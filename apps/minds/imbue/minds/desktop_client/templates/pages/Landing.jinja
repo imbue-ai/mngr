@@ -131,7 +131,7 @@
         else if (state === 'STOPPING') { text = 'Stopping…'; tone = 'bg-warning/15 text-warning'; }
         else if (state === 'STARTING') { text = 'Starting…'; tone = 'bg-warning/15 text-warning'; }
         badge.textContent = text;
-        badge.className = 'landing-mind-state-badge inline-flex items-center px-2 py-0.5 rounded-md type-label' + tone;
+        badge.className = 'landing-mind-state-badge inline-flex items-center px-2 py-0.5 rounded-md type-label ' + tone;
         // Inline display again (the base class is inline-flex, so a .hidden
         // class wouldn't hide the empty RUNNING-state badge).
         badge.style.display = text ? '' : 'none';
@@ -308,7 +308,7 @@
         }
 
         var badge = document.createElement('span');
-        badge.className = 'inline-flex items-center px-2 py-0.5 rounded-md type-label' + badgeClassForStatus(entry.status);
+        badge.className = 'inline-flex items-center px-2 py-0.5 rounded-md type-label ' + badgeClassForStatus(entry.status);
         badge.textContent = badgeLabelForStatus(entry.status);
         row.appendChild(badge);
 
@@ -379,7 +379,7 @@
       });
     })();
 
-    var BACKUP_BADGE_BASE = 'landing-backup-badge inline-flex items-center px-2 py-0.5 rounded-md type-label';
+    var BACKUP_BADGE_BASE = 'landing-backup-badge inline-flex items-center px-2 py-0.5 rounded-md type-label ';
     var BACKUP_RECENT_CREATE_MS = 75 * 60 * 1000;
     var BACKUP_CHECKING_TEXT = 'Checking backups…';
 

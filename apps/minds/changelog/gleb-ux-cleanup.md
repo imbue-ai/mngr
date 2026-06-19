@@ -74,6 +74,8 @@ Added the type ramp (Figma): six semantic roles defined as `@utility` in `app.cs
 
 - Fixed a `Notice` regression from the migration: the role swap dropped the separating space in the component's runtime class concat, fusing `my-2` with the variant background (e.g. `my-2bg-info/12`) so every notice banner lost its vertical margin and background tint. Restored the space.
 
+- Fixed the same dropped-space regression in the Landing page's JS-built badges: the role swap turned `text-sm font-medium ` (trailing space) into `type-label` (no trailing space), so the four `'... type-label' + tone` concatenations for the mind container-state, provider-status, and backup-status badges fused into an invalid `type-labelbg-...` class -- silently dropping both the type role and the tone color. Restored the separating space.
+
 Dropped the unused `--shadow-seam` token. It was only ever demoed in the styleguide (no real surface applied it -- the titlebar drop shadow it once named is gone), so the definition, both styleguide demos, and its drift-guard entry were removed.
 
 Added an elevation scale: two box-shadow steps defined in `app.css` `@theme` (generating `shadow-raised` / `shadow-overlay`), with a styleguide "Elevation" section and a guard.
