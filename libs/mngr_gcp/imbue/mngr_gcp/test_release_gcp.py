@@ -215,6 +215,9 @@ class _GcpReleaseProfile(VpsCloudReleaseProfile):
     # spec's divergence was fixed in this PR -- see `_gcp_unavailable_error` in mngr_gcp/backend.py).
     has_curated_unavailable_help = True
     credential_setup_command = "gcloud auth application-default login"
+    # GCP captures host_dir to the GCS state bucket at `mngr stop`, so a stopped host's host_dir is
+    # readable offline (Trip 1's opt-in offline-host_dir step). Matches AWS / Azure.
+    supports_offline_host_dir = True
 
     def __init__(self, client: GcpVpsClient, isolation: IsolationMode, project: str) -> None:
         super().__init__(client, isolation)

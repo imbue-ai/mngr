@@ -16,7 +16,7 @@ Credentials are resolved exclusively via Google [Application Default Credentials
 
 No config fields are strictly required. The one identifier the provider needs is `project_id` — a plain, non-secret value — and when it is omitted it falls back to the project that ADC resolves from the environment: the active `gcloud config set project` or the `GOOGLE_CLOUD_PROJECT` env var. Set `project_id` explicitly to pin a specific project (recommended when you have access to several); `mngr create` logs which project it inferred when relying on the fallback.
 
-### One-time firewall setup
+### One-time setup (firewall + GCS state bucket)
 
 GCE firewall creation is privileged (`compute.firewalls.create`). Like AWS's
 `mngr aws prepare`, the firewall rule is created once by an operator, so the
@@ -37,6 +37,15 @@ resolves the rule read-only and errors with a pointer back to `prepare` if it is
 missing. Setting `allowed_ssh_cidrs = []` opts out entirely: no rule is created
 and the instance is unreachable from outside its VPC.
 
+`prepare` also creates a GCS state bucket (named `mngr-state-<project_id>` by
+default, overridable via `state_bucket_name`) that backs the offline `host_dir`
+mirror: `mngr stop` captures the host's `host_dir` to the bucket so reads from
+a stopped instance (`mngr event` / `mngr transcript` / `mngr file`) work
+without resuming it. The bucket is also idempotent (a no-op when it already
+exists). Set `is_offline_host_dir_enabled = false` on the provider block to
+turn the feature off without removing the bucket. Host + agent *records*
+still live in GCE instance metadata regardless (see "Implementation details").
+
 `prepare` and `cleanup` read their defaults from your `[providers.<name>]`
 settings.toml block, selected with `--provider` (default `gcp`), so the rule
 lands in the same project / network / zone the runtime `mngr create --provider
@@ -51,8 +60,9 @@ mngr gcp prepare --provider gcp-eu   # uses that block's network + CIDRs, no fla
 ### Teardown: `mngr gcp cleanup`
 
 `mngr gcp cleanup` is the inverse of `prepare`: it deletes the `mngr-gcp-ssh`
-firewall rule so the project returns to its pre-`prepare` state (useful when
-retiring a provider or testing the first-run experience).
+firewall rule and the GCS state bucket so the project returns to its
+pre-`prepare` state (useful when retiring a provider or testing the first-run
+experience).
 
 ```bash
 mngr gcp cleanup --project my-gcp-project
@@ -62,10 +72,14 @@ It is **safe by design**: it refuses (non-zero exit, deletes nothing) if any
 mngr-managed instance still exists anywhere in the project (checked across all
 zones, because the firewall rule is network-global), so it can never strand a
 running agent's SSH access. Destroy those first with `mngr destroy <agent>`,
-then re-run. It is idempotent -- a no-op when the rule is already gone. It needs
-`compute.instances.list` (aggregated), `compute.firewalls.get`, and
-`compute.firewalls.delete`. It does **not** delete per-host SSH keys: those live
-only in per-instance metadata and die with the VM, not with `prepare`.
+then re-run. It also refuses to delete a state bucket that still holds offline
+host state from hosts whose instances are gone; pass `--force` to delete the
+bucket and the orphaned state anyway. It is idempotent -- a no-op when each
+resource is already gone. It needs `compute.instances.list` (aggregated),
+`compute.firewalls.get`, `compute.firewalls.delete`, `storage.buckets.get`,
+`storage.objects.list`, `storage.objects.delete`, and `storage.buckets.delete`.
+It does **not** delete per-host SSH keys: those live only in per-instance
+metadata and die with the VM, not with `prepare`.
 
 ```toml
 [providers.gcp]
@@ -129,7 +143,7 @@ mngr destroy my-agent
 
 Note: GCE VMs are zonal, so the placement knob is `--gcp-zone=` (e.g. `us-west1-b`), not a region. When `default_region` is set explicitly, the chosen zone must belong to it; otherwise the region is derived from the zone. The boot-disk image can be overridden per host with `--gcp-image=` (otherwise the config's `default_source_image` is used).
 
-`mngr stop` stops the agent's container **and the GCE VM** (`instances.stop`), so a paused agent costs only disk storage -- compute billing ends and the boot disk (with all state) persists. `mngr start` resumes it (`instances.start`), rebinding to the fresh ephemeral external IP. An idle agent self-stops the same way: a guest poweroff lands a GCE VM in `TERMINATED` (stopped, disk preserved, no compute billing), so the in-container idle watcher just powers the box off -- no API call or extra IAM. A stopped VM still shows in `mngr list` and resolves by name (offline discovery via instance metadata). See "How it works".
+`mngr stop` stops the agent's container **and the GCE VM** (`instances.stop`), so a paused agent costs only disk storage -- compute billing ends and the boot disk (with all state) persists. Before pausing, the host's `host_dir` is captured to the GCS state bucket so files (events, transcripts) are readable while the VM is stopped. `mngr start` resumes the VM (`instances.start`), rebinding to the fresh ephemeral external IP. An idle agent self-stops the same way: a guest poweroff lands a GCE VM in `TERMINATED` (stopped, disk preserved, no compute billing), so the in-container idle watcher just powers the box off -- no API call or extra IAM. A stopped VM still shows in `mngr list` and resolves by name (offline discovery via instance metadata, with `host_dir` reads served from the GCS state bucket). See "How it works".
 
 ## GCP-specific configuration
 
@@ -152,6 +166,8 @@ These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 | `service_account_email` | `None` | Optional service account attached to launched instances. When `None` the field is omitted from the create request, so GCE applies its normal default for an unspecified service account. |
 | `service_account_scopes` | `("https://www.googleapis.com/auth/cloud-platform",)` | OAuth scopes for the attached service account (only used when `service_account_email` is set). |
 | `auto_shutdown_seconds` | `None` | When set, instances launch with `scheduling.max_run_duration` + `instance_termination_action=DELETE` so the VM self-deletes after N seconds. Leave `None` for normal long-lived behavior; useful for ephemeral test / scratch hosts. |
+| `state_bucket_name` | `None` | Name of the GCS bucket backing the offline `host_dir` mirror. When `None`, derived as `mngr-state-<project_id>`. Provisioned by `mngr gcp prepare` and only used when `is_offline_host_dir_enabled` is on. |
+| `is_offline_host_dir_enabled` | `True` | When on, a stopped instance's `host_dir` is captured to the state bucket at `mngr stop` and readable without resuming the instance (so `mngr event` / `mngr transcript` / `mngr file` work against it). Set `False` to turn the feature off without removing the bucket. |
 
 ## Required IAM permissions
 
@@ -161,13 +177,16 @@ so developers can run with a reduced role:
 `mngr gcp prepare` (operator, once per project):
 
 ```
-compute.firewalls.get, compute.firewalls.create
+compute.firewalls.get, compute.firewalls.create,
+storage.buckets.create, storage.buckets.get
 ```
 
 `mngr gcp cleanup` (operator, teardown; in addition to `compute.firewalls.get`):
 
 ```
-compute.instances.list, compute.firewalls.delete
+compute.instances.list, compute.firewalls.delete,
+storage.buckets.get, storage.buckets.delete,
+storage.objects.list, storage.objects.delete
 ```
 
 `mngr create --provider gcp` (developer, per host):
@@ -178,12 +197,18 @@ compute.instances.list, compute.firewalls.get,
 compute.zoneOperations.get
 ```
 
+When `is_offline_host_dir_enabled` is on (default), the runtime stop/start
+path additionally needs `storage.objects.create`, `storage.objects.get`,
+`storage.objects.list`, and `storage.objects.delete` on the state bucket so
+`mngr stop` can write the captured `host_dir` and offline reads can serve
+files from it.
+
 If `service_account_email` is set, the caller also needs `iam.serviceAccounts.actAs` on that service account.
 
 ## Implementation details
 
 - Uses the `google-cloud-compute` SDK (`compute_v1`) for the Compute Engine API.
-- Instances carry one GCE label, `mngr-provider=<name>`, the server-side filter for discovery and the cleanup scan. GCE label values are restricted to `[a-z0-9_-]`, so the provider lowercases the value before applying it and applies the same transform to the discovery filter (two provider instances whose names differ only by case would collide — name them distinctly). All other mngr identity lives in instance *metadata* (which doesn't fit the label charset): `mngr-host-id`, the human host name (`mngr-host-name`, so a stopped VM still resolves by name), `mngr-created-at`, and the full records — the complete `VpsHostRecord` JSON under `mngr-host-state` and one full agent-record JSON per agent under `mngr-agent-<id>`. This metadata store is the GCP analog of the AWS/Azure object-storage state bucket, behind the same `HostStateStore` interface; GCE metadata is large and permissive enough (256 KB per value, 512 KB per instance) to hold these records, so GCP needs no separate bucket.
+- Instances carry one GCE label, `mngr-provider=<name>`, the server-side filter for discovery and the cleanup scan. GCE label values are restricted to `[a-z0-9_-]`, so the provider lowercases the value before applying it and applies the same transform to the discovery filter (two provider instances whose names differ only by case would collide — name them distinctly). All other mngr identity lives in instance *metadata* (which doesn't fit the label charset): `mngr-host-id`, the human host name (`mngr-host-name`, so a stopped VM still resolves by name), `mngr-created-at`, and the full records — the complete `VpsHostRecord` JSON under `mngr-host-state` and one full agent-record JSON per agent under `mngr-agent-<id>`. This metadata store is the GCP analog of the AWS/Azure object-storage record store, behind the same `HostStateStore` interface; GCE metadata is large and permissive enough (256 KB per value, 512 KB per instance) to hold these records, so GCP keeps host + agent records in metadata and reserves the separate GCS state bucket for the offline `host_dir` mirror (which would not fit in metadata).
 - SSH key auth: there is no per-key GCE resource (unlike an EC2 KeyPair). The client holds the per-host public key in memory and writes it into the instance's `ssh-keys` metadata as `ubuntu:<pub>` at create time. The key lives only in per-instance metadata and dies with the VM. OS Login and project-wide SSH keys are disabled per instance (`enable-oslogin=FALSE`, `block-project-ssh-keys=TRUE`).
 - The first-boot bootstrap is delivered via the GCE `startup-script` metadata key, run by the google-guest-agent on every image (including the default Debian 12, which ships no cloud-init -- so the `user-data` flow the other backends use would be ignored here). It renders the same shared host-setup steps and writes the provider key into root's authorized_keys. It installs the SSH host key and restarts sshd as its first action; since that happens after sshd booted with a random key, the provisioner polls the live host key until it matches before strict-checking (`_wait_for_expected_host_key`).
 - Discovery: `instances.list` filtered by the `mngr-provider` label, then SSH to each VPS to read host records from the state volume.
@@ -195,6 +220,7 @@ If `service_account_email` is set, the caller also needs `iam.serviceAccounts.ac
 - **VM-level stop/start (idle-pause + resume)**: `mngr stop` stops the agent's container and then the GCE VM (`instances.stop`), so a paused agent costs only disk storage and the boot disk preserves all state; `mngr start` finds the stopped instance by its `mngr-host-id` metadata value (it has no external IP while stopped), starts it (`instances.start`), and rebinds known_hosts to the fresh ephemeral external IP before resuming the container. Needs `compute.instances.stop` / `compute.instances.start`. Mirrors `mngr_aws`; the shared `mngr_vps` base is untouched.
 - **Idle self-stop (no API call)**: the in-container idle watcher touches a sentinel on the shared volume; a host-side systemd `.path` unit fires a oneshot that runs `shutdown -P now`. On GCE a guest poweroff lands the VM in `TERMINATED` (stopped, disk preserved, no compute billing) by default -- there is no GCE analog to AWS's `InstanceInitiatedShutdownBehavior` and none is needed, so idle self-stop needs no extra IAM. (Orthogonal to the `auto_shutdown_seconds` time-cap, which *deletes* the VM.)
 - **Offline discovery**: the full host record (`mngr-host-state`) and per-agent records (`mngr-agent-<id>`) are mirrored into instance *metadata* (GCE labels are too restricted -- lowercased `[a-z0-9_-]`, 63 chars -- to hold them), so a stopped VM still appears in `mngr list` and resolves by name without SSH. `discover_hosts_and_agents` identifies stopped (`TERMINATED`/`STOPPING`) hosts from the cheap `mngr-host-id` metadata value and reads their full record + agents back from the metadata store (the GCP arm of the shared `HostStateStore`, uniform with the AWS/Azure buckets).
+- **Offline `host_dir`** (gated by `is_offline_host_dir_enabled`, default on): at `mngr stop` the operator reads the host's `host_dir` off the box (still SSH-reachable) and uploads it to the GCS state bucket created by `mngr gcp prepare`. While the VM is `TERMINATED`, `mngr event` / `mngr transcript` / `mngr file` read from the bucket without resuming it (via the shared `BucketHostDirBackend` -- the same backend AWS/Azure use, just pointed at GCS). Unlike the metadata-backed record store, the bucket has no practical size limit, so it can hold the full `host_dir` tree. The bucket is named `mngr-state-<project_id>` by default (overridable via `state_bucket_name`) and is created/deleted by `mngr gcp prepare` / `mngr gcp cleanup`.
 
 ## Release tests and cost
 

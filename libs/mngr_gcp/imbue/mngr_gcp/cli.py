@@ -37,6 +37,10 @@ from imbue.mngr_gcp.config import GcpProviderConfig
 from imbue.mngr_gcp.config import get_gcloud_compute_zone
 from imbue.mngr_gcp.errors import GcpCredentialsError
 from imbue.mngr_gcp.errors import GcpProjectError
+from imbue.mngr_gcp.errors import GcpStateBucketNotEmptyError
+from imbue.mngr_gcp.errors import GcpStateBucketProvisioningError
+from imbue.mngr_gcp.state_bucket import GcsStateBucket
+from imbue.mngr_gcp.state_bucket import GcsStateBucketError
 from imbue.mngr_vps.cli_helpers import refuse_if_managed_resources_exist
 from imbue.mngr_vps.cli_helpers import resolve_provider_config
 
@@ -61,6 +65,10 @@ class _GcpPrepareCliOptions(_GcpOperatorCliOptions):
     zone: str | None
     firewall_target_tag: str | None
     allowed_ssh_cidrs: tuple[str, ...]
+
+
+class _GcpCleanupCliOptions(_GcpOperatorCliOptions):
+    force: bool
 
 
 def _resolve_provider_config(mngr_ctx: MngrContext, provider_name: str) -> GcpProviderConfig:
@@ -145,15 +153,71 @@ def _build_operator_client(
     )
 
 
-def _perform_cleanup(client: GcpVpsClient) -> str | None:
-    """Core of ``mngr gcp cleanup``: refuse if instances exist, else delete the rule.
+def _build_state_bucket(base: GcpProviderConfig, client: GcpVpsClient) -> GcsStateBucket:
+    """Build the GCS state bucket for the operator commands.
 
-    Returns the deleted firewall rule name, or ``None`` when there was nothing to
-    delete. Raises ``ManagedResourcesExistError`` (a ``MngrError``) when any
-    mngr-managed instance still exists in the project, so cleanup never strands a
-    running agent's SSH access. Split from the click callback so the refuse/delete
-    decision is unit-testable against a stubbed client, without the click runtime
-    or real credentials.
+    Uses the resolved provider config's bucket name (or the derived
+    ``mngr-state-<project_id>``). The bucket lives in the same region as the
+    GCE instances writing to it (the resolved zone's region).
+    """
+    return base.build_state_bucket(
+        credentials=client.credentials,
+        project_id=client.project_id,
+        region=base.resolve_state_bucket_region(client.zone),
+    )
+
+
+def _ensure_state_bucket(base: GcpProviderConfig, client: GcpVpsClient) -> tuple[str, bool]:
+    """Create (idempotently) the GCS state bucket, returning ``(bucket_name, was_created)``.
+
+    The bucket backs offline ``host_dir`` reads (captured operator-side at ``mngr
+    stop``), so a missing storage permission or API failure raises here rather
+    than masquerading as a silent "no bucket". Errors surface as an actionable
+    ``GcpStateBucketProvisioningError`` (a ``MngrError``). Mirrors
+    ``mngr_aws.cli._ensure_state_bucket``.
+    """
+    bucket = _build_state_bucket(base, client)
+    try:
+        was_created = bucket.ensure_bucket()
+    except GcsStateBucketError as e:
+        raise GcpStateBucketProvisioningError(
+            f"Failed to create the GCS state bucket {bucket.bucket_name!r} "
+            f"(check storage permissions, then re-run `mngr gcp prepare`): {e}"
+        ) from e
+    return bucket.bucket_name, was_created
+
+
+def _perform_state_bucket_cleanup(bucket: GcsStateBucket, *, force: bool) -> str | None:
+    """Delete the GCS state bucket, refusing while any managed-host state remains.
+
+    Returns the deleted bucket name, or ``None`` when no bucket existed. Unless
+    ``force`` is set, raises ``GcpStateBucketNotEmptyError`` (a ``MngrError``)
+    when the bucket still holds ``hosts/`` state. By the time this runs the
+    instance-exists check has already passed, so any remaining state is
+    *orphaned* offline state (a host whose instance is gone but whose
+    ``delete_host_state`` never ran) -- deleting it silently could drop offline
+    records the operator still wants, so we refuse and let ``--force`` opt into
+    deleting it. Mirrors ``mngr_aws.cli._perform_state_bucket_cleanup``.
+    """
+    if not bucket.bucket_exists():
+        return None
+    if not force and bucket.has_any_host_state():
+        raise GcpStateBucketNotEmptyError(
+            f"Refusing to delete GCS state bucket {bucket.bucket_name!r}: it still holds offline host "
+            "state (from hosts that are no longer running instances). Re-run with `--force` to "
+            "delete the bucket and the remaining state."
+        )
+    bucket.delete_bucket()
+    return bucket.bucket_name
+
+
+def _refuse_cleanup_if_instances_exist(client: GcpVpsClient) -> None:
+    """Raise ``ManagedResourcesExistError`` when any mngr-managed instance still exists.
+
+    Run first by ``mngr gcp cleanup``, before any teardown, so a still-running
+    instance aborts the whole cleanup (bucket + firewall) and strands nothing.
+    Split out so the refusal is unit-testable against a stubbed client. Mirrors
+    ``mngr_aws.cli._refuse_cleanup_if_instances_exist``.
     """
     instances = client.list_mngr_managed_instances()
     refuse_if_managed_resources_exist(
@@ -163,6 +227,19 @@ def _perform_cleanup(client: GcpVpsClient) -> str | None:
         scope_description=f"project {client.project_id}",
         cleanup_command="mngr gcp cleanup",
     )
+
+
+def _perform_cleanup(client: GcpVpsClient) -> str | None:
+    """Core of ``mngr gcp cleanup``: refuse if instances exist, else delete the rule.
+
+    Returns the deleted firewall rule name, or ``None`` when there was nothing to
+    delete. Raises ``ManagedResourcesExistError`` (a ``MngrError``) when any
+    mngr-managed instance still exists in the project, so cleanup never strands a
+    running agent's SSH access. Split from the click callback so the refuse/delete
+    decision is unit-testable against a stubbed client, without the click runtime
+    or real credentials. Mirrors ``mngr_aws.cli._perform_cleanup``.
+    """
+    _refuse_cleanup_if_instances_exist(client)
     return client.delete_firewall()
 
 
@@ -170,14 +247,18 @@ def _output_prepare_result(
     result: FirewallPrepareResult,
     firewall_name: str,
     project_id: str,
+    state_bucket_name: str | None,
+    was_bucket_created: bool,
     output_format: OutputFormat,
 ) -> None:
     """Emit the result of ``mngr gcp prepare`` in the requested format.
 
-    HUMAN: one result line to stdout. JSON: a single object. JSONL: a
-    ``prepared`` event. The structured forms carry ``created`` so a caller can
-    tell a first-run create from an idempotent no-op.
+    HUMAN: one (or more) result lines to stdout. JSON: a single object. JSONL: a
+    ``prepared`` event. The structured forms carry ``created`` (firewall) and
+    ``state_bucket_name`` / ``state_bucket_created`` so a caller can tell a
+    first-run create from an idempotent no-op.
     """
+    bucket_verb = "Created" if was_bucket_created else "Reused existing"
     emit_operator_result(
         "prepared",
         [
@@ -188,6 +269,12 @@ def _output_prepare_result(
                 project_id=project_id,
                 created=result.was_created,
             ),
+            OperatorResultPart.shown_if(
+                state_bucket_name,
+                f"{bucket_verb} GCS state bucket {state_bucket_name} in project {project_id}",
+                state_bucket_name=state_bucket_name,
+                state_bucket_created=was_bucket_created,
+            ),
         ],
         output_format,
     )
@@ -197,13 +284,15 @@ def _output_cleanup_result(
     deleted_firewall: str | None,
     firewall_name: str,
     project_id: str,
+    deleted_bucket_name: str | None,
     output_format: OutputFormat,
 ) -> None:
     """Emit the result of ``mngr gcp cleanup`` in the requested format.
 
-    HUMAN: one result line to stdout. JSON: a single object. JSONL: a
+    HUMAN: one (or more) result lines to stdout. JSON: a single object. JSONL: a
     ``cleaned_up`` event. ``deleted`` is False when the rule was already absent
-    (idempotent no-op).
+    (idempotent no-op); ``state_bucket_deleted`` carries the deleted bucket name
+    (or None when no bucket existed).
     """
     emit_operator_result(
         "cleaned_up",
@@ -215,6 +304,11 @@ def _output_cleanup_result(
                 firewall_name=firewall_name,
                 project_id=project_id,
                 deleted=deleted_firewall is not None,
+            ),
+            OperatorResultPart.shown_if(
+                deleted_bucket_name,
+                f"Deleted GCS state bucket {deleted_bucket_name} in project {project_id}",
+                state_bucket_deleted=deleted_bucket_name,
             ),
         ],
         output_format,
@@ -288,12 +382,15 @@ def gcp_cli_group() -> None:
 @add_common_options
 @click.pass_context
 def prepare(ctx: click.Context, **_kwargs: Any) -> None:
-    """Create (or reuse) the GCP firewall rule for mngr-managed instances.
+    """Create (or reuse) the GCP firewall rule and GCS state bucket for mngr-managed instances.
 
-    Idempotent: re-running is a no-op when the rule already exists. Needs
-    compute.firewalls.get + compute.firewalls.create. After this succeeds,
-    ``mngr create --provider gcp`` only needs instance create/get/list
-    permissions (no firewall-management permissions).
+    Idempotent: re-running is a no-op when each resource already exists. Needs
+    compute.firewalls.get + compute.firewalls.create + storage.buckets.get +
+    storage.buckets.create. After this succeeds, ``mngr create --provider gcp``
+    only needs instance create/get/list permissions (no firewall-management
+    permissions); the runtime stop/start path additionally needs
+    storage.objects.* on the state bucket when ``is_offline_host_dir_enabled``
+    is on (see the README's "Required IAM permissions" section).
     """
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
@@ -324,7 +421,22 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
         # intact rather than being flattened.
         raise GcpCredentialsError(str(e)) from e
     result = client.ensure_firewall()
-    _output_prepare_result(result, client.firewall_name, client.project_id, output_opts.output_format)
+    # GCS state bucket: backs the offline ``host_dir`` mirror written at ``mngr
+    # stop``. Created here so the runtime create/stop paths can attach to it with
+    # no extra bucket-management permissions. A storage permission or API failure
+    # surfaces as a GcpStateBucketProvisioningError (the bucket is the
+    # offline-host_dir feature's only backing store; a firewall-only prepare would leave offline host_dir
+    # unavailable). Offline host_dir is the operator's own write path (no managed
+    # identity needed), so prepare sets up only the firewall + bucket.
+    state_bucket_name, was_bucket_created = _ensure_state_bucket(base, client)
+    _output_prepare_result(
+        result,
+        client.firewall_name,
+        client.project_id,
+        state_bucket_name,
+        was_bucket_created,
+        output_opts.output_format,
+    )
 
 
 @gcp_cli_group.command(name="cleanup")
@@ -358,26 +470,39 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     default=None,
     help="VPC network the rule applies to (part of its identity). Defaults to the resolved provider config's network.",
 )
+@optgroup.option(
+    "--force",
+    "force",
+    is_flag=True,
+    default=False,
+    help=(
+        "Also delete the GCS state bucket when it still holds offline host state left over from "
+        "hosts that no longer exist as instances (otherwise cleanup refuses to delete a non-empty bucket)."
+    ),
+)
 @add_common_options
 @click.pass_context
 def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
-    """Undo `mngr gcp prepare`: delete the mngr-managed firewall rule.
+    """Undo `mngr gcp prepare`: delete the mngr-managed firewall rule and state bucket.
 
     The safe inverse of `prepare`. Refuses (non-zero exit, deletes nothing) if
     any mngr-managed instance still exists anywhere in the project -- destroy
     those first with `mngr destroy <agent>` so a running agent's SSH access is
     never stranded. With no instances present, deletes the `mngr-gcp-ssh`
-    firewall rule that `mngr gcp prepare` created. Idempotent: a no-op (exit 0)
-    when the rule is already gone.
+    firewall rule and the GCS state bucket that `mngr gcp prepare` created.
+    Idempotent: a no-op (exit 0) when each resource is already gone.
 
     Needs compute.instances.list (aggregated) + compute.firewalls.get +
-    compute.firewalls.delete. Does not touch per-host keys -- those are created
-    and deleted by the create/destroy lifecycle, not by `prepare`.
+    compute.firewalls.delete + storage.buckets.get + storage.buckets.delete +
+    storage.objects.list + storage.objects.delete (the storage.objects.*
+    permissions are required because the bucket is emptied before deletion).
+    Does not touch per-host keys -- those are created and deleted by the
+    create/destroy lifecycle, not by `prepare` or `cleanup`.
     """
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="gcp cleanup",
-        command_class=_GcpOperatorCliOptions,
+        command_class=_GcpCleanupCliOptions,
     )
     base = _resolve_provider_config(mngr_ctx, opts.provider)
     try:
@@ -390,5 +515,19 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
         # Same credential wrapping as the prepare path; the GcpError ValueErrors
         # propagate with their specific type.
         raise GcpCredentialsError(str(e)) from e
+    # Refuse the whole cleanup (delete nothing) while any mngr-managed instance
+    # still exists, BEFORE tearing down the bucket -- a running instance must
+    # abort cleanup so its offline state is never stranded.
+    _refuse_cleanup_if_instances_exist(client)
+    # No instances remain: tear down the bucket while it holds no host state
+    # (its own refusal mirrors the instance check, as defense in depth).
+    bucket = _build_state_bucket(base, client)
+    deleted_bucket_name = _perform_state_bucket_cleanup(bucket, force=opts.force)
     deleted_firewall = _perform_cleanup(client)
-    _output_cleanup_result(deleted_firewall, client.firewall_name, client.project_id, output_opts.output_format)
+    _output_cleanup_result(
+        deleted_firewall,
+        client.firewall_name,
+        client.project_id,
+        deleted_bucket_name,
+        output_opts.output_format,
+    )
