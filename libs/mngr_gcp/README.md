@@ -126,7 +126,9 @@ These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 | `associate_external_ip` | `true` | Assign an ephemeral external IPv4 to instances. Required for the current mngr-from-developer-laptop SSH access model; for a more secure deployment, set to False and run mngr from a bastion inside the VPC. |
 | `service_account_email` | `None` | Optional service account email attached to launched instances. When None, GCE applies its normal default for an unspecified service account. |
 | `service_account_scopes` | `("https://www.googleapis.com/auth/cloud-platform",)` | OAuth scopes for the attached service account (only used when service_account_email is set). |
-| `allowed_ssh_cidrs` | `("0.0.0.0/0",)` | Inbound (ingress) CIDR blocks allowed on tcp/22 and the container SSH port on the security group / NSG / firewall rule the provider's `prepare` command creates. Default ('0.0.0.0/0',) allows any IP; use e.g. ('203.0.113.4/32',) to restrict to your own IP, or () for no ingress (no rule is created, leaving the instance unreachable from outside its network). A warning is logged when the effective range is 0.0.0.0/0 or empty. Replace-by-default across config layers (combining CIDRs across layers is never the intent). |
+| `state_bucket_name` | `None` | GCS bucket where mngr stores a stopped instance's offline host_dir mirror so it is readable without starting the instance. When None, named 'mngr-state-<project_id>'. The bucket is provisioned by `mngr gcp prepare` and only used when `is_offline_host_dir_enabled` is on; the host + agent records still live in GCE instance metadata regardless. |
+| `is_offline_host_dir_enabled` | `true` | When on (default), a stopped instance's host_dir is readable without starting it, so `mngr event` / `mngr transcript` / `mngr file` work against it. `mngr gcp prepare` sets up the GCS bucket it needs. Set False to turn it off. |
+| `allowed_ssh_cidrs` | `("0.0.0.0/0",)` | Inbound CIDR blocks allowed on tcp/22 and the container SSH port in the security group / NSG / firewall rule the provider's `prepare` command creates. Default ('0.0.0.0/0',) allows any IP; use e.g. ('203.0.113.4/32',) to restrict to your own, or () for no ingress (no rule is created, so the instance is unreachable from outside its network). A warning is logged when the effective range is 0.0.0.0/0 or empty. Replaced, not merged, across config layers. |
 | `auto_shutdown_seconds` | `None` | When set, the host OS halts itself after about this many seconds (rounded up to whole minutes, the granularity `shutdown` accepts) -- a hard max-lifetime cap, distinct from the activity-based default_idle_timeout. Whether the halt stops, terminates, or deletes the instance is provider-specific (see the provider's README). |
 <!-- END GENERATED CONFIG TABLE -->
 
@@ -135,13 +137,16 @@ These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 `mngr gcp prepare` (operator, once per project):
 
 ```
-compute.firewalls.get, compute.firewalls.create
+compute.firewalls.get, compute.firewalls.create,
+storage.buckets.create, storage.buckets.get
 ```
 
 `mngr gcp cleanup` (operator, teardown), additionally:
 
 ```
-compute.instances.list, compute.firewalls.delete
+compute.instances.list, compute.firewalls.delete,
+storage.buckets.get, storage.buckets.delete,
+storage.objects.list, storage.objects.delete
 ```
 
 `mngr create --provider gcp` (developer, per host):
@@ -151,6 +156,12 @@ compute.instances.create, compute.instances.delete, compute.instances.get,
 compute.instances.list, compute.instances.stop, compute.instances.start,
 compute.firewalls.get, compute.zoneOperations.get
 ```
+
+When `is_offline_host_dir_enabled` is on (default), the runtime stop/start
+path additionally needs `storage.objects.create`, `storage.objects.get`,
+`storage.objects.list`, and `storage.objects.delete` on the state bucket so
+`mngr stop` can write the captured `host_dir` and offline reads can serve
+files from it.
 
 If `service_account_email` is set, the caller also needs `iam.serviceAccounts.actAs` on that service account.
 

@@ -282,7 +282,7 @@ def _maybe_connect(
 
     resolved_command = resolve_connect_command(opts.connect_command, mngr_ctx)
     if resolved_command is not None:
-        session_name = f"{mngr_ctx.config.prefix}{last_started_agent.name}"
+        session_name = last_started_agent.session_name
         run_connect_command(
             resolved_command,
             str(last_started_agent.name),

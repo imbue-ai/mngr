@@ -66,7 +66,7 @@ The base config (`VpsProviderConfig`) provides these settings:
 | Field | Default | Description |
 |---|---|---|
 | `isolation` | `CONTAINER` | How the agent is isolated on its VPS. CONTAINER (the default) runs the agent in a Docker container; NONE runs it directly on the VPS OS. Selects the realizer the provider uses; the default preserves the original container behavior. |
-| `host_dir` | `/mngr` | Base directory for mngr data inside containers |
+| `host_dir` | `/mngr` | Base directory for mngr data on the agent host. With container isolation this is the path inside the container; with bare isolation it is the path on the VM's OS. |
 | `default_image` | `debian:bookworm-slim` | Default Docker image |
 | `default_idle_timeout` | `800` | Idle timeout in seconds |
 | `default_idle_mode` | `IO` | Idle detection mode |

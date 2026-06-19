@@ -540,6 +540,20 @@ class AwsVpsClient(VpsClientInterface):
         )
         return VpsInstanceId(instance_id)
 
+    def set_instance_tags(self, instance_id: VpsInstanceId, tags: Mapping[str, str]) -> None:
+        """Upsert tags on an existing instance (EC2 ``create_tags`` is an upsert).
+
+        Used to re-stamp the cheap identity tags offline discovery reads (e.g.
+        the ``Name`` tag after a rename) without touching the rest of the
+        instance's tag set. AWS-only, like ``stop_instance`` -- reached via
+        ``self.aws_client``, not the shared ``VpsClientInterface``.
+        """
+        with self._translate_aws_errors():
+            self._ec2().create_tags(
+                Resources=[str(instance_id)],
+                Tags=[{"Key": key, "Value": value} for key, value in tags.items()],
+            )
+
     def destroy_instance(self, instance_id: VpsInstanceId) -> None:
         with self._translate_aws_errors():
             self._ec2().terminate_instances(InstanceIds=[str(instance_id)])

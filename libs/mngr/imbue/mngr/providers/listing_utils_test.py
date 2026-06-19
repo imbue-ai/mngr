@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
 from imbue.mngr.providers.listing_utils import extract_agent_data_from_parsed_listing
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
@@ -42,6 +44,19 @@ def test_build_listing_collection_script_contains_key_sections() -> None:
     assert "data.json" in script
     assert "ps -e" in script
     assert "/mngr/agents" in script
+
+
+def test_build_listing_collection_script_targets_named_primary_window() -> None:
+    """Lifecycle detection must target the agent window by name, not the literal :0,
+    so it works regardless of the user's tmux base-index."""
+    script = build_listing_collection_script("/mngr", "mngr-", window_name="agent")
+    assert ':agent" -F' in script
+    assert ':0" -F' not in script
+
+
+def test_build_listing_collection_script_uses_custom_window_name() -> None:
+    script = build_listing_collection_script("/mngr", "mngr-", window_name="primary")
+    assert ':primary" -F' in script
 
 
 def test_parse_listing_collection_output_basic() -> None:
@@ -111,14 +126,17 @@ def test_parse_listing_collection_output_empty() -> None:
     assert result.get("agents", []) == []
 
 
-def test_extract_agent_data_returns_data_dicts_and_skips_malformed() -> None:
-    """Only well-formed ``{"data": {...}}`` entries contribute agent data."""
+@pytest.mark.allow_warnings(match=r"missing or non-object 'data'")
+def test_extract_agent_data_returns_data_dicts_and_skips_malformed(log_warnings: list[str]) -> None:
+    """Only well-formed ``{"data": {...}}`` entries contribute agent data; an entry with
+    missing or non-object ``data`` (corrupt/hand-edited) is skipped with a warning."""
     parsed_listing = {
         "container_state": "running",
         "agents": [
             {"data": {"id": "a-1", "name": "system-services"}},
             {"data": {"id": "a-2", "name": "chat-host"}},
             {"user_activity_mtime": 123},
+            {"data": ["not", "an", "object"]},
         ],
     }
 
@@ -126,3 +144,4 @@ def test_extract_agent_data_returns_data_dicts_and_skips_malformed() -> None:
         {"id": "a-1", "name": "system-services"},
         {"id": "a-2", "name": "chat-host"},
     ]
+    assert sum("missing or non-object 'data'" in message for message in log_warnings) == 2

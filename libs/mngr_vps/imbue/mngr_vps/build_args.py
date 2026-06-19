@@ -42,7 +42,12 @@ def extract_git_depth(args: Sequence[str]) -> tuple[int | None, list[str]]:
     every provider accepts it under the same name.
     """
     raw, remaining = extract_single_value_arg(args, "--git-depth=")
-    return (int(raw) if raw is not None else None), remaining
+    if raw is None:
+        return None, remaining
+    try:
+        return int(raw), remaining
+    except ValueError as e:
+        raise MngrError(f"--git-depth must be an integer. Got: {raw!r}") from e
 
 
 def extract_presence_flag(args: Sequence[str], flag: str) -> tuple[bool, list[str]]:

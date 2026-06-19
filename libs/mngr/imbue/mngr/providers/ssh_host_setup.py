@@ -207,11 +207,14 @@ def build_add_authorized_keys_command(
     user: str,
     authorized_keys_entries: tuple[str, ...],
 ) -> str | None:
-    """Build a shell command that adds entries to the user's authorized_keys file.
+    """Build a shell command that idempotently adds entries to the user's authorized_keys file.
 
     This command:
-    1. Creates the user's .ssh directory if it doesn't exist
-    2. Appends each authorized_keys entry to the authorized_keys file
+    1. Creates the user's .ssh directory and authorized_keys file if needed
+    2. Appends each entry that is not already present (a ``grep -qxF`` guard), so
+       re-running it -- e.g. re-seeding a restarted container whose ``/root``
+       persisted -- does not accumulate duplicate lines
+    3. Sets proper permissions on the authorized_keys file
 
     Returns a shell command string that can be executed via sh -c, or None if
     there are no entries to add.
@@ -225,12 +228,19 @@ def build_add_authorized_keys_command(
     script_lines: list[str] = [
         # Create .ssh directory if needed
         f"mkdir -p '{ssh_dir}'",
+        # Ensure the file exists so the grep guard below has something to read
+        # even on a fresh host (avoids a spurious "No such file" on the first entry).
+        f"touch '{authorized_keys_path}'",
     ]
 
     for entry in authorized_keys_entries:
         assert "'" not in entry, "Single quotes are not allowed in authorized_keys entries"
-        # Append entry to authorized_keys (with a newline)
-        script_lines.append(f"printf '%s\\n' '{entry}' >> '{authorized_keys_path}'")
+        # Append the entry only if the exact line isn't already present, so the
+        # command is idempotent across re-runs. The subshell groups the ``||`` so
+        # it doesn't interact with the surrounding ``&&`` chain.
+        script_lines.append(
+            f"( grep -qxF '{entry}' '{authorized_keys_path}' || printf '%s\\n' '{entry}' >> '{authorized_keys_path}' )"
+        )
 
     # Set proper permissions on authorized_keys file
     script_lines.append(f"chmod 600 '{authorized_keys_path}'")

@@ -23,6 +23,7 @@ from google.cloud import compute_v1
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.config import LocalProviderConfig
@@ -30,13 +31,19 @@ from imbue.mngr_gcp.backend import GCP_BACKEND_NAME
 from imbue.mngr_gcp.cli import _output_cleanup_result
 from imbue.mngr_gcp.cli import _output_prepare_result
 from imbue.mngr_gcp.cli import _perform_cleanup
+from imbue.mngr_gcp.cli import _perform_state_bucket_cleanup
+from imbue.mngr_gcp.cli import _refuse_cleanup_if_instances_exist
 from imbue.mngr_gcp.cli import _resolve_provider_config
 from imbue.mngr_gcp.cli import gcp_cli_group
 from imbue.mngr_gcp.client import FirewallPrepareResult
 from imbue.mngr_gcp.config import GcpProviderConfig
+from imbue.mngr_gcp.errors import GcpStateBucketNotEmptyError
 from imbue.mngr_gcp.testing import FakeFirewallsClient
 from imbue.mngr_gcp.testing import FakeInstancesClient
+from imbue.mngr_gcp.testing import _FAKE_CREDENTIALS
+from imbue.mngr_gcp.testing import _FakeStorageClient
 from imbue.mngr_gcp.testing import _StubbedGcpVpsClient
+from imbue.mngr_gcp.testing import _StubbedGcsStateBucket
 from imbue.mngr_vps.errors import ManagedResourcesExistError
 
 
@@ -123,6 +130,92 @@ def test_cleanup_logic_refuses_when_instances_exist() -> None:
 
 
 # =============================================================================
+# Cleanup-helpers: instance-exists guard + bucket teardown contract
+# =============================================================================
+
+
+def _make_state_bucket(fake_gcs: _FakeStorageClient, bucket_name: str) -> _StubbedGcsStateBucket:
+    return _StubbedGcsStateBucket(
+        credentials=_FAKE_CREDENTIALS,
+        project_id="test-project",
+        region="us-west1",
+        bucket_name=bucket_name,
+        stubbed_storage_client=fake_gcs,
+    )
+
+
+def test_refuse_cleanup_if_instances_exist_aborts_before_teardown() -> None:
+    """The instance-exists guard runs before any teardown, so the bucket survives.
+
+    Reproduces the callback ordering: when an instance is still alive, the guard
+    raises before the bucket is touched, so a bucket holding host state stays
+    intact for the operator to inspect after destroying the lingering host.
+    """
+    firewalls = FakeFirewallsClient()
+    firewalls.existing = compute_v1.Firewall(name="mngr-gcp-ssh")
+    instances = FakeInstancesClient()
+    instances.aggregated_result = [
+        (
+            "zones/us-west1-a",
+            [compute_v1.Instance(name="mngr-host-live", status="RUNNING", labels={"mngr-provider": "gcp"})],
+        )
+    ]
+    client = _cleanup_client(instances, firewalls)
+    fake_gcs = _FakeStorageClient()
+    bucket = _make_state_bucket(fake_gcs, "mngr-state-refuse-first")
+    bucket.ensure_bucket()
+    bucket.write_host_record_json(HostId.generate(), "{}")
+    with pytest.raises(ManagedResourcesExistError, match="Refusing"):
+        _refuse_cleanup_if_instances_exist(client)
+    # The guard raised before any teardown, so the bucket and its state survive.
+    assert bucket.bucket_exists() is True
+    assert bucket.has_any_host_state() is True
+
+
+def test_perform_state_bucket_cleanup_refuses_while_host_state_remains() -> None:
+    """The bucket cleanup refuses (deletes nothing) while any host state remains.
+
+    Without ``--force``, orphaned offline state from a removed host must not be
+    silently dropped: the helper raises a ``GcpStateBucketNotEmptyError`` pointing
+    the operator at ``--force``, and the bucket is left untouched.
+    """
+    fake_gcs = _FakeStorageClient()
+    bucket = _make_state_bucket(fake_gcs, "mngr-state-cleanup-refuse")
+    bucket.ensure_bucket()
+    bucket.write_host_record_json(HostId.generate(), "{}")
+    with pytest.raises(GcpStateBucketNotEmptyError, match="still holds offline host state"):
+        _perform_state_bucket_cleanup(bucket, force=False)
+    # The bucket must still exist after a refusal.
+    assert bucket.bucket_exists() is True
+
+
+def test_perform_state_bucket_cleanup_force_deletes_despite_host_state() -> None:
+    """``--force`` deletes the bucket (and its leftover state) instead of refusing."""
+    fake_gcs = _FakeStorageClient()
+    bucket = _make_state_bucket(fake_gcs, "mngr-state-cleanup-purge")
+    bucket.ensure_bucket()
+    bucket.write_host_record_json(HostId.generate(), "{}")
+    assert _perform_state_bucket_cleanup(bucket, force=True) == "mngr-state-cleanup-purge"
+    assert bucket.bucket_exists() is False
+
+
+def test_perform_state_bucket_cleanup_deletes_empty_bucket() -> None:
+    """With no host state, the bucket cleanup deletes the bucket and returns its name."""
+    fake_gcs = _FakeStorageClient()
+    bucket = _make_state_bucket(fake_gcs, "mngr-state-cleanup-empty")
+    bucket.ensure_bucket()
+    assert _perform_state_bucket_cleanup(bucket, force=False) == "mngr-state-cleanup-empty"
+    assert bucket.bucket_exists() is False
+
+
+def test_perform_state_bucket_cleanup_is_noop_when_bucket_absent() -> None:
+    """Calling cleanup on a bucket that was never created returns None (idempotent)."""
+    fake_gcs = _FakeStorageClient()
+    bucket = _make_state_bucket(fake_gcs, "mngr-state-cleanup-absent")
+    assert _perform_state_bucket_cleanup(bucket, force=False) is None
+
+
+# =============================================================================
 # format-aware output (prepare / cleanup respect --format)
 # =============================================================================
 
@@ -130,46 +223,61 @@ def test_cleanup_logic_refuses_when_instances_exist() -> None:
 def test_output_prepare_result_human_emits_single_line(capsys: pytest.CaptureFixture[str]) -> None:
     """HUMAN mode emits one result sentence to stdout (no bare echo line)."""
     result = FirewallPrepareResult(target_tag="mngr-ssh", was_created=True)
-    _output_prepare_result(result, "mngr-gcp-ssh", "test-project", OutputFormat.HUMAN)
+    _output_prepare_result(result, "mngr-gcp-ssh", "test-project", "mngr-state-test-project", True, OutputFormat.HUMAN)
     captured = capsys.readouterr()
-    assert captured.out == "Prepared GCP firewall rule mngr-gcp-ssh (tag mngr-ssh) in project test-project\n"
+    assert (
+        captured.out == "Prepared GCP firewall rule mngr-gcp-ssh (tag mngr-ssh) in project test-project\n"
+        "Created GCS state bucket mngr-state-test-project in project test-project\n"
+    )
 
 
 def test_output_prepare_result_json_carries_created_flag(capsys: pytest.CaptureFixture[str]) -> None:
-    """JSON mode emits a structured object including the created signal."""
+    """JSON mode emits a structured object including the created signals (firewall + bucket)."""
     result = FirewallPrepareResult(target_tag="mngr-ssh", was_created=False)
-    _output_prepare_result(result, "mngr-gcp-ssh", "test-project", OutputFormat.JSON)
+    _output_prepare_result(result, "mngr-gcp-ssh", "test-project", "mngr-state-test-project", False, OutputFormat.JSON)
     payload = json.loads(capsys.readouterr().out.strip())
     assert payload == {
         "firewall_name": "mngr-gcp-ssh",
         "target_tag": "mngr-ssh",
         "project_id": "test-project",
         "created": False,
+        "state_bucket_name": "mngr-state-test-project",
+        "state_bucket_created": False,
     }
 
 
 def test_output_prepare_result_jsonl_emits_prepared_event(capsys: pytest.CaptureFixture[str]) -> None:
     """JSONL mode emits a ``prepared`` event with the same fields."""
     result = FirewallPrepareResult(target_tag="mngr-ssh", was_created=True)
-    _output_prepare_result(result, "mngr-gcp-ssh", "test-project", OutputFormat.JSONL)
+    _output_prepare_result(result, "mngr-gcp-ssh", "test-project", "mngr-state-test-project", True, OutputFormat.JSONL)
     payload = json.loads(capsys.readouterr().out.strip())
     assert payload["event"] == "prepared"
     assert payload["created"] is True
     assert payload["firewall_name"] == "mngr-gcp-ssh"
+    assert payload["state_bucket_name"] == "mngr-state-test-project"
+    assert payload["state_bucket_created"] is True
 
 
 def test_output_cleanup_result_json_reports_deleted(capsys: pytest.CaptureFixture[str]) -> None:
     """JSON cleanup output reports deleted=True when a rule was removed."""
-    _output_cleanup_result("mngr-gcp-ssh", "mngr-gcp-ssh", "test-project", OutputFormat.JSON)
+    _output_cleanup_result(
+        "mngr-gcp-ssh", "mngr-gcp-ssh", "test-project", "mngr-state-test-project", OutputFormat.JSON
+    )
     payload = json.loads(capsys.readouterr().out.strip())
-    assert payload == {"firewall_name": "mngr-gcp-ssh", "project_id": "test-project", "deleted": True}
+    assert payload == {
+        "firewall_name": "mngr-gcp-ssh",
+        "project_id": "test-project",
+        "deleted": True,
+        "state_bucket_deleted": "mngr-state-test-project",
+    }
 
 
 def test_output_cleanup_result_json_reports_noop(capsys: pytest.CaptureFixture[str]) -> None:
     """JSON cleanup output reports deleted=False on the idempotent no-op path."""
-    _output_cleanup_result(None, "mngr-gcp-ssh", "test-project", OutputFormat.JSON)
+    _output_cleanup_result(None, "mngr-gcp-ssh", "test-project", None, OutputFormat.JSON)
     payload = json.loads(capsys.readouterr().out.strip())
     assert payload["deleted"] is False
+    assert payload["state_bucket_deleted"] is None
 
 
 def test_prepare_command_help_is_reachable() -> None:

@@ -435,6 +435,8 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
         cwd: Path | None = None,
         env: Mapping[str, str] | None = None,
         shutdown_event: ReadOnlyEvent | None = None,
+        # Open file descriptors to keep open in (and inherit into) the spawned child, by their fd numbers.
+        pass_fds: Sequence[int] = (),
     ) -> RunningProcess:
         """
         Run a process in the background, returning immediately.
@@ -454,6 +456,7 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
                 is_checked=is_checked_by_group,
                 timeout=timeout,
                 shutdown_event=self._maybe_wrap_external_shutdown_event(shutdown_event),
+                pass_fds=pass_fds,
                 process_class=RunningProcessWithOnLineCallback,
                 process_class_kwargs={"on_line_callback": on_output},
             )

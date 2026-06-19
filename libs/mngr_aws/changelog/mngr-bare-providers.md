@@ -59,3 +59,9 @@ without SSH and probes it with the matching realizer. Pre-existing hosts have no
 tag and default to container, preserving prior behavior.
 
 Behavior-preserving dedup against the shared offline layer. The AWS `_state_store` / `_host_dir_backend` cached properties are now thin wrappers over the shared `OfflineCapableVpsProvider._select_bucket_store` / `_select_bucket_host_dir_backend` (supplying only the resolved S3 bucket, its label, and `mngr aws prepare`). The near-identical `_offline_discovered_host_from_instance` is dropped in favor of the shared default; AWS now sets only the `Name` host-name tag key via the new `_host_name_tag_key()` hook. No user-visible behavior change.
+
+
+Bugfix: `mngr rename` now re-stamps the EC2 `Name` identity tag (read by offline discovery) so a renamed-then-stopped host lists under its new name in `mngr list`. Previously the `Name` tag was stamped only at create, so a host renamed while running still surfaced under its old name once stopped. Implemented via a new `AwsVpsClient.set_instance_tags` (an EC2 `create_tags` upsert) called from the AWS provider's `_remirror_host_name` hook.
+
+Doc: removed a stale README note about speculative EBS `create_snapshot` /
+`list_snapshots` / `delete_snapshot` client methods that no longer exist.

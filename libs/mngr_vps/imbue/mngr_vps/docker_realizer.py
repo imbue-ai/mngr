@@ -106,7 +106,7 @@ def _read_host_id_label_from_vps(outer: OuterHostInterface) -> HostId | None:
 
 
 def _read_live_listing_from_vps(
-    outer: OuterHostInterface, host_id: HostId, host_dir: str, prefix: str
+    outer: OuterHostInterface, host_id: HostId, host_dir: str, prefix: str, window_name: str
 ) -> dict[str, Any]:
     """Run the outer listing script on the VPS and return the parsed live listing.
 
@@ -114,7 +114,9 @@ def _read_live_listing_from_vps(
     for a stopped container, from a ``docker cp``-extracted copy), so agents
     created *inside* the container are discovered.
     """
-    script = build_outer_listing_collection_script(str(host_id), host_dir, prefix, host_id_label=LABEL_HOST_ID)
+    script = build_outer_listing_collection_script(
+        str(host_id), host_dir, prefix, host_id_label=LABEL_HOST_ID, window_name=window_name
+    )
     result = outer.execute_idempotent_command(script, timeout_seconds=60.0)
     if not result.success:
         raise MngrError(
@@ -213,9 +215,9 @@ class DockerRealizer(SnapshotCapableRealizer):
         return host_id, record
 
     def read_live_listing(
-        self, outer: OuterHostInterface, host_id: HostId, host_dir: str, prefix: str
+        self, outer: OuterHostInterface, host_id: HostId, host_dir: str, prefix: str, window_name: str
     ) -> tuple[list[dict[str, Any]], bool]:
-        parsed = _read_live_listing_from_vps(outer, host_id, host_dir, prefix)
+        parsed = _read_live_listing_from_vps(outer, host_id, host_dir, prefix, window_name)
         return extract_agent_data_from_parsed_listing(parsed), is_running_container_state(
             parsed.get("container_state")
         )
@@ -453,7 +455,16 @@ class DockerRealizer(SnapshotCapableRealizer):
         return SnapshotId(image_id)
 
     def delete_snapshot_placement(self, outer: OuterHostInterface, snapshot_id: SnapshotId) -> None:
+        # Idempotent: an already-absent image ("No such image", a stable docker string)
+        # means the postcondition -- the snapshot is gone -- already holds, so treat it
+        # as success. Any OTHER rmi failure means the image still exists, so raise rather
+        # than swallow: the provider's delete_snapshot only drops the snapshot from the
+        # host record on success, and a failed delete must not be reported as one.
+        # (The original docker provider only logs a warning here; this one raises.)
         try:
             run_docker(outer, ["rmi", str(snapshot_id)])
         except MngrError as e:
-            logger.warning("Failed to delete snapshot image: {}", e)
+            if "no such image" in str(e).lower():
+                logger.trace("Snapshot image {} already gone -- nothing to remove", snapshot_id)
+                return
+            raise

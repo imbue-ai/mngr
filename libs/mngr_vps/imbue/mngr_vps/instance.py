@@ -29,6 +29,7 @@ from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
@@ -1278,9 +1279,19 @@ class VpsProvider(BaseProviderInstance):
         realizer = self._realizer_for_record(host_record)
 
         if create_snapshot:
+            # Warn-not-raise: a stop preserves the volume, so the pre-stop snapshot is
+            # a belt-and-suspenders extra -- a failed snapshot loses no data, and
+            # blocking a requested stop over it would be worse. Mirrors the Modal and
+            # Docker providers (mngr_modal/instance.py "Failed to create snapshot
+            # before termination"; providers/docker/instance.py "Failed to create
+            # snapshot before stop").
             try:
                 self.create_snapshot(host_id)
             except MngrError as e:
+                # FIXME: stopping a host should be like stopping an agent -- various components can fail, and those
+                #  failures ought to be collected as the process continues, then at the very end, the exception can be
+                #  raised (and include all of the things that went wrong, and triggrer a non-zero exit code, while
+                #  still ensuring that we stop and clean up as much as possible)
                 logger.warning("Failed to create snapshot before stop: {}", e)
 
         # Disconnect SSH before stopping (also disconnect the passed-in host
@@ -1346,18 +1357,9 @@ class VpsProvider(BaseProviderInstance):
             # The in-container activity watcher is a backgrounded process that does
             # not survive the container restart, so relaunch it -- else auto-stop-
             # on-idle would silently stop working after the first resume (for every
-            # vps provider, not just AWS). Best-effort: a resumed host that
-            # can't auto-stop is better than a failed resume.
+            # vps provider, not just AWS).
             with log_span("Relaunching activity watcher"):
-                try:
-                    realizer.start_activity_watcher(outer, handle)
-                except MngrError as e:
-                    logger.warning(
-                        "Failed to relaunch the activity watcher on resume for host {} ({}); "
-                        "this host will not auto-stop on idle until it is recreated",
-                        host_id,
-                        e,
-                    )
+                realizer.start_activity_watcher(outer, handle)
 
         logger.info("Host {} started", host_id)
         return host_obj
@@ -1715,8 +1717,10 @@ class VpsProvider(BaseProviderInstance):
         # instance's ``mngr-isolation`` marker, no SSH needed), not the provider's
         # create-time default -- otherwise a bare host probed by the default
         # container realizer finds no container and is invisible to discovery.
-        realizer = self._realizer_for_vps_ip(vps_ip)
+        # Resolved inside the try so a corrupt marker (a VpsError) degrades just
+        # this VPS rather than aborting the whole discovery sweep.
         try:
+            realizer = self._realizer_for_vps_ip(vps_ip)
             with self._make_outer_for_vps_ip(vps_ip) as outer:
                 found = realizer.find_host_record(outer)
                 if found is None:
@@ -1732,7 +1736,11 @@ class VpsProvider(BaseProviderInstance):
                 # cache-fallback branch.
                 try:
                     live_agent_data, is_running = realizer.read_live_listing(
-                        outer, host_id, str(self.host_dir), self.mngr_ctx.config.prefix
+                        outer,
+                        host_id,
+                        str(self.host_dir),
+                        self.mngr_ctx.config.prefix,
+                        self.mngr_ctx.config.tmux.primary_window_name,
                     )
                 except MngrError as listing_exc:
                     logger.warning(
@@ -2158,12 +2166,32 @@ class VpsProvider(BaseProviderInstance):
         self._require_snapshot_capable_realizer(self._realizer)
         host_id = host.id if isinstance(host, HostInterface) else host
         host_record = self._find_host_record(host_id)
-        if host_record is None or host_record.vps_ip is None:
+        if host_record is None or host_record.config is None or host_record.vps_ip is None:
             raise HostNotFoundError(self.name, host_id)
         realizer = self._require_snapshot_capable_realizer(self._realizer_for_record(host_record))
 
+        certified = host_record.certified_host_data
+        remaining_snapshots = [s for s in certified.snapshots if s.id != str(snapshot_id)]
+        if len(remaining_snapshots) == len(certified.snapshots):
+            raise SnapshotNotFoundError(self.name, snapshot_id)
+
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
+            # Delete the image first: on a real failure this raises (the snapshot stays
+            # in the record, so it still lists), and only on success do we drop it from
+            # the record -- so the record never claims a snapshot is gone while its image
+            # remains. (create_snapshot is the inverse: image, then record.)
             realizer.delete_snapshot_placement(outer, snapshot_id)
+            updated_record = host_record.with_certified_updates(
+                to_update(certified.field_ref().snapshots, remaining_snapshots),
+                to_update(certified.field_ref().updated_at, datetime.now(timezone.utc)),
+            )
+            host_store = realizer.open_host_store(outer, host_id)
+            self._write_and_mirror(host_store, updated_record)
+
+        # Refresh the cache so a same-process ``list_snapshots`` (cache-first) does not
+        # still report the just-deleted snapshot.
+        self._host_record_cache[host_id] = updated_record
+        logger.info("Deleted snapshot {} for host {}", snapshot_id, host_id)
 
     # =========================================================================
     # Tags
@@ -2207,7 +2235,27 @@ class VpsProvider(BaseProviderInstance):
                 host_store = self._realizer_for_record(host_record).open_host_store(outer, host_id)
                 self._write_and_mirror(host_store, updated_record)
 
+        # Re-stamp the cheap host-name identity tag/metadata that offline discovery
+        # reads (it never reads the mirrored record), so a renamed host no longer
+        # resolves under its old name once stopped. Runs via the cloud API, so it
+        # works whether the host is up or stopped; default no-op for providers with
+        # no such identity tag.
+        self._remirror_host_name(updated_record, name)
+
         return self.get_host(host_id)
+
+    def _remirror_host_name(self, host_record: VpsHostRecord, name: HostName) -> None:
+        """Re-stamp the create-time host-name identity tag/metadata after a rename.
+
+        Offline discovery recovers a stopped host's name from a cheap instance
+        tag/metadata stamped at create (the EC2 ``Name`` tag, the Azure/GCP
+        ``mngr-host-name`` tag/metadata) -- not from the mirrored record -- so without
+        this a renamed host still lists under its old name once stopped. The value
+        matches create's ``label`` (``mngr-<host_name>``). Default no-op (a provider
+        with no such identity tag needs nothing); offline-capable cloud providers
+        override to update it through their cloud API.
+        """
+        del host_record, name
 
     # =========================================================================
     # Volumes
@@ -2252,7 +2300,9 @@ class VpsProvider(BaseProviderInstance):
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
             host_store = self._realizer_for_record(host_record).open_host_store(outer, host_id)
-            return host_store.list_persisted_agent_data()
+            records = host_store.list_persisted_agent_data()
+        logger.debug("Read {} persisted agent record(s) for host {}", len(records), host_id)
+        return records
 
     def persist_agent_data(self, host_id: HostId, agent_data: Mapping[str, object]) -> None:
         host_record = self._find_host_record(host_id)

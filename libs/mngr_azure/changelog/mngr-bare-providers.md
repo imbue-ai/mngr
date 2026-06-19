@@ -67,3 +67,18 @@ without SSH and probes it with the matching realizer. Pre-existing hosts have no
 tag and default to container, preserving prior behavior.
 
 Behavior-preserving dedup against the shared offline layer. The Azure `_state_store` / `_host_dir_backend` cached properties are now thin wrappers over the shared `OfflineCapableVpsProvider._select_bucket_store` / `_select_bucket_host_dir_backend` (supplying only the resolved Blob bucket, its label, and `mngr azure prepare`). The near-identical `_offline_discovered_host_from_instance` is dropped in favor of the shared default; Azure now sets only the `mngr-host-name` host-name tag key via the new `_host_name_tag_key()` hook. No user-visible behavior change.
+
+
+Bugfix: `rename_host` now re-stamps the cheap `mngr-host-name` VM tag that offline
+discovery reads (previously stamped only at create), so a host renamed and then
+stopped lists under its new name rather than its old one. The re-stamp merges into
+the VM's existing tags rather than replacing them, preserving the other index tags
+(`mngr-host-id`, `mngr-provider`, etc.).
+
+Doc: removed a stale README note about speculative `create_snapshot` /
+`list_snapshots` / `delete_snapshot` client methods that no longer exist.
+
+Internal cleanup (no behavior change): renamed `_build_self_deallocate_script`'s
+`sentinel_on_outer` parameter to `sentinel_to_remove` (clearer that `None` means no
+sentinel to delete, i.e. the bare path), and dropped the now-unused
+`sentinel_on_outer` parameter from the `_idle_watcher_service_unit` override.

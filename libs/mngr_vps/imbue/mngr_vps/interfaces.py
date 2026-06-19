@@ -115,7 +115,7 @@ class HostRealizer(MutableModel, ABC):
 
     @abstractmethod
     def read_live_listing(
-        self, outer: OuterHostInterface, host_id: HostId, host_dir: str, prefix: str
+        self, outer: OuterHostInterface, host_id: HostId, host_dir: str, prefix: str, window_name: str
     ) -> tuple[list[dict[str, Any]], bool]:
         """Read live agent data and the running state of the placement.
 

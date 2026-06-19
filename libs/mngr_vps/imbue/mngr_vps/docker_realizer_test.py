@@ -9,12 +9,14 @@ from pydantic import ConfigDict
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import SnapshotId
 from imbue.mngr_vps.config import VpsProviderConfig
 from imbue.mngr_vps.data_types import PlacementHandle
 from imbue.mngr_vps.docker_realizer import CONTAINER_KNOWN_HOSTS_NAME
@@ -105,3 +107,48 @@ def test_teardown_placement_raises_cleanup_failed_group_when_steps_fail(
     outer = cast(OuterHostInterface, _AllFailOuter())
     with pytest.raises(CleanupFailedGroup):
         realizer.teardown_placement(outer, HostId.generate(), _container_handle())
+
+
+class _OneResultOuter(MutableModel):
+    """Outer host that returns a single canned ``CommandResult`` for any command."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    result: CommandResult
+
+    def execute_idempotent_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Any = None,
+        env: Any = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        return self.result
+
+
+def _outer_returning(stdout: str = "", stderr: str = "", success: bool = True) -> OuterHostInterface:
+    return cast(
+        OuterHostInterface, _OneResultOuter(result=CommandResult(stdout=stdout, stderr=stderr, success=success))
+    )
+
+
+def test_delete_snapshot_placement_succeeds_when_rmi_succeeds(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    realizer = _realizer(temp_mngr_ctx, tmp_path)
+    realizer.delete_snapshot_placement(_outer_returning(stdout="deleted"), SnapshotId("sha256:abc"))
+
+
+def test_delete_snapshot_placement_tolerates_already_gone_image(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """An already-absent image (docker's "No such image") is benign -- the snapshot is gone."""
+    outer = _outer_returning(stderr="Error: No such image: sha256:abc", success=False)
+    realizer = _realizer(temp_mngr_ctx, tmp_path)
+    realizer.delete_snapshot_placement(outer, SnapshotId("sha256:abc"))
+
+
+def test_delete_snapshot_placement_raises_on_real_rmi_failure(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """A non-"No such image" rmi failure means the image still exists, so it raises rather
+    than swallow (unlike the docker provider, which only warns)."""
+    outer = _outer_returning(stderr="image is being used by running container abc", success=False)
+    realizer = _realizer(temp_mngr_ctx, tmp_path)
+    with pytest.raises(MngrError):
+        realizer.delete_snapshot_placement(outer, SnapshotId("sha256:abc"))

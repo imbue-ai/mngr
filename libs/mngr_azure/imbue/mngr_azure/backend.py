@@ -24,6 +24,7 @@ from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_azure import hookimpl
@@ -73,7 +74,7 @@ def _build_idle_watcher_service_unit() -> str:
     )
 
 
-def _build_self_deallocate_script(sentinel_on_outer: str | None) -> str:
+def _build_self_deallocate_script(sentinel_to_remove: str | None) -> str:
     """Build the host-side self-deallocate script that halts this VM's compute billing.
 
     Fetches the VM's managed-identity token from IMDS (no az CLI needed -- plain
@@ -85,18 +86,19 @@ def _build_self_deallocate_script(sentinel_on_outer: str | None) -> str:
     compute billing, so a fallback ``shutdown`` would only strand the VM
     unreachable while it keeps billing.
 
-    The container path passes ``sentinel_on_outer`` so the script removes the idle
-    sentinel first (a resumed VM must not immediately re-trigger, and the ``.path``
-    unit re-fires this deallocate next time the watcher re-creates it). The bare
-    path runs this directly as the agent's ``shutdown.sh`` -- there is no sentinel,
-    so it passes ``None`` and the removal line is omitted.
+    ``sentinel_to_remove`` is the idle sentinel the script deletes before
+    deallocating, or ``None`` when there is nothing to remove. The container path
+    passes the sentinel (a resumed VM must not immediately re-trigger; the ``.path``
+    unit re-fires this deallocate next time the watcher re-creates it); the bare
+    path runs this directly as the agent's ``shutdown.sh`` -- it has no sentinel, so
+    it passes ``None`` and the removal line is omitted.
     """
     token_url = (
         "http://169.254.169.254/metadata/identity/oauth2/token"
         "?api-version=2018-02-01&resource=https%3A%2F%2Fmanagement.azure.com%2F"
     )
     resource_id_url = "http://169.254.169.254/metadata/instance/compute/resourceId?api-version=2021-02-01&format=text"
-    remove_sentinel_line = f'rm -f "{sentinel_on_outer}"\n' if sentinel_on_outer is not None else ""
+    remove_sentinel_line = f'rm -f "{sentinel_to_remove}"\n' if sentinel_to_remove is not None else ""
     return (
         "#!/bin/sh\n"
         "# Installed by mngr (AzureProvider) -- deallocate this VM when idle.\n"
@@ -406,16 +408,15 @@ class AzureProvider(OfflineCapableVpsProvider):
         in ``_post_finalize_steps`` still applies). There is no sentinel on the bare
         path, so the script is built with ``None``.
         """
-        self._write_shutdown_script(host, _build_self_deallocate_script(None))
+        self._write_shutdown_script(host, _build_self_deallocate_script(sentinel_to_remove=None))
 
-    def _idle_watcher_service_unit(self, sentinel_on_outer: str) -> str:
+    def _idle_watcher_service_unit(self) -> str:
         """Azure override: the oneshot ``.service`` runs the installed ARM self-deallocate script.
 
-        ``sentinel_on_outer`` is unused here -- the sentinel removal lives in the
-        deallocate script itself (written by ``_prepare_idle_watcher_outer``), since
-        an Azure OS poweroff would not halt billing.
+        The sentinel removal lives in the deallocate script itself (written by
+        ``_prepare_idle_watcher_outer``), since an Azure OS poweroff would not halt
+        billing.
         """
-        del sentinel_on_outer
         return _build_idle_watcher_service_unit()
 
     def _prepare_idle_watcher_outer(self, outer: OuterHostInterface, sentinel_on_outer: str) -> None:
@@ -430,7 +431,9 @@ class AzureProvider(OfflineCapableVpsProvider):
         outer.execute_idempotent_command(
             "command -v curl >/dev/null 2>&1 || (apt-get update && apt-get install -y curl)"
         )
-        outer.write_text_file(Path(_DEALLOCATE_SCRIPT_PATH), _build_self_deallocate_script(sentinel_on_outer))
+        outer.write_text_file(
+            Path(_DEALLOCATE_SCRIPT_PATH), _build_self_deallocate_script(sentinel_to_remove=sentinel_on_outer)
+        )
         outer.execute_idempotent_command(f"chmod +x {_DEALLOCATE_SCRIPT_PATH}")
 
     def _post_finalize_steps(self, *, host_id: HostId, vps_ip: str) -> list[tuple[str, Callable[[], None]]]:
@@ -475,6 +478,18 @@ class AzureProvider(OfflineCapableVpsProvider):
         # ``mngr-<host_name>``); the shared ``_offline_discovered_host_from_instance``
         # reads it through here.
         return HOST_NAME_TAG_KEY
+
+    def _remirror_host_name(self, host_record: VpsHostRecord, name: HostName) -> None:
+        """Re-stamp the ``mngr-host-name`` VM tag (read by offline discovery) after a rename.
+
+        Merges into the VM's existing tags (does not replace them); the value matches
+        create's ``label`` (``mngr-<host_name>``).
+        """
+        if host_record.config is None:
+            return
+        self.azure_client.set_instance_tags(
+            host_record.config.vps_instance_id, {self._host_name_tag_key(): f"mngr-{name}"}
+        )
 
     def _is_instance_offline(self, instance: Mapping[str, Any]) -> bool:
         """Whether the VM is halted (stopped/deallocated, and their in-flight transitions).

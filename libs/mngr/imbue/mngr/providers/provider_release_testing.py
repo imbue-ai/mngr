@@ -118,9 +118,9 @@ class ProviderReleaseProfile(abc.ABC):
     supports_snapshots: bool
     snapshot_survives_destroy: bool
     # Whether a stopped host's host_dir is readable from the offline mirror (captured to the state
-    # bucket at ``mngr stop``). True only for clouds with a real host_dir backend (AWS/Azure); GCP
-    # uses ``NullHostDirBackend`` and Modal has no ``--stop-host`` window, so both stay False.
-    # Read only by Trip 1's opt-in offline-host_dir step (gated by ``_OFFLINE_HOST_DIR_ENV_VAR``).
+    # bucket at ``mngr stop``). True for clouds with a real host_dir backend (AWS S3 / Azure Blob /
+    # GCP GCS); Modal has no ``--stop-host`` window, so it stays False. Read only by Trip 1's opt-in
+    # offline-host_dir step (gated by ``_OFFLINE_HOST_DIR_ENV_VAR``).
     supports_offline_host_dir: bool = False
     # Whether this profile's shape is a *bare* host -- the agent shell is the VM's own OS, with no
     # container. When True, Trip 1 asserts the no-container shape end to end (the bare host store

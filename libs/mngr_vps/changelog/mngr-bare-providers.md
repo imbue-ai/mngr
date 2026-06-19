@@ -199,3 +199,49 @@ without SSH. A host created before this change carries no marker and defaults to
 container, preserving the prior behavior.
 
 Behavior-preserving dedup in the shared offline layer. The near-identical AWS/Azure bucket-store selection now lives on `OfflineCapableVpsProvider` as `_select_bucket_store` (builds a `BucketHostStateStore`, or raises the actionable `missing_state_bucket_error` when the bucket is absent) and `_select_bucket_host_dir_backend` (bucket-backed when the feature is enabled and the bucket is present, else the no-op `NullHostDirBackend`); the AWS/Azure `_state_store` / `_host_dir_backend` cached properties are now thin wrappers passing only their resolved bucket, label, and prepare-command. The shared offline discovery now has a concrete `_offline_discovered_host_from_instance` default (builds a STOPPED `DiscoveredHost` from the `mngr-host-id` / name identity tags) with a `_host_name_tag_key()` hook; AWS/Azure drop their copies and set only the key (`Name` / `mngr-host-name`). The resume known_hosts rebind's add half is now a shared `_add_known_hosts_for_ip` helper (adds the VPS port-22 and container endpoints, each only when its key is present). GCP is unaffected: it keeps its metadata-backed `_state_store`, the `NullHostDirBackend` default, and its metadata-encoded discovery override. No user-visible behavior change.
+
+Hardened the post-finalize idle-watcher install. A missing host record at
+`_on_host_finalized` -- which runs only after the record has been made durable, so
+a missing record there is a broken invariant rather than a tolerable condition --
+now fails `create_host` (raising `HostCreationError`, whose cleanup tears the VPS
+back down) instead of logging a WARNING and silently shipping a host that can never
+auto-stop on idle. Genuine idle-watcher *install* failures (a network or systemctl
+error) stay best-effort and tolerated as before. Also documented why the remaining
+warn-not-raise sites in the provider (snapshot-before-stop, the activity-watcher
+relaunch on resume, the agent-record id guard, and the malformed-identity skip in
+offline discovery) warn rather than raise, cross-referencing their Modal/Docker and
+online-discovery equivalents.
+
+Added a shared `_remirror_host_name` hook on `VpsProvider`, called from the base
+`rename_host` after the record write. Offline discovery recovers a stopped host's
+name from a cheap instance tag/metadata stamped at create (not from the mirrored
+record), so without re-stamping it a renamed host kept listing under its old name
+once stopped. The base hook is a no-op (providers with no such identity tag need
+nothing); the offline-capable cloud providers (AWS/Azure/GCP) override it to update
+the identity through their cloud API. The hook runs whether the host is up or
+stopped, since the cloud-API tag/metadata write does not require a reachable host.
+
+Performance: `mngr stop` on a bare (`isolation=NONE`) host no longer hangs for minutes while it captures the host's `host_dir`. A bare `host_dir` holds the agent's full working tree (a git checkout is thousands of small files), and the offline capture writes one object per file to the state bucket; these uploads previously ran serially, so one wide-area round-trip per object made the capture take minutes (the EC2 pause only happens after the capture completes). The per-file uploads now run concurrently across a bounded worker pool, turning a minutes-long stop into seconds. Found by a real-cloud smoke test; container hosts were unaffected (their `host_dir` is small).
+
+Internal cleanup (no behavior change): dropped the unused `sentinel_on_outer`
+parameter from the `_idle_watcher_service_unit` hook -- the sentinel removal lives
+in the poweroff/deallocate scripts, not the oneshot `.service` body.
+
+Bugfix: `mngr snapshot delete` on a VPS now actually takes effect. `delete_snapshot`
+previously removed the docker image but never dropped the snapshot from the host
+record, so `mngr snapshot list` kept showing a deleted snapshot (and an unknown id
+succeeded silently). It now removes the entry from the record (raising
+`SnapshotNotFoundError` for an unknown id) and refreshes the cache. The image
+removal (`delete_snapshot_placement`) now treats an already-absent image as success
+but raises on any other failure -- so a failed delete is no longer reported as one,
+and the snapshot stays listed until its image is really gone. (The docker provider
+still only warns here; the VPS provider deliberately raises.)
+
+`isolation_from_marker` now parses a *present* `mngr-isolation` marker strictly: an
+unrecognized value raises rather than silently resolving to CONTAINER (an absent
+marker still defaults to CONTAINER for pre-marker hosts, since the marker is
+mngr-written and a bad value is corruption worth surfacing).
+
+Extracted `host_name_from_prefixed_value` (shared by `host_name_from_tags` and GCP's
+metadata-based recovery) so the strip-`mngr-`-prefix / host-id fallback logic lives
+in one place. No behavior change.

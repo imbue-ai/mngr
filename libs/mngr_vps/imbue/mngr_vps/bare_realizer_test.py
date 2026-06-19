@@ -179,7 +179,7 @@ def test_read_live_listing_runs_inner_script_directly_on_the_vm(temp_mngr_ctx: M
     realizer = _bare_realizer(temp_mngr_ctx, tmp_path)
     outer, stub = _recording_outer()
 
-    agent_data, is_running = realizer.read_live_listing(outer, HostId.generate(), "/mngr/hosts/test", "mngr-")
+    agent_data, is_running = realizer.read_live_listing(outer, HostId.generate(), "/mngr/hosts/test", "mngr-", "agent")
 
     assert is_running is True
     # An empty listing output yields no agents.

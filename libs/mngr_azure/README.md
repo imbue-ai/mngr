@@ -118,7 +118,75 @@ mngr start my-agent
 mngr destroy my-agent
 ```
 
-`mngr stop` stops the container and then **deallocates** the VM, which halts compute billing (an OS-level shutdown alone only powers it off — "Stopped (not deallocated)" — and keeps billing); the OS disk and all state persist, so a paused agent costs only disk storage. `mngr start` re-allocates it. The static public IP and SSH host keys survive the stop, and a deallocated VM still appears in `mngr list` and resolves by name (offline discovery reads its state from the state storage account; without one, offline reads raise an actionable error pointing at `mngr azure prepare`). An idle agent deallocates its own VM the same way (via its managed identity), so billing stops even if the orchestrating `mngr` process is gone. `mngr destroy` deletes the VM; the NIC, public IP, and OS disk are reaped automatically. If a `mngr create` fails after the IP/NIC are provisioned but before the VM (e.g. an Azure `SkuNotAvailable` capacity error), those are cleaned up automatically. A `SkuNotAvailable` error means the chosen VM size has no capacity in the region right now; pick another size with `-b --azure-vm-size=...` or another region.
+`mngr stop` stops the container and then **deallocates** the VM, which actually
+halts compute billing (an OS-level shutdown would only power it off — "Stopped
+(not deallocated)" — and keep billing); the OS disk and all state persist, so a
+paused agent costs only disk storage. `mngr start` re-allocates it. The public IP
+is static, so it and the SSH host keys survive the stop (no known_hosts rebind on
+resume). A deallocated VM still shows in `mngr list` and resolves by name (offline
+discovery reads its state from the state storage account; without one, offline
+reads raise an actionable error pointing at `mngr azure prepare`). `mngr destroy`
+deletes the VM, and the NIC, public IP and
+OS disk are reaped automatically via their `delete_option=Delete` (no orphaned
+resources).
+
+If a `mngr create` fails *after* the public IP + NIC are provisioned but before
+the VM (e.g. an Azure `SkuNotAvailable` capacity error), those are cleaned up —
+immediately when possible, or otherwise reclaimed at GC time by `mngr gc` (which
+also runs after every `mngr destroy`) (Azure reserves the NIC for the would-be VM
+for 180s, so immediate deletion can be briefly blocked). A `SkuNotAvailable` error means the chosen VM
+size has no capacity in the region right now; pick another size with
+`-b --azure-vm-size=...` or another region.
+
+## How it works
+
+- **Per-host create:** a Standard-SKU static public IP + a NIC bound to the
+  prepared subnet + a VM. The OS disk, NIC, and public IP are all created with
+  `delete_option=Delete`, so deleting the VM cascades all four — `destroy` is a
+  single VM delete.
+- **SSH keys** are injected inline at VM create (`os_profile.linux_configuration.ssh`);
+  Azure has no per-key resource. Cloud-init also forwards the key into root's
+  `authorized_keys`, so mngr's root SSH works.
+- **Image:** Debian 12 by default (matching the other mngr providers; runs
+  cloud-init with the Azure datasource, so the shared `mngr_vps` bootstrap
+  works unchanged). Configurable via `image_publisher` / `image_offer` /
+  `image_sku` / `image_version`.
+- **No snapshot workflow:** the Azure client exposes no managed-disk-snapshot surface, so a hard-killed host cannot be rehydrated.
+- **Spot** (`--azure-spot`): `priority=Spot`, `eviction_policy=Delete`,
+  `max_price=-1` — evicted only on capacity, and deleted (not stopped) on
+  eviction, matching AWS spot's terminate-on-reclaim.
+- VMs are tagged `mngr-provider`, `mngr-host-id`, `mngr-created-at`,
+  `managed-by=mngr`, and `mngr-host-name`; discovery filters the resource group's
+  VM list by `mngr-provider`. Offline discovery identifies deallocated/stopped
+  VMs from those cheap index tags and reads their full host record + per-agent
+  records from the **state storage account** (see "Offline state storage
+  account"). When it does not exist (older `prepare` / no storage permission),
+  offline host state is unavailable and the read raises an actionable error
+  pointing at `mngr azure prepare` (no per-agent VM-tag mirror is written). Power
+  state for a not-SSH-reachable VM is confirmed with a per-VM
+  `get_instance_status` call (Azure rejects `expand=instanceView` on a
+  resource-group VM list).
+- **Stop/start = deallocate/start:** `mngr stop` deallocates the VM
+  (`virtual_machines.begin_deallocate`) to halt compute billing; `mngr start`
+  re-allocates it (`begin_start`). The static public IP and on-disk SSH host keys
+  persist, so resume needs no IP/known_hosts fixup. Mirrors `mngr_aws`/`mngr_gcp`;
+  the shared `mngr_vps` base is untouched.
+- **Idle self-deallocate (managed identity):** each VM is created with a
+  system-assigned managed identity. The in-container idle watcher touches a
+  sentinel; a host-side systemd path unit runs a script that uses the VM's IMDS
+  token to call the ARM `deallocate` API on itself (the only in-guest way to halt
+  Azure compute billing — an OS shutdown does not). `mngr azure prepare` creates a
+  least-privilege custom role (`mngr-self-deallocate`, just
+  `Microsoft.Compute/virtualMachines/deallocate/action` + `read`), and each VM
+  gets a role assignment scoped to itself. **Graceful fallback:** if the operator
+  lacks `Microsoft.Authorization/roleAssignments`/`roleDefinitions` write (Owner /
+  User Access Administrator), the role steps are skipped with a clear warning and
+  idle self-deallocate is disabled; on a refused deallocate the in-VM script just
+  logs and exits (it does not poweroff — an Azure OS shutdown would only strand the
+  VM unreachable while it keeps billing). `mngr stop`/`start` still deallocate
+  normally, and remain the only way to halt billing on such a host.
+
+## Auto-shutdown and cost safety
 
 ## Limitations
 

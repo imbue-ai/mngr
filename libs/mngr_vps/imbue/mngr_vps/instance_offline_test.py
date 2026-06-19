@@ -1,5 +1,6 @@
 """Tests for the offline VPS provider subsystem (external HostStateStore mirror)."""
 
+import threading
 from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -14,12 +15,16 @@ import pytest
 from pydantic import PrivateAttr
 
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import HostCreationError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.volume import Volume
+from imbue.mngr.interfaces.volume_test import InMemoryVolume
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
@@ -38,6 +43,8 @@ from imbue.mngr_vps.host_store_test import _LocalFakeOuter
 from imbue.mngr_vps.host_store_test import _make_local_connector
 from imbue.mngr_vps.instance_offline import BucketHostDirBackend
 from imbue.mngr_vps.instance_offline import OfflineCapableVpsProvider
+from imbue.mngr_vps.instance_offline import _HOST_DIR_UPLOAD_CONCURRENCY
+from imbue.mngr_vps.instance_offline import _write_files_concurrently
 from imbue.mngr_vps.interfaces import HostRealizer
 from imbue.mngr_vps.primitives import ISOLATION_TAG_KEY
 from imbue.mngr_vps.primitives import IsolationMode
@@ -328,6 +335,148 @@ def test_realizer_for_vps_ip_falls_back_to_create_time_realizer_for_unknown_ip(t
     assert provider._realizer_for_vps_ip("10.0.0.99") is provider._realizer
 
 
+def test_realizer_for_vps_ip_raises_mngr_error_on_corrupt_marker(temp_mngr_ctx: MngrContext) -> None:
+    """A corrupt ``mngr-isolation`` marker raises an ``MngrError`` (not a bare ``ValueError``).
+
+    The marker is an account-writable tag, so a corrupt value is a realistic input.
+    Discovery's per-VPS error isolation only catches ``MngrError``; if marker parsing
+    leaked a bare ``ValueError`` it would escape that handling and abort the whole
+    discovery sweep, dropping every other VPS's hosts. Asserting ``MngrError`` here
+    pins the failure into the family that per-VPS degradation handles.
+    """
+    instances = [{"id": "i-bad", "main_ip": "10.0.0.8", "tags": [f"{ISOLATION_TAG_KEY}=gvisor"]}]
+    provider = _marker_provider(temp_mngr_ctx, instances)
+    with pytest.raises(MngrError):
+        provider._realizer_for_vps_ip("10.0.0.8")
+
+
+# =========================================================================
+# Post-finalize idle-watcher invariant (_on_host_finalized)
+# =========================================================================
+
+
+class _FinalizeProvider(_MarkerProvider):
+    """Drives ``_on_host_finalized``: the host-record presence is injected and the
+    idle-watcher install is recorded rather than run (so no SSH happens)."""
+
+    _record: VpsHostRecord | None = PrivateAttr(default=None)
+    _watcher_installed: bool = PrivateAttr(default=False)
+
+    def _find_host_record(self, host: HostId | HostName) -> VpsHostRecord | None:
+        return self._record
+
+    def _install_idle_watcher(self, *, host_id: HostId, vps_ip: str) -> None:
+        self._watcher_installed = True
+
+
+def _finalize_provider(temp_mngr_ctx: MngrContext, isolation: IsolationMode) -> _FinalizeProvider:
+    return _FinalizeProvider(
+        name=ProviderInstanceName("offline-test"),
+        host_dir=temp_mngr_ctx.config.default_host_dir,
+        config=VpsProviderConfig(backend=ProviderBackendName("offline-test"), isolation=isolation),
+        mngr_ctx=temp_mngr_ctx,
+        vps_client=ExternallyManagedVpsClient(),
+    )
+
+
+def _record_with_config(host_id: HostId) -> VpsHostRecord:
+    return VpsHostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=str(host_id),
+            host_name="finalize-host",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        ),
+        vps_ip="10.0.0.1",
+        config=VpsHostConfig(vps_instance_id=VpsInstanceId("i-finalize"), region="r", plan="p"),
+    )
+
+
+def test_on_host_finalized_raises_when_record_missing_blocks_watcher(temp_mngr_ctx: MngrContext) -> None:
+    """A missing host record at post-finalize, when the idle watcher is due (a container
+    placement that cannot stop its own host), is a broken invariant -- the record was
+    just made durable. ``_on_host_finalized`` must raise (failing create, whose cleanup
+    tears the VPS back down) rather than silently skip the watcher and ship a host that
+    can never auto-stop on idle.
+    """
+    provider = _finalize_provider(temp_mngr_ctx, IsolationMode.CONTAINER)
+    assert not provider._realizer.idle_shutdown_stops_host
+    provider._record = None
+    with pytest.raises(HostCreationError):
+        provider._on_host_finalized(host_id=HostId.generate(), vps_ip="10.0.0.1")
+    assert not provider._watcher_installed
+
+
+def test_on_host_finalized_installs_watcher_when_record_present(temp_mngr_ctx: MngrContext) -> None:
+    """With the record durable, finalize proceeds to install the watcher (no raise)."""
+    provider = _finalize_provider(temp_mngr_ctx, IsolationMode.CONTAINER)
+    host_id = HostId.generate()
+    provider._record = _record_with_config(host_id)
+    provider._on_host_finalized(host_id=host_id, vps_ip="10.0.0.1")
+    assert provider._watcher_installed
+
+
+def test_on_host_finalized_skips_record_check_for_self_stopping_placement(temp_mngr_ctx: MngrContext) -> None:
+    """A bare placement self-stops on idle, so no host-side watcher is installed and the
+    record invariant does not apply -- a missing record there must not fail finalize.
+    """
+    provider = _finalize_provider(temp_mngr_ctx, IsolationMode.NONE)
+    assert provider._realizer.idle_shutdown_stops_host
+    provider._record = None
+    provider._on_host_finalized(host_id=HostId.generate(), vps_ip="10.0.0.1")
+    assert not provider._watcher_installed
+
+
+# =========================================================================
+# rename_host re-mirrors the cheap host-name identity (_remirror_host_name)
+# =========================================================================
+
+
+class _RenameProvider(_MarkerProvider):
+    """Captures the ``_remirror_host_name`` call ``rename_host`` makes, and stubs
+    ``get_host`` so the rename path needs no reachable host."""
+
+    _record: VpsHostRecord | None = PrivateAttr(default=None)
+    _remirror_calls: list[tuple[str, str]] = PrivateAttr(default_factory=list)
+
+    def _find_host_record(self, host: HostId | HostName) -> VpsHostRecord | None:
+        return self._record
+
+    def _remirror_host_name(self, host_record: VpsHostRecord, name: HostName) -> None:
+        self._remirror_calls.append((host_record.certified_host_data.host_id, str(name)))
+
+    def get_host(self, host: HostId | HostName) -> HostInterface:
+        return cast(HostInterface, object())
+
+
+def test_rename_host_remirrors_updated_name(temp_mngr_ctx: MngrContext) -> None:
+    """rename_host re-stamps the cheap host-name identity (via _remirror_host_name) with
+    the NEW name, so a renamed-then-stopped host stops listing under its old name. A
+    stopped record (vps_ip=None) is used so the rename needs no reachable volume.
+    """
+    provider = _RenameProvider(
+        name=ProviderInstanceName("offline-test"),
+        host_dir=temp_mngr_ctx.config.default_host_dir,
+        config=VpsProviderConfig(backend=ProviderBackendName("offline-test")),
+        mngr_ctx=temp_mngr_ctx,
+        vps_client=ExternallyManagedVpsClient(),
+    )
+    host_id = HostId.generate()
+    provider._record = VpsHostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=str(host_id),
+            host_name="oldname",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            stop_reason=HostState.STOPPED.value,
+        ),
+        vps_ip=None,
+        config=VpsHostConfig(vps_instance_id=VpsInstanceId("i-rename"), region="r", plan="p"),
+    )
+    provider.rename_host(host_id, HostName("newname"))
+    assert provider._remirror_calls == [(str(host_id), "newname")]
+
+
 # =========================================================================
 # Shared tag-based offline discovery default (_offline_discovered_host_from_instance)
 # =========================================================================
@@ -473,3 +622,53 @@ def test_add_known_hosts_for_ip_skips_endpoint_with_absent_key(temp_mngr_ctx: Mn
     provider._add_known_hosts_for_ip("10.0.0.6", vps_public_key="ssh-ed25519 AAAAVPS", container_public_key=None)
     assert "10.0.0.6 ssh-ed25519 AAAAVPS" in provider._vps_known_hosts_path().read_text()
     assert not provider._container_known_hosts_path().exists()
+
+
+# =========================================================================
+# Concurrent host_dir capture upload (_write_files_concurrently)
+# =========================================================================
+
+
+def test_write_files_concurrently_overlaps_writers_and_persists_all_files() -> None:
+    """All files land regardless of chunking, and the per-file writes genuinely overlap."""
+    file_count = _HOST_DIR_UPLOAD_CONCURRENCY * 3 + 1
+    files = {f"projects/repo/.git/objects/{i:04d}": f"obj-{i}".encode() for i in range(file_count)}
+    worker_count = min(_HOST_DIR_UPLOAD_CONCURRENCY, file_count)
+    lock = threading.Lock()
+    written: dict[str, bytes] = {}
+    # Every worker must rendezvous at the barrier before any proceeds, so the upload
+    # completes only if the workers truly run concurrently; a serialized
+    # implementation would block the first worker forever and time out here.
+    barrier = threading.Barrier(worker_count, timeout=30)
+
+    class _BarrierVolume(InMemoryVolume):
+        def write_files(self, file_contents_by_path: Mapping[str, bytes]) -> None:
+            barrier.wait()
+            with lock:
+                written.update(file_contents_by_path)
+
+    _write_files_concurrently(_BarrierVolume(), files)
+
+    assert written == files
+
+
+def test_write_files_concurrently_empty_is_a_noop() -> None:
+    """An empty mapping writes nothing and spawns no workers."""
+    volume = InMemoryVolume()
+    _write_files_concurrently(volume, {})
+    assert volume.files == {}
+
+
+def test_write_files_concurrently_surfaces_worker_failure() -> None:
+    """A failure in any worker propagates out of the concurrent upload."""
+    files: dict[str, bytes] = {f"f{i}": b"x" for i in range(_HOST_DIR_UPLOAD_CONCURRENCY * 2)}
+    files["dir/boom"] = b"x"
+
+    class _FailingVolume(InMemoryVolume):
+        def write_files(self, file_contents_by_path: Mapping[str, bytes]) -> None:
+            if any("boom" in path for path in file_contents_by_path):
+                raise MngrError("upload failed")
+            self.files.update(file_contents_by_path)
+
+    with pytest.raises(MngrError, match="upload failed"):
+        _write_files_concurrently(_FailingVolume(), files)

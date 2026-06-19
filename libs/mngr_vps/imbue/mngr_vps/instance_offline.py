@@ -13,9 +13,11 @@ from loguru import logger
 from pydantic import ConfigDict
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import HostConnectionError
+from imbue.mngr.errors import HostCreationError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.host import Host
@@ -26,6 +28,7 @@ from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.volume import HostVolume
+from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
@@ -37,6 +40,7 @@ from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr_vps.container_setup import download_directory_from_outer
 from imbue.mngr_vps.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps.container_setup import translate_outer_concurrency_errors
+from imbue.mngr_vps.errors import VpsError
 from imbue.mngr_vps.host_state_store import BucketHostStateStore
 from imbue.mngr_vps.host_state_store import HostDirBackend
 from imbue.mngr_vps.host_state_store import HostStateStore
@@ -515,7 +519,16 @@ class OfflineCapableVpsProvider(VpsProvider):
 
     def _realizer_for_instance(self, instance: Mapping[str, Any]) -> HostRealizer:
         """The realizer matching a host's placement, read from its instance marker (no SSH)."""
-        return self._realizer_for_isolation(isolation_from_marker(self._isolation_marker_for_instance(instance)))
+        marker_value = self._isolation_marker_for_instance(instance)
+        # ``isolation_from_marker`` raises a bare ``ValueError`` on a corrupt marker
+        # (the marker is an account-writable tag/metadata item). Wrap it as a
+        # ``VpsError`` so discovery's per-VPS ``except MngrError`` degrades just that
+        # host instead of aborting the whole sweep.
+        try:
+            isolation = isolation_from_marker(marker_value)
+        except ValueError as e:
+            raise VpsError(f"Corrupt {ISOLATION_TAG_KEY} marker {marker_value!r} on instance") from e
+        return self._realizer_for_isolation(isolation)
 
     def _realizer_for_host_id(self, host_id: HostId) -> HostRealizer:
         """Resolve a host's realizer from its instance's ``mngr-isolation`` marker.
@@ -630,15 +643,15 @@ class OfflineCapableVpsProvider(VpsProvider):
         """
         super()._create_shutdown_script(host)
 
-    def _idle_watcher_service_unit(self, sentinel_on_outer: str) -> str:
+    def _idle_watcher_service_unit(self) -> str:
         """Hook: the oneshot ``.service`` body the host-side idle watcher runs.
 
         Default (AWS/GCP) powers the host off with ``shutdown -P now`` (the poweroff
         script removes the sentinel first so a resumed instance is not immediately
         re-stopped). Azure overrides this to run its installed ARM self-deallocate
-        script.
+        script. The sentinel removal lives in those scripts, not the unit body, so
+        this needs no sentinel path.
         """
-        del sentinel_on_outer
         return build_poweroff_idle_watcher_service_unit()
 
     def _prepare_idle_watcher_outer(self, outer: OuterHostInterface, sentinel_on_outer: str) -> None:
@@ -660,16 +673,10 @@ class OfflineCapableVpsProvider(VpsProvider):
 
         The path unit watches the outer-filesystem location of the in-container idle
         sentinel and, when it appears, the oneshot service stops the instance (the
-        action is the ``_idle_watcher_service_unit`` hook's body). Returns early
-        (after a WARNING) when the host record is missing.
+        action is the ``_idle_watcher_service_unit`` hook's body). The caller
+        (``_on_host_finalized``) asserts the host record is durable first, since a
+        host that can never auto-stop is a create failure, not a tolerable one.
         """
-        record = self._find_host_record(host_id)
-        if record is None or record.config is None:
-            logger.warning(
-                "Idle watcher: no host record for {}; skipping watcher install (no auto-stop)",
-                host_id,
-            )
-            return
         sentinel_on_outer = str(self._idle_sentinel_path_on_outer(host_id))
         with log_span("Installing idle self-stop watcher"):
             with self._make_outer_for_vps_ip(vps_ip) as outer:
@@ -680,7 +687,7 @@ class OfflineCapableVpsProvider(VpsProvider):
                 )
                 outer.write_text_file(
                     Path(f"/etc/systemd/system/{IDLE_WATCHER_UNIT_NAME}.service"),
-                    self._idle_watcher_service_unit(sentinel_on_outer),
+                    self._idle_watcher_service_unit(),
                 )
                 outer.execute_idempotent_command("systemctl daemon-reload")
                 outer.execute_idempotent_command(f"systemctl enable --now {IDLE_WATCHER_UNIT_NAME}.path")
@@ -794,12 +801,29 @@ class OfflineCapableVpsProvider(VpsProvider):
         fails an already-durable ``create_host`` (the agent simply won't auto-stop
         on idle, but ``mngr stop`` still works).
 
+        The one exception is a *missing host record* when the idle watcher is due to
+        be installed: this method runs only after the record is durable, so a missing
+        record is a broken invariant, not a tolerable install failure. It raises
+        (failing ``create_host``, whose cleanup then tears the VPS back down) rather
+        than silently shipping a host that can never auto-stop.
+
         Offline host_dir needs no create-time provisioning: it is captured
         operator-side at ``mngr stop`` (see ``_capture_host_dir_before_pause``), so
         there is no sync daemon to install and no bucket-write identity to attach.
         """
         steps: list[tuple[str, Callable[[], None]]] = list(self._post_finalize_steps(host_id=host_id, vps_ip=vps_ip))
         if not self._realizer.idle_shutdown_stops_host:
+            # The idle watcher is this host's only auto-stop safety net. We run after
+            # the record is durable, so a missing record is a broken invariant: fail
+            # loudly here (outside the best-effort loop below) rather than skip the
+            # watcher and silently ship a host that can never auto-stop on idle.
+            record = self._find_host_record(host_id)
+            if record is None or record.config is None:
+                raise HostCreationError(
+                    self.name,
+                    f"Host record for {host_id} vanished immediately after finalize; "
+                    "cannot install the idle auto-stop watcher.",
+                )
             steps.append(
                 (
                     "the agent will not auto-stop on idle, but `mngr stop` still works",
@@ -953,6 +977,10 @@ class OfflineCapableVpsProvider(VpsProvider):
             super().persist_agent_data(host_id, agent_data)
         except HostNotFoundError:
             logger.debug("Host {} unreachable; mirroring agent data to the offline store only", host_id)
+        # Warn-not-raise, matching the on-volume writer this mirrors (host_store.py
+        # "Cannot persist agent data without id field") and the Modal provider
+        # (mngr_modal/instance.py, same guard): an id-less record can't be keyed, so
+        # both halves of the write skip it uniformly rather than one raising.
         agent_id = agent_data.get("id")
         if agent_id is None:
             logger.warning("Cannot mirror agent data without an id (name={!r})", agent_data.get("name"))
@@ -987,10 +1015,16 @@ class OfflineCapableVpsProvider(VpsProvider):
         ``mngr start``.
 
         One bad instance never aborts the sweep: a malformed mngr host identity is
-        logged and skipped. The offline check runs only for instances the live
-        sweep did not already surface (and after the cheap not-a-mngr-host / dedup
-        filters), so a healthy ``mngr list`` does no extra per-instance work and a
-        running-but-transiently-unreachable instance is not misreported as STOPPED.
+        logged and skipped. This matches the live path, which warn-and-skips a
+        corrupt on-volume record identically (``host_store.py`` "Failed to parse host
+        record" returns None), and the Modal provider (mngr_modal/instance.py
+        "Skipped sandbox with invalid tags"). Per-instance data corruption is skipped
+        here; only *provider*-level operational failures propagate, where the api/list
+        wrapper honors the caller's ``--on-error`` (a provider-granular control). The
+        offline check runs only for instances the live sweep did not already surface
+        (and after the cheap not-a-mngr-host / dedup filters), so a healthy ``mngr
+        list`` does no extra per-instance work and a running-but-transiently-
+        unreachable instance is not misreported as STOPPED.
         """
         result = super().discover_hosts_and_agents(cg, include_destroyed=include_destroyed)
         online_host_ids = {ref.host_id for ref in result}
@@ -1096,6 +1130,42 @@ def _read_local_file_tree(root: Path) -> dict[str, bytes]:
     return files
 
 
+# A captured host_dir can be a full git checkout -- thousands of tiny files --
+# and an object-store volume PUTs one object per file. Uploading the files across
+# this many worker threads overlaps the per-object round-trips instead of
+# serializing them (which made `mngr stop` on a large host_dir take minutes).
+_HOST_DIR_UPLOAD_CONCURRENCY: Final[int] = 32
+
+
+def _write_files_concurrently(volume: Volume, files: Mapping[str, bytes]) -> None:
+    """Upload ``files`` to ``volume`` with the per-object writes overlapped across worker threads.
+
+    Object-store volumes PUT one object per file, so a large captured host_dir
+    otherwise uploads file-by-file, serializing one WAN round-trip per object.
+    The files are split round-robin across a bounded pool of workers, each of
+    which writes its share through the volume's public ``write_files`` (so the
+    volume's own error translation is unchanged). A failure in any worker
+    surfaces via ``future.result()``.
+    """
+    items = list(files.items())
+    if not items:
+        return
+    worker_count = min(_HOST_DIR_UPLOAD_CONCURRENCY, len(items))
+    chunks: list[dict[str, bytes]] = [{} for _ in range(worker_count)]
+    for index, (path, content) in enumerate(items):
+        chunks[index % worker_count][path] = content
+    with ConcurrencyGroup(name="host-dir-capture-upload") as cg:
+        with ConcurrencyGroupExecutor(
+            parent_cg=cg, name="host-dir-capture-upload", max_workers=worker_count
+        ) as executor:
+            futures = [executor.submit(volume.write_files, chunk) for chunk in chunks]
+    # Surface a worker's failure *outside* the ConcurrencyGroup block: re-raising it
+    # inside would let the group's __exit__ wrap it in a ConcurrencyExceptionGroup,
+    # hiding the underlying MngrError that the caller's error handling expects.
+    for future in futures:
+        future.result()
+
+
 class BucketHostDirBackend(HostDirBackend):
     """Operator-driven offline ``host_dir`` backend for the object-storage providers (AWS S3, Azure Blob).
 
@@ -1139,7 +1209,9 @@ class BucketHostDirBackend(HostDirBackend):
         (``stop_host``) pauses the instance in a ``finally`` *before* this can
         propagate, so raising never leaks a running instance: the host is stopped
         and ``mngr stop`` then surfaces the error. The tree is read into memory
-        before upload, which is fine for a bounded ``host_dir`` (events / transcripts).
+        and the per-file uploads are overlapped across worker threads
+        (``_write_files_concurrently``), so a large host_dir (a full git checkout)
+        does not serialize one object-store round-trip per file.
         """
         try:
             with log_span("Capturing host_dir to the bucket for host {}", host_id):
@@ -1148,7 +1220,7 @@ class BucketHostDirBackend(HostDirBackend):
                     self.provider._pull_host_dir_to_local(host_id, vps_ip, local_root)
                     files = _read_local_file_tree(local_root)
                     if files:
-                        self.bucket.volume_for_host(host_id).write_files(files)
+                        _write_files_concurrently(self.bucket.volume_for_host(host_id), files)
                     else:
                         logger.debug("host_dir for host {} is empty; nothing to capture", host_id)
         # A capture failure surfaces (it is NOT swallowed) -- the operator should
@@ -1186,17 +1258,20 @@ def normalized_tags_to_dict(instance: Mapping[str, Any]) -> dict[str, str]:
     return tags
 
 
-def host_name_from_tags(tags: Mapping[str, str], name_tag_key: str) -> HostName:
-    """Recover the host name from the ``<name_tag_key>=mngr-<host_name>`` identity tag.
+def host_name_from_prefixed_value(raw_name: str, host_id_fallback: str) -> HostName:
+    """Recover a host name from a ``mngr-<host_name>`` identity value.
 
-    Strips the ``mngr-`` prefix; falls back to the raw tag value, then to the
-    ``mngr-host-id`` tag, when the name tag is missing/unprefixed. Used only to
-    label a STOPPED host in discovery -- the authoritative name lives in the full
-    record in the external state store.
+    Strips the ``mngr-`` prefix; falls back to the raw value, then the host id, then
+    ``"unknown"``. Shared by the tag-keyed providers (``host_name_from_tags``) and
+    GCP's metadata-keyed recovery, which read the same ``mngr-``-prefixed value from
+    different sources (instance tags vs GCE metadata). Used only to label a STOPPED
+    host in discovery -- the authoritative name lives in the external state record.
     """
-    name_tag = tags.get(name_tag_key, "")
-    if name_tag.startswith(_HOST_NAME_TAG_PREFIX):
-        return HostName(name_tag[len(_HOST_NAME_TAG_PREFIX) :])
-    if name_tag:
-        return HostName(name_tag)
-    return HostName(tags.get("mngr-host-id", "unknown"))
+    if raw_name.startswith(_HOST_NAME_TAG_PREFIX):
+        return HostName(raw_name[len(_HOST_NAME_TAG_PREFIX) :])
+    return HostName(raw_name or host_id_fallback or "unknown")
+
+
+def host_name_from_tags(tags: Mapping[str, str], name_tag_key: str) -> HostName:
+    """Recover the host name from the ``<name_tag_key>=mngr-<host_name>`` identity tag."""
+    return host_name_from_prefixed_value(tags.get(name_tag_key, ""), tags.get("mngr-host-id", ""))
