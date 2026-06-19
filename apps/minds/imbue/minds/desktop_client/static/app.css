@@ -151,6 +151,54 @@
 }
 
 /*
+ * Type ramp (Figma). Six semantic roles, each bundling font-size + weight +
+ * line-height (and transform / tracking for the section eyebrow) into one
+ * utility, so a text element's role is a single class. Sizes reuse Tailwind's
+ * native steps (24/18/14/12 px = text-2xl/lg/sm/xs). COLOR is orthogonal --
+ * compose with text-primary / -secondary / -tertiary (or -inverse-*). A ratchet
+ * keeps content text on these roles instead of raw text-size / font-weight.
+ *
+ *   type-heading-lg  24 / bold       large heading
+ *   type-heading     18 / semibold   regular heading
+ *   type-label       14 / semibold   form + control labels
+ *   type-body        14 / regular    default body text
+ *   type-helper      12 / regular    captions, hints, metadata
+ *   type-section     12 / semibold   ALL-CAPS section eyebrow
+ */
+@utility type-heading-lg {
+  font-size: var(--text-2xl);
+  line-height: 1.2;
+  font-weight: 700;
+}
+@utility type-heading {
+  font-size: var(--text-lg);
+  line-height: 1.333;
+  font-weight: 600;
+}
+@utility type-label {
+  font-size: var(--text-sm);
+  line-height: 1.4;
+  font-weight: 600;
+}
+@utility type-body {
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  font-weight: 400;
+}
+@utility type-helper {
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  font-weight: 400;
+}
+@utility type-section {
+  font-size: var(--text-xs);
+  line-height: 1.3;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/*
  * Default border color. Tailwind v4 defaults un-colored borders / dividers to
  * ``currentColor``; we instead default them to the themeable ``border-default``
  * token so every bare ``border`` / ``border-t`` / ... utility is both legible

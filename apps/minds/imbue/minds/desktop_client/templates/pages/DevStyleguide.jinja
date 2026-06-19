@@ -51,40 +51,43 @@
       </div>
     </section>
 
-    {# Type ramp + text-color tokens. These are conventions enforced by
-       sweep rather than CSS tokens; documenting them here is the source
-       of truth for new templates. #}
+    {# Type ramp (Figma). Six semantic roles defined as type-* utilities in
+       app.css; each bundles font-size + weight + line-height (+ caps / tracking
+       for the section eyebrow), so a text element's role is one class. Colour is
+       orthogonal -- compose with text-primary / -secondary / -tertiary. A
+       ratchet keeps content text on these roles instead of raw text-size /
+       font-weight. #}
     <section class="mb-12">
-      <h2 class="text-lg font-semibold text-primary mb-1">Type ramp</h2>
-      <p class="text-xs text-secondary mb-4">
-        Heading hierarchy and body text. Every heading is
-        ``font-semibold text-primary``; the only axis is size. Body and
-        captions use ``text-sm`` / ``text-xs``.
+      <h2 class="type-heading text-primary mb-1">Type ramp</h2>
+      <p class="type-helper text-secondary mb-4">
+        Six roles, one class each (size + weight + line-height bundled). Sizes
+        reuse Tailwind's steps -- 24 / 18 / 14 / 12 px. Compose with a colour
+        token, e.g. <code>type-label text-primary</code>.
       </p>
-      <div class="bg-surface-primary border border-default rounded-lg p-4 flex flex-col gap-3">
+      <div class="bg-surface-primary border border-default rounded-lg p-4 flex flex-col gap-4">
         <div>
-          <p class="text-3xl font-bold text-primary">Splash heading</p>
-          <p class="text-[11px] text-secondary font-mono mt-0.5">text-3xl font-bold -- one-off, Welcome only</p>
+          <p class="type-heading-lg text-primary">Large heading</p>
+          <p class="type-helper text-tertiary font-mono mt-0.5">type-heading-lg -- 24 / bold</p>
         </div>
         <div>
-          <p class="text-2xl font-semibold text-primary">Big page heading (h1)</p>
-          <p class="text-[11px] text-secondary font-mono mt-0.5">text-2xl font-semibold -- auth pages, Sharing, DevStyleguide, PermissionsHeader</p>
+          <p class="type-heading text-primary">Regular heading</p>
+          <p class="type-helper text-tertiary font-mono mt-0.5">type-heading -- 18 / semibold</p>
         </div>
         <div>
-          <p class="text-xl font-semibold text-primary">Standard page heading (h1)</p>
-          <p class="text-[11px] text-secondary font-mono mt-0.5">text-xl font-semibold -- Landing, Login, AuthError, Destroying, InboxUnavailable, WorkspaceSettings, Accounts</p>
+          <p class="type-label text-primary">Label</p>
+          <p class="type-helper text-tertiary font-mono mt-0.5">type-label -- 14 / semibold</p>
         </div>
         <div>
-          <p class="text-lg font-semibold text-primary">Section / modal heading (h2)</p>
-          <p class="text-[11px] text-secondary font-mono mt-0.5">text-lg font-semibold -- Creating step questions, modal dialogs, DevStyleguide section headers</p>
+          <p class="type-body text-primary">Body -- the default readable paragraph text on a surface.</p>
+          <p class="type-helper text-tertiary font-mono mt-0.5">type-body -- 14 / regular</p>
         </div>
         <div>
-          <p class="text-sm text-primary">Default body text. Readable paragraph on a card.</p>
-          <p class="text-[11px] text-secondary font-mono mt-0.5">text-sm -- default body</p>
+          <p class="type-helper text-primary">Helper -- captions, hints, and metadata sit at this size.</p>
+          <p class="type-helper text-tertiary font-mono mt-0.5">type-helper -- 12 / regular</p>
         </div>
         <div>
-          <p class="text-xs text-secondary">Caption / secondary text. Goes under headings and beside controls.</p>
-          <p class="text-[11px] text-secondary font-mono mt-0.5">text-xs -- secondary / caption</p>
+          <p class="type-section text-secondary">Section title</p>
+          <p class="type-helper text-tertiary font-mono mt-0.5">type-section -- 12 / semibold / all caps</p>
         </div>
       </div>
     </section>
