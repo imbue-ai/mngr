@@ -54,10 +54,10 @@ def test_call_result_defaults() -> None:
 def test_call_runs_mngr_version_in_warm_process(mngr_caller: MngrCaller) -> None:
     """End-to-end: a real ``mngr --version`` runs in a warm process.
 
-    This exercises the whole mechanism: spawning a warm process, waiting for it
-    to start listening, handing it the argv over the socket, running the CLI, and
-    capturing stdout/exit-code. ``--version`` is used because it does no provider
-    discovery, so the call is fast and deterministic.
+    This exercises the whole mechanism: spawning a warm process connected by an
+    anonymous socketpair, handing it the argv over the socket, running the CLI,
+    and capturing stdout/exit-code. ``--version`` is used because it does no
+    provider discovery, so the call is fast and deterministic.
 
     Marked flaky: warm-process cold-start occasionally exceeds the 10s pytest
     timeout under CI load.

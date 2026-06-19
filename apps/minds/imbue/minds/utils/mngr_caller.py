@@ -8,12 +8,20 @@ warmth).
 :class:`MngrCaller` avoids paying that cost on the request path by keeping a
 single "warm" ``mngr`` process running ahead of time. A warm process is a fresh
 Python interpreter (started via ``python -m imbue.minds.utils.mngr_caller``)
-that has already imported ``imbue.mngr.main`` and is sitting on a Unix-domain
-socket waiting for one request. When :meth:`MngrCaller.call` runs it claims the
-waiting warm process, hands it the argv over the socket, reads back
+that has already imported ``imbue.mngr.main`` and is blocked reading one request
+off an anonymous socket. When :meth:`MngrCaller.call` runs it claims the waiting
+warm process, hands it the argv over the socket, reads back
 stdout/stderr/exit-code, and the warm process then exits. As soon as a warm
 process is claimed, a replacement is spawned so the next call again finds one
 ready.
+
+The socket is an anonymous, connected ``socketpair`` (via
+:func:`multiprocessing.connection.Pipe`): the parent keeps one end and passes
+the other end's file descriptor to the child at spawn time. There is no
+rendezvous file on disk and no listening/connecting handshake -- the connection
+is live from the moment the child is forked, so "the warm process is not ready
+yet" is handled for free: the parent's request simply buffers in the socket
+until the child finishes importing ``mngr`` and reads it.
 
 This deliberately avoids the ``multiprocessing`` forkserver's fork-without-exec
 model, which is unreliable on macOS. Each warm process is a clean, freshly
@@ -31,17 +39,13 @@ importing ``imbue.mngr.main`` once, off the request path.
 import contextlib
 import io
 import os
-import shutil
 import sys
-import tempfile
 import threading
 import traceback
 from collections.abc import Mapping
 from collections.abc import Sequence
-from multiprocessing.connection import Client
 from multiprocessing.connection import Connection
-from multiprocessing.connection import Listener
-from pathlib import Path
+from multiprocessing.connection import Pipe
 from subprocess import TimeoutExpired
 from typing import Final
 
@@ -54,20 +58,11 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.errors import MngrError
-from imbue.mngr.utils.polling import poll_for_value
 
 # Module path of the warm-server entry point, launched as ``python -m <module>``.
 _WARM_SERVER_MODULE: Final[str] = "imbue.minds.utils.mngr_caller"
 
 _DEFAULT_CALL_TIMEOUT_SECONDS: Final[float] = 60.0
-
-# How long to wait for a freshly spawned warm process to start listening on its
-# socket. This must comfortably exceed mngr's import cost (and any contention),
-# since a cold call spawns the warm process and immediately connects to it.
-_DEFAULT_WARM_STARTUP_TIMEOUT_SECONDS: Final[float] = 120.0
-
-# How often to retry connecting while a warm process is still starting up.
-_CONNECT_POLL_INTERVAL_SECONDS: Final[float] = 0.02
 
 # When terminating a claimed/replaced warm process, give it this long to die
 # before escalating to SIGKILL.
@@ -75,21 +70,6 @@ _TERMINATE_FORCE_KILL_SECONDS: Final[float] = 5.0
 
 # Sentinel returncode used when a call is terminated for exceeding its timeout.
 _TIMEOUT_RETURNCODE: Final[int] = -1
-
-# AF_UNIX socket paths are limited to ~104 bytes, so keep names short.
-_SOCKET_DIR_PREFIX: Final[str] = "mngrc-"
-
-
-class MngrCallerError(Exception):
-    """Base error for the in-app ``mngr`` CLI caller."""
-
-    ...
-
-
-class WarmProcessStartupError(MngrCallerError):
-    """Raised when a warm ``mngr`` process never started listening on its socket."""
-
-    ...
 
 
 class MngrCallResult(MutableModel):
@@ -154,12 +134,13 @@ def _execute_mngr_cli(
     return returncode, stdout_buffer.getvalue(), stderr_buffer.getvalue()
 
 
-def _run_warm_mngr_server(socket_path: Path) -> None:
+def _run_warm_mngr_server(connection_fd: int) -> None:
     """Warm-process entry point: import mngr, then serve exactly one CLI request.
 
-    Imports ``imbue.mngr.main`` eagerly (this is the warm-up) before binding the
-    socket, so by the time a client can connect the interpreter is fully warm.
-    Serves a single request and then returns, so each warm process is single-use.
+    Imports ``imbue.mngr.main`` eagerly (this is the warm-up), then reads one
+    request off the inherited socket file descriptor, runs the CLI, and sends the
+    result back. Serves a single request and then returns, so each warm process
+    is single-use.
     """
     # This inline import is the whole point of the warm process: it pays mngr's
     # multi-second import cost here (in a throwaway interpreter), off the minds
@@ -167,63 +148,30 @@ def _run_warm_mngr_server(socket_path: Path) -> None:
     # inline-imports ratchet.
     from imbue.mngr.main import cli
 
-    listener = Listener(address=str(socket_path), family="AF_UNIX", authkey=None)
+    connection = Connection(connection_fd)
     try:
-        connection = listener.accept()
-        try:
-            argv, env_overrides = connection.recv()
-            returncode, stdout, stderr = _execute_mngr_cli(cli, argv, env_overrides)
-            connection.send((returncode, stdout, stderr))
-        finally:
-            connection.close()
+        argv, env_overrides = connection.recv()
+        returncode, stdout, stderr = _execute_mngr_cli(cli, argv, env_overrides)
+        connection.send((returncode, stdout, stderr))
     finally:
-        listener.close()
+        connection.close()
 
 
 class _WarmMngrProcess(MutableModel):
-    """A single, pre-warmed, single-use ``mngr`` server process and its socket."""
+    """A single, pre-warmed, single-use ``mngr`` process and its (parent-side) socket."""
 
-    socket_path: Path = Field(description="AF_UNIX socket the warm process listens on.")
+    connection: Connection = Field(description="Parent end of the anonymous socketpair to the warm process.")
     running_process: RunningProcess = Field(description="The spawned warm-server subprocess.")
 
     model_config = {"arbitrary_types_allowed": True, "frozen": False, "extra": "forbid"}
 
-    def connect(self, startup_timeout_seconds: float) -> Connection:
-        """Connect to the warm process, waiting for it to start listening.
-
-        Polls until the socket accepts a connection or ``startup_timeout_seconds``
-        elapses. Raises :class:`WarmProcessStartupError` if the warm process exits
-        before it starts listening or the deadline passes.
-        """
-        connection, _, _ = poll_for_value(
-            self._try_connect,
-            timeout=startup_timeout_seconds,
-            poll_interval=_CONNECT_POLL_INTERVAL_SECONDS,
-        )
-        if connection is None:
-            raise WarmProcessStartupError(
-                f"mngr warm process did not start listening within {startup_timeout_seconds:.0f}s"
-            )
-        return connection
-
-    def _try_connect(self) -> Connection | None:
-        """Attempt one connection; return None while the warm process is still starting up."""
-        if self.running_process.is_finished():
-            raise WarmProcessStartupError(
-                f"mngr warm process exited before listening (exit {self.running_process.returncode}); "
-                f"stderr: {self.running_process.read_stderr()[:1024]}"
-            )
-        try:
-            return Client(address=str(self.socket_path), family="AF_UNIX", authkey=None)
-        except (FileNotFoundError, ConnectionRefusedError):
-            return None
-
     def terminate(self) -> None:
-        """Terminate the warm process (a no-op if it has already exited)."""
+        """Close the parent socket and terminate the warm process (no-op if already exited)."""
+        self.connection.close()
         try:
             self.running_process.terminate(force_kill_seconds=_TERMINATE_FORCE_KILL_SECONDS)
         except TimeoutExpired:
-            logger.warning("Timed out force-killing warm mngr process on socket {}", self.socket_path)
+            logger.warning("Timed out force-killing a warm mngr process")
 
 
 class MngrCaller(MutableModel):
@@ -237,18 +185,12 @@ class MngrCaller(MutableModel):
         default=_DEFAULT_CALL_TIMEOUT_SECONDS,
         description="Timeout applied to a call when none is passed explicitly.",
     )
-    warm_startup_timeout_seconds: float = Field(
-        default=_DEFAULT_WARM_STARTUP_TIMEOUT_SECONDS,
-        description="How long a call waits for a freshly spawned warm process to start listening.",
-    )
 
     # ``ConcurrencyGroup``/``RunningProcess``/locks are not pydantic-native; hold
     # them as private runtime state and allow arbitrary types through.
     _concurrency_group: ConcurrencyGroup | None = PrivateAttr(default=None)
     _owned_concurrency_group: ConcurrencyGroup | None = PrivateAttr(default=None)
     _warm_process: _WarmMngrProcess | None = PrivateAttr(default=None)
-    _socket_directory: Path | None = PrivateAttr(default=None)
-    _socket_counter: int = PrivateAttr(default=0)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _is_prewarm_started: bool = PrivateAttr(default=False)
 
@@ -292,22 +234,36 @@ class MngrCaller(MutableModel):
                 self._owned_concurrency_group = owned_group
             return self._owned_concurrency_group
 
-    def _allocate_socket_path(self) -> Path:
-        """Return a fresh, short AF_UNIX socket path inside this caller's temp directory."""
-        with self._lock:
-            if self._socket_directory is None:
-                self._socket_directory = Path(tempfile.mkdtemp(prefix=_SOCKET_DIR_PREFIX))
-            self._socket_counter += 1
-            return self._socket_directory / f"w{self._socket_counter}.sock"
-
     def _spawn_warm_process(self) -> _WarmMngrProcess:
-        """Launch a fresh warm ``mngr`` server process listening on a new socket."""
-        socket_path = self._allocate_socket_path()
-        command = [sys.executable, "-m", _WARM_SERVER_MODULE, str(socket_path)]
-        # The warm process exits on its own (after one request) or is terminated;
-        # its non-zero exit on termination is expected, so it is not group-checked.
-        running_process = self._get_concurrency_group().run_process_in_background(command, is_checked_by_group=False)
-        return _WarmMngrProcess(socket_path=socket_path, running_process=running_process)
+        """Launch a fresh warm ``mngr`` process connected by an anonymous socketpair.
+
+        Creates a connected ``socketpair``, passes the child's end (by fd) into the
+        spawned process, and keeps the parent's end. The connection is live from
+        the moment the child is forked, so there is nothing to wait for: a request
+        sent now simply buffers until the child finishes importing ``mngr``.
+        """
+        parent_connection, child_connection = Pipe(duplex=True)
+        try:
+            child_fd = child_connection.fileno()
+            os.set_inheritable(child_fd, True)
+            command = [sys.executable, "-m", _WARM_SERVER_MODULE, str(child_fd)]
+            # The warm process exits on its own (after one request) or is
+            # terminated; its non-zero exit on termination is expected, so it is
+            # not group-checked. ``run_process_in_background`` returns only after
+            # the child has been forked (and thus has inherited ``child_fd``), so
+            # closing the parent's copy below is race-free.
+            running_process = self._get_concurrency_group().run_process_in_background(
+                command, is_checked_by_group=False, pass_fds=(child_fd,)
+            )
+        except BaseException:
+            # The spawn failed, so no warm process owns the parent's end; close it.
+            parent_connection.close()
+            raise
+        finally:
+            # The parent must drop its copy of the child's end so that, when the
+            # child dies, the parent's ``recv`` sees EOF rather than hanging.
+            child_connection.close()
+        return _WarmMngrProcess(connection=parent_connection, running_process=running_process)
 
     def _store_or_terminate_warm_process(self, warm_process: _WarmMngrProcess) -> None:
         """Keep ``warm_process`` as the idle one, or terminate it if one already exists."""
@@ -357,32 +313,28 @@ class MngrCaller(MutableModel):
         """
         resolved_timeout = self.default_timeout_seconds if timeout is None else timeout
         warm_process = self._claim_warm_process()
+        connection = warm_process.connection
         request = (tuple(argv), dict(env_overrides or {}))
         # Always reap the claimed warm process (normally it exits on its own after
-        # responding; on a startup/exec failure or a hang it must be terminated).
+        # responding; on an exec failure or a hang it must be terminated). On a
+        # cold call the warm process may still be importing ``mngr`` -- the request
+        # buffers in the socket and ``poll`` simply waits for the response.
         try:
-            try:
-                connection = warm_process.connect(self.warm_startup_timeout_seconds)
-            except WarmProcessStartupError as exc:
-                return MngrCallResult(returncode=1, stderr=str(exc))
-            try:
-                connection.send(request)
-                if connection.poll(resolved_timeout):
-                    try:
-                        returncode, stdout, stderr = connection.recv()
-                        return MngrCallResult(returncode=returncode, stdout=stdout, stderr=stderr)
-                    except EOFError:
-                        return MngrCallResult(
-                            returncode=1,
-                            stderr="mngr warm process exited without returning a result",
-                        )
-                return MngrCallResult(
-                    returncode=_TIMEOUT_RETURNCODE,
-                    is_timed_out=True,
-                    stderr=f"mngr {' '.join(argv)} timed out after {resolved_timeout:.0f}s",
-                )
-            finally:
-                connection.close()
+            connection.send(request)
+            if connection.poll(resolved_timeout):
+                try:
+                    returncode, stdout, stderr = connection.recv()
+                    return MngrCallResult(returncode=returncode, stdout=stdout, stderr=stderr)
+                except EOFError:
+                    return MngrCallResult(
+                        returncode=1,
+                        stderr="mngr warm process exited without returning a result",
+                    )
+            return MngrCallResult(
+                returncode=_TIMEOUT_RETURNCODE,
+                is_timed_out=True,
+                stderr=f"mngr {' '.join(argv)} timed out after {resolved_timeout:.0f}s",
+            )
         finally:
             warm_process.terminate()
 
@@ -398,14 +350,10 @@ class MngrCaller(MutableModel):
             self._warm_process = None
             owned_group = self._owned_concurrency_group
             self._owned_concurrency_group = None
-            socket_directory = self._socket_directory
-            self._socket_directory = None
         if idle_process is not None:
             idle_process.terminate()
         if owned_group is not None:
             owned_group.__exit__(None, None, None)
-        if socket_directory is not None:
-            shutil.rmtree(socket_directory, ignore_errors=True)
 
 
 _DEFAULT_CALLER_HOLDER: dict[str, MngrCaller | None] = {"caller": None}
@@ -426,8 +374,8 @@ def get_default_mngr_caller() -> MngrCaller:
 
 
 def _main() -> None:
-    socket_path = Path(sys.argv[1])
-    _run_warm_mngr_server(socket_path)
+    connection_fd = int(sys.argv[1])
+    _run_warm_mngr_server(connection_fd)
 
 
 if __name__ == "__main__":
