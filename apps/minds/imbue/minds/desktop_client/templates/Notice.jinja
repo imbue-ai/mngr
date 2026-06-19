@@ -15,7 +15,7 @@
   "success": "bg-success/12 text-success border border-success/30",
   "error":   "bg-important/12 text-important border border-important/30",
 } %}
-{% set _cls = "px-3 py-2 rounded-md type-body my-2" ~ _notice_variants[variant] %}
+{% set _cls = "px-3 py-2 rounded-md type-body my-2 " ~ _notice_variants[variant] %}
 <div {{ attrs.render(classes=_cls) }}>
   {{ content }}
 </div>

@@ -72,6 +72,8 @@ Added the type ramp (Figma): six semantic roles defined as `@utility` in `app.cs
 
 - The styleguide gains a "Type ramp" section demoing the six roles. A guard test keeps content text on the roles: no raw font-size utilities or `font-medium` in the authored source (SVG path data skipped); inline `font-normal` / `font-semibold` / `font-bold` stay allowed.
 
+- Fixed a `Notice` regression from the migration: the role swap dropped the separating space in the component's runtime class concat, fusing `my-2` with the variant background (e.g. `my-2bg-info/12`) so every notice banner lost its vertical margin and background tint. Restored the space.
+
 Dropped the unused `--shadow-seam` token. It was only ever demoed in the styleguide (no real surface applied it -- the titlebar drop shadow it once named is gone), so the definition, both styleguide demos, and its drift-guard entry were removed.
 
 Added an elevation scale: two box-shadow steps defined in `app.css` `@theme` (generating `shadow-raised` / `shadow-overlay`), with a styleguide "Elevation" section and a guard.
