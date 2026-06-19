@@ -97,15 +97,12 @@
       // postMessage listener) -- the SSE path still updates the bar
       // a tick later.
       if (typeof hex !== 'string') return;
-      var fg = window.mindsAccent && window.mindsAccent.pickForegroundForHex
-        ? window.mindsAccent.pickForegroundForHex(hex)
-        : null;
-      if (!fg) return;
+      // Only the accent is sent; the chrome derives the contrasting titlebar
+      // foreground from it in pure CSS (see .titlebar-surface in app.css).
       window.postMessage({
         type: 'minds:preview-workspace-accent',
         agentId: agentId,
         accent: hex,
-        accentFg: fg,
       }, '*');
     }
 

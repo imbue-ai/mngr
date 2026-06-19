@@ -29,10 +29,10 @@
   // -- Per-agent accent color ------------------------------------------------
   //
   // Each SSE ``workspaces`` payload carries a per-workspace ``accent``
-  // (#rrggbb) and ``accent_fg`` (RGB triple for the contrasting titlebar
-  // foreground). The chrome caches both per agent id (see
+  // (#rrggbb). The chrome caches it per agent id (see
   // ``rememberWorkspaceAccents`` below) so accent application is a
-  // synchronous lookup. No client-side hash or hex math.
+  // synchronous lookup. The contrasting titlebar foreground is derived
+  // from the accent in pure CSS (``.titlebar-surface`` in app.css), not here.
 
   // -- Navigation adapter ---------------------------------------------------
   function navigateContent(url) {
@@ -117,20 +117,19 @@
 
   // -- Titlebar accent ------------------------------------------------------
   //
-  // The titlebar background and contrasting foreground are driven by three
-  // CSS variables set on the document root:
+  // The titlebar background is driven by two CSS variables set on the
+  // document root, plus the ``.titlebar-surface`` class toggled on
+  // #minds-titlebar:
   //   --workspace-accent  the workspace's #rrggbb accent (also consumed by
   //                       sidebar spines etc.)
   //   --titlebar-bg       the same color, used by the titlebar background
-  //   --titlebar-fg       an RGB triple ("0 0 0" | "255 255 255") for the
-  //                       contrasting foreground; titlebar-* utility classes
-  //                       compose this with per-element alpha for hierarchy
-  // Cleared back to the neutral chrome (pure-white bar via the Chrome.jinja
-  // fallback, dark "0 0 0" foreground via the tokens.css fallback) on any
-  // non-workspace minds screen -- so a sign-out / workspace-delete /
-  // freshly-launched app, and plain navigation to Home / Create / accounts,
-  // all render the neutral white chrome. (Light-mode default; dark-mode
-  // pure black is a deferred follow-up.)
+  // The contrasting foreground is NOT a variable -- the ``.titlebar-surface``
+  // scope derives it from --titlebar-bg in pure CSS and re-bases the
+  // foreground tokens on it (see app.css). Cleared back to the neutral chrome
+  // (surface-primary bar via the Chrome.jinja fallback, app tokens for the
+  // foreground) on any non-workspace minds screen -- so a sign-out /
+  // workspace-delete / freshly-launched app, and plain navigation to Home /
+  // Create / accounts, all render the neutral chrome.
   //
   // ``currentTitleAgentId`` tracks the workspace ACTUALLY DISPLAYED in this
   // window's content view -- it gates ``maybeRedirectToRecovery`` so a stuck
@@ -141,9 +140,9 @@
   // must never write to ``currentTitleAgentId`` or trigger recovery, or a
   // stuck agent in another window will hijack this window's content view.
   var currentTitleAgentId = null;
-  // Per-agent {accent, accent_fg} map populated from each SSE
-  // ``workspaces`` payload. ``applyTitleAccent`` reads from this cache
-  // so accent application is synchronous.
+  // Per-agent {accent} map populated from each SSE ``workspaces`` payload.
+  // ``applyTitleAccent`` reads from this cache so accent application is
+  // synchronous.
   // Workspaces missing from the cache (e.g. an agentId for which no SSE
   // tick has arrived yet) leave the accent unset on this call and get
   // painted by ``renderWorkspaces`` on the next tick.

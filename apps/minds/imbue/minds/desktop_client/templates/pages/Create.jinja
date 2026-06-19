@@ -52,14 +52,11 @@
       // repaints to the neutral chrome (see hasFreeformAccentPreview in
       // electron/main.js).
       if (typeof hex !== 'string') return;
-      var fg = window.mindsAccent && window.mindsAccent.pickForegroundForHex
-        ? window.mindsAccent.pickForegroundForHex(hex)
-        : null;
-      if (!fg) return;
+      // Only the accent is sent; the chrome derives the contrasting titlebar
+      // foreground from it in pure CSS (see .titlebar-surface in app.css).
       window.postMessage({
         type: 'minds:preview-freeform-accent',
         accent: hex,
-        accentFg: fg,
       }, '*');
     }
     function selectColorSwatch(hex) {
@@ -82,10 +79,8 @@
     // Paint the initial default-color preview so the bar shows the
     // form's pre-selected color even before the user clicks (matches
     // the "what you see on submit" expectation). Deferred to
-    // DOMContentLoaded: this inline IIFE runs during parsing, before
-    // the deferred workspace_accent.js has executed, so window.mindsAccent
-    // (which previewCreateAccent needs for pickForegroundForHex) isn't
-    // ready yet. DOMContentLoaded fires after deferred scripts run.
+    // DOMContentLoaded as a stable init point (parsing finished, all
+    // page scripts run) rather than firing mid-parse.
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', function () {
         previewCreateAccent(colorInput.value);

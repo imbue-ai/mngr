@@ -141,7 +141,6 @@ from imbue.minds.desktop_client.webdav import create_webdav_app
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
 from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
-from imbue.minds.desktop_client.workspace_color import pick_workspace_foreground
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.envs.docker_cleanup import stop_active_env_state_container
 from imbue.minds.errors import BackupProvisioningError
@@ -2512,14 +2511,13 @@ def _build_workspace_list(
 ) -> list[dict[str, str]]:
     """Build a JSON-serializable list of workspaces from the backend resolver.
 
-    Each entry carries an ``accent`` (#rrggbb CSS color) and ``accent_fg``
-    (RGB triple for the contrasting titlebar foreground) for the chrome
-    and sidebar to render. The accent is the workspace's stored
-    ``color`` label (set at create time by the create-form picker, or via
-    the settings POST endpoint); workspaces that lack the label (i.e. they
-    were created before the picker shipped and the user hasn't repicked
-    yet) get the default workspace color. ``accent_fg`` is the
-    WCAG-contrasting foreground for the resolved hex.
+    Each entry carries an ``accent`` (#rrggbb CSS color) for the chrome and
+    sidebar to render. The accent is the workspace's stored ``color`` label
+    (set at create time by the create-form picker, or via the settings POST
+    endpoint); workspaces that lack the label (i.e. they were created before
+    the picker shipped and the user hasn't repicked yet) get the default
+    workspace color. The contrasting titlebar foreground is no longer sent --
+    the chrome derives it from the accent in pure CSS (``.titlebar-surface``).
 
     Entries whose provider's latest discovery poll errored carry
     ``is_stale="true"`` so the UI can flag them as
@@ -2546,7 +2544,6 @@ def _build_workspace_list(
             "id": str(aid),
             "name": ws_name,
             "accent": accent,
-            "accent_fg": pick_workspace_foreground(accent),
         }
         # Mark the workspace stale when its provider's most recent discovery
         # poll errored: it was retained from prior state, so its liveness is

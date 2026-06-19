@@ -145,18 +145,18 @@
  * ---------------------------------------------------------------------------
  * Hand-written CSS that Tailwind doesn't cover (migrated verbatim from the
  * former tokens.css): per-workspace accent spine, spinner keyframes, titlebar
- * drop shadow, titlebar foreground tokens, shared card / pill / option /
- * color-picker recipes. These stay UNLAYERED so they keep the same precedence
- * over Tailwind utilities they had when tokens.css was a separate stylesheet.
+ * drop shadow, the .titlebar-surface self-theming recipe, shared card / pill /
+ * option / color-picker recipes. These stay UNLAYERED so they keep the same
+ * precedence over Tailwind utilities they had when tokens.css was a separate
+ * stylesheet.
  *
- * Chrome colors / focus rings / link color are not tokens here -- chrome uses
- * raw Tailwind classes (bg-zinc-900, text-zinc-200, border-white/10,
- * focus:ring-blue-600/15, ...) directly. The only token consumed by
- * non-styleguide code is --shadow-seam (titlebar drop shadow,
- * templates/pages/Chrome.jinja) and the implicit --workspace-accent /
- * --titlebar-bg / --titlebar-fg (set per-workspace via inline style by
- * chrome.js; consumed by the .accent-spine / .accent-swatch / .titlebar-*
- * rules below).
+ * The titlebar takes only --titlebar-bg (the workspace accent, set per-
+ * workspace via inline style by chrome.js); .titlebar-surface derives the
+ * contrasting foreground text tokens from it in pure CSS (lch relative color),
+ * so there is no JS contrast math and no --titlebar-fg. --shadow-seam (the
+ * titlebar drop shadow, templates/pages/Chrome.jinja) is the other token
+ * consumed by non-styleguide code; --workspace-accent / --titlebar-bg feed the
+ * .accent-spine / .accent-swatch / .titlebar-* rules below.
  * ---------------------------------------------------------------------------
  */
 

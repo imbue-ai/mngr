@@ -23,7 +23,6 @@ from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR_N
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
 from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
-from imbue.minds.desktop_client.workspace_color import pick_workspace_foreground
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
@@ -938,10 +937,11 @@ def test_titlebar_button_danger_tone_applies_red_hover() -> None:
 # The palette is the user-pickable set of workspace colors. It lives
 # server-side only (``WORKSPACE_PALETTE`` in workspace_color.py): the
 # pickers render server-side swatches carrying data-color attributes,
-# and the SSE workspaces payload emits the resolved accent/accent_fg.
-# static/workspace_accent.js keeps just the two runtime helpers
-# (normalizeHex / pickForegroundForHex); the guard test below ensures
-# no JS palette mirror gets reintroduced.
+# and the SSE workspaces payload emits the resolved accent. The titlebar
+# derives its contrasting foreground from that accent in pure CSS (see
+# .titlebar-surface in app.css). static/workspace_accent.js keeps just
+# the ``normalizeHex`` runtime helper; the guard test below ensures no
+# JS palette mirror gets reintroduced.
 
 # Order is significant: it drives the picker's render order and
 # pick_unused_create_color's preference walk. ``confusion`` (the
@@ -995,41 +995,11 @@ def test_workspace_accent_js_has_no_palette_mirror() -> None:
     reaches the client as server-rendered swatches with data-color
     attributes. A JS palette literal would be a second source of truth
     to keep in sync; this guard fails if someone reintroduces one.
-    The JS file keeps only the two runtime helpers (normalizeHex /
-    pickForegroundForHex)."""
+    The JS file keeps only the ``normalizeHex`` runtime helper -- the
+    titlebar derives its contrasting foreground in pure CSS now."""
     js_content = _WORKSPACE_ACCENT_JS_PATH.read_text()
     assert "WORKSPACE_PALETTE" not in js_content
     assert "normalizeHex" in js_content
-    assert "pickForegroundForHex" in js_content
-
-
-# ``pick_workspace_foreground`` runs on any hex (palette entries *and*
-# custom hexes typed into the settings input), so the cases below cover
-# both. Ordered: 3 dark palette entries (-> white text), 7 light palette
-# entries (-> black text), then 4 customs incl. the pure black/white
-# extremes (no longer palette entries) and two mid-range values that
-# exercise either side of the WCAG threshold.
-_PICK_FOREGROUND_CASES: Final[tuple[tuple[str, str], ...]] = (
-    ("#0b292b", "255 255 255"),
-    ("#492222", "255 255 255"),
-    ("#3c3d06", "255 255 255"),
-    ("#9fbbd3", "0 0 0"),
-    ("#e8a7a8", "0 0 0"),
-    ("#cecd0c", "0 0 0"),
-    ("#cfc7b3", "0 0 0"),
-    ("#f5d6a0", "0 0 0"),
-    ("#e9ecd9", "0 0 0"),
-    ("#fcefd4", "0 0 0"),
-    ("#000000", "255 255 255"),
-    ("#ffffff", "0 0 0"),
-    ("#808080", "0 0 0"),
-    ("#404040", "255 255 255"),
-)
-
-
-@pytest.mark.parametrize(("hex_color", "expected_foreground"), _PICK_FOREGROUND_CASES)
-def test_pick_workspace_foreground_chooses_legible_text(hex_color: str, expected_foreground: str) -> None:
-    assert pick_workspace_foreground(hex_color) == expected_foreground
 
 
 @pytest.mark.parametrize(
