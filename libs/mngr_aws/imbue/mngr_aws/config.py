@@ -97,16 +97,11 @@ class AwsProviderConfig(PublicIpVpsProviderConfig):
     )
     default_region: str = Field(
         default="us-east-1",
-        description="Default AWS region (e.g., 'us-east-1').",
+        description="Default AWS region.",
     )
     default_instance_type: str = Field(
         default="t3.small",
-        description=(
-            "Default EC2 instance type (e.g., 't3.small' for 2 vCPU, 2GB RAM). "
-            "Threaded through the shared `plan` slot in the parsed-build-args struct; "
-            "AWS surfaces it to users as `--aws-instance-type=` rather than `--aws-plan=` "
-            "because that's what the AWS docs and console call it."
-        ),
+        description=("EC2 instance type. Surfaced as the `--aws-instance-type=` build arg."),
     )
     default_ami_id: str | None = Field(
         default=None,
@@ -119,8 +114,8 @@ class AwsProviderConfig(PublicIpVpsProviderConfig):
         default_factory=AutoCreateSecurityGroup,
         description=(
             "Either {'kind': 'existing', 'id': 'sg-...'} to attach an existing security group, "
-            "or {'kind': 'auto_create', 'name': '...'} to auto-create one by name. Default is "
-            "auto-create with name 'mngr-aws'. The auto-create path consults allowed_ssh_cidrs."
+            "or {'kind': 'auto_create', 'name': '...'} to auto-create one by name. "
+            "The auto-create path consults allowed_ssh_cidrs."
         ),
     )
     subnet_id: str | None = Field(
@@ -137,7 +132,7 @@ class AwsProviderConfig(PublicIpVpsProviderConfig):
     )
     root_volume_type: str = Field(
         default="gp3",
-        description="EBS volume type for the root volume (e.g., gp3, gp2, io2).",
+        description="EBS volume type for the root volume.",
     )
     iam_instance_profile: str | None = Field(
         default=None,
@@ -162,13 +157,9 @@ class AwsProviderConfig(PublicIpVpsProviderConfig):
     terminate_on_shutdown: bool = Field(
         default=False,
         description=(
-            "Sets EC2 InstanceInitiatedShutdownBehavior. False (default) -> 'stop': an OS "
-            "shutdown -- whether the idle watcher powering the host off, or the "
-            "auto_shutdown_seconds time cap -- STOPS the instance, so it is resumable via "
-            "`mngr start` with its EBS volume intact (the Modal-like idle-pause; an abandoned "
-            "stopped instance costs only EBS until reaped by `mngr destroy` or GC). True -> "
-            "'terminate': an OS shutdown TERMINATES the instance (ephemeral, self-cleaning -- "
-            "used by the release tests so a leaked instance auto-destroys at the time cap)."
+            "EC2 shutdown behavior (InstanceInitiatedShutdownBehavior) on an OS shutdown. "
+            "False keeps the instance stoppable and resumable via `mngr start` (EBS preserved); "
+            "True terminates it (ephemeral / self-cleaning)."
         ),
     )
 

@@ -25,15 +25,15 @@ class VultrProviderConfig(VpsProviderConfig):
     )
     default_region: str = Field(
         default="ewr",
-        description="Default Vultr region (e.g., 'ewr' for New Jersey)",
+        description="Default Vultr region",
     )
     default_plan: str = Field(
         default="vc2-2c-4gb",
-        description="Default Vultr plan (e.g., 'vc2-2c-4gb' for 2 CPU, 4GB RAM)",
+        description="Default Vultr plan",
     )
     default_os_id: int = Field(
         default=2136,
-        description="Default Vultr OS ID (2136 = Debian 12 x64)",
+        description="Default Vultr OS ID (Debian 12 x64)",
     )
 
     def get_api_key(self) -> str:

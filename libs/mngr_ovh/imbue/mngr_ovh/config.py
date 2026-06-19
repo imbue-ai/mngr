@@ -40,27 +40,27 @@ class OvhProviderConfig(VpsProviderConfig):
     )
     endpoint: str = Field(
         default=_DEFAULT_ENDPOINT,
-        description="python-ovh endpoint id ('ovh-eu', 'ovh-us', 'ovh-ca', ...). Falls back to OVH_ENDPOINT.",
+        description="python-ovh endpoint id ('ovh-eu', 'ovh-ca', ...). Falls back to OVH_ENDPOINT.",
     )
     application_key: SecretStr | None = Field(
         default=None,
-        description="OVH application key (AK). Falls back to OVH_APPLICATION_KEY or OVH_APP_KEY env vars.",
+        description="OVH application key (AK). Falls back to OVH_APPLICATION_KEY/OVH_APP_KEY env vars or ~/.ovh.conf.",
     )
     application_secret: SecretStr | None = Field(
         default=None,
-        description="OVH application secret (AS). Falls back to OVH_APPLICATION_SECRET or OVH_APP_SECRET env vars.",
+        description="OVH application secret (AS). Falls back to OVH_APPLICATION_SECRET/OVH_APP_SECRET env vars or ~/.ovh.conf.",
     )
     consumer_key: SecretStr | None = Field(
         default=None,
-        description="OVH consumer key (CK). Falls back to OVH_CONSUMER_KEY env var.",
+        description="OVH consumer key (CK). Falls back to OVH_CONSUMER_KEY env var or ~/.ovh.conf.",
     )
     client_id: SecretStr | None = Field(
         default=None,
-        description="OVH OAuth2 client id. Falls back to OVH_CLIENT_ID env var.",
+        description="OVH OAuth2 client id. Falls back to OVH_CLIENT_ID env var or ~/.ovh.conf.",
     )
     client_secret: SecretStr | None = Field(
         default=None,
-        description="OVH OAuth2 client secret. Falls back to OVH_CLIENT_SECRET env var.",
+        description="OVH OAuth2 client secret. Falls back to OVH_CLIENT_SECRET env var or ~/.ovh.conf.",
     )
     project_id: str | None = Field(
         default=None,
@@ -68,25 +68,22 @@ class OvhProviderConfig(VpsProviderConfig):
     )
     default_region: str = Field(
         default=_DEFAULT_REGION,
-        description="Default VPS datacenter (e.g. US-EAST-VA, US-WEST-OR for US accounts).",
+        description="Default VPS datacenter (e.g. US-WEST-OR for US accounts).",
     )
     default_plan: str = Field(
         default=_DEFAULT_PLAN,
-        description="Default VPS plan code (e.g. vps-2025-model1 for VPS-1, ~$7.60/mo).",
+        description="Default VPS plan code (1 vCPU / 8 GB RAM / 80 GB SSD, ~$7.99/mo).",
     )
     default_image_name: str = Field(
         default=_DEFAULT_IMAGE_NAME,
-        description="Default OS image name (resolved to UUID per-VPS at create time).",
+        description="Default OS image name (Docker pre-installed).",
     )
     bootstrap_ssh_user: str = Field(
         default=_DEFAULT_BOOTSTRAP_SSH_USER,
         description=(
-            "Default non-root user the OVH image installs the rebuild key for. "
-            "On the default ``Debian 12 - Docker`` image this is ``debian``; "
-            "Ubuntu images use ``ubuntu``; AlmaLinux uses ``almalinux``; etc. "
-            "Used during the post-rebuild bootstrap to sudo-copy authorized_keys "
-            "into ``/root/.ssh`` so the rest of the provider (which assumes root "
-            "SSH) works without scattering sudos through downstream code."
+            "Non-root user the OVH image installs the rebuild key for. "
+            "Override only if you change default_image_name to a non-Debian "
+            "image (e.g. ubuntu, almalinux)."
         ),
     )
     pricing_mode: OvhPricingMode = Field(
@@ -99,14 +96,7 @@ class OvhProviderConfig(VpsProviderConfig):
     )
     instance_boot_timeout: float = Field(
         default=600.0,
-        description=(
-            "Seconds to wait for an OVH order to deliver a VPS (slower than direct-create APIs). "
-            "On timeout, ``_provision_vps`` writes a pending-order marker under the provider's "
-            "state dir; the next ``mngr create`` runs ``_reconcile_pending_orders`` at the top "
-            "of ``_provision_vps`` and adopts any VPS that has since delivered as a recycle "
-            "candidate. No inline extended wait happens here -- the failing bake exits at this "
-            "timeout, and recovery is eventually-consistent across subsequent bakes."
-        ),
+        description="Seconds to wait for the OVH order to deliver a VPS.",
     )
     ovh_subsidiary: str = Field(
         default="US",
@@ -114,37 +104,20 @@ class OvhProviderConfig(VpsProviderConfig):
     )
     enable_recycle_cancelled: bool = Field(
         default=True,
-        description=(
-            "Whether `mngr create` may reuse an OVH VPS that has been marked for "
-            "cancellation (``renew.deleteAtExpiration=true``) by un-cancelling it "
-            "and rebuilding the OS, instead of ordering a fresh one. "
-            "Useful for pool-style workloads (e.g. mngr_imbue_cloud) where a "
-            "VPS is destroyed in the mngr sense but OVH keeps it billable "
-            "until end of month."
-        ),
+        description=("Whether `mngr create` may reuse a cancelled-but-still-alive VPS instead of ordering fresh."),
     )
     recycle_safety_margin_hours: int = Field(
         default=2,
-        description=(
-            "Minimum number of hours of remaining ``expiration`` for a cancelled "
-            "VPS to be considered for recycling. Buffer against the billing "
-            "boundary so OVH does not decommission the VPS mid-recycle. "
-            "The default is tuned for pool workloads (the recycle path's "
-            "intended user), where same-day destroy + create is the common "
-            "case and we want recycling to claim a cancelled VPS aggressively."
-        ),
+        description=("Minimum hours of remaining expiration for a cancelled VPS to be recyclable."),
     )
     recycle_max_candidates_considered: int = Field(
         default=10,
         description=(
-            "Maximum number of provider-tagged VPSes whose serviceInfos / vps "
-            "detail will be fetched during candidate selection on a single "
-            "``mngr create``. Caps per-VPS API round-trips; if every fetched "
-            "VPS is filtered out (e.g. all currently active), recycling falls "
-            "through to a fresh order. Note the cap is applied to the raw "
-            "tagged-VPS list before the cancellation/state/expiration filters "
-            "run, so on accounts with many active mngr-tagged VPSes a "
-            "recyclable candidate further down the list may be missed."
+            "Cap on provider-tagged VPSes evaluated before falling through to a "
+            "fresh order. Applied to the raw tagged-VPS list before the "
+            "cancellation/state/expiration filters run, so on accounts with many "
+            "active mngr-tagged VPSes a recyclable candidate further down the "
+            "list may be missed."
         ),
     )
 

@@ -1,1 +1,3 @@
-Core libraries that are shared across all imbue projects.
+# imbue-common
+
+Foundation library of core utilities shared across imbue projects.
