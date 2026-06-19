@@ -5,6 +5,7 @@ import pytest
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.mngr_caller import _coerce_exit_code
+from imbue.mngr.utils.polling import wait_for
 
 
 @pytest.fixture()
@@ -100,3 +101,23 @@ def test_call_times_out_and_reports_timed_out(mngr_caller: MngrCaller) -> None:
     result = mngr_caller.call(["--version"], timeout=0.0)
     assert result.is_timed_out is True
     assert result.returncode != 0
+
+
+@pytest.mark.flaky
+@pytest.mark.timeout(60)
+def test_warm_process_exits_when_parent_disconnects(mngr_caller: MngrCaller) -> None:
+    """An idle warm process must not hang around once its parent socket is closed.
+
+    Closing the parent end without sending a request simulates the minds backend
+    going away (e.g. a hard kill). The warm process should observe EOF on its
+    socket and exit on its own, leaving no orphan.
+    """
+    warm_process = mngr_caller._spawn_warm_process()
+    warm_process.connection.close()
+    wait_for(
+        warm_process.running_process.is_finished,
+        timeout=30.0,
+        poll_interval=0.05,
+        error_message="warm mngr process did not exit after its parent disconnected",
+    )
+    assert warm_process.running_process.is_finished()

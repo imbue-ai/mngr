@@ -150,7 +150,14 @@ def _run_warm_mngr_server(connection_fd: int) -> None:
 
     connection = Connection(connection_fd)
     try:
-        argv, env_overrides = connection.recv()
+        try:
+            argv, env_overrides = connection.recv()
+        except EOFError:
+            # The parent (minds backend) went away before sending a request --
+            # e.g. it was killed without a chance to terminate us. Exit cleanly
+            # rather than hanging on the socket or crashing with a traceback, so
+            # no orphaned warm process is left behind.
+            return
         returncode, stdout, stderr = _execute_mngr_cli(cli, argv, env_overrides)
         connection.send((returncode, stdout, stderr))
     finally:
@@ -243,6 +250,7 @@ class MngrCaller(MutableModel):
         sent now simply buffers until the child finishes importing ``mngr``.
         """
         parent_connection, child_connection = Pipe(duplex=True)
+        is_spawn_successful = False
         try:
             child_fd = child_connection.fileno()
             os.set_inheritable(child_fd, True)
@@ -255,15 +263,16 @@ class MngrCaller(MutableModel):
             running_process = self._get_concurrency_group().run_process_in_background(
                 command, is_checked_by_group=False, pass_fds=(child_fd,)
             )
-        except BaseException:
-            # The spawn failed, so no warm process owns the parent's end; close it.
-            parent_connection.close()
-            raise
+            warm_process = _WarmMngrProcess(connection=parent_connection, running_process=running_process)
+            is_spawn_successful = True
+            return warm_process
         finally:
-            # The parent must drop its copy of the child's end so that, when the
-            # child dies, the parent's ``recv`` sees EOF rather than hanging.
+            # Always drop the parent's copy of the child's end so that, when the
+            # child dies, the parent's ``recv`` sees EOF rather than hanging. On
+            # failure also close the parent's end, which no warm process owns.
             child_connection.close()
-        return _WarmMngrProcess(connection=parent_connection, running_process=running_process)
+            if not is_spawn_successful:
+                parent_connection.close()
 
     def _store_or_terminate_warm_process(self, warm_process: _WarmMngrProcess) -> None:
         """Keep ``warm_process`` as the idle one, or terminate it if one already exists."""
