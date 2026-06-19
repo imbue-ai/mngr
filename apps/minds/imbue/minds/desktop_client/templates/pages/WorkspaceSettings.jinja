@@ -75,13 +75,13 @@
   <PageContainer>
     <div id="workspace-settings" data-agent-id="{{ agent_id }}" data-is-stale="{{ 'true' if is_stale else 'false' }}">
       <h1 class="text-xl font-semibold text-primary leading-tight">{{ ws_name }}</h1>
-      <p class="text-xs text-tertiary mb-16">{{ agent_id }}</p>
+      <p class="text-xs text-tertiary mb-4">{{ agent_id }}</p>
 
       {# ``extra`` turns the h2 into a flex row so the badge centers on
          the title's vertical axis; ``leading-none`` + fixed badge height
          keeps the line box from growing when the badge un-hides (which
          would push the swatches down a couple px). #}
-      <SectionHeader extra="flex items-center gap-8">Workspace Color <span id="color-saving-badge" class="hidden leading-none text-[10px] uppercase tracking-wider font-semibold text-primary bg-surface-primary rounded-sm px-6 py-4">Saving</span></SectionHeader>
+      <SectionHeader extra="flex items-center gap-2">Workspace Color <span id="color-saving-badge" class="hidden leading-none text-[10px] uppercase tracking-wider font-semibold text-primary bg-surface-primary rounded-sm px-1.5 py-1">Saving</span></SectionHeader>
       <div id="color-section">
         {% if is_stale %}
           <Notice variant="warn">
@@ -91,7 +91,7 @@
         {% endif %}
         <div role="radiogroup"
              aria-label="Workspace color palette"
-             class="flex flex-wrap items-center gap-8 mb-12"
+             class="flex flex-wrap items-center gap-2 mb-3"
              id="color-swatches">
           {% for name, hex_value in palette.items() %}
             <ColorSwatch :hex="hex_value" :name="name" size="md"
@@ -99,7 +99,7 @@
           {% endfor %}
           <input id="color-hex-input"
                  type="text"
-                 class="color-hex-pill h-[34px] px-12 rounded-full text-sm font-mono text-primary placeholder:text-tertiary disabled:opacity-40{{ ' is-selected' if current_color not in palette.values() else '' }}"
+                 class="color-hex-pill h-[34px] px-3 rounded-full text-sm font-mono text-primary placeholder:text-tertiary disabled:opacity-40{{ ' is-selected' if current_color not in palette.values() else '' }}"
                  value="{{ current_color }}"
                  placeholder="#a1b2c3"
                  maxlength="9"
@@ -109,7 +109,7 @@
                  size="8"
                  {% if is_stale %}disabled{% endif %}>
         </div>
-        <p id="color-error" class="hidden text-sm text-important mt-8" role="alert"></p>
+        <p id="color-error" class="hidden text-sm text-important mt-2" role="alert"></p>
       </div>
 
       <SectionHeader divider>Account</SectionHeader>
@@ -130,7 +130,7 @@
           You will need to set up sharing again after re-associating.
         </Notice>
         <Button variant="danger" id="disassociate-btn">Disassociate</Button>
-        <span id="disassociate-spinner" class="hidden text-secondary ml-8">Disassociating...</span>
+        <span id="disassociate-spinner" class="hidden text-secondary ml-2">Disassociating...</span>
       {% else %}
         <Associate :agent_id="agent_id" :accounts="accounts" />
       {% endif %}
@@ -156,20 +156,20 @@
       {% endif %}
 
       <SectionHeader divider>Danger zone</SectionHeader>
-      <p class="text-sm text-secondary mb-12">Permanently destroy this project and release any associated resources.</p>
+      <p class="text-sm text-secondary mb-3">Permanently destroy this project and release any associated resources.</p>
       <Button variant="danger" id="destroy-btn">Destroy project</Button>
-      <p id="destroy-error" class="hidden text-sm text-important mt-8"></p>
+      <p id="destroy-error" class="hidden text-sm text-important mt-2"></p>
 
       <Modal id="destroy-dialog">
-        <h2 class="text-lg font-semibold text-primary mb-12">Destroy project?</h2>
-        <p class="text-sm text-primary mb-16">This will permanently destroy <strong>{{ ws_name }}</strong> and all its data. This action cannot be undone.</p>
-        <div class="flex justify-end gap-12">
+        <h2 class="text-lg font-semibold text-primary mb-3">Destroy project?</h2>
+        <p class="text-sm text-primary mb-4">This will permanently destroy <strong>{{ ws_name }}</strong> and all its data. This action cannot be undone.</p>
+        <div class="flex justify-end gap-3">
           <Button variant="secondary" id="destroy-cancel-btn">Cancel</Button>
           <Button variant="danger" id="destroy-confirm-btn">Destroy</Button>
         </div>
       </Modal>
 
-      <div class="mt-32">
+      <div class="mt-8">
         <Link href="/">&larr; Back to projects</Link>
       </div>
     </div>

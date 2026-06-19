@@ -10,6 +10,6 @@
   blue top, used inside the backup-export "downloading..." indicator
   where the surrounding text and affordance are already blue.
 #}
-{%- set _dim = {"sm": "w-14 h-14 border", "md": "w-[18px] h-[18px] border-2", "lg": "w-32 h-32 border-[3px]"} -%}
+{%- set _dim = {"sm": "w-3.5 h-3.5 border", "md": "w-[18px] h-[18px] border-2", "lg": "w-8 h-8 border-[3px]"} -%}
 {%- set _tone = " spinner-accent" if tone == "accent" else "" -%}
 <span class="spinner{{ _tone }} inline-block align-middle {{ _dim[size] }} {{ extra }}" aria-hidden="true"></span>

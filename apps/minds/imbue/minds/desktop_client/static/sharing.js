@@ -52,7 +52,7 @@
   var removed = [];
 
   function createAclRow(email, variant) {
-    var base = 'flex items-center justify-between px-12 py-8 border rounded-md my-4 ';
+    var base = 'flex items-center justify-between px-3 py-2 border rounded-md my-1 ';
     var rowCls = {
       existing: 'bg-surface-primary border-default',
       added:    'bg-success/12 border-success/30',
@@ -64,7 +64,7 @@
     var left = document.createElement('span');
     if (variant === 'added' || variant === 'removed') {
       var prefix = document.createElement('span');
-      prefix.className = 'font-semibold mr-6 ' + (variant === 'added' ? 'text-success' : 'text-important');
+      prefix.className = 'font-semibold mr-1.5 ' + (variant === 'added' ? 'text-success' : 'text-important');
       prefix.textContent = variant === 'added' ? '+' : '−';
       left.appendChild(prefix);
     }
@@ -75,7 +75,7 @@
     row.appendChild(left);
 
     var btn = document.createElement('button');
-    btn.className = 'bg-transparent border-none cursor-pointer text-tertiary text-lg leading-none px-4 hover:text-primary';
+    btn.className = 'bg-transparent border-none cursor-pointer text-tertiary text-lg leading-none px-1 hover:text-primary';
     btn.setAttribute('aria-label', 'Remove');
     btn.setAttribute('data-action',
       variant === 'added' ? 'unmark-added'
@@ -177,7 +177,7 @@
     if (existing) existing.remove();
     var box = document.createElement('div');
     box.id = 'sharing-error';
-    box.className = 'mt-12 mb-4 px-12 py-8 rounded-md bg-important/12 border border-important/30 text-sm text-important';
+    box.className = 'mt-3 mb-1 px-3 py-2 rounded-md bg-important/12 border border-important/30 text-sm text-important';
     box.textContent = message;
     var actions = document.getElementById('action-buttons');
     actions.parentNode.insertBefore(box, actions);
@@ -333,7 +333,7 @@
     .catch(function (err) {
       var state = document.getElementById('loading-state');
       state.textContent = 'Failed to load sharing status: ' + err.message;
-      state.className = 'text-important py-16';
+      state.className = 'text-important py-4';
       document.getElementById('editor-content').classList.remove('hidden');
       added = proposedEmails.slice();
       renderACL();

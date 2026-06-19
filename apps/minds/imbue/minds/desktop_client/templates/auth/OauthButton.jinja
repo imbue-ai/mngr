@@ -12,11 +12,11 @@
   ``document.querySelectorAll('.oauth-btn')`` to enable/disable them as
   a group during an OAuth flow.
 
-  ``extra`` is for one-off layout shims (``mb-8`` to space buttons in a
+  ``extra`` is for one-off layout shims (``mb-2`` to space buttons in a
   vertical stack).
 #}
 {%- set _label = {"google": "Continue with Google", "github": "Continue with GitHub"}[provider] -%}
 <button data-oauth="{{ provider }}"
-        class="oauth-btn w-full py-8 px-12 bg-surface-primary border border-default rounded-lg text-sm cursor-pointer flex items-center justify-center gap-8 text-primary hover:bg-fill-hover {{ extra }}">
+        class="oauth-btn w-full py-2 px-3 bg-surface-primary border border-default rounded-lg text-sm cursor-pointer flex items-center justify-center gap-2 text-primary hover:bg-fill-hover {{ extra }}">
   <auth.OauthIcon :provider="provider" /> {{ _label }}
 </button>

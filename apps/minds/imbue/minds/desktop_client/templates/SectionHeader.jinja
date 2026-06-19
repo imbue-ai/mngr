@@ -8,6 +8,6 @@
   Use ``extra=""`` for one-off margin overrides; the existing call sites
   are stable enough that the default + divider variants cover them.
 #}
-{% set _base = "text-sm font-medium text-secondary mb-12" %}
-{% set _divider = "mt-32 pt-16 border-t border-default" if divider else "" %}
+{% set _base = "text-sm font-medium text-secondary mb-3" %}
+{% set _divider = "mt-8 pt-4 border-t border-default" if divider else "" %}
 <h2 class="{{ _base }} {{ _divider }} {{ extra }}">{{ content }}</h2>

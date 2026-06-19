@@ -53,14 +53,14 @@ TEMPLATE_DIR: Final[Path] = Path(__file__).resolve().parent / "templates"
 # auth flow; ``icon`` is a square padding for icon-only buttons (e.g. the
 # restart / settings icons in the Landing project row).
 _BTN_BASE: Final[str] = (
-    "inline-flex items-center justify-center gap-6 leading-tight "
+    "inline-flex items-center justify-center gap-1.5 leading-tight "
     "transition-colors disabled:opacity-30 disabled:cursor-not-allowed "
     "cursor-pointer no-underline whitespace-nowrap"
 )
 _BTN_SIZES: Final[Mapping[str, str]] = {
-    "md": "px-12 py-8 rounded-md font-medium text-sm",
-    "lg": "px-16 py-12 rounded-lg font-semibold text-base",
-    "icon": "p-6 rounded-md font-medium text-sm",
+    "md": "px-3 py-2 rounded-md font-medium text-sm",
+    "lg": "px-4 py-3 rounded-lg font-semibold text-base",
+    "icon": "p-1.5 rounded-md font-medium text-sm",
 }
 _BTN_VARIANTS: Final[Mapping[str, str]] = {
     "primary": "bg-surface-inverse text-inverse-primary border border-transparent hover:opacity-90",
@@ -76,7 +76,7 @@ _BTN_VARIANTS: Final[Mapping[str, str]] = {
 # exactly one place. Width and border-radius vary per-component so they
 # are NOT included here -- each component sets its own.
 _INPUT_BASE: Final[str] = (
-    "px-12 py-8 text-sm border border-strong bg-surface-primary text-primary "
+    "px-3 py-2 text-sm border border-strong bg-surface-primary text-primary "
     "outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/40"
 )
 

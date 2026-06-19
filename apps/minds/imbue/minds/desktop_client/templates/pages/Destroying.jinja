@@ -13,9 +13,9 @@
   <PageContainer>
     <div id="destroying-page" data-agent-id="{{ agent_id }}" data-pid="{{ pid }}" data-initial-status="{{ status }}">
       <h1 class="text-xl font-semibold text-primary leading-tight">Destroying {{ agent_name }}</h1>
-      <p class="text-xs text-tertiary mb-16">{{ agent_id }} &middot; pid {{ pid }}</p>
+      <p class="text-xs text-tertiary mb-4">{{ agent_id }} &middot; pid {{ pid }}</p>
 
-      <div id="destroying-status" class="my-16 flex items-center gap-8">
+      <div id="destroying-status" class="my-4 flex items-center gap-2">
         {% if status == 'running' %}
           <Spinner />
           <span id="status-text" class="text-primary">Running...</span>
@@ -26,16 +26,16 @@
         {% endif %}
       </div>
 
-      <h2 class="text-sm font-medium text-secondary mt-24 mb-8">Log</h2>
+      <h2 class="text-sm font-medium text-secondary mt-6 mb-2">Log</h2>
       <div id="destroying-log"
-           class="dark p-12 bg-surface-primary text-secondary font-mono text-xs rounded-lg max-h-[420px] overflow-y-auto whitespace-pre-wrap border border-subtle"></div>
+           class="dark p-3 bg-surface-primary text-secondary font-mono text-xs rounded-lg max-h-[420px] overflow-y-auto whitespace-pre-wrap border border-subtle"></div>
 
-      <div id="destroying-actions" class="mt-24 flex gap-12 hidden">
+      <div id="destroying-actions" class="mt-6 flex gap-3 hidden">
         <Button variant="primary" id="destroying-retry-btn">Retry</Button>
         <Button variant="secondary" id="destroying-dismiss-btn">Dismiss</Button>
       </div>
 
-      <div class="mt-32">
+      <div class="mt-8">
         <Link href="/">&larr; Back to projects</Link>
       </div>
     </div>

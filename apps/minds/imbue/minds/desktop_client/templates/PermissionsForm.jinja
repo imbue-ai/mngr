@@ -9,10 +9,10 @@
 #}
 <form id="permissions-form" method="POST"
       action={{ "/requests/" ~ request_id ~ "/grant" }}
-      class="mt-24">
+      class="mt-6">
   {{ content }}
 
-  <div class="flex gap-8 mt-16 justify-end">
+  <div class="flex gap-2 mt-4 justify-end">
     <Button variant="danger" onclick="submitPermissionDeny()">Deny</Button>
     <ButtonSubmit id="permissions-approve-btn" variant="success" disabled>Approve</ButtonSubmit>
   </div>

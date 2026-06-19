@@ -21,14 +21,14 @@
     statusContainer.innerHTML = '';
     if (status === 'running') {
       statusContainer.innerHTML =
-        '<span class="spinner inline-block w-12 h-12 align-middle"></span>' +
+        '<span class="spinner inline-block w-3 h-3 align-middle"></span>' +
         '<span class="text-primary">Running...</span>';
     } else if (status === 'failed') {
       statusContainer.innerHTML =
-        '<span class="inline-flex items-center px-8 py-2 rounded-md text-sm font-medium bg-important/15 text-important">Failed</span>';
+        '<span class="inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium bg-important/15 text-important">Failed</span>';
     } else if (status === 'done') {
       statusContainer.innerHTML =
-        '<span class="inline-flex items-center px-8 py-2 rounded-md text-sm font-medium bg-success/15 text-success">Done. Redirecting...</span>';
+        '<span class="inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium bg-success/15 text-success">Done. Redirecting...</span>';
     }
   }
 

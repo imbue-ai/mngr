@@ -127,17 +127,13 @@
 }
 
 /*
- * Spacing scale -- re-based so the utility number reads as PIXELS. Tailwind
- * computes every spacing / sizing utility as calc(var(--spacing) * N); setting
- * --spacing to 1px makes p-2 = 2px, py-64 = 64px (vs the stock 0.25rem, where
- * p-4 = 16px). The padding / margin / gap scale is 2/4/6/8/12/16/24/32/48/64
- * px (a ratchet holds it); width / height / inset stay free px for layout.
- * NOTE: this intentionally diverges from Tailwind's documented scale -- here
- * p-4 is 4px, not 16px -- so lean on this styleguide rather than upstream docs.
+ * Spacing scale -- standard Tailwind (--spacing stays the stock 0.25rem, so
+ * p-1 = 4px, p-4 = 16px). We constrain padding / margin / gap to a fixed
+ * subset of the native steps: 0.5 / 1 / 1.5 / 2 / 3 / 4 / 6 / 8 / 12 / 16
+ * (= 2/4/6/8/12/16/24/32/48/64 px), held by a ratchet. Width / height / inset
+ * stay free for layout. Keeping the stock scale means upstream docs / tooling /
+ * IntelliSense all read correctly. See the styleguide's "Spacing scale".
  */
-@theme {
-  --spacing: 1px;
-}
 
 /*
  * Corner-radius scale -- four steps (px), held by a ratchet alongside the
@@ -285,7 +281,7 @@ html {
  * via DOM methods after toggling the share state), so factoring the
  * recipe into one CSS class keeps the two sides from drifting.
  * Tailwind equivalents:
- *   bg-fill-subtle rounded-md px-6 py-2 font-mono text-[0.95em]
+ *   bg-fill-subtle rounded-md px-1.5 py-0.5 font-mono text-[0.95em]
  */
 .code-pill {
   background: var(--c-fill-subtle);

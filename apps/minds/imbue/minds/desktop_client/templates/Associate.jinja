@@ -4,10 +4,10 @@
   has no associated account yet. Either prompts the user to pick an account
   to associate (if any are signed in) or links to sign-in/create-account.
 #}
-<Card extra="my-12">
-  <p class="font-medium mb-8">This workspace needs to be associated with an account before sharing can be configured.</p>
+<Card extra="my-3">
+  <p class="font-medium mb-2">This workspace needs to be associated with an account before sharing can be configured.</p>
   {% if accounts %}
-    <form method="POST" action="/workspace/{{ agent_id }}/associate" class="flex gap-8 items-center mt-8">
+    <form method="POST" action="/workspace/{{ agent_id }}/associate" class="flex gap-2 items-center mt-2">
       <Select name="user_id" width="w-auto">
         {% for acct in accounts %}
           <option value="{{ acct.user_id }}">{{ acct.email }}</option>
@@ -17,6 +17,6 @@
       <ButtonSubmit variant="primary">Associate</ButtonSubmit>
     </form>
   {% else %}
-    <p class="mt-8"><Link href="/auth/login">Sign in or create an account</Link> to enable sharing.</p>
+    <p class="mt-2"><Link href="/auth/login">Sign in or create an account</Link> to enable sharing.</p>
   {% endif %}
 </Card>

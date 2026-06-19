@@ -7,8 +7,8 @@
 
   Props:
     title       <title> contents.
-    padding     "default" (``p-32``, used by the auth flow) or "form"
-                (``p-24``, used by the workspace-creation form and any
+    padding     "default" (``p-8``, used by the auth flow) or "form"
+                (``p-6``, used by the workspace-creation form and any
                 other page-card that mostly holds inputs).
     max_width   Tailwind max-width utility on the card. Caller picks
                 per page (e.g. ``"max-w-[420px]"`` for auth,
@@ -21,9 +21,9 @@
   almost every content page; only special-case shells (Chrome,
   Sidebar) and overlay dialogs go outside both.
 #}
-{%- set _padding_cls = "p-32" if padding == "default" else "p-24" -%}
+{%- set _padding_cls = "p-8" if padding == "default" else "p-6" -%}
 <Base title={{ title }}
-      body_class="bg-surface-primary text-primary font-sans antialiased flex items-center justify-center min-h-screen p-16"
+      body_class="bg-surface-primary text-primary font-sans antialiased flex items-center justify-center min-h-screen p-4"
       scripts={{ scripts }}>
   <div class="bg-surface-primary border border-default rounded-lg shadow-sm {{ _padding_cls }} {{ max_width }} w-full">
     {{ content }}

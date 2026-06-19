@@ -12,16 +12,16 @@
   Props:
     layout      "block" (default), "row", or "row-spread".
                   - block:      no flex; caller arranges children.
-                  - row:        flex items-center gap-6 (children flow left-to-right;
+                  - row:        flex items-center gap-1.5 (children flow left-to-right;
                                 a flex-1 child pushes following items to the right edge).
-                  - row-spread: flex items-center justify-between gap-6 (header/action layout).
-    padding     "default" (p-16) or "tight" (px-16 py-8).
+                  - row-spread: flex items-center justify-between gap-1.5 (header/action layout).
+    padding     "default" (p-4) or "tight" (px-4 py-2).
     interactive Adds cursor-pointer + transition + hover:border-strong so the
                 surface reads as clickable. Typical with tag="a".
     tag         "div" (default), "a", or "button". Use "a" for click-anywhere
                 navigation; pass href=... when "a".
     href        href for tag="a".
-    extra       Trailing Tailwind for one-off overrides (e.g. "mt-16", "accent-spine").
+    extra       Trailing Tailwind for one-off overrides (e.g. "mt-4", "accent-spine").
 
   Any HTML attribute on the tag that is not declared above (style=, data-*,
   onclick=, id=, title=, aria-*) flows through via JinjaX's ``attrs``
@@ -36,12 +36,12 @@
 #}
 {%- set _layout_cls = {
   "block": "",
-  "row": "flex items-center gap-6",
-  "row-spread": "flex items-center justify-between gap-6",
+  "row": "flex items-center gap-1.5",
+  "row-spread": "flex items-center justify-between gap-1.5",
 }[layout] -%}
 {%- set _padding_cls = {
-  "default": "p-16",
-  "tight": "px-16 py-8",
+  "default": "p-4",
+  "tight": "px-4 py-2",
 }[padding] -%}
 {%- set _interactive_cls = "cursor-pointer transition hover:border-strong hover:shadow-sm" if interactive else "" -%}
 {%- set _anchor_cls = "no-underline text-inherit" if tag == "a" else "" -%}

@@ -23,7 +23,7 @@
     size      -- "md" (34px, settings picker) or "sm" (24px, create form).
     disabled  -- when true, renders the button disabled (stale workspace).
 #}
-{%- set _sizes = {"md": "w-[34px] h-[34px]", "sm": "w-24 h-24"} -%}
+{%- set _sizes = {"md": "w-[34px] h-[34px]", "sm": "w-6 h-6"} -%}
 {%- set _cls = "color-swatch " ~ _sizes[size] ~ " rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 disabled:opacity-40" -%}
 <button type="button"
         role="radio"

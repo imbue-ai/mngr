@@ -15,31 +15,31 @@
 </script>
 {% endset %}
 <CardPage title="Account settings" max_width="max-w-[480px]" scripts={{ _scripts }}>
-  <h1 class="text-2xl font-semibold text-primary mb-8">Account settings</h1>
-  <p class="text-secondary mb-24">Manage your Imbue account</p>
-  <div class="flex justify-between items-center py-12 border-b border-subtle">
+  <h1 class="text-2xl font-semibold text-primary mb-2">Account settings</h1>
+  <p class="text-secondary mb-6">Manage your Imbue account</p>
+  <div class="flex justify-between items-center py-3 border-b border-subtle">
     <span class="text-sm text-secondary">Email</span>
     <span class="text-primary font-medium">{{ email }}</span>
   </div>
   {% if display_name %}
-    <div class="flex justify-between items-center py-12 border-b border-subtle">
+    <div class="flex justify-between items-center py-3 border-b border-subtle">
       <span class="text-sm text-secondary">Name</span>
       <span class="text-primary font-medium">{{ display_name }}</span>
     </div>
   {% endif %}
-  <div class="flex justify-between items-center py-12 border-b border-subtle">
+  <div class="flex justify-between items-center py-3 border-b border-subtle">
     <span class="text-sm text-secondary">Auth provider</span>
     <span class="text-primary font-medium">{{ provider }}</span>
   </div>
-  <div class="flex justify-between items-center py-12 border-b border-subtle">
+  <div class="flex justify-between items-center py-3 border-b border-subtle">
     <span class="text-sm text-secondary">User ID prefix</span>
     <span class="text-primary font-medium font-mono text-xs">{{ user_id_prefix }}</span>
   </div>
-  <div class="mt-24 flex flex-col gap-8">
+  <div class="mt-6 flex flex-col gap-2">
     {% if provider == 'email' %}
       <ButtonLink href="/auth/forgot-password" variant="secondary" size="lg" block>Change password</ButtonLink>
     {% endif %}
     <Button variant="danger" size="lg" block id="signout-btn">Sign out</Button>
   </div>
-  <div class="text-center mt-16 text-sm text-secondary"><Link href="/" weight="medium">Back to home</Link></div>
+  <div class="text-center mt-4 text-sm text-secondary"><Link href="/" weight="medium">Back to home</Link></div>
 </CardPage>

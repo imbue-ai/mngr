@@ -6,8 +6,8 @@
   callouts (the accounts "Signed out" tag); ``size="sm"`` is for badges
   that sit in their own slot.
 
-  ``extra`` is for one-off layout shims (``ml-8`` on inline tags,
-  ``gap-8`` when the badge contains its own spinner). ``title`` adds a
+  ``extra`` is for one-off layout shims (``ml-2`` on inline tags,
+  ``gap-2`` when the badge contains its own spinner). ``title`` adds a
   native browser tooltip on hover.
 #}
 {% set _variants = {
@@ -17,5 +17,5 @@
   "warn":    "bg-warning/15 text-warning",
   "info":    "bg-info/15 text-info",
 } %}
-<span class="inline-flex items-center px-8 py-2 rounded-md text-{{ size }} font-medium {{ _variants[variant] }} {{ extra }}"
+<span class="inline-flex items-center px-2 py-0.5 rounded-md text-{{ size }} font-medium {{ _variants[variant] }} {{ extra }}"
       {% if title %}title="{{ title }}"{% endif %}>{{ content }}</span>

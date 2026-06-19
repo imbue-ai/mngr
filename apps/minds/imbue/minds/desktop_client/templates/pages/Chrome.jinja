@@ -46,19 +46,19 @@
       scripts={{ _scripts }}>
   <div id="minds-titlebar"
        style="background-color: var(--titlebar-bg, var(--c-surface-primary));"
-       class="fixed top-0 left-0 right-0 h-[38px] flex items-center select-none z-[100] px-4 {% if is_mac %}pl-[76px]{% endif %}">
-    <div class="flex gap-2">
+       class="fixed top-0 left-0 right-0 h-[38px] flex items-center select-none z-[100] px-1 {% if is_mac %}pl-[76px]{% endif %}">
+    <div class="flex gap-0.5">
       <TitlebarButton id="sidebar-toggle" title="Projects"><Icon24 name="menu" /></TitlebarButton>
       <TitlebarButton id="home-btn" title="Home"><Icon24 name="home" /></TitlebarButton>
       <TitlebarButton id="back-btn" title="Back"><Icon24 name="back" /></TitlebarButton>
       <TitlebarButton id="forward-btn" title="Forward"><Icon24 name="forward" /></TitlebarButton>
     </div>
-    <div class="flex-1 flex items-center justify-center px-8 min-w-0">
+    <div class="flex-1 flex items-center justify-center px-2 min-w-0">
       <span id="page-title" class="text-primary text-xs whitespace-nowrap overflow-hidden text-ellipsis">Minds</span>
     </div>
     <TitlebarButton id="requests-toggle" title="Requests" extra="relative">
       <Icon24 name="messages" />
-      <span id="requests-badge" class="hidden absolute top-2 right-2 w-8 h-8 rounded-full bg-important"></span>
+      <span id="requests-badge" class="hidden absolute top-0.5 right-0.5 w-2 h-2 rounded-full bg-important"></span>
     </TitlebarButton>
     <div class="flex {% if is_mac %}hidden{% endif %}">
       <TitlebarButton variant="control" id="min-btn" title="Minimize"><Icon12 name="minimize" /></TitlebarButton>
@@ -77,12 +77,12 @@
      uses the same #sidebar-backdrop / #sidebar-menu shape with the
      /_static/sidebar.js renderer. Both modes share the position model:
      menu.top-left = trigger.bottom-left + offset, with a uniform 4px panel
-     pad (p-4) and 2px between entries (gap-2); each row adds its own
-     px-8 for the hover highlight's inset. #}
+     pad (p-1) and 2px between entries (gap-0.5); each row adds its own
+     px-2 for the hover highlight's inset. #}
   <div id="sidebar-backdrop" class="fixed inset-0 z-50 hidden">
     <div id="sidebar-menu"
-         class="dark absolute w-[280px] flex flex-col gap-2 p-4 rounded-lg border border-subtle bg-surface-primary shadow-[0_12px_32px_rgba(0,0,0,0.25)] overflow-hidden">
-      <div id="sidebar-workspaces" class="flex flex-col gap-2"></div>
+         class="dark absolute w-[280px] flex flex-col gap-0.5 p-1 rounded-lg border border-subtle bg-surface-primary shadow-[0_12px_32px_rgba(0,0,0,0.25)] overflow-hidden">
+      <div id="sidebar-workspaces" class="flex flex-col gap-0.5"></div>
       <SidebarBottom />
     </div>
   </div>

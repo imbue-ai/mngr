@@ -9,7 +9,7 @@
   Two layouts:
 
   ``inline=False`` (default) -- a block label that sits above the
-  input, with ``mb-6`` bottom spacing. Used by the auth flow stack
+  input, with ``mb-1.5`` bottom spacing. Used by the auth flow stack
   (email / password) and the Create form's vertical form sections.
 
   ``inline=True`` -- an inline label that sits in a horizontal flex
@@ -20,5 +20,5 @@
   above an input; adding ``inline`` flips it to a horizontal-row
   treatment for cases like a label sitting beside a Select.
 #}
-{%- set _layout = "" if inline else "block mb-6" -%}
+{%- set _layout = "" if inline else "block mb-1.5" -%}
 <label for="{{ target }}" class="text-sm font-medium text-primary {{ _layout }} {{ extra }}">{{ content }}</label>

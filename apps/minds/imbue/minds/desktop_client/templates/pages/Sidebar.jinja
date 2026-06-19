@@ -19,8 +19,8 @@
     top  = trigger_y + trigger_h + offset_y
   Because the chrome view and the modal view share the same window
   coordinate space, the trigger's rect translates directly. The panel
-  carries a uniform 4px pad on all sides (``p-4``) with 2px between
-  entries (``gap-2``); each row adds its own ``px-8`` for the hover
+  carries a uniform 4px pad on all sides (``p-1``) with 2px between
+  entries (``gap-0.5``); each row adds its own ``px-2`` for the hover
   highlight's inset.
 
   Defaults (no query params): anchor a 38px-tall element at the top-left
@@ -45,8 +45,8 @@
   <div id="sidebar-backdrop" class="fixed inset-0">
     <div id="sidebar-menu"
          style="left:{{ _menu_left }}px; top:{{ _menu_top }}px;"
-         class="dark absolute w-[280px] flex flex-col gap-2 p-4 rounded-lg border border-subtle bg-surface-primary shadow-[0_12px_32px_rgba(0,0,0,0.25)] overflow-hidden">
-      <div id="sidebar-workspaces" class="flex flex-col gap-2"></div>
+         class="dark absolute w-[280px] flex flex-col gap-0.5 p-1 rounded-lg border border-subtle bg-surface-primary shadow-[0_12px_32px_rgba(0,0,0,0.25)] overflow-hidden">
+      <div id="sidebar-workspaces" class="flex flex-col gap-0.5"></div>
       <SidebarBottom />
     </div>
   </div>

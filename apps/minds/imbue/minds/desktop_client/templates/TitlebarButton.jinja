@@ -13,10 +13,10 @@
   Props:
     variant
       "nav"     -- left-side icon hits (sidebar / home / back / forward /
-                   requests). ``w-32 h-28`` with a slight rounded corner.
+                   requests). ``w-8 h-7`` with a slight rounded corner.
       "control" -- right-side native window controls (min / max / close)
                    on platforms where minds draws its own frame.
-                   ``w-36 h-[38px]``, square corners (matches the OS).
+                   ``w-9 h-[38px]``, square corners (matches the OS).
     tone
       "default" -- accent-aware hover via ``.titlebar-btn``.
       "danger"  -- close-button-only red hover regardless of accent
@@ -27,8 +27,8 @@
   aria-*, data-*) flows through via JinjaX's ``attrs`` passthrough.
 #}
 {%- set _variants = {
-  "nav": "w-32 h-28 rounded-md",
-  "control": "w-36 h-[38px] rounded-none",
+  "nav": "w-8 h-7 rounded-md",
+  "control": "w-9 h-[38px] rounded-none",
 } -%}
 {%- set _tones = {
   "default": "",
