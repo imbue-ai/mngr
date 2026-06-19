@@ -55,6 +55,11 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
     mngr_ctx: MngrContext = Field(frozen=True, repr=False, description="Mngr context")
     agent_config: AgentConfigT = Field(frozen=True, repr=False, description="Agent type config")
 
+    @property
+    def session_name(self) -> str:
+        """The agent's tmux session name (``prefix + name``), via the config's single definition."""
+        return self.mngr_ctx.config.agent_session_name(self.name)
+
     @abstractmethod
     def get_host(self) -> OnlineHostInterface:
         """Return the host this agent runs on (must be online)."""

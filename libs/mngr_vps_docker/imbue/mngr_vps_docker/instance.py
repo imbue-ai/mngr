@@ -305,6 +305,7 @@ def _read_live_listing_from_vps(
     host_id: HostId,
     host_dir: str,
     prefix: str,
+    window_name: str,
 ) -> dict[str, Any]:
     """Run the outer listing script on the VPS and return the parsed live listing.
 
@@ -314,7 +315,9 @@ def _read_live_listing_from_vps(
     persisted outer store -- are discovered. This mirrors the read path
     ``ImbueCloudProvider`` already uses.
     """
-    script = build_outer_listing_collection_script(str(host_id), host_dir, prefix, host_id_label=LABEL_HOST_ID)
+    script = build_outer_listing_collection_script(
+        str(host_id), host_dir, prefix, host_id_label=LABEL_HOST_ID, window_name=window_name
+    )
     result = outer.execute_idempotent_command(script, timeout_seconds=60.0)
     if not result.success:
         raise MngrError(
@@ -1978,7 +1981,11 @@ class VpsDockerProvider(BaseProviderInstance):
                 # handled by the outer cache-fallback branch.
                 try:
                     parsed_listing = _read_live_listing_from_vps(
-                        outer, host_id, str(self.host_dir), self.mngr_ctx.config.prefix
+                        outer,
+                        host_id,
+                        str(self.host_dir),
+                        self.mngr_ctx.config.prefix,
+                        self.mngr_ctx.config.tmux.primary_window_name,
                     )
                 except MngrError as listing_exc:
                     logger.warning(
@@ -2120,7 +2127,9 @@ class VpsDockerProvider(BaseProviderInstance):
                 )
 
             # Collect all data in one SSH command
-            script = build_listing_collection_script(str(self.host_dir), self.mngr_ctx.config.prefix)
+            script = build_listing_collection_script(
+                str(self.host_dir), self.mngr_ctx.config.prefix, self.mngr_ctx.config.tmux.primary_window_name
+            )
 
             with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
                 with log_span("Collecting listing data via single SSH command"):

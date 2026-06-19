@@ -1120,7 +1120,7 @@ def _post_create(
     if opts.connect:
         resolved_connect_command = resolve_connect_command(opts.connect_command, mngr_ctx)
         if resolved_connect_command is not None:
-            session_name = f"{mngr_ctx.config.prefix}{create_result.agent.name}"
+            session_name = create_result.agent.session_name
             run_connect_command(
                 resolved_connect_command,
                 str(create_result.agent.name),
