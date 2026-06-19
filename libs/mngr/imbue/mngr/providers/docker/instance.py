@@ -801,13 +801,15 @@ kill -TERM 1
         propagates so it is visible rather than silently leaking the image.
         Snapshot images are independent `docker commit` images that retain
         the underlying layers, so removing this tag does not break snapshot
-        restore.
+        restore. Forced because the host's own (now-stopped) container can
+        still reference the image, which Docker otherwise refuses to delete
+        ("must be forced - container is using its referenced image").
         """
         tag = self._build_image_tag(host_id)
         if not self._docker_client.images.list(name=tag):
             logger.trace("No build image to remove for host {}", host_id)
             return
-        self._docker_client.images.remove(tag)
+        self._docker_client.images.remove(tag, force=True)
 
     def _build_image(self, build_args: Sequence[str], tag: str) -> str:
         """Build a Docker image using the configured builder (docker or depot)."""
@@ -1565,8 +1567,15 @@ kill -TERM 1
             except (FileNotFoundError, OSError, MngrError) as e:
                 logger.trace("No host volume to clean up for {}: {}", host_id, e)
 
-        # Defensive untag in case destroy_host did not run (idempotent).
-        self._remove_build_image(host_id)
+        # Defensive untag in case destroy_host did not run (idempotent). A
+        # removal failure here must not abort GC (which would crash the whole
+        # `mngr destroy`/`mngr gc`), so log and continue -- the build image is
+        # disposable and a later sweep retries it. Mirrors the snapshot-removal
+        # handling above.
+        try:
+            self._remove_build_image(host_id)
+        except docker.errors.DockerException as e:
+            logger.warning("Error removing build image for host {}: {}", host_id, e)
 
         self._host_store.delete_host_record(host_id)
         self._container_cache_by_id.pop(host_id, None)

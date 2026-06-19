@@ -823,3 +823,77 @@ def test_docker_build_timeout_error_help_text_mentions_config_setting() -> None:
     assert error.user_help_text is not None
     assert "build_timeout_seconds" in error.user_help_text
     assert "my-docker" in error.user_help_text
+
+
+# =========================================================================
+# Build-image removal during destroy / GC
+# =========================================================================
+
+
+class _BuildRemovalImages:
+    """Minimal stand-in for ``docker_client.images`` for build-image removal."""
+
+    def __init__(self, *, present: bool, remove_error: Exception | None = None) -> None:
+        self._present = present
+        self._remove_error = remove_error
+        self.remove_calls: list[dict] = []
+
+    def list(self, name: str | None = None) -> list[object]:
+        return [object()] if self._present else []
+
+    def remove(self, tag: str, force: bool = False) -> None:
+        self.remove_calls.append({"tag": tag, "force": force})
+        if self._remove_error is not None:
+            raise self._remove_error
+
+
+class _BuildRemovalDockerClient:
+    def __init__(self, images: _BuildRemovalImages) -> None:
+        self.images = images
+
+
+def test_remove_build_image_forces_removal(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """The per-host build image is removed with force=True.
+
+    A (now-stopped) container created from the image still references it, so an
+    unforced delete fails with Docker's "must be forced" conflict.
+    """
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    fake_images = _BuildRemovalImages(present=True)
+    provider.__dict__["_docker_client"] = _BuildRemovalDockerClient(fake_images)
+
+    provider._remove_build_image(HostId(HOST_ID_A))
+
+    expected_tag = DockerProviderInstance._build_image_tag(HostId(HOST_ID_A))
+    assert fake_images.remove_calls == [{"tag": expected_tag, "force": True}]
+
+
+@pytest.mark.allow_warnings(match=r"Error removing build image for host")
+def test_delete_host_tolerates_build_image_removal_conflict(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """delete_host must not propagate a build-image removal conflict.
+
+    GC calls delete_host on aged-out destroyed hosts; an orphaned container can
+    still reference the build image, so its removal raises a 409 conflict. That
+    must be logged and swallowed -- otherwise it aborts GC and crashes the whole
+    ``mngr destroy`` even though the agent was already destroyed.
+    """
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    conflict = docker.errors.APIError("conflict: (must be forced) - container is using its referenced image")
+    provider.__dict__["_docker_client"] = _BuildRemovalDockerClient(
+        _BuildRemovalImages(present=True, remove_error=conflict)
+    )
+
+    record = HostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=HOST_ID_A,
+            host_name="h",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+    )
+    provider._host_store.write_host_record(record)
+    host = provider._create_host_from_host_record(record)
+
+    provider.delete_host(host)
+
+    assert provider._host_store.read_host_record(HostId(HOST_ID_A), use_cache=False) is None
