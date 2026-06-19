@@ -15,6 +15,7 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import tempfile
 import threading
 from collections.abc import Iterator
@@ -23,10 +24,12 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
+from typing import Final
 from urllib.parse import urlencode
 from uuid import uuid4
 
 import click
+import psutil
 import psycopg2
 from loguru import logger
 from tabulate import tabulate
@@ -51,6 +54,7 @@ from imbue.mngr_imbue_cloud.data_types import BareMetalServer
 from imbue.mngr_imbue_cloud.data_types import BareMetalServerCapacity
 from imbue.mngr_imbue_cloud.data_types import SlicePricingRow
 from imbue.mngr_imbue_cloud.errors import BareMetalProvisioningError
+from imbue.mngr_imbue_cloud.errors import SliceBakeTerminatedError
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerStatus
 from imbue.mngr_imbue_cloud.primitives import OVH_US_DATACENTER_CODES
@@ -62,17 +66,21 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_MEMORY_PER_SLICE_GB
 from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_SLICE_CPU_OVERCOMMIT_RATIO
 from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_SLICE_PORT_RANGE_END
 from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_SLICE_PORT_RANGE_START
-from imbue.mngr_imbue_cloud.slices.bare_metal import choose_server_for_new_slice
+from imbue.mngr_imbue_cloud.slices.bare_metal import compute_orphan_slice_disk_names
+from imbue.mngr_imbue_cloud.slices.bare_metal import compute_orphan_slice_instance_names
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_disk_gib
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_memory_mib
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_vcpus
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slot_count
+from imbue.mngr_imbue_cloud.slices.bare_metal import find_server_capacity_by_id
 from imbue.mngr_imbue_cloud.slices.bare_metal import partition_port_range
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_disk_name
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import build_slice_pool_host_insert_values
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_server_by_id
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_server_capacities
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_slice_disk_names_for_server
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_slice_instance_names_for_server
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import insert_bare_metal_server
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import insert_slice_pool_host
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import update_server
@@ -158,6 +166,13 @@ def _derive_public_key(private_key_path: Path) -> str:
     return result.stdout.strip()
 
 
+# Hard timeout for the box-prep SSH script. Generous because prep does heavy,
+# network-bound one-time work: apt installs (incl. libguestfs-tools), the lima
+# download, the multi-hundred-MB guest-image download, and the virt-customize pass
+# that boots an appliance and apt-installs pinned Docker into the image.
+_BOX_PREP_SSH_TIMEOUT_SECONDS: Final[float] = 1800.0
+
+
 def _run_root_script_over_ssh(server_address: str, ssh_user: str, private_key_path: Path, script: str) -> None:
     """Pipe a bash script to ``sudo bash`` on the box over SSH (base64 to dodge quoting)."""
     encoded = base64.b64encode(script.encode()).decode()
@@ -176,7 +191,7 @@ def _run_root_script_over_ssh(server_address: str, ssh_user: str, private_key_pa
                 f"{ssh_user}@{server_address}",
                 remote,
             ],
-            timeout=600.0,
+            timeout=_BOX_PREP_SSH_TIMEOUT_SECONDS,
             is_checked_after=False,
             on_output=lambda line, _is_stdout: logger.info("  [box] {}", line.rstrip()),
         )
@@ -386,6 +401,17 @@ def slice_advertised_attributes(sizing: dict[str, int]) -> dict[str, Any]:
 # carry the box address + per-slice carve sizing into the create.
 _SLICE_PROVIDER_INSTANCE: str = "imbue_cloud_slice"
 
+# Per-slice ``mngr create`` hard timeout (carve + FCT container build + agent
+# bootstrap). 45 min gives headroom for the build under concurrency; the bake's
+# semaphore keeps concurrency low enough that any single create stays well under
+# it. Applied per create, so one slice timing out never aborts the others.
+_SLICE_MNGR_CREATE_TIMEOUT_SECONDS: Final[int] = 2700
+
+# Default cap on how many slices bake concurrently per invocation (overridable via
+# --max-concurrency). Bounds box CPU/IO/network contention so each create finishes
+# within its timeout; the rest queue and start as slots free.
+DEFAULT_SLICE_BAKE_CONCURRENCY: Final[int] = 4
+
 
 def _build_slice_create_args(
     *,
@@ -536,6 +562,7 @@ def _bake_one_slice(
                 port_range_start=port_range_start,
                 port_range_end=port_range_end,
             ),
+            mngr_create_timeout_seconds=_SLICE_MNGR_CREATE_TIMEOUT_SECONDS,
         )
         # The VM now exists; any failure in the post-create steps or the insert must
         # tear it down so it does not leak its box slot + forwarded ports.
@@ -636,30 +663,184 @@ def _bake_into_outcomes(
     port_range_start: int,
     port_range_end: int,
     is_deferred_install_wait_skipped: bool,
+    semaphore: "threading.Semaphore",
+    total: int,
     outcomes: list[dict[str, Any]],
     outcomes_lock: "threading.Lock",
 ) -> None:
-    """Thread target: bake one slice and append its outcome under the lock."""
-    outcome = _bake_one_slice(
-        server=server,
-        sizing=sizing,
-        lease_attributes=lease_attributes,
-        region=region,
-        workspace_dir=workspace_dir,
-        pool_public_key=pool_public_key,
-        private_key_path=private_key_path,
-        database_url=database_url,
-        port_range_start=port_range_start,
-        port_range_end=port_range_end,
-        is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
-    )
+    """Thread target: bake one slice under the concurrency semaphore, recording progress.
+
+    The semaphore caps how many bakes run at once (the rest block here until a slot
+    frees). Each bake has its own per-create timeout, so one slice failing or timing
+    out releases its slot and lets the queued ones proceed -- it never aborts the rest.
+    """
+    with semaphore:
+        outcome = _bake_one_slice(
+            server=server,
+            sizing=sizing,
+            lease_attributes=lease_attributes,
+            region=region,
+            workspace_dir=workspace_dir,
+            pool_public_key=pool_public_key,
+            private_key_path=private_key_path,
+            database_url=database_url,
+            port_range_start=port_range_start,
+            port_range_end=port_range_end,
+            is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
+        )
     with outcomes_lock:
         outcomes.append(outcome)
+        done = len(outcomes)
+        succeeded_so_far = sum(1 for entry in outcomes if entry.get("status") == "succeeded")
+    logger.info(
+        "Slice bake progress: {}/{} done ({} succeeded) -- {} {}",
+        done,
+        total,
+        succeeded_so_far,
+        outcome.get("host_name"),
+        outcome.get("status"),
+    )
+
+
+def _raise_on_bake_termination_signal(signum: int, _frame: object) -> None:
+    """SIGTERM/SIGINT handler: raise so the bake's main-thread try/except runs cleanup.
+
+    Kept trivial (just raises) so the kill+reap logic can live in ``allocate_slices``
+    where the server / key / DSN are in scope, rather than being bound into the
+    handler. Raising interrupts the main thread's ``thread.join()``.
+    """
+    raise SliceBakeTerminatedError(f"slice bake received signal {signum}")
+
+
+def _kill_bake_worker_processes(grace_seconds: float = 5.0) -> None:
+    """Terminate every child process of this bake (the in-flight ``mngr create`` workers).
+
+    On a top-level kill (e.g. the minds wrapper's subprocess timeout SIGTERMs us),
+    the worker subprocesses would otherwise be reparented and keep carving VMs after
+    we exit -- leaking both processes and VMs. SIGTERM them (then SIGKILL stragglers)
+    so no new VM can appear on the box once the orphan reap has run.
+    """
+    children = psutil.Process().children(recursive=True)
+    for child in children:
+        try:
+            child.terminate()
+        except psutil.NoSuchProcess:
+            pass
+    _gone, alive = psutil.wait_procs(children, timeout=grace_seconds)
+    for child in alive:
+        try:
+            child.kill()
+        except psutil.NoSuchProcess:
+            pass
+
+
+def _reap_orphan_slice_resources(*, server: BareMetalServer, private_key_path: Path, database_url: str) -> None:
+    """Delete slice VMs AND data disks on the box that have no pool_hosts row (orphans from failed bakes).
+
+    Reconciles the box's lima instances and disks against the DB: any ``mngr-slice-``
+    resource with no row (any status) is an orphan -- a ``mngr create`` killed by its own
+    timeout after carving but before the row insert (the provider's rollback never ran),
+    or a disk left behind when a rollback ``limactl delete`` could not unlock it (so the
+    VM is gone but its disk leaked, permanently holding the box slot). Disks are reconciled
+    independently of instances so a disk that outlived its VM is still reaped. Best-effort:
+    logs and continues on any error so it never fails the bake. Assumes no other bake
+    invocation is concurrently mid-carve against this box (an in-flight resource not yet
+    inserted would otherwise look orphaned).
+    """
+    ssh_user = server.lima_service_user or "limahost"
+    client = LimaSliceVpsClient(
+        box_address=str(server.public_address),
+        box_ssh_user=ssh_user,
+        private_key_path=str(private_key_path),
+    )
+
+    # Reap orphan VM instances.
+    try:
+        box_instance_names = client.list_instance_names()
+    except (MngrError, OSError) as exc:
+        logger.warning("Orphan reap skipped: could not list slice VMs on {}: {}", server.public_address, exc)
+        box_instance_names = None
+    if box_instance_names is not None:
+        conn = psycopg2.connect(database_url)
+        try:
+            tracked_instance_names = fetch_slice_instance_names_for_server(conn, server.id)
+        finally:
+            conn.close()
+        instance_orphans = compute_orphan_slice_instance_names(box_instance_names, tracked_instance_names)
+        if not instance_orphans:
+            logger.info("Orphan reap: no untracked slice VMs on {}", server.public_address)
+        else:
+            logger.info(
+                "Orphan reap: deleting {} untracked slice VM(s) on {}: {}",
+                len(instance_orphans),
+                server.public_address,
+                sorted(instance_orphans),
+            )
+            for instance_name in sorted(instance_orphans):
+                try:
+                    client.destroy_instance(VpsInstanceId(instance_name))
+                except (MngrError, OSError) as exc:
+                    logger.warning(
+                        "Orphan reap: failed to delete VM {} on {}: {}", instance_name, server.public_address, exc
+                    )
+
+    # Reap orphan data disks (a disk can outlive its instance when the rollback delete
+    # could not unlock it). Done after the VM reap so a just-deleted VM's disk -- which
+    # destroy_instance already removes -- is no longer present to look orphaned.
+    try:
+        box_disk_names = client.list_disk_names()
+    except (MngrError, OSError) as exc:
+        logger.warning("Orphan disk reap skipped: could not list slice disks on {}: {}", server.public_address, exc)
+        return
+    conn = psycopg2.connect(database_url)
+    try:
+        tracked_disk_names = fetch_slice_disk_names_for_server(conn, server.id)
+    finally:
+        conn.close()
+    disk_orphans = compute_orphan_slice_disk_names(box_disk_names, tracked_disk_names)
+    if not disk_orphans:
+        logger.info("Orphan reap: no untracked slice disks on {}", server.public_address)
+        return
+    logger.info(
+        "Orphan reap: deleting {} untracked slice disk(s) on {}: {}",
+        len(disk_orphans),
+        server.public_address,
+        sorted(disk_orphans),
+    )
+    for disk_name in sorted(disk_orphans):
+        try:
+            client.destroy_disk(disk_name)
+        except (MngrError, OSError) as exc:
+            logger.warning("Orphan reap: failed to delete disk {} on {}: {}", disk_name, server.public_address, exc)
+
+
+def destroy_slice_vm(*, server: BareMetalServer, lima_instance_name: str) -> None:
+    """Destroy one slice's lima VM (and its data disk) on its box, freeing the box slot.
+
+    The teardown counterpart of the carve: SSHes the bare-metal box with the pool
+    management key (POOL_SSH_PRIVATE_KEY) and runs ``limactl delete`` for the named
+    instance -- the same client + key path the orphan reaper uses, but targeted at a
+    single known instance so ``admin pool destroy`` can fully tear down a slice
+    before dropping its ``pool_hosts`` row (instead of stranding the VM on the box).
+    """
+    if not server.public_address:
+        raise BareMetalProvisioningError(
+            f"server {server.id} has no public_address; cannot reach the box to destroy {lima_instance_name}"
+        )
+    ssh_user = server.lima_service_user or "limahost"
+    with _pool_private_key_path() as private_key_path:
+        client = LimaSliceVpsClient(
+            box_address=str(server.public_address),
+            box_ssh_user=ssh_user,
+            private_key_path=str(private_key_path),
+        )
+        client.destroy_instance(VpsInstanceId(lima_instance_name))
 
 
 def allocate_slices(
     *,
     count: int,
+    server_id: str,
     lease_attributes: dict[str, Any],
     region: str,
     workspace_dir: Path,
@@ -667,38 +848,49 @@ def allocate_slices(
     database_url: str,
     is_dry_run: bool,
     is_deferred_install_wait_skipped: bool,
+    max_concurrency: int,
 ) -> None:
-    """Bake ``count`` slices onto a single ready bare-metal server and insert their pool rows.
+    """Bake ``count`` slices onto the explicitly chosen bare-metal server and insert their pool rows.
 
-    The slice backend of ``admin pool create``. Picks the ready server with the
-    most free slots (one server per invocation: a server's per-slice vCPU/RAM/disk
+    The slice backend of ``admin pool create``. Bakes onto the operator-named
+    ``server_id`` (one server per invocation: a server's per-slice vCPU/RAM/disk
     are fixed by its registration, so a batch is homogeneous), vendors this branch's
-    mngr into the FCT workspace once, then bakes the slices in parallel -- each
-    ``mngr create`` drives the slice provider, which carves a lima VM over SSH on
-    the box and bakes the shared container, exactly like an OVH pool bake. Each row
-    advertises ``lease_attributes`` (the operator's lease metadata) with the derived
-    per-box size stamped on top, and records ``region`` (the lease-region label, not
-    the box's raw datacenter code) so the connector's region-filtered lease matches.
-    ``database_url`` is already resolved by the caller. ``is_dry_run`` only reports
-    placement.
+    mngr into the FCT workspace once, then bakes the slices concurrently -- at most
+    ``max_concurrency`` at a time (the rest queue) so the box isn't over-contended,
+    which would push each ``mngr create`` past its timeout. Each ``mngr create``
+    drives the slice provider to carve a lima VM over SSH on the box and bake the
+    shared container, exactly like an OVH pool bake. Each row advertises
+    ``lease_attributes`` (the operator's lease metadata) with the derived per-box
+    size stamped on top, and records ``region`` (the lease-region label, not the
+    box's raw datacenter code) so the connector's region-filtered lease matches.
+
+    After the bakes finish, reconciles the box's slice VMs against the DB and reaps
+    any orphan (a VM with no pool_hosts row -- e.g. a create killed by its own
+    timeout after carving but before the insert). ``database_url`` is already
+    resolved by the caller. ``is_dry_run`` only reports placement.
     """
     if count <= 0:
         raise click.UsageError("--count must be positive")
+    if max_concurrency <= 0:
+        raise click.UsageError("--max-concurrency must be positive")
     conn = psycopg2.connect(database_url)
     try:
         capacities = fetch_server_capacities(conn)
     finally:
         conn.close()
-    # One server per batch (homogeneous sizing): pick the ready box with the most
-    # free slots and require it to hold the whole batch. Server selection is NOT
-    # filtered by ``region`` today (single-fleet assumption); multi-region fleet
-    # filtering is future work.
-    chosen = choose_server_for_new_slice(capacities)
+    # One explicitly-chosen server per batch (homogeneous sizing): the operator names the box via
+    # ``--server-id``; we never auto-select. Require it to be ready and to hold the whole batch.
+    chosen = find_server_capacity_by_id(capacities, BareMetalServerDbId(server_id))
     server = chosen.server
+    if str(server.status) != SERVER_STATUS_READY:
+        raise click.UsageError(
+            f"server {server.id} is '{server.status}', not '{SERVER_STATUS_READY}'; "
+            "finish `admin server await-delivery` + `setup` before baking slices on it"
+        )
     if chosen.free_slots < count:
         raise click.UsageError(
             f"server {server.id} has only {chosen.free_slots} free slot(s); cannot bake {count} "
-            "(allocate on one server per invocation -- run again to use another server)"
+            "(allocate on one server per invocation -- run again, or choose another --server-id)"
         )
     sizing = compute_server_slice_sizing(server)
 
@@ -730,13 +922,15 @@ def allocate_slices(
 
     with _pool_private_key_path() as private_key_path:
         pool_public_key = _derive_public_key(private_key_path)
-        # Bake all slices in parallel (one thread each). Each bake is a separate
-        # ``mngr create`` that drives the slice provider to carve a VM (over SSH on
-        # the box) and pick the lowest free ports in the window it is given; handing
-        # each a DISJOINT sub-range of the box port range stops concurrent bakes
-        # from deterministically choosing the same ports.
+        # Spawn one thread per slice but cap how many bake at once with a semaphore
+        # (``max_concurrency``): each thread blocks on it before its ``mngr create``,
+        # so the box is never contended by more than K simultaneous carves+builds
+        # (which would push each create past its timeout). Each bake gets a DISJOINT
+        # port sub-range -- partitioned across the FULL ``count`` (not K), since a
+        # finished slice's VM keeps its ports, so windows must never be reused.
         outcomes: list[dict[str, Any]] = []
         outcomes_lock = threading.Lock()
+        bake_semaphore = threading.Semaphore(max_concurrency)
         port_windows = [
             partition_port_range(DEFAULT_SLICE_PORT_RANGE_START, DEFAULT_SLICE_PORT_RANGE_END, count, idx)
             for idx in range(count)
@@ -756,6 +950,8 @@ def allocate_slices(
                     port_range_start=port_windows[idx][0],
                     port_range_end=port_windows[idx][1],
                     is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
+                    semaphore=bake_semaphore,
+                    total=count,
                     outcomes=outcomes,
                     outcomes_lock=outcomes_lock,
                 ),
@@ -763,10 +959,43 @@ def allocate_slices(
             )
             for idx in range(count)
         ]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
+        logger.info("Baking {} slice(s) on {} ({} at a time)", count, server.public_address, max_concurrency)
+
+        # ``signal.signal`` only works on the main thread; the admin CLI always runs
+        # allocate_slices there, but guard so an off-main-thread caller falls back to
+        # the finally reap rather than crashing on install.
+        is_main_thread = threading.current_thread() is threading.main_thread()
+        previous_sigterm = signal.signal(signal.SIGTERM, _raise_on_bake_termination_signal) if is_main_thread else None
+        previous_sigint = signal.signal(signal.SIGINT, _raise_on_bake_termination_signal) if is_main_thread else None
+        try:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        except SliceBakeTerminatedError:
+            # Top-level kill (e.g. the minds wrapper's subprocess timeout SIGTERMs us).
+            # Without this, the workers would be reparented and keep carving VMs. Ignore
+            # further signals, kill the in-flight workers so no new VM is carved, and let
+            # their threads settle; the finally reaps the orphans. Exit non-zero so the
+            # caller sees the failure.
+            if is_main_thread:
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                signal.signal(signal.SIGINT, signal.SIG_IGN)
+            logger.warning("Slice bake terminated by signal; killing in-flight workers before reap")
+            _kill_bake_worker_processes()
+            for thread in threads:
+                thread.join()
+            raise SystemExit(1) from None
+        finally:
+            # Reap VMs left orphaned by a killed/timed-out create (carved but never
+            # inserted, so the provider's rollback never ran). Runs after all threads
+            # join -- an individual-create timeout (already a 'failed' outcome by now)
+            # is cleaned here; the except above handles a top-level kill. Restore the
+            # signal handlers last so the reap itself isn't interrupted.
+            _reap_orphan_slice_resources(server=server, private_key_path=private_key_path, database_url=database_url)
+            if is_main_thread:
+                signal.signal(signal.SIGTERM, previous_sigterm)
+                signal.signal(signal.SIGINT, previous_sigint)
 
     succeeded = [outcome for outcome in outcomes if outcome.get("status") == "succeeded"]
     emit_json(
@@ -992,6 +1221,16 @@ def _wait_for_ssh_ready(server_address: str, ssh_user: str, private_key_path: Pa
     show_default=True,
     help="CPU overcommit factor recorded for slice sizing on this box.",
 )
+@click.option(
+    "--option",
+    "option_codes",
+    multiple=True,
+    help=(
+        "Explicit planCode for a mandatory option family that offers more than one choice (e.g. "
+        "bandwidth, vrack). Repeatable. Required when the plan offers a real choice -- run once without "
+        "it and the error lists each family's offers + monthly prices so you can re-run with --option."
+    ),
+)
 @click.option("--yes", is_flag=True, default=False, help="Skip the interactive confirmation and place the order.")
 @click.option("--database-url", default=None, help="Pool DSN (else resolved from env/activated minds env).")
 def order(
@@ -1001,6 +1240,7 @@ def order(
     storage: str,
     memory_per_slice_gb: int,
     cpu_overcommit: float,
+    option_codes: tuple[str, ...],
     yes: bool,
     database_url: str | None,
 ) -> None:
@@ -1008,7 +1248,8 @@ def order(
 
     Builds + assigns the eco cart, shows the real OVH price preview for confirmation, places the order, and
     inserts a bare_metal_servers row (specs derived from the catalog). Then run ``await-delivery`` + ``setup``.
-    Needs OVH_* credentials and the pool DSN.
+    Any mandatory option family with more than one offer (e.g. bandwidth, vrack) must be chosen explicitly
+    via ``--option``; needs OVH_* credentials and the pool DSN.
     """
     config = _require_ovh_config()
     client = build_ovh_client(config)
@@ -1022,7 +1263,12 @@ def order(
         )
 
     cart_id, preview, _option_codes = build_and_assign_eco_cart(
-        client, plan_code=plan_code, datacenter=region, memory_gb=memory_gb, storage_short=storage
+        client,
+        plan_code=plan_code,
+        datacenter=region,
+        memory_gb=memory_gb,
+        storage_short=storage,
+        explicit_option_codes=option_codes,
     )
     write_human_line(
         f"About to order {plan_code} in {region}: {memory_gb}GB RAM, {storage}, {cpu_cores}c/{cpu_threads}t, "

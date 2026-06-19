@@ -687,6 +687,57 @@ class RetryConfig(FrozenModel):
         )
 
 
+class TmuxConfig(FrozenModel):
+    """Configuration for the tmux sessions that mngr runs agents in.
+
+    These options let tmux users customize how mngr creates and attaches to agent
+    sessions without resorting to a full ``connect_command`` override. See
+    ``docs/tmux_users.md`` for usage.
+    """
+
+    primary_window_name: str = Field(
+        default="agent",
+        min_length=1,
+        description="Name of the primary tmux window where the agent runs. mngr targets this "
+        "window by name rather than by index (``:0``), so its targeting works regardless of the "
+        "user's tmux 'base-index' setting.",
+    )
+    attach_args: tuple[str, ...] = Field(
+        default=(),
+        description="Extra tmux client flags inserted before the 'attach' subcommand when "
+        "connecting to an agent, i.e. ``tmux <attach_args> attach ...``. For example, "
+        "['-CC'] enables iTerm2 control mode; '-u' / '-2' force UTF-8 / 256-color.",
+    )
+    additional_config_path: Path | None = Field(
+        default=None,
+        description="Path (on the agent's host) to an additional tmux config file sourced into "
+        "every mngr session. Unlike the auto-generated ~/.mngr/tmux.conf, this file is never "
+        "overwritten by mngr, so it is a stable place for mngr-session-specific tmux config.",
+    )
+
+    @field_validator("attach_args", mode="before")
+    @classmethod
+    def _normalize_attach_args(cls, value: str | list[str] | tuple[str, ...]) -> tuple[str, ...]:
+        if isinstance(value, str):
+            return split_cli_args_string(value) if value else ()
+        return tuple(value)
+
+    def merge_with(self, override: Self) -> Self:
+        """Merge this config with an override config.
+
+        Uses ``model_fields_set`` so only the fields the override layer actually
+        set replace the base value. ``attach_args`` is assign-by-default like
+        other aggregate fields; use ``tmux.attach_args__extend`` in TOML for
+        additive behavior.
+        """
+        explicitly_set = override.model_fields_set
+        if not explicitly_set:
+            return self
+        override_values = override.model_dump()
+        updates: list[tuple[str, Any]] = [(field_name, override_values[field_name]) for field_name in explicitly_set]
+        return self.model_copy_update(*updates)
+
+
 class MngrConfig(FrozenModel):
     """Root configuration model for mngr."""
 
@@ -768,6 +819,11 @@ class MngrConfig(FrozenModel):
         default=False,
         description="Allow attaching to tmux sessions from within an existing tmux session by unsetting $TMUX",
     )
+    tmux: TmuxConfig = Field(
+        default_factory=TmuxConfig,
+        description="Configuration for the tmux sessions that mngr runs agents in "
+        "(primary window name, attach flags such as -CC, extra sourced config file).",
+    )
     headless: bool = Field(
         default=False,
         description="When true, disables all interactive behavior (prompts, TUI, editor). "
@@ -815,6 +871,14 @@ class MngrConfig(FrozenModel):
         ),
     )
 
+    def agent_session_name(self, agent_name: str) -> str:
+        """The tmux session name for an agent: the configured ``prefix`` + the agent name.
+
+        Single source of truth for the ``prefix + name`` rule, so call sites do not
+        hand-roll the f-string (and so cannot drift from one another).
+        """
+        return f"{self.prefix}{agent_name}"
+
     def merge_with(self, override: Self) -> Self:
         """Merge this config with an override config.
 
@@ -840,6 +904,7 @@ class MngrConfig(FrozenModel):
 
         merged_retry = self.retry.merge_with(override.retry) if override.retry is not None else self.retry
         merged_logging = self.logging.merge_with(override.logging) if override.logging is not None else self.logging
+        merged_tmux = self.tmux.merge_with(override.tmux) if override.tmux is not None else self.tmux
 
         return self.__class__(
             prefix=_assign_scalar(self.prefix, override.prefix),
@@ -877,6 +942,7 @@ class MngrConfig(FrozenModel):
             retry=merged_retry,
             logging=merged_logging,
             is_nested_tmux_allowed=_assign_scalar(self.is_nested_tmux_allowed, override.is_nested_tmux_allowed),
+            tmux=merged_tmux,
             headless=_assign_scalar(self.headless, override.headless),
             is_error_reporting_enabled=_assign_scalar(
                 self.is_error_reporting_enabled,
@@ -1045,6 +1111,7 @@ class CreateCliOptions(CommonCliOptions):
     name_style: str
     extra_window: tuple[str, ...]
     source: str | None
+    adopt_session: tuple[str, ...]
     target_path: str | None
     transfer: str | None
     rsync: bool | None

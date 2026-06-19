@@ -1,15 +1,21 @@
-"""Pure parsing/diffing of the claude agent's ``stream_buffer`` snapshots.
+"""Parsing/diffing of the claude agent's ``stream_buffer`` snapshots into text deltas.
 
 ``stream_buffer`` is written by the mngr_claude tmux watcher (``stream_snapshot.py``): line 1 is the
 uuid of the last *complete* assistant message (empty if none yet) and lines 2+ are the in-progress
-assistant text, reverse-mapped to approximate markdown and strict-appended within a message.
+assistant text, reverse-mapped to approximate markdown and strict-appended within a message. The
+watcher overwrites the whole file with a fresh snapshot each tick, so "new" text is the diff of the
+body against what has already been emitted.
 
-These helpers turn successive snapshots into incremental text deltas. They are shared by the
-robinhood CLI orchestrator (which renders deltas as plain text / ``text_delta`` partials) and the
-mngr-backed Agent SDK driver (which wraps deltas as synthesized ``StreamEvent`` payloads).
+:class:`SnapshotDeltaReader` adapts that diff to the shared :class:`LiveOutputReader` contract; the
+pure ``compute_stream_delta`` / ``buffer_body`` helpers it wraps are also used directly by tests and
+remain the single source of the reflow-tolerant diff logic. Consumers: the robinhood CLI
+orchestrator (renders deltas as plain text / ``text_delta`` partials), the mngr-backed Agent SDK
+driver (wraps deltas as synthesized ``StreamEvent`` payloads), and -- via the reader -- any pull
+consumer tailing the buffer through ``tail_live_output``.
 """
 
 from imbue.imbue_common.pure import pure
+from imbue.mngr.interfaces.live_output import LiveOutputReader
 
 
 @pure
@@ -105,3 +111,31 @@ def _complete_lines_prefix(body: str) -> str:
     if last_newline == -1:
         return ""
     return body[: last_newline + 1]
+
+
+class SnapshotDeltaReader(LiveOutputReader):
+    """Reader for the claude ``stream_buffer`` snapshot (uuid id line + in-progress markdown body).
+
+    Each read is a full snapshot, so new text is the diff of the body against what was already
+    emitted. :meth:`feed` withholds the still-streaming final line (so its churn is never emitted
+    mid-stream); :meth:`finalize` releases it from the most recent non-empty snapshot and resets, so
+    the same reader can be reused across the next message/turn.
+    """
+
+    emitted_body: str = ""
+    last_content: str = ""
+
+    def feed(self, content: str) -> list[str]:
+        # Track the most recent non-empty snapshot: the watcher empties the
+        # buffer when the agent goes idle, so finalize() must diff against the
+        # last content that actually carried a body, not a post-turn empty read.
+        if buffer_body(content).strip():
+            self.last_content = content
+        delta, self.emitted_body = compute_stream_delta(content, self.emitted_body, is_flush=False)
+        return [delta] if delta else []
+
+    def finalize(self) -> list[str]:
+        delta, self.emitted_body = compute_stream_delta(self.last_content, self.emitted_body, is_flush=True)
+        self.emitted_body = ""
+        self.last_content = ""
+        return [delta] if delta else []

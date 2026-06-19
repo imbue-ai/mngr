@@ -21,6 +21,17 @@ def test_tmux_session_target_renders_with_exact_match_prefix() -> None:
     assert target.as_shell_arg() == "=mngr-my-agent"
 
 
+def test_tmux_session_target_as_target_arg_is_raw_unquoted() -> None:
+    """as_target_arg is the raw `=name` for argv contexts; as_shell_arg wraps it in shell quoting."""
+    plain = TmuxSessionTarget(session_name="mngr-my-agent")
+    assert plain.as_target_arg() == "=mngr-my-agent"
+    assert plain.as_shell_arg() == "=mngr-my-agent"
+
+    spaced = TmuxSessionTarget(session_name="mngr-weird name")
+    assert spaced.as_target_arg() == "=mngr-weird name"
+    assert spaced.as_shell_arg() == "'=mngr-weird name'"
+
+
 def test_tmux_window_target_default_window_is_zero() -> None:
     target = TmuxWindowTarget(session_name="mngr-my-agent")
     assert target.session_name == "mngr-my-agent"

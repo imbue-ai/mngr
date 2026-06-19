@@ -151,6 +151,10 @@ class AgentError(MngrError):
     """
 
 
+class AgentInstallationError(AgentError):
+    """Raised when an agent's CLI binary is missing and cannot be installed."""
+
+
 class NoCommandDefinedError(AgentError, ValueError):
     """Raised when no command is defined for an agent type."""
 
@@ -426,15 +430,6 @@ class SnapshotsNotSupportedError(SnapshotError):
 
     def __init__(self, provider_name: ProviderInstanceName) -> None:
         super().__init__(provider_name, f"Provider {provider_name} does not support snapshots")
-
-
-class TagLimitExceededError(ProviderError):
-    """Tags exceed provider's storage limit."""
-
-    def __init__(self, provider_name: ProviderInstanceName, limit: int, actual: int) -> None:
-        self.limit = limit
-        self.actual = actual
-        super().__init__(provider_name, f"Tag limit exceeded: {actual} tags (limit: {limit})")
 
 
 class LocalHostNotStoppableError(ProviderError):

@@ -7,13 +7,19 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr.api.preservation import PreservedItem
+from imbue.mngr.api.preservation import adopt_sessions
 from imbue.mngr.api.preservation import build_transcript_preserved_items
+from imbue.mngr.api.preservation import dedupe_by_resolved_path
 from imbue.mngr.api.preservation import flag_gated_items
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.preservation import get_preserved_agent_dir
 from imbue.mngr.api.preservation import preserve_agent_data
 from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
+from imbue.mngr.api.preservation import require_unique_match
+from imbue.mngr.api.preservation import run_adopt_session_preflight
+from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.hosts.offline_host import OfflineHost
@@ -23,12 +29,15 @@ from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.interfaces.host import HostFileReadInterface
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 
 
@@ -330,3 +339,148 @@ def test_preserve_host_agents_on_destroy_skips_non_readable_host(
 
     # Must return without raising even though the host exposes no readable volume.
     preserve_host_agents_on_destroy(offline, temp_mngr_ctx, AgentTypeName("codex"), _items_when_opted_in)
+
+
+def test_dedupe_by_resolved_path_preserves_first_seen_order(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    other = tmp_path / "other"
+    other.mkdir()
+
+    # ``link`` resolves to ``real`` (already seen) and the trailing ``real`` is a literal
+    # repeat -- both collapse, and the first-seen unresolved paths keep their order.
+    assert dedupe_by_resolved_path([real, link, other, real]) == [real, other]
+
+
+def test_run_adopt_session_preflight_noop_without_sessions(temp_mngr_ctx: MngrContext) -> None:
+    calls: list[str] = []
+    run_adopt_session_preflight(AgentTypeName("claude"), (), temp_mngr_ctx, object, calls.append)
+    assert calls == []
+
+
+def test_run_adopt_session_preflight_resolves_each_session_for_matching_type(temp_mngr_ctx: MngrContext) -> None:
+    claude_class = resolve_agent_type(AgentTypeName("claude"), temp_mngr_ctx.config).agent_class
+    calls: list[str] = []
+    run_adopt_session_preflight(AgentTypeName("claude"), ("a", "b"), temp_mngr_ctx, claude_class, calls.append)
+    assert calls == ["a", "b"]
+
+
+def test_run_adopt_session_preflight_skips_for_nonmatching_type(temp_mngr_ctx: MngrContext) -> None:
+    class _Unrelated:
+        pass
+
+    calls: list[str] = []
+    run_adopt_session_preflight(AgentTypeName("claude"), ("a",), temp_mngr_ctx, _Unrelated, calls.append)
+    assert calls == []
+
+
+def test_require_unique_match_returns_the_lone_match() -> None:
+    assert require_unique_match([Path("/a")], not_found_message="nope", ambiguous_message="many:") == Path("/a")
+
+
+def test_require_unique_match_raises_not_found_for_zero() -> None:
+    with pytest.raises(UserInputError, match="session xyz not found"):
+        require_unique_match([], not_found_message="session xyz not found", ambiguous_message="many:")
+
+
+def test_require_unique_match_raises_ambiguous_for_many_with_listing_last() -> None:
+    with pytest.raises(UserInputError) as exc:
+        require_unique_match(
+            [Path("/a"), Path("/b")],
+            not_found_message="nope",
+            ambiguous_message="found in multiple stores; pass the full path:",
+        )
+    message = str(exc.value)
+    # The single message comes first, then the candidate list last (one per indented line).
+    assert message == "found in multiple stores; pass the full path:\n  /a\n  /b"
+
+
+def test_adopt_sessions_copies_all_explicit_and_resumes_the_last() -> None:
+    copied: list[str] = []
+    resumed: list[str] = []
+
+    def copy_explicit(arg: str) -> str:
+        copied.append(arg)
+        return f"id:{arg}"
+
+    def copy_clone(_location: HostLocation) -> str:
+        raise AssertionError("copy_clone must not run without a --from source")
+
+    adopt_sessions(("a", "b", "c"), None, copy_explicit=copy_explicit, copy_clone=copy_clone, resume=resumed.append)
+    # Every named session is copied; the last is the one resumed.
+    assert copied == ["a", "b", "c"]
+    assert resumed == ["id:c"]
+
+
+def test_adopt_sessions_clone_is_resumed_over_explicit(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+    location = HostLocation(host=host, path=tmp_path)
+    copied: list[str] = []
+    cloned: list[HostLocation] = []
+    resumed: list[str] = []
+
+    def copy_explicit(arg: str) -> str:
+        copied.append(arg)
+        return f"id:{arg}"
+
+    def copy_clone(loc: HostLocation) -> str:
+        cloned.append(loc)
+        return "clone-id"
+
+    adopt_sessions(("a", "b"), location, copy_explicit=copy_explicit, copy_clone=copy_clone, resume=resumed.append)
+    # All --adopt sessions are still copied, but the clone is the one resumed.
+    assert copied == ["a", "b"]
+    assert cloned == [location]
+    assert resumed == ["clone-id"]
+
+
+def test_adopt_sessions_clone_without_session_falls_back_to_last_explicit(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+    location = HostLocation(host=host, path=tmp_path)
+    resumed: list[str] = []
+
+    # A --from clone with no resumable session returns None (it warns, not raises); the last
+    # --adopt session is then still the one resumed.
+    adopt_sessions(
+        ("a", "b"),
+        location,
+        copy_explicit=lambda arg: f"id:{arg}",
+        copy_clone=lambda _loc: None,
+        resume=resumed.append,
+    )
+    assert resumed == ["id:b"]
+
+
+def test_adopt_sessions_clone_without_session_and_no_adopt_is_fresh(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+    location = HostLocation(host=host, path=tmp_path)
+    resumed: list[str] = []
+
+    # --from with no session and no --adopt resumes nothing (fresh start).
+    def fail_explicit(_arg: str) -> str:
+        raise AssertionError("copy_explicit must not run")
+
+    adopt_sessions((), location, copy_explicit=fail_explicit, copy_clone=lambda _loc: None, resume=resumed.append)
+    assert resumed == []
+
+
+def test_adopt_sessions_no_op_when_neither() -> None:
+    def fail_explicit(_arg: str) -> str:
+        raise AssertionError("copy_explicit must not run")
+
+    def fail_clone(_location: HostLocation) -> str:
+        raise AssertionError("copy_clone must not run")
+
+    def fail_resume(_session_id: str) -> None:
+        raise AssertionError("resume must not run")
+
+    adopt_sessions((), None, copy_explicit=fail_explicit, copy_clone=fail_clone, resume=fail_resume)

@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.base_agent import SendKeysAgent
 from imbue.mngr.agents.base_agent import quote_agent_args
 from imbue.mngr.cli.testing import create_test_agent
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -37,13 +38,15 @@ def test_agent(
     local_provider: LocalProviderInstance,
     temp_work_dir: Path,
 ) -> BaseAgent:
+    # SendKeysAgent (a BaseAgent subclass) so the send-keys methods are present for the
+    # message-sending tests; all base-behavior tests are unaffected (it adds only send_message).
     return create_test_agent(
         local_provider,
         temp_work_dir,
         agent_config=None,
         agent_type=None,
         extra_data=None,
-        agent_class=BaseAgent,
+        agent_class=SendKeysAgent,
     )
 
 
@@ -76,10 +79,13 @@ def _create_running_agent(
         agent_class=BaseAgent,
     )
     session_name = f"{test_agent.mngr_ctx.config.prefix}{test_agent.name}"
+    window_name = test_agent.mngr_ctx.config.tmux.primary_window_name
 
-    # Create a tmux session and run the expected command
+    # Create a tmux session and run the expected command. The primary window is
+    # named to match production (and thus the agent's tmux_target), which targets
+    # the window by name rather than the literal :0 index.
     test_agent.host.execute_idempotent_command(
-        f"tmux new-session -d -s '{session_name}' 'sleep {sleep_duration}'",
+        f"tmux new-session -d -s '{session_name}' -n '{window_name}' 'sleep {sleep_duration}'",
         timeout_seconds=5.0,
     )
 
@@ -147,10 +153,12 @@ def test_lifecycle_state_running_unknown_agent_type_when_different_process_exist
         is_type_registered=False,
     )
     session_name = f"{unregistered_agent.mngr_ctx.config.prefix}{unregistered_agent.name}"
+    window_name = unregistered_agent.mngr_ctx.config.tmux.primary_window_name
 
-    # Create a tmux session with a different command (cat waits for input indefinitely)
+    # Create a tmux session with a different command (cat waits for input indefinitely).
+    # The window is named to match the agent's tmux_target (which targets by name).
     unregistered_agent.host.execute_idempotent_command(
-        f"tmux new-session -d -s '{session_name}' 'cat'",
+        f"tmux new-session -d -s '{session_name}' -n '{window_name}' 'cat'",
         timeout_seconds=5.0,
     )
 
@@ -172,11 +180,13 @@ def test_lifecycle_state_done_when_no_process_in_pane(
 ) -> None:
     """Test that agent is DONE when tmux session exists but no process is running."""
     session_name = f"{test_agent.mngr_ctx.config.prefix}{test_agent.name}"
+    window_name = test_agent.mngr_ctx.config.tmux.primary_window_name
 
-    # Create a tmux session, then manually stop the process inside it
-    # First create it with a long-running command
+    # Create a tmux session with the primary window named to match the agent's
+    # tmux_target (which targets by name). The session's shell has no child
+    # process, so the agent reports DONE.
     test_agent.host.execute_idempotent_command(
-        f"tmux new-session -d -s '{session_name}'",
+        f"tmux new-session -d -s '{session_name}' -n '{window_name}'",
         timeout_seconds=5.0,
     )
 
@@ -199,10 +209,12 @@ def test_lifecycle_state_waiting_when_no_active_file(
 ) -> None:
     """Test that agent is WAITING when tmux session exists with expected process but no active file."""
     session_name = f"{test_agent.mngr_ctx.config.prefix}{test_agent.name}"
+    window_name = test_agent.mngr_ctx.config.tmux.primary_window_name
 
-    # Create a tmux session and run the expected command
+    # Create a tmux session and run the expected command. The primary window is
+    # named to match the agent's tmux_target (which targets by name).
     test_agent.host.execute_idempotent_command(
-        f"tmux new-session -d -s '{session_name}' 'sleep 1000'",
+        f"tmux new-session -d -s '{session_name}' -n '{window_name}' 'sleep 1000'",
         timeout_seconds=5.0,
     )
 
@@ -226,10 +238,12 @@ def test_lifecycle_state_running_when_active_file_created(
 ) -> None:
     """Test that agent transitions from WAITING to RUNNING when active file is created."""
     session_name = f"{test_agent.mngr_ctx.config.prefix}{test_agent.name}"
+    window_name = test_agent.mngr_ctx.config.tmux.primary_window_name
 
-    # Create a tmux session and run the expected command
+    # Create a tmux session and run the expected command. The primary window is
+    # named to match the agent's tmux_target (which targets by name).
     test_agent.host.execute_idempotent_command(
-        f"tmux new-session -d -s '{session_name}' 'sleep 1000'",
+        f"tmux new-session -d -s '{session_name}' -n '{window_name}' 'sleep 1000'",
         timeout_seconds=5.0,
     )
 
@@ -333,22 +347,26 @@ def test_get_expected_process_name_uses_command_basename(
     assert test_agent.get_expected_process_name() == "sleep"
 
 
-def test_tmux_target_uses_exact_match_window_zero(
+def test_tmux_target_uses_exact_match_named_primary_window(
     test_agent: BaseAgent,
 ) -> None:
-    """tmux_target should return a TmuxWindowTarget pinned to window 0.
+    """tmux_target should return a TmuxWindowTarget pinned to the named primary window.
 
     The window pin protects against additional windows (watchers, ttyd) routing
-    target resolution to the wrong pane. When rendered via as_shell_arg(), the
-    leading ``=`` forces exact session-name matching; without it, tmux silently
-    falls back to prefix matching and a query for ``mngr-foo`` would match a
-    live session called ``mngr-foo-bar`` once ``mngr-foo`` is gone.
+    target resolution to the wrong pane. Targeting by name (``tmux.primary_window_name``,
+    default ``agent``) instead of ``:0`` keeps this correct regardless of the user's
+    tmux ``base-index``. When rendered via as_shell_arg(), the leading ``=`` forces
+    exact session-name matching; without it, tmux silently falls back to prefix
+    matching and a query for ``mngr-foo`` would match a live session called
+    ``mngr-foo-bar`` once ``mngr-foo`` is gone.
     """
+    window_name = test_agent.mngr_ctx.config.tmux.primary_window_name
+    assert window_name == "agent"
     target = test_agent.tmux_target
     assert isinstance(target, TmuxWindowTarget)
     assert target.session_name == test_agent.session_name
-    assert target.window == 0
-    assert target.as_shell_arg() == f"={test_agent.session_name}:0"
+    assert target.window == window_name
+    assert target.as_shell_arg() == f"={test_agent.session_name}:agent"
 
 
 @pytest.mark.tmux
@@ -362,11 +380,13 @@ def test_capture_pane_content_targets_requested_window(
     window's pane rather than the agent's primary one.
     """
     session_name = test_agent.session_name
+    window_name = test_agent.mngr_ctx.config.tmux.primary_window_name
     window_zero_marker = "WINDOW_ZERO_MARKER"
     window_one_marker = "WINDOW_ONE_MARKER"
 
+    # Name the primary window so the default capture (which targets it by name) finds it.
     test_agent.host.execute_idempotent_command(
-        f"tmux new-session -d -s '{session_name}' -x 200 -y 24 'echo {window_zero_marker}; sleep 493827'",
+        f"tmux new-session -d -s '{session_name}' -n '{window_name}' -x 200 -y 24 'echo {window_zero_marker}; sleep 493827'",
         timeout_seconds=5.0,
     )
     try:
@@ -411,20 +431,23 @@ def test_send_tmux_literal_keys_short_message_with_leading_dash(
     argv parser treats the leading dash as a flag and errors with
     `invalid flag --`, so the message never reaches the pane.
     """
-    session_name = f"{test_agent.mngr_ctx.config.prefix}{test_agent.name}"
+    # The fixture builds a SendKeysAgent; narrow so the send-keys method is in view.
+    assert isinstance(test_agent, SendKeysAgent)
+    send_keys_agent: SendKeysAgent = test_agent
+    session_name = f"{send_keys_agent.mngr_ctx.config.prefix}{send_keys_agent.name}"
     tmux_target = TmuxWindowTarget(session_name=session_name, window=0)
     message = "--model gemma --flag-leading-message"
 
     # `cat` echoes typed characters via the PTY's line discipline, so the
     # message becomes visible in the pane without needing to press Enter.
-    test_agent.host.execute_idempotent_command(
+    send_keys_agent.host.execute_idempotent_command(
         f"tmux new-session -d -s '{session_name}' -x 200 -y 24 'cat'",
         timeout_seconds=5.0,
     )
 
     try:
         # If the bug is back, this raises SendMessageError with "invalid flag --".
-        test_agent._send_tmux_literal_keys(tmux_target, message)
+        send_keys_agent._send_tmux_literal_keys(tmux_target, message)
 
         def _message_visible() -> bool:
             result = test_agent.host.execute_idempotent_command(
@@ -1015,6 +1038,7 @@ class _StubHost:
         self._default_result = default_result
         self.executed_commands: list[str] = []
         self.written_files: list[tuple[Path, str]] = []
+        self.host_dir = Path("/tmp/stub-host")
 
     def _execute_command(self, command: str, **kwargs: object) -> CommandResult:
         self.executed_commands.append(command)
@@ -1031,14 +1055,17 @@ class _StubHost:
     def write_text_file(self, path: Path, content: str, **kwargs: object) -> None:
         self.written_files.append((path, content))
 
+    def read_text_file(self, path: Path, **kwargs: object) -> str:
+        raise FileNotFoundError(path)
+
 
 def _create_named_agent_with_stub_host(
     temp_mngr_ctx: MngrContext,
     stub: _StubHost,
     name: AgentName,
-    cls: type[BaseAgent] = BaseAgent,
+    cls: type[SendKeysAgent] = SendKeysAgent,
     **kwargs: Any,
-) -> BaseAgent:
+) -> SendKeysAgent:
     """Create an agent with a stub host for command recording.
 
     Uses model_construct to bypass Pydantic validation so the stub host
@@ -1063,9 +1090,11 @@ def _create_named_agent_with_stub_host(
 def _create_agent_with_stub_host(
     temp_mngr_ctx: MngrContext,
     stub: _StubHost,
-    cls: type[BaseAgent] = BaseAgent,
+    cls: type[SendKeysAgent] = SendKeysAgent,
     **kwargs: Any,
-) -> BaseAgent:
+) -> SendKeysAgent:
+    # Default to SendKeysAgent so the send-keys methods (_send_tmux_literal_keys /
+    # _send_message_simple) are available; it is a BaseAgent for every other test.
     return _create_named_agent_with_stub_host(temp_mngr_ctx, stub, AgentName("stub-agent"), cls, **kwargs)
 
 
@@ -1152,6 +1181,77 @@ def test_send_tmux_literal_keys_short_message_raises_on_send_keys_failure(
 
     with pytest.raises(SendMessageError, match="send-keys failed"):
         agent._send_tmux_literal_keys(TmuxWindowTarget(session_name="mngr-test", window=0), "hello")
+
+
+# =========================================================================
+# Unnamed-primary-window migration tests (pre-upgrade in-flight agents)
+# =========================================================================
+
+
+def test_migrate_unnamed_primary_window_renames_lowest_index_window(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """The migration guards on has-session and renames the session's lowest-index window by name."""
+    stub = _StubHost(command_results=[CommandResult(success=True, stdout="", stderr="")])
+    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
+
+    is_migrated = agent._migrate_unnamed_primary_window()
+
+    assert is_migrated is True
+    assert len(stub.executed_commands) == 1
+    command = stub.executed_commands[0]
+    session_target = TmuxSessionTarget(session_name=agent.session_name).as_shell_arg()
+    # Guarded by has-session so a missing session is a no-op.
+    assert f"tmux has-session -t {session_target}" in command
+    # Selects the lowest window index (robust to base-index and extra windows) ...
+    assert f"tmux list-windows -t {session_target} -F '#I'" in command
+    assert "sort -n | head -n 1" in command
+    # ... and renames that window to the configured primary window name.
+    assert "tmux rename-window -t" in command
+    assert temp_mngr_ctx.config.tmux.primary_window_name in command
+
+
+def test_get_lifecycle_state_migrates_on_name_miss_then_reprobes(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A by-name probe miss on an existing session triggers a rename and a successful re-probe."""
+    stub = _StubHost(
+        command_results=[
+            # Initial by-name probe misses (unnamed pre-upgrade primary window).
+            CommandResult(success=True, stdout="", stderr=""),
+            # The one-shot migration rename succeeds.
+            CommandResult(success=True, stdout="", stderr=""),
+            # The re-probe now resolves the renamed primary window.
+            CommandResult(success=True, stdout="0|node|12345", stderr=""),
+            # ps output for descendant detection.
+            CommandResult(success=True, stdout="12345 1 node\n", stderr=""),
+        ]
+    )
+    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
+
+    agent.get_lifecycle_state()
+
+    # First probe, then rename, then re-probe (a correctly-named session would skip the latter two).
+    assert "list-panes" in stub.executed_commands[0]
+    assert "rename-window" in stub.executed_commands[1]
+    assert "list-panes" in stub.executed_commands[2]
+
+
+def test_get_lifecycle_state_skips_migration_when_name_probe_hits(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A correctly-named session resolves on the first probe and never issues a rename."""
+    stub = _StubHost(
+        command_results=[
+            CommandResult(success=True, stdout="0|node|12345", stderr=""),
+            CommandResult(success=True, stdout="12345 1 node\n", stderr=""),
+        ]
+    )
+    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
+
+    agent.get_lifecycle_state()
+
+    assert not any("rename-window" in command for command in stub.executed_commands)
 
 
 def test_agent_name_rejects_slash() -> None:

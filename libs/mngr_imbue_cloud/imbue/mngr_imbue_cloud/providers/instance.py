@@ -549,7 +549,12 @@ class ImbueCloudProvider(BaseProviderInstance):
             self._ensure_outer_host_key_known(lease)
             with self.outer_host_for(host_id) as outer:
                 assert outer is not None
-                script = build_outer_listing_collection_script(str(host_id), host_dir, self.mngr_ctx.config.prefix)
+                script = build_outer_listing_collection_script(
+                    str(host_id),
+                    host_dir,
+                    self.mngr_ctx.config.prefix,
+                    window_name=self.mngr_ctx.config.tmux.primary_window_name,
+                )
                 result = outer.execute_idempotent_command(script, timeout_seconds=60.0)
         except HostAuthenticationError as exc:
             logger.warning(

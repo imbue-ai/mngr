@@ -22,6 +22,7 @@ from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.update_policy import AgentUpdatePolicy
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.preservation import preserve_agent_data
 from imbue.mngr.api.testing import FakeHost
@@ -29,6 +30,8 @@ from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import AgentInstallationError
+from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import UserInputError
@@ -73,12 +76,14 @@ from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_claude.plugin import CostThresholdDialogIndicator
 from imbue.mngr_claude.plugin import ProvisioningContext
+from imbue.mngr_claude.plugin import _build_claude_install_command
 from imbue.mngr_claude.plugin import _build_install_command_hint
 from imbue.mngr_claude.plugin import _build_settings_json
 from imbue.mngr_claude.plugin import _check_settings_local_gitignored
 from imbue.mngr_claude.plugin import _claude_json_has_primary_api_key
 from imbue.mngr_claude.plugin import _claude_preserved_items
 from imbue.mngr_claude.plugin import _compute_keychain_label_suffix
+from imbue.mngr_claude.plugin import _generate_claude_json
 from imbue.mngr_claude.plugin import _generate_installed_plugins_content
 from imbue.mngr_claude.plugin import _generate_known_marketplaces_content
 from imbue.mngr_claude.plugin import _get_claude_version
@@ -94,10 +99,12 @@ from imbue.mngr_claude.plugin import _sync_user_resources
 from imbue.mngr_claude.plugin import _write_generated_files
 from imbue.mngr_claude.plugin import agent_field_generators
 from imbue.mngr_claude.plugin import approve_api_key_for_claude
+from imbue.mngr_claude.plugin import compute_claude_json_flags
+from imbue.mngr_claude.plugin import compute_settings_json_flags
 from imbue.mngr_claude.plugin import get_files_for_deploy
 from imbue.mngr_claude.plugin import on_before_create
 from imbue.mngr_claude.plugin import on_before_host_destroy
-from imbue.mngr_claude.plugin import register_cli_options
+from imbue.mngr_claude.plugin import should_trust_work_dir
 
 # =============================================================================
 # Test Helpers
@@ -501,7 +508,7 @@ def test_claude_agent_assemble_command_sets_is_sandbox_for_remote_host(
     uuid = agent.id.get_uuid()
     prefix = temp_mngr_ctx.config.prefix
     session_name = f"{prefix}test-agent"
-    background_cmd = agent._build_background_tasks_command(session_name)
+    background_cmd = agent._build_background_tasks_command(session_name, temp_mngr_ctx.config.tmux.primary_window_name)
     sid_export = _sid_export_for(uuid)
     # Remote hosts SHOULD have IS_SANDBOX set
     assert command == CommandString(
@@ -535,7 +542,7 @@ def test_claude_agent_assemble_command_resume_branch_runs_when_session_jsonl_exi
     Files on disk are named ``<session_id>.jsonl``, so the guard returned no
     matches, the ``&&`` short-circuited, and the silent ``||`` fallback ran
     ``claude --session-id <fresh agent uuid>`` instead of ``claude --resume <adopted_id>``.
-    The end-user symptom was that ``--adopt-session`` appeared to do nothing
+    The end-user symptom was that ``--adopt`` appeared to do nothing
     and a brand-new session opened with no error.
 
     This test executes the assembled shell pipeline against a stub ``claude``
@@ -622,7 +629,7 @@ def test_build_background_tasks_command(
 
     prefix = temp_mngr_ctx.config.prefix
     session_name = f"{prefix}test-agent"
-    cmd = agent._build_background_tasks_command(session_name)
+    cmd = agent._build_background_tasks_command(session_name, "agent")
 
     # Should be a background subshell
     assert cmd.startswith("(")
@@ -631,8 +638,20 @@ def test_build_background_tasks_command(
     # Should reference the provisioned script
     assert "claude_background_tasks.sh" in cmd
 
-    # Should pass the session name as argument
-    assert session_name in cmd
+    # Should pass the session name and the primary window name as arguments so the
+    # response-streaming watcher captures the agent pane by window name (not :0).
+    assert f"claude_background_tasks.sh {session_name} agent " in cmd
+
+
+def test_build_background_tasks_command_passes_custom_primary_window_name(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A custom primary window name is forwarded to claude_background_tasks.sh."""
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    cmd = agent._build_background_tasks_command("mngr-test-agent", "primary")
+
+    assert "claude_background_tasks.sh mngr-test-agent primary " in cmd
 
 
 # =============================================================================
@@ -1051,12 +1070,12 @@ def test_get_expected_process_name_returns_claude(
     assert agent.get_expected_process_name() == "claude"
 
 
-def test_tui_ready_indicator_is_claude_code(
+def test_tui_ready_indicator_is_input_prompt_glyph(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """ClaudeAgent inherits InteractiveTuiAgent's TUI_READY_INDICATOR class var."""
+    """ClaudeAgent uses the input-prompt glyph, which renders on both fresh start and resume."""
     agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
-    assert agent.get_tui_ready_indicator() == "Claude Code"
+    assert agent.get_tui_ready_indicator() == "❯"
 
 
 @pytest.mark.skipif(
@@ -1685,7 +1704,7 @@ def test_provision_raises_when_remote_installation_disabled(
 
         with pytest.raises(ConcurrencyExceptionGroup) as exc_info:
             agent.provision(host=non_local_host, options=options, mngr_ctx=ctx)
-        assert isinstance(exc_info.value.main_exception, PluginMngrError)
+        assert isinstance(exc_info.value.main_exception, AgentInstallationError)
         assert "automatic remote installation is disabled" in str(exc_info.value.main_exception)
 
 
@@ -3407,7 +3426,7 @@ def test_provision_raises_on_version_mismatch(
 
         with pytest.raises(ConcurrencyExceptionGroup) as exc_info:
             agent.provision(host=host_with_wrong_version, options=options, mngr_ctx=ctx)
-        assert isinstance(exc_info.value.main_exception, PluginMngrError)
+        assert isinstance(exc_info.value.main_exception, AgentInstallationError)
         assert "Claude version mismatch" in str(exc_info.value.main_exception)
 
 
@@ -3464,33 +3483,83 @@ def test_install_claude_verifies_binary_exists() -> None:
 
 
 # =============================================================================
+# Capability-mixin contract methods (install / unattended / version)
+# =============================================================================
+
+
+def test_get_install_binary_name_is_claude() -> None:
+    agent = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig())
+    assert agent.get_install_binary_name() == "claude"
+
+
+def test_get_install_command_installs_claude() -> None:
+    agent = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig())
+    assert agent.get_install_command() == _build_claude_install_command(None)
+
+
+def test_get_install_command_pins_configured_version() -> None:
+    agent = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig(version="2.1.50"))
+    assert agent.get_install_command() == _build_claude_install_command("2.1.50")
+
+
+def test_is_unattended_enabled_reflects_auto_allow_permissions() -> None:
+    unattended = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig(auto_allow_permissions=True))
+    attended = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig())
+    assert unattended.is_unattended_enabled() is True
+    assert attended.is_unattended_enabled() is False
+
+
+def _version_stub_host(version_output: str) -> OnlineHostInterface:
+    """A host whose `claude --version` returns ``version_output`` (for reconcile tests)."""
+    return cast(
+        OnlineHostInterface,
+        SimpleNamespace(
+            execute_idempotent_command=lambda *args, **kwargs: SimpleNamespace(
+                success=True, stdout=version_output, stderr=""
+            )
+        ),
+    )
+
+
+def test_reconcile_installed_version_unpinned_is_noop() -> None:
+    # Unpinned: claude follows its own auto-update, so there is nothing to enforce and
+    # reconcile returns without touching the host.
+    agent = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig())
+    agent.reconcile_installed_version(
+        cast(OnlineHostInterface, SimpleNamespace()), cast(MngrContext, SimpleNamespace())
+    )
+
+
+def test_reconcile_installed_version_pinned_match_is_noop() -> None:
+    agent = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig(version="2.1.50"))
+    agent.reconcile_installed_version(_version_stub_host("2.1.50 (Claude Code)"), cast(MngrContext, SimpleNamespace()))
+
+
+def test_reconcile_installed_version_raises_on_mismatch() -> None:
+    agent = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig(version="2.1.50"))
+    with pytest.raises(AgentInstallationError, match="version mismatch"):
+        agent.reconcile_installed_version(
+            _version_stub_host("9.9.9 (Claude Code)"), cast(MngrContext, SimpleNamespace())
+        )
+
+
+# =============================================================================
 # register_cli_options Tests
 # =============================================================================
 
 
-def test_register_cli_options_returns_adopt_session_for_create() -> None:
-    """register_cli_options should return --adopt-session for the create command."""
-    result = register_cli_options(command_name="create")
-    assert result is not None
-    assert "Behavior" in result
-    options = result["Behavior"]
-    assert len(options) == 1
-    assert "--adopt-session" in options[0].param_decls
-
-
-def test_register_cli_options_returns_none_for_other_commands() -> None:
-    """register_cli_options should return None for non-create commands."""
-    assert register_cli_options(command_name="connect") is None
-    assert register_cli_options(command_name="list") is None
+# The --adopt option declaration + the agent-agnostic gate (type must support
+# session adoption; mutual exclusion with --from) now live in core, tested
+# there; claude only retains its claude-specific fail-fast pre-resolution below.
 
 
 # =============================================================================
-# on_before_create Tests
+# on_before_create Tests (claude-specific fail-fast pre-resolution)
 # =============================================================================
 
 
 def test_on_before_create_skips_when_no_adopt_session(temp_mngr_ctx: MngrContext) -> None:
-    """on_before_create should return None when adopt_session is not in plugin_data."""
+    """on_before_create should return None when adopt_session is empty."""
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(agent_type=AgentTypeName("claude")),
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
@@ -3500,13 +3569,13 @@ def test_on_before_create_skips_when_no_adopt_session(temp_mngr_ctx: MngrContext
 
 
 def test_on_before_create_passes_with_adopt_session(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
-    """on_before_create should pass when --adopt-session names a resolvable session with a claude agent."""
+    """on_before_create should pass when --adopt names a resolvable session with a claude agent."""
     session_file = tmp_path / "abc123.jsonl"
     session_file.write_text('{"type":"message"}\n')
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(
             agent_type=AgentTypeName("claude"),
-            plugin_data={"adopt_session": (str(session_file),)},
+            adopt_session=(str(session_file),),
         ),
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
@@ -3515,27 +3584,13 @@ def test_on_before_create_passes_with_adopt_session(tmp_path: Path, temp_mngr_ct
     assert result is None
 
 
-def test_on_before_create_rejects_non_claude_agent_type(temp_mngr_ctx: MngrContext) -> None:
-    """on_before_create should raise UserInputError for non-claude agent types."""
-    args = OnBeforeCreateArgs(
-        agent_options=CreateAgentOptions(
-            agent_type=AgentTypeName("generic"),
-            plugin_data={"adopt_session": ("some-id",)},
-        ),
-        target_host=NewHostOptions(provider=ProviderInstanceName("local")),
-        create_work_dir=True,
-    )
-    with pytest.raises(UserInputError, match="--adopt-session can only be used with a Claude agent type"):
-        on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
-
-
 def test_on_before_create_passes_with_claude_subtype(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
     """on_before_create should accept a config-defined subtype whose parent_type
-    chain reaches claude (e.g. a ``write-plus`` template), not just the literal
+    chain reaches claude (e.g. a custom ``coder`` template), not just the literal
     ``claude`` type name. This is the centralized "is a claude agent" check via
     resolve_agent_type, rather than a string comparison against "claude".
     """
-    subtype = AgentTypeName("write-plus")
+    subtype = AgentTypeName("coder")
     config_with_subtype = temp_mngr_ctx.config.model_copy_update(
         to_update(
             temp_mngr_ctx.config.field_ref().agent_types,
@@ -3550,7 +3605,7 @@ def test_on_before_create_passes_with_claude_subtype(tmp_path: Path, temp_mngr_c
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(
             agent_type=subtype,
-            plugin_data={"adopt_session": (str(session_file),)},
+            adopt_session=(str(session_file),),
         ),
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
@@ -3558,31 +3613,8 @@ def test_on_before_create_passes_with_claude_subtype(tmp_path: Path, temp_mngr_c
     assert on_before_create(args=args, mngr_ctx=mngr_ctx) is None
 
 
-def test_on_before_create_rejects_adopt_session_with_clone_source(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """on_before_create should raise UserInputError when both --adopt-session
-    and a clone source (source_agent_state_location) are passed: each is its
-    own session-adoption directive and on_after_provisioning would silently
-    pick one and drop the other otherwise.
-    """
-    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
-    assert isinstance(host, Host)
-    args = OnBeforeCreateArgs(
-        agent_options=CreateAgentOptions(
-            agent_type=AgentTypeName("claude"),
-            plugin_data={"adopt_session": ("some-id",)},
-            source_agent_state_location=HostLocation(host=host, path=tmp_path / "src"),
-        ),
-        target_host=NewHostOptions(provider=ProviderInstanceName("local")),
-        create_work_dir=True,
-    )
-    with pytest.raises(UserInputError, match="incompatible with cloning via --from"):
-        on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
-
-
 def test_on_before_create_rejects_unknown_adopt_session(temp_mngr_ctx: MngrContext) -> None:
-    """on_before_create should raise UserInputError when an --adopt-session ID does not resolve.
+    """on_before_create should raise UserInputError when an --adopt ID does not resolve.
 
     Validating here -- before any host or worktree is created, and outside the provisioning
     ConcurrencyGroup -- means a bad session ID surfaces as a clean, fail-fast user error
@@ -3592,7 +3624,7 @@ def test_on_before_create_rejects_unknown_adopt_session(temp_mngr_ctx: MngrConte
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(
             agent_type=AgentTypeName("claude"),
-            plugin_data={"adopt_session": ("nonexistent-session",)},
+            adopt_session=("nonexistent-session",),
         ),
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
@@ -3639,7 +3671,7 @@ def test_on_after_provisioning_adopts_session_by_id(
 
     options = CreateAgentOptions(
         agent_type=AgentTypeName("claude"),
-        plugin_data={"adopt_session": (target_session_id,)},
+        adopt_session=(target_session_id,),
     )
 
     with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
@@ -3681,7 +3713,7 @@ def test_on_after_provisioning_raises_when_session_not_found(
 
     options = CreateAgentOptions(
         agent_type=AgentTypeName("claude"),
-        plugin_data={"adopt_session": ("nonexistent-session",)},
+        adopt_session=("nonexistent-session",),
     )
 
     with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
@@ -3711,7 +3743,7 @@ def test_on_after_provisioning_finds_session_despite_claude_config_dir(
 
     options = CreateAgentOptions(
         agent_type=AgentTypeName("claude"),
-        plugin_data={"adopt_session": (target_session_id,)},
+        adopt_session=(target_session_id,),
     )
 
     home_claude = str(Path.home() / ".claude")
@@ -3746,7 +3778,7 @@ def test_on_after_provisioning_adopts_session_from_jsonl_path(
 
     options = CreateAgentOptions(
         agent_type=AgentTypeName("claude"),
-        plugin_data={"adopt_session": (str(session_file),)},
+        adopt_session=(str(session_file),),
     )
 
     agent.on_after_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
@@ -3789,7 +3821,7 @@ def test_on_after_provisioning_adopts_session_from_preserved_agent(
 
     options = CreateAgentOptions(
         agent_type=AgentTypeName("claude"),
-        plugin_data={"adopt_session": (target_session_id,)},
+        adopt_session=(target_session_id,),
     )
 
     with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
@@ -3832,7 +3864,7 @@ def test_on_after_provisioning_adopts_session_from_live_mngr_agent(
 
     options = CreateAgentOptions(
         agent_type=AgentTypeName("claude"),
-        plugin_data={"adopt_session": (target_session_id,)},
+        adopt_session=(target_session_id,),
     )
 
     with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
@@ -3844,6 +3876,49 @@ def test_on_after_provisioning_adopts_session_from_live_mngr_agent(
         agent.get_claude_config_dir() / "projects" / expected_project_name / f"{target_session_id}.jsonl"
     )
     assert dest_session_file.exists()
+
+
+@pytest.mark.rsync
+def test_on_after_provisioning_multi_adopt_resumes_last(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """``--adopt A B`` copies both sessions in but resumes the *last* (B).
+
+    Claude can only resume one session at a time, so every named session is
+    made available under the destination's encoded project dir while
+    ``claude_session_id`` is set to the last named session.
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    # Two sessions in distinct source project dirs (so both dirs are copied).
+    first_project = Path.home() / ".claude" / "projects" / "first-project"
+    second_project = Path.home() / ".claude" / "projects" / "second-project"
+    first_project.mkdir(parents=True)
+    second_project.mkdir(parents=True)
+    first_session_id = "first-session-id"
+    second_session_id = "second-session-id"
+    (first_project / f"{first_session_id}.jsonl").write_text('{"type":"first"}\n')
+    (second_project / f"{second_session_id}.jsonl").write_text('{"type":"second"}\n')
+
+    agent_state_dir = agent._get_agent_dir()
+    agent_state_dir.mkdir(parents=True, exist_ok=True)
+
+    options = CreateAgentOptions(
+        agent_type=AgentTypeName("claude"),
+        adopt_session=(first_session_id, second_session_id),
+    )
+
+    with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
+        agent.on_after_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+
+    # The last named session is the one resumed.
+    assert (agent_state_dir / "claude_session_id").read_text() == second_session_id
+
+    # Both sessions are available under the destination's encoded project dir.
+    expected_project_name = encode_claude_project_dir_name(agent.work_dir)
+    dest_project_dir = agent.get_claude_config_dir() / "projects" / expected_project_name
+    assert (dest_project_dir / f"{first_session_id}.jsonl").exists()
+    assert (dest_project_dir / f"{second_session_id}.jsonl").exists()
 
 
 # =============================================================================
@@ -3858,10 +3933,17 @@ def test_on_after_provisioning_adopts_session_from_live_mngr_agent(
 
 
 def _run_clone_adoption(agent: ClaudeAgent, host: OnlineHostInterface, source_dir: Path) -> None:
-    """Drive both clone steps in order against the test agent/host."""
+    """Drive the clone flow end-to-end against the test agent/host.
+
+    Mirrors production: rsync the source plugin/, then run ``adopt_session`` with the
+    clone location so ``_adopt_cloned_session`` rekeys the subdir and the resume step
+    finalizes (writes ``claude_session_id``). Warns and adopts nothing when the clone
+    has no resumable session.
+    """
     location = HostLocation(host=host, path=source_dir)
     agent._transfer_source_plugin_data(location)
-    agent._adopt_cloned_session(host, location)
+    options = CreateAgentOptions(agent_type=AgentTypeName("claude"), source_agent_state_location=location)
+    agent.adopt_session(host, options, agent.mngr_ctx)
 
 
 @pytest.mark.rsync
@@ -3904,11 +3986,16 @@ def test_clone_adoption_copies_plugin_dir(
     assert not (dest_dir / "plugin" / "claude" / "anthropic" / "projects" / source_project_subdir).exists()
 
 
-def test_clone_adoption_skips_when_no_plugin_dir(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+def test_clone_adoption_warns_when_no_plugin_dir(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    log_warnings: list[str],
 ) -> None:
-    """The rsync step is a no-op when the source has no plugin/ dir, and the
-    subsequent adopt step bails (logs a warning) without raising.
+    """The rsync step is a no-op when the source has no plugin/ dir, so the
+    subsequent adopt step finds no session JSONL. A ``--from`` clone is a
+    workspace clone (carrying the session forward is a bonus), so that warns
+    and adopts nothing rather than raising -- no ``claude_session_id`` is written.
     """
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
 
@@ -3918,8 +4005,10 @@ def test_clone_adoption_skips_when_no_plugin_dir(
     source_dir = tmp_path / "source_agent_state"
     source_dir.mkdir()
 
-    # Should not raise
     _run_clone_adoption(agent, host, source_dir)
+
+    assert any("no session JSONL found at source" in message for message in log_warnings), log_warnings
+    assert not (dest_dir / "claude_session_id").exists()
 
 
 @pytest.mark.rsync
@@ -4002,17 +4091,62 @@ def test_clone_adoption_uses_jsonl_filename_not_source_session_id_file(
 
 
 @pytest.mark.rsync
-def test_clone_adoption_refuses_to_clobber_existing_target(
+def test_adopt_and_from_resumes_clone(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """``--adopt A --from X`` copies both A and the clone, then resumes the *clone*.
+
+    The explicit ``--adopt`` session is made available alongside the clone, but
+    the resumed session (``claude_session_id``) is the clone's, since a ``--from``
+    clone is the session the new agent is meant to continue.
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    dest_dir = agent._get_agent_dir()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    # Explicit ``--adopt`` session lives under ~/.claude/.
+    adopt_project = Path.home() / ".claude" / "projects" / "adopt-project"
+    adopt_project.mkdir(parents=True)
+    adopt_session_id = "explicit-adopt-session-id"
+    (adopt_project / f"{adopt_session_id}.jsonl").write_text('{"type":"adopt"}\n')
+
+    # ``--from`` clone source: a separate agent state dir whose plugin/ holds
+    # the session to clone.
+    source_dir = tmp_path / "source_agent_state"
+    src_project = source_dir / "plugin" / "claude" / "anthropic" / "projects" / "-Users-ev-some-source-workdir"
+    src_project.mkdir(parents=True)
+    clone_session_id = "11111111-2222-3333-4444-555555555555"
+    (src_project / f"{clone_session_id}.jsonl").write_text('{"type":"clone"}\n')
+
+    location = HostLocation(host=host, path=source_dir)
+    agent._transfer_source_plugin_data(location)
+    options = CreateAgentOptions(
+        agent_type=AgentTypeName("claude"),
+        adopt_session=(adopt_session_id,),
+        source_agent_state_location=location,
+    )
+
+    with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
+        agent.adopt_session(host, options, agent.mngr_ctx)
+
+    expected_project_name = encode_claude_project_dir_name(agent.work_dir)
+    dest_project_dir = agent.get_claude_config_dir() / "projects" / expected_project_name
+    # Both sessions are available; the clone is the one resumed.
+    assert (dest_project_dir / f"{adopt_session_id}.jsonl").exists()
+    assert (dest_project_dir / f"{clone_session_id}.jsonl").exists()
+    assert (dest_dir / "claude_session_id").read_text().strip() == clone_session_id
+
+
+@pytest.mark.rsync
+def test_clone_adoption_merges_into_existing_target(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """When the source has a project subdir whose name coincidentally matches
     the destination's encoded work_dir AND a separate, more-recently-active
-    source-encoded subdir, the rsync brings both over and the rekey ``mv``
-    would clobber the pre-existing target. _adopt_cloned_session refuses
-    the clobber and returns without writing claude_session_id, leaving
-    both subdirs intact for manual inspection. This guards a defensive
-    branch designed to prevent silent data loss when source has visited
-    multiple cwds.
+    source-encoded subdir, the rsync brings both over. With *distinct* session-id
+    filenames, the rekey merges the source-encoded subdir's files into the
+    pre-existing target rather than clobbering it: both sessions coexist under
+    the destination's encoded work_dir, and the latest is resumed.
     """
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
     dest_dir = agent._get_agent_dir()
@@ -4031,7 +4165,8 @@ def test_clone_adoption_refuses_to_clobber_existing_target(
     older_jsonl.write_text('{"type":"older"}\n')
 
     # (b) A separate source-encoded subdir holding the most-recently-active
-    # session JSONL so ``ls -t`` picks it as latest_on_source.
+    # session JSONL so ``ls -t`` picks it as latest_on_source. Its filename
+    # differs from the target's, so the merge is non-destructive.
     src_project = plugin_dir / "projects" / "-Users-ev-some-source-workdir"
     src_project.mkdir(parents=True)
     newer_session_id = "11111111-2222-3333-4444-555555555555"
@@ -4046,10 +4181,58 @@ def test_clone_adoption_refuses_to_clobber_existing_target(
     _run_clone_adoption(agent, host, source_dir)
 
     dest_projects = dest_dir / "plugin" / "claude" / "anthropic" / "projects"
-    # Both subdirs survive: the rekey was refused, no clobber happened.
+    # Both sessions now coexist under the destination's encoded work_dir.
     assert (dest_projects / dest_project_name / f"{older_session_id}.jsonl").exists()
-    assert (dest_projects / "-Users-ev-some-source-workdir" / f"{newer_session_id}.jsonl").exists()
-    # claude_session_id was NOT written: the function bailed before finalize.
+    assert (dest_projects / dest_project_name / f"{newer_session_id}.jsonl").exists()
+    # The source-encoded subdir was emptied and removed by the merge.
+    assert not (dest_projects / "-Users-ev-some-source-workdir").exists()
+    # The most-recently-active session is the one resumed.
+    assert (dest_dir / "claude_session_id").read_text().strip() == newer_session_id
+
+
+@pytest.mark.rsync
+def test_clone_adoption_refuses_per_file_collision(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A genuine per-file collision -- the same session-id filename present in
+    both the source-encoded subdir and the pre-existing target -- would lose
+    data on merge. _adopt_cloned_session refuses and raises ``AgentStartError``
+    without writing claude_session_id, leaving both subdirs intact.
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    dest_dir = agent._get_agent_dir()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    source_dir = tmp_path / "source_agent_state"
+    plugin_dir = source_dir / "plugin" / "claude" / "anthropic"
+
+    # Same session-id filename in both the target-named subdir and the
+    # source-encoded subdir -- merging would overwrite the target's copy.
+    colliding_session_id = "11111111-2222-3333-4444-555555555555"
+
+    dest_project_name = encode_claude_project_dir_name(agent.work_dir)
+    coincident_subdir = plugin_dir / "projects" / dest_project_name
+    coincident_subdir.mkdir(parents=True)
+    target_jsonl = coincident_subdir / f"{colliding_session_id}.jsonl"
+    target_jsonl.write_text('{"type":"target"}\n')
+
+    src_project = plugin_dir / "projects" / "-Users-ev-some-source-workdir"
+    src_project.mkdir(parents=True)
+    source_jsonl = src_project / f"{colliding_session_id}.jsonl"
+    source_jsonl.write_text('{"type":"source"}\n')
+
+    # Make the source copy the most-recently-active so ``ls -t`` selects it.
+    os.utime(target_jsonl, (1_000_000_000, 1_000_000_000))
+    os.utime(source_jsonl, (2_000_000_000, 2_000_000_000))
+
+    with pytest.raises(AgentStartError, match="already exist in the target"):
+        _run_clone_adoption(agent, host, source_dir)
+
+    dest_projects = dest_dir / "plugin" / "claude" / "anthropic" / "projects"
+    # Both subdirs survive: the merge was refused, no clobber happened.
+    assert (dest_projects / dest_project_name / f"{colliding_session_id}.jsonl").exists()
+    assert (dest_projects / "-Users-ev-some-source-workdir" / f"{colliding_session_id}.jsonl").exists()
+    # claude_session_id was NOT written: the clone raised before finalize.
     assert not (dest_dir / "claude_session_id").exists()
 
 
@@ -4558,6 +4741,42 @@ def test_build_settings_json_local_context_no_flags() -> None:
     assert "fastMode" not in data
 
 
+def test_compute_claude_json_flags_auto_approve_dismisses_dialogs_but_not_permission_mode() -> None:
+    """--yes (is_auto_approve) on a local agent dismisses the cosmetic first-run dialogs, but does
+    NOT accept bypass-permissions mode (that stays an unattended/auto_allow_permissions concern)."""
+    flags = compute_claude_json_flags(ProvisioningContext(is_unattended=False, is_auto_approve=True))
+    assert flags["effortCalloutDismissed"] is True
+    assert flags["hasCompletedOnboarding"] is True
+    assert flags["hasAcknowledgedCostThreshold"] is True
+    assert "bypassPermissionsModeAccepted" not in flags
+
+
+def test_compute_claude_json_flags_unattended_also_accepts_permission_mode() -> None:
+    flags = compute_claude_json_flags(ProvisioningContext(is_unattended=True))
+    assert flags["bypassPermissionsModeAccepted"] is True
+    assert flags["hasCompletedOnboarding"] is True
+
+
+def test_compute_claude_json_flags_attended_no_auto_approve_only_cost() -> None:
+    flags = compute_claude_json_flags(ProvisioningContext(is_unattended=False, is_auto_approve=False))
+    assert flags == {"hasAcknowledgedCostThreshold": True}
+
+
+def test_compute_settings_json_flags_auto_approve_does_not_change_permissions() -> None:
+    """--yes must not silently flip tool-permission settings; only a genuinely unattended agent does."""
+    assert compute_settings_json_flags(ProvisioningContext(is_unattended=False, is_auto_approve=True)) == {}
+    assert (
+        compute_settings_json_flags(ProvisioningContext(is_unattended=True))["skipDangerousModePermissionPrompt"]
+        is True
+    )
+
+
+def test_should_trust_work_dir_auto_approve() -> None:
+    config = ClaudeAgentConfig(check_installation=False)
+    assert should_trust_work_dir(config, ProvisioningContext(is_unattended=False, is_auto_approve=True)) is True
+    assert should_trust_work_dir(config, ProvisioningContext(is_unattended=False, is_auto_approve=False)) is False
+
+
 # =============================================================================
 # Volume-based session preservation tests
 # =============================================================================
@@ -4975,6 +5194,8 @@ def test_modify_env_vars_sets_claude_config_dirs(
     # $CLAUDE_CONFIG_DIR / $ORIGINAL_CLAUDE_CONFIG_DIR, so the resolved value is
     # known: it must be exactly ~/.claude (not, e.g., the per-agent config dir).
     assert env_vars["ORIGINAL_CLAUDE_CONFIG_DIR"] == str(Path.home() / ".claude")
+    # The default policy disables claude's auto-updater even on an attended local host.
+    assert env_vars["DISABLE_AUTOUPDATER"] == "1"
 
 
 def test_modify_env_vars_omits_claude_config_dir_in_shared_mode(
@@ -5000,6 +5221,75 @@ def test_modify_env_vars_omits_claude_config_dir_in_shared_mode(
     # In shared mode there's nothing to add: the transcript opt-out is
     # gated at provisioning time (on-disk script presence), not via env var.
     assert env_vars == {}
+
+
+def test_modify_env_vars_disables_autoupdater_when_policy_never(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """update_policy=NEVER sets DISABLE_AUTOUPDATER=1 even on an attended local host."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, update_policy=AgentUpdatePolicy.NEVER),
+    )
+    env_vars: dict[str, str] = {}
+
+    agent.modify_env_vars(host, env_vars)
+
+    assert env_vars["DISABLE_AUTOUPDATER"] == "1"
+
+
+def test_modify_env_vars_leaves_autoupdater_alone_when_policy_auto(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """update_policy=AUTO leaves claude's auto-updater enabled (no DISABLE_AUTOUPDATER)."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, update_policy=AgentUpdatePolicy.AUTO),
+    )
+    env_vars: dict[str, str] = {}
+
+    agent.modify_env_vars(host, env_vars)
+
+    assert "DISABLE_AUTOUPDATER" not in env_vars
+
+
+def test_modify_env_vars_respects_explicit_disable_autoupdater(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit user-provided DISABLE_AUTOUPDATER value is not overwritten."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, update_policy=AgentUpdatePolicy.NEVER),
+    )
+    env_vars: dict[str, str] = {"DISABLE_AUTOUPDATER": "0"}
+
+    agent.modify_env_vars(host, env_vars)
+
+    assert env_vars["DISABLE_AUTOUPDATER"] == "0"
+
+
+def test_generate_claude_json_autoupdates_follows_disable_flag() -> None:
+    """The generated .claude.json autoUpdates flag mirrors the disable_auto_update arg."""
+    assert _generate_claude_json(None, disable_auto_update=True)["autoUpdates"] is False
+    assert _generate_claude_json(None, disable_auto_update=False)["autoUpdates"] is True
 
 
 # =============================================================================

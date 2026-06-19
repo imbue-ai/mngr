@@ -1,0 +1,3 @@
+Added an `update_policy` field to the antigravity agent type that governs agy's background self-updater. `NEVER` sets `AGY_CLI_DISABLE_AUTO_UPDATE=true` in the agent environment so the installed build stays put; `AUTO` leaves agy's self-updater enabled; `ASK` behaves like `AUTO`. When unset, it defaults to `NEVER` (auto-update disabled) -- set `AUTO` to leave the self-updater on.
+
+Note: agy has no version-pinning capability -- Google's installer always installs the latest build (no version argument or env var) -- so there is no `version` field. The default `update_policy = "NEVER"` freezes whatever build was installed.
