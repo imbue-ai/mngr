@@ -250,9 +250,9 @@
   <form id="create-form" action="/create" method="post">
 
       <div class="flex items-center justify-between gap-4 mb-4">
-        <h1 class="text-sm font-medium text-secondary">Create workspace</h1>
+        <h1 class="type-label text-secondary">Create workspace</h1>
         <select id="account_id" name="account_id"
-                class="max-w-[220px] text-xs text-right text-tertiary bg-transparent border-0 rounded-md px-1 py-1 outline-none cursor-pointer transition-colors hover:text-primary focus:outline-none focus:ring-0">
+                class="max-w-[220px] type-helper text-right text-tertiary bg-transparent border-0 rounded-md px-1 py-1 outline-none cursor-pointer transition-colors hover:text-primary focus:outline-none focus:ring-0">
           {% for acct in accounts %}
             <option value="{{ acct.user_id }}"{% if acct.user_id == default_account_id %} selected{% endif %}>{{ acct.email }}</option>
           {% endfor %}
@@ -278,10 +278,10 @@
         </div>
       </div>
 
-      <div class="flex items-center justify-between gap-3 mt-2 px-1 text-xs">
+      <div class="flex items-center justify-between gap-3 mt-2 px-1 type-helper">
         <span id="config-summary" class="text-tertiary leading-snug"></span>
         <Button variant="ghost" id="configure-toggle"
-                extra="!p-0 !bg-transparent !text-xs !font-normal !text-accent hover:!bg-transparent hover:underline whitespace-nowrap">
+                extra="!p-0 !bg-transparent !type-helper !text-accent hover:!bg-transparent hover:underline whitespace-nowrap">
           Configure&hellip;
         </Button>
       </div>
@@ -298,8 +298,8 @@
               {% endfor %}
             </Select>
           </div>
-          <p id="launch-mode-account-error" class="hidden mt-1 text-xs text-warning text-right">imbue_cloud requires a selected account.</p>
-          <p id="aws-credentials-note" class="hidden mt-1 text-xs text-tertiary">
+          <p id="launch-mode-account-error" class="hidden mt-1 type-helper text-warning text-right">imbue_cloud requires a selected account.</p>
+          <p id="aws-credentials-note" class="hidden mt-1 type-helper text-tertiary">
             AWS credentials are read from this machine's environment
             (<code>AWS_ACCESS_KEY_ID</code> / <code>AWS_SECRET_ACCESS_KEY</code>,
             or <code>AWS_PROFILE</code>, or <code>~/.aws/credentials</code>).
@@ -317,7 +317,7 @@
               {% endfor %}
             </Select>
           </div>
-          <p id="ai-provider-account-error" class="hidden mt-1 text-xs text-warning text-right">imbue_cloud requires a selected account.</p>
+          <p id="ai-provider-account-error" class="hidden mt-1 type-helper text-warning text-right">imbue_cloud requires a selected account.</p>
           <div id="api-key-row" class="mt-2 hidden">
             <FormLabel target="anthropic_api_key">Anthropic API key</FormLabel>
             <TextInput name="anthropic_api_key" :value="anthropic_api_key" placeholder="sk-ant-..." id="anthropic_api_key" type="password" />
@@ -334,11 +334,11 @@
               {% endfor %}
             </Select>
           </div>
-          <p id="backup-provider-account-error" class="hidden mt-1 text-xs text-warning text-right">imbue_cloud requires a selected account.</p>
+          <p id="backup-provider-account-error" class="hidden mt-1 type-helper text-warning text-right">imbue_cloud requires a selected account.</p>
 
           <div id="backup-api-key-row" class="mt-2 hidden">
             <FormLabel target="backup_api_key_env">restic environment</FormLabel>
-            <p class="mb-1 text-xs text-tertiary">
+            <p class="mb-1 type-helper text-tertiary">
               Written verbatim to <code>restic.env</code>. Don't set <code>RESTIC_PASSWORD</code> -- minds assigns each
               workspace its own. See the
               <Link href="https://restic.readthedocs.io/en/stable/040_backup.html#environment-variables"
@@ -362,11 +362,11 @@
           <div id="backup-master-password-row" class="mt-2 hidden">
             <FormLabel target="backup_master_password">Backup master password</FormLabel>
             {% if has_saved_backup_password %}
-              <p class="text-xs text-secondary">A saved backup password will be used for this workspace.</p>
+              <p class="type-helper text-secondary">A saved backup password will be used for this workspace.</p>
             {% else %}
               <TextInput type="password" name="backup_master_password" id="backup_master_password"
                          placeholder="remember this -- backups are unrecoverable without it" />
-              <label class="mt-2 flex items-center gap-2 text-xs text-secondary">
+              <label class="mt-2 flex items-center gap-2 type-helper text-secondary">
                 <input type="checkbox" id="backup_save_password" name="backup_save_password" value="1" />
                 Save this password for all my workspaces
               </label>
@@ -375,7 +375,7 @@
         </div>
 
         <Button variant="ghost" id="toggle-advanced"
-                extra="self-start !p-0 !bg-transparent !text-xs !font-normal !text-accent hover:!bg-transparent hover:underline">
+                extra="self-start !p-0 !bg-transparent !type-helper !text-accent hover:!bg-transparent hover:underline">
           Show advanced settings
         </Button>
 
@@ -385,16 +385,16 @@
               <FormLabel target="region" inline>Region</FormLabel>
               <Select id="region" name="region" width="w-48"></Select>
             </div>
-            <p class="mt-1 text-xs text-tertiary text-right">Where the machine is created. If a region is out of capacity, try another.</p>
+            <p class="mt-1 type-helper text-tertiary text-right">Where the machine is created. If a region is out of capacity, try another.</p>
           </div>
           <div>
             <FormLabel target="git_url">Repository</FormLabel>
-            <p class="mb-1 text-xs text-tertiary">Git URL or local path</p>
+            <p class="mb-1 type-helper text-tertiary">Git URL or local path</p>
             <TextInput name="git_url" :value="git_url" placeholder="https://github.com/user/repo.git" id="git_url" required />
           </div>
           <div>
             <FormLabel target="branch">Branch</FormLabel>
-            <p class="mb-1 text-xs text-tertiary">Leave empty for latest version</p>
+            <p class="mb-1 type-helper text-tertiary">Leave empty for latest version</p>
             <TextInput name="branch" :value="branch" placeholder="latest tag" id="branch" />
           </div>
         </div>

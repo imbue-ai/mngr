@@ -14,7 +14,7 @@
       body_class="bg-surface-primary text-primary font-sans antialiased"
       scripts={{ _scripts }}>
   <PageContainer>
-    <h1 id="page-heading" class="text-2xl font-semibold text-primary leading-tight">
+    <h1 id="page-heading" class="type-heading-lg text-primary">
       Share <code class="code-pill">{{ service_name }}</code>
       in <Link href={{ mngr_forward_origin ~ "/goto/" ~ agent_id ~ "/" }}>{{ ws_name or agent_id }}</Link>
       {% if account_email %}(<Link href="/accounts">{{ account_email }}</Link>){% endif %}?
@@ -30,25 +30,25 @@
 
       <div id="editor-content" class="hidden">
         <div id="url-section" class="hidden mb-4">
-          <p class="font-medium mb-1">Shared URL</p>
-          <div id="url-provisioning" class="hidden flex gap-2 items-center text-sm text-secondary my-2">
+          <p class="font-semibold mb-1">Shared URL</p>
+          <div id="url-provisioning" class="hidden flex gap-2 items-center type-body text-secondary my-2">
             <Spinner size="sm" />
             <span>Provisioning share&hellip;</span>
           </div>
           <div id="url-ready" class="hidden">
             <div class="flex gap-2 items-center bg-fill-subtle border border-default rounded-md px-3 py-2 my-2">
               <input type="text" id="share-url" readonly
-                     class="flex-1 bg-transparent border-0 text-sm text-primary font-mono outline-none"
+                     class="flex-1 bg-transparent border-0 type-body text-primary font-mono outline-none"
                      onclick="this.select()">
               <Button variant="secondary" id="copy-btn" onclick="copyUrl()">Copy</Button>
             </div>
-            <p id="url-fallback-note" class="hidden text-xs text-tertiary mt-1">
+            <p id="url-fallback-note" class="hidden type-helper text-tertiary mt-1">
               This link may take a moment to become reachable.
             </p>
           </div>
         </div>
 
-        <h2 class="text-sm font-medium text-secondary mt-6 mb-3">Access List</h2>
+        <h2 class="type-label text-secondary mt-6 mb-3">Access List</h2>
         <div id="email-list"></div>
         <div class="flex gap-2 items-center mt-2">
           <TextInput type="email" name="new_email" id="new-email" placeholder="Add email address" extra="flex-1"

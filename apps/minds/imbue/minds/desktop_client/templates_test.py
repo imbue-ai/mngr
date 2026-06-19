@@ -829,24 +829,21 @@ def test_button_submit_has_form_attribute_when_passed() -> None:
 
 def test_button_default_size_uses_md_geometry() -> None:
     html = CATALOG.render("Button", variant="primary", _content="X")
-    # md size = px-3 py-2 rounded-md font-medium text-sm
+    # md size = px-3 py-2 rounded-md type-label
     assert "px-3" in html
     assert "py-2" in html
     assert "rounded-md" in html
-    assert "font-medium" in html
-    assert "text-sm" in html
-    # Should not pick up lg-specific classes
+    assert "type-label" in html
+    # Should not pick up lg-specific geometry
     assert "py-3" not in html
     assert "rounded-lg" not in html
-    assert "font-semibold" not in html
 
 
 def test_button_size_lg_uses_block_cta_geometry() -> None:
     html = CATALOG.render("Button", variant="primary", size="lg", block=True, _content="Sign in")
     assert "py-3" in html
     assert "rounded-lg" in html
-    assert "font-semibold" in html
-    assert "text-base" in html
+    assert "type-label" in html
     assert "w-full" in html
 
 
@@ -1154,9 +1151,29 @@ _SPACING_SCALE_STEPS: Final[frozenset[float]] = frozenset({0, 0.5, 1, 1.5, 2, 3,
 # Only padding / margin / gap follow the scale; width / height / inset are
 # free layout dimensions and are intentionally NOT scanned.
 _SPACING_PREFIXES: Final[tuple[str, ...]] = (
-    "p", "px", "py", "pt", "pr", "pb", "pl", "ps", "pe",
-    "m", "mx", "my", "mt", "mr", "mb", "ml", "ms", "me",
-    "gap", "gap-x", "gap-y", "space-x", "space-y",
+    "p",
+    "px",
+    "py",
+    "pt",
+    "pr",
+    "pb",
+    "pl",
+    "ps",
+    "pe",
+    "m",
+    "mx",
+    "my",
+    "mt",
+    "mr",
+    "mb",
+    "ml",
+    "ms",
+    "me",
+    "gap",
+    "gap-x",
+    "gap-y",
+    "space-x",
+    "space-y",
 )
 
 
@@ -1215,6 +1232,26 @@ def test_radius_utilities_stay_on_scale() -> None:
     assert offenders == [], (
         "Disallowed corner-radius utilities found. Use rounded-sm/-md/-lg/-xl "
         f"(2/4/8/16 px) or rounded-full/-none: {offenders}"
+    )
+
+
+def test_text_uses_type_roles_not_raw_size_or_medium() -> None:
+    """Content text must use the type ramp roles (``type-heading-lg`` /
+    ``type-heading`` / ``type-label`` / ``type-body`` / ``type-helper`` /
+    ``type-section``), which bundle font-size + weight + line-height. Raw
+    font-size utilities (``text-sm``, ``text-[13px]`` ...) and ``font-medium``
+    (dropped from the ramp -- it's 400 / 600 only) are disallowed. Inline
+    ``font-normal`` / ``font-semibold`` / ``font-bold`` for emphasis within a
+    role are still allowed; SVG path data is skipped."""
+    banned = re.compile(r"\btext-(?:xs|sm|base|lg|xl|2xl|3xl)\b|\btext-\[[0-9.]+px\]|\bfont-medium\b")
+    offenders: list[str] = []
+    for path in _design_system_source_files():
+        text = _strip_svg_path_data(path.read_text())
+        for match in banned.finditer(text):
+            offenders.append(f"{path.name}: {match.group(0)}")
+    assert offenders == [], (
+        "Raw font-size / font-medium found. Use a type-* role (it bundles "
+        f"size + weight + line-height); the ramp weights are 400/600/bold: {offenders}"
     )
 
 
@@ -1292,19 +1329,17 @@ def test_form_label_default_is_block_with_mb_1_5() -> None:
     assert 'for="email"' in html
     assert "block" in html
     assert "mb-1.5" in html
-    assert "text-sm" in html
-    assert "font-medium" in html
+    assert "type-label" in html
     assert "text-primary" in html
 
 
 def test_form_label_inline_drops_block_and_mb() -> None:
     html = CATALOG.render("FormLabel", target="x", inline=True, _content="Provider")
     # Inline layout: no block / mb classes (the parent flex row handles
-    # spacing), but the shared color and weight tokens remain.
+    # spacing), but the shared type role + color remain.
     assert "block" not in html
     assert "mb-1.5" not in html
-    assert "text-sm" in html
-    assert "font-medium" in html
+    assert "type-label" in html
 
 
 def test_oauth_button_renders_google_label_and_brand_icon_with_hook_class() -> None:
@@ -1511,9 +1546,9 @@ def test_link_regular_uses_accent_underline_recipe() -> None:
     assert "font-medium" not in html
 
 
-def test_link_medium_weight_adds_font_medium() -> None:
+def test_link_medium_weight_adds_font_semibold() -> None:
     html = CATALOG.render("Link", href="/x", weight="medium", _content="Sign in")
-    assert "font-medium" in html
+    assert "font-semibold" in html
 
 
 def test_link_passes_through_arbitrary_attrs() -> None:
@@ -1601,10 +1636,11 @@ def test_status_badge_renders_each_variant_class_set() -> None:
         assert css_class in html, f"variant={variant} missing {css_class}"
 
 
-def test_status_badge_size_xs_uses_text_xs() -> None:
+def test_status_badge_size_xs_uses_helper_role() -> None:
     html = CATALOG.render("StatusBadge", size="xs", _content="x")
-    assert "text-xs" in html
-    assert "text-sm" not in html
+    # xs inline tag reads as helper (12); sm slot badge reads as label (14).
+    assert "type-helper" in html
+    assert "type-label" not in html
 
 
 def test_status_badge_title_renders_when_present() -> None:

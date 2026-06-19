@@ -88,7 +88,7 @@
       if (!el) return;
       el.textContent = msg;
       el.classList.remove('hidden');
-      el.className = 'text-accent text-sm mb-3 px-3 py-2 bg-accent/12 rounded-md border border-accent/30';
+      el.className = 'text-accent type-body mb-3 px-3 py-2 bg-accent/12 rounded-md border border-accent/30';
     });
   }
 

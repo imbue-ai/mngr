@@ -22,12 +22,12 @@
     {# Question 1: data preference (static descriptions) #}
     <section class="{{ _card }}" data-screen="q1" data-question="data_preference">
       <div class="flex items-center justify-between mb-4">
-        <span class="flex items-center gap-2 text-xs text-tertiary">
+        <span class="flex items-center gap-2 type-helper text-tertiary">
           <span class="inline-block w-1.5 h-1.5 rounded-full bg-accent animate-pulse"></span>Creating workspace
         </span>
-        <span class="text-xs text-tertiary">1 of 3</span>
+        <span class="type-helper text-tertiary">1 of 3</span>
       </div>
-      <h2 class="text-lg font-semibold leading-snug mb-4">Is it OK if I get to know you?</h2>
+      <h2 class="type-heading mb-4">Is it OK if I get to know you?</h2>
       <div class="flex flex-col gap-2">
         <Opt val="CONVENIENCE" title="I want convenience" desc="Import as much data as you can." />
         <Opt val="PRIVACY" title="I want privacy" desc="Gather minimal data and show me before using it. No data leaves your computer." selected />
@@ -42,16 +42,16 @@
     {# Question 2: what to start with (editable options) #}
     <section class="{{ _card }} hidden" data-screen="q2" data-question="initial_problem">
       <div class="flex items-center justify-between mb-4">
-        <span class="flex items-center gap-2 text-xs text-tertiary">
+        <span class="flex items-center gap-2 type-helper text-tertiary">
           <span class="inline-block w-1.5 h-1.5 rounded-full bg-accent animate-pulse"></span>Creating workspace
         </span>
-        <span class="text-xs text-tertiary">2 of 3</span>
+        <span class="type-helper text-tertiary">2 of 3</span>
       </div>
-      <h2 class="text-lg font-semibold leading-snug mb-4">What should we start with?</h2>
+      <h2 class="type-heading mb-4">What should we start with?</h2>
       <div class="flex flex-col gap-2">
         <Opt val="custom" title="Describe the problem you want to solve" desc="Tell me in your own words what you'd like to work on." editable selected placeholder="e.g. Help me keep track of follow-ups across email and Slack in one place." />
       </div>
-      <h2 class="text-lg font-semibold leading-snug mt-6 mb-4">Or start with a template:</h2>
+      <h2 class="type-heading mt-6 mb-4">Or start with a template:</h2>
       <div class="flex flex-col gap-2">
         <Opt val="tasks" title="Task management" desc="Build a system to help me organize my tasks and get work done." editable preset="Build a system to help me organize my tasks and get work done." />
         <Opt val="inbox" title="Inbox triage" desc="Set up systems to help summarize, label, and respond to my messages." editable preset="Set up systems to help summarize, label, and respond to my messages." />
@@ -67,12 +67,12 @@
     {# Question 3: permissions preference (editable options) #}
     <section class="{{ _card }} hidden" data-screen="q3" data-question="permissions_preference">
       <div class="flex items-center justify-between mb-4">
-        <span class="flex items-center gap-2 text-xs text-tertiary">
+        <span class="flex items-center gap-2 type-helper text-tertiary">
           <span class="inline-block w-1.5 h-1.5 rounded-full bg-accent animate-pulse"></span>Creating workspace
         </span>
-        <span class="text-xs text-tertiary">3 of 3</span>
+        <span class="type-helper text-tertiary">3 of 3</span>
       </div>
-      <h2 class="text-lg font-semibold leading-snug mb-4">How do you want to deal with permissions?</h2>
+      <h2 class="type-heading mb-4">How do you want to deal with permissions?</h2>
       <div class="flex flex-col gap-2">
         <Opt val="safety" title="I want safety" desc="Access only the minimal information you need to accomplish my goals, and always ask me before doing anything potentially dangerous." editable selected rows={{ 4 }} preset="Access only the minimal information you need to accomplish my goals, and always ask me before doing anything potentially dangerous." />
         <Opt val="convenience" title="I want convenience" desc="Default to broader permissions so you can work more autonomously -- I'll be careful about what I give you access to." editable rows={{ 4 }} preset="Default to broader permissions so you can work more autonomously -- I'll be careful about what I give you access to." />
@@ -91,8 +91,8 @@
       {# Progress sub-view: shown while creation is in flight. #}
       <div id="progress-view">
         <div class="text-center pt-2 pb-1">
-          <div class="text-lg font-semibold mb-1.5">Setting up your workspace</div>
-          <p id="tip" class="text-[13px] text-secondary min-h-[34px] leading-snug transition-opacity"></p>
+          <div class="type-heading mb-1.5">Setting up your workspace</div>
+          <p id="tip" class="type-body text-secondary min-h-[34px] transition-opacity"></p>
         </div>
         <div class="h-1.5 bg-fill-subtle rounded-full overflow-hidden">
           <div id="bar-fill" class="h-full w-0 rounded-full bg-accent transition-[width] duration-300 ease-out"></div>
@@ -102,11 +102,11 @@
       {# Failure sub-view: revealed by creating.js the moment creation fails. #}
       <div id="failure-view" class="hidden">
         <div class="text-center pt-2 pb-1">
-          <div class="text-lg font-semibold mb-1.5 text-important">We couldn't set up your workspace</div>
-          <p class="text-[13px] text-secondary leading-snug">Setup stopped before your workspace was ready.</p>
+          <div class="type-heading mb-1.5 text-important">We couldn't set up your workspace</div>
+          <p class="type-body text-secondary">Setup stopped before your workspace was ready.</p>
         </div>
         <Notice variant="error">
-          <span id="error-message" class="font-mono text-[12.5px] break-words whitespace-pre-wrap"></span>
+          <span id="error-message" class="font-mono type-helper break-words whitespace-pre-wrap"></span>
         </Notice>
         <div class="flex items-center justify-center gap-2 mt-4">
           <ButtonLink href="/create" variant="primary">Back to setup</ButtonLink>
@@ -115,7 +115,7 @@
       </div>
 
       {# Shared footer: live stage caption + collapsible logs. #}
-      <div class="flex items-center justify-between mt-2 text-[11.5px] text-tertiary">
+      <div class="flex items-center justify-between mt-2 type-helper text-tertiary">
         <span id="stage">{{ status_text }}</span>
         <button type="button" id="details-toggle"
                 class="js-details inline-flex items-center gap-1 text-tertiary hover:text-primary cursor-pointer">
@@ -123,7 +123,7 @@
         </button>
       </div>
       <div id="logs"
-           class="dark hidden mt-3 p-3 bg-surface-primary text-secondary font-mono text-xs rounded-lg max-h-[260px] overflow-y-auto whitespace-pre-wrap border border-subtle"></div>
+           class="dark hidden mt-3 p-3 bg-surface-primary text-secondary font-mono type-helper rounded-lg max-h-[260px] overflow-y-auto whitespace-pre-wrap border border-subtle"></div>
     </section>
 
   </main>

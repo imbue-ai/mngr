@@ -17,5 +17,8 @@
   "warn":    "bg-warning/15 text-warning",
   "info":    "bg-info/15 text-info",
 } %}
-<span class="inline-flex items-center px-2 py-0.5 rounded-md text-{{ size }} font-medium {{ _variants[variant] }} {{ extra }}"
+{# Badge type role from size: sm slot badges read as labels (14/semibold),
+   xs inline tags as helper (12/regular). #}
+{% set _type = "type-label" if size == "sm" else "type-helper" %}
+<span class="inline-flex items-center px-2 py-0.5 rounded-md {{ _type }} {{ _variants[variant] }} {{ extra }}"
       {% if title %}title="{{ title }}"{% endif %}>{{ content }}</span>

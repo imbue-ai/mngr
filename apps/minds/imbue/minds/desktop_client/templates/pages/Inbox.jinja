@@ -602,7 +602,7 @@
       <div class="grid grid-cols-3 items-center px-2 h-[38px] border-b border-default"
            style="-webkit-app-region: drag;">
         <div></div>
-        <h1 class="text-sm font-semibold text-primary uppercase tracking-wider leading-none text-center">Requests</h1>
+        <h1 class="type-section text-primary text-center">Requests</h1>
         <button type="button" aria-label="Close"
                 id="inbox-close-btn"
                 onclick="closeInbox()"
@@ -624,7 +624,7 @@
             <InboxList :cards="cards" :selected_id="selected_id" />
           </div>
           <div id="inbox-list-footer" class="border-t border-default px-3 py-2 flex items-center">
-            <label class="text-xs text-secondary cursor-pointer flex items-center gap-1.5 leading-none">
+            <label class="type-helper text-secondary cursor-pointer flex items-center gap-1.5">
               <input type="checkbox" id="inbox-auto-open"
                      {% if auto_open %}checked{% endif %}
                      onchange="onAutoOpenToggle(event)">

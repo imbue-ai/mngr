@@ -72,7 +72,7 @@
     // ``gap``, keeping this element positioning-free and composable.
     var row = document.createElement('div');
     row.className =
-      'sidebar-item group flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer text-[13px] text-primary'
+      'sidebar-item group flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer type-body text-primary'
       + (isCurrent ? ' is-current bg-fill-active' : ' hover:bg-fill-hover');
     row.setAttribute('data-agent-id', workspace.id);
 

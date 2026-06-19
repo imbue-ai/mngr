@@ -1,7 +1,7 @@
 {#def href, weight="regular", extra="" #}
 {#
   Inline text link. Renders ``<a class="text-accent hover:underline">``
-  with an optional ``font-medium`` weight for the auth-flow "Sign in" /
+  with an optional ``font-semibold`` weight for the auth-flow "Sign in" /
   "Create account" / "Back to home" affordances.
 
   Usage:
@@ -17,6 +17,6 @@
   -- those are buttons by semantics and the keyboard focus / accessibility
   story is cleaner.
 #}
-{%- set _weight = "font-medium " if weight == "medium" else "" -%}
+{%- set _weight = "font-semibold " if weight == "medium" else "" -%}
 {%- set _cls = "text-accent hover:underline " ~ _weight ~ extra -%}
 <a {{ attrs.render(href=href, classes=_cls) }}>{{ content }}</a>

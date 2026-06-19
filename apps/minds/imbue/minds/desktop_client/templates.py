@@ -58,9 +58,9 @@ _BTN_BASE: Final[str] = (
     "cursor-pointer no-underline whitespace-nowrap"
 )
 _BTN_SIZES: Final[Mapping[str, str]] = {
-    "md": "px-3 py-2 rounded-md font-medium text-sm",
-    "lg": "px-4 py-3 rounded-lg font-semibold text-base",
-    "icon": "p-1.5 rounded-md font-medium text-sm",
+    "md": "px-3 py-2 rounded-md type-label",
+    "lg": "px-4 py-3 rounded-lg type-label",
+    "icon": "p-1.5 rounded-md type-label",
 }
 _BTN_VARIANTS: Final[Mapping[str, str]] = {
     "primary": "bg-surface-inverse text-inverse-primary border border-transparent hover:opacity-90",
@@ -76,7 +76,7 @@ _BTN_VARIANTS: Final[Mapping[str, str]] = {
 # exactly one place. Width and border-radius vary per-component so they
 # are NOT included here -- each component sets its own.
 _INPUT_BASE: Final[str] = (
-    "px-3 py-2 text-sm border border-strong bg-surface-primary text-primary "
+    "px-3 py-2 type-body border border-strong bg-surface-primary text-primary "
     "outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/40"
 )
 

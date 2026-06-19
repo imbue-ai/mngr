@@ -69,13 +69,13 @@
       left.appendChild(prefix);
     }
     var emailEl = document.createElement('span');
-    emailEl.className = 'text-sm ' + (variant === 'removed' ? 'text-tertiary' : 'text-primary');
+    emailEl.className = 'type-body' + (variant === 'removed' ? 'text-tertiary' : 'text-primary');
     emailEl.textContent = email;
     left.appendChild(emailEl);
     row.appendChild(left);
 
     var btn = document.createElement('button');
-    btn.className = 'bg-transparent border-none cursor-pointer text-tertiary text-lg leading-none px-1 hover:text-primary';
+    btn.className = 'bg-transparent border-none cursor-pointer text-tertiary type-heading px-1 hover:text-primary';
     btn.setAttribute('aria-label', 'Remove');
     btn.setAttribute('data-action',
       variant === 'added' ? 'unmark-added'
@@ -106,7 +106,7 @@
     });
     if (rowCount === 0) {
       var empty = document.createElement('p');
-      empty.className = 'text-sm text-tertiary';
+      empty.className = 'type-body text-tertiary';
       empty.textContent = 'No one in the access list';
       container.appendChild(empty);
     }
@@ -177,7 +177,7 @@
     if (existing) existing.remove();
     var box = document.createElement('div');
     box.id = 'sharing-error';
-    box.className = 'mt-3 mb-1 px-3 py-2 rounded-md bg-important/12 border border-important/30 text-sm text-important';
+    box.className = 'mt-3 mb-1 px-3 py-2 rounded-md bg-important/12 border border-important/30 type-body text-important';
     box.textContent = message;
     var actions = document.getElementById('action-buttons');
     actions.parentNode.insertBefore(box, actions);
