@@ -4825,12 +4825,16 @@ def test_build_settings_json_bare_override_narrows_raises() -> None:
 
 def test_build_settings_json_narrowing_error_emits_mngr_merge_remediation() -> None:
     """The Claude provision narrowing error spells out the exact ``__mngr_merge`` patch the
-    user needs (Claude-compatible), not the internal ``__extend`` suffix, naming each
-    narrowed path.
+    user needs (Claude-compatible), not the internal ``__extend`` suffix. The remediation
+    recurses past the dict-level short-circuit: the dict that drops a sibling key (``deny``)
+    is ``extend`` (so the sibling survives), and the replaced ``allow`` list is ``assign`` (so
+    the user's exact list is kept) -- the full nested patch, in one error.
     """
     claude_dir = Path.home() / ".claude"
     claude_dir.mkdir(parents=True, exist_ok=True)
-    (claude_dir / "settings.json").write_text(json.dumps({"permissions": {"allow": ["Bash(git *)"]}}))
+    (claude_dir / "settings.json").write_text(
+        json.dumps({"permissions": {"allow": ["Bash(git *)"], "deny": ["Bash(rm *)"]}})
+    )
 
     ctx = ProvisioningContext(is_unattended=False)
     config = ClaudeAgentConfig(
@@ -4840,7 +4844,7 @@ def test_build_settings_json_narrowing_error_emits_mngr_merge_remediation() -> N
     with pytest.raises(ConfigParseError) as exc_info:
         _build_settings_json(claude_dir, config, ctx, sync_local=True)
     message = str(exc_info.value)
-    assert '__mngr_merge = {"permissions.allow" = "extend"}' in message
+    assert '__mngr_merge = {"permissions" = "extend", "permissions.allow" = "assign"}' in message
     # The internal suffix form is never shown as remediation on the Claude path.
     assert "allow__extend" not in message
 

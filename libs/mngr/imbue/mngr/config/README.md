@@ -107,14 +107,25 @@ allow = ["Bash(npm *)"]
 "permissions.allow" = "extend"   # merge onto the base; "assign" replaces without the guard
 ```
 
-`_desugar_settings_overrides` (`key_resolver.py`) rewrites this at config-load into the
-internal suffix form (the targeted leaf takes the operator's suffix; every ancestor takes
-`__extend` so the recursive merge reaches it), so the rest of the algebra is unchanged. A
-bare key (absent from the map) stays a narrowing-checked assign. The one-operator-per-path
-model intentionally drops the within-layer reset-then-add idiom (inexpressible in the clean
-JSON an external CLI reads). The provision-time fold (`overlay_merge.apply_settings_patch`,
-shared by both plugins) strips a stray `__mngr_merge` from the base (a no-op on the floor)
-and reports any narrowing with the exact `__mngr_merge` patch to add.
+All of this lives in one self-contained module, **`external_settings.py`** ("logic for a
+settings file owned by an external tool"); the config-tree wiring just calls it.
+`desugar_settings_overrides` rewrites the map at config-load into the internal suffix form
+(the targeted leaf takes the operator's suffix; every ancestor takes `__extend` so the
+recursive merge reaches it), so the rest of the algebra is unchanged. A bare key (absent
+from the map) stays a narrowing-checked assign. The one-operator-per-path model
+intentionally drops the within-layer reset-then-add idiom (inexpressible in the clean JSON
+an external CLI reads). `mngr config extend|assign <path> <value>` writes these directives
+for you (bare value + a `__mngr_merge` entry) on a `settings_overrides` path.
+
+The provision-time fold (`apply_settings_patch`, shared by both plugins) strips a stray
+`__mngr_merge` from the base (a no-op on the floor) and, on a narrowing, reports the exact
+`__mngr_merge` patch to add. That remediation recurses *past* the dict-level short-circuit
+of `narrowing_paths`: a dict that drops a sibling key is suggested as `extend` (so the
+sibling survives) and a replaced list/value as `assign` (so your exact value is kept, not
+silently broadened) -- the full nested patch in one error. Because `__mngr_merge` keys are
+dotted paths, a settings key that contains a *literal* dot (e.g. an MCP server name like
+`my.server`) cannot be targeted: such a directive errors as dangling, and the
+auto-remediation skips it rather than mis-advising.
 
 ## Registries (`RegistryField`)
 
@@ -146,7 +157,7 @@ is only built at runtime. `resolve_extends` preserves them verbatim for a small
 registry of paths, each with a wired consumer (`key_resolver.py`):
 
 - `create_templates.<name>` -> `apply_create_template` (at `mngr create` time).
-- `agent_types.<name>.settings_overrides` -> `overlay_merge.apply_settings_patch`
+- `agent_types.<name>.settings_overrides` -> `external_settings.apply_settings_patch`
   (via `mngr_claude` / `mngr_antigravity`), folded against the provisioned base
   `settings.json`. Markers here arrive desugared from the `__mngr_merge` surface (above).
 

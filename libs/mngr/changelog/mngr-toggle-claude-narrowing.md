@@ -9,4 +9,8 @@ allow = ["Bash(npm *)"]
 "permissions.allow" = "extend"   # merge onto the base; "assign" replaces without the narrowing guard
 ```
 
-A bare key still assigns with the narrowing guard; the narrowing error now prints the exact `__mngr_merge` patch to add. Raw `__extend` / `__assign` suffix keys under `settings_overrides` are a hard error pointing to `__mngr_merge`. mngr's own (non-`settings_overrides`) config is unchanged and still uses the suffixes.
+A bare key still assigns with the narrowing guard; the narrowing error now prints the exact `__mngr_merge` patch to add. The suggested patch is the full nested one in a single error: a dict that would drop a sibling key is suggested as `extend` (so the sibling survives) and a replaced list/value as `assign` (so your exact value is kept, not silently broadened). Raw `__extend` / `__assign` suffix keys under `settings_overrides` are a hard error pointing to `__mngr_merge`. mngr's own (non-`settings_overrides`) config is unchanged and still uses the suffixes.
+
+New `mngr config assign <key> <value>` command, mirroring `mngr config extend`: it writes a `key__assign` entry (replace without the narrowing guard), or -- on a `settings_overrides` path -- a `__mngr_merge` `assign` directive. `mngr config set key__assign <value>` routes to it, and `mngr config get` resolves the `__assign` form.
+
+A settings key that contains a literal dot (e.g. an MCP server name like `my.server`) cannot be targeted by a dotted `__mngr_merge` path: such a directive errors as dangling and the auto-remediation skips it rather than mis-advising.

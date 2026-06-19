@@ -7,4 +7,4 @@ allow = ["command(git)"]
 "permissions.allow" = "extend"
 ```
 
-`__mngr_merge` is ignored by vanilla antigravity, so the generated `settings.json` stays clean. Raw `__extend` / `__assign` suffix keys are rejected in `settings_overrides`, and a `__mngr_merge` key in the synced home settings base is stripped. Previously `settings_overrides` replaced top-level keys wholesale with no narrowing guard.
+`__mngr_merge` is ignored by vanilla antigravity, so the generated `settings.json` stays clean. Raw `__extend` / `__assign` suffix keys are rejected in `settings_overrides`, and a `__mngr_merge` key in the synced home settings base is stripped. On a narrowing, the error prints the exact `__mngr_merge` patch to add (the full nested patch: `extend` for a dict that would drop a sibling key, `assign` for a replaced list/value). Previously `settings_overrides` replaced top-level keys wholesale with no narrowing guard.

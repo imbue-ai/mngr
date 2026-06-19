@@ -563,3 +563,91 @@ def test_config_set_with_extend_suffix_routes_to_extend(
     config_path = temp_git_repo / f".{mngr_test_root_name}" / "settings.toml"
     content = config_path.read_text()
     assert 'unset_vars__extend = ["FROM_SET_EXTEND"]' in content, content
+
+
+def test_config_assign_writes_assign_suffixed_key(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mngr_test_root_name: str,
+) -> None:
+    """`mngr config assign` writes a ``field__assign`` entry (replace without the narrowing guard)."""
+    monkeypatch.chdir(temp_git_repo)
+    result = cli_runner.invoke(
+        config,
+        ["assign", "unset_vars", '["ONLY"]', "--scope", "project"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    content = (temp_git_repo / f".{mngr_test_root_name}" / "settings.toml").read_text()
+    assert 'unset_vars__assign = ["ONLY"]' in content, content
+
+
+def test_config_set_with_assign_suffix_routes_to_assign(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mngr_test_root_name: str,
+) -> None:
+    """`mngr config set KEY__assign VALUE` routes to the same write as `mngr config assign`."""
+    monkeypatch.chdir(temp_git_repo)
+    result = cli_runner.invoke(
+        config,
+        ["set", "unset_vars__assign", '["ONLY"]', "--scope", "project"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    content = (temp_git_repo / f".{mngr_test_root_name}" / "settings.toml").read_text()
+    assert 'unset_vars__assign = ["ONLY"]' in content, content
+
+
+def test_config_assign_settings_overrides_writes_mngr_merge(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mngr_test_root_name: str,
+) -> None:
+    """`mngr config assign` on a settings_overrides path writes the bare value plus a
+    `__mngr_merge` ``assign`` directive, not an ``__assign`` suffix key."""
+    monkeypatch.chdir(temp_git_repo)
+    result = cli_runner.invoke(
+        config,
+        ["assign", "agent_types.claude.settings_overrides.permissions.allow", '["Bash(npm *)"]', "--scope", "project"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    content = (temp_git_repo / f".{mngr_test_root_name}" / "settings.toml").read_text()
+    assert "allow__assign" not in content, content
+    assert '"permissions.allow" = "assign"' in content, content
+
+
+def test_config_extend_accumulates_second_mngr_merge_directive(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mngr_test_root_name: str,
+) -> None:
+    """A second `config extend`/`assign` on a different settings_overrides leaf preserves the
+    first directive in the shared `__mngr_merge` map rather than clobbering it."""
+    monkeypatch.chdir(temp_git_repo)
+    # Pre-seed the project config with the pytest opt-in so the second invocation (which
+    # reloads the file the first one wrote) passes the test-config guard.
+    config_path = temp_git_repo / f".{mngr_test_root_name}" / "settings.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("is_allowed_in_pytest = true\n")
+    base = "agent_types.claude.settings_overrides.permissions"
+    for verb, leaf, value in (("extend", "allow", '["A"]'), ("assign", "deny", '["D"]')):
+        result = cli_runner.invoke(
+            config, [verb, f"{base}.{leaf}", value, "--scope", "project"], obj=plugin_manager, catch_exceptions=False
+        )
+        assert result.exit_code == 0, result.output
+    content = config_path.read_text()
+    assert '"permissions.allow" = "extend"' in content, content
+    assert '"permissions.deny" = "assign"' in content, content

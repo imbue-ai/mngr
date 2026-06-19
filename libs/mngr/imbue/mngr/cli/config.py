@@ -27,7 +27,7 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import OutputOptions
-from imbue.mngr.config.field_markers import MNGR_MERGE_KEY
+from imbue.mngr.config.external_settings import MNGR_MERGE_KEY
 from imbue.mngr.config.key_resolver import is_settings_overrides_path
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.loader import parse_config
@@ -47,7 +47,9 @@ from imbue.mngr.utils.toml_config import load_config_file_tomlkit
 from imbue.mngr.utils.toml_config import save_config_file
 from imbue.mngr.utils.toml_config import set_nested_value
 from imbue.overlay.errors import OverlayError
+from imbue.overlay.operators import ASSIGN_SUFFIX
 from imbue.overlay.operators import EXTEND_SUFFIX
+from imbue.overlay.operators import is_assign_key
 from imbue.overlay.operators import is_extend_key
 from imbue.overlay.operators import parse_scalar_value
 
@@ -439,15 +441,16 @@ def _config_get_impl(ctx: click.Context, key: str, **kwargs: Any) -> None:
             return
         except KeyError:
             pass
-        # Bare key not found; try the ``key__extend`` form for scope-file reads.
-        extend_key = f"{key}{EXTEND_SUFFIX}"
-        try:
-            extend_value = _get_nested_value(config_data, extend_key)
-        except KeyError:
-            _emit_key_not_found(key, output_opts)
-            ctx.exit(1)
+        # Bare key not found; try the ``key__extend`` / ``key__assign`` forms for scope reads.
+        for suffix in (EXTEND_SUFFIX, ASSIGN_SUFFIX):
+            try:
+                suffixed_value = _get_nested_value(config_data, f"{key}{suffix}")
+            except KeyError:
+                continue
+            _emit_config_extend_value(key, f"{key}{suffix}", suffixed_value, output_opts)
             return
-        _emit_config_extend_value(key, extend_key, extend_value, output_opts)
+        _emit_key_not_found(key, output_opts)
+        ctx.exit(1)
         return
 
     # Merged mode: extends are already applied; bare key lookup is sufficient.
@@ -546,15 +549,19 @@ def config_set(ctx: click.Context, key: str, value: str, **kwargs: Any) -> None:
 def _config_set_impl(ctx: click.Context, key: str, value: str, **kwargs: Any) -> None:
     """Implementation of ``mngr config set``.
 
-    The same path also handles ``mngr config set foo__extend value`` — when
-    the final segment of the key ends in ``__extend``, the write is routed
-    through the same code as ``mngr config extend foo value``, so the two
-    spellings are interchangeable.
+    The same path also handles ``mngr config set foo__extend value`` and
+    ``foo__assign value`` — when the final segment ends in ``__extend`` /
+    ``__assign``, the write is routed through the same code as ``mngr config
+    extend`` / ``mngr config assign``, so the spellings are interchangeable.
     """
-    if is_extend_key(key.split(".")[-1]):
+    last_segment = key.split(".")[-1]
+    if is_extend_key(last_segment):
         # ``... .field__extend`` is the same operation as ``mngr config extend``.
-        bare = key[: -len(EXTEND_SUFFIX)]
-        _config_extend_impl(ctx, bare, value, **kwargs)
+        _config_merge_op_impl(ctx, key[: -len(EXTEND_SUFFIX)], value, op="extend", **kwargs)
+        return
+    if is_assign_key(last_segment):
+        # ``... .field__assign`` is the same operation as ``mngr config assign``.
+        _config_merge_op_impl(ctx, key[: -len(ASSIGN_SUFFIX)], value, op="assign", **kwargs)
         return
 
     mngr_ctx, output_opts, opts = setup_command_context(
@@ -596,12 +603,17 @@ def _validate_doc_after_set(doc: Any, base_config: MngrConfig, *, disabled_plugi
     parse_config(resolved, disabled_plugins=disabled_plugins)
 
 
-def _config_extend_impl(ctx: click.Context, key: str, value: str, **kwargs: Any) -> None:
-    """Implementation of ``mngr config extend``.
+def _config_merge_op_impl(ctx: click.Context, key: str, value: str, *, op: str, **kwargs: Any) -> None:
+    """Shared implementation of ``mngr config extend`` (``op="extend"``) and
+    ``mngr config assign`` (``op="assign"``).
 
-    Writes a ``key__extend`` entry into the TOML file. The value must be a
-    JSON list / dict / scalar matching the target field's aggregate type;
-    a scalar target raises ``ConfigParseError``.
+    For a normal config path, writes a ``key__extend`` / ``key__assign`` entry. For a
+    ``settings_overrides`` path, the suffixes are not allowed (they would leak into the
+    external CLI's settings.json), so it instead writes the bare value and declares the op
+    in the root ``__mngr_merge`` map, keyed by the literal dotted path relative to the root
+    (re-setting the whole map so an existing directive for another key is preserved). The
+    value must be a JSON list / dict / scalar; a structurally invalid target (e.g. an
+    ``extend`` on a scalar) raises ``ConfigParseError`` during validation.
     """
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
@@ -617,11 +629,6 @@ def _config_extend_impl(ctx: click.Context, key: str, value: str, **kwargs: Any)
     parsed_value = parse_scalar_value(value)
     key_segments = tuple(key.split("."))
     if is_settings_overrides_path(key_segments) and len(key_segments) > 3:
-        # settings_overrides expresses merge intent via the Claude-compatible `__mngr_merge`
-        # map, not the `__extend` suffix (which would leak into the external CLI's
-        # settings.json as a junk key). Write the bare value, then declare it `extend` in the
-        # root `__mngr_merge` map, keyed by the literal dotted path relative to the root
-        # (re-setting the whole map so an existing directive for another key is preserved).
         set_nested_value(doc, key, parsed_value)
         merge_path = f"{'.'.join(key_segments[:3])}.{MNGR_MERGE_KEY}"
         relative = ".".join(key_segments[3:])
@@ -629,22 +636,18 @@ def _config_extend_impl(ctx: click.Context, key: str, value: str, **kwargs: Any)
             existing_directives = _get_nested_value(dict(doc.unwrap()), merge_path)
         except ConfigKeyNotFoundError:
             existing_directives = {}
-        directives = (
-            {**existing_directives, relative: "extend"}
-            if isinstance(existing_directives, dict)
-            else {relative: "extend"}
-        )
+        directives = {**existing_directives, relative: op} if isinstance(existing_directives, dict) else {relative: op}
         set_nested_value(doc, merge_path, directives)
         written_key = f"{merge_path}.{relative}"
     else:
-        written_key = f"{key}{EXTEND_SUFFIX}"
+        written_key = f"{key}{EXTEND_SUFFIX if op == 'extend' else ASSIGN_SUFFIX}"
         set_nested_value(doc, written_key, parsed_value)
 
-    # Validate by resolving the new extend against the current merged config.
+    # Validate by resolving the new operator against the current merged config.
     _validate_doc_after_set(doc, mngr_ctx.config, disabled_plugins=mngr_ctx.config.disabled_plugins)
 
     save_config_file(config_path, doc)
-    _emit_config_extend_result(key, written_key, parsed_value, scope, config_path, output_opts)
+    _emit_config_merge_op_result(key, written_key, parsed_value, scope, config_path, output_opts, op=op)
 
 
 @config.command(name="extend")
@@ -662,7 +665,7 @@ def _config_extend_impl(ctx: click.Context, key: str, value: str, **kwargs: Any)
 def config_extend(ctx: click.Context, key: str, value: str, **kwargs: Any) -> None:
     """Write a ``key__extend`` entry that appends to / merges with the base."""
     try:
-        _config_extend_impl(ctx, key, value, **kwargs)
+        _config_merge_op_impl(ctx, key, value, op="extend", **kwargs)
     except (OverlayError, ConfigParseError) as e:
         logger.error("Invalid configuration: {}", e)
         ctx.exit(1)
@@ -671,20 +674,46 @@ def config_extend(ctx: click.Context, key: str, value: str, **kwargs: Any) -> No
         ctx.exit(1)
 
 
-def _emit_config_extend_result(
+@config.command(name="assign")
+@click.argument("key")
+@click.argument("value")
+@click.option(
+    "--scope",
+    type=click.Choice(["user", "project", "local"], case_sensitive=False),
+    default="project",
+    show_default=True,
+    help="Config scope: user (~/.mngr/profiles/<profile_id>/), project (.mngr/), or local (.mngr/settings.local.toml)",
+)
+@add_common_options
+@click.pass_context
+def config_assign(ctx: click.Context, key: str, value: str, **kwargs: Any) -> None:
+    """Write a ``key__assign`` entry that replaces the base without the narrowing guard."""
+    try:
+        _config_merge_op_impl(ctx, key, value, op="assign", **kwargs)
+    except (OverlayError, ConfigParseError) as e:
+        logger.error("Invalid configuration: {}", e)
+        ctx.exit(1)
+    except AbortError as e:
+        logger.error("Aborted: {}", e.message)
+        ctx.exit(1)
+
+
+def _emit_config_merge_op_result(
     key: str,
-    extend_key: str,
+    written_key: str,
     value: Any,
     scope: ConfigScope,
     config_path: Path,
     output_opts: OutputOptions,
+    *,
+    op: str,
 ) -> None:
-    """Emit the result of a ``mngr config extend`` operation."""
+    """Emit the result of a ``mngr config extend`` / ``assign`` operation."""
     match output_opts.output_format:
         case OutputFormat.JSON:
             write_json_line(
                 {
-                    "key": extend_key,
+                    "key": written_key,
                     "value": value,
                     "scope": scope.value.lower(),
                     "path": str(config_path),
@@ -693,8 +722,8 @@ def _emit_config_extend_result(
         case OutputFormat.JSONL:
             write_json_line(
                 {
-                    "event": "config_extend",
-                    "key": extend_key,
+                    "event": f"config_{op}",
+                    "key": written_key,
                     "value": value,
                     "scope": scope.value.lower(),
                     "path": str(config_path),
@@ -702,7 +731,8 @@ def _emit_config_extend_result(
             )
         case OutputFormat.HUMAN:
             write_human_line(
-                "Extended {} with {} in {} ({})",
+                "{} {} with {} in {} ({})",
+                "Extended" if op == "extend" else "Assigned",
                 key,
                 _format_value_for_display(value),
                 scope.value.lower(),

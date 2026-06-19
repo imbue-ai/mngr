@@ -62,7 +62,7 @@ from pathlib import Path
 from typing import Any
 
 from imbue.imbue_common.pure import pure
-from imbue.mngr.config.overlay_merge import apply_settings_patch
+from imbue.mngr.config.external_settings import apply_settings_patch
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.host import OnlineHostInterface
 

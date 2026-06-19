@@ -37,6 +37,7 @@ from imbue.mngr.config.field_markers import SettingsPatchField
 from imbue.mngr.config.loader import parse_config
 from imbue.mngr.config.overlay_merge import build_settings_narrowing_message
 from imbue.mngr.config.overlay_merge import merge_models_via_overlay
+from imbue.mngr.config.overlay_merge import suffix_remediation
 from imbue.mngr.config.provider_config_registry import register_provider_config
 from imbue.mngr.config.provider_config_registry import reset_provider_config_registry
 from imbue.mngr.errors import ConfigParseError
@@ -165,27 +166,19 @@ def test_merge_models_via_overlay_rejects_mismatched_types() -> None:
 
 
 def test_narrowing_message_tailors_extend_example_to_the_narrowed_key() -> None:
-    """The narrowing message's ``__extend`` example is adapted to the user's actual key so
-    it shows how to fix their config; a nested path nests the suffix, and it falls back to a
+    """The config-load (suffix) remediation example is adapted to the user's actual key so it
+    shows how to fix their config; a nested path nests the suffix, and it falls back to a
     generic example when no key is given."""
-    top = build_settings_narrowing_message(["  work_dir_extra_paths"], example_key_path="work_dir_extra_paths")
-    assert "work_dir_extra_paths__extend = ..." in top
-    nested = build_settings_narrowing_message(["  permissions.allow"], example_key_path="permissions.allow")
-    assert "permissions__extend = {allow__extend = ...}" in nested
-    generic = build_settings_narrowing_message(["  something"])
-    assert "permissions__extend = {allow__extend" in generic
-
-
-def test_narrowing_message_emits_mngr_merge_patch_for_claude_path() -> None:
-    """Given ``mngr_merge_paths`` (the Claude ``settings_overrides`` surface), the message
-    emits the exact ``__mngr_merge`` map for every narrowed path and never the internal
-    suffix form."""
-    message = build_settings_narrowing_message(
-        ["  permissions.allow", "  env"], mngr_merge_paths=["permissions.allow", "env"]
+    top = build_settings_narrowing_message(
+        ["  work_dir_extra_paths"], remediation=suffix_remediation("work_dir_extra_paths")
     )
-    assert '__mngr_merge = {"permissions.allow" = "extend", "env" = "extend"}' in message
-    assert "__extend" not in message
-    assert '"assign"' in message
+    assert "work_dir_extra_paths__extend = ..." in top
+    nested = build_settings_narrowing_message(
+        ["  permissions.allow"], remediation=suffix_remediation("permissions.allow")
+    )
+    assert "permissions__extend = {allow__extend = ...}" in nested
+    generic = build_settings_narrowing_message(["  something"], remediation=suffix_remediation())
+    assert "permissions__extend = {allow__extend" in generic
 
 
 # =============================================================================
