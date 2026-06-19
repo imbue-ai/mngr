@@ -239,10 +239,10 @@ class _StubOuter(MutableModel):
 
     Only ``execute_idempotent_command`` is exercised by the get_host probe and
     start_host (container-id lookup, ``docker inspect`` running-state probe,
-    ``docker start``, and the ``docker exec`` sshd-relaunch / authorized_keys
-    re-seed). Following the sibling vps_docker provider tests, it implements just
-    that method and is handed to the provider via ``cast(OuterHostInterface,
-    ...)`` rather than subclassing the (large) ``OuterHostInterface``.
+    ``docker start``, and the ``docker exec`` sshd-relaunch). Following the
+    sibling vps_docker provider tests, it implements just that method and is
+    handed to the provider via ``cast(OuterHostInterface, ...)`` rather than
+    subclassing the (large) ``OuterHostInterface``.
     """
 
     container_running: bool = True
@@ -278,8 +278,8 @@ class _FakeImbueCloudProvider(ImbueCloudProvider):
     sshd-readiness wait and host-key re-scan (both real network round-trips to
     the container), and the final host construction (pyinfra wiring). Everything
     in between -- the container lookup, the ``docker inspect`` running-state
-    probe, ``docker start``, the sshd relaunch and the authorized_keys re-seed --
-    runs for real against ``_outer``. Mirrors the sibling vps_docker tests.
+    probe, ``docker start`` and the sshd relaunch -- runs for real against
+    ``_outer``. Mirrors the sibling vps_docker tests.
     """
 
     _lease: LeasedHostInfo | None = None
