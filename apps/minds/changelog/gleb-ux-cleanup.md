@@ -83,3 +83,11 @@ Added an elevation scale: two box-shadow steps defined in `app.css` `@theme` (ge
 - `shadow-raised` is the subtle hover lift on interactive cards (the prior `shadow-sm` value, so cards are unchanged). `shadow-overlay` is the soft floating shadow for surfaces above the page -- menus, modals, tooltips -- taken from Figma's `minds-elevation-1` (two 8%-black drop shadows: `0 1px 1px` + `0 3px 12px`).
 
 - Migrated the call sites: interactive cards / CardPage / Creating card -> `shadow-raised`; the floating workspace menu (previously a heavy `0 12px 32px` at 25%), the modal, and the inbox panel -> `shadow-overlay` (softer and now uniform). A guard test allows only `shadow-raised` / `shadow-overlay` / `shadow-none` -- raw Tailwind shadow steps and arbitrary `shadow-[..]` are disallowed.
+
+Reorganized the dev styleguide page (`/_dev/styleguide`) into two labeled groups with clearer separation -- **Design System** (the foundational tokens plus the shared icon set) and **Patterns & Components** (the composed primitives) -- and added a sticky left-hand table of contents for jumping between sections.
+
+- The light/dark toggle is now a fixed top-right control: it stays visible at any scroll position and floats over the page (no backing bar). It's rebuilt on the `Button` secondary primitive instead of bespoke button classes, so the styleguide's own chrome uses the design system it documents.
+
+- Moved the 24px / 12px icon catalogs up into the Design System group (icons are a shared primitive ramp, like the color and type tokens); moved the workspace-accent picker and the color swatches down into Patterns & Components.
+
+- Each section is a scroll anchor carrying a `scroll-mt` offset, so a TOC jump lands the heading below the viewport top rather than flush against it. `dev_styleguide.js` adds an `IntersectionObserver` scrollspy that marks the active section's link via `aria-current="page"` (styled in `app.css`).

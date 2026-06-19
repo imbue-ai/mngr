@@ -506,3 +506,14 @@ html {
 #color-section.is-saving .color-hex-pill:disabled {
   cursor: progress;
 }
+
+/*
+ * Dev styleguide table-of-contents active link. dev_styleguide.js sets
+ * aria-current="page" on the link whose section is nearest the top of the
+ * viewport (scrollspy). The attribute selector outranks the muted
+ * text-secondary / text-tertiary utility on the link, so the active entry
+ * reads at full-strength primary text without any class juggling.
+ */
+.styleguide-toc-link[aria-current="page"] {
+  color: var(--color-primary);
+}

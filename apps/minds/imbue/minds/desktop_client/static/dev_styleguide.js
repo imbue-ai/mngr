@@ -59,3 +59,53 @@
   panel.appendChild(window.mindsSidebarRow.buildRow(samples[1], { withOpenNew: true }));
   panel.appendChild(window.mindsSidebarRow.buildRow(samples[2], { withOpenNew: true }));
 })();
+
+// Table-of-contents scrollspy. Highlights the TOC link whose section is
+// currently nearest the top of the viewport by toggling aria-current="page"
+// (styled in app.css :: .styleguide-toc-link[aria-current="page"]). The jump
+// itself is plain anchor navigation -- each section carries a scroll-mt so the
+// heading lands below the top edge rather than flush against it.
+(function () {
+  var links = Array.prototype.slice.call(document.querySelectorAll('.styleguide-toc-link'));
+  if (!links.length || !('IntersectionObserver' in window)) return;
+  var targets = [];
+  var visible = Object.create(null);
+  links.forEach(function (link) {
+    var id = (link.getAttribute('href') || '').replace(/^#/, '');
+    var el = id && document.getElementById(id);
+    if (el) targets.push(el);
+  });
+  if (!targets.length) return;
+  function updateActive() {
+    // Active = the intersecting section closest to the top of the viewport.
+    var activeId = null;
+    var best = Infinity;
+    targets.forEach(function (el) {
+      if (!visible[el.id]) return;
+      var top = el.getBoundingClientRect().top;
+      if (top < best) {
+        best = top;
+        activeId = el.id;
+      }
+    });
+    links.forEach(function (link) {
+      var id = (link.getAttribute('href') || '').replace(/^#/, '');
+      if (id && id === activeId) {
+        link.setAttribute('aria-current', 'page');
+      } else {
+        link.removeAttribute('aria-current');
+      }
+    });
+  }
+  // The negative top/bottom margins form a thin band near the top of the
+  // viewport; a section counts as active only while it sits within that band.
+  var observer = new IntersectionObserver(function (entries) {
+    entries.forEach(function (entry) {
+      visible[entry.target.id] = entry.isIntersecting;
+    });
+    updateActive();
+  }, { rootMargin: '-10% 0px -80% 0px', threshold: 0 });
+  targets.forEach(function (el) {
+    observer.observe(el);
+  });
+})();
