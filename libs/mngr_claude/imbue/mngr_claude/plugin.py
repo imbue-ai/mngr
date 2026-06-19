@@ -54,6 +54,7 @@ from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentInstallationError
 from imbue.mngr.errors import AgentStartError
+from imbue.mngr.errors import ConfigError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import SendMessageError
@@ -332,6 +333,19 @@ class ClaudeAgentConfig(AgentTypeConfig):
         "ignored for remote agents. When False (and local), other sync/override/auto-dismiss fields on this "
         "config are silently ignored.",
     )
+    # TODO: remove `use_env_config_dir` (and resolve_isolate_local_config_dir's
+    # reconciliation, the deprecation warning in on_before_provisioning, and the
+    # fallback in _claude_items_to_preserve_for_discovered_agent) once all configs
+    # that still set it -- notably the forever-claude-template's .mngr/settings.toml
+    # -- have migrated to `isolate_local_config_dir`.
+    use_env_config_dir: bool | None = Field(
+        default=None,
+        description="DEPRECATED: the old name for the inverse of isolate_local_config_dir; set "
+        "isolate_local_config_dir instead. use_env_config_dir=true means the same as "
+        "isolate_local_config_dir=false (share the user's $CLAUDE_CONFIG_DIR), and use_env_config_dir=false "
+        "means isolate_local_config_dir=true (per-agent config dir). When set, mngr emits a deprecation "
+        "warning; setting both keys to non-inverse values (e.g. both true) is an error.",
+    )
     streaming_snapshot_interval_seconds: float = Field(
         default=0.0,
         description="Poll interval (in seconds) for the tmux-based response-streaming watcher. When > 0, a "
@@ -341,22 +355,30 @@ class ClaudeAgentConfig(AgentTypeConfig):
         "not provisioned or run.",
     )
 
-    @classmethod
-    def migrate_legacy_config_fields(cls, raw_config: dict[str, Any]) -> dict[str, Any]:
-        """Translate the deprecated ``use_env_config_dir`` key to ``isolate_local_config_dir``.
+    def resolve_isolate_local_config_dir(self) -> bool:
+        """Return the effective ``isolate_local_config_dir``, reconciling the deprecated alias.
 
-        ``use_env_config_dir`` was renamed to ``isolate_local_config_dir`` with its
-        boolean inverted (``use_env_config_dir = true`` -> ``isolate_local_config_dir
-        = false``). The config loader calls this before validating field names, so
-        configs still using the old key keep working. The new key wins if both are
-        present. Returns a new dict; the input is not mutated.
+        ``use_env_config_dir`` is the deprecated inverse of ``isolate_local_config_dir``
+        (``use_env_config_dir=true`` == ``isolate_local_config_dir=false``). When only
+        the deprecated key is set, its inverse is used. When both are set they must be
+        consistent inverses; setting them to the same value (e.g. both ``true``) is
+        contradictory and raises. The deprecation warning is emitted separately (once,
+        at provisioning time) rather than here, since this is called on every access.
         """
-        if "use_env_config_dir" not in raw_config:
-            return raw_config
-        migrated = {key: value for key, value in raw_config.items() if key != "use_env_config_dir"}
-        if "isolate_local_config_dir" not in migrated:
-            migrated["isolate_local_config_dir"] = not raw_config["use_env_config_dir"]
-        return migrated
+        # TODO: once `use_env_config_dir` is removed, delete this method and read
+        # `self.isolate_local_config_dir` directly at the call sites.
+        if self.use_env_config_dir is None:
+            return self.isolate_local_config_dir
+        if "isolate_local_config_dir" in self.model_fields_set and (
+            self.isolate_local_config_dir == self.use_env_config_dir
+        ):
+            raise ConfigError(
+                "Contradictory Claude config: `isolate_local_config_dir` and the deprecated "
+                "`use_env_config_dir` are inverses of each other, but both were set to the same value "
+                f"(isolate_local_config_dir={self.isolate_local_config_dir}, "
+                f"use_env_config_dir={self.use_env_config_dir}). Set only `isolate_local_config_dir`."
+            )
+        return not self.use_env_config_dir
 
 
 class ProvisioningContext(FrozenModel):
@@ -1558,9 +1580,10 @@ class ClaudeCoreAgent(
         user's ``$CLAUDE_CONFIG_DIR`` / keychain live on the local machine and
         are not reachable on the remote host, so there is nothing to share. This
         is why the flag carries ``local`` in its name -- it is ignored when the
-        host is not local.
+        host is not local. ``resolve_isolate_local_config_dir`` reconciles the
+        deprecated ``use_env_config_dir`` alias.
         """
-        return self.agent_config.isolate_local_config_dir or not self.host.is_local
+        return self.agent_config.resolve_isolate_local_config_dir() or not self.host.is_local
 
     def modify_env_vars(self, host: OnlineHostInterface, env_vars: dict[str, str]) -> None:
         """Add CLAUDE_CONFIG_DIR and ORIGINAL_CLAUDE_CONFIG_DIR.
@@ -1883,7 +1906,7 @@ class ClaudeCoreAgent(
         the exact command to turn it off.
         """
         config = self.agent_config
-        if not (host.is_local and is_macos() and config.isolate_local_config_dir):
+        if not (host.is_local and is_macos() and config.resolve_isolate_local_config_dir()):
             return
         if not _is_using_claude_oauth_subscription(get_user_claude_config_dir(), mngr_ctx.concurrency_group):
             return
@@ -2372,8 +2395,24 @@ class ClaudeAgent(
         ``isolate_local_config_dir=False``) the dialog-dismissal validation is
         skipped entirely -- the user is responsible for their own config and
         mngr makes no writes to it.
+
+        Also surfaces the ``use_env_config_dir`` deprecation: warns once if the
+        old key is set, and raises early if it contradicts ``isolate_local_config_dir``.
         """
         config = self.agent_config
+
+        # TODO: remove this deprecation warning + the resolve() call below once
+        # `use_env_config_dir` is removed from ClaudeAgentConfig.
+        if config.use_env_config_dir is not None:
+            logger.warning(
+                "The claude `use_env_config_dir` config option is deprecated; set `isolate_local_config_dir` "
+                "(its inverse) instead. use_env_config_dir={} is being treated as isolate_local_config_dir={}.",
+                config.use_env_config_dir,
+                not config.use_env_config_dir,
+            )
+        # Resolve once here so a contradictory use_env_config_dir / isolate_local_config_dir
+        # pairing fails early with a clear message (the call raises on conflict).
+        config.resolve_isolate_local_config_dir()
 
         # Validate dialogs for non-interactive local runs so we fail early with
         # a clear message. Skip in shared mode (mngr does not write to the user's
@@ -2415,7 +2454,7 @@ class ClaudeAgent(
         (prompt/validate per mode).
         """
         config = self.agent_config
-        if not (host.is_local and config.isolate_local_config_dir):
+        if not (host.is_local and config.resolve_isolate_local_config_dir()):
             return
         # Determine the source path for trust extension.
         source_path: Path | None = None
@@ -2706,15 +2745,19 @@ def _claude_items_to_preserve_for_discovered_agent(ref: DiscoveredAgent) -> list
     if not _should_preserve_sessions(ref):
         return None
     agent_config = ref.certified_data.get("agent_config", {})
-    # Default isolated: an agent record that set neither key -- or one created
-    # before either existed -- is treated as having an isolated per-agent config
-    # dir, so its ``projects/`` is preserved. The new ``isolate_local_config_dir``
-    # key wins; fall back to the deprecated ``use_env_config_dir`` for records
-    # written before the rename.
-    if "isolate_local_config_dir" in agent_config:
-        is_shared_config = not agent_config["isolate_local_config_dir"]
+    # Mirror ClaudeAgentConfig.resolve_isolate_local_config_dir on the raw record:
+    # the deprecated ``use_env_config_dir`` (when set) is the inverse of
+    # ``isolate_local_config_dir`` and takes precedence; otherwise fall back to
+    # ``isolate_local_config_dir`` (default True -> isolated). An agent record
+    # that set neither key -- or one created before either existed -- is treated
+    # as isolated, so its per-agent ``projects/`` is preserved.
+    # TODO: drop the use_env_config_dir branch once the deprecated key is removed
+    # (agent records will then only ever carry isolate_local_config_dir).
+    legacy_use_env = agent_config.get("use_env_config_dir")
+    if legacy_use_env is not None:
+        is_shared_config = bool(legacy_use_env)
     else:
-        is_shared_config = bool(agent_config.get("use_env_config_dir", False))
+        is_shared_config = not agent_config.get("isolate_local_config_dir", True)
     return _claude_preserved_items(is_shared_config=is_shared_config)
 
 

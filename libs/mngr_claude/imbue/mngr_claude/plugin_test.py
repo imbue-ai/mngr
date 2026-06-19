@@ -32,6 +32,7 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentInstallationError
 from imbue.mngr.errors import AgentStartError
+from imbue.mngr.errors import ConfigError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import UserInputError
@@ -2744,32 +2745,67 @@ def test_on_before_provisioning_succeeds_with_credentials(
 
 
 # =============================================================================
-# Deprecated use_env_config_dir alias migration Tests
+# Deprecated use_env_config_dir alias reconciliation Tests
 # =============================================================================
 
 
-def test_migrate_legacy_config_maps_use_env_config_dir_true_to_isolate_false() -> None:
-    """The deprecated use_env_config_dir=true maps to isolate_local_config_dir=false (inverted)."""
-    migrated = ClaudeAgentConfig.migrate_legacy_config_fields({"use_env_config_dir": True})
-    assert migrated == {"isolate_local_config_dir": False}
+def test_resolve_isolate_defaults_to_true_without_either_key() -> None:
+    """With neither key set, the default isolate_local_config_dir=True is used."""
+    assert ClaudeAgentConfig(check_installation=False).resolve_isolate_local_config_dir() is True
 
 
-def test_migrate_legacy_config_maps_use_env_config_dir_false_to_isolate_true() -> None:
-    migrated = ClaudeAgentConfig.migrate_legacy_config_fields({"use_env_config_dir": False})
-    assert migrated == {"isolate_local_config_dir": True}
-
-
-def test_migrate_legacy_config_prefers_new_key_when_both_present() -> None:
-    """When both keys are set, the new isolate_local_config_dir wins and the legacy key is dropped."""
-    migrated = ClaudeAgentConfig.migrate_legacy_config_fields(
-        {"use_env_config_dir": True, "isolate_local_config_dir": True}
+def test_resolve_isolate_uses_new_key_when_only_it_is_set() -> None:
+    assert (
+        ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False).resolve_isolate_local_config_dir()
+        is False
     )
-    assert migrated == {"isolate_local_config_dir": True}
 
 
-def test_migrate_legacy_config_is_noop_without_legacy_key() -> None:
-    raw = {"isolate_local_config_dir": False, "version": "2.1.50"}
-    assert ClaudeAgentConfig.migrate_legacy_config_fields(raw) == raw
+def test_resolve_isolate_inverts_deprecated_use_env_true() -> None:
+    """The deprecated use_env_config_dir=true means isolate_local_config_dir=false (its inverse)."""
+    config = ClaudeAgentConfig(check_installation=False, use_env_config_dir=True)
+    assert config.resolve_isolate_local_config_dir() is False
+
+
+def test_resolve_isolate_inverts_deprecated_use_env_false() -> None:
+    config = ClaudeAgentConfig(check_installation=False, use_env_config_dir=False)
+    assert config.resolve_isolate_local_config_dir() is True
+
+
+def test_resolve_isolate_allows_consistent_inverse_dual_spec() -> None:
+    """Setting both keys to consistent inverses (isolate=false, use_env=true) is allowed."""
+    config = ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False, use_env_config_dir=True)
+    assert config.resolve_isolate_local_config_dir() is False
+
+
+def test_resolve_isolate_raises_on_contradictory_dual_spec() -> None:
+    """Setting both keys to the same value (they are inverses) is contradictory and raises."""
+    config = ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=True, use_env_config_dir=True)
+    with pytest.raises(ConfigError, match="Contradictory"):
+        config.resolve_isolate_local_config_dir()
+
+
+def test_on_before_provisioning_warns_when_use_env_config_dir_is_set(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Setting the deprecated use_env_config_dir emits a deprecation warning at provisioning time."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "shared"))
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
+    )
+
+    options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
+    with capture_loguru() as log_output:
+        agent.on_before_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+
+    assert "use_env_config_dir" in log_output.getvalue()
+    assert "deprecated" in log_output.getvalue()
 
 
 # =============================================================================

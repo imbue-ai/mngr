@@ -40,6 +40,12 @@ tokens refresh, leading to auth failures. Sharing the config dir reuses the same
 keychain entry as your own claude. mngr warns about this at agent-creation time
 when it detects subscription credentials with isolation enabled.
 
+**Deprecated `use_env_config_dir`:** this is the old name for the inverse of
+`isolate_local_config_dir` (`use_env_config_dir = true` == `isolate_local_config_dir
+= false`). It is still accepted for backward compatibility but emits a deprecation
+warning; prefer `isolate_local_config_dir`. Setting both to contradictory
+(non-inverse) values is an error.
+
 ## Version pinning and auto-updates
 
 Pin the Claude Code version that gets installed, and control its background

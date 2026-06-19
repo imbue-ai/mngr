@@ -367,16 +367,6 @@ def test_parse_agent_types_raises_on_unknown_fields() -> None:
         _parse_agent_types(raw, disabled_plugins=frozenset())
 
 
-def test_parse_agent_types_migrates_deprecated_use_env_config_dir() -> None:
-    """The deprecated use_env_config_dir key is accepted (not rejected) and migrated to
-    isolate_local_config_dir with the boolean inverted."""
-    raw = {"claude": {"use_env_config_dir": True}}
-    result = _parse_agent_types(raw, disabled_plugins=frozenset())
-    dumped = result[AgentTypeName("claude")].model_dump()
-    assert dumped["isolate_local_config_dir"] is False
-    assert "use_env_config_dir" not in dumped
-
-
 @pytest.mark.allow_warnings(match=r"Unknown fields in agent_types\.claude.*bogus_option")
 def test_parse_agent_types_warns_on_unknown_fields_when_not_strict(log_warnings: list[str]) -> None:
     """_parse_agent_types with strict=False should warn about unknown fields and not apply them to the model."""

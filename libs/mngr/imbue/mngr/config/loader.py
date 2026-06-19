@@ -819,12 +819,6 @@ def _parse_agent_types(
                 "installed. Otherwise the agent type name or one of the field names may be "
                 "misspelled."
             )
-        # Let the resolved config class migrate deprecated/renamed field names
-        # (e.g. a plugin that renamed a field) before the unknown-field check, so
-        # configs written for an older version of the plugin keep working. The
-        # base AgentTypeConfig implementation is a no-op; subclasses override it,
-        # so core never needs to know plugin-specific field names.
-        raw_config = config_class.migrate_legacy_config_fields(raw_config)
         cleaned_config = _drop_unknown_fields(
             raw_config,
             config_class,
