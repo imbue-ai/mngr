@@ -343,28 +343,34 @@ def clone_git_repo(
 
     The clone_dir must not already exist -- this function creates it.
 
-    ``branch`` accepts a branch name, a tag name, or a commit SHA -- git
-    fetch handles all three uniformly. The fetched ref lands in
-    ``FETCH_HEAD``, which we then check out (detached) so the clone has a
-    materialised working tree -- exactly what ``git clone`` produces. The
-    caller still calls :func:`checkout_branch` next to rename the detached
-    HEAD to a real local branch.
+    The two cases take deliberately different code paths:
 
-    Checking out here (rather than leaving an empty tree for the caller)
-    is load-bearing: callers that overlay a worktree via
+    No ``branch`` given: a plain ``git clone <url> <dir>``. This resolves
+    the remote's default branch natively (in one connection), creates a
+    matching *named* local branch, and checks it out -- exactly the state a
+    user gets from ``git clone``. The named branch is load-bearing: the
+    downstream ``mngr create`` mirror push only pushes ``refs/heads/*`` +
+    ``refs/tags/*`` (a detached HEAD leaves ``refs/heads/*`` empty and the
+    push fails with "No refs in common and none specified; doing nothing"),
+    and the resolved name becomes the agent's source-base branch. Letting
+    git resolve the default branch avoids parsing ``ls-remote`` output or
+    making a second round trip whose name could disagree with the fetch.
+
+    Explicit ``branch`` (a branch name, tag name, or commit SHA): ``git
+    init`` + ``git remote add origin`` + ``git fetch origin <ref>`` + ``git
+    checkout --detach FETCH_HEAD``, then the caller renames the detached
+    HEAD to a real local branch via :func:`checkout_branch`. We avoid ``git
+    clone --branch <ref>`` here because ``--branch`` rejects commit SHAs
+    (``fatal: Remote branch <sha> not found in upstream origin``); ``git
+    fetch`` accepts a branch, tag, or SHA uniformly. The fetch downloads
+    only the requested ref's full ancestry.
+
+    Both paths materialise a checked-out working tree, which is
+    load-bearing: callers that overlay a worktree via
     :func:`rsync_worktree_over_clone` need a *checked-out* clone, else the
     rsync'd files land untracked and the subsequent ``checkout_branch``
     aborts with "untracked working tree files would be overwritten by
-    checkout". A bare ``git init`` + ``git fetch`` (no checkout) silently
-    broke every local-worktree create until this checkout was restored.
-
-    Implementation is ``git init`` + ``git remote add origin`` + ``git
-    fetch origin <ref>`` + ``git checkout --detach FETCH_HEAD`` rather than
-    ``git clone --single-branch --branch <ref>``. ``--branch`` rejects
-    commit SHAs (``fatal: Remote branch <sha> not found in upstream
-    origin``); ``git fetch`` does not. The fetch downloads only the
-    requested ref's full ancestry -- same shape as ``--single-branch``,
-    still non-shallow.
+    checkout".
 
     We deliberately do NOT shallow-clone (no ``--depth``): this clone is
     the source ``mngr create`` mirror-pushes into the agent container's
@@ -383,23 +389,27 @@ def clone_git_repo(
     # which would otherwise leak tokens from credentialed URLs into logs.
     redacted_on_output = _RedactingOutputCallback(inner=on_output) if on_output is not None else None
 
-    # `init` and `remote add` are local-only and never fail in healthy
-    # environments; `fetch` is the step that can legitimately error
-    # (auth, network, ref-not-found). The final `checkout --detach`
-    # materialises the working tree from the just-fetched FETCH_HEAD so
-    # the clone matches what `git clone` produces. All steps are wrapped
-    # under the same child concurrency group so cancellation is uniform;
-    # the failure is raised AFTER the `with cg` block to keep GitCloneError
-    # from being wrapped in a ConcurrencyExceptionGroup.
+    # All steps run under the same child concurrency group so cancellation is
+    # uniform; the failure is raised AFTER the `with cg` block to keep
+    # GitCloneError from being wrapped in a ConcurrencyExceptionGroup. For the
+    # explicit-ref path, `init`/`remote add` are local-only and never fail in
+    # healthy environments; `fetch` is the step that can legitimately error
+    # (auth, network, ref-not-found).
     cg = _make_child_cg("git-clone", parent_cg)
     failed: tuple[str, str] | None = None
     with cg:
-        for command in (
-            ["git", "init", "-q"],
-            ["git", "remote", "add", "origin", str(git_url)],
-            ["git", "fetch", "origin", str(branch) if branch is not None else "HEAD"],
-            ["git", "checkout", "--detach", "FETCH_HEAD"],
-        ):
+        if branch is None:
+            # Plain clone: git resolves the remote's default branch and leaves a
+            # named local branch checked out (see docstring for why this matters).
+            commands: tuple[list[str], ...] = (["git", "clone", str(git_url), str(clone_dir)],)
+        else:
+            commands = (
+                ["git", "init", "-q"],
+                ["git", "remote", "add", "origin", str(git_url)],
+                ["git", "fetch", "origin", str(branch)],
+                ["git", "checkout", "--detach", "FETCH_HEAD"],
+            )
+        for command in commands:
             result = cg.run_process_to_completion(
                 command=command,
                 cwd=clone_dir,
@@ -1455,10 +1465,17 @@ class AgentCreator(MutableModel):
                         if clone_target.exists():
                             shutil.rmtree(clone_target)
                         file_url = GitUrl("file://{}".format(resolved_path))
+                        # Pass the branch through (like the remote-URL case
+                        # below) so that when one is requested the clone takes
+                        # the fetch-into-FETCH_HEAD path that the subsequent
+                        # ``checkout_branch`` depends on. With no branch, the
+                        # plain ``git clone`` lands on the worktree's own branch
+                        # and ``checkout_branch`` is skipped.
                         clone_git_repo(
                             file_url,
                             clone_target,
                             on_output=emit_log,
+                            branch=GitBranch(branch) if branch else None,
                             parent_cg=self.root_concurrency_group,
                         )
                         # Rsync the worktree's working directory over so that
