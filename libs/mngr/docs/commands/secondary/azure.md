@@ -61,6 +61,7 @@ mngr azure cleanup [OPTIONS]
 | `--subscription-id` | text | Azure subscription ID. Defaults to the resolved provider config, then AZURE_SUBSCRIPTION_ID, then your active `az` subscription. | None |
 | `--region` | text | Azure region. Defaults to the resolved provider config's default_region (westus if unset). | None |
 | `--resource-group` | text | Resource group to delete. Defaults to the resolved provider config's resource_group. | None |
+| `--force` | boolean | Also delete the state storage account when it still holds offline host state left over from hosts that no longer exist as VMs (otherwise cleanup refuses to delete a non-empty account). | `False` |
 
 ## Common
 

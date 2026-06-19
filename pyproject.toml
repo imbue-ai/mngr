@@ -42,6 +42,8 @@ dev = [
     "tomlkit>=0.12.0",
     "imbue-common[dev]",
     "shellcheck-py>=0.10.0",
+    # In-memory AWS service mocks for unit tests (S3 state-bucket round-trips).
+    "moto[s3]>=5.0",
 ]
 
 # Shared pytest settings (markers, filterwarnings, coverage report config)

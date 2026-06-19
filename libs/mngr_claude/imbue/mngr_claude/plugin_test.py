@@ -608,7 +608,7 @@ def test_claude_agent_assemble_command_sets_is_sandbox_for_remote_host(
     uuid = agent.id.get_uuid()
     prefix = temp_mngr_ctx.config.prefix
     session_name = f"{prefix}test-agent"
-    background_cmd = agent._build_background_tasks_command(session_name)
+    background_cmd = agent._build_background_tasks_command(session_name, temp_mngr_ctx.config.tmux.primary_window_name)
     sid_export = _sid_export_for(uuid)
     # Remote hosts SHOULD have IS_SANDBOX set
     assert command == CommandString(
@@ -729,7 +729,7 @@ def test_build_background_tasks_command(
 
     prefix = temp_mngr_ctx.config.prefix
     session_name = f"{prefix}test-agent"
-    cmd = agent._build_background_tasks_command(session_name)
+    cmd = agent._build_background_tasks_command(session_name, "agent")
 
     # Should be a background subshell
     assert cmd.startswith("(")
@@ -738,8 +738,20 @@ def test_build_background_tasks_command(
     # Should reference the provisioned script
     assert "claude_background_tasks.sh" in cmd
 
-    # Should pass the session name as argument
-    assert session_name in cmd
+    # Should pass the session name and the primary window name as arguments so the
+    # response-streaming watcher captures the agent pane by window name (not :0).
+    assert f"claude_background_tasks.sh {session_name} agent " in cmd
+
+
+def test_build_background_tasks_command_passes_custom_primary_window_name(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A custom primary window name is forwarded to claude_background_tasks.sh."""
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    cmd = agent._build_background_tasks_command("mngr-test-agent", "primary")
+
+    assert "claude_background_tasks.sh mngr-test-agent primary " in cmd
 
 
 # =============================================================================

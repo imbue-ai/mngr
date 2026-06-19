@@ -5,13 +5,16 @@ import json
 import pytest
 
 from imbue.mngr.cli.output_helpers import AbortError
+from imbue.mngr.cli.output_helpers import OperatorResultPart
 from imbue.mngr.cli.output_helpers import emit_error_event
 from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import emit_info
+from imbue.mngr.cli.output_helpers import emit_operator_result
 from imbue.mngr.cli.output_helpers import format_size
 from imbue.mngr.cli.output_helpers import on_error
 from imbue.mngr.cli.output_helpers import render_format_template
+from imbue.mngr.cli.output_helpers import write_event_line
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.errors import MngrError
@@ -104,6 +107,67 @@ def test_emit_event_json_format(capsys: pytest.CaptureFixture[str]) -> None:
     emit_event("destroyed", {"agent_id": "agent-123"}, OutputFormat.JSON)
     captured = capsys.readouterr()
     assert captured.out == ""
+
+
+# =============================================================================
+# Tests for write_event_line
+# =============================================================================
+
+
+def test_write_event_line_prepends_event_field(capsys: pytest.CaptureFixture[str]) -> None:
+    """write_event_line should emit the payload with a leading ``event`` field."""
+    write_event_line("destroyed", {"agent_id": "agent-123"})
+    output = json.loads(capsys.readouterr().out.strip())
+    assert output == {"event": "destroyed", "agent_id": "agent-123"}
+
+
+# =============================================================================
+# Tests for emit_operator_result
+# =============================================================================
+
+
+def test_emit_operator_result_json_merges_part_data(capsys: pytest.CaptureFixture[str]) -> None:
+    """JSON mode writes the parts' merged data as a bare object, without an ``event`` field."""
+    parts = [
+        OperatorResultPart(data={"created": True}, human="Made it"),
+        OperatorResultPart(data={"bucket": None}, human=None),
+    ]
+    emit_operator_result("prepared", parts, OutputFormat.JSON)
+    assert json.loads(capsys.readouterr().out.strip()) == {"created": True, "bucket": None}
+
+
+def test_emit_operator_result_jsonl_tags_merged_data_with_event(capsys: pytest.CaptureFixture[str]) -> None:
+    """JSONL mode tags the merged data with the event name."""
+    parts = [OperatorResultPart(data={"created": True}, human="Made it")]
+    emit_operator_result("prepared", parts, OutputFormat.JSONL)
+    assert json.loads(capsys.readouterr().out.strip()) == {"event": "prepared", "created": True}
+
+
+def test_operator_result_part_shown_always_has_human_line() -> None:
+    """``shown`` keeps the human line and collects the keyword fields as data."""
+    part = OperatorResultPart.shown("a line", foo=1, bar=None)
+    assert part.human == "a line"
+    assert part.data == {"foo": 1, "bar": None}
+
+
+def test_operator_result_part_shown_if_drops_human_line_when_absent() -> None:
+    """``shown_if`` keeps the data either way but drops the human line when the gate is None."""
+    present = OperatorResultPart.shown_if("bucket-1", "made bucket-1", bucket="bucket-1")
+    absent = OperatorResultPart.shown_if(None, "made nothing", bucket=None)
+    assert present.human == "made bucket-1"
+    assert absent.human is None
+    assert absent.data == {"bucket": None}
+
+
+def test_emit_operator_result_human_writes_lines_skipping_none(capsys: pytest.CaptureFixture[str]) -> None:
+    """HUMAN mode writes each part's human line in order, skipping parts whose line is None."""
+    parts = [
+        OperatorResultPart(data={"a": 1}, human="line one"),
+        OperatorResultPart(data={"b": None}, human=None),
+        OperatorResultPart(data={"c": 3}, human="line three"),
+    ]
+    emit_operator_result("prepared", parts, OutputFormat.HUMAN)
+    assert capsys.readouterr().out == "line one\nline three\n"
 
 
 # =============================================================================

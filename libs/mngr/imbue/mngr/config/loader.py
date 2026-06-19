@@ -35,6 +35,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.data_types import RetryConfig
+from imbue.mngr.config.data_types import TmuxConfig
 from imbue.mngr.config.data_types import split_cli_args_string
 from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.config.key_resolver import resolve_extends
@@ -199,6 +200,7 @@ def load_config(
         providers={},
         plugins={},
         logging=LoggingConfig(),
+        tmux=TmuxConfig(),
         commands={},
     )
 
@@ -317,6 +319,10 @@ def load_config(
     # Include logging if not None
     if config.logging is not None:
         config_dict["logging"] = config.logging
+
+    # Include tmux if not None
+    if config.tmux is not None:
+        config_dict["tmux"] = config.tmux
 
     config_dict["unset_vars"] = config.unset_vars
     config_dict["pager"] = config.pager
@@ -983,6 +989,33 @@ def _parse_logging_config(raw_logging: dict[str, Any], *, strict: bool = True, s
     return LoggingConfig.model_construct(**cleaned_logging)
 
 
+def _parse_tmux_config(raw_tmux: dict[str, Any], *, strict: bool = True, silent: bool = False) -> TmuxConfig:
+    """Parse tmux config.
+
+    Uses model_construct to bypass validation and explicitly set None for unset fields.
+    ``attach_args`` is coerced to a tuple here (accepting either a single string or a
+    list) because model_construct skips the field validator that would otherwise do so.
+    A string value is wrapped in ``ScalarTuple`` (mirroring how ``cli_args`` is
+    handled in ``_normalize_tuple_fields_for_construct``) so narrowing detection treats
+    a higher-precedence string replacement as scalar replacement rather than aggregate
+    narrowing.
+    """
+    raw_tmux = _normalize_field_keys(raw_tmux, "tmux")
+    cleaned_tmux = _drop_unknown_fields(raw_tmux, TmuxConfig, "tmux", strict=strict, silent=silent)
+    if "attach_args" in cleaned_tmux:
+        attach_args = cleaned_tmux["attach_args"]
+        if isinstance(attach_args, str):
+            tokens = split_cli_args_string(attach_args) if attach_args else ()
+            cleaned_tmux["attach_args"] = ScalarTuple(tokens)
+        else:
+            cleaned_tmux["attach_args"] = tuple(attach_args)
+    # Coerce the path to Path here: model_construct bypasses field validation, so
+    # without this the field would hold a bare str despite its Path | None type.
+    if cleaned_tmux.get("additional_config_path") is not None:
+        cleaned_tmux["additional_config_path"] = Path(cleaned_tmux["additional_config_path"])
+    return TmuxConfig.model_construct(**cleaned_tmux)
+
+
 def _parse_commands(raw_commands: dict[str, dict[str, Any]]) -> dict[str, CommandDefaults]:
     """Parse command defaults from config.
 
@@ -1103,6 +1136,7 @@ def parse_config(
     kwargs["logging"] = (
         _parse_logging_config(raw.pop("logging", {}), strict=strict, silent=silent) if "logging" in raw else None
     )
+    kwargs["tmux"] = _parse_tmux_config(raw.pop("tmux", {}), strict=strict, silent=silent) if "tmux" in raw else None
     kwargs["is_nested_tmux_allowed"] = raw.pop("is_nested_tmux_allowed", None)
     kwargs["headless"] = raw.pop("headless", None)
     kwargs["is_error_reporting_enabled"] = raw.pop("is_error_reporting_enabled", None)
