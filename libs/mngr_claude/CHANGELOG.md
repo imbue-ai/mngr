@@ -6,6 +6,16 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `update_policy` field on the claude agent type that governs Claude Code's background auto-updater. `NEVER` sets `DISABLE_AUTOUPDATER=1` so the installed (optionally `version`-pinned) binary stays put; `AUTO` leaves the auto-updater enabled; `ASK` behaves like `AUTO` (claude has no interactive update flow). Default is `NEVER`. Pin a specific version with `version`.
+
+### Changed
+
+- Changed: **Behavior change** — claude agents now disable Claude Code's auto-updater by default (local and remote). Previously mngr did not disable it on local agents, so local agents typically auto-updated based on the inherited `~/.claude.json` `autoUpdates` value. Set `update_policy = "AUTO"` to opt back into the auto-updater. The policy is ignored in `use_env_config_dir` (shared) mode, where mngr leaves your claude environment alone.
+
+- Changed: The Claude response-streaming snapshot watcher now captures the agent's tmux pane by the configured primary window name (`tmux.primary_window_name`, default `agent`) instead of the literal `:0` index, so response streaming works regardless of the user's tmux `base-index`.
+
 ## [v0.2.17] - 2026-06-18
 
 ### Added

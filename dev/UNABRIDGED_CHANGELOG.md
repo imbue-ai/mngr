@@ -4,6 +4,18 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-18
+
+The `identify-*` skills (`identify-doc-code-disagreements`, `identify-inconsistencies`, `identify-outdated-docstrings`, `identify-style-issues`) now accept a `target_path` argument instead of a bare library name. You can scope them to a whole library (`libs/mngr` or just `mngr`) or to any subdirectory within one (e.g. `libs/mngr/imbue/mngr/cli`). Each skill resolves the scan scope and its containing library, gathers the containing library's context, and writes findings to the containing library's `_tasks/` folder.
+
+Added a new `identify-suspicious-edge-cases` skill that flags over-broad exception catches, fallback `else` branches, defensive guards, and unnecessary `| None` types under a given path.
+
+Add a design spec (`specs/provider-state-bucket/`) for giving the AWS and Azure providers a cloud object-storage bucket (S3 / Azure Blob) that holds mngr control-plane state, so a stopped instance's host record, agent metadata, and `host_dir` are all readable offline without hitting the 256-char EC2/VM tag-value limit.
+
+The spec covers: `prepare`/`cleanup` creating and tearing down the bucket plus a best-effort bucket-write identity (AWS IAM instance profile / Azure managed identity, provisioned when the `is_offline_host_dir_enabled` provider config field is on); moving the per-agent tag mirror into the bucket via the existing `persist_agent_data` / `list_persisted_agent_data_for_host` hooks; and an on-by-default `host_dir` offline volume backed by an on-box sync daemon (instance-push) read back through `get_volume_for_host()` -> `OfflineHostWithVolume`. GCP is intentionally out of scope (its per-instance metadata allowance is sufficient).
+
+Added `moto[s3]` to the root dev dependency group for in-memory S3 unit tests of the new AWS state bucket.
+
 ## 2026-06-17
 
 Added a design doc (`specs/agent-plugin-parity/capability-mixins.md`) proposing a code-derived agent capability taxonomy: capability mixins plus a registry that generates the parity matrix from the agent classes, replacing the hand-maintained table and guarding against doc/code drift.

@@ -6,6 +6,12 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: `mngr imbue_cloud admin pool list` (and the `minds pool list` wrapper) now emits every `pool_hosts` column. Previously it printed a hand-maintained 10-column subset that omitted `region`, `backend_kind`, the slice identifiers (`bare_metal_server_id`, `lima_instance_name`, `lima_disk_name`), `host_name`, `vps_instance_id`, and the SSH ports, so a baked slice host showed up looking like a region-less OVH VPS. SELECT and the emitted JSON keys are now both driven by a single column list, with a regression test asserting it stays in lockstep with the schema.
+
+- Changed: Agent lifecycle detection now targets the agent's primary tmux window by name (the configurable `tmux.primary_window_name`, default `agent`) instead of the literal `:0` index, so it works regardless of the user's tmux `base-index` setting.
+
 ## [v0.1.6] - 2026-06-18
 
 ### Added

@@ -6,6 +6,24 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Required, private, encrypted S3 **state bucket** as the offline store for AWS hosts. A stopped instance's full `VpsDockerHostRecord` (config, IP, host keys) and per-agent records now live in the bucket instead of `mngr-agent-<id>-*` EC2 tags, removing the tag mirror's silent 256-char `labels` drop and the EC2 50-tag ceiling. `mngr aws prepare` creates the bucket (named `mngr-state-<account_id>-<region>` by default, overridable via `state_bucket_name`); the bucket is required (no tag-mirror fallback) and mngr raises an actionable error pointing at `mngr aws prepare` when it is absent. `mngr aws cleanup` deletes the bucket and refuses a non-empty one unless `--force` is passed.
+
+- Added: Offline `host_dir`, on by default (new `is_offline_host_dir_enabled` provider config field). At `mngr stop`, the operator-driven capture uploads the host's `host_dir` to the state bucket with the operator's own credentials so `mngr event` / `mngr transcript` / `mngr file` work against a paused host. A host that idle-self-poweroffs (or crashes) is not captured.
+
+### Fixed
+
+- Fixed: `mngr destroy` of a stopped AWS host no longer leaks its still-billing EC2 instance and its S3 state. Destroy now falls back to an offline path that resolves the stopped instance by its `mngr-host-id` tag and terminates it via `TerminateInstances`, then removes the state-bucket records, failing loudly if the instance could not be terminated.
+
+- Fixed: A partial S3 `DeleteObjects` failure (the API returns HTTP 200 with per-key failures in `Errors`) now raises instead of being silently dropped, so a failed state/`host_dir` removal can't leave orphans behind unnoticed.
+
+- Fixed: `mngr aws prepare` is now idempotent under a concurrent `prepare` race — a `BucketAlreadyOwnedByYou` from the bucket create is treated as a no-op, still applying the bucket's idempotent hardening config.
+
+### Removed
+
+- Removed: `AwsVpsClient.add_tags` / `AwsVpsClient.remove_tags` (and their unit tests). They only ever existed to push per-agent records into EC2 instance tags for the old tag mirror, which the state bucket replaces.
+
 ## [v0.1.4] - 2026-06-18
 
 ### Changed

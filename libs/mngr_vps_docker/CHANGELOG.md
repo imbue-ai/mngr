@@ -6,6 +6,20 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Uniform offline host/agent-state store for cloud providers via the new `HostStateStore` abstraction (`host_state_store.py`). The base `VpsDockerProvider` calls `_persist_host_record_externally` / `_delete_host_record_externally` hooks after every on-volume host-record write and on destroy; `OfflineCapableVpsDockerProvider` owns the shared persist/remove envelope and the offline discovery/listing path, delegating the per-provider step to `_mirror_agent_record` / `_remove_mirrored_agent_record` / `_offline_agent_dicts_for`. The object-storage implementation `BucketHostStateStore` (over a `StateBucket` protocol shared by AWS S3 and Azure Blob) treats the bucket as required infrastructure — a missing bucket raises an actionable error pointing at the provider's `prepare` command, and storage errors propagate rather than being swallowed.
+
+- Added: Offline `host_dir` capability as a select-once `HostDirBackend` strategy — a cloud-agnostic, bucket-backed `BucketHostDirBackend` (capture + offline-read volume) or a no-op `NullHostDirBackend` when the feature is off. Capture is operator-driven: `mngr stop` rsyncs the host's `host_dir` off the box and uploads it to the bucket with the operator's own credentials, skipping sockets/other special files natively.
+
+### Changed
+
+- Changed: Agent lifecycle detection now targets the agent's primary tmux window by name (the configurable `tmux.primary_window_name`, default `agent`) instead of the literal `:0` index, so it works regardless of the user's tmux `base-index` setting.
+
+### Fixed
+
+- Fixed: `mngr destroy` of a stopped (deallocated / powered-off) host no longer leaves the underlying cloud instance and its mirrored state behind. The base `VpsDockerProvider.destroy` tore down hosts over SSH using the host record, which works only while the instance is reachable; a stopped instance either made destroy raise `HostNotFoundError` and leak the still-billing instance, or — with a stale cached record from an in-process `mngr stop` — ran a doomed SSH teardown and still leaked. `OfflineCapableVpsDockerProvider` now dispatches up front on the instance's own power state (resolved from its `mngr-host-id` tag/label, no SSH): a stopped instance goes straight to an offline teardown that terminates it through the same cloud `destroy_instance` primitive the online path uses, cleans up the per-host SSH key, and deletes the external state. It fails loudly — a termination that could not be carried out raises `CleanupFailedGroup` rather than reporting success.
+
 ## [v0.1.10] - 2026-06-18
 
 ### Added
