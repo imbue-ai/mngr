@@ -8,7 +8,6 @@ kwarg, matching the pattern used in ``vault_reader_test.py``.
 import json
 import re
 import stat
-from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -70,16 +69,6 @@ def _make_fake_vault_binary(
     )
     script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return script
-
-
-@pytest.fixture
-def _root_cg() -> "Iterator[ConcurrencyGroup]":
-    """Yield an active ConcurrencyGroup so the spawned ``vault`` subprocess
-    can run under it (``cg.run_process_to_completion`` requires ACTIVE state).
-    """
-    cg = ConcurrencyGroup(name="generation-test-root")
-    with cg:
-        yield cg
 
 
 def _kv_get_payload(*, generation_id: str | None) -> str:
@@ -181,12 +170,18 @@ def test_delete_generation_id_is_idempotent_on_missing_entry(tmp_path: Path, _ro
         delete_exit_code=2,
         delete_stderr="No value found at secrets/metadata/minds/staging/generation",
     )
-    # Should not raise -- "not found" is treated as success.
+    # "not found" is treated as success (does not raise) -- but the delete must
+    # actually have been attempted. Without this argv assertion, a buggy
+    # early-return that never shelled out to vault would also "not raise" and so
+    # pass while exercising none of the not-found-is-success handling.
     delete_generation_id(
         "secrets/minds/staging",
         parent_concurrency_group=_root_cg,
         vault_binary=str(fake),
     )
+    calls = (tmp_path / "_calls.log").read_text()
+    assert "kv metadata delete" in calls
+    assert "minds/staging/generation" in calls
 
 
 def test_delete_generation_id_invokes_vault_metadata_delete(tmp_path: Path, _root_cg: ConcurrencyGroup) -> None:

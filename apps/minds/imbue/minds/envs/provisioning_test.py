@@ -41,31 +41,6 @@ from imbue.minds.errors import MindError
 from imbue.minds.primitives import ServiceName
 from imbue.mngr_ovh.iam_tags import IamResource
 
-
-@pytest.fixture
-def _isolated_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """Sandbox $HOME + cwd so deploy/destroy/recover write to a tmp tree only.
-
-    Also seeds an ``apps/`` marker so :func:`find_monorepo_root` (called
-    by deploy_env to pick the recover-target file location) finds a
-    monorepo root under the tmp tree instead of the real repo.
-    """
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("MINDS_ROOT_NAME", raising=False)
-    (tmp_path / "apps").mkdir()
-    monkeypatch.chdir(tmp_path)
-    return tmp_path
-
-
-@pytest.fixture
-def _root_cg() -> ConcurrencyGroup:
-    """Bare ConcurrencyGroup the fakes accept as their parent.
-
-    The fakes never spawn subprocesses, so we don't need to ``with`` it.
-    """
-    return ConcurrencyGroup(name="provisioning-test-root")
-
-
 # Fixed test workspace name used everywhere ``deploy_dev_env`` /
 # ``deploy_tier_env`` constructs an expected URL via ``per_env_*_url`` /
 # ``tier_*_url``. The fake deploy_litellm_proxy / deploy_remote_service_connector
@@ -416,8 +391,18 @@ def test_deploy_dev_env_writes_split_files(_isolated_home: Path, _root_cg: Concu
     assert result.secrets_path is not None and result.secrets_path.endswith("/.minds-dev-alice/secrets.toml")
 
 
-def test_deploy_dev_env_is_idempotent_on_re_run(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
-    """Re-running deploy for an existing env succeeds (overwrites in place)."""
+def test_deploy_dev_env_re_run_succeeds_with_one_deploy_pass_each_time(
+    _isolated_home: Path, _root_cg: ConcurrencyGroup
+) -> None:
+    """Re-running deploy for an existing env succeeds and runs exactly one deploy pass each time.
+
+    This guards "no accidental second-pass redeploy within a single run", NOT
+    resource-level idempotency: the fake ``create_neon_project`` always creates,
+    so at the resource level a re-run is not a no-op. Adoption-vs-create dedup
+    (so a re-run reuses the existing Neon project instead of duplicating it) is
+    the F32 ``_select_one_or_raise_multi_match`` contract, covered in
+    ``providers/neon_db_test.py``.
+    """
     call_log = _make_call_log()
     providers = _build_fake_providers(call_log)
     deploy_env(
@@ -466,8 +451,14 @@ def test_deploy_env_dev_neon_failure_does_not_inline_rollback(
             parent_concurrency_group=_root_cg,
         )
     step_names = [c[0] for c in call_log["calls"]]
-    # No delete_* calls fire on failure -- recover is the rollback path.
-    assert step_names == ["ensure_modal_env", "create_neon_project"]
+    # The invariant under test is "no inline rollback": no delete_*/wipe_* step
+    # fires on failure (recover is the canonical rollback path). Assert that
+    # directly rather than pinning the exact full call list, so a future benign
+    # preflight step before create_neon_project wouldn't break this test.
+    assert not any(c[0].startswith("delete_") or c[0].startswith("wipe_") for c in call_log["calls"])
+    # Sanity: deploy did get as far as creating the Neon project (the failing step).
+    assert "ensure_modal_env" in step_names
+    assert "create_neon_project" in step_names
     # No client.toml / secrets.toml written for a failed deploy.
     assert not client_config_exists(DevEnvName("dev-carol"))
 
@@ -487,12 +478,15 @@ def test_deploy_env_dev_supertokens_failure_does_not_inline_rollback(
             parent_concurrency_group=_root_cg,
         )
     step_names = [c[0] for c in call_log["calls"]]
-    # No delete_* calls fire -- recover handles rollback in a later phase.
-    assert step_names == [
-        "ensure_modal_env",
-        "create_neon_project",
-        "create_supertokens_app",
-    ]
+    # The invariant under test is "no inline rollback": no delete_*/wipe_* step
+    # fires on failure (recover is the canonical rollback path). Assert that
+    # directly rather than pinning the exact full call list, so a future benign
+    # preflight step wouldn't break this test.
+    assert not any(c[0].startswith("delete_") or c[0].startswith("wipe_") for c in call_log["calls"])
+    # Sanity: deploy did get as far as creating the SuperTokens app (the failing step).
+    assert "ensure_modal_env" in step_names
+    assert "create_neon_project" in step_names
+    assert "create_supertokens_app" in step_names
 
 
 def test_deploy_dev_env_pushes_per_env_secrets_into_dev_modal_env(

@@ -193,7 +193,10 @@ def test_delete_tunnels_iterates_all_ids() -> None:
 
 
 def test_delete_tunnels_treats_404_as_success() -> None:
+    requests: list[httpx.Request] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
         return httpx.Response(404, json={"errors": [{"message": "gone"}]})
 
     delete_tunnels(
@@ -202,6 +205,11 @@ def test_delete_tunnels_treats_404_as_success() -> None:
         api_token=SecretStr("t"),
         transport=httpx.MockTransport(handler),
     )
+    # 404 must be swallowed (no raise) AND the DELETE must actually have been
+    # issued -- a buggy skip that never sent the request would also "not raise".
+    assert len(requests) == 1
+    assert requests[0].method == "DELETE"
+    assert str(requests[0].url).rstrip("/").endswith("missing-tunnel")
 
 
 def test_delete_tunnels_raises_on_non_404_error() -> None:
