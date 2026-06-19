@@ -336,20 +336,22 @@ def test_resolve_extends_does_not_preserve_extend_outside_create_templates() -> 
 
 
 def test_resolve_extends_preserves_extend_inside_settings_overrides() -> None:
-    """An ``<key>__extend`` anywhere under ``agent_types.<name>.settings_overrides``
-    whose base lookup yields ``None`` is preserved verbatim through config-load,
-    destined for the provision-time fold against the concrete settings base ``B``.
-
-    ``settings_overrides`` is schemaless, so the base lookup is ``None``; without
-    the deferred-path carveout the marker would collapse to a bare assign at
-    config-load instead of merging onto the home settings.json at provision.
+    """A ``__mngr_merge`` directive under ``settings_overrides`` is desugared and, because the
+    base lookup yields ``None``, preserved verbatim for the provision-time fold (the
+    deferred-path carveout) rather than collapsed to a bare assign. (Desugar mechanics are
+    pinned in external_settings_test.)
     """
     base = MngrConfig()
     resolved = resolve_extends(
         base,
         {
             "agent_types": {
-                "my_claude": {"settings_overrides": {"permissions__extend": {"allow__extend": ["Bash(npm *)"]}}}
+                "my_claude": {
+                    "settings_overrides": {
+                        "permissions": {"allow": ["Bash(npm *)"]},
+                        "__mngr_merge": {"permissions.allow": "extend"},
+                    }
+                }
             }
         },
     )
@@ -361,41 +363,68 @@ def test_resolve_extends_preserves_extend_inside_settings_overrides() -> None:
 
 
 def test_resolve_extends_preserves_deep_extend_inside_settings_overrides() -> None:
-    """The settings_overrides carveout is a *prefix* match: a marker nested several
-    levels deep under settings_overrides is also preserved, not just a top-level one.
+    """A directive targeting a key nested under ``settings_overrides`` is desugared and
+    preserved through the resolver, the same as a top-level one.
     """
     base = MngrConfig()
-    override = {"agent_types": {"my_claude": {"settings_overrides": {"hooks": {"SessionStart__extend": [{"x": 1}]}}}}}
+    override = {
+        "agent_types": {
+            "my_claude": {
+                "settings_overrides": {
+                    "hooks": {"SessionStart": [{"x": 1}]},
+                    "__mngr_merge": {"hooks.SessionStart": "extend"},
+                }
+            }
+        }
+    }
     resolved = resolve_extends(base, override)
-    assert resolved == override
+    assert resolved == {
+        "agent_types": {"my_claude": {"settings_overrides": {"hooks__extend": {"SessionStart__extend": [{"x": 1}]}}}}
+    }
 
 
 def test_resolve_extends_preserves_assign_inside_settings_overrides() -> None:
-    """A ``<key>__assign`` under ``settings_overrides`` whose base lookup yields
-    ``None`` is preserved verbatim (not collapsed to bare), so the no-warn intent
-    survives to the provision-time fold, where it suppresses the narrowing guard.
+    """A ``__mngr_merge`` ``assign`` directive desugars to a ``<key>__assign`` and, with a
+    ``None`` base lookup, is preserved verbatim (not collapsed to bare), so the no-warn
+    intent survives to the provision-time fold where it suppresses the narrowing guard.
     Contrast ``create_templates`` (below), whose consumer reads only ``__extend``.
     """
     base = MngrConfig()
-    override = {"agent_types": {"my_claude": {"settings_overrides": {"permissions__assign": {"allow": ["X"]}}}}}
+    override = {
+        "agent_types": {
+            "my_claude": {
+                "settings_overrides": {"permissions": {"allow": ["X"]}, "__mngr_merge": {"permissions": "assign"}}
+            }
+        }
+    }
     resolved = resolve_extends(base, override)
-    assert resolved == override
+    assert resolved == {
+        "agent_types": {"my_claude": {"settings_overrides": {"permissions__assign": {"allow": ["X"]}}}}
+    }
 
 
 def test_resolve_extends_preserves_assign_inside_settings_overrides_when_base_set() -> None:
     """A deferred ``__assign`` is preserved verbatim even when the base *already* has a
     value at that key -- which is exactly when a cross-scope narrowing could fire. If the
-    suffix collapsed to bare here, a higher scope's ``permissions__assign`` over a lower
-    scope's ``permissions`` would be flagged as narrowing despite the explicit opt-out.
+    suffix collapsed to bare here, a higher scope's ``assign`` over a lower scope's
+    ``permissions`` would be flagged as narrowing despite the explicit opt-out.
     """
     base = {
         "agent_types": {
             "my_claude": {"settings_overrides": {"permissions": {"allow": ["A"], "defaultMode": "acceptEdits"}}}
         }
     }
-    override = {"agent_types": {"my_claude": {"settings_overrides": {"permissions__assign": {"allow": ["B"]}}}}}
+    override = {
+        "agent_types": {
+            "my_claude": {
+                "settings_overrides": {"permissions": {"allow": ["B"]}, "__mngr_merge": {"permissions": "assign"}}
+            }
+        }
+    }
     resolved = resolve_extends(base, override)
-    assert resolved == override
+    assert resolved == {
+        "agent_types": {"my_claude": {"settings_overrides": {"permissions__assign": {"allow": ["B"]}}}}
+    }
 
 
 def test_resolve_extends_collapses_assign_inside_create_templates() -> None:
