@@ -33,3 +33,5 @@ Added themeable surface + fill tokens (next category): surfaces `bg-surface-prim
 - Added `color-scheme: light` / `dark` to the theme roots so native controls (form fields, scrollbars, autofill, caret) render in the right scheme.
 
 With surfaces tokenized, dark mode now renders correctly across page/cards/text/borders/buttons. (Light mode is unchanged.)
+
+Added status / feedback tokens (Figma): `important` / `success` / `warning` / `info` (one solid hue each, mode-independent) + `focus-ring`. Notice / badge backgrounds derive from a single hue via an opacity modifier (e.g. `bg-success/12 border-success/30 text-success`), which adapts to the surface in both modes. Stood up in the styleguide; call-site migration (notices, badges, danger/success buttons, focus rings) follows. Link / selection blue is intentionally out of scope (not part of the status set).

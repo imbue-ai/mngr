@@ -334,6 +334,60 @@
       <div class="mt-2 text-[11px] text-zinc-500 font-mono">app.css :: --color-surface-* (bg-surface-*) + --color-fill-* (bg-fill-*)</div>
     </section>
 
+    {# Status / feedback tokens. One solid hue per semantic (Figma),
+       mode-independent; notice / badge backgrounds are derived with an
+       opacity modifier (bg-success/12 etc.). focus-ring is the focus
+       indicator color. data-token marks each --color-* for the drift guard. #}
+    <section class="mb-12">
+      <h2 class="text-lg font-semibold text-zinc-900 mb-1">Status / feedback tokens</h2>
+      <p class="text-xs text-zinc-500 mb-4">
+        One solid hue per semantic (<code>important</code> / <code>success</code>
+        / <code>warning</code> / <code>info</code>) plus <code>focus-ring</code>.
+        Same in both modes; notice / badge tints are derived via an opacity
+        modifier (e.g. <code>bg-success/12 border-success/30 text-success</code>).
+      </p>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+
+        {# Light #}
+        <div>
+          <div class="text-[11px] uppercase tracking-wide text-zinc-500 mb-2">Light</div>
+          <div class="light bg-surface-primary border border-default rounded-lg p-4">
+            <div class="grid grid-cols-5 gap-2 mb-4">
+              <div data-token="--color-important" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-important"></div><code class="text-[10px] font-mono text-secondary">important</code></div>
+              <div data-token="--color-success" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-success"></div><code class="text-[10px] font-mono text-secondary">success</code></div>
+              <div data-token="--color-warning" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-warning"></div><code class="text-[10px] font-mono text-secondary">warning</code></div>
+              <div data-token="--color-info" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-info"></div><code class="text-[10px] font-mono text-secondary">info</code></div>
+              <div data-token="--color-focus-ring" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-focus-ring"></div><code class="text-[10px] font-mono text-secondary">focus</code></div>
+            </div>
+            <div class="flex flex-col gap-2">
+              <div class="rounded-md border border-success/30 bg-success/12 text-success px-3 py-2 text-sm">Success notice (hue + opacity)</div>
+              <div class="rounded-md border border-important/30 bg-important/12 text-important px-3 py-2 text-sm">Error notice (important)</div>
+            </div>
+          </div>
+        </div>
+
+        {# Dark #}
+        <div>
+          <div class="text-[11px] uppercase tracking-wide text-zinc-500 mb-2">Dark</div>
+          <div class="dark bg-surface-primary border border-default rounded-lg p-4">
+            <div class="grid grid-cols-5 gap-2 mb-4">
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-important"></div><code class="text-[10px] font-mono text-secondary">important</code></div>
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-success"></div><code class="text-[10px] font-mono text-secondary">success</code></div>
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-warning"></div><code class="text-[10px] font-mono text-secondary">warning</code></div>
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-info"></div><code class="text-[10px] font-mono text-secondary">info</code></div>
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-focus-ring"></div><code class="text-[10px] font-mono text-secondary">focus</code></div>
+            </div>
+            <div class="flex flex-col gap-2">
+              <div class="rounded-md border border-success/30 bg-success/12 text-success px-3 py-2 text-sm">Success notice (hue + opacity)</div>
+              <div class="rounded-md border border-important/30 bg-important/12 text-important px-3 py-2 text-sm">Error notice (important)</div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+      <div class="mt-2 text-[11px] text-zinc-500 font-mono">app.css :: --color-important / -success / -warning / -info / -focus-ring</div>
+    </section>
+
     {# Text-color ramp (LEGACY -- superseded by the token section above; kept
        until the call sites migrate off raw zinc). Five roles, five shades.
        Banished: text-zinc-600 (consolidated into 500 or 700 depending on

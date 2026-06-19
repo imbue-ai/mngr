@@ -115,6 +115,13 @@
   --color-fill-subtle: var(--c-fill-subtle);
   --color-fill-hover: var(--c-fill-hover);
   --color-fill-active: var(--c-fill-active);
+  /* status / feedback: text-/bg-/border-{important,success,warning,info}
+     (tints via /opacity) + ring-focus-ring */
+  --color-important: var(--c-important);
+  --color-success: var(--c-success);
+  --color-warning: var(--c-warning);
+  --color-info: var(--c-info);
+  --color-focus-ring: var(--c-focus-ring);
 }
 
 /*
@@ -155,6 +162,15 @@
 
 :root {
   --shadow-seam: 0 4px 10px -6px rgba(0, 0, 0, 0.35);
+  /* Status / feedback (Figma). Single hue per semantic, mode-independent --
+     they read on both light and dark surfaces; tints for notice/badge
+     backgrounds are derived with an opacity modifier (e.g. bg-success/10).
+     Add a .dark override later only if a hue needs a contrast tweak. */
+  --c-important: #f50d00;
+  --c-success: #5c8a3c;
+  --c-warning: #d49a2c;
+  --c-info: #527ea3;
+  --c-focus-ring: #0a84ffe5;
 }
 
 /*
