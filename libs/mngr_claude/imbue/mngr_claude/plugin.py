@@ -341,6 +341,23 @@ class ClaudeAgentConfig(AgentTypeConfig):
         "not provisioned or run.",
     )
 
+    @classmethod
+    def migrate_legacy_config_fields(cls, raw_config: dict[str, Any]) -> dict[str, Any]:
+        """Translate the deprecated ``use_env_config_dir`` key to ``isolate_local_config_dir``.
+
+        ``use_env_config_dir`` was renamed to ``isolate_local_config_dir`` with its
+        boolean inverted (``use_env_config_dir = true`` -> ``isolate_local_config_dir
+        = false``). The config loader calls this before validating field names, so
+        configs still using the old key keep working. The new key wins if both are
+        present. Returns a new dict; the input is not mutated.
+        """
+        if "use_env_config_dir" not in raw_config:
+            return raw_config
+        migrated = {key: value for key, value in raw_config.items() if key != "use_env_config_dir"}
+        if "isolate_local_config_dir" not in migrated:
+            migrated["isolate_local_config_dir"] = not raw_config["use_env_config_dir"]
+        return migrated
+
 
 class ProvisioningContext(FrozenModel):
     """Runtime context derived from host type and transfer mode."""
@@ -2690,10 +2707,16 @@ def _claude_items_to_preserve_for_discovered_agent(ref: DiscoveredAgent) -> list
     """Return the items to preserve for a discovered (offline) Claude agent, or None to skip it."""
     if not _should_preserve_sessions(ref):
         return None
-    # Default True (isolated): an agent record that never set the field -- or one
-    # created before this field existed -- is treated as having an isolated
-    # per-agent config dir, so its ``projects/`` is preserved.
-    is_shared_config = not ref.certified_data.get("agent_config", {}).get("isolate_local_config_dir", True)
+    agent_config = ref.certified_data.get("agent_config", {})
+    # Default isolated: an agent record that set neither key -- or one created
+    # before either existed -- is treated as having an isolated per-agent config
+    # dir, so its ``projects/`` is preserved. The new ``isolate_local_config_dir``
+    # key wins; fall back to the deprecated ``use_env_config_dir`` for records
+    # written before the rename.
+    if "isolate_local_config_dir" in agent_config:
+        is_shared_config = not agent_config["isolate_local_config_dir"]
+    else:
+        is_shared_config = bool(agent_config.get("use_env_config_dir", False))
     return _claude_preserved_items(is_shared_config=is_shared_config)
 
 

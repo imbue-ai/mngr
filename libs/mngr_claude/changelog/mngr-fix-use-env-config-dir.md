@@ -1,4 +1,6 @@
-Renamed the claude agent type's `use_env_config_dir` option to `isolate_local_config_dir` and flipped its meaning: it now defaults to `true` (each local agent gets its own per-agent Claude config dir, so mngr never touches your default config). Set `isolate_local_config_dir = false` to share the user's `$CLAUDE_CONFIG_DIR` instead (the old `use_env_config_dir = true` behavior).
+Renamed the claude agent type's `use_env_config_dir` option to `isolate_local_config_dir` and flipped its meaning: it now defaults to `true` (each local agent gets its own per-agent Claude config dir, so mngr never touches your default config). Set `isolate_local_config_dir = false` to share the user's `$CLAUDE_CONFIG_DIR` instead (the old `use_env_config_dir = true` behavior). The flag only affects local agents; remote agents always use an isolated config dir and ignore it.
+
+The old `use_env_config_dir` key still works as a deprecated alias: configs that set it are automatically migrated to `isolate_local_config_dir` (with the boolean inverted), so existing config files keep working.
 
 **Bug fix:** in shared mode (`isolate_local_config_dir = false`), mngr now injects `CLAUDE_CONFIG_DIR` into the agent environment, pointing at the user's shared config dir (`$CLAUDE_CONFIG_DIR`, or `~/.claude` when unset). Previously it was left unset, so the launch command's session-file lookup saw an empty `$CLAUDE_CONFIG_DIR` and claude could not find the user's config or sessions.
 

@@ -2744,6 +2744,35 @@ def test_on_before_provisioning_succeeds_with_credentials(
 
 
 # =============================================================================
+# Deprecated use_env_config_dir alias migration Tests
+# =============================================================================
+
+
+def test_migrate_legacy_config_maps_use_env_config_dir_true_to_isolate_false() -> None:
+    """The deprecated use_env_config_dir=true maps to isolate_local_config_dir=false (inverted)."""
+    migrated = ClaudeAgentConfig.migrate_legacy_config_fields({"use_env_config_dir": True})
+    assert migrated == {"isolate_local_config_dir": False}
+
+
+def test_migrate_legacy_config_maps_use_env_config_dir_false_to_isolate_true() -> None:
+    migrated = ClaudeAgentConfig.migrate_legacy_config_fields({"use_env_config_dir": False})
+    assert migrated == {"isolate_local_config_dir": True}
+
+
+def test_migrate_legacy_config_prefers_new_key_when_both_present() -> None:
+    """When both keys are set, the new isolate_local_config_dir wins and the legacy key is dropped."""
+    migrated = ClaudeAgentConfig.migrate_legacy_config_fields(
+        {"use_env_config_dir": True, "isolate_local_config_dir": True}
+    )
+    assert migrated == {"isolate_local_config_dir": True}
+
+
+def test_migrate_legacy_config_is_noop_without_legacy_key() -> None:
+    raw = {"isolate_local_config_dir": False, "version": "2.1.50"}
+    assert ClaudeAgentConfig.migrate_legacy_config_fields(raw) == raw
+
+
+# =============================================================================
 # Subscription-credential isolation warning Tests
 # =============================================================================
 

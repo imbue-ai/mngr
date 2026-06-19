@@ -1,3 +1,5 @@
 Added `mngr config wizard`, an interactive command that walks through common one-time user-scope configuration. Each step short-circuits when its setting is already configured, so it is safe to re-run.
 
 The first step (shown only when the claude agent type is installed) asks whether to enable config-dir isolation for local Claude agents: enabling it keeps each agent's Claude config separate so mngr never touches your default config, while disabling it shares your default config -- which is what Claude subscriptions on macOS need to keep credentials working. The choice is written to `agent_types.claude.isolate_local_config_dir` in your user config.
+
+The config loader now lets an agent-type config class migrate deprecated/renamed field names before the unknown-field check (via an optional `migrate_legacy_config_fields` hook), so configs written for an older version of a plugin keep loading instead of being rejected.
