@@ -1288,6 +1288,10 @@ class VpsProvider(BaseProviderInstance):
             try:
                 self.create_snapshot(host_id)
             except MngrError as e:
+                # FIXME: stopping a host should be like stopping an agent -- various components can fail, and those
+                #  failures ought to be collected as the process continues, then at the very end, the exception can be
+                #  raised (and include all of the things that went wrong, and triggrer a non-zero exit code, while
+                #  still ensuring that we stop and clean up as much as possible)
                 logger.warning("Failed to create snapshot before stop: {}", e)
 
         # Disconnect SSH before stopping (also disconnect the passed-in host
@@ -1353,18 +1357,9 @@ class VpsProvider(BaseProviderInstance):
             # The in-container activity watcher is a backgrounded process that does
             # not survive the container restart, so relaunch it -- else auto-stop-
             # on-idle would silently stop working after the first resume (for every
-            # vps provider, not just AWS). Best-effort: a resumed host that
-            # can't auto-stop is better than a failed resume.
+            # vps provider, not just AWS).
             with log_span("Relaunching activity watcher"):
-                try:
-                    realizer.start_activity_watcher(outer, handle)
-                except MngrError as e:
-                    logger.warning(
-                        "Failed to relaunch the activity watcher on resume for host {} ({}); "
-                        "this host will not auto-stop on idle until it is recreated",
-                        host_id,
-                        e,
-                    )
+                realizer.start_activity_watcher(outer, handle)
 
         logger.info("Host {} started", host_id)
         return host_obj
