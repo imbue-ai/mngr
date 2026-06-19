@@ -29,7 +29,7 @@
 
     var link = document.createElement('a');
     link.href = mngrForwardOrigin + '/goto/' + agentId + '/';
-    link.className = 'text-blue-600 hover:underline';
+    link.className = 'text-accent hover:underline';
     link.textContent = wsName;
     h.appendChild(link);
 
@@ -37,7 +37,7 @@
       h.appendChild(document.createTextNode(' ('));
       var acctLink = document.createElement('a');
       acctLink.href = '/accounts';
-      acctLink.className = 'text-blue-600 hover:underline';
+      acctLink.className = 'text-accent hover:underline';
       acctLink.textContent = accountEmail;
       h.appendChild(acctLink);
       h.appendChild(document.createTextNode(')'));

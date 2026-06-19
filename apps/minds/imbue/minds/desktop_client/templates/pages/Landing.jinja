@@ -392,7 +392,7 @@
       var text = '';
       var tone = 'bg-fill-subtle text-secondary';
       if (state === 'BACKING_UP') {
-        text = 'Backing up…'; tone = 'bg-blue-100 text-blue-800';
+        text = 'Backing up…'; tone = 'bg-accent/15 text-accent';
       } else if (state === 'BACKED_UP') {
         text = 'Backed up ' + relativeAgo(status.last_success_at); tone = 'bg-success/15 text-success';
       } else if (state === 'NEVER') {

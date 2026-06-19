@@ -336,15 +336,15 @@
 
     {# Status / feedback tokens. One solid hue per semantic (Figma),
        mode-independent; notice / badge backgrounds are derived with an
-       opacity modifier (bg-success/12 etc.). focus-ring is the focus
-       indicator color. data-token marks each --color-* for the drift guard. #}
+       opacity modifier (bg-success/12 etc.). data-token marks each
+       --color-* for the drift guard. #}
     <section class="mb-12">
       <h2 class="text-lg font-semibold text-zinc-900 mb-1">Status / feedback tokens</h2>
       <p class="text-xs text-zinc-500 mb-4">
         One solid hue per semantic (<code>important</code> / <code>success</code>
-        / <code>warning</code> / <code>info</code>) plus <code>focus-ring</code>.
-        Same in both modes; notice / badge tints are derived via an opacity
-        modifier (e.g. <code>bg-success/12 border-success/30 text-success</code>).
+        / <code>warning</code> / <code>info</code>). Same in both modes; notice /
+        badge tints are derived via an opacity modifier (e.g.
+        <code>bg-success/12 border-success/30 text-success</code>).
       </p>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
 
@@ -352,12 +352,11 @@
         <div>
           <div class="text-[11px] uppercase tracking-wide text-zinc-500 mb-2">Light</div>
           <div class="light bg-surface-primary border border-default rounded-lg p-4">
-            <div class="grid grid-cols-5 gap-2 mb-4">
+            <div class="grid grid-cols-4 gap-2 mb-4">
               <div data-token="--color-important" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-important"></div><code class="text-[10px] font-mono text-secondary">important</code></div>
               <div data-token="--color-success" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-success"></div><code class="text-[10px] font-mono text-secondary">success</code></div>
               <div data-token="--color-warning" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-warning"></div><code class="text-[10px] font-mono text-secondary">warning</code></div>
               <div data-token="--color-info" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-info"></div><code class="text-[10px] font-mono text-secondary">info</code></div>
-              <div data-token="--color-focus-ring" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-focus-ring"></div><code class="text-[10px] font-mono text-secondary">focus</code></div>
             </div>
             <div class="flex flex-col gap-2">
               <div class="rounded-md border border-success/30 bg-success/12 text-success px-3 py-2 text-sm">Success notice (hue + opacity)</div>
@@ -370,12 +369,11 @@
         <div>
           <div class="text-[11px] uppercase tracking-wide text-zinc-500 mb-2">Dark</div>
           <div class="dark bg-surface-primary border border-default rounded-lg p-4">
-            <div class="grid grid-cols-5 gap-2 mb-4">
+            <div class="grid grid-cols-4 gap-2 mb-4">
               <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-important"></div><code class="text-[10px] font-mono text-secondary">important</code></div>
               <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-success"></div><code class="text-[10px] font-mono text-secondary">success</code></div>
               <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-warning"></div><code class="text-[10px] font-mono text-secondary">warning</code></div>
               <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-info"></div><code class="text-[10px] font-mono text-secondary">info</code></div>
-              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-focus-ring"></div><code class="text-[10px] font-mono text-secondary">focus</code></div>
             </div>
             <div class="flex flex-col gap-2">
               <div class="rounded-md border border-success/30 bg-success/12 text-success px-3 py-2 text-sm">Success notice (hue + opacity)</div>
@@ -385,7 +383,56 @@
         </div>
 
       </div>
-      <div class="mt-2 text-[11px] text-zinc-500 font-mono">app.css :: --color-important / -success / -warning / -info / -focus-ring</div>
+      <div class="mt-2 text-[11px] text-zinc-500 font-mono">app.css :: --color-important / -success / -warning / -info</div>
+    </section>
+
+    {# Accent / interactive token. One mode-independent blue -- the system
+       accent -- behind links, selected states, focus rings and progress.
+       Solid for selection/progress, derived tints/rings via /opacity.
+       data-token marks --color-accent for the drift guard. #}
+    <section class="mb-12">
+      <h2 class="text-lg font-semibold text-zinc-900 mb-1">Accent / interactive token</h2>
+      <p class="text-xs text-zinc-500 mb-4">
+        One <code>accent</code> hue (Apple blue), same in both modes, behind
+        links, selected states, focus rings and progress. Solid for
+        selection / progress (<code>bg-accent</code>, <code>border-accent</code>);
+        lighter rings and tints derive via an opacity modifier (e.g.
+        <code>ring-accent/40</code>, <code>bg-accent/15</code>).
+      </p>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+
+        {# Light #}
+        <div>
+          <div class="text-[11px] uppercase tracking-wide text-zinc-500 mb-2">Light</div>
+          <div class="light bg-surface-primary border border-default rounded-lg p-4 flex flex-col gap-3">
+            <div class="grid grid-cols-4 gap-2">
+              <div data-token="--color-accent" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-accent"></div><code class="text-[10px] font-mono text-secondary">accent</code></div>
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-accent/40"></div><code class="text-[10px] font-mono text-secondary">/40</code></div>
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-accent/15"></div><code class="text-[10px] font-mono text-secondary">/15</code></div>
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md border border-accent"></div><code class="text-[10px] font-mono text-secondary">border</code></div>
+            </div>
+            <a href="#" class="text-accent hover:underline text-sm">A text link (text-accent)</a>
+            <div class="h-1.5 bg-fill-subtle rounded-full overflow-hidden"><div class="h-full w-2/3 rounded-full bg-accent"></div></div>
+          </div>
+        </div>
+
+        {# Dark #}
+        <div>
+          <div class="text-[11px] uppercase tracking-wide text-zinc-500 mb-2">Dark</div>
+          <div class="dark bg-surface-primary border border-default rounded-lg p-4 flex flex-col gap-3">
+            <div class="grid grid-cols-4 gap-2">
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-accent"></div><code class="text-[10px] font-mono text-secondary">accent</code></div>
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-accent/40"></div><code class="text-[10px] font-mono text-secondary">/40</code></div>
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-accent/15"></div><code class="text-[10px] font-mono text-secondary">/15</code></div>
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md border border-accent"></div><code class="text-[10px] font-mono text-secondary">border</code></div>
+            </div>
+            <a href="#" class="text-accent hover:underline text-sm">A text link (text-accent)</a>
+            <div class="h-1.5 bg-fill-subtle rounded-full overflow-hidden"><div class="h-full w-2/3 rounded-full bg-accent"></div></div>
+          </div>
+        </div>
+
+      </div>
+      <div class="mt-2 text-[11px] text-zinc-500 font-mono">app.css :: --color-accent (links, selection, focus rings, progress)</div>
     </section>
 
     {# Text-color ramp (LEGACY -- superseded by the token section above; kept
@@ -606,11 +653,11 @@
         <div class="mt-1 text-[11px] text-zinc-500 font-mono">templates/pages/Landing.jinja, templates/pages/Destroying.jinja :: .accent-spine from app.css</div>
       </div>
 
-      {# Focus ring -- shared by TextInput, Select, Textarea via INPUT_BASE #}
+      {# Focus ring -- the accent ring shared by TextInput, Select, Textarea via INPUT_BASE #}
       <div class="mb-6">
         <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Form controls (TextInput / Select / Textarea)</div>
         <div class="bg-white border border-zinc-200 rounded-lg p-4 flex flex-col gap-3">
-          <TextInput name="styleguide-focus-ring-input" placeholder="TextInput -- click to focus" />
+          <TextInput name="styleguide-accent-input" placeholder="TextInput -- click to focus" />
           <div class="flex items-center gap-2">
             <Select name="styleguide-select" width="w-48">
               <option>Option A</option>
@@ -621,7 +668,7 @@
           </div>
           <Textarea name="styleguide-textarea" rows="3" extra="font-mono" :value="'shared focus ring\\nshared border\\nshared px-3 py-2.5'" />
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">TextInput.jinja / Select.jinja / Textarea.jinja :: INPUT_BASE (focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15)</div>
+        <div class="mt-1 text-[11px] text-zinc-500 font-mono">TextInput.jinja / Select.jinja / Textarea.jinja :: INPUT_BASE (focus:border-accent focus:ring-2 focus:ring-accent/40)</div>
       </div>
 
       {# Shadow seam #}
@@ -754,7 +801,7 @@
       </div>
 
       {# Inline links. Use the Link component for real navigations -- it
-         picks up the ``text-blue-600 hover:underline`` recipe with an
+         picks up the ``text-accent hover:underline`` recipe with an
          optional ``weight="medium"`` for prominent auth-flow affordances. #}
       <div class="mb-6">
         <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Links</div>
@@ -781,7 +828,7 @@
         <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Buttons -- link style (via extra=)</div>
         <div class="bg-white border border-zinc-200 rounded-lg p-4 flex flex-wrap items-center gap-4">
           <Button variant="ghost"
-                  extra="!p-0 !bg-transparent !text-xs !font-normal !text-blue-600 hover:!bg-transparent hover:underline hover:!text-blue-700">
+                  extra="!p-0 !bg-transparent !text-xs !font-normal !text-accent hover:!bg-transparent hover:underline">
             Configure&hellip;
           </Button>
           <Button variant="ghost"
@@ -790,7 +837,7 @@
           </Button>
         </div>
         <p class="mt-1 text-[11px] text-zinc-500">
-          For text-link toggles use a ghost Button with ``extra=&quot;!p-0 !bg-transparent !text-xs !font-normal !text-blue-600 hover:!bg-transparent hover:underline hover:!text-blue-700&quot;``. The ``!`` prefix is load-bearing -- without it, the Button's base ``font-medium text-sm`` and the ghost variant's ``text-zinc-700`` win and the toggle reads as a heavy button rather than a link.
+          For text-link toggles use a ghost Button with ``extra=&quot;!p-0 !bg-transparent !text-xs !font-normal !text-accent hover:!bg-transparent hover:underline&quot;``. The ``!`` prefix is load-bearing -- without it, the Button's base ``font-medium text-sm`` and the ghost variant's ``text-primary`` win and the toggle reads as a heavy button rather than a link.
         </p>
         <div class="mt-0.5 text-[11px] text-zinc-500 font-mono">Button.jinja :: variant=&quot;ghost&quot; with extra= overrides</div>
       </div>

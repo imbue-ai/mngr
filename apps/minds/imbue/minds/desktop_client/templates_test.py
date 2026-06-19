@@ -756,7 +756,7 @@ def test_render_dev_styleguide_page_surfaces_tokens_and_component_widgets() -> N
     # reaches the rendered page.
     assert ">Primary<" in html and ">Danger<" in html
     assert "All set: action completed." in html
-    assert 'name="styleguide-focus-ring-input"' in html
+    assert 'name="styleguide-accent-input"' in html
 
 
 def test_dev_styleguide_token_swatches_enumerate_design_tokens() -> None:
@@ -1408,8 +1408,8 @@ def test_select_renders_with_option_children_and_focus_ring() -> None:
     assert "<select" in html
     assert 'name="launch_mode"' in html
     assert '<option value="LIMA">lima</option>' in html
-    # Inherits the shared INPUT_BASE focus ring.
-    assert "focus:border-focus-ring" in html
+    # Inherits the shared INPUT_BASE accent focus ring.
+    assert "focus:border-accent" in html
     assert "focus:ring-2" in html
     # Default width is w-full.
     assert "w-full" in html
@@ -1422,11 +1422,11 @@ def test_select_honors_width_prop() -> None:
     assert " w-full " not in html
 
 
-def test_link_regular_uses_blue_underline_recipe() -> None:
+def test_link_regular_uses_accent_underline_recipe() -> None:
     html = CATALOG.render("Link", href="/x", _content="back").strip()
     assert "<a " in html
     assert 'href="/x"' in html
-    assert "text-blue-600" in html
+    assert "text-accent" in html
     assert "hover:underline" in html
     assert "font-medium" not in html
 
@@ -1460,7 +1460,7 @@ def test_textarea_renders_value_in_content_with_shared_shell() -> None:
     assert 'rows="6"' in html
     assert "line1\nline2" in html
     assert "font-mono" in html
-    assert "focus:border-focus-ring" in html
+    assert "focus:border-accent" in html
 
 
 def test_section_header_plain_has_no_divider_classes() -> None:

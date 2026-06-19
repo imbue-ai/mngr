@@ -116,12 +116,14 @@
   --color-fill-hover: var(--c-fill-hover);
   --color-fill-active: var(--c-fill-active);
   /* status / feedback: text-/bg-/border-{important,success,warning,info}
-     (tints via /opacity) + ring-focus-ring */
+     (tints via /opacity) */
   --color-important: var(--c-important);
   --color-success: var(--c-success);
   --color-warning: var(--c-warning);
   --color-info: var(--c-info);
-  --color-focus-ring: var(--c-focus-ring);
+  /* accent / interactive: text-accent (links), border-/bg-accent (selection,
+     progress), ring-accent/NN (focus rings); tints via /opacity */
+  --color-accent: var(--c-accent);
 }
 
 /*
@@ -170,7 +172,11 @@
   --c-success: #5c8a3c;
   --c-warning: #d49a2c;
   --c-info: #527ea3;
-  --c-focus-ring: #0a84ffe5;
+  /* Accent / interactive (links, selected states, focus rings, progress).
+     One mode-independent blue -- the system accent -- reading on both light
+     and dark surfaces. Lighter rings / tints derive from it via an opacity
+     modifier (e.g. ring-accent/40, bg-accent/15). */
+  --c-accent: #0a84ff;
 }
 
 /*
@@ -280,8 +286,8 @@ html {
   border-color: rgba(9, 9, 11, 0.2);
 }
 .opt-selected {
-  border-color: #2563eb;
-  background: rgba(37, 99, 235, 0.06);
+  border-color: var(--c-accent);
+  background: rgb(from var(--c-accent) r g b / 0.06);
 }
 .opt-radio {
   flex: 0 0 auto;
@@ -293,14 +299,14 @@ html {
   position: relative;
 }
 .opt-selected .opt-radio {
-  border-color: #2563eb;
+  border-color: var(--c-accent);
 }
 .opt-selected .opt-radio::after {
   content: '';
   position: absolute;
   inset: 3.5px;
   border-radius: 50%;
-  background: #2563eb;
+  background: var(--c-accent);
 }
 .opt-body {
   flex: 1;
@@ -323,14 +329,15 @@ html {
   animation: spin 800ms linear infinite;
 }
 /*
- * Accent-toned spinner: blue ring + saturated blue top, used inside
+ * Accent-toned spinner: faint accent ring + saturated accent top, used inside
  * primary-action affordances (the backup-export "downloading..."
  * indicator). The base ``.spinner`` provides geometry + animation;
- * ``.spinner-accent`` only overrides the colors.
+ * ``.spinner-accent`` only overrides the colors (both derived from the one
+ * accent token -- the ring is the accent at low alpha).
  */
 .spinner-accent {
-  border-color: #93c5fd; /* blue-300 */
-  border-top-color: #2563eb; /* blue-600 */
+  border-color: rgb(from var(--c-accent) r g b / 0.4);
+  border-top-color: var(--c-accent);
 }
 @keyframes spin {
   to {
@@ -354,7 +361,7 @@ html {
   box-shadow:
     inset 0 0 0 2px rgba(0, 0, 0, 0.25),
     0 0 0 2px #fff,
-    0 0 0 4px #2563eb; /* blue-600 selection ring */
+    0 0 0 4px var(--c-accent); /* accent selection ring */
 }
 
 /*
@@ -369,7 +376,7 @@ html {
   box-shadow:
     inset 0 0 0 1px rgba(0, 0, 0, 0.25),
     0 0 0 2px #fff,
-    0 0 0 4px #2563eb;
+    0 0 0 4px var(--c-accent);
 }
 
 /*
@@ -388,7 +395,7 @@ html {
   box-shadow:
     inset 0 0 0 2px rgba(0, 0, 0, 0.25),
     0 0 0 2px #fff,
-    0 0 0 4px #60a5fa; /* blue-400: a 2px ring, lighter than the blue-600 selected ring */
+    0 0 0 4px rgb(from var(--c-accent) r g b / 0.5); /* accent at half alpha: lighter than the solid selected ring */
 }
 /*
  * When the active color is a custom hex (no palette swatch matches),
@@ -401,7 +408,7 @@ html {
   box-shadow:
     inset 0 0 0 2px rgba(0, 0, 0, 0.25),
     0 0 0 2px #fff,
-    0 0 0 4px #2563eb; /* blue-600, matches .color-swatch[aria-checked="true"] */
+    0 0 0 4px var(--c-accent); /* matches .color-swatch[aria-checked="true"] */
 }
 
 /*

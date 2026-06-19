@@ -173,12 +173,12 @@ The "ghost Button that looks like a text link" recipe in the styleguide
 needs every override prefixed with `!`:
 
 ```
-extra="!p-0 !bg-transparent !text-xs !font-normal !text-blue-600
-       hover:!bg-transparent hover:underline hover:!text-blue-700"
+extra="!p-0 !bg-transparent !text-xs !font-normal !text-accent
+       hover:!bg-transparent hover:underline"
 ```
 
 The `!` is load-bearing -- the Button base's `font-medium text-sm` and
-the ghost variant's `text-zinc-700` have the same Tailwind specificity
+the ghost variant's `text-primary` have the same Tailwind specificity
 as the extras and land earlier in the generated stylesheet, so they
 win without `!`. Without it, the "link" reads as a heavy button.
 

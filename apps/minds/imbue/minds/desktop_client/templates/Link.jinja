@@ -1,6 +1,6 @@
 {#def href, weight="regular", extra="" #}
 {#
-  Inline text link. Renders ``<a class="text-blue-600 hover:underline">``
+  Inline text link. Renders ``<a class="text-accent hover:underline">``
   with an optional ``font-medium`` weight for the auth-flow "Sign in" /
   "Create account" / "Back to home" affordances.
 
@@ -18,5 +18,5 @@
   story is cleaner.
 #}
 {%- set _weight = "font-medium " if weight == "medium" else "" -%}
-{%- set _cls = "text-blue-600 hover:underline " ~ _weight ~ extra -%}
+{%- set _cls = "text-accent hover:underline " ~ _weight ~ extra -%}
 <a {{ attrs.render(href=href, classes=_cls) }}>{{ content }}</a>

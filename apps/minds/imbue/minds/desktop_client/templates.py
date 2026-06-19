@@ -72,12 +72,12 @@ _BTN_VARIANTS: Final[Mapping[str, str]] = {
 
 # Shared Tailwind class string for the three form-control components
 # (TextInput.jinja, Select.jinja, Textarea.jinja). Exposed as a Catalog
-# global so the focus-ring token, border, padding and text size live in
+# global so the accent focus ring, border, padding and text size live in
 # exactly one place. Width and border-radius vary per-component so they
 # are NOT included here -- each component sets its own.
 _INPUT_BASE: Final[str] = (
     "px-3 py-2.5 text-sm border border-strong bg-surface-primary text-primary "
-    "outline-none transition focus:border-focus-ring focus:ring-2 focus:ring-focus-ring/40"
+    "outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/40"
 )
 
 # Inner SVG path data for the lucide-style 24x24 stroke icons. The
