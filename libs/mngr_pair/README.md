@@ -6,9 +6,7 @@ A plugin for [mngr](https://github.com/imbue-ai/mngr) that adds the `mngr pair` 
 
 ## Overview
 
-`mngr pair` watches for file changes on both sides and syncs them in real-time using [unison](https://github.com/bcpierce00/unison). If both directories are git repositories, the command first synchronizes git state (branches and commits) before starting continuous file sync.
-
-This is useful for iterative workflows where you want to edit alongside an agent, reviewing and modifying its work as it happens.
+`mngr pair` watches for file changes on both sides and syncs them in real-time using [unison](https://github.com/bcpierce00/unison). If both directories are git repositories, it first synchronizes git state (branches and commits) before starting continuous file sync. This lets you edit alongside an agent, reviewing and modifying its work as it happens.
 
 ## Requirements
 
