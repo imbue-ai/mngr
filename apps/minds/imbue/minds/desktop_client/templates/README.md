@@ -81,14 +81,14 @@ in sync:
 | `.code-pill` | Inline `<code>` pill (bg-fill-subtle, rounded-md, monospace, 0.95em). Match `Sharing.jinja`'s service-name pills. |
 | `.accent-spine` | Vertical workspace-accent stripe on the left edge. Used by Landing project rows + Destroying. |
 | `.sidebar-dot` | Per-workspace accent circle in the workspace menu rows. Sized by Tailwind (`w-2.5 h-2.5 rounded-full`); colored inline per workspace by `sidebar.js` / `chrome.js`. Not an app.css class -- listed here as the accent-surface to keep in sync. (The workspace row itself carries the `.sidebar-item` class purely as a JS selector hook + `is-current` / `is-stale` state marker; it has no app.css styling.) |
-| `.titlebar-title` / `.titlebar-btn` / `.titlebar-btn-danger` | Accent-aware titlebar foreground utilities. Read `--titlebar-fg` with varying alpha for the title / nav-icon / hover-tint hierarchy; `-danger` keeps the destructive red hover regardless of accent. |
+| `.titlebar-surface` / `.titlebar-btn-danger` | Titlebar self-theming. `.titlebar-surface` (toggled on the bar by `chrome.js` while a workspace accent is active) derives a black/white contrast from `--titlebar-bg` in pure CSS (lch relative color) and re-bases the foreground text tokens on it, so the title + buttons read on any accent -- no JS luminance. `-danger` keeps the destructive red hover regardless of accent. |
 
 ## Where the shared tokens live
 
 | Source | Contents |
 |---|---|
 | `templates.py` | `BTN_BASE` / `BTN_SIZES` / `BTN_VARIANTS` (button shell), `INPUT_BASE` (form-control shell), `ICONS_24` / `ICONS_12` (SVG path data). Exposed as JinjaX Catalog globals. |
-| `static/app.css` | `.minds-card`, `.spinner` + `.spinner-accent`, `.code-pill`, `.accent-spine`, `.accent-swatch`, `.color-swatch` / `.color-hex-pill` (workspace color picker rim + selection-ring / hex-input pill), `.titlebar-title` / `.titlebar-btn` / `.titlebar-btn-danger`, `--shadow-seam`, `--workspace-accent` / `--titlebar-bg` / `--titlebar-fg` (set via inline style on the document root by chrome.js). |
+| `static/app.css` | The `@theme` design tokens (colors, radius, type ramp, elevation) plus hand-written recipes: `.minds-card`, `.spinner` + `.spinner-accent`, `.code-pill`, `.accent-spine`, `.accent-swatch`, `.color-swatch` / `.color-hex-pill` (workspace color picker rim + selection-ring / hex-input pill), `.titlebar-surface` / `.titlebar-btn-danger`, and the runtime `--workspace-accent` / `--titlebar-bg` (set via inline style on the document root by chrome.js). |
 | `templates/pages/DevStyleguide.jinja` | The live visual catalog. Mount at `/_dev/styleguide` in a running app. Tells you what exists and what each variant looks like. |
 
 The type ramp (h1/h2/body/caption sizes), the text-color ramp (the 5

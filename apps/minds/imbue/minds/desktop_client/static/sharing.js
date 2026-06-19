@@ -69,7 +69,7 @@
       left.appendChild(prefix);
     }
     var emailEl = document.createElement('span');
-    emailEl.className = 'type-body' + (variant === 'removed' ? 'text-tertiary' : 'text-primary');
+    emailEl.className = 'type-body ' + (variant === 'removed' ? 'text-tertiary' : 'text-primary');
     emailEl.textContent = email;
     left.appendChild(emailEl);
     row.appendChild(left);
