@@ -17,6 +17,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
+from imbue.mngr.agents.update_policy import AgentUpdatePolicy
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.errors import AgentStartError
@@ -122,6 +123,11 @@ def test_get_install_binary_name_is_opencode() -> None:
 def test_get_install_command_installs_opencode() -> None:
     agent = OpenCodeAgent.model_construct(agent_config=OpenCodeAgentConfig())
     assert agent.get_install_command() == "curl -fsSL https://opencode.ai/install | bash"
+
+
+def test_get_install_command_pins_version() -> None:
+    agent = OpenCodeAgent.model_construct(agent_config=OpenCodeAgentConfig(version="0.4.10"))
+    assert agent.get_install_command() == "curl -fsSL https://opencode.ai/install | VERSION=0.4.10 bash"
 
 
 def test_is_unattended_enabled_reflects_auto_allow_permissions() -> None:
@@ -345,6 +351,33 @@ def test_provision_injects_wildcard_allow_when_auto_allow(
     _provision(agent)
     parsed = json.loads(get_opencode_config_file_path(agent._get_opencode_config_dir()).read_text())
     assert parsed["permission"] == {"*": "allow"}
+
+
+def test_provision_disables_autoupdate_when_policy_never(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """update_policy=NEVER writes autoupdate:false into the per-agent opencode.json."""
+    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig(update_policy=AgentUpdatePolicy.NEVER))
+    _provision(agent)
+    parsed = json.loads(get_opencode_config_file_path(agent._get_opencode_config_dir()).read_text())
+    assert parsed["autoupdate"] is False
+
+
+def test_provision_disables_autoupdate_by_default_on_attended_local(opencode_agent: OpenCodeAgent) -> None:
+    """The default policy disables opencode's auto-update, even on an attended local host."""
+    _provision(opencode_agent)
+    parsed = json.loads(get_opencode_config_file_path(opencode_agent._get_opencode_config_dir()).read_text())
+    assert parsed["autoupdate"] is False
+
+
+def test_provision_leaves_autoupdate_unset_when_policy_auto(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """Explicit AUTO opts back into opencode's auto-update (no autoupdate key written)."""
+    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig(update_policy=AgentUpdatePolicy.AUTO))
+    _provision(agent)
+    parsed = json.loads(get_opencode_config_file_path(agent._get_opencode_config_dir()).read_text())
+    assert "autoupdate" not in parsed
 
 
 def test_provision_installs_lifecycle_plugin(opencode_agent: OpenCodeAgent) -> None:
@@ -797,8 +830,10 @@ def test_get_lifecycle_state_promotes_running_to_waiting_when_blocked_on_permiss
     agent_dir.mkdir(parents=True, exist_ok=True)
     (agent_dir / ACTIVE_MARKER_FILENAME).write_text("")
     session_name = agent.session_name
+    window_name = agent.mngr_ctx.config.tmux.primary_window_name
+    # Name the primary window so lifecycle detection (which targets it by name) finds the pane.
     agent.host.execute_idempotent_command(
-        f"tmux new-session -d -s {shlex.quote(session_name)} {shlex.quote(str(fake_opencode))} 600",
+        f"tmux new-session -d -s {shlex.quote(session_name)} -n {shlex.quote(window_name)} {shlex.quote(str(fake_opencode))} 600",
         timeout_seconds=5.0,
     )
     try:

@@ -2654,7 +2654,7 @@ log "=== Shutdown script completed ==="
         prefix = self.mngr_ctx.config.prefix
 
         # Build a shell script that collects everything we need
-        script = build_listing_collection_script(host_dir, prefix)
+        script = build_listing_collection_script(host_dir, prefix, self.mngr_ctx.config.tmux.primary_window_name)
 
         with log_span("Collecting listing data via single SSH command", host_id=str(host.id)):
             result = host.execute_idempotent_command(script, timeout_seconds=30.0)

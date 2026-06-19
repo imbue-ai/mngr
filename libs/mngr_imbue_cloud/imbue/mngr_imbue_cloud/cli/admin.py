@@ -734,6 +734,37 @@ def _create_ovh_vps_pool_hosts(
         raise SystemExit(1)
 
 
+# Every pool_hosts column, in a stable display order, used to build BOTH the
+# `pool list` SELECT and the keys of each emitted JSON row -- so the two can
+# never drift. Hand-maintaining a subset is what silently dropped region,
+# backend_kind, and the slice identifiers (bare_metal_server_id /
+# lima_instance_name / lima_disk_name) from the output, making every slice row
+# look like an OVH VPS with no region. emit_json serialises the UUID and
+# datetime values via its default=str, so no per-column coercion is needed.
+_POOL_HOST_LIST_COLUMNS: Final[tuple[str, ...]] = (
+    "id",
+    "host_name",
+    "status",
+    "region",
+    "backend_kind",
+    "attributes",
+    "vps_address",
+    "vps_instance_id",
+    "agent_id",
+    "host_id",
+    "ssh_user",
+    "ssh_port",
+    "container_ssh_port",
+    "bare_metal_server_id",
+    "lima_instance_name",
+    "lima_disk_name",
+    "leased_to_user",
+    "leased_at",
+    "released_at",
+    "created_at",
+)
+
+
 @pool.command(name="list")
 @click.option(
     "--database-url",
@@ -753,31 +784,11 @@ def pool_list(database_url: str | None) -> None:
     conn = psycopg2.connect(resolved_database_url)
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT id, vps_address, agent_id, host_id, status, attributes, "
-                "leased_to_user, leased_at, released_at, created_at "
-                "FROM pool_hosts ORDER BY created_at DESC"
-            )
+            cur.execute(f"SELECT {', '.join(_POOL_HOST_LIST_COLUMNS)} FROM pool_hosts ORDER BY created_at DESC")
             rows = cur.fetchall()
     finally:
         conn.close()
-    emit_json(
-        [
-            {
-                "id": str(row[0]),
-                "vps_address": row[1],
-                "agent_id": row[2],
-                "host_id": row[3],
-                "status": row[4],
-                "attributes": row[5],
-                "leased_to_user": row[6],
-                "leased_at": str(row[7]) if row[7] else None,
-                "released_at": str(row[8]) if row[8] else None,
-                "created_at": str(row[9]) if row[9] else None,
-            }
-            for row in rows
-        ]
-    )
+    emit_json([dict(zip(_POOL_HOST_LIST_COLUMNS, row, strict=True)) for row in rows])
 
 
 # ``pool_hosts.backend_kind`` value for bare-metal slices (lima VMs). OVH-VPS rows

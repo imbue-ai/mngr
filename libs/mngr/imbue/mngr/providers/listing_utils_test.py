@@ -46,6 +46,19 @@ def test_build_listing_collection_script_contains_key_sections() -> None:
     assert "/mngr/agents" in script
 
 
+def test_build_listing_collection_script_targets_named_primary_window() -> None:
+    """Lifecycle detection must target the agent window by name, not the literal :0,
+    so it works regardless of the user's tmux base-index."""
+    script = build_listing_collection_script("/mngr", "mngr-", window_name="agent")
+    assert ':agent" -F' in script
+    assert ':0" -F' not in script
+
+
+def test_build_listing_collection_script_uses_custom_window_name() -> None:
+    script = build_listing_collection_script("/mngr", "mngr-", window_name="primary")
+    assert ':primary" -F' in script
+
+
 def test_parse_listing_collection_output_basic() -> None:
     output = "\n".join(
         [

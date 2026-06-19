@@ -2260,6 +2260,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         env_vars["MNGR_AGENT_STATE_DIR"] = str(agent_state_dir)
         env_vars["MNGR_AGENT_WORK_DIR"] = str(agent.work_dir)
         env_vars["LLM_USER_PATH"] = str(agent_state_dir / "llm_data")
+        # The agent's primary tmux window name, exported so in-session helpers
+        # (e.g. the ttyd attach script) can target the window by name rather than
+        # the literal :0 index, keeping them independent of the user's base-index.
+        env_vars["MNGR_PRIMARY_WINDOW_NAME"] = self.mngr_ctx.config.tmux.primary_window_name
 
         # 2. Add programmatic defaults
         base_branch = (options.git.base_branch if options.git else None) or ""
@@ -2522,8 +2526,8 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             data_path = agent_state_dir / "data.json"
 
             # Rename the tmux session first (idempotent -- no-ops if session doesn't exist with old name)
-            old_session_name = f"{self.mngr_ctx.config.prefix}{old_name}"
-            new_session_name = f"{self.mngr_ctx.config.prefix}{new_name}"
+            old_session_name = self.mngr_ctx.config.agent_session_name(old_name)
+            new_session_name = self.mngr_ctx.config.agent_session_name(new_name)
             old_session_target = TmuxSessionTarget(session_name=old_session_name).as_shell_arg()
             result = self.execute_idempotent_command(
                 f"tmux has-session -t {old_session_target} 2>/dev/null && "
@@ -2690,6 +2694,26 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             "",
         ]
 
+        # Source the user's extra mngr-specific tmux config if one is configured.
+        # Unlike this auto-generated file, that path is never overwritten by mngr,
+        # so it is a stable place for users to add their own session config. (This
+        # is distinct from ~/.tmux.conf, which tmux loads itself at server start;
+        # mngr does not re-source that, to avoid re-running non-idempotent user
+        # config on every agent creation.) The path is interpolated unquoted so a
+        # leading ~ is expanded by the host's shell and tmux; additional_config_path
+        # is expected to be an absolute or ~-relative path without shell-special
+        # characters.
+        additional_config_path = self.mngr_ctx.config.tmux.additional_config_path
+        if additional_config_path is not None:
+            additional_config_str = str(additional_config_path)
+            lines.extend(
+                [
+                    "# Source the user's extra mngr tmux config if it exists",
+                    f"if-shell 'test -f {additional_config_str}' 'source-file {additional_config_str}'",
+                    "",
+                ]
+            )
+
         if self.is_local:
             # Local hosts: detach and exec into mngr destroy/stop directly
             lines.extend(
@@ -2777,7 +2801,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     else:
                         onboarding_text = ONBOARDING_TEXT
 
-                session_name = f"{self.mngr_ctx.config.prefix}{agent.name}"
+                session_name = agent.session_name
                 with log_span("Starting agent {} in tmux session {}", agent.name, session_name):
                     # Build and execute a single combined shell command for this agent
                     combined_command = _build_start_agent_shell_command(
@@ -2789,6 +2813,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                         tmux_config_path=tmux_config_path,
                         unset_vars=self.mngr_ctx.config.unset_vars,
                         host_dir=self.host_dir,
+                        primary_window_name=self.mngr_ctx.config.tmux.primary_window_name,
                         tmux_options=self.get_agent_tmux_options(agent),
                         onboarding_text=onboarding_text,
                     )
@@ -3064,7 +3089,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                         continue
 
                     current_agents.append(agent)
-                    session_name = f"{self.mngr_ctx.config.prefix}{agent.name}"
+                    session_name = self.mngr_ctx.config.agent_session_name(agent.name)
                     all_pids.extend(self._collect_session_pids(session_name, failures, agent.name))
                     # Also pick up orphans (e.g. children of an OOM-killed claude) that
                     # reparented to PID 1 and so are invisible to the pane-descendant walk.
@@ -3105,7 +3130,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 # "can't find session") is benign; a session that exists but cannot be killed
                 # is a real LOCAL_STATE_REMAINS failure.
                 for agent in current_agents:
-                    session_name = f"{self.mngr_ctx.config.prefix}{agent.name}"
+                    session_name = self.mngr_ctx.config.agent_session_name(agent.name)
                     _result, failure = self._run_classified_cleanup_command(
                         f"tmux kill-session -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()}",
                         failure_category=CleanupFailureCategory.LOCAL_STATE_REMAINS,
@@ -3298,6 +3323,7 @@ def _build_start_agent_shell_command(
     tmux_config_path: Path,
     unset_vars: Sequence[str],
     host_dir: Path,
+    primary_window_name: str,
     tmux_options: AgentTmuxOptions,
     onboarding_text: str | None = None,
 ) -> str:
@@ -3333,6 +3359,10 @@ def _build_start_agent_shell_command(
     # Code's Ink framework to render at 1 column wide, breaking marker-based
     # message sending. Passing -x/-y appears to use a different tmux code
     # path that sets the PTY dimensions correctly at creation time.
+    # Name the primary window (-n) and target it by name everywhere below, so
+    # mngr's targeting is independent of the user's tmux `base-index` setting
+    # (a `set -g base-index 1` in ~/.tmux.conf would otherwise create the agent
+    # window at index 1 while mngr hardcoded `:0`).
     # Width/height come from the agent's tmux options (falling back to the
     # historical 200x50). Unless window-size is "manual", the window will still be
     # resized to match the client's terminal when attached.
@@ -3341,6 +3371,7 @@ def _build_start_agent_shell_command(
     steps.append(
         "tmux new-session -d"
         f" -s {shlex.quote(session_name)}"
+        f" -n {shlex.quote(primary_window_name)}"
         f" -x {tmux_width} -y {tmux_height}"
         f" -c {shlex.quote(str(agent.work_dir))}"
         f" {shlex.quote(env_shell_cmd)}"
@@ -3352,11 +3383,11 @@ def _build_start_agent_shell_command(
     # not the whole && chain.
     steps.append(f"(tmux source-file {shlex.quote(str(tmux_config_path))} || true)")
 
-    quoted_exact_agent_window = TmuxWindowTarget(session_name=session_name, window=0).as_shell_arg()
+    quoted_exact_agent_window = TmuxWindowTarget(session_name=session_name, window=primary_window_name).as_shell_arg()
 
     # Apply the requested resize policy (e.g. "manual" pins the window to the
     # dimensions above so attaching clients never resize it). window-size is a
-    # window option, so it is set on the agent's window (:0). When unset, tmux's
+    # window option, so it is set on the agent's primary window. When unset, tmux's
     # own default ("latest") is left in place -- today's behavior.
     if tmux_options.window_size is not None:
         steps.append(
@@ -3423,8 +3454,8 @@ def _build_start_agent_shell_command(
         steps.append(f"tmux select-window -t {quoted_exact_agent_window}")
 
     # Send the agent command as literal keys, then Enter to execute.
-    # Target window :0 explicitly so this works even after additional windows
-    # have been created (which changes the active window).
+    # Target the agent's primary window by name explicitly so this works even
+    # after additional windows have been created (which changes the active window).
     steps.append(f"tmux send-keys -t {quoted_exact_agent_window} -l -- {shlex.quote(command)}")
     steps.append(f"tmux send-keys -t {quoted_exact_agent_window} Enter")
 
@@ -3442,7 +3473,7 @@ def _build_start_agent_shell_command(
     )
     steps.append(activity_printf_cmd)
 
-    # Build the process activity monitor script (runs in the background, inspects window :0 where the agent is assumed to be running)
+    # Build the process activity monitor script (runs in the background, inspects the agent's primary window where the agent is assumed to be running)
     # Wait up to 10 seconds for the PANE_PID to appear (tmux can take a moment to start)
     max_wait_seconds = 10
     tmux_list_panes_cmd = f"tmux list-panes -t {quoted_exact_agent_window} -F '#{{pane_pid}}' 2>/dev/null | head -n 1"

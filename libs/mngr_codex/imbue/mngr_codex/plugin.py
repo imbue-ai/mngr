@@ -92,6 +92,7 @@ from imbue.mngr.agents.common_transcript import maybe_provision_common_transcrip
 from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
 from imbue.mngr.agents.installation import ensure_cli_installed
+from imbue.mngr.agents.installation import verify_pinned_cli_version
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.api.preservation import PreservedItem
@@ -296,6 +297,13 @@ class CodexAgentConfig(AgentTypeConfig):
         "`NEVER`: only log a non-blocking notice, never update. Updating mutates the user's "
         "*global* codex install. mngr always disables codex's own blocking startup update prompt.",
     )
+    version: str | None = Field(
+        default=None,
+        description="Pin the codex CLI version to install (e.g., '0.139.0'). When set, installation runs "
+        "`npm i -g @openai/codex@<version>` and provisioning verifies the installed codex matches, erroring "
+        "on a mismatch. When None (the default), installs the latest version. A pin also suppresses the "
+        "provision-time update check (`update_policy` is ignored), since updating would defeat the pin.",
+    )
     # emit_common_transcript gates the rollout -> common-schema converter. The
     # raw transcript is always captured (HasTranscriptMixin); only the common
     # converter is gated.
@@ -414,16 +422,42 @@ class CodexAgent(
         return policy
 
     def reconcile_installed_version(self, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
-        # codex follows an update policy (ask / auto / never) rather than pinning a version: a
-        # network-free check of the installed codex against its own recorded latest, then the
-        # update_policy action. Best-effort and never fatal -- an outdated codex still runs.
+        # With a pinned version, verify the installed codex matches and error on a mismatch --
+        # and skip the update check entirely, since prompting to update would defeat the pin.
+        if self.agent_config.version is not None:
+            self._verify_pinned_codex_version(host)
+            return
+        # Otherwise codex follows an update policy (ask / auto / never) rather than pinning a
+        # version: a network-free check of the installed codex against its own recorded latest,
+        # then the update_policy action. Best-effort and never fatal -- an outdated codex still runs.
         self._maybe_check_for_codex_update(host, self._resolve_user_codex_home(host), mngr_ctx)
+
+    def _verify_pinned_codex_version(self, host: OnlineHostInterface) -> None:
+        """Verify the installed codex matches ``config.version``, erroring on a mismatch.
+
+        Called only when a version is pinned. A mismatch means the wrong codex is on
+        PATH (e.g. a pre-existing global install that ``check_installation`` left in
+        place), which the user must resolve -- re-install the pinned version or update
+        the pin. Delegates to the shared verifier so codex matches the pin the same
+        (scheme-agnostic) way as the other agents.
+        """
+        pinned_version = self.agent_config.version
+        if pinned_version is None:
+            return
+        verify_pinned_cli_version(
+            host,
+            command=str(self.agent_config.command),
+            binary_name=self.get_install_binary_name(),
+            pinned_version=pinned_version,
+        )
 
     def get_install_binary_name(self) -> str:
         return "codex"
 
     def get_install_command(self) -> str:
-        return "npm i -g @openai/codex"
+        version = self.agent_config.version
+        package = f"@openai/codex@{version}" if version is not None else "@openai/codex"
+        return f"npm i -g {shlex.quote(package)}"
 
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve transcripts and session-id history before the state dir is deleted."""

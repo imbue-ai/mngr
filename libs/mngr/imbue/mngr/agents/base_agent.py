@@ -29,6 +29,7 @@ from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import determine_lifecycle_state
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.tmux import LONG_MESSAGE_THRESHOLD
+from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import capture_tmux_pane_content
 from imbue.mngr.interfaces.agent import AgentConfigT
@@ -217,11 +218,22 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         try:
             # Get pane state and pid in one command.
             result = self.host.execute_idempotent_command(
-                f"tmux list-panes -t {self.tmux_target.as_shell_arg()} "
-                f"-F '#{{pane_dead}}|#{{pane_current_command}}|#{{pane_pid}}' 2>/dev/null | head -n 1",
+                self._build_lifecycle_probe_command(),
                 timeout_seconds=5.0,
             )
             tmux_info = result.stdout.strip() if result.success else None
+
+            # Migrate pre-upgrade agents whose primary window predates named-window
+            # targeting: if the by-name probe missed but the session exists, rename
+            # its primary window to the configured name and probe once more.
+            if not tmux_info:
+                is_migrated = self._migrate_unnamed_primary_window()
+                if is_migrated:
+                    reprobe_result = self.host.execute_idempotent_command(
+                        self._build_lifecycle_probe_command(),
+                        timeout_seconds=5.0,
+                    )
+                    tmux_info = reprobe_result.stdout.strip() if reprobe_result.success else None
 
             # Get ps output for descendant process detection
             ps_result = self.host.execute_idempotent_command(
@@ -248,6 +260,43 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         except HostConnectionError:
             logger.trace("Determined agent {} lifecycle state: STOPPED (host connection error)", self.name)
             return AgentLifecycleState.STOPPED
+
+    def _build_lifecycle_probe_command(self) -> str:
+        """Build the command that probes the agent's primary window for lifecycle state."""
+        return (
+            f"tmux list-panes -t {self.tmux_target.as_shell_arg()} "
+            f"-F '#{{pane_dead}}|#{{pane_current_command}}|#{{pane_pid}}' 2>/dev/null | head -n 1"
+        )
+
+    def _migrate_unnamed_primary_window(self) -> bool:
+        """One-time migration for in-flight agents created before named-window targeting.
+
+        Agents started before mngr named the primary window (``tmux.primary_window_name``)
+        have an unnamed primary window (tmux auto-named it after the running command), so
+        targeting it by name misses and every window-targeted op silently fails. When the
+        session exists but the by-name probe missed, rename the session's primary (lowest-index)
+        window to the configured name so name-based targeting resolves again. This exists ONLY
+        to migrate such pre-upgrade sessions; it is not part of normal operation, and a
+        correctly-named session never reaches this path (the probe would have hit).
+
+        Selecting the lowest-index window (rather than ``:0`` or the active window) is robust to
+        the user's ``base-index`` and to extra mngr windows (ttyd, watchers): the agent always
+        runs in the session's first-created window. Runs through the host exec layer, so it works
+        on remote hosts too. Returns whether the rename command succeeded.
+        """
+        session_target = TmuxSessionTarget(session_name=self.session_name)
+        quoted_primary_window_name = shlex.quote(self.mngr_ctx.config.tmux.primary_window_name)
+        # Guard with has-session so a non-existent session is a no-op, then rename the
+        # lowest-index window (the agent's primary window) to the configured name.
+        rename_command = (
+            f"tmux has-session -t {session_target.as_shell_arg()} 2>/dev/null && "
+            f"MNGR_PRIMARY_WINDOW_INDEX=$(tmux list-windows -t {session_target.as_shell_arg()} "
+            f"-F '#I' 2>/dev/null | sort -n | head -n 1) && "
+            f'tmux rename-window -t {session_target.as_shell_arg()}:"$MNGR_PRIMARY_WINDOW_INDEX" '
+            f"{quoted_primary_window_name}"
+        )
+        result = self.host.execute_idempotent_command(rename_command, timeout_seconds=5.0)
+        return result.success
 
     def _get_command_basename(self, command: CommandString) -> str:
         """Extract the basename from a command string.
@@ -290,18 +339,16 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         return stored
 
     @property
-    def session_name(self) -> str:
-        return f"{self.mngr_ctx.config.prefix}{self.name}"
-
-    @property
     def tmux_target(self) -> TmuxWindowTarget:
-        """Structured tmux target for the agent's primary window (window 0).
+        """Structured tmux target for the agent's primary window.
 
-        Always pins window 0 because agents run there; using the session
-        without a window component selects the *currently active* window, which
-        is wrong when additional windows exist (e.g., watchers, ttyd).
+        Pins the named primary window (``tmux.primary_window_name``, default
+        ``agent``) because agents run there; using the session without a window
+        component selects the *currently active* window, which is wrong when
+        additional windows exist (e.g., watchers, ttyd). Targeting by name (not
+        ``:0``) keeps this correct regardless of the user's tmux ``base-index``.
         """
-        return TmuxWindowTarget(session_name=self.session_name, window=0)
+        return TmuxWindowTarget(session_name=self.session_name, window=self.mngr_ctx.config.tmux.primary_window_name)
 
     @contextmanager
     def _message_lock(self) -> Generator[None, None, None]:
