@@ -81,6 +81,24 @@ _HOST_NAME_PREFIX: Final[str] = "mngr-"
 # ``NullHostDirBackend`` (the default ``_host_dir_backend``) and installs no sync daemon.
 
 
+def _gcp_unavailable_error(name: ProviderInstanceName, reason: str) -> ProviderUnavailableError:
+    """Build a ``ProviderUnavailableError`` with GCP-specific, actionable help text.
+
+    The generic ``ProviderUnavailableError`` help text tells the user to "start Docker", which is
+    wrong advice for a GCP ADC / project failure -- so we curate the guidance toward resolving
+    Application Default Credentials and the project.
+    """
+    help_text = (
+        "GCP could not be reached. Check, in order:\n"
+        "  - credentials: run `gcloud auth application-default login` (or set "
+        "GOOGLE_APPLICATION_CREDENTIALS to a service-account key);\n"
+        "  - project: set `project_id` in [providers.gcp], or run `gcloud config set project <id>`;\n"
+        "  - one-time setup: run `mngr gcp prepare` if you have not yet.\n"
+        f"Or disable the provider: mngr config set --scope user providers.{name}.is_enabled false"
+    )
+    return ProviderUnavailableError(name, reason, user_help_text=help_text)
+
+
 def _resolve_credentials_project_and_zone_or_unavailable(
     name: ProviderInstanceName, config: GcpProviderConfig, concurrency_group: ConcurrencyGroup
 ) -> tuple[Credentials, str, str]:
@@ -108,7 +126,7 @@ def _resolve_credentials_project_and_zone_or_unavailable(
         credentials, adc_project = config.get_credentials_and_resolved_project()
         project_id = config.resolve_project_id(adc_project)
     except (ValueError, google_auth_exceptions.GoogleAuthError) as e:
-        raise ProviderUnavailableError(name, str(e)) from e
+        raise _gcp_unavailable_error(name, str(e)) from e
     return credentials, project_id, zone
 
 

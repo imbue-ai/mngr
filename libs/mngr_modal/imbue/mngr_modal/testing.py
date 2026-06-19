@@ -4,9 +4,11 @@ Non-fixture helpers for creating test objects. Fixtures that use these
 helpers live in conftest.py.
 """
 
+import os
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import Final
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
@@ -27,6 +29,12 @@ from imbue.mngr_modal.instance import TAG_HOST_NAME
 from imbue.mngr_modal.instance import TAG_USER_PREFIX
 from imbue.modal_proxy.interface import SandboxInterface
 from imbue.modal_proxy.testing import FakeModalInterface
+
+# Release-test opt-in flag. Mirrors ``AWS_RELEASE_TESTS_OPT_IN`` in mngr_aws:
+# the Modal release trip only runs when this is set, on top of the Modal
+# credential check. Read once at import time so the test module and any
+# gating helper observe the same value.
+MODAL_RELEASE_TESTS_OPT_IN: Final[bool] = os.environ.get("MNGR_MODAL_RELEASE_TESTS") == "1"
 
 _DEFAULT_SANDBOX_CONFIG = SandboxConfig()
 

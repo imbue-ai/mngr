@@ -29,9 +29,9 @@ Run manually (release tests do not run in CI):
         uv run pytest --no-cov -n 0 -m release \\
         libs/mngr_gcp/imbue/mngr_gcp/test_release_gcp.py
 
-The ``PYTEST_MAX_DURATION_SECONDS=1800`` is important: the two lifecycle tests
-each boot a real GCE VM serially (``-n 0``), which exceeds the default ~600s
-budget. That env var sets the pytest global-lock deadline -- once it passes, a
+The ``PYTEST_MAX_DURATION_SECONDS=1800`` is important: the provider release
+trips each boot a real GCE VM serially (``-n 0``), which exceeds the default
+~600s budget. That env var sets the pytest global-lock deadline -- once it passes, a
 concurrent pytest run reclaims (kills) this one -- so a too-low value SIGTERMs
 the suite mid-test and can leak a VM. Invoke ``uv run pytest`` directly (not
 ``just test``, whose recipe hardcodes the 600s budget). Other long real-resource
@@ -40,13 +40,18 @@ release tests follow the same convention (e.g. ``test_adopt_session`` at 1500).
 
 import os
 import subprocess
-import time
-from collections.abc import Iterator
+from collections.abc import Mapping
+from collections.abc import Sequence
 from pathlib import Path
 
 import google.auth
 import pytest
 
+from imbue.mngr.providers.provider_release_testing import run_provider_release_trip1
+from imbue.mngr.providers.provider_release_testing import run_provider_release_trip2
+from imbue.mngr.providers.provider_release_testing import run_provider_release_trip3
+from imbue.mngr.providers.provider_release_testing import run_provider_release_trip4
+from imbue.mngr_gcp.client import GCP_PYTEST_LAUNCHED_LABEL
 from imbue.mngr_gcp.client import GcpVpsClient
 from imbue.mngr_gcp.testing import GCP_DEFAULT_REGION
 from imbue.mngr_gcp.testing import GCP_DEFAULT_ZONE
@@ -55,6 +60,9 @@ from imbue.mngr_gcp.testing import GCP_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS
 from imbue.mngr_gcp.testing import GCP_TEST_NAME_PREFIX
 from imbue.mngr_gcp.testing import gcp_credentials_available
 from imbue.mngr_gcp.testing import get_default_project
+from imbue.mngr_vps.primitives import IsolationMode
+from imbue.mngr_vps.testing import VpsCloudReleaseProfile
+from imbue.mngr_vps.testing import find_handle_by_launched_label
 
 pytestmark = [
     pytest.mark.release,
@@ -189,244 +197,120 @@ def _gcp_release_test_firewall_prepared(
     )
 
 
-@pytest.fixture()
-def gcp_test_settings_dir(
+# =============================================================================
+# Trip 1 -- the shared provider release lifecycle (create -> stop/start ->
+# sketchy kill -> gc), parametrized over isolation mode. See
+# `imbue.mngr.providers.provider_release_testing` and
+# `specs/provider-release-tests.md`.
+# =============================================================================
+
+
+class _GcpReleaseProfile(VpsCloudReleaseProfile):
+    """GCP plumbing for the shared provider release trip."""
+
+    provider_name = "gcp"
+    name_prefix = GCP_TEST_NAME_PREFIX
+
+    # Trip 4: GCP curates the missing-credential help text toward the ADC login command (the
+    # spec's divergence was fixed in this PR -- see `_gcp_unavailable_error` in mngr_gcp/backend.py).
+    has_curated_unavailable_help = True
+    credential_setup_command = "gcloud auth application-default login"
+
+    def __init__(self, client: GcpVpsClient, isolation: IsolationMode, project: str) -> None:
+        super().__init__(client, isolation)
+        self._gcp_client = client
+        self._project = project
+
+    def unavailable_reason(self) -> str | None:
+        if not (gcp_credentials_available() and GCP_RELEASE_TESTS_OPT_IN):
+            return "GCP ADC or MNGR_GCP_RELEASE_TESTS=1 not set"
+        return None
+
+    def write_settings(self, settings_dir: Path) -> None:
+        _write_release_settings(
+            settings_dir, self._project, isolation="NONE" if self._isolation is IsolationMode.NONE else None
+        )
+
+    def create_extra_args(self) -> Sequence[str]:
+        return ()
+
+    def make_credentials_unresolvable_env(self) -> Mapping[str, str | None]:
+        # Point ADC's well-known-file resolution at an empty location and clear every project /
+        # key env var so ``google.auth.default()`` finds nothing and raises
+        # ``DefaultCredentialsError`` (a ``GoogleAuthError``) -> the contract
+        # ``ProviderUnavailableError``. The conftest pins ``CLOUDSDK_CONFIG`` to the real gcloud
+        # dir, so overriding it to a nonexistent path is what actually hides ADC.
+        return {
+            "CLOUDSDK_CONFIG": "/nonexistent/gcloud/config",
+            "GOOGLE_APPLICATION_CREDENTIALS": "/nonexistent/gcloud/adc.json",
+            "GOOGLE_CLOUD_PROJECT": None,
+            "GCLOUD_PROJECT": None,
+            "MNGR_GCP_PROJECT": None,
+        }
+
+    def find_launched_host_handle(self, host_name: str) -> str | None:
+        return find_handle_by_launched_label(self._gcp_client.list_instances(), GCP_PYTEST_LAUNCHED_LABEL)
+
+
+@pytest.mark.rsync
+@pytest.mark.parametrize("isolation", [IsolationMode.CONTAINER, IsolationMode.NONE])
+def test_provider_release_trip1(
+    isolation: IsolationMode,
     tmp_path: Path,
+    temp_git_repo: Path,
+    gcp_release_client: GcpVpsClient,
     gcp_release_test_project: str,
     _gcp_release_test_firewall_prepared: None,
-) -> Iterator[Path]:
-    """Write a project settings.toml that sets the GCP project + auto-shutdown TTL.
-
-    The release tests must set ``auto_shutdown_seconds`` on the GCP provider
-    config so the GCE-native self-delete safety net actually fires; the
-    production GcpProvider refuses to create an instance under pytest without it.
-    Using ``MNGR_PROJECT_CONFIG_DIR`` to point the subprocess at this settings
-    file keeps the test-only TTL out of production code paths.
-    """
-    _write_release_settings(tmp_path, gcp_release_test_project)
-    yield tmp_path
+) -> None:
+    run_provider_release_trip1(
+        _GcpReleaseProfile(gcp_release_client, isolation, gcp_release_test_project), tmp_path, temp_git_repo
+    )
 
 
-@pytest.fixture()
-def gcp_bare_test_settings_dir(
+@pytest.mark.rsync
+@pytest.mark.parametrize("isolation", [IsolationMode.CONTAINER, IsolationMode.NONE])
+def test_provider_release_trip2(
+    isolation: IsolationMode,
     tmp_path: Path,
+    temp_git_repo: Path,
+    gcp_release_client: GcpVpsClient,
     gcp_release_test_project: str,
     _gcp_release_test_firewall_prepared: None,
-) -> Iterator[Path]:
-    """Like ``gcp_test_settings_dir`` but with ``isolation = "NONE"`` (bare placement).
-
-    Exercises the no-Docker shape: the agent runs directly on the GCE instance's
-    OS, reached at ``<ip>:22`` as root, with no container.
-    """
-    _write_release_settings(tmp_path, gcp_release_test_project, isolation="NONE")
-    yield tmp_path
-
-
-def _run_mngr(
-    project_config_dir: Path,
-    cwd: Path,
-    *args: str,
-    timeout: int = 300,
-) -> subprocess.CompletedProcess[str]:
-    """Run a mngr command with the test settings.toml in scope.
-
-    ``cwd`` must be inside a git repository -- ``mngr create`` reads the source
-    from the current git checkout unless ``--from`` is passed. The release tests
-    supply the ``temp_git_repo`` fixture for this.
-
-    Streams stdout+stderr to a file under ``project_config_dir`` rather than
-    buffering with ``capture_output=True``. The buffered mode loses everything on
-    ``TimeoutExpired``, which makes diagnosing a stuck ``mngr create``
-    impossible.
-    """
-    env = os.environ.copy()
-    env["MNGR_PROJECT_CONFIG_DIR"] = str(project_config_dir)
-    cmd = ["uv", "run", "mngr", *args]
-    log_path = Path(project_config_dir) / f"mngr-{args[0] if args else 'cmd'}.log"
-    with log_path.open("w") as log_file:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            text=True,
-            cwd=str(cwd),
-            env=env,
-        )
-        try:
-            returncode = proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-            # 124 is the GNU-coreutils ``timeout`` convention.
-            returncode = 124
-    log_text = log_path.read_text()
-    return subprocess.CompletedProcess(
-        args=cmd,
-        returncode=returncode,
-        stdout=log_text,
-        stderr=""
-        if returncode == 0
-        else (
-            "see stdout (subprocess stderr was merged into stdout)\n"
-            + (f"subprocess timed out after {timeout}s\n" if returncode == 124 else "")
-        ),
+) -> None:
+    run_provider_release_trip2(
+        _GcpReleaseProfile(gcp_release_client, isolation, gcp_release_test_project), tmp_path, temp_git_repo
     )
-
-
-# =============================================================================
-# Provider lifecycle (full create / exec / stop / start / destroy)
-# =============================================================================
 
 
 @pytest.mark.rsync
-def test_provider_lifecycle_create_exec_and_destroy(
-    gcp_test_settings_dir: Path,
+@pytest.mark.parametrize("isolation", [IsolationMode.CONTAINER, IsolationMode.NONE])
+def test_provider_release_trip3(
+    isolation: IsolationMode,
+    tmp_path: Path,
     temp_git_repo: Path,
+    gcp_release_client: GcpVpsClient,
+    gcp_release_test_project: str,
+    _gcp_release_test_firewall_prepared: None,
 ) -> None:
-    agent_name = f"{GCP_TEST_NAME_PREFIX}{int(time.time()) % 100000}"
-
-    result = _run_mngr(
-        gcp_test_settings_dir,
-        temp_git_repo,
-        "create",
-        agent_name,
-        "--type",
-        "command",
-        "--provider",
-        "gcp",
-        "--no-connect",
-        "--",
-        "sleep",
-        "99999",
+    run_provider_release_trip3(
+        _GcpReleaseProfile(gcp_release_client, isolation, gcp_release_test_project), tmp_path, temp_git_repo
     )
-    assert result.returncode == 0, f"Create failed: {result.stderr}\n--- stdout ---\n{result.stdout}"
-    assert "successfully" in result.stdout.lower(), f"unexpected create output: {result.stdout}"
-
-    try:
-        result = _run_mngr(gcp_test_settings_dir, temp_git_repo, "exec", agent_name, "echo hello-from-gcp")
-        assert result.returncode == 0, f"Exec failed: {result.stderr}"
-        assert "hello-from-gcp" in result.stdout
-
-        result = _run_mngr(gcp_test_settings_dir, temp_git_repo, "exec", agent_name, "test -d /mngr && echo exists")
-        assert result.returncode == 0, f"host_dir check failed: {result.stderr}"
-        assert "exists" in result.stdout
-
-        result = _run_mngr(gcp_test_settings_dir, temp_git_repo, "list")
-        assert result.returncode == 0, f"List failed: {result.stderr}"
-        assert agent_name in result.stdout
-        assert "gcp" in result.stdout
-    finally:
-        # --force skips the destroy confirmation. Result intentionally not
-        # checked: best-effort cleanup.
-        _run_mngr(gcp_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=180)
 
 
-@pytest.mark.rsync
-def test_provider_lifecycle_create_stop_start_destroy(
-    gcp_test_settings_dir: Path,
+def test_provider_release_trip4(
+    tmp_path: Path,
     temp_git_repo: Path,
+    gcp_release_client: GcpVpsClient,
+    gcp_release_test_project: str,
 ) -> None:
-    agent_name = f"{GCP_TEST_NAME_PREFIX}ss-{int(time.time()) % 100000}"
-
-    result = _run_mngr(
-        gcp_test_settings_dir,
+    # No-boot CLI error-classification trip: not parametrized over isolation (the error paths are
+    # isolation-agnostic) and no ``rsync`` mark (it never provisions a host). No firewall-prepare
+    # dependency either -- nothing is created.
+    run_provider_release_trip4(
+        _GcpReleaseProfile(gcp_release_client, IsolationMode.CONTAINER, gcp_release_test_project),
+        tmp_path,
         temp_git_repo,
-        "create",
-        agent_name,
-        "--type",
-        "command",
-        "--provider",
-        "gcp",
-        "--no-connect",
-        "--",
-        "sleep",
-        "99999",
     )
-    assert result.returncode == 0, f"Create failed: {result.stderr}\n--- stdout ---\n{result.stdout}"
-    assert "successfully" in result.stdout.lower(), f"unexpected create output: {result.stdout}"
-
-    try:
-        result = _run_mngr(gcp_test_settings_dir, temp_git_repo, "stop", agent_name)
-        assert result.returncode == 0, f"Stop failed: {result.stderr}"
-
-        result = _run_mngr(gcp_test_settings_dir, temp_git_repo, "list")
-        assert result.returncode == 0
-        assert agent_name in result.stdout
-
-        result = _run_mngr(gcp_test_settings_dir, temp_git_repo, "start", agent_name, "--no-connect")
-        assert result.returncode == 0, f"Start failed: {result.stderr}"
-
-        result = _run_mngr(gcp_test_settings_dir, temp_git_repo, "exec", agent_name, "echo alive-after-restart")
-        assert result.returncode == 0, f"Post-restart exec failed: {result.stderr}"
-        assert "alive-after-restart" in result.stdout
-    finally:
-        _run_mngr(gcp_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=180)
-
-
-# =============================================================================
-# Bare placement (isolation=NONE): the agent runs on the GCE instance's OS,
-# no Docker container. Mirrors the container lifecycle tests above.
-# =============================================================================
-
-
-@pytest.mark.rsync
-def test_bare_provider_lifecycle_create_exec_and_destroy(
-    gcp_bare_test_settings_dir: Path,
-    temp_git_repo: Path,
-) -> None:
-    """A bare GCE host comes up reachable, with the agent on the VM's OS (no container).
-
-    The bare-specific assertions prove the no-Docker shape end to end: the agent
-    shell is the GCE instance's root (``/var/lib/mngr-host`` -- the bare host
-    store -- exists, and there is no ``/.dockerenv``), and the mngr host_dir
-    symlink (``/mngr``) still works.
-    """
-    agent_name = f"{GCP_TEST_NAME_PREFIX}bare-{int(time.time()) % 100000}"
-    result = _run_mngr(
-        gcp_bare_test_settings_dir,
-        temp_git_repo,
-        "create",
-        agent_name,
-        "--type",
-        "command",
-        "--provider",
-        "gcp",
-        "--no-connect",
-        "--",
-        "sleep",
-        "99999",
-    )
-    assert result.returncode == 0, f"Create failed: {result.stderr}\n--- stdout ---\n{result.stdout}"
-    assert "successfully" in result.stdout.lower(), f"unexpected create output: {result.stdout}"
-
-    try:
-        result = _run_mngr(gcp_bare_test_settings_dir, temp_git_repo, "exec", agent_name, "echo hello-from-bare-gcp")
-        assert result.returncode == 0, f"Exec failed: {result.stderr}"
-        assert "hello-from-bare-gcp" in result.stdout
-
-        result = _run_mngr(
-            gcp_bare_test_settings_dir, temp_git_repo, "exec", agent_name, "test -d /mngr && echo exists"
-        )
-        assert result.returncode == 0, f"host_dir check failed: {result.stderr}"
-        assert "exists" in result.stdout
-
-        # Bare-specific: the agent shell is the VM's root, not a container.
-        result = _run_mngr(
-            gcp_bare_test_settings_dir,
-            temp_git_repo,
-            "exec",
-            agent_name,
-            "test -d /var/lib/mngr-host && test ! -e /.dockerenv && echo bare-confirmed",
-        )
-        assert result.returncode == 0, f"bare-shape check failed: {result.stderr}\n{result.stdout}"
-        assert "bare-confirmed" in result.stdout, f"expected a bare (non-container) host: {result.stdout}"
-
-        result = _run_mngr(gcp_bare_test_settings_dir, temp_git_repo, "list")
-        assert result.returncode == 0, f"List failed: {result.stderr}"
-        assert agent_name in result.stdout
-        assert "gcp" in result.stdout
-    finally:
-        _run_mngr(gcp_bare_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=180)
 
 
 # =============================================================================
