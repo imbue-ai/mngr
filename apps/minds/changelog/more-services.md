@@ -1,1 +1,1 @@
-Bump the bundled latchkey CLI to 2.17.0.
+Bump the bundled latchkey CLI to 2.17.1.
