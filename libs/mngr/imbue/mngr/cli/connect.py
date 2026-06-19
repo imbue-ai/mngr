@@ -125,7 +125,7 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
     # builtin tmux attach, mirroring how create/start honor connect_command.
     resolved_connect_command = resolve_connect_command(opts.connect_command, mngr_ctx)
     if resolved_connect_command is not None:
-        session_name = f"{mngr_ctx.config.prefix}{agent.name}"
+        session_name = agent.session_name
         run_connect_command(
             resolved_connect_command,
             str(agent.name),

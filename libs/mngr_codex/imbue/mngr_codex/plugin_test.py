@@ -919,8 +919,10 @@ def test_get_lifecycle_state_promotes_running_to_waiting_when_blocked_on_permiss
     agent_dir.mkdir(parents=True, exist_ok=True)
     (agent_dir / ACTIVE_MARKER_FILENAME).write_text("")
     session_name = agent.session_name
+    window_name = agent.mngr_ctx.config.tmux.primary_window_name
+    # Name the primary window so lifecycle detection (which targets it by name) finds the pane.
     agent.host.execute_idempotent_command(
-        f"tmux new-session -d -s {shlex.quote(session_name)} {shlex.quote(str(fake_codex))} 600",
+        f"tmux new-session -d -s {shlex.quote(session_name)} -n {shlex.quote(window_name)} {shlex.quote(str(fake_codex))} 600",
         timeout_seconds=5.0,
     )
     try:

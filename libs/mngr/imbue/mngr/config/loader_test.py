@@ -23,6 +23,7 @@ from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import PluginConfig
+from imbue.mngr.config.data_types import TmuxConfig
 from imbue.mngr.config.data_types import get_or_create_user_id
 from imbue.mngr.config.loader import _FileSettingsSource
 from imbue.mngr.config.loader import _NarrowingViolation
@@ -39,6 +40,7 @@ from imbue.mngr.config.loader import _parse_logging_config
 from imbue.mngr.config.loader import _parse_mngr_env_overrides
 from imbue.mngr.config.loader import _parse_plugins
 from imbue.mngr.config.loader import _parse_providers
+from imbue.mngr.config.loader import _parse_tmux_config
 from imbue.mngr.config.loader import _record_provenance
 from imbue.mngr.config.loader import block_disabled_plugins
 from imbue.mngr.config.loader import get_or_create_profile_dir
@@ -56,6 +58,7 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.registry import load_all_registries
 from imbue.mngr.utils.logging import LoggingConfig
+from imbue.overlay.markers import ScalarTuple
 
 hookimpl = pluggy.HookimplMarker("mngr")
 
@@ -693,6 +696,43 @@ def test_parse_logging_config_warns_on_unknown_fields_when_not_strict(log_warnin
 
 
 # =============================================================================
+# Tests for _parse_tmux_config
+# =============================================================================
+
+
+def test_parse_tmux_config_marks_string_attach_args_as_scalar_tuple() -> None:
+    """A string attach_args is shell-split and tagged ScalarTuple so narrowing
+    detection treats a higher-precedence string replacement as scalar replacement."""
+    result = _parse_tmux_config({"attach_args": "-CC -u"})
+    assert result.attach_args == ("-CC", "-u")
+    assert isinstance(result.attach_args, ScalarTuple)
+
+
+def test_parse_tmux_config_keeps_list_attach_args_as_plain_tuple() -> None:
+    """An explicit list attach_args is genuine aggregate intent, not a scalar string."""
+    result = _parse_tmux_config({"attach_args": ["-CC", "-u"]})
+    assert result.attach_args == ("-CC", "-u")
+    assert not isinstance(result.attach_args, ScalarTuple)
+
+
+def test_string_attach_args_replacement_is_not_flagged_as_narrowing() -> None:
+    """Replacing one string attach_args with another (e.g. '-CC -u' then '-2') is scalar
+    replacement, mirroring cli_args, so it must not trip the narrowing safety net."""
+    base = MngrConfig(prefix="mngr-", tmux=_parse_tmux_config({"attach_args": "-CC -u"}))
+    override = MngrConfig(prefix="mngr-", tmux=_parse_tmux_config({"attach_args": "-2"}))
+    _, narrowings = base.merge_with(override)
+    assert narrowings == []
+
+
+def test_list_attach_args_replacement_is_flagged_as_narrowing() -> None:
+    """A list override that drops base entries is aggregate narrowing and is flagged."""
+    base = MngrConfig(prefix="mngr-", tmux=TmuxConfig(attach_args=("-CC", "-u")))
+    override = MngrConfig(prefix="mngr-", tmux=_parse_tmux_config({"attach_args": ["-2"]}))
+    _, narrowings = base.merge_with(override)
+    assert narrowings == ["tmux.attach_args"]
+
+
+# =============================================================================
 # Tests for _parse_commands
 # =============================================================================
 
@@ -939,6 +979,9 @@ def test_load_config_threads_every_field_from_toml(
     assert config.default_destroyed_host_persisted_seconds == 12345.0
     assert config.retry.connect_retry_times == 5
     assert config.retry.connect_retry_delay == "10s"
+    assert config.tmux.primary_window_name == "main"
+    assert config.tmux.attach_args == ("-CC",)
+    assert config.tmux.additional_config_path == Path("~/.mngr/tmux.user.conf")
     assert "TEST_VAR" in config.unset_vars
     assert ProviderBackendName("local") in config.enabled_backends
     assert ".venv" in config.work_dir_extra_paths
@@ -1035,6 +1078,11 @@ _SAMPLE_CONFIG_VALUES: dict[str, Any] = {
     "work_dir_extra_paths": {".venv": "SHARE", ".test_output": "COPY"},
     "retry": {"connect_retry_times": 5, "connect_retry_delay": "10s"},
     "logging": {"file_level": "DEBUG"},
+    "tmux": {
+        "primary_window_name": "main",
+        "attach_args": ["-CC"],
+        "additional_config_path": "~/.mngr/tmux.user.conf",
+    },
     "is_remote_agent_installation_allowed": False,
     "connect_command": "my-connect",
     "is_nested_tmux_allowed": True,
@@ -1080,6 +1128,11 @@ connect_retry_delay = "10s"
 
 [logging]
 file_level = "DEBUG"
+
+[tmux]
+primary_window_name = "main"
+attach_args = ["-CC"]
+additional_config_path = "~/.mngr/tmux.user.conf"
 """
 
 
