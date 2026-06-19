@@ -53,6 +53,7 @@ members = [
     "minds",
     "modal-litellm",
     "modal-proxy",
+    "overlay",
     "remote-service-connector",
     "resource-guards",
     "skitwright",
@@ -2071,6 +2072,7 @@ dependencies = [
     { name = "docker" },
     { name = "imbue-common" },
     { name = "markdown-it-py" },
+    { name = "overlay" },
     { name = "packaging" },
     { name = "paramiko" },
     { name = "pluggy" },
@@ -2100,6 +2102,7 @@ requires-dist = [
     { name = "docker", specifier = "==7.1.0" },
     { name = "imbue-common", editable = "libs/imbue_common" },
     { name = "markdown-it-py", specifier = ">=2.2.0" },
+    { name = "overlay", editable = "libs/overlay" },
     { name = "packaging", specifier = ">=21.0" },
     { name = "paramiko", specifier = ">=3.0" },
     { name = "pluggy", specifier = ">=1.5.0" },
@@ -2188,6 +2191,7 @@ source = { editable = "libs/mngr_claude" }
 dependencies = [
     { name = "anthropic" },
     { name = "imbue-mngr" },
+    { name = "overlay" },
 ]
 
 [package.dev-dependencies]
@@ -2199,6 +2203,7 @@ dev = [
 requires-dist = [
     { name = "anthropic" },
     { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "overlay", editable = "libs/overlay" },
 ]
 
 [package.metadata.requires-dev]
@@ -3602,6 +3607,20 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/f3/c3/0c6798456bade745c75c452342dabacce5798196483e77e643be1f53877d/orjson-3.11.9-cp314-cp314-win_amd64.whl", hash = "sha256:32ef5f4283a3be81913947d19608eacb7c6608026851123790cd9cc8982af34b", size = 127078, upload-time = "2026-05-06T15:11:05.123Z" },
     { url = "https://files.pythonhosted.org/packages/16/21/5a3f1e8913103b703a436a5664238e5b965ec392b555fe68943ea3691e6b/orjson-3.11.9-cp314-cp314-win_arm64.whl", hash = "sha256:eebdbdeef0094e4f5aefa20dcd4eb2368ab5e7a3b4edea27f1e7b2892e009cf9", size = 126687, upload-time = "2026-05-06T15:11:06.602Z" },
 ]
+
+[[package]]
+name = "overlay"
+version = "0.1.0"
+source = { editable = "libs/overlay" }
+
+[package.optional-dependencies]
+dev = [
+    { name = "inline-snapshot" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "inline-snapshot", marker = "extra == 'dev'", specifier = ">=0.13" }]
+provides-extras = ["dev"]
 
 [[package]]
 name = "ovh"

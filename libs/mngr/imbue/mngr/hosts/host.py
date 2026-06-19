@@ -259,6 +259,26 @@ def read_json_dict_via_host(host: OnlineHostInterface, path: Path) -> dict[str, 
     return loaded if isinstance(loaded, dict) else {}
 
 
+def write_json_dict_via_host(
+    host: OnlineHostInterface, path: Path, data: dict[str, Any], *, make_parent: bool = False
+) -> None:
+    """Write-side counterpart to ``read_json_dict_via_host``.
+
+    Serializes ``data`` as pretty-printed JSON (two-space indent, trailing
+    newline) and writes it to ``path`` via the host (works for local or
+    remote hosts). When ``make_parent`` is True, creates the parent directory
+    first so the write does not depend on something else having created it.
+
+    Lives here rather than in ``file_utils`` because it needs
+    ``OnlineHostInterface``, which would create a circular import via
+    ``config.data_types``.
+    """
+    text = json.dumps(data, indent=2) + "\n"
+    if make_parent:
+        host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(path.parent))}", timeout_seconds=5.0)
+    host.write_text_file(path, text)
+
+
 def _git_command_stdout(host: OnlineHostInterface, command: str, cwd: Path) -> str | None:
     """Run a git command on a host and return its stripped stdout, or None if it failed or was empty.
 
