@@ -87,8 +87,10 @@ def _handle_telegram_status(agent_id: str) -> Response:
     if info is None:
         is_active = telegram_orchestrator.agent_has_telegram(parsed_id)
         if is_active:
-            paths: WorkspacePaths = get_state().api_v1_paths
-            credentials = load_agent_bot_credentials(paths.data_dir, parsed_id)
+            # The /api/v1 blueprint is only mounted when paths is set, so this is
+            # non-None here; guard anyway to satisfy the type checker.
+            paths: WorkspacePaths | None = get_state().api_v1_paths
+            credentials = load_agent_bot_credentials(paths.data_dir, parsed_id) if paths is not None else None
             result: dict[str, object] = {
                 "agent_id": str(parsed_id),
                 "status": str(TelegramSetupStatus.DONE),

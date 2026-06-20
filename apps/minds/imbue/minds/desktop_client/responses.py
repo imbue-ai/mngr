@@ -9,7 +9,7 @@ generator is consumed (the SSE handlers read ``request`` / ``current_app``
 mid-stream).
 """
 
-from collections.abc import Iterable
+from collections.abc import Iterator
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -54,7 +54,7 @@ def make_file_response(path: str | Path, media_type: str | None = None, filename
 
 
 def make_streaming_response(
-    content: Iterable[str | bytes],
+    content: Iterator[str],
     media_type: str | None = None,
     headers: Mapping[str, str] | None = None,
 ) -> Response:

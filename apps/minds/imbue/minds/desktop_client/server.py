@@ -123,10 +123,10 @@ def serve_desktop_client(app: Flask, state: DesktopClientState, host: str, port:
     sequence runs in :func:`desktop_client_runtime`'s ``finally`` after this
     returns.
     """
+    # ``threaded=True`` yields a ThreadedWSGIServer, whose ``daemon_threads`` is
+    # already True -- so a still-iterating SSE connection can never block process
+    # exit (and the shutdown flag makes those threads return promptly anyway).
     server = make_server(host, port, app, threaded=True)
-    # Daemonize worker threads so a still-iterating SSE connection can never
-    # block process exit; the shutdown flag makes them return promptly anyway.
-    server.daemon_threads = True
 
     def _handle_exit(signal_number: int, _frame: FrameType | None) -> None:
         logger.info("Received signal {}; beginning graceful shutdown", signal_number)

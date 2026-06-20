@@ -4158,7 +4158,7 @@ def create_desktop_client(
     app = Flask(__name__, static_folder=str(_static_dir), static_url_path="/_static")
 
     @app.errorhandler(Exception)
-    def _unhandled_exception_handler(exc: Exception) -> Response:
+    def _unhandled_exception_handler(exc: Exception) -> Response | HTTPException:
         # Let werkzeug's HTTP exceptions (404, 405, abort(401), ...) keep their
         # own status instead of collapsing them into a 500 -- matching the prior
         # FastAPI/Starlette behavior where the catch-all only handled real 500s.
@@ -4233,7 +4233,9 @@ def create_desktop_client(
         # ``minds_api_key`` from the app's state on every request so the gate
         # stays in sync if a future code path ever rotates the key.
         webdav_app = create_webdav_app(_MindsApiKeyProvider(app=app))
-        app.wsgi_app = DispatcherMiddleware(app.wsgi_app, {"/api/v1/files": webdav_app})
+        # The standard Flask sub-app mount pattern; ``wsgi_app`` is typed as the
+        # bound method, so assigning a WSGI middleware over it trips the checker.
+        app.wsgi_app = DispatcherMiddleware(app.wsgi_app, {"/api/v1/files": webdav_app})  # ty: ignore[invalid-assignment]
 
     # Chrome (persistent shell) routes
     app.add_url_rule("/_chrome", view_func=_handle_chrome_page)

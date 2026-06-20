@@ -1306,7 +1306,7 @@ def test_unhandled_exception_returns_500_with_message(tmp_path: Path) -> None:
     )
 
     @app.get("/explode")
-    def explode() -> None:
+    def explode() -> Response:
         raise RuntimeError("test boom")
 
     client = app.test_client()
