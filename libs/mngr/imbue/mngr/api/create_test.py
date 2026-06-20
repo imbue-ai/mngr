@@ -9,6 +9,7 @@ from imbue.mngr import hookimpl
 from imbue.mngr.api.create import _create_new_host
 from imbue.mngr.api.create import _generate_unique_host_name
 from imbue.mngr.api.create import _run_post_host_create_commands
+from imbue.mngr.api.create import _run_post_host_create_outer_commands
 from imbue.mngr.api.create import _validate_session_adoption
 from imbue.mngr.api.create import _write_host_env_vars
 from imbue.mngr.api.create import create
@@ -168,6 +169,35 @@ def test_run_post_host_create_commands_raises_on_first_failure(
             ),
         )
     # The second command must not have executed.
+    assert not marker.exists()
+
+
+# =============================================================================
+# _run_post_host_create_outer_commands Tests
+# =============================================================================
+
+
+def test_run_post_host_create_outer_commands_no_op_on_empty_tuple(
+    local_host: Host,
+    temp_host_dir: Path,
+) -> None:
+    """An empty commands tuple is a no-op (the outer is never even opened)."""
+    _run_post_host_create_outer_commands(local_host, ())
+
+
+@pytest.mark.allow_warnings
+def test_run_post_host_create_outer_commands_skips_when_no_outer(
+    local_host: Host,
+    temp_host_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """The local provider exposes no outer host, so the commands are skipped (no error)."""
+    marker = tmp_path / "outer_ran.txt"
+    # Sanity: the local host has no outer.
+    with local_host.outer_host() as outer:
+        assert outer is None
+    # The command must be skipped (not run, not raised) when there is no outer.
+    _run_post_host_create_outer_commands(local_host, (CommandString(f"touch {marker}"),))
     assert not marker.exists()
 
 

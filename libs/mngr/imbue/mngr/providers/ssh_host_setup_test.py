@@ -12,13 +12,16 @@ import pytest
 
 import imbue.mngr.resources as mngr_resources
 from imbue.mngr.providers.ssh_host_setup import RequiredHostPackage
+from imbue.mngr.providers.ssh_host_setup import SSHD_HOST_KEY_PATH
 from imbue.mngr.providers.ssh_host_setup import WARNING_PREFIX
 from imbue.mngr.providers.ssh_host_setup import _build_package_check_snippet
 from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_command
 from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
 from imbue.mngr.providers.ssh_host_setup import build_check_and_install_packages_command
 from imbue.mngr.providers.ssh_host_setup import build_configure_ssh_command
+from imbue.mngr.providers.ssh_host_setup import build_self_healing_host_entrypoint_command
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
+from imbue.mngr.providers.ssh_host_setup import build_start_sshd_command
 from imbue.mngr.providers.ssh_host_setup import build_start_volume_sync_command
 from imbue.mngr.providers.ssh_host_setup import get_user_ssh_dir
 from imbue.mngr.providers.ssh_host_setup import load_resource_script
@@ -463,3 +466,74 @@ def test_get_activity_sources_returns_sources_when_configured(tmp_path: Path) ->
     sources = result.stdout.strip().split()
     assert "boot" in sources
     assert "agent" in sources
+
+
+# =========================================================================
+# sshd start + self-healing entrypoint commands
+# =========================================================================
+
+
+def test_self_healing_entrypoint_is_valid_shell_and_backgrounds_only_idle() -> None:
+    """The entrypoint must be valid shell and keep PID 1 alive after the sshd check."""
+    cmd = build_self_healing_host_entrypoint_command()
+    # Valid POSIX shell.
+    assert subprocess.run(["sh", "-n", "-c", cmd], capture_output=True).returncode == 0
+    # SIGTERM trap (clean docker stop) and the idle keep-alive are both present.
+    assert "trap 'exit 0' TERM" in cmd
+    assert "tail -f /dev/null & wait" in cmd
+    # sshd is only (re)started when mngr has already provisioned a host key.
+    assert SSHD_HOST_KEY_PATH in cmd
+    assert "/usr/sbin/sshd" in cmd
+
+
+def test_self_healing_entrypoint_skips_sshd_without_a_host_key(tmp_path: Path) -> None:
+    """Without a provisioned host key the entrypoint must not try to start sshd."""
+    # Run only the synchronous prefix (drop the blocking `tail -f` keep-alive) and
+    # rewrite the root-only paths / sshd binary into observable, unprivileged probes.
+    marker = tmp_path / "sshd_was_called"
+    key_path = tmp_path / "ssh_host_ed25519_key"
+    cmd = build_self_healing_host_entrypoint_command()
+    prefix = cmd.split("; tail -f /dev/null")[0]
+    probe = (
+        prefix.replace(SSHD_HOST_KEY_PATH, str(key_path))
+        .replace("mkdir -p /run/sshd; ", "")
+        .replace("/usr/sbin/sshd -o MaxSessions=100", f"touch {marker}")
+    )
+    # No key file present -> sshd branch is skipped (the `[ -f ] && {{...}}` is a no-op).
+    subprocess.run(["sh", "-c", probe], check=False)
+    assert not marker.exists()
+    # Key present -> sshd branch runs.
+    key_path.write_text("dummy")
+    subprocess.run(["sh", "-c", probe], check=False)
+    assert marker.exists()
+
+
+def test_start_sshd_command_is_guarded_and_valid_shell() -> None:
+    """The explicit sshd start must be valid shell and guarded against a running sshd."""
+    cmd = build_start_sshd_command()
+    assert subprocess.run(["sh", "-n", "-c", cmd], capture_output=True).returncode == 0
+    assert "mkdir -p /run/sshd" in cmd
+    assert "/usr/sbin/sshd -D" in cmd
+    # The guard uses /proc (procps-free) rather than pgrep/pidof.
+    assert "/proc/" in cmd
+    assert "pgrep" not in cmd
+
+
+def test_start_sshd_command_is_a_noop_when_sshd_is_already_running(tmp_path: Path) -> None:
+    """When an sshd process is detected the guard must skip starting another one."""
+    # Rewrite the root-only `mkdir -p /run/sshd` and the real sshd binary into
+    # unprivileged probes so the guard's effect is observable without root.
+    marker = tmp_path / "sshd_started"
+    cmd = (
+        build_start_sshd_command()
+        .replace("mkdir -p /run/sshd && ", "")
+        .replace("/usr/sbin/sshd -D -o MaxSessions=100", f"touch {marker}")
+    )
+    # Force the not-running check to report "already running" (false): start is skipped.
+    running_cmd = cmd.replace("! grep -lxs sshd /proc/[0-9]*/comm >/dev/null 2>&1", "false")
+    subprocess.run(["sh", "-c", running_cmd], check=False)
+    assert not marker.exists()
+    # When the check reports "not running" (true), the start runs.
+    not_running_cmd = cmd.replace("! grep -lxs sshd /proc/[0-9]*/comm >/dev/null 2>&1", "true")
+    subprocess.run(["sh", "-c", not_running_cmd], check=False)
+    assert marker.exists()
