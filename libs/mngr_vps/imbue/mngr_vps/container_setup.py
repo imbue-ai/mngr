@@ -29,6 +29,8 @@ from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_comman
 from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
 from imbue.mngr.providers.ssh_host_setup import build_check_and_install_packages_command
 from imbue.mngr.providers.ssh_host_setup import build_configure_ssh_command
+from imbue.mngr.providers.ssh_host_setup import build_self_healing_host_entrypoint_command
+from imbue.mngr.providers.ssh_host_setup import build_start_sshd_command
 from imbue.mngr.utils.git_utils import rsync_worktree_over_clone
 from imbue.mngr_vps.errors import ContainerSetupError
 from imbue.mngr_vps.errors import VpsProvisioningError
@@ -54,9 +56,12 @@ HOST_VOLUME_MOUNT_PATH: Final[str] = "/mngr-vol"
 # Subdirectory inside the unified volume that backs the agent's mngr host_dir.
 HOST_DIR_SUBPATH: Final[str] = "host_dir"
 
-# Shell command for the agent container's PID 1: trap SIGTERM and stay alive
-# until SIGTERM arrives so `docker stop` (idle timeout, manual stop) exits cleanly.
-CONTAINER_ENTRYPOINT_CMD: Final[str] = "trap 'exit 0' TERM; tail -f /dev/null & wait"
+# Shell command for the agent container's PID 1. Self-heals sshd on every
+# (re)start once mngr has provisioned a host key, so the container is reachable
+# again after an out-of-band restart (VM reboot, `docker restart`) without
+# waiting for `mngr start`. Also traps SIGTERM and stays alive until SIGTERM
+# arrives so `docker stop` (idle timeout, manual stop) exits cleanly.
+CONTAINER_ENTRYPOINT_CMD: Final[str] = build_self_healing_host_entrypoint_command()
 
 # In-container path the host_backup service writes / reads snapshot
 # request and result JSON to. Backed by the per-host docker volume
@@ -912,7 +917,7 @@ def start_container_sshd(outer: OuterHostInterface, container_name: str) -> None
         exec_in_container(
             outer,
             container_name,
-            "mkdir -p /run/sshd && /usr/sbin/sshd -D -o MaxSessions=100 &",
+            f"{build_start_sshd_command()} &",
         )
 
 

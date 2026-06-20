@@ -115,6 +115,58 @@ def build_check_and_install_packages_command(
     return " && ".join(script_lines)
 
 
+# Options passed to sshd on startup to raise the per-connection session cap.
+# Shared by the provider's explicit start and the self-healing entrypoint so
+# both bring sshd up with identical settings.
+SSHD_START_OPTIONS: Final[str] = "-o MaxSessions=100"
+
+# Path to the ed25519 host key that mngr injects during provisioning. Its
+# presence is the signal that mngr has already provisioned this host, which the
+# self-healing entrypoint uses to decide whether to (re)start sshd on boot.
+SSHD_HOST_KEY_PATH: Final[str] = "/etc/ssh/ssh_host_ed25519_key"
+
+
+@pure
+def _build_sshd_not_running_check() -> str:
+    """Build a shell test that succeeds only when no sshd process is running.
+
+    Uses /proc rather than pgrep/pidof so it works on minimal images that do
+    not ship procps. Each /proc/<pid>/comm holds the process name followed by a
+    newline, so a whole-line match (grep -x) identifies sshd exactly.
+    """
+    return "! grep -lxs sshd /proc/[0-9]*/comm >/dev/null 2>&1"
+
+
+@pure
+def build_start_sshd_command() -> str:
+    """Build an idempotent command that starts sshd only if it is not already running.
+
+    Runs sshd in the foreground (``-D``) so that, when launched via a detached
+    ``docker exec`` / ``sandbox.exec``, the exec'd process stays alive as the
+    sshd master. The not-running guard makes a redundant start a clean no-op
+    (rather than a failed bind) when sshd was already brought up -- e.g. by the
+    self-healing entrypoint after an out-of-band restart.
+    """
+    return f"mkdir -p /run/sshd && ( {_build_sshd_not_running_check()} && /usr/sbin/sshd -D {SSHD_START_OPTIONS} )"
+
+
+@pure
+def build_self_healing_host_entrypoint_command() -> str:
+    """Build the PID-1 entrypoint command for mngr host containers.
+
+    On every container (re)start, if mngr has already provisioned an SSH host
+    key, (re)start sshd in daemon mode so the container becomes reachable again
+    after an out-of-band restart (``docker restart``, daemon restart, host
+    reboot) without waiting for ``mngr start`` to re-exec it. On the very first
+    create the host key does not exist yet, so this is a no-op and mngr starts
+    sshd during provisioning as usual. PID 1 then idles, trapping SIGTERM so a
+    ``docker stop`` exits cleanly and fast.
+    """
+    start_sshd = f"mkdir -p /run/sshd; /usr/sbin/sshd {SSHD_START_OPTIONS}"
+    self_heal = f"[ -f {SSHD_HOST_KEY_PATH} ] && {{ {start_sshd}; }}"
+    return f"trap 'exit 0' TERM; {self_heal}; tail -f /dev/null & wait"
+
+
 @pure
 def build_configure_ssh_command(
     user: str,
