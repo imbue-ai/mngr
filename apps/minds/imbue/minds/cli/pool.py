@@ -786,15 +786,17 @@ def pool_create(
     max_concurrency: int | None,
     is_deferred_install_wait_skipped: bool,
 ) -> None:
-    """Create pool hosts for the activated minds env (OVH VPS or bare-metal slice).
+    """Create bare-metal slice pool hosts for the activated minds env.
 
     Resolves the activated tier's secrets from Vault so the operator never exports
-    them by hand: for ``ovh_vps`` the OVH AK/AS/CK plus the management public key
-    derived from ``<vault_path_prefix>/pool-ssh``; for ``slice`` the
+    them by hand: for ``slice`` (the default and only supported backend) the
     POOL_SSH_PRIVATE_KEY (used to SSH the bare-metal box and carve the lima VM). The
     activated env dictates the tier, keeping "I'm on dev, I bake against the dev
     account using the dev keypair" the unambiguous default and making the
     keypair-mismatch class of bake failures unreachable for the standard path.
+
+    ``--backend ovh_vps`` is DEPRECATED and rejected up front: baking new OVH classic
+    VPS pool hosts is no longer supported (existing ones stay listable/destroyable).
     """
     # Baking new OVH VPS pool hosts is deprecated -- Imbue Cloud serves agents on
     # bare-metal slices now. Reject fast, before any activated-env / Vault / OVH

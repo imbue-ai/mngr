@@ -1,12 +1,14 @@
 """`mngr imbue_cloud admin pool ...` -- operator-only pool provisioning.
 
-``pool create`` bakes pre-provisioned pool hosts on a chosen ``--backend``: an OVH
-classic VPS ordered on demand (``ovh_vps``, the default) or a lima-VM "slice" carved
-on one of our registered bare-metal boxes (``slice``; the shared implementation is
-``cli.server.allocate_slices``). Both bake the same FCT pool host and write the same
-kind of leasable row to the connector's Neon ``pool_hosts`` table -- only the
-machine-provisioning step differs (order-a-VPS vs. carve-a-VM). The OVH path also
-installs + configures ufw and a management SSH key on the VPS + container.
+``pool create`` bakes pre-provisioned pool hosts on a chosen ``--backend``: a lima-VM
+"slice" carved on one of our registered bare-metal boxes (``slice``, the default; the
+shared implementation is ``cli.server.allocate_slices``), or -- DEPRECATED -- an OVH
+classic VPS ordered on demand (``ovh_vps``; baking new OVH VPS pool hosts is no longer
+supported, though existing ones stay listable/destroyable). Both bake the same FCT
+pool host and write the same kind of leasable row to the connector's Neon
+``pool_hosts`` table -- only the machine-provisioning step differs (carve-a-VM vs.
+order-a-VPS). The OVH path also installs + configures ufw and a management SSH key on
+the VPS + container.
 
 Provider-generic by design: extra VPS-side tags (e.g. ``minds_env=<name>``
 threaded through by the ``minds pool`` env-aware wrapper) come from
