@@ -10,6 +10,7 @@ import docker.models.containers
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.docker.config import DockerProviderConfig
 from imbue.mngr.providers.docker.instance import DockerProviderInstance
@@ -210,13 +211,13 @@ def make_docker_provider_with_cleanup(
         for host in discovered:
             try:
                 provider.destroy_host(host.host_id)
-            except (MngrError, docker.errors.DockerException, OSError):
+            except (MngrError, CleanupFailedGroup, docker.errors.DockerException, OSError):
                 pass
             try:
                 provider.delete_host(provider.get_host(host.host_id))
-            except (MngrError, docker.errors.DockerException, OSError):
+            except (MngrError, CleanupFailedGroup, docker.errors.DockerException, OSError):
                 pass
-    except (MngrError, docker.errors.DockerException, OSError):
+    except (MngrError, CleanupFailedGroup, docker.errors.DockerException, OSError):
         pass
 
     try:
