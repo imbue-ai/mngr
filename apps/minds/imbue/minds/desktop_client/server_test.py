@@ -15,15 +15,14 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import httpx
+from cheroot import wsgi
 from flask.testing import FlaskClient
-from werkzeug.serving import make_server
 
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
-from imbue.minds.desktop_client.server import _Http11RequestHandler
 from imbue.minds.desktop_client.server import desktop_client_runtime
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
@@ -99,27 +98,33 @@ def test_chrome_events_sse_returns_cleanly_when_shutting_down(tmp_path: Path) ->
 
 @contextmanager
 def _serve_in_background(tmp_path: Path) -> Iterator[tuple[int, FileAuthStore, DesktopClientState]]:
-    """Run the real graceful WSGI server on an ephemeral port for the duration of the block."""
+    """Run the real cheroot WSGI server on an ephemeral port for the duration of the block."""
     auth_store = FileAuthStore(data_directory=tmp_path / "auth")
-    app = create_desktop_client(auth_store=auth_store, backend_resolver=MngrCliBackendResolver(), http_client=None)
-    server = make_server("127.0.0.1", 0, app, threaded=True, request_handler=_Http11RequestHandler)
-    thread = threading.Thread(target=server.serve_forever, name="server-test-wsgi", daemon=True)
+    resolver = MngrCliBackendResolver()
+    app = create_desktop_client(auth_store=auth_store, backend_resolver=resolver, http_client=None)
+    server = wsgi.Server(("127.0.0.1", 0), app)
+    server.prepare()
+    port = server.bind_addr[1]
+    thread = threading.Thread(target=server.serve, name="server-test-wsgi", daemon=True)
     thread.start()
     try:
-        yield server.server_port, auth_store, get_state(app)
+        yield port, auth_store, get_state(app)
     finally:
+        # Mirror the real shutdown: flip the flag AND fire the resolver change
+        # event the SSE generators block on, so they return promptly instead of
+        # making ``server.stop()`` wait out a worker wedged in its poll wait.
         get_state(app).shutdown_event.set()
-        server.shutdown()
+        resolver.notify_change()
+        server.stop()
         thread.join(timeout=5)
 
 
 def test_chrome_events_sse_streams_chunked_over_http_1_1(tmp_path: Path) -> None:
-    """Over a real socket the SSE endpoint streams chunked HTTP/1.1, not a buffered HTTP/1.0 body.
+    """Over a real socket the SSE endpoint streams chunked HTTP/1.1 incrementally.
 
-    Werkzeug defaults to HTTP/1.0 (no chunked transfer-encoding), under which a
-    Content-Length-less streaming generator does not stream incrementally to an
-    EventSource. ``_Http11RequestHandler`` restores the HTTP/1.1 + chunked
-    behavior the prior uvicorn server provided; assert it end-to-end.
+    A Content-Length-less streaming generator must reach an EventSource
+    chunk-by-chunk, not after the whole response is buffered. cheroot speaks
+    HTTP/1.1 and chunk-encodes the SSE; assert it end-to-end.
     """
     with _serve_in_background(tmp_path) as (port, auth_store, _state):
         cookie = create_session_cookie(signing_key=auth_store.get_signing_key())
@@ -140,3 +145,31 @@ def test_chrome_events_sse_streams_chunked_over_http_1_1(tmp_path: Path) -> None
                 if time.monotonic() > deadline:
                     break
             assert saw_workspaces
+
+
+def test_server_keeps_connections_alive(tmp_path: Path) -> None:
+    """The server reuses a single TCP connection across requests (HTTP/1.1 keep-alive).
+
+    The Werkzeug development server hardcodes ``Connection: close`` on every
+    response, so it never reuses a connection. The Electron shell's startup
+    consumes the one-time code with a ``net.request`` to ``/authenticate`` that
+    307-redirects to ``/`` and awaits the followed response; Chromium's network
+    stack does not follow that redirect cleanly when the 307 closes the socket,
+    hanging UI startup. Keep-alive (which cheroot provides) is what the shell was
+    built against -- assert two requests share one connection and that the
+    redirect target is reachable on the reused connection.
+    """
+    with _serve_in_background(tmp_path) as (port, auth_store, _state):
+        cookie = create_session_cookie(signing_key=auth_store.get_signing_key())
+        headers = {"Cookie": f"{SESSION_COOKIE_NAME}={cookie}"}
+        # A single client connection-pool: if the server sent ``Connection:
+        # close`` the second request would open a new socket.
+        with httpx.Client(timeout=10.0, follow_redirects=True) as client:
+            first = client.get(f"http://127.0.0.1:{port}/", headers=headers)
+            assert first.status_code == 200
+            assert first.http_version == "HTTP/1.1"
+            # The response must not force the connection closed.
+            assert first.headers.get("connection", "").lower() != "close"
+            second = client.get(f"http://127.0.0.1:{port}/welcome", headers=headers)
+            assert second.status_code == 200
+            assert second.headers.get("connection", "").lower() != "close"

@@ -1,4 +1,4 @@
-"""Graceful Werkzeug WSGI server + lifecycle for the Flask desktop client.
+"""Graceful cheroot WSGI server + lifecycle for the Flask desktop client.
 
 Replaces the FastAPI/uvicorn ``_PreShutdownAwareServer`` subclass and the
 async ``_managed_lifespan`` teardown with one synchronous, explicitly-ordered
@@ -8,11 +8,24 @@ shutdown path:
    poke the backend resolver's change callback so every long-lived SSE
    generator wakes and returns cleanly (no mid-stream cancellation, no
    tracebacks on a clean exit).
-2. Stop the WSGI server (from a helper thread -- ``shutdown()`` must not be
-   called from the thread running ``serve_forever()``).
+2. Stop the WSGI server (from a helper thread -- ``stop()`` must not be called
+   from the thread running ``serve()``).
 3. Once serving has stopped, run the teardown sequence: close the shared
    HTTP client, terminate the envelope + permission-requests consumers, stop
    the pre-warmed mngr caller, and drain the root concurrency group.
+
+The server is cheroot's pure-Python threaded WSGI server rather than the
+Werkzeug development server. Werkzeug's dev server hardcodes ``Connection:
+close`` on every response (it cannot drain a keep-alive socket before the next
+request line), so it never reuses connections. The prior uvicorn server spoke
+HTTP/1.1 with keep-alive, and the Electron shell relies on that: its main
+process consumes the one-time login code with a ``net.request`` to
+``/authenticate`` that 307-redirects to ``/`` and *awaits* the followed
+response before loading the chrome view. Chromium's network stack does not
+follow that redirect cleanly when the 307 closes the socket, so the await --
+and the whole UI startup -- hangs. cheroot restores real HTTP/1.1 keep-alive
+(and still streams Server-Sent-Events chunk-by-chunk), matching the wire
+behavior the shell was built against.
 
 ``desktop_client_runtime`` is a context manager that owns startup (HTTP client
 + geo detection) and the teardown above; ``serve_desktop_client`` runs the
@@ -27,10 +40,9 @@ from types import FrameType
 from typing import Final
 
 import httpx
+from cheroot import wsgi
 from flask import Flask
 from loguru import logger
-from werkzeug.serving import WSGIRequestHandler
-from werkzeug.serving import make_server
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -43,19 +55,13 @@ from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 # (mirrors the old FastAPI lifespan's httpx client timeout).
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
 
-
-class _Http11RequestHandler(WSGIRequestHandler):
-    """Werkzeug request handler pinned to HTTP/1.1.
-
-    Werkzeug's default ``protocol_version`` is HTTP/1.0, under which a streaming
-    response with no Content-Length (our Server-Sent-Events generators) cannot
-    use chunked transfer-encoding and is instead delimited by closing the
-    connection -- which breaks incremental ``EventSource`` streaming and keep-alive.
-    The prior uvicorn server spoke HTTP/1.1; pin it here to preserve that wire
-    behavior so SSE streams chunk-by-chunk as the browser expects.
-    """
-
-    protocol_version = "HTTP/1.1"
+# Worker-thread pool floor for the cheroot server. With keep-alive, each live
+# connection (page loads, static assets, and the long-lived SSE streams) holds
+# a worker thread for its lifetime, so the floor is sized above the handful of
+# connections a single Electron client keeps open to avoid pool-growth latency
+# during the startup burst. The pool still grows without bound above this floor
+# (``max=-1``) if needed.
+_SERVER_THREAD_POOL_SIZE: Final[int] = 50
 
 
 def _wake_sse_handlers(state: DesktopClientState) -> None:
@@ -138,12 +144,11 @@ def serve_desktop_client(app: Flask, state: DesktopClientState, host: str, port:
     sequence runs in :func:`desktop_client_runtime`'s ``finally`` after this
     returns.
     """
-    # ``threaded=True`` yields a ThreadedWSGIServer, whose ``daemon_threads`` is
-    # already True -- so a still-iterating SSE connection can never block process
-    # exit (and the shutdown flag makes those threads return promptly anyway).
-    # The HTTP/1.1 request handler preserves chunked SSE streaming + keep-alive
-    # parity with the prior uvicorn server (Werkzeug defaults to HTTP/1.0).
-    server = make_server(host, port, app, threaded=True, request_handler=_Http11RequestHandler)
+    # cheroot speaks HTTP/1.1 with keep-alive and streams responses without a
+    # Content-Length chunk-by-chunk (our SSE generators), matching the wire
+    # behavior of the prior uvicorn server -- see this module's docstring for
+    # why keep-alive is load-bearing for the Electron shell's startup.
+    server = wsgi.Server((host, port), app, numthreads=_SERVER_THREAD_POOL_SIZE)
 
     def _handle_exit(signal_number: int, _frame: FrameType | None) -> None:
         logger.info("Received signal {}; beginning graceful shutdown", signal_number)
@@ -151,16 +156,16 @@ def serve_desktop_client(app: Flask, state: DesktopClientState, host: str, port:
         # their generators return cleanly instead of being cut off mid-stream.
         state.shutdown_event.set()
         _wake_sse_handlers(state)
-        # ``shutdown()`` blocks until ``serve_forever()`` returns and must run
-        # on a different thread than the one serving.
-        threading.Thread(target=server.shutdown, name="minds-server-shutdown", daemon=True).start()
+        # ``stop()`` blocks until the serve loop winds down and must run on a
+        # different thread than the one calling ``serve()``.
+        threading.Thread(target=server.stop, name="minds-server-shutdown", daemon=True).start()
 
     previous_handler_by_signal = {
         signal_number: signal.signal(signal_number, _handle_exit) for signal_number in (signal.SIGINT, signal.SIGTERM)
     }
+    server.prepare()
     try:
-        server.serve_forever()
+        server.serve()
     finally:
-        server.server_close()
         for signal_number, previous_handler in previous_handler_by_signal.items():
             signal.signal(signal_number, previous_handler)

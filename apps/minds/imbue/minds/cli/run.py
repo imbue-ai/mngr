@@ -459,7 +459,7 @@ def run(
     # ``desktop_client_runtime`` owns the shared HTTP client + geo-detection
     # startup and the ordered shutdown teardown (close client, terminate
     # consumers, stop the mngr caller, drain the root concurrency group).
-    # ``serve_desktop_client`` runs the graceful Werkzeug server until
+    # ``serve_desktop_client`` runs the graceful cheroot server until
     # SIGINT/SIGTERM, flipping ``shutdown_event`` + waking the SSE handlers
     # before the server drains so streams end cleanly with no tracebacks.
     with desktop_client_runtime(get_state(app), is_externally_managed_client=False):
