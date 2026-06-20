@@ -1,8 +1,9 @@
 - Container hosts now self-heal sshd after an out-of-band restart. The host
   container entrypoint (re)starts sshd on boot whenever mngr has already
-  provisioned a host key, so a `docker restart`, docker daemon restart, or host
-  reboot brings ssh back without waiting for `mngr start`. mngr's own sshd start
-  is now idempotent (a no-op when sshd is already running).
+  provisioned this host (tracked by a marker, so a host key pre-baked into the
+  base image is never used by mistake), so a `docker restart`, docker daemon
+  restart, or host reboot brings ssh back without waiting for `mngr start`.
+  mngr's own sshd start is now idempotent (a no-op when sshd is already running).
 
 - `mngr start` is now safe to run concurrently for the same host. The agent
   (re)launch is serialized by a dedicated cross-actor `flock` (local in-host

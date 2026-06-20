@@ -12,7 +12,7 @@ import pytest
 
 import imbue.mngr.resources as mngr_resources
 from imbue.mngr.providers.ssh_host_setup import RequiredHostPackage
-from imbue.mngr.providers.ssh_host_setup import SSHD_HOST_KEY_PATH
+from imbue.mngr.providers.ssh_host_setup import SSHD_PROVISIONED_MARKER_PATH
 from imbue.mngr.providers.ssh_host_setup import WARNING_PREFIX
 from imbue.mngr.providers.ssh_host_setup import _build_package_check_snippet
 from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_command
@@ -481,31 +481,55 @@ def test_self_healing_entrypoint_is_valid_shell_and_backgrounds_only_idle() -> N
     # SIGTERM trap (clean docker stop) and the idle keep-alive are both present.
     assert "trap 'exit 0' TERM" in cmd
     assert "tail -f /dev/null & wait" in cmd
-    # sshd is only (re)started when mngr has already provisioned a host key.
-    assert SSHD_HOST_KEY_PATH in cmd
+    # sshd is only (re)started once mngr has provisioned it (marker gate), not on
+    # the mere presence of an image-baked host key.
+    assert SSHD_PROVISIONED_MARKER_PATH in cmd
     assert "/usr/sbin/sshd" in cmd
 
 
-def test_self_healing_entrypoint_skips_sshd_without_a_host_key(tmp_path: Path) -> None:
-    """Without a provisioned host key the entrypoint must not try to start sshd."""
+def test_self_healing_entrypoint_skips_sshd_without_provisioned_marker(tmp_path: Path) -> None:
+    """Without mngr's provisioned-marker the entrypoint must not start sshd.
+
+    This is the regression guard for image-baked host keys: the gate must be the
+    mngr marker, not the host key file (which a base image may already ship).
+    """
     # Run only the synchronous prefix (drop the blocking `tail -f` keep-alive) and
     # rewrite the root-only paths / sshd binary into observable, unprivileged probes.
-    marker = tmp_path / "sshd_was_called"
-    key_path = tmp_path / "ssh_host_ed25519_key"
+    sshd_started = tmp_path / "sshd_was_called"
+    marker_path = tmp_path / "mngr_host_provisioned"
     cmd = build_self_healing_host_entrypoint_command()
     prefix = cmd.split("; tail -f /dev/null")[0]
     probe = (
-        prefix.replace(SSHD_HOST_KEY_PATH, str(key_path))
+        prefix.replace(SSHD_PROVISIONED_MARKER_PATH, str(marker_path))
         .replace("mkdir -p /run/sshd; ", "")
-        .replace("/usr/sbin/sshd -o MaxSessions=100", f"touch {marker}")
+        .replace("/usr/sbin/sshd -o MaxSessions=100", f"touch {sshd_started}")
     )
-    # No key file present -> sshd branch is skipped (the `[ -f ] && {{...}}` is a no-op).
+    # No marker present -> sshd branch is skipped (the `[ -f ] && {{...}}` is a no-op).
     subprocess.run(["sh", "-c", probe], check=False)
-    assert not marker.exists()
-    # Key present -> sshd branch runs.
-    key_path.write_text("dummy")
+    assert not sshd_started.exists()
+    # Marker present -> sshd branch runs.
+    marker_path.write_text("")
     subprocess.run(["sh", "-c", probe], check=False)
-    assert marker.exists()
+    assert sshd_started.exists()
+
+
+def test_configure_ssh_command_writes_provisioned_marker() -> None:
+    """build_configure_ssh_command must write the provisioned marker after the host key.
+
+    The marker must be written after the `rm -f /etc/ssh/ssh_host_*` cleanup so it
+    survives, and must not itself match that glob.
+    """
+    cmd = build_configure_ssh_command(
+        user="root",
+        client_public_key="ssh-ed25519 AAAA... user@host",
+        host_private_key="-----BEGIN OPENSSH PRIVATE KEY-----\nx\n-----END OPENSSH PRIVATE KEY-----",
+        host_public_key="ssh-ed25519 BBBB... hostkey",
+    )
+    assert f"touch '{SSHD_PROVISIONED_MARKER_PATH}'" in cmd
+    # The marker write must come after the host-key removal so it is not deleted.
+    assert cmd.index("rm -f /etc/ssh/ssh_host_*") < cmd.index(f"touch '{SSHD_PROVISIONED_MARKER_PATH}'")
+    # The marker must not be caught by the ssh_host_* removal glob.
+    assert not SSHD_PROVISIONED_MARKER_PATH.rsplit("/", 1)[-1].startswith("ssh_host_")
 
 
 def test_start_sshd_command_is_guarded_and_valid_shell() -> None:
