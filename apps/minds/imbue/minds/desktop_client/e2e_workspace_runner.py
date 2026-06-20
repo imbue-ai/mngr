@@ -836,10 +836,17 @@ def _attempt_create_workspace_via_electron(
                 browser = playwright.chromium.connect_over_cdp(
                     f"http://127.0.0.1:{debug_port}", timeout=_CDP_CONNECT_TIMEOUT_MS
                 )
-                page = _pick_content_page(browser, _BACKEND_READY_TIMEOUT_SECONDS)
             except (PlaywrightError, TimeoutError) as exc:
                 raise _ElectronConnectError(f"Electron CDP attach failed on port {debug_port}: {exc}") from exc
+            # Always disconnect the browser once it is open, regardless of which
+            # phase fails: picking the content page is still part of the attach
+            # phase (a wedged-launch flake -> ``_ElectronConnectError``), while a
+            # create-flow failure is a real test failure that must propagate.
             try:
+                try:
+                    page = _pick_content_page(browser, _BACKEND_READY_TIMEOUT_SECONDS)
+                except (PlaywrightError, TimeoutError) as exc:
+                    raise _ElectronConnectError(f"Electron CDP attach failed on port {debug_port}: {exc}") from exc
                 _drive_create_flow(page, fct_path, workspace_name)
             finally:
                 browser.close()
