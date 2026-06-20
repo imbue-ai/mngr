@@ -801,9 +801,15 @@ kill -TERM 1
         propagates so it is visible rather than silently leaking the image.
         Snapshot images are independent `docker commit` images that retain
         the underlying layers, so removing this tag does not break snapshot
-        restore. Forced because the host's own (now-stopped) container can
-        still reference the image, which Docker otherwise refuses to delete
-        ("must be forced - container is using its referenced image").
+        restore.
+
+        `force=True` removes the tag, not the image. `mngr-build-<host_id>`
+        is the image's only tag, so an unforced remove tries to delete the
+        underlying image -- which Docker refuses while a (leftover) stopped
+        container still references it ("must be forced - container is using
+        its referenced image"). Forcing drops just the tag (all mngr needs);
+        the image lingers as a dangling layer, reclaimed once that container
+        is gone.
         """
         tag = self._build_image_tag(host_id)
         if not self._docker_client.images.list(name=tag):
@@ -1546,9 +1552,9 @@ kill -TERM 1
     def delete_host(self, host: HostInterface) -> None:
         """Permanently delete all records associated with a (destroyed) host.
 
-        Removes snapshot images, the host volume directory, the build image,
-        and the host record. Called by gc_machines once a destroyed host has
-        aged past ``destroyed_host_persisted_seconds``.
+        Removes snapshot images, the host volume directory, the build image
+        tag, and the host record. Called by gc_machines once a destroyed host
+        has aged past ``destroyed_host_persisted_seconds``.
 
         Best-effort: every step is attempted, and a real failure (a resource
         that exists but could not be removed) is recorded and raised as a
