@@ -230,19 +230,27 @@ def _start_agents(
         provider = get_provider_instance(provider_name, mngr_ctx)
         host = provider.get_host(HostId(host_id_str))
 
-        # Ensure host is started (always start since this is the start command)
+        # Ensure host is started (always start since this is the start command).
+        # start_host is idempotent (returns early if the host is already running),
+        # so concurrent starts do not need to coordinate around this step.
         online_host, _ = ensure_host_started(host, is_start_desired=True, provider=provider)
 
         agent_ids = [match.agent_id for match in agent_list]
 
-        # Stop agents first when restarting
-        if is_restart:
-            with log_span("Stopping {} agent(s) for restart", len(agent_ids)):
-                online_host.stop_agents(agent_ids)
+        # Serialize agent (re)launch against any other `mngr start` for this host
+        # -- e.g. the minds desktop client (remote, over SSH) racing a VM/container
+        # boot hook (local). The lock blocks indefinitely; once it is held, an
+        # already-running agent's launch is a no-op (the start command exits early
+        # when its tmux session exists), so the loser cleanly does nothing.
+        with online_host.lock_for_starting():
+            # Stop agents first when restarting
+            if is_restart:
+                with log_span("Stopping {} agent(s) for restart", len(agent_ids)):
+                    online_host.stop_agents(agent_ids)
 
-        # Start agents on this host
-        with log_span("Starting {} agent(s)", len(agent_ids)):
-            online_host.start_agents(agent_ids)
+            # Start agents on this host
+            with log_span("Starting {} agent(s)", len(agent_ids)):
+                online_host.start_agents(agent_ids)
 
         # Emit discovery events for agents and host
         emit_discovery_events_for_host(mngr_ctx.config, online_host)

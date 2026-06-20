@@ -456,6 +456,16 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
         ...
 
     @abstractmethod
+    @contextmanager
+    def lock_for_starting(self) -> Iterator[None]:
+        """Context manager that serializes concurrent ``mngr start`` runs for this host.
+
+        Holds an exclusive flock(2) that coordinates local (in-host) and remote
+        (over-SSH) starts. Blocks indefinitely until the lock is acquired.
+        """
+        ...
+
+    @abstractmethod
     def get_reported_lock_time(self) -> datetime | None:
         """Return the last modification time of the host lock file, or None if not locked."""
         ...
