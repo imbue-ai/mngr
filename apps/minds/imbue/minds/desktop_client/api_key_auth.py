@@ -25,22 +25,21 @@ Two consumer shapes are exposed:
   :mod:`imbue.minds.desktop_client.webdav`), which can't take a decorator.
 """
 
+import json
 from collections.abc import Callable
 from functools import wraps
 from typing import ParamSpec
-from typing import TypeVar
 
 from flask import Response
-from flask import abort
 from flask import request
 
 from imbue.minds.desktop_client.api_key_store import is_valid_minds_api_key
+from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.state import get_state
 
 _BEARER_PREFIX = "Bearer "
 
 _ViewParams = ParamSpec("_ViewParams")
-_ViewReturn = TypeVar("_ViewReturn", bound=Response)
 
 
 def _extract_bearer_token(authorization: str | None) -> str | None:
@@ -67,20 +66,31 @@ def is_request_authenticated(authorization_header_value: str | None, expected_ke
     return is_valid_minds_api_key(token, expected_key)
 
 
-def require_minds_api_key(view: Callable[_ViewParams, _ViewReturn]) -> Callable[_ViewParams, _ViewReturn]:
+def require_minds_api_key(view: Callable[_ViewParams, Response]) -> Callable[_ViewParams, Response]:
     """Flask view decorator: abort 401 unless the request carries the central key.
 
     The wrapped view takes no extra argument (the central-key model carries
     no per-call identity). Routes that need an agent id pick it up from the
     URL path via the usual ``<agent_id>`` path parameter. Fails closed when
     the key is unset (e.g. tests that don't populate it).
+
+    On failure it returns a JSON ``{"error": ...}`` 401 with a
+    ``WWW-Authenticate: Bearer`` challenge -- matching the JSON error shape
+    of the rest of ``/api/v1`` and the WebDAV gate, rather than Flask's
+    default HTML ``abort(401)`` page (which is what the FastAPI dependency's
+    ``HTTPException(401)`` JSON body was, so this preserves wire parity).
     """
 
     @wraps(view)
-    def wrapper(*args: _ViewParams.args, **kwargs: _ViewParams.kwargs) -> _ViewReturn:
+    def wrapper(*args: _ViewParams.args, **kwargs: _ViewParams.kwargs) -> Response:
         expected_key = get_state().minds_api_key
         if expected_key is None or not is_request_authenticated(request.headers.get("authorization"), expected_key):
-            abort(401, description="Missing or invalid Authorization header")
+            return make_response(
+                content=json.dumps({"error": "Missing or invalid Authorization header"}),
+                status_code=401,
+                media_type="application/json",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
         return view(*args, **kwargs)
 
     return wrapper
