@@ -220,7 +220,7 @@ def run(
     gateway_client = LatchkeyGatewayClient.from_latchkey(latchkey)
 
     # Build the supervisor once and keep the handle: the startup restart runs on
-    # the background thread below, and the same instance is stashed on app.state
+    # the background thread below, and the same instance is held in the app state
     # so the provider-change request handlers can ``bounce()`` it mid-session
     # (mirroring the SIGHUP minds already sends its own ``mngr forward`` observe).
     latchkey_forward_supervisor = LatchkeyForwardSupervisor(
