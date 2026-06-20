@@ -6,6 +6,16 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: `mngr imbue_cloud admin pool list` (and the `minds pool list` wrapper) now emits every `pool_hosts` column (including `region`, `backend_kind`, the slice identifiers, `host_name`, `vps_instance_id`, and the SSH ports). Previously a hand-maintained 10-column subset omitted several so a baked slice host showed up looking like a region-less OVH VPS.
+- Changed: `mngr list` discovery now reports a transport-level failure reaching the Imbue Cloud connector (connection refused, DNS failure, timeout) as a typed `ProviderUnavailableError` rather than a bare httpx error. Auth and account-configuration problems keep their own error types. This lets the minds recovery flow tell "the provider is unreachable, so a restart can't help" apart from "your workspace can't be reached for another reason".
+- Changed: Agent lifecycle detection now targets the agent's primary tmux window by name (`tmux.primary_window_name`, default `agent`) instead of the literal `:0` index.
+
+### Fixed
+
+- Fixed: Restarting a stopped `imbue_cloud` (leased pool) mind no longer leaves it in a broken, unrecoverable state. `ImbueCloudProvider.get_host` now probes the inner container's running state via the outer root SSH and returns an offline host when the container is stopped, so `mngr start` routes through `start_host` instead of SSHing into the dead container. `start_host` now re-bootstraps the container's SSH over the outer root SSH (relaunches sshd, re-seeds the per-host authorized key, waits for sshd, re-scans and re-records the served host key) so the resume succeeds.
+
 ## [v0.1.6] - 2026-06-18
 
 ### Added

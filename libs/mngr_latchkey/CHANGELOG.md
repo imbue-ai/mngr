@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: Bumped the bundled latchkey CLI to 2.17.1. The pinned version installed on remote VPS environments is now 2.17.1, and the wrapper rejects any installed CLI older than 2.17.1 at initialization.
+
 ## [v0.1.6] - 2026-06-18
 
 ### Added

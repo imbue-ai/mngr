@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-19
+
+Added an optional `pass_fds` parameter to `ConcurrencyGroup.run_process_in_background`, `run_background`, and `run_local_command_modern_version`. It forwards to `subprocess.Popen(pass_fds=...)`, keeping the given file descriptors open in (and inheritable by) the spawned child. This lets callers hand an already-connected `socketpair` endpoint to a child process without a rendezvous file on disk. Defaults to empty, so existing behavior is unchanged.
+
 ## 2026-06-11
 
 Replaced a direct ValueError raise in concurrency group exception handling with a dedicated custom exception type.

@@ -4,6 +4,22 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-19
+
+Fixed a dead relative link in the README so it resolves on the PyPI project page.
+
+Added `test_provider_release_trip1` to the Modal release suite: a single-boot full-lifecycle trip (create, exec, plain stop, `--stop-host` refusal, start, persistence, snapshot, out-of-band kill, gc, backend-clean) built on the shared provider release harness. Modal cannot stop a host's compute, so the trip asserts `mngr stop --stop-host` is refused with `HostShutdownNotSupportedError`; it is not parametrized over isolation (Modal has no isolation modes). Gated on Modal credentials plus the new `MNGR_MODAL_RELEASE_TESTS=1` opt-in.
+
+Also added `test_provider_release_trip3` (snapshot survives destroy): Modal snapshots are portable, so the trip snapshots a host, destroys it, then asserts a fresh `mngr create --snapshot` restores the captured filesystem.
+
+Also added `test_provider_release_trip4` (error classification): a no-boot CLI trip asserting `mngr create` with unresolvable Modal credentials surfaces the right error. This PR also fixes Modal to raise the contract `ProviderUnavailableError` (it previously raised a plain `MngrError`), with curated help pointing at `uvx modal token set`; the trip asserts the contract error class + that help. The `--vps-*` migration-arg scenario is skipped (Modal has its own build-arg parser).
+
+Also added `test_provider_release_trip2` (idle auto-shutdown contract): it caps the sandbox lifetime via `-b --timeout=120` and asserts the sandbox is terminated by Modal's own timeout. Modal has no resumable stopped state, so the trip asserts the termination only and skips the resume.
+
+## 2026-06-18
+
+Agent lifecycle detection now targets the agent's primary tmux window by name (the configurable `tmux.primary_window_name`, default `agent`) instead of the literal `:0` index, so it works regardless of the user's tmux `base-index` setting.
+
 ## 2026-06-16
 
 `destroy_host` now raises a `CleanupFailedGroup` carrying the classified cleanup failures (instead of returning them, or swallowing errors as warnings) when a resource is left behind, and returns normally otherwise. A resource that was already gone is treated as benign (no failure); a resource that exists but could not be destroyed is recorded as a `HOST_RESOURCE_REMAINS` failure (or `OTHER` for a bookkeeping/record write failure), so `mngr destroy`/`cleanup` can surface it and exit with an informative, cause-specific code. See `specs/cleanup-error-aggregation.md`.

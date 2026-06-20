@@ -6,6 +6,34 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `[tmux]` configuration section for customizing the tmux sessions mngr runs agents in. `tmux.attach_args` injects extra tmux client flags before the `attach` subcommand (motivating case: `["-CC"]` for iTerm2 control mode); `tmux.additional_config_path` is an extra tmux config file sourced into every mngr session that is never overwritten by mngr; `tmux.primary_window_name` (default `agent`) names the agent's primary window and is targeted by name so mngr works regardless of the user's tmux `base-index` setting. Agents running before this upgrade self-heal: mngr renames the existing primary window the first time it inspects such an agent.
+- Added: Shared `AgentUpdatePolicy` (`AUTO` / `ASK` / `NEVER`) used by the agent plugins to govern an agent CLI's self-updater, plus a shared `verify_pinned_cli_version` helper so plugins can verify an installed CLI matches a pinned version. When unset, the default is `NEVER` (block self-update); an *attended* agent that implements an interactive update flow defaults to `ASK`; unattended agents always default to `NEVER`.
+- Added: `mngr config assign <key> <value>` CLI command, mirroring `mngr config extend`. Writes a `key__assign` entry (replace without the narrowing guard), or — on a `settings_overrides` path — a `__mngr_merge` `assign` directive. `mngr config set key__assign <value>` routes to it, and `mngr config get` resolves the `__assign` form.
+
+### Changed
+
+- Changed: mngr config merging is now expressed through the explicit operator algebra from the new standalone `overlay` library. A bare `key` assigns (narrowing-checked); `key__extend` merges onto the layer below — now **recursively** (a nested `key__extend` merges deeper, while a nested bare key still replaces; backward-compatible); the new `key__assign` assigns *without* the narrowing warning (the per-key opt-out). A `settings_overrides` patch field now **accumulates** across config scopes (user < project < local) and `parent_type` inheritance instead of a higher scope replacing the whole value: non-overlapping keys from every scope survive and same-key `__extend`s combine.
+- Changed: Merge intent for an agent type's `settings_overrides` is now declared with a Claude-compatible `__mngr_merge` map instead of the `__extend` / `__assign` key suffixes. Because `settings_overrides` is folded into a file the external AI CLI also reads (Claude Code's / antigravity's `settings.json`), the suffixes — which that CLI does not understand and would surface as junk literal keys — are no longer allowed there. Declare the operator in a single top-level `__mngr_merge` map keyed by dotted path (`"permissions.allow" = "extend"` or `"assign"`). On a narrowing, the error prints the exact `__mngr_merge` patch to add. mngr's own (non-`settings_overrides`) config is unchanged and still uses the suffixes.
+- Changed: `mngr config` command is now exempt from the settings-narrowing guard, so a config that would otherwise narrow can still be loaded in order to *edit* it. Previously `mngr config set` / `mngr config unset` (the way to fix a narrowing config) failed with the narrowing error themselves (a catch-22). The guard still fires for every other command.
+- Changed: `mngr event --follow` no longer polls the persisted files of an offline (stopped-but-not-destroyed) agent every second. Each per-source tail thread now lives for the whole follow session and gates its own I/O on a shared online/offline signal; while the target is offline it parks and does no reads at all. Previously a handful of stopped Docker agents could drive the Docker engine to a large wasted CPU load (~30 `docker exec`/sec). Affects `mngr event --follow`, `mngr forward`, and the minds desktop app.
+- Changed: `build_add_authorized_keys_command` (the shared SSH-key seeding helper used by every provider's host/container setup) is now idempotent — each entry is appended only if not already present (a `grep -qxF` guard) — so re-running it does not accumulate duplicate `authorized_keys` lines.
+- Changed: An expected (`MngrError`) error raised during agent provisioning — e.g. a settings-narrowing `ConfigParseError` while building the per-agent `settings.json` — now surfaces as a clean one-line error instead of an "Unexpected error" with a full traceback. The `create` flow unwraps a single expected error from `provision_agent`'s `ConcurrencyExceptionGroup` before it reaches the CLI.
+- Changed: The narrowing error's `__extend` example is now tailored to the offending key (e.g. `work_dir_extra_paths__extend = ...`, or `permissions__extend = {allow__extend = ...}` for a nested path) instead of a fixed generic example, so the message shows exactly how to fix the user's own config.
+- Changed: `mngr aws` / `mngr azure` / `mngr gcp` prepare / cleanup commands now share an `emit_operator_result` helper for structured-data + human output across JSON / JSONL / human formats, and the cleanup-refusal when instances still exist now raises the unified `ManagedResourcesExistError` across all providers.
+
+### Fixed
+
+- Fixed: Latent crash in `MngrConfig.merge_with` (`AttributeError` when the base config's `retry` / `logging` was `None` and the override set them). Masked in production, but a real footgun.
+- Fixed: Config-merge bug where a partial override of a nested sub-model field (`logging`, `retry`, or a provider's `security_group`) silently reverted the base scope's other sub-fields to their defaults. For example, project scope `[logging] file_level = "ERROR"` plus local scope `[logging] console_level = "TRACE"` previously dropped `file_level` back to its default; now `file_level` carries through.
+- Fixed: `mngr plugin list` mislabeling opt-in plugins (e.g. `claude_subagent_proxy`) as `enabled=true` when they are actually blocked. The reported `enabled` state now reflects the plugin's real block state. Underlying this, `config.disabled_plugins` now faithfully includes opt-in plugins that are disabled by default, so every consumer of that field sees the correct effective disabled set.
+- Fixed: `mngr transcript` failing with "Unknown agent type" for config-defined agent subtypes (a custom `[agent_types.X]` with a `parent_type`). The command now resolves the type through its parent chain (like every other command) instead of a flat class-registry lookup.
+
+### Removed
+
+- Removed: `TagLimitExceededError` — it existed only to flag the EC2 50-tag ceiling for the AWS provider's offline tag mirror, which is replaced by the S3 state bucket.
+
 ## [v0.2.17] - 2026-06-18
 
 ### Added

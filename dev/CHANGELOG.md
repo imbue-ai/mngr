@@ -4,6 +4,34 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-06-19
+
+### Added
+
+- Added: `overlay` workspace library registered in the root `pyproject.toml` (`[tool.uv.sources]` workspace source and `--cov=imbue.overlay` in shared coverage flags), so the new library is measured in the offload combined-coverage gate.
+- Added: `google-cloud-storage>=2.18` runtime dependency at the repo root (via `libs/mngr_gcp/pyproject.toml` propagating to the lockfile), used by the GCP provider's new offline `host_dir` GCS state bucket.
+- Added: Provider specs under `specs/` covering all nine `mngr` provider plugins (modal, aws, azure, gcp, vultr, ovh, lima, docker, ssh): `specs/provider-uniformity-review.md` (descriptive cross-provider review with ranked findings, lifecycle matrices, recommendations); `specs/provider-shape.md` (prescriptive contract for what an mngr provider ought to look like); `specs/implementing-a-provider.md` (dev guide); and `specs/provider-release-tests.md` condensed to a remaining-gaps tracker now that the shared release-test harness has landed.
+- Added: Design doc under `blueprint/remote-mind-recovery/` for extending minds' workspace-recovery flow to remote (Imbue Cloud) minds.
+
+### Changed
+
+- Changed: `make_cli_docs.py` now also generates the provider/agent config tables in each plugin README from the Pydantic field descriptions (the source of truth, also shown by `mngr config`), spliced between markers and verified by the docs `--check` gate so the tables can no longer drift from the code. The `regenerate-cli-docs` pre-commit hook now runs `make_cli_docs.py --check` (non-mutating, covering every generated file) instead of regenerating in place and diffing only the mngr command docs.
+- Changed: Updated the root pytest coverage config to track the renamed `imbue.mngr_vps` package (was `imbue.mngr_vps_docker`).
+- Changed: Removed a monorepo-development-only paragraph (the `~/.local/bin` pre-commit shim note) from the top-level README so the published PyPI README stays focused on user-relevant content.
+- Changed: Documented Vault setup for pool/slice bakes in the `minds-dev-workflow` skill (bakes need an interactive `vault login -method=oidc`; the minds wrappers auto-apply the imbue HCP `VAULT_ADDR` / `VAULT_NAMESPACE` defaults; raw `vault` / `mngr imbue_cloud admin` commands need those two exported).
+
+## 2026-06-18
+
+### Added
+
+- Added: New `identify-suspicious-edge-cases` skill that flags over-broad exception catches, fallback `else` branches, defensive guards, and unnecessary `| None` types under a given path.
+- Added: Design spec `specs/provider-state-bucket/` for giving the AWS and Azure providers a cloud object-storage bucket (S3 / Azure Blob) that holds mngr control-plane state, so a stopped instance's host record, agent metadata, and `host_dir` are all readable offline without hitting the 256-char EC2/VM tag-value limit.
+- Added: `moto[s3]` to the root dev dependency group for in-memory S3 unit tests of the new AWS state bucket.
+
+### Changed
+
+- Changed: The `identify-*` skills (`identify-doc-code-disagreements`, `identify-inconsistencies`, `identify-outdated-docstrings`, `identify-style-issues`) now accept a `target_path` argument instead of a bare library name. You can scope them to a whole library (`libs/mngr` or just `mngr`) or to any subdirectory within one (e.g. `libs/mngr/imbue/mngr/cli`).
+
 ## 2026-06-17
 
 ### Added
