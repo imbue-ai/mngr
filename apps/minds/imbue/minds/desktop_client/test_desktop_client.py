@@ -680,6 +680,27 @@ def test_create_agent_api_returns_agent_id(tmp_path: Path) -> None:
     agent_creator.wait_for_all()
 
 
+def test_create_agent_api_accepts_json_body_without_content_type_header(tmp_path: Path) -> None:
+    """A JSON body posted without an ``application/json`` Content-Type is still parsed.
+
+    The FastAPI version parsed the request body regardless of its Content-Type
+    (``await request.json()`` ignores the header). The Flask port preserves that
+    via ``get_json(force=True)``; without it, Flask returns None for a missing
+    header and the endpoint would 400 a valid JSON payload. Regression guard for
+    that parity fix.
+    """
+    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/api/create-agent",
+        data=json.dumps({"git_url": "file:///nonexistent-repo"}),
+        headers={"content-type": "text/plain"},
+    )
+    assert response.status_code == 200
+    assert "agent_id" in response.get_json()
+    agent_creator.wait_for_all()
+
+
 def test_create_agent_api_rejects_empty_git_url(tmp_path: Path) -> None:
     """POST /api/create-agent with empty git_url returns 400."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
@@ -1561,6 +1582,42 @@ def _create_test_client_with_stores(
     )
     client = app.test_client()
     return client, auth_store
+
+
+def _create_test_client_with_auth_routes(tmp_path: Path) -> FlaskClient:
+    """Create a desktop client with the /auth blueprint mounted.
+
+    The auth blueprint is only registered when both a session store and an
+    imbue_cloud CLI are wired, so this passes both.
+    """
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    cli = make_fake_imbue_cloud_cli()
+    session_store = make_session_store_for_test(tmp_path, cli=cli)
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        http_client=None,
+        imbue_cloud_cli=cli,
+        session_store=session_store,
+    )
+    return app.test_client()
+
+
+def test_auth_login_page_renders_message_query_param(tmp_path: Path) -> None:
+    """GET /auth/login?message=... renders the banner (e.g. the Electron shell's
+    'You need to sign in...' prompt on the auth_required event)."""
+    client = _create_test_client_with_auth_routes(tmp_path)
+    response = client.get("/auth/login", query_string={"message": "You need to sign in to Imbue"})
+    assert response.status_code == 200
+    assert "You need to sign in to Imbue" in response.text
+
+
+def test_auth_login_page_without_message_query_param(tmp_path: Path) -> None:
+    """GET /auth/login with no message renders without injecting one."""
+    client = _create_test_client_with_auth_routes(tmp_path)
+    response = client.get("/auth/login")
+    assert response.status_code == 200
+    assert "You need to sign in to Imbue" not in response.text
 
 
 def test_accounts_page_requires_auth(tmp_path: Path) -> None:

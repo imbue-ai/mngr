@@ -278,12 +278,16 @@ def _handle_auth_page() -> Response:
     /auth/signup always defaults to sign-up mode. /auth/login defaults
     to sign-in mode (unless the user has never signed in before, in
     which case it shows sign-up as a convenience).
+
+    An optional ``?message=`` query parameter is rendered as a banner on
+    the page (e.g. the Electron shell appends one explaining why the user
+    was redirected here to sign in).
     """
     default_to_signup = request.path.rstrip("/").endswith("/signup")
     return make_html_response(
         render_auth_page(
             default_to_signup=default_to_signup,
-            message=None,
+            message=request.args.get("message"),
         )
     )
 
@@ -292,7 +296,7 @@ def _handle_signup_api() -> Response:
     """Handle email/password sign-up (JSON API)."""
     session_store = _get_session_store()
     backend = _get_auth_backend()
-    body = request.get_json(silent=True) or {}
+    body = request.get_json(silent=True, force=True) or {}
     email = body.get("email", "").strip()
     password = body.get("password", "")
 
@@ -318,7 +322,7 @@ def _handle_signin_api() -> Response:
     """Handle email/password sign-in (JSON API)."""
     session_store = _get_session_store()
     backend = _get_auth_backend()
-    body = request.get_json(silent=True) or {}
+    body = request.get_json(silent=True, force=True) or {}
     email = body.get("email", "").strip()
     password = body.get("password", "")
 
@@ -384,7 +388,7 @@ def _handle_signout_api() -> Response:
     logged; we still drop the local mirror so the user's intent is honored
     even when the connector is unreachable.
     """
-    body = request.get_json(silent=True)
+    body = request.get_json(silent=True, force=True)
     user_id = body.get("user_id") if isinstance(body, dict) else None
 
     if not user_id:
@@ -657,7 +661,7 @@ def _handle_forgot_password_api() -> Response:
     backend errors would enable email enumeration.
     """
     backend = _get_auth_backend()
-    body = request.get_json(silent=True) or {}
+    body = request.get_json(silent=True, force=True) or {}
     email = body.get("email", "").strip()
     if not email:
         return _json_response({"status": "FIELD_ERROR", "message": "Email is required"}, 400)
