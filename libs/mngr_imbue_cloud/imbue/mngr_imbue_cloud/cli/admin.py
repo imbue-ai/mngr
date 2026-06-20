@@ -567,7 +567,10 @@ def pool_create(
     max_concurrency: int,
     is_deferred_install_wait_skipped: bool,
 ) -> None:
-    """Create pre-provisioned pool hosts on the chosen backend (OVH VPS or bare-metal slice).
+    """Create pre-provisioned bare-metal slice pool hosts (``--backend slice``, the default).
+
+    ``--backend ovh_vps`` is DEPRECATED and rejected: baking new OVH classic VPS pool
+    hosts is no longer supported (existing ones stay listable/destroyable).
 
     The bake source -- exactly one of ``--from-tag`` (production, clones a tag) or
     ``--workspace-dir`` (dev, a working tree) -- determines the content baked and
