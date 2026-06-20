@@ -167,5 +167,11 @@ def serve_desktop_client(app: Flask, state: DesktopClientState, host: str, port:
     try:
         server.serve()
     finally:
+        # Always close the listening socket and tear down the worker pool, even
+        # if ``serve()`` exits by some path other than the signal-driven
+        # ``stop()`` (e.g. cheroot re-raising an internal worker interrupt).
+        # ``stop()`` is idempotent (it returns early once ``ready`` is False),
+        # so this is a no-op on the normal signal-driven shutdown.
+        server.stop()
         for signal_number, previous_handler in previous_handler_by_signal.items():
             signal.signal(signal_number, previous_handler)
