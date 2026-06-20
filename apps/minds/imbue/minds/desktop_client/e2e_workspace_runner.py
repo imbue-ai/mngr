@@ -455,6 +455,14 @@ def _stream_electron_output(process: subprocess.Popen[bytes]) -> None:
 _ELECTRON_SIGTERM_GRACE_SECONDS: Final[int] = 30
 
 
+def _signal_process_group(process_group_id: int, sig: int) -> None:
+    """Send ``sig`` to a whole process group, ignoring an already-dead group."""
+    try:
+        os.killpg(process_group_id, sig)
+    except ProcessLookupError:
+        pass
+
+
 def _terminate_electron_process_tree(process: subprocess.Popen[bytes]) -> None:
     """SIGTERM (then SIGKILL) the Electron process group, so no child survives.
 
@@ -471,13 +479,7 @@ def _terminate_electron_process_tree(process: subprocess.Popen[bytes]) -> None:
     except ProcessLookupError:
         return
 
-    def _signal_group(sig: int) -> None:
-        try:
-            os.killpg(process_group_id, sig)
-        except ProcessLookupError:
-            pass
-
-    _signal_group(signal.SIGTERM)
+    _signal_process_group(process_group_id, signal.SIGTERM)
     try:
         process.wait(timeout=_ELECTRON_SIGTERM_GRACE_SECONDS)
     except subprocess.TimeoutExpired:
@@ -485,7 +487,7 @@ def _terminate_electron_process_tree(process: subprocess.Popen[bytes]) -> None:
             "Electron did not exit on SIGTERM within {}s; sending SIGKILL",
             _ELECTRON_SIGTERM_GRACE_SECONDS,
         )
-        _signal_group(signal.SIGKILL)
+        _signal_process_group(process_group_id, signal.SIGKILL)
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
