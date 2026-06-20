@@ -29,6 +29,7 @@ from typing import Final
 import httpx
 from flask import Flask
 from loguru import logger
+from werkzeug.serving import WSGIRequestHandler
 from werkzeug.serving import make_server
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
@@ -41,6 +42,20 @@ from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 # Hard timeout for the shared HTTP client used by the share-readiness probe
 # (mirrors the old FastAPI lifespan's httpx client timeout).
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
+
+
+class _Http11RequestHandler(WSGIRequestHandler):
+    """Werkzeug request handler pinned to HTTP/1.1.
+
+    Werkzeug's default ``protocol_version`` is HTTP/1.0, under which a streaming
+    response with no Content-Length (our Server-Sent-Events generators) cannot
+    use chunked transfer-encoding and is instead delimited by closing the
+    connection -- which breaks incremental ``EventSource`` streaming and keep-alive.
+    The prior uvicorn server spoke HTTP/1.1; pin it here to preserve that wire
+    behavior so SSE streams chunk-by-chunk as the browser expects.
+    """
+
+    protocol_version = "HTTP/1.1"
 
 
 def _wake_sse_handlers(state: DesktopClientState) -> None:
@@ -126,7 +141,9 @@ def serve_desktop_client(app: Flask, state: DesktopClientState, host: str, port:
     # ``threaded=True`` yields a ThreadedWSGIServer, whose ``daemon_threads`` is
     # already True -- so a still-iterating SSE connection can never block process
     # exit (and the shutdown flag makes those threads return promptly anyway).
-    server = make_server(host, port, app, threaded=True)
+    # The HTTP/1.1 request handler preserves chunked SSE streaming + keep-alive
+    # parity with the prior uvicorn server (Werkzeug defaults to HTTP/1.0).
+    server = make_server(host, port, app, threaded=True, request_handler=_Http11RequestHandler)
 
     def _handle_exit(signal_number: int, _frame: FrameType | None) -> None:
         logger.info("Received signal {}; beginning graceful shutdown", signal_number)

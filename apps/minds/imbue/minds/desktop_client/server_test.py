@@ -8,16 +8,22 @@ Covers the two behaviors that matter for "shut down quickly and cleanly":
   this is what lets the server drain without cancelling a stream mid-flight.
 """
 
+import threading
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import httpx
 from flask.testing import FlaskClient
+from werkzeug.serving import make_server
 
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.minds.desktop_client.server import _Http11RequestHandler
 from imbue.minds.desktop_client.server import desktop_client_runtime
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
@@ -89,3 +95,48 @@ def test_chrome_events_sse_returns_cleanly_when_shutting_down(tmp_path: Path) ->
     assert '"type": "workspaces"' in body
     # The generator's finally removed its on-change callback (no leak).
     assert resolver._on_change_callbacks == []
+
+
+@contextmanager
+def _serve_in_background(tmp_path: Path) -> Iterator[tuple[int, FileAuthStore, DesktopClientState]]:
+    """Run the real graceful WSGI server on an ephemeral port for the duration of the block."""
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    app = create_desktop_client(auth_store=auth_store, backend_resolver=MngrCliBackendResolver(), http_client=None)
+    server = make_server("127.0.0.1", 0, app, threaded=True, request_handler=_Http11RequestHandler)
+    thread = threading.Thread(target=server.serve_forever, name="server-test-wsgi", daemon=True)
+    thread.start()
+    try:
+        yield server.server_port, auth_store, get_state(app)
+    finally:
+        get_state(app).shutdown_event.set()
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_chrome_events_sse_streams_chunked_over_http_1_1(tmp_path: Path) -> None:
+    """Over a real socket the SSE endpoint streams chunked HTTP/1.1, not a buffered HTTP/1.0 body.
+
+    Werkzeug defaults to HTTP/1.0 (no chunked transfer-encoding), under which a
+    Content-Length-less streaming generator does not stream incrementally to an
+    EventSource. ``_Http11RequestHandler`` restores the HTTP/1.1 + chunked
+    behavior the prior uvicorn server provided; assert it end-to-end.
+    """
+    with _serve_in_background(tmp_path) as (port, auth_store, _state):
+        cookie = create_session_cookie(signing_key=auth_store.get_signing_key())
+        headers = {"Cookie": f"{SESSION_COOKIE_NAME}={cookie}"}
+        with httpx.stream("GET", f"http://127.0.0.1:{port}/_chrome/events", headers=headers, timeout=10.0) as response:
+            assert response.status_code == 200
+            assert response.http_version == "HTTP/1.1"
+            assert response.headers.get("transfer-encoding") == "chunked"
+            assert response.headers["content-type"].startswith("text/event-stream")
+            # The first streamed event arrives promptly (incrementally), not after
+            # the whole response is buffered.
+            deadline = time.monotonic() + 5.0
+            saw_workspaces = False
+            for line in response.iter_lines():
+                if line.startswith("data:") and "workspaces" in line:
+                    saw_workspaces = True
+                    break
+                if time.monotonic() > deadline:
+                    break
+            assert saw_workspaces
