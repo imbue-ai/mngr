@@ -613,6 +613,14 @@ class _CreateCommand(click.Command):
     help="Shell command to run inside the new host after it is created, before any agent "
     "work_dir setup. Runs synchronously; non-zero exit aborts the create. [repeatable]",
 )
+@optgroup.option(
+    "--post-host-create-outer-command",
+    "post_host_create_outer_command",
+    multiple=True,
+    help="Shell command to run once on the host's outer machine (the underlying VM/daemon "
+    "host) after the host is created. Runs synchronously; non-zero exit aborts the create. "
+    "Skipped (with a warning) when the provider has no outer host. [repeatable]",
+)
 @optgroup.group("Host Lifecycle")
 @optgroup.option(
     "--idle-timeout",

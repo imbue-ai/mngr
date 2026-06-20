@@ -279,6 +279,13 @@ def create(
             # subsequent exec depends on.
             _run_post_host_create_commands(host, target_host.provisioning.post_host_create_commands)
 
+            # Run post-host-create commands on the outer machine (the underlying
+            # VM/daemon host). This is the only create-time hook that targets the
+            # outer rather than the host/container itself -- e.g. installing a
+            # VM-level systemd unit. Skipped (with a warning) for providers that
+            # expose no outer host.
+            _run_post_host_create_outer_commands(host, target_host.provisioning.post_host_create_outer_commands)
+
         # ``host.pre_baked_agent_id`` (default None on the base Host class,
         # populated by providers whose ``create_host`` returns a host with a
         # baked-in agent -- ``ImbueCloudHost`` is the only one today) marks
@@ -441,6 +448,39 @@ def _run_post_host_create_commands(
                     raise MngrError(
                         f"post-host-create command failed: {cmd}\nstdout: {result.stdout}\nstderr: {result.stderr}"
                     )
+
+
+def _run_post_host_create_outer_commands(
+    host: OnlineHostInterface,
+    commands: tuple[CommandString, ...],
+) -> None:
+    """Run the configured post-host-create commands on the host's outer machine.
+
+    Opens the outer host (the underlying VM/daemon host) and runs each command
+    in order via ``execute_idempotent_command``; a non-zero exit raises
+    ``MngrError`` and aborts the create. When the provider exposes no outer
+    host (e.g. local, ssh, modal, docker over a local socket or tcp://), the
+    commands are skipped with a warning so a missing outer is visible rather
+    than silently ignored.
+    """
+    if not commands:
+        return
+    with host.outer_host() as outer:
+        if outer is None:
+            logger.warning(
+                "Skipping {} post-host-create outer command(s): this provider exposes no outer host",
+                len(commands),
+            )
+            return
+        with log_span("Running post-host-create outer commands", count=len(commands)):
+            for cmd in commands:
+                with log_span("post-host-create (outer): {}", cmd):
+                    result = outer.execute_idempotent_command(cmd)
+                    if not result.success:
+                        raise MngrError(
+                            f"post-host-create outer command failed: {cmd}\n"
+                            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+                        )
 
 
 def _write_host_env_vars(

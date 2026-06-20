@@ -1124,6 +1124,13 @@ class HostProvisioningOptions(FrozenModel):
         "synchronously, after the host is ready but before any agent work_dir "
         "is touched. Each command runs in order; a non-zero exit aborts the create.",
     )
+    post_host_create_outer_commands: tuple[CommandString, ...] = Field(
+        default=(),
+        description="Shell commands to run once on the host's outer machine (the "
+        "underlying VM/daemon host), synchronously, after the host is ready. Run "
+        "in order; a non-zero exit aborts the create. Skipped (with a warning) "
+        "when the provider exposes no outer host.",
+    )
 
 
 # Mapping from raw-string config/CLI field names to HostProvisioningOptions
@@ -1132,6 +1139,7 @@ class HostProvisioningOptions(FrozenModel):
 # sync.
 HOST_PROVISIONING_FIELD_MAP: tuple[tuple[str, str, Any], ...] = (
     ("post_host_create_command", "post_host_create_commands", CommandString),
+    ("post_host_create_outer_command", "post_host_create_outer_commands", CommandString),
 )
 
 

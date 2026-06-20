@@ -157,6 +157,7 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 | `-b`, `--build-arg` | text | Build argument as key=value or --key=value (e.g., -b gpu=h100 -b cpu=2) [repeatable] | None |
 | `-s`, `--start-arg` | text | Argument for start [repeatable] | None |
 | `--post-host-create-command` | text | Shell command to run inside the new host after it is created, before any agent work_dir setup. Runs synchronously; non-zero exit aborts the create. [repeatable] | None |
+| `--post-host-create-outer-command` | text | Shell command to run once on the host's outer machine (the underlying VM/daemon host) after the host is created. Runs synchronously; non-zero exit aborts the create. Skipped (with a warning) when the provider has no outer host. [repeatable] | None |
 
 ## Host Lifecycle
 
