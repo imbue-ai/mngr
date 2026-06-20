@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 import httpx
 from flask import Flask
 from flask import Response
+from flask import abort
 from flask import request
 from loguru import logger
 from pydantic import Field
@@ -216,9 +217,14 @@ def _read_json_body() -> Any:
     Mirrors the FastAPI ``await request.json()`` contract closely enough that
     the existing ``except (json.JSONDecodeError, ValueError)`` handlers around
     the call sites keep working: Flask's ``get_json(silent=True)`` returns
-    ``None`` on a malformed or non-JSON body, which we turn into a ``ValueError``.
+    ``None`` on a malformed body, which we turn into a ``ValueError``.
+
+    ``force=True`` parses the body regardless of the request's ``Content-Type``
+    so a client that POSTs JSON without an ``application/json`` header is still
+    accepted -- matching the FastAPI ``request.json()`` behavior (which ignored
+    the content type) and avoiding a wire-behavior regression for API callers.
     """
-    data = request.get_json(silent=True)
+    data = request.get_json(silent=True, force=True)
     if data is None:
         raise InvalidJsonBodyError("Invalid or empty JSON body")
     return data
@@ -265,6 +271,21 @@ def _int_query_param(name: str, default: int) -> int:
 # -- Auth helpers --
 
 
+def _required_one_time_code() -> OneTimeCode:
+    """Parse the required ``one_time_code`` query param, aborting 422 when absent.
+
+    Under FastAPI ``one_time_code`` was a required query parameter, so a request
+    missing it was rejected with 422 before the handler ran. Mirror that here:
+    abort 422 (the catch-all error handler passes HTTPExceptions through with
+    their own status) instead of constructing ``OneTimeCode("")``, which would
+    raise and surface as a 500.
+    """
+    raw = request.args.get("one_time_code")
+    if not raw:
+        abort(422)
+    return OneTimeCode(raw)
+
+
 def _is_request_authenticated() -> bool:
     """Check whether the current request carries a valid global session cookie."""
     if os.getenv("SKIP_AUTH", "0") == "1":
@@ -283,7 +304,7 @@ def _is_request_authenticated() -> bool:
 
 
 def _handle_login() -> Response:
-    code = OneTimeCode(request.args.get("one_time_code", ""))
+    code = _required_one_time_code()
 
     # If user already has a valid session, redirect to landing page
     if _is_request_authenticated():
@@ -295,7 +316,7 @@ def _handle_login() -> Response:
 
 
 def _handle_authenticate() -> Response:
-    code = OneTimeCode(request.args.get("one_time_code", ""))
+    code = _required_one_time_code()
 
     is_valid = get_state().auth_store.validate_and_consume_code(code=code)
 

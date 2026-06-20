@@ -156,6 +156,21 @@ def test_login_redirects_to_authenticate_via_js(tmp_path: Path) -> None:
     assert "/authenticate" in response.text
 
 
+def test_login_without_one_time_code_returns_422(tmp_path: Path) -> None:
+    """A missing one_time_code is a 422 (matching FastAPI's required-query-param
+    rejection), not a 500."""
+    client, _, _ = _setup_test_server(tmp_path)
+    response = client.get("/login", follow_redirects=False)
+    assert response.status_code == 422
+
+
+def test_authenticate_without_one_time_code_returns_422(tmp_path: Path) -> None:
+    """A missing one_time_code is a 422, not a 500."""
+    client, _, _ = _setup_test_server(tmp_path)
+    response = client.get("/authenticate", follow_redirects=False)
+    assert response.status_code == 422
+
+
 def test_authenticate_with_valid_code_sets_cookie_and_redirects(tmp_path: Path) -> None:
     client, auth_store, _ = _setup_test_server(tmp_path)
     code = OneTimeCode("auth-code-{}".format(AgentId()))
