@@ -99,8 +99,9 @@ from imbue.mngr.providers.ssh_utils import wait_for_sshd
 
 # PID-1 entrypoint for host containers. Unlike the idle state-container
 # entrypoint, this self-heals sshd on every (re)start once mngr has provisioned
-# a host key, so the container is reachable again after an out-of-band restart
-# without waiting for `mngr start`.
+# this host (tracked by a marker, so a host key pre-baked into the base image is
+# never used by mistake), so the container is reachable again after an
+# out-of-band restart without waiting for `mngr start`.
 HOST_CONTAINER_ENTRYPOINT_CMD: Final[str] = build_self_healing_host_entrypoint_command()
 
 # Container entrypoint as SDK-style command tuple (used by tests)
