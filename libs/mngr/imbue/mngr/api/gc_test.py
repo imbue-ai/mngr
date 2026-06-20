@@ -246,6 +246,51 @@ def test_gc_machines_deletes_old_destroyed_host_with_agents(
     assert gc_mock_provider.deleted_hosts == [host.id]
 
 
+def test_gc_machines_records_leaked_resource_but_continues_when_delete_host_raises(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A leaked resource during offline-host deletion is recorded but does not abort the sweep.
+
+    delete_host raises a CleanupFailedGroup when the host's records were deleted but a resource
+    was left behind (e.g. a docker build image still referenced by an orphaned container). GC
+    records the leak in result.failures and still counts the host as deleted, rather than letting
+    one host's leak propagate and abort the whole sweep.
+    """
+
+    class _LeakyDeleteProvider(MockProviderInstance):
+        def delete_host(self, host: HostInterface) -> None:
+            self.deleted_hosts.append(host.id)
+            raise CleanupFailedGroup.from_failures(
+                [
+                    CleanupFailure(
+                        category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                        message="build image could not be removed",
+                        host_id=host.id,
+                    )
+                ]
+            )
+
+    provider = _LeakyDeleteProvider(
+        name=ProviderInstanceName("test-provider-leaky-delete"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+    host = _make_offline_host(provider, temp_mngr_ctx, days_old=14)
+    provider.mock_hosts = [host]
+
+    result = _run_gc_machines(provider)
+
+    # The host record is gone (delete attempted), so it still counts as deleted...
+    assert provider.deleted_hosts == [host.id]
+    assert len(result.machines_deleted) == 1
+    assert result.machines_deleted[0].host_id == host.id
+    # ...but the leak is recorded as a structured failure (preserving the category and host_id
+    # from delete_host) rather than swallowed or allowed to abort the sweep.
+    assert len(result.failures) == 1
+    assert result.failures[0].category == CleanupFailureCategory.HOST_RESOURCE_REMAINS
+    assert result.failures[0].host_id == host.id
+
+
 # =========================================================================
 # _handle_error tests
 # =========================================================================
