@@ -3273,6 +3273,7 @@ dependencies = [
     { name = "telethon" },
     { name = "tenacity" },
     { name = "tomlkit" },
+    { name = "werkzeug" },
     { name = "wsgidav" },
 ]
 
@@ -3302,6 +3303,7 @@ requires-dist = [
     { name = "telethon", specifier = ">=1.40.0" },
     { name = "tenacity" },
     { name = "tomlkit", specifier = ">=0.12.0" },
+    { name = "werkzeug", specifier = ">=3.0" },
     { name = "wsgidav", specifier = ">=4.3" },
 ]
 

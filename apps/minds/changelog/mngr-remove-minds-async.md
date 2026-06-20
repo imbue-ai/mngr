@@ -8,4 +8,4 @@ This is an internal framework swap with no user-visible behavior change: every r
 
 - The WebDAV file server under `/api/v1/files` is mounted directly as a WSGI app (the `a2wsgi` ASGI bridge is gone). The `/api/v1` REST API and the `/auth` SuperTokens pages are now Flask blueprints.
 
-- Removed the `fastapi`, `uvicorn`, `a2wsgi`, `python-multipart`, and `websockets` dependencies; added `flask`.
+- Removed the `fastapi`, `uvicorn`, `a2wsgi`, `python-multipart`, and `websockets` dependencies; added `flask` and a direct `werkzeug` dependency (the server, dispatcher mount, and HTTP-exception handling import it directly).
