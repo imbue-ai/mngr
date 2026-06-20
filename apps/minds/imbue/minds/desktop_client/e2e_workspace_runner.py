@@ -21,9 +21,11 @@ and own the environment / cleanup story themselves.
 
 import os
 import re
+import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -453,6 +455,43 @@ def _stream_electron_output(process: subprocess.Popen[bytes]) -> None:
 _ELECTRON_SIGTERM_GRACE_SECONDS: Final[int] = 30
 
 
+def _terminate_electron_process_tree(process: subprocess.Popen[bytes]) -> None:
+    """SIGTERM (then SIGKILL) the Electron process group, so no child survives.
+
+    Electron is launched as a session leader (``start_new_session=True``), so
+    its renderer/GPU/utility children and the backend it spawns share its
+    process group. Signalling the group -- rather than just ``process.pid`` --
+    guarantees the whole tree dies; a leftover child would otherwise keep the
+    profile's single-instance lock held and wedge the next relaunch.
+    """
+    if process.poll() is not None:
+        return
+    try:
+        process_group_id = os.getpgid(process.pid)
+    except ProcessLookupError:
+        return
+
+    def _signal_group(sig: int) -> None:
+        try:
+            os.killpg(process_group_id, sig)
+        except ProcessLookupError:
+            pass
+
+    _signal_group(signal.SIGTERM)
+    try:
+        process.wait(timeout=_ELECTRON_SIGTERM_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "Electron did not exit on SIGTERM within {}s; sending SIGKILL",
+            _ELECTRON_SIGTERM_GRACE_SECONDS,
+        )
+        _signal_group(signal.SIGKILL)
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            logger.warning("Electron process group did not exit within 5s of SIGKILL")
+
+
 @contextmanager
 def _launched_electron(
     workspace_git_url: Path,
@@ -473,13 +512,23 @@ def _launched_electron(
     repo root, which is what the snapshot script wants.
 
     SIGTERM with a ``_ELECTRON_SIGTERM_GRACE_SECONDS`` grace, then
-    SIGKILL. The Electron main process owns the backend subprocess and
-    the renderer; clean termination cascades. The grace window is
+    SIGKILL -- delivered to the whole process group (Electron is launched
+    as a session leader via ``start_new_session=True``), not just the main
+    PID. The Electron main process owns the backend subprocess and the
+    renderer/GPU children; signalling the group ensures they all die
+    instead of being orphaned. That matters for the retry path: a SIGKILL
+    that left renderer/GPU children alive would keep them holding the
+    profile's single-instance lock, so the next relaunch would bind its
+    debug port, fail ``requestSingleInstanceLock()``, and quit immediately
+    (the CDP port then refusing every connection). The grace window is
     intentionally generous (30s) because the minds backend that Electron
-    spawns has its own asyncio teardown path that needs ~5-10 seconds to
-    drain mngr_forward streams cleanly -- shorter grace periods
-    routinely escalate to SIGKILL and leave the workspace in a
-    half-shutdown state.
+    spawns needs a few seconds to drain mngr_forward streams cleanly --
+    shorter grace periods routinely escalate to SIGKILL and leave the
+    workspace in a half-shutdown state.
+
+    Each launch also gets its own throwaway ``--user-data-dir`` so that,
+    even if a prior attempt's teardown was imperfect, this instance never
+    collides with a stale single-instance lock from the default profile.
 
     Note: tearing down Electron does NOT destroy the workspace's mngr
     agent / Docker container. Those persist as separate host-level
@@ -490,44 +539,43 @@ def _launched_electron(
             f"Electron binary missing at {_ELECTRON_BINARY}. Run `cd apps/minds && pnpm install` first."
         )
 
-    cmd = [
-        str(_ELECTRON_BINARY),
-        str(_ELECTRON_MAIN_JS),
-        f"--remote-debugging-port={debug_port}",
-        # GitHub Actions runners ship Electron's chrome-sandbox binary
-        # without the setuid bit, so the renderer aborts on launch with
-        # `FATAL:setuid_sandbox_host.cc -- The SUID sandbox helper
-        # binary was found, but is not configured correctly`. Disabling
-        # the sandbox sidesteps the chown/chmod dance and matches the
-        # well-trodden CI pattern (Playwright's own electron docs ship
-        # `--no-sandbox` for the same reason). Acceptable here because
-        # the binary we drive is a dev-mode Electron launched against
-        # our own backend, not a downloaded one.
-        "--no-sandbox",
-    ]
-    logger.info("Launching Electron: {}", " ".join(cmd))
-    process = subprocess.Popen(
-        cmd,
-        cwd=str(host_config_dir or _REPO_ROOT),
-        env=_build_electron_env(workspace_git_url, workspace_name),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    _stream_electron_output(process)
-    try:
-        yield process
-    finally:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=_ELECTRON_SIGTERM_GRACE_SECONDS)
-            except subprocess.TimeoutExpired:
-                logger.warning(
-                    "Electron did not exit on SIGTERM within {}s; sending SIGKILL",
-                    _ELECTRON_SIGTERM_GRACE_SECONDS,
-                )
-                process.kill()
-                process.wait(timeout=5)
+    with tempfile.TemporaryDirectory(prefix="minds-electron-userdata-") as user_data_dir:
+        cmd = [
+            str(_ELECTRON_BINARY),
+            str(_ELECTRON_MAIN_JS),
+            f"--remote-debugging-port={debug_port}",
+            # A fresh, throwaway profile per launch. Electron's single-instance
+            # lock is keyed on the user-data-dir; isolating it guarantees a
+            # relaunch (after a prior attempt was SIGKILLed) cannot fail
+            # ``requestSingleInstanceLock()`` against a lock a surviving child
+            # of the previous attempt might still hold.
+            f"--user-data-dir={user_data_dir}",
+            # GitHub Actions runners ship Electron's chrome-sandbox binary
+            # without the setuid bit, so the renderer aborts on launch with
+            # `FATAL:setuid_sandbox_host.cc -- The SUID sandbox helper
+            # binary was found, but is not configured correctly`. Disabling
+            # the sandbox sidesteps the chown/chmod dance and matches the
+            # well-trodden CI pattern (Playwright's own electron docs ship
+            # `--no-sandbox` for the same reason). Acceptable here because
+            # the binary we drive is a dev-mode Electron launched against
+            # our own backend, not a downloaded one.
+            "--no-sandbox",
+        ]
+        logger.info("Launching Electron: {}", " ".join(cmd))
+        process = subprocess.Popen(
+            cmd,
+            cwd=str(host_config_dir or _REPO_ROOT),
+            env=_build_electron_env(workspace_git_url, workspace_name),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            # Own session/process group so teardown can signal the whole tree.
+            start_new_session=True,
+        )
+        _stream_electron_output(process)
+        try:
+            yield process
+        finally:
+            _terminate_electron_process_tree(process)
 
 
 def _wait_for_cdp(debug_port: int, timeout_seconds: int) -> None:
