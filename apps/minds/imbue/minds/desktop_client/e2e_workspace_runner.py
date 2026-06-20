@@ -38,6 +38,7 @@ from loguru import logger
 from playwright.sync_api import Browser
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page
+from playwright.sync_api import Playwright
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
@@ -84,6 +85,13 @@ _ELECTRON_MAIN_JS: Final[Path] = _REPO_ROOT / "apps" / "minds" / "electron" / "m
 # "stuck in <phase>" error before a wrapping suite-level timeout fires.
 _CDP_READY_TIMEOUT_SECONDS: Final[int] = 120
 _BACKEND_READY_TIMEOUT_SECONDS: Final[int] = 120
+# ``connect_over_cdp`` occasionally hangs in its CDP handshake under
+# Electron-in-CI even after ``/json/version`` is up (GPU/sandbox/dbus quirks):
+# the WebSocket connects but target negotiation stalls. Retry a few times with a
+# bounded per-attempt timeout instead of waiting out Playwright's long default.
+_CDP_CONNECT_ATTEMPTS: Final[int] = 3
+_CDP_CONNECT_TIMEOUT_MS: Final[float] = 60_000.0
+_CDP_CONNECT_RETRY_DELAY_SECONDS: Final[float] = 1.0
 _CREATE_FORM_TIMEOUT_SECONDS: Final[int] = 600
 _SYSTEM_INTERFACE_TIMEOUT_SECONDS: Final[int] = 180
 _CREATE_OUTCOME_POLL_INTERVAL_MS: Final[int] = 500
@@ -541,6 +549,31 @@ def _wait_for_cdp(debug_port: int, timeout_seconds: int) -> None:
     raise TimeoutError(f"CDP at port {debug_port} did not respond within {timeout_seconds}s (last: {last_error})")
 
 
+def _connect_over_cdp_with_retry(playwright: Playwright, debug_port: int) -> Browser:
+    """Connect Playwright to Electron's CDP endpoint, retrying transient handshake stalls.
+
+    ``_wait_for_cdp`` has already confirmed the DevTools HTTP endpoint is up, but
+    the CDP WebSocket negotiation can intermittently hang under Electron-in-CI.
+    Retry with a bounded per-attempt timeout rather than hanging on Playwright's
+    long default; a stalled first attempt usually succeeds on the next try once
+    the renderer has finished initializing.
+    """
+    endpoint = f"http://127.0.0.1:{debug_port}"
+    last_error: PlaywrightError | None = None
+    for attempt in range(1, _CDP_CONNECT_ATTEMPTS + 1):
+        try:
+            return playwright.chromium.connect_over_cdp(endpoint, timeout=_CDP_CONNECT_TIMEOUT_MS)
+        except PlaywrightError as exc:
+            last_error = exc
+            logger.warning(
+                "connect_over_cdp attempt {}/{} to {} failed: {}", attempt, _CDP_CONNECT_ATTEMPTS, endpoint, exc
+            )
+            threading.Event().wait(timeout=_CDP_CONNECT_RETRY_DELAY_SECONDS)
+    raise PlaywrightTimeoutError(
+        f"connect_over_cdp to {endpoint} failed after {_CDP_CONNECT_ATTEMPTS} attempts (last error: {last_error})"
+    )
+
+
 def _pick_content_page(browser: Browser, timeout_seconds: int) -> Page:
     """Return the Electron WebContentsView that serves the main content.
 
@@ -751,7 +784,7 @@ def create_workspace_via_electron(
     with _launched_electron(fct_path, workspace_name, debug_port, host_config_dir):
         _wait_for_cdp(debug_port, _CDP_READY_TIMEOUT_SECONDS)
         with sync_playwright() as playwright:
-            browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{debug_port}")
+            browser = _connect_over_cdp_with_retry(playwright, debug_port)
             try:
                 page = _pick_content_page(browser, _BACKEND_READY_TIMEOUT_SECONDS)
                 backend_origin = _backend_origin_from_page(page)
