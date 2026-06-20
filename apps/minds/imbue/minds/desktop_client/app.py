@@ -1847,10 +1847,9 @@ def _handle_set_workspace_color_api(
     # keys, so we shell out to the CLI to get the merge for free.
     argv = [mngr_binary, "label", str(parsed_id), "-l", f"color={normalized}"]
     try:
-        # This route is async (it awaits the JSON body), so the blocking
-        # subprocess must run in the threadpool -- calling it inline would
-        # stall the event loop (SSE, proxying, every other route) for the
-        # duration of the ``mngr label`` run.
+        # Run ``mngr label`` to completion on the root concurrency group so the
+        # subprocess plumbing (launch, timeout, capture) lives in one place and
+        # the handler returns the real outcome of the label write.
         _run_mngr(concurrency_group, argv, env)
     except MngrCommandError as exc:
         logger.warning("mngr label failed for {}: {}", parsed_id, exc)
@@ -2940,9 +2939,9 @@ def _handle_restart_host_api(
 # resolver so the landing page and quit prompt flip at once; the next discovery
 # snapshot then confirms (or corrects) it.
 #
-# The single-mind endpoints run the ``mngr`` command synchronously (in the
-# request's Starlette threadpool worker) and return the real outcome -- no
-# fire-and-forget dispatch. The quit-time bulk stop issues ONE
+# The single-mind endpoints run the ``mngr`` command synchronously (on the
+# request's worker thread) and return the real outcome -- no fire-and-forget
+# dispatch. The quit-time bulk stop issues ONE
 # ``mngr stop <ids...> --stop-host``, which stops every named host concurrently
 # via mngr's own executor, rather than one subprocess per mind.
 
