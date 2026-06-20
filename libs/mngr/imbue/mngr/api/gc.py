@@ -362,7 +362,16 @@ def _gc_single_host(
                         #  there's a risk of getting into a screwy situation here--if we delete this right as
                         #  someone else starts it, you might have a host that is running but is untracked
                         #  This can be easily fixed by adding some host-id-keyed locking at the provider level (which both create/start/delete would acquire)
-                        provider.delete_host(host)
+                        # delete_host raises a CleanupFailedGroup when the host's
+                        # records were deleted but a resource was left behind. Record
+                        # the leak and continue the sweep (the host record is gone, so
+                        # it still counts as deleted) rather than letting one host's
+                        # leak abort GC. Mirrors the online-destroy path below.
+                        try:
+                            provider.delete_host(host)
+                        except CleanupFailedGroup as group:
+                            with results_lock:
+                                result.failures.extend(group.failures)
                         emit_host_destroyed(
                             mngr_ctx.config,
                             host_ref.host_id,

@@ -1546,40 +1546,63 @@ kill -TERM 1
     def delete_host(self, host: HostInterface) -> None:
         """Permanently delete all records associated with a (destroyed) host.
 
-        Removes snapshot images, the host volume directory, and the host
-        record. Called by gc_machines once a destroyed host has aged past
-        ``destroyed_host_persisted_seconds``.
+        Removes snapshot images, the host volume directory, the build image,
+        and the host record. Called by gc_machines once a destroyed host has
+        aged past ``destroyed_host_persisted_seconds``.
+
+        Best-effort: every step is attempted, and a real failure (a resource
+        that exists but could not be removed) is recorded and raised as a
+        ``CleanupFailedGroup`` rather than aborting the GC sweep with a raw
+        provider exception. The host record is still deleted, so the host does
+        not reappear on the next sweep. Mirrors ``destroy_host``. See
+        specs/cleanup-error-aggregation.md.
         """
         host_id = host.id
 
-        host_record = self._host_store.read_host_record(host_id, use_cache=False)
-        if host_record is not None:
-            for snap in host_record.certified_host_data.snapshots:
+        with collecting_cleanup_failures() as failures:
+            host_record = self._host_store.read_host_record(host_id, use_cache=False)
+            if host_record is not None:
+                for snap in host_record.certified_host_data.snapshots:
+                    try:
+                        self._docker_client.images.remove(snap.id)
+                    except docker.errors.NotFound:
+                        pass
+                    except docker.errors.DockerException as e:
+                        logger.warning("Failed to remove snapshot image {} for host {}: {}", snap.id, host_id, e)
+                        failures.append(
+                            CleanupFailure(
+                                category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                                message=f"failed to remove snapshot image {snap.id} for host {host_id}: {e}",
+                                host_id=host_id,
+                            )
+                        )
+
+            if self.config.is_host_volume_created:
+                volume_id = self._volume_id_for_host(host_id)
                 try:
-                    self._docker_client.images.remove(snap.id)
-                except docker.errors.DockerException as e:
-                    logger.warning("Error removing snapshot image {}: {}", snap.id, e)
+                    self._state_volume.remove_directory(f"volumes/{volume_id}")
+                except (FileNotFoundError, OSError, MngrError) as e:
+                    logger.trace("No host volume to clean up for {}: {}", host_id, e)
 
-        if self.config.is_host_volume_created:
-            volume_id = self._volume_id_for_host(host_id)
+            # Defensive untag in case destroy_host did not run (idempotent). A
+            # removal failure is recorded as a leak rather than aborting the GC
+            # sweep with a raw DockerException. _remove_build_image no-ops if
+            # the image is already gone.
             try:
-                self._state_volume.remove_directory(f"volumes/{volume_id}")
-            except (FileNotFoundError, OSError, MngrError) as e:
-                logger.trace("No host volume to clean up for {}: {}", host_id, e)
+                self._remove_build_image(host_id)
+            except docker.errors.DockerException as e:
+                logger.warning("Failed to remove build image for host {}: {}", host_id, e)
+                failures.append(
+                    CleanupFailure(
+                        category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                        message=f"failed to remove build image for host {host_id}: {e}",
+                        host_id=host_id,
+                    )
+                )
 
-        # Defensive untag in case destroy_host did not run (idempotent). A
-        # removal failure here must not abort GC (which would crash the whole
-        # `mngr destroy`/`mngr gc`), so log and continue -- the build image is
-        # disposable and a later sweep retries it. Mirrors the snapshot-removal
-        # handling above.
-        try:
-            self._remove_build_image(host_id)
-        except docker.errors.DockerException as e:
-            logger.warning("Error removing build image for host {}: {}", host_id, e)
-
-        self._host_store.delete_host_record(host_id)
-        self._container_cache_by_id.pop(host_id, None)
-        self._evict_cached_host(host_id)
+            self._host_store.delete_host_record(host_id)
+            self._container_cache_by_id.pop(host_id, None)
+            self._evict_cached_host(host_id)
 
     def on_connection_error(self, host_id: HostId) -> None:
         """Clear all caches for a host on connection error."""

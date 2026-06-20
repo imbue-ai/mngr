@@ -19,7 +19,9 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import OfflineHostWithVolume
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.host import HostFileReadInterface
 from imbue.mngr.interfaces.host import HostFileWriteInterface
 from imbue.mngr.primitives import DockerBuilder
@@ -868,14 +870,18 @@ def test_remove_build_image_forces_removal(temp_mngr_ctx: MngrContext, tmp_path:
     assert fake_images.remove_calls == [{"tag": expected_tag, "force": True}]
 
 
-@pytest.mark.allow_warnings(match=r"Error removing build image for host")
-def test_delete_host_tolerates_build_image_removal_conflict(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
-    """delete_host must not propagate a build-image removal conflict.
+@pytest.mark.allow_warnings(match=r"Failed to remove build image for host")
+def test_delete_host_records_build_image_failure_as_cleanup_failure(
+    temp_mngr_ctx: MngrContext, tmp_path: Path
+) -> None:
+    """A build-image removal failure in delete_host is recorded and raised as a
+    CleanupFailedGroup -- not a raw DockerException that aborts the GC sweep.
 
     GC calls delete_host on aged-out destroyed hosts; an orphaned container can
-    still reference the build image, so its removal raises a 409 conflict. That
-    must be logged and swallowed -- otherwise it aborts GC and crashes the whole
-    ``mngr destroy`` even though the agent was already destroyed.
+    still reference the build image, so its removal can raise a 409 conflict.
+    delete_host must surface that as a CleanupFailedGroup (which GC aggregates
+    and continues past) while still deleting the host record so the host does
+    not reappear on the next sweep.
     """
     provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
     conflict = docker.errors.APIError("conflict: (must be forced) - container is using its referenced image")
@@ -894,6 +900,9 @@ def test_delete_host_tolerates_build_image_removal_conflict(temp_mngr_ctx: MngrC
     provider._host_store.write_host_record(record)
     host = provider._create_host_from_host_record(record)
 
-    provider.delete_host(host)
+    with pytest.raises(CleanupFailedGroup) as exc_info:
+        provider.delete_host(host)
 
+    assert any(f.category == CleanupFailureCategory.HOST_RESOURCE_REMAINS for f in exc_info.value.failures)
+    # The host record is still deleted, so the host does not reappear next sweep.
     assert provider._host_store.read_host_record(HostId(HOST_ID_A), use_cache=False) is None

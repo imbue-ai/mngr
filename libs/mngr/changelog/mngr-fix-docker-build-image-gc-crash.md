@@ -2,4 +2,4 @@ Fixed `mngr destroy` (and `mngr gc`) crashing with a Docker `409 Conflict` trace
 
 The post-destroy garbage collection removed the build image without `force`, which Docker refuses with "must be forced - container is using its referenced image", and the error was not caught in `delete_host`, so it aborted GC and surfaced as a failed `mngr destroy` even though the requested agent had already been destroyed.
 
-The build image is now force-removed, and a removal failure during GC is logged and skipped instead of aborting the whole command.
+The build image is now force-removed (the daemon's prescribed remedy when an image is still referenced by a container -- it drops the tag and leaves the now-dangling image for the container, which is all mngr needs). And if a removal genuinely fails, `delete_host` now records it as a structured cleanup failure and raises a `CleanupFailedGroup`, which the GC sweep aggregates and continues past -- mirroring how `destroy_host` and the online-destroy GC path already behave. So one host's leak is surfaced with a cause-specific exit code instead of crashing the whole `mngr destroy`/`mngr gc`.
