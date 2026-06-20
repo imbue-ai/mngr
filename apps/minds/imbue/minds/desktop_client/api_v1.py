@@ -60,7 +60,10 @@ def _handle_telegram_setup(agent_id: str) -> Response:
     parsed_id = AgentId(agent_id)
 
     agent_name = str(parsed_id)[:8]
-    body = request.get_json(silent=True)
+    # force=True parses the body regardless of Content-Type, matching the old
+    # FastAPI ``await request.json()`` (which ignored the header) so a caller
+    # that omits ``application/json`` is still honored.
+    body = request.get_json(silent=True, force=True)
     if isinstance(body, dict):
         raw_name = body.get("agent_name", agent_name)
         agent_name = str(raw_name).strip() if raw_name else agent_name
@@ -121,7 +124,9 @@ def _handle_notification(agent_id: str) -> Response:
     if dispatcher is None:
         return _json_error("Notification dispatch not configured", 501)
 
-    body = request.get_json(silent=True)
+    # force=True parses the body regardless of Content-Type, matching the old
+    # FastAPI ``await request.json()`` (which ignored the header).
+    body = request.get_json(silent=True, force=True)
     if body is None:
         return _json_error("Invalid JSON body", 400)
     if not isinstance(body, dict):
