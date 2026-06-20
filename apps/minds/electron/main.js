@@ -3091,7 +3091,7 @@ async function runQuitSequence() {
 
 // Route POSIX SIGTERM / SIGINT through the quit sequence so they trigger the
 // same `backend.shutdown()` chain that window-close uses (SIGTERMing the python
-// backend and waiting for uvicorn's graceful exit). Without these handlers
+// backend and waiting for its graceful exit). Without these handlers
 // Node's default for these signals is to exit immediately, which orphans the
 // python backend and the `mngr forward` / `observe` subprocesses. The `just
 // minds-stop` recipe sends SIGTERM here; we mark it headless so it shuts down

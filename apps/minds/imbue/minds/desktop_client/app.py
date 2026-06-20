@@ -1,42 +1,35 @@
-import asyncio
 import json
 import os
 import queue
 import shlex
 import threading
 import time
-from collections.abc import AsyncGenerator
 from collections.abc import Collection
+from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
-from contextlib import asynccontextmanager
 from datetime import datetime
 from enum import auto
 from pathlib import Path
-from typing import Annotated
 from typing import Any
 from typing import Final
 from typing import assert_never
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import Depends
-from fastapi import FastAPI
-from fastapi import Request
-from fastapi.responses import FileResponse
-from fastapi.responses import HTMLResponse
-from fastapi.responses import RedirectResponse
-from fastapi.responses import Response
-from fastapi.responses import StreamingResponse
-from fastapi.staticfiles import StaticFiles
+from flask import Flask
+from flask import Response
+from flask import request
 from loguru import logger
 from pydantic import Field
 from pydantic import SecretStr
+from werkzeug.exceptions import HTTPException
+from werkzeug.middleware.dispatcher import DispatcherMiddleware
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.imbue_common.enums import UpperCaseStrEnum
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.bootstrap import is_imbue_cloud_provider_enabled_for_account
 from imbue.minds.bootstrap import list_disabled_provider_names
@@ -49,7 +42,7 @@ from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
 from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
 from imbue.minds.desktop_client.agent_creator import resolve_template_version
-from imbue.minds.desktop_client.api_v1 import create_api_v1_router
+from imbue.minds.desktop_client.api_v1 import create_api_v1_blueprint
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
@@ -64,7 +57,6 @@ from imbue.minds.desktop_client.backup_status import compute_backup_status_for_w
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
-from imbue.minds.desktop_client.deps import BackendResolverDep
 from imbue.minds.desktop_client.destroying import DestroyingStatus
 from imbue.minds.desktop_client.destroying import delete_destroying
 from imbue.minds.desktop_client.destroying import list_destroying
@@ -99,13 +91,17 @@ from imbue.minds.desktop_client.region_preference import VULTR_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import default_region_for_provider
 from imbue.minds.desktop_client.region_preference import known_regions_for_provider
 from imbue.minds.desktop_client.region_preference import resolve_default_region
-from imbue.minds.desktop_client.region_preference import start_geo_detection
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import parse_request_event
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.request_handler import find_handler_for_event
+from imbue.minds.desktop_client.responses import make_file_response
+from imbue.minds.desktop_client.responses import make_html_response
+from imbue.minds.desktop_client.responses import make_redirect_response
+from imbue.minds.desktop_client.responses import make_response
+from imbue.minds.desktop_client.responses import make_streaming_response
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sharing_handler import SharingError
@@ -114,8 +110,11 @@ from imbue.minds.desktop_client.sharing_handler import is_probeable_share_url
 from imbue.minds.desktop_client.sharing_handler import is_share_ready_from_edge_response
 from imbue.minds.desktop_client.sharing_handler import parse_emails_form_value
 from imbue.minds.desktop_client.sharing_handler import resolve_account_email_for_workspace
+from imbue.minds.desktop_client.state import DesktopClientState
+from imbue.minds.desktop_client.state import get_state
+from imbue.minds.desktop_client.state import set_state
 from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
-from imbue.minds.desktop_client.supertokens_routes import create_supertokens_router
+from imbue.minds.desktop_client.supertokens_routes import create_supertokens_blueprint
 from imbue.minds.desktop_client.supertokens_routes import signout_user_via_plugin
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
@@ -148,6 +147,7 @@ from imbue.minds.desktop_client.workspace_color import pick_workspace_foreground
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.envs.docker_cleanup import stop_active_env_state_container
 from imbue.minds.errors import BackupProvisioningError
+from imbue.minds.errors import InvalidJsonBodyError
 from imbue.minds.errors import MindsConfigError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.errors import MngrCommandTimeoutError
@@ -175,7 +175,7 @@ _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
 
 def _json_error(message: str, status_code: int) -> Response:
     """Return a small ``{"error": ...}`` JSON response."""
-    return Response(
+    return make_response(
         content=json.dumps({"error": message}),
         media_type="application/json",
         status_code=status_code,
@@ -183,8 +183,8 @@ def _json_error(message: str, status_code: int) -> Response:
 
 
 def _enqueue_health_change(
-    health_queue: "asyncio.Queue[tuple[str, AgentHealth]]",
-    change_event: asyncio.Event,
+    health_queue: "queue.Queue[tuple[str, AgentHealth]]",
+    change_event: threading.Event,
     agent_id: AgentId,
     status: AgentHealth,
 ) -> None:
@@ -207,27 +207,34 @@ def _system_interface_status_payload(
     return payload
 
 
-# -- Dependency injection helpers --
+# -- Request-body + dependency helpers --
 
 
-def _get_auth_store(request: Request) -> AuthStoreInterface:
-    return request.app.state.auth_store
+def _read_json_body() -> Any:
+    """Parse the request body as JSON, raising ``ValueError`` on missing/invalid input.
+
+    Mirrors the FastAPI ``await request.json()`` contract closely enough that
+    the existing ``except (json.JSONDecodeError, ValueError)`` handlers around
+    the call sites keep working: Flask's ``get_json(silent=True)`` returns
+    ``None`` on a malformed or non-JSON body, which we turn into a ``ValueError``.
+    """
+    data = request.get_json(silent=True)
+    if data is None:
+        raise InvalidJsonBodyError("Invalid or empty JSON body")
+    return data
 
 
-AuthStoreDep = Annotated[AuthStoreInterface, Depends(_get_auth_store)]
-
-
-def _get_mngr_forward_origin(request: Request) -> str:
+def _get_mngr_forward_origin() -> str:
     """Build the bare-origin URL of the ``mngr forward`` plugin.
 
     Used by templates to construct ``/goto/<agent>/`` URLs that target the
     plugin (which owns subdomain forwarding) rather than minds.
     """
-    port = request.app.state.mngr_forward_port or 8421
+    port = get_state().mngr_forward_port or 8421
     return f"http://localhost:{port}"
 
 
-def _get_is_mac(request: Request) -> bool:
+def _get_is_mac() -> bool:
     """Return True if the request's User-Agent indicates macOS.
 
     Used by templates that gate macOS-specific styling (traffic-light
@@ -237,7 +244,7 @@ def _get_is_mac(request: Request) -> bool:
     return "Macintosh" in user_agent or "Mac OS" in user_agent
 
 
-def _int_query_param(request: Request, name: str, default: int) -> int:
+def _int_query_param(name: str, default: int) -> int:
     """Read a single integer query param with a fallback when missing or invalid.
 
     Used by routes that take optional numeric layout hints from the caller
@@ -246,7 +253,7 @@ def _int_query_param(request: Request, name: str, default: int) -> int:
     handler because the codebase forbids inline functions (see
     `check_inline_functions` in test_ratchets.py).
     """
-    raw = request.query_params.get(name)
+    raw = request.args.get(name)
     if raw is None:
         return default
     try:
@@ -258,15 +265,12 @@ def _int_query_param(request: Request, name: str, default: int) -> int:
 # -- Auth helpers --
 
 
-def _is_authenticated(
-    cookies: Mapping[str, str],
-    auth_store: AuthStoreInterface,
-) -> bool:
-    """Check whether the user has a valid global session cookie."""
+def _is_request_authenticated() -> bool:
+    """Check whether the current request carries a valid global session cookie."""
     if os.getenv("SKIP_AUTH", "0") == "1":
         return True
-    signing_key = auth_store.get_signing_key()
-    cookie_value = cookies.get(SESSION_COOKIE_NAME)
+    signing_key = get_state().auth_store.get_signing_key()
+    cookie_value = request.cookies.get(SESSION_COOKIE_NAME)
     if cookie_value is None:
         return False
     return verify_session_cookie(
@@ -275,128 +279,29 @@ def _is_authenticated(
     )
 
 
-# -- Lifespan --
+# -- Route handlers (module-level; deps read from get_state()) --
 
 
-@asynccontextmanager
-async def _managed_lifespan(
-    inner_app: FastAPI,
-    is_externally_managed_client: bool,
-) -> AsyncGenerator[None, None]:
-    """Manage the httpx client lifecycle and root concurrency group teardown.
-
-    SSH tunnels (forward + reverse) live in ``cli/run.py``'s
-    ``SSHTunnelManager``, which is solely used by the surviving Latchkey
-    discovery callback and is cleaned up by ``cli/run.py``.
-    """
-    if not is_externally_managed_client:
-        inner_app.state.http_client = httpx.AsyncClient(
-            follow_redirects=False,
-            timeout=_PROXY_TIMEOUT_SECONDS,
-        )
-    # Kick off the one-shot IP-geolocation lookup in the background so the create
-    # form can default each provider's region to the user's nearest datacenter.
-    geo_location_cache: GeoLocationCache = inner_app.state.geo_location_cache
-    geo_root_concurrency_group: ConcurrencyGroup | None = inner_app.state.root_concurrency_group
-    if geo_root_concurrency_group is not None:
-        start_geo_detection(geo_root_concurrency_group, geo_location_cache)
-    try:
-        yield
-    finally:
-        # Signal SSE handlers to exit before anything else. Setting the
-        # event alone isn't enough -- the chrome SSE blocks on a
-        # ``change_event.wait()`` with a 30s timeout, so it'd take up to
-        # 30s to notice the shutdown. Poke the backend resolver's
-        # change callback (which fires the same change_event) to wake
-        # every chrome SSE handler immediately; they then see the
-        # shutdown event set and return cleanly from their generators.
-        inner_app.state.shutdown_event.set()
-        backend_resolver = inner_app.state.backend_resolver
-        if isinstance(backend_resolver, MngrCliBackendResolver):
-            backend_resolver.notify_change()
-        if not is_externally_managed_client:
-            await inner_app.state.http_client.aclose()
-        # Stop every long-lived strand that's blocked on external I/O
-        # BEFORE draining the concurrency group. The CG's __exit__ just
-        # joins threads with a timeout; threads blocked on subprocess
-        # pipes or socket reads with no read timeout can't unblock on
-        # their own. If we drain the CG while they're still wedged, it
-        # times out waiting for them and surfaces "N strands did not
-        # finish in time" warnings on every clean shutdown.
-        #
-        # Order matters within this block only to the extent that each
-        # stop() returns quickly; their effects (terminate subprocess,
-        # close httpx connection) all unblock threads independently.
-        # Redundant cleanup calls in ``cli/run.py``'s finally block
-        # remain as fallbacks for startup-error paths that never reach
-        # this lifespan teardown.
-        envelope_stream_consumer = inner_app.state.envelope_stream_consumer
-        if envelope_stream_consumer is not None:
-            # SIGTERMs the mngr forward subprocess; closes its pipes so
-            # the three mngr-forward-{stdout,stderr,lifecycle} reader
-            # threads exit their for-line loops.
-            envelope_stream_consumer.terminate()
-        permission_requests_consumer = inner_app.state.permission_requests_consumer
-        if permission_requests_consumer is not None:
-            # Sets the consumer's stop event AND closes the in-flight
-            # follow-stream httpx client so the latchkey-permission-
-            # requests-consumer thread unblocks from its iter_lines read
-            # (which uses read=None timeout and otherwise blocks forever
-            # waiting for the gateway to push the next request).
-            permission_requests_consumer.stop()
-        # Terminate the idle pre-warmed ``mngr`` process (if any) before
-        # draining the root concurrency group. It is blocked reading its
-        # socket for the next request and never exits on its own, so leaving
-        # it for the CG drain below would wait out the full shutdown timeout
-        # and surface a "strand did not finish in time" warning on every clean
-        # exit -- the same reasoning as the consumers above. ``stop`` SIGTERMs
-        # it so the drain sees it already finished.
-        get_default_mngr_caller().stop()
-        # Exit the root ConcurrencyGroup. ``__exit__`` waits up to
-        # ``shutdown_timeout_seconds`` for any still-in-flight strands (e.g.
-        # a detached tunnel-setup task) to finish.
-        root_concurrency_group: ConcurrencyGroup | None = inner_app.state.root_concurrency_group
-        if root_concurrency_group is not None:
-            logger.info("Exiting root concurrency group...")
-            try:
-                root_concurrency_group.__exit__(None, None, None)
-            except ConcurrencyExceptionGroup as exc:
-                # Strands reported failures or timed out during shutdown;
-                # log but don't propagate so other cleanup below can run.
-                logger.warning("Root concurrency group exit reported errors: {}", exc)
-
-
-# -- Route handlers (module-level, using Depends for dependency injection) --
-
-
-def _handle_login(
-    one_time_code: str,
-    request: Request,
-    auth_store: AuthStoreDep,
-) -> Response:
-    code = OneTimeCode(one_time_code)
+def _handle_login() -> Response:
+    code = OneTimeCode(request.args.get("one_time_code", ""))
 
     # If user already has a valid session, redirect to landing page
-    if _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=307, headers={"Location": "/"})
+    if _is_request_authenticated():
+        return make_response(status_code=307, headers={"Location": "/"})
 
     # Render JS redirect to /authenticate (prevents prefetch consumption)
     html = render_login_redirect_page(one_time_code=code)
-    return HTMLResponse(content=html)
+    return make_html_response(content=html)
 
 
-def _handle_authenticate(
-    one_time_code: str,
-    request: Request,
-    auth_store: AuthStoreDep,
-) -> Response:
-    code = OneTimeCode(one_time_code)
+def _handle_authenticate() -> Response:
+    code = OneTimeCode(request.args.get("one_time_code", ""))
 
-    is_valid = auth_store.validate_and_consume_code(code=code)
+    is_valid = get_state().auth_store.validate_and_consume_code(code=code)
 
     if not is_valid:
         html = render_auth_error_page(message="This login code is invalid or has already been used.")
-        return HTMLResponse(content=html, status_code=403)
+        return make_html_response(content=html, status_code=403)
 
     # Set a host-only session cookie on the bare origin. We do NOT try to
     # share the cookie across `<agent-id>.localhost` subdomains via
@@ -404,10 +309,10 @@ def _handle_authenticate(
     # a public suffix and refuse to send such cookies to subdomains. Each
     # subdomain gets its own cookie set on first visit, minted via the
     # ``/goto/{agent_id}/`` auth-bridge redirect below.
-    signing_key = auth_store.get_signing_key()
+    signing_key = get_state().auth_store.get_signing_key()
     cookie_value = create_session_cookie(signing_key=signing_key)
 
-    response = Response(status_code=307, headers={"Location": "/"})
+    response = make_response(status_code=307, headers={"Location": "/"})
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
         value=cookie_value,
@@ -477,31 +382,28 @@ def _suggested_create_color(backend_resolver: BackendResolverInterface) -> str:
     return pick_unused_create_color(used)
 
 
-def _handle_welcome_page(request: Request, auth_store: AuthStoreDep) -> Response:
+def _handle_welcome_page() -> Response:
     """Render the welcome/splash page for first-time users."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+    if not _is_request_authenticated():
         html = render_login_page()
-        return HTMLResponse(content=html)
+        return make_html_response(content=html)
     html = render_welcome_page()
-    return HTMLResponse(content=html)
+    return make_html_response(content=html)
 
 
-def _handle_landing_page(
-    request: Request,
-    auth_store: AuthStoreDep,
-    backend_resolver: BackendResolverDep,
-) -> Response:
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+def _handle_landing_page() -> Response:
+    if not _is_request_authenticated():
         html = render_login_page()
-        return HTMLResponse(content=html)
+        return make_html_response(content=html)
 
+    backend_resolver = get_state().backend_resolver
     all_agent_ids = backend_resolver.list_active_workspace_ids()
-    paths: WorkspacePaths | None = request.app.state.api_v1_paths
-    landing_session_store: MultiAccountSessionStore | None = request.app.state.session_store
+    paths: WorkspacePaths | None = get_state().api_v1_paths
+    landing_session_store: MultiAccountSessionStore | None = get_state().session_store
     destroying_status_by_agent_id = _resolve_destroying_for_landing(paths, backend_resolver, landing_session_store)
 
     if all_agent_ids:
-        telegram_orchestrator: TelegramSetupOrchestrator | None = request.app.state.telegram_orchestrator
+        telegram_orchestrator: TelegramSetupOrchestrator | None = get_state().telegram_orchestrator
         telegram_status: dict[str, bool] | None = None
         if telegram_orchestrator is not None:
             telegram_status = {str(aid): telegram_orchestrator.agent_has_telegram(aid) for aid in all_agent_ids}
@@ -525,7 +427,7 @@ def _handle_landing_page(
         }
         html = render_landing_page(
             accessible_agent_ids=all_agent_ids,
-            mngr_forward_origin=_get_mngr_forward_origin(request),
+            mngr_forward_origin=_get_mngr_forward_origin(),
             telegram_status_by_agent_id=telegram_status,
             agent_names=agent_names,
             destroying_status_by_agent_id=destroying_status_by_agent_id,
@@ -534,7 +436,7 @@ def _handle_landing_page(
             mind_liveness_by_agent_id=mind_liveness_by_agent_id,
             agent_providers=agent_providers,
         )
-        return HTMLResponse(content=html)
+        return make_html_response(content=html)
 
     # No agents discovered yet. If discovery is still in progress, show a
     # "Discovering agents..." page with auto-refresh. Once discovery has
@@ -543,17 +445,17 @@ def _handle_landing_page(
     if not backend_resolver.has_completed_initial_discovery():
         html = render_landing_page(
             accessible_agent_ids=(),
-            mngr_forward_origin=_get_mngr_forward_origin(request),
+            mngr_forward_origin=_get_mngr_forward_origin(),
             is_discovering=True,
         )
-        return HTMLResponse(content=html)
+        return make_html_response(content=html)
 
-    git_url = request.query_params.get("git_url", "")
-    branch = request.query_params.get("branch", "")
-    session_store: MultiAccountSessionStore | None = request.app.state.session_store
-    minds_config: MindsConfig | None = request.app.state.minds_config
-    agent_creator: AgentCreator | None = request.app.state.agent_creator
-    geo_cache: GeoLocationCache | None = request.app.state.geo_location_cache
+    git_url = request.args.get("git_url", "")
+    branch = request.args.get("branch", "")
+    session_store: MultiAccountSessionStore | None = get_state().session_store
+    minds_config: MindsConfig | None = get_state().minds_config
+    agent_creator: AgentCreator | None = get_state().agent_creator
+    geo_cache: GeoLocationCache | None = get_state().geo_location_cache
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
     is_backup_password_saved = has_saved_backup_password(agent_creator.paths) if agent_creator is not None else False
@@ -568,14 +470,10 @@ def _handle_landing_page(
         region_selected_by_launch_mode=region_selected,
         color=_suggested_create_color(backend_resolver),
     )
-    return HTMLResponse(content=html)
+    return make_html_response(content=html)
 
 
-def _handle_post_login_redirect(
-    request: Request,
-    auth_store: AuthStoreDep,
-    backend_resolver: BackendResolverDep,
-) -> Response:
+def _handle_post_login_redirect() -> Response:
     """Decide where a just-authenticated user lands (GET /post-login).
 
     All sign-in paths (email/password, OAuth, post-email-verification) funnel
@@ -584,11 +482,12 @@ def _handle_post_login_redirect(
     create form -- so first-time users land on the new-workspace screen instead
     of the account page.
     """
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=302, headers={"Location": "/login"})
+    if not _is_request_authenticated():
+        return make_response(status_code=302, headers={"Location": "/login"})
+    backend_resolver = get_state().backend_resolver
     has_any_workspace = bool(backend_resolver.list_active_workspace_ids())
     destination = "/accounts" if has_any_workspace else "/"
-    return Response(status_code=302, headers={"Location": destination})
+    return make_response(status_code=302, headers={"Location": destination})
 
 
 def _region_provider_key_for_launch_mode(launch_mode: LaunchMode) -> str | None:
@@ -686,23 +585,20 @@ def _persist_region_for_launch_mode(
         logger.debug("Failed to persist region {} for provider {}: {}", region, provider_key, exc)
 
 
-def _handle_backup_status_api(
-    request: Request,
-    auth_store: AuthStoreDep,
-    backend_resolver: BackendResolverDep,
-) -> Response:
+def _handle_backup_status_api() -> Response:
     """Return per-project backup status (GET /api/backup-status).
 
     Queries restic (from the minds machine) for every known workspace using
     its canonical restic.env, in parallel with a per-workspace timeout. The
     landing page fetches this once on load to fill each tile.
     """
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
-    paths: WorkspacePaths | None = request.app.state.api_v1_paths
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+    backend_resolver = get_state().backend_resolver
+    paths: WorkspacePaths | None = get_state().api_v1_paths
     if paths is None:
-        return Response(content="{}", media_type="application/json")
-    root_concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
+        return make_response(content="{}", media_type="application/json")
+    root_concurrency_group: ConcurrencyGroup | None = get_state().root_concurrency_group
     agent_ids = backend_resolver.list_active_workspace_ids()
     status_by_agent_id = compute_backup_status_for_workspaces(paths, agent_ids, parent_cg=root_concurrency_group)
     # Workspace creation time lets the landing page show "Created N ago" instead
@@ -722,43 +618,45 @@ def _handle_backup_status_api(
         }
         for agent_id, status in status_by_agent_id.items()
     }
-    return Response(content=json.dumps(payload), media_type="application/json")
+    return make_response(content=json.dumps(payload), media_type="application/json")
 
 
 def _handle_backup_export_api(
     agent_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
-    backend_resolver: BackendResolverDep,
 ) -> Response:
     """Build + stream a zip of the workspace's latest snapshot (GET /api/backup-export/{agent_id}).
 
     Produces the zip on the minds machine via ``restic dump --archive zip`` to a
     /tmp file keyed by host id (so re-exports overwrite), then returns it.
     """
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
-    paths: WorkspacePaths | None = request.app.state.api_v1_paths
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+    backend_resolver = get_state().backend_resolver
+    paths: WorkspacePaths | None = get_state().api_v1_paths
     if paths is None:
-        return Response(status_code=404, content='{"error": "No backups configured"}', media_type="application/json")
+        return make_response(
+            status_code=404, content='{"error": "No backups configured"}', media_type="application/json"
+        )
     try:
         typed_agent_id = AgentId(agent_id)
     except ValueError:
-        return Response(status_code=400, content='{"error": "Invalid agent id"}', media_type="application/json")
+        return make_response(status_code=400, content='{"error": "Invalid agent id"}', media_type="application/json")
     display_info = backend_resolver.get_agent_display_info(typed_agent_id)
     # The zip file is keyed by host id (per the export contract); fall back to the
     # agent id only if discovery has no display info for this agent.
     host_id = display_info.host_id if display_info is not None else agent_id
     download_label = display_info.agent_name if display_info is not None else agent_id
-    root_concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
+    root_concurrency_group: ConcurrencyGroup | None = get_state().root_concurrency_group
     try:
         zip_path = export_latest_snapshot_zip(
             paths=paths, agent_id=typed_agent_id, host_id=host_id, parent_cg=root_concurrency_group
         )
     except BackupProvisioningError as e:
         logger.warning("Backup export failed for {}: {}", agent_id, e)
-        return Response(status_code=500, content=json.dumps({"error": str(e)}), media_type="application/json")
-    return FileResponse(path=str(zip_path), media_type="application/zip", filename=f"{download_label}-backup.zip")
+        return make_response(status_code=500, content=json.dumps({"error": str(e)}), media_type="application/json")
+    return make_file_response(
+        path=str(zip_path), media_type="application/zip", filename=f"{download_label}-backup.zip"
+    )
 
 
 # -- Agent creation route handlers --
@@ -910,7 +808,6 @@ class _OnCreatedCallbackFactory(MutableModel):
 
 
 def _build_on_created_callback(
-    request: Request,
     account_id: str,
 ) -> _OnCreatedCallbackFactory | None:
     """Build a callback that injects the tunnel token after agent creation.
@@ -920,11 +817,11 @@ def _build_on_created_callback(
     if not account_id:
         return None
 
-    session_store: MultiAccountSessionStore | None = request.app.state.session_store
-    imbue_cloud_cli: ImbueCloudCli | None = request.app.state.imbue_cloud_cli
-    root_concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
-    notification_dispatcher: NotificationDispatcher | None = request.app.state.notification_dispatcher
-    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    session_store: MultiAccountSessionStore | None = get_state().session_store
+    imbue_cloud_cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
+    root_concurrency_group: ConcurrencyGroup | None = get_state().root_concurrency_group
+    notification_dispatcher: NotificationDispatcher | None = get_state().notification_dispatcher
+    backend_resolver: BackendResolverInterface = get_state().backend_resolver
 
     if (
         session_store is None
@@ -998,16 +895,16 @@ def _build_backup_request_or_error(
     )
 
 
-async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep) -> Response:
+def _handle_create_form_submit() -> Response:
     """Handle form submission to create a new agent."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content="Not authenticated")
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
 
-    agent_creator: AgentCreator | None = request.app.state.agent_creator
+    agent_creator: AgentCreator | None = get_state().agent_creator
     if agent_creator is None:
-        return Response(status_code=501, content="Agent creation not configured")
+        return make_response(status_code=501, content="Agent creation not configured")
 
-    form = await request.form()
+    form = request.form
     git_url = str(form.get("git_url", "")).strip()
     host_name = str(form.get("host_name", "")).strip()
     branch = str(form.get("branch", "")).strip()
@@ -1037,9 +934,9 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
     backup_api_key_env = str(form.get("backup_api_key_env", ""))
     submitted_region = str(form.get("region", "")).strip()
 
-    session_store_inst: MultiAccountSessionStore | None = request.app.state.session_store
-    minds_config: MindsConfig | None = request.app.state.minds_config
-    geo_cache: GeoLocationCache | None = request.app.state.geo_location_cache
+    session_store_inst: MultiAccountSessionStore | None = get_state().session_store
+    minds_config: MindsConfig | None = get_state().minds_config
+    geo_cache: GeoLocationCache | None = get_state().geo_location_cache
 
     def _re_render_with_error(message: str, status: int = 400) -> Response:
         accounts_list = session_store_inst.list_accounts() if session_store_inst else []
@@ -1065,7 +962,7 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
             error_message=message,
             color=color,
         )
-        return HTMLResponse(content=html_body, status_code=status)
+        return make_html_response(content=html_body, status_code=status)
 
     if not git_url:
         return _re_render_with_error("Repository URL is required.")
@@ -1129,7 +1026,7 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
 
     # Build a post-creation callback that injects the tunnel token, then also
     # persists the chosen region (fires only after a successful create).
-    base_on_created = _build_on_created_callback(request, account_id)
+    base_on_created = _build_on_created_callback(account_id)
 
     def on_created(agent_id: AgentId) -> None:
         if base_on_created is not None:
@@ -1157,24 +1054,21 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
     )
 
     creating_url = "/creating/{}".format(creation_id)
-    return Response(status_code=303, headers={"Location": creating_url})
+    return make_response(status_code=303, headers={"Location": creating_url})
 
 
-def _handle_create_page(
-    request: Request,
-    auth_store: AuthStoreDep,
-    backend_resolver: BackendResolverDep,
-) -> Response:
+def _handle_create_page() -> Response:
     """Show the create form page (GET /create)."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content="Not authenticated")
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
 
-    git_url = request.query_params.get("git_url", "")
-    branch = request.query_params.get("branch", "")
-    session_store: MultiAccountSessionStore | None = request.app.state.session_store
-    minds_config: MindsConfig | None = request.app.state.minds_config
-    agent_creator: AgentCreator | None = request.app.state.agent_creator
-    geo_cache: GeoLocationCache | None = request.app.state.geo_location_cache
+    backend_resolver = get_state().backend_resolver
+    git_url = request.args.get("git_url", "")
+    branch = request.args.get("branch", "")
+    session_store: MultiAccountSessionStore | None = get_state().session_store
+    minds_config: MindsConfig | None = get_state().minds_config
+    agent_creator: AgentCreator | None = get_state().agent_creator
+    geo_cache: GeoLocationCache | None = get_state().geo_location_cache
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
     is_backup_password_saved = has_saved_backup_password(agent_creator.paths) if agent_creator is not None else False
@@ -1189,25 +1083,25 @@ def _handle_create_page(
         region_selected_by_launch_mode=region_selected,
         color=_suggested_create_color(backend_resolver),
     )
-    return HTMLResponse(content=html)
+    return make_html_response(content=html)
 
 
-async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -> Response:
+def _handle_create_agent_api() -> Response:
     """API endpoint for creating an agent (POST /api/create-agent).
 
     Accepts JSON body with git_url. Returns JSON with agent_id and status.
     """
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
 
-    agent_creator: AgentCreator | None = request.app.state.agent_creator
+    agent_creator: AgentCreator | None = get_state().agent_creator
     if agent_creator is None:
-        return Response(status_code=501, content="Agent creation not configured")
+        return make_response(status_code=501, content="Agent creation not configured")
 
     try:
-        body = await request.json()
+        body = _read_json_body()
     except (json.JSONDecodeError, ValueError):
-        return Response(
+        return make_response(
             status_code=400,
             content='{"error": "Invalid JSON body"}',
             media_type="application/json",
@@ -1218,7 +1112,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
     try:
         launch_mode = LaunchMode(str(body.get("launch_mode", LaunchMode.DOCKER.value)))
     except ValueError:
-        return Response(
+        return make_response(
             status_code=400,
             content='{"error": "Invalid launch_mode"}',
             media_type="application/json",
@@ -1226,7 +1120,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
     try:
         ai_provider = AIProvider(str(body.get("ai_provider", AIProvider.SUBSCRIPTION.value)))
     except ValueError:
-        return Response(
+        return make_response(
             status_code=400,
             content='{"error": "Invalid ai_provider"}',
             media_type="application/json",
@@ -1234,7 +1128,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
     try:
         backup_provider = BackupProvider(str(body.get("backup_provider", BackupProvider.CONFIGURE_LATER.value)))
     except ValueError:
-        return Response(
+        return make_response(
             status_code=400,
             content='{"error": "Invalid backup_provider"}',
             media_type="application/json",
@@ -1244,7 +1138,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
             str(body.get("backup_encryption_method", BackupEncryptionMethod.NO_PASSWORD.value))
         )
     except ValueError:
-        return Response(
+        return make_response(
             status_code=400,
             content='{"error": "Invalid backup_encryption_method"}',
             media_type="application/json",
@@ -1257,7 +1151,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
     submitted_region = str(body.get("region", "")).strip()
     color = _color_for_new_workspace(body.get("color", ""))
     if not git_url:
-        return Response(
+        return make_response(
             status_code=400,
             content='{"error": "git_url is required"}',
             media_type="application/json",
@@ -1268,7 +1162,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
         try:
             HostName(host_name)
         except InvalidName as exc:
-            return Response(
+            return make_response(
                 status_code=400,
                 content=json.dumps({"error": str(exc)}),
                 media_type="application/json",
@@ -1279,13 +1173,13 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
     is_imbue_cloud_compute = launch_mode is LaunchMode.IMBUE_CLOUD
     is_imbue_cloud_ai = ai_provider is AIProvider.IMBUE_CLOUD
     if not account_id and (is_imbue_cloud_compute or is_imbue_cloud_ai):
-        return Response(
+        return make_response(
             status_code=400,
             content='{"error": "account_id is required when launch_mode or ai_provider is IMBUE_CLOUD"}',
             media_type="application/json",
         )
     if ai_provider is AIProvider.API_KEY and not anthropic_api_key:
-        return Response(
+        return make_response(
             status_code=400,
             content='{"error": "anthropic_api_key is required when ai_provider is API_KEY"}',
             media_type="application/json",
@@ -1298,7 +1192,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
     is_imbue_cloud_backup = backup_provider is BackupProvider.IMBUE_CLOUD
     account_email = ""
     if account_id and (is_imbue_cloud_compute or is_imbue_cloud_ai or is_imbue_cloud_backup):
-        session_store_inst: MultiAccountSessionStore | None = request.app.state.session_store
+        session_store_inst: MultiAccountSessionStore | None = get_state().session_store
         if session_store_inst is not None:
             account_email = session_store_inst.get_account_email(account_id) or ""
 
@@ -1315,14 +1209,14 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
     #     the default at render time, or mirror this 409 on the form
     #     path.
     if host_name:
-        backend_resolver = request.app.state.backend_resolver
+        backend_resolver = get_state().backend_resolver
         existing_names: set[str] = set()
         for existing_id in backend_resolver.list_known_workspace_ids():
             existing_name = backend_resolver.get_workspace_name(existing_id)
             if existing_name is not None:
                 existing_names.add(existing_name)
         if host_name in existing_names:
-            return Response(
+            return make_response(
                 status_code=409,
                 content=json.dumps(
                     {
@@ -1345,15 +1239,15 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
         paths=agent_creator.paths,
     )
     if backup_error is not None:
-        return Response(
+        return make_response(
             status_code=400,
             content=json.dumps({"error": backup_error}),
             media_type="application/json",
         )
 
     # Resolve the explicit region (or its default) and persist it on success.
-    minds_config: MindsConfig | None = request.app.state.minds_config
-    geo_cache: GeoLocationCache | None = request.app.state.geo_location_cache
+    minds_config: MindsConfig | None = get_state().minds_config
+    geo_cache: GeoLocationCache | None = get_state().geo_location_cache
     region = _resolve_effective_region(launch_mode, submitted_region, minds_config, geo_cache)
 
     def _persist_region_on_created(agent_id: AgentId) -> None:
@@ -1378,7 +1272,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
     # them are unaffected. The form-driven UI submits answers separately via
     # POST /api/create-agent/{id}/onboarding once the user finishes the
     # questions.
-    onboarding_applier: OnboardingApplier | None = request.app.state.onboarding_applier
+    onboarding_applier: OnboardingApplier | None = get_state().onboarding_applier
     if onboarding_applier is not None:
         onboarding_applier.start_apply(creation_id, _parse_onboarding_answers(body))
 
@@ -1386,7 +1280,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
     # compatibility with existing API clients, but the value is now a
     # CreationId (minds-internal in-flight handle, distinct prefix from a
     # canonical AgentId). The status-polling endpoints accept either.
-    return Response(
+    return make_response(
         content=json.dumps({"agent_id": str(creation_id), "status": str(AgentCreationStatus.INITIALIZING)}),
         media_type="application/json",
     )
@@ -1394,16 +1288,14 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
 
 def _handle_creation_status_api(
     agent_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
 ) -> Response:
     """API endpoint for checking agent creation status."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
 
-    agent_creator: AgentCreator | None = request.app.state.agent_creator
+    agent_creator: AgentCreator | None = get_state().agent_creator
     if agent_creator is None:
-        return Response(status_code=501, content="Agent creation not configured")
+        return make_response(status_code=501, content="Agent creation not configured")
 
     # The URL parameter is named ``agent_id`` for legacy API compatibility
     # but it actually carries a ``CreationId`` (minds-internal in-flight
@@ -1412,7 +1304,7 @@ def _handle_creation_status_api(
     creation_id = CreationId(agent_id)
     info = agent_creator.get_creation_info(creation_id)
     if info is None:
-        return Response(
+        return make_response(
             status_code=404,
             content='{"error": "Unknown agent creation"}',
             media_type="application/json",
@@ -1428,7 +1320,7 @@ def _handle_creation_status_api(
         result["redirect_url"] = info.redirect_url
     if info.error is not None:
         result["error"] = info.error
-    return Response(content=json.dumps(result), media_type="application/json")
+    return make_response(content=json.dumps(result), media_type="application/json")
 
 
 def _parse_onboarding_answers(data: Mapping[str, object]) -> OnboardingAnswers:
@@ -1452,10 +1344,8 @@ def _parse_onboarding_answers(data: Mapping[str, object]) -> OnboardingAnswers:
     )
 
 
-async def _handle_onboarding_submit(
+def _handle_onboarding_submit(
     agent_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
 ) -> Response:
     """Apply onboarding answers for an in-flight creation (POST /api/create-agent/{agent_id}/onboarding).
 
@@ -1463,33 +1353,33 @@ async def _handle_onboarding_submit(
     the user finishes the questions, then applied on a background thread.
     Returns immediately; the route param carries a ``CreationId``.
     """
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
 
-    onboarding_applier: OnboardingApplier | None = request.app.state.onboarding_applier
+    onboarding_applier: OnboardingApplier | None = get_state().onboarding_applier
     if onboarding_applier is None:
-        return Response(
+        return make_response(
             status_code=501, content='{"error": "Onboarding not configured"}', media_type="application/json"
         )
 
     try:
-        body = await request.json()
+        body = _read_json_body()
     except (json.JSONDecodeError, ValueError):
-        return Response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
+        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
 
     creation_id = CreationId(agent_id)
     if onboarding_applier.agent_creator.get_creation_info(creation_id) is None:
-        return Response(status_code=404, content='{"error": "Unknown agent creation"}', media_type="application/json")
+        return make_response(
+            status_code=404, content='{"error": "Unknown agent creation"}', media_type="application/json"
+        )
 
     answers = _parse_onboarding_answers(body)
     onboarding_applier.start_apply(creation_id, answers)
-    return Response(content=json.dumps({"status": "ok"}), media_type="application/json")
+    return make_response(content=json.dumps({"status": "ok"}), media_type="application/json")
 
 
 def _handle_creating_page(
     agent_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
 ) -> Response:
     """Show the creating/onboarding page (GET /creating/{agent_id}).
 
@@ -1500,31 +1390,31 @@ def _handle_creating_page(
     questions still need to be shown so their answers can take effect; the
     page itself redirects into the workspace once the user finishes.
     """
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content="Not authenticated")
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
 
-    agent_creator: AgentCreator | None = request.app.state.agent_creator
+    agent_creator: AgentCreator | None = get_state().agent_creator
     if agent_creator is None:
-        return Response(status_code=501, content="Agent creation not configured")
+        return make_response(status_code=501, content="Agent creation not configured")
 
     # ``agent_id`` route param is actually a CreationId (see comment in
     # ``_handle_creation_status_api``).
     creation_id = CreationId(agent_id)
     info = agent_creator.get_creation_info(creation_id)
     if info is None:
-        return Response(status_code=404, content="Unknown agent creation")
+        return make_response(status_code=404, content="Unknown agent creation")
 
     html = render_creating_page(creation_id=creation_id, info=info)
-    return HTMLResponse(content=html)
+    return make_html_response(content=html)
 
 
-async def _stream_creation_logs(
+def _stream_creation_logs(
     log_queue: queue.Queue[str],
     agent_creator: AgentCreator,
     creation_id: CreationId,
     shutdown_event: threading.Event,
-) -> AsyncGenerator[str, None]:
-    """Async generator that yields SSE events from a creation log queue.
+) -> Iterator[str]:
+    """Generator that yields SSE events from a creation log queue.
 
     Each iteration polls ``agent_creator.get_creation_info(creation_id)``
     and emits a ``{"_type": "status", ...}`` event whenever the status
@@ -1556,8 +1446,8 @@ async def _stream_creation_logs(
             yield "data: {}\n\n".format(json.dumps(status_event))
 
         try:
-            line = await asyncio.get_running_loop().run_in_executor(None, log_queue.get, True, 1.0)
-        except (queue.Empty, TimeoutError, OSError):
+            line = log_queue.get(block=True, timeout=1.0)
+        except queue.Empty:
             yield ": keepalive\n\n"
             continue
 
@@ -1579,28 +1469,26 @@ async def _stream_creation_logs(
             yield "data: {}\n\n".format(json.dumps({"log": line}))
 
 
-async def _handle_creation_logs_sse(
+def _handle_creation_logs_sse(
     agent_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
 ) -> Response:
     """SSE endpoint that streams creation logs for an agent."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content="Not authenticated")
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
 
-    agent_creator: AgentCreator | None = request.app.state.agent_creator
+    agent_creator: AgentCreator | None = get_state().agent_creator
     if agent_creator is None:
-        return Response(status_code=501, content="Agent creation not configured")
+        return make_response(status_code=501, content="Agent creation not configured")
 
     # ``agent_id`` route param carries a CreationId (see comment in
     # ``_handle_creation_status_api``).
     creation_id = CreationId(agent_id)
     log_queue = agent_creator.get_log_queue(creation_id)
     if log_queue is None:
-        return Response(status_code=404, content="Unknown agent creation")
+        return make_response(status_code=404, content="Unknown agent creation")
 
-    return StreamingResponse(
-        _stream_creation_logs(log_queue, agent_creator, creation_id, request.app.state.shutdown_event),
+    return make_streaming_response(
+        _stream_creation_logs(log_queue, agent_creator, creation_id, get_state().shutdown_event),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -1687,19 +1575,17 @@ def _host_still_active(
     return state is not None and state is not HostState.DESTROYED
 
 
-def _is_host_still_active(request: Request, agent_id: AgentId) -> bool:
+def _is_host_still_active(agent_id: AgentId) -> bool:
     """Request-scoped wrapper around :func:`_host_still_active`."""
     return _host_still_active(
-        request.app.state.backend_resolver,
-        request.app.state.api_v1_paths,
+        get_state().backend_resolver,
+        get_state().api_v1_paths,
         agent_id,
     )
 
 
-async def _handle_destroy_agent_api(
+def _handle_destroy_agent_api(
     agent_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
 ) -> Response:
     """POST /api/destroy-agent/<agent_id>: spawn a detached destroy.
 
@@ -1721,20 +1607,22 @@ async def _handle_destroy_agent_api(
     Returns ``redirect_url: "/"`` on success so the settings-page JS can
     navigate to the landing page (where the destroying marker is visible).
     """
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
 
-    paths: WorkspacePaths | None = request.app.state.api_v1_paths
+    paths: WorkspacePaths | None = get_state().api_v1_paths
     if paths is None:
-        return Response(status_code=501, content='{"error": "Destroy not configured"}', media_type="application/json")
+        return make_response(
+            status_code=501, content='{"error": "Destroy not configured"}', media_type="application/json"
+        )
 
     parsed_id = AgentId(agent_id)
-    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    backend_resolver: BackendResolverInterface = get_state().backend_resolver
 
     # Idempotent: short-circuit if a destroy is already running.
-    existing = read_destroying(parsed_id, paths, is_host_still_active=_is_host_still_active(request, parsed_id))
+    existing = read_destroying(parsed_id, paths, is_host_still_active=_is_host_still_active(parsed_id))
     if existing is not None and existing.status == DestroyingStatus.RUNNING:
-        return Response(
+        return make_response(
             status_code=200,
             content=json.dumps({"agent_id": agent_id, "status": "running", "redirect_url": "/"}),
             media_type="application/json",
@@ -1746,7 +1634,7 @@ async def _handle_destroy_agent_api(
     host_id = _resolve_host_id(backend_resolver, parsed_id)
     if host_id is None:
         logger.warning("Refusing to destroy {}: could not resolve its host id from discovery", agent_id)
-        return Response(
+        return make_response(
             status_code=409,
             content=json.dumps(
                 {"error": "Could not determine the workspace's host yet. Please wait a moment and try again."}
@@ -1755,7 +1643,7 @@ async def _handle_destroy_agent_api(
         )
     start_destroy(parsed_id, paths, host_id)
 
-    return Response(
+    return make_response(
         status_code=202,
         content=json.dumps({"agent_id": agent_id, "status": "running", "redirect_url": "/"}),
         media_type="application/json",
@@ -1764,20 +1652,18 @@ async def _handle_destroy_agent_api(
 
 def _handle_destroying_status_api(
     agent_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
 ) -> Response:
     """GET /api/destroying/<agent_id>/status: live status of a destroy."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
-    paths: WorkspacePaths | None = request.app.state.api_v1_paths
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+    paths: WorkspacePaths | None = get_state().api_v1_paths
     if paths is None:
-        return Response(status_code=404, content='{"error": "No record"}', media_type="application/json")
+        return make_response(status_code=404, content='{"error": "No record"}', media_type="application/json")
     parsed_id = AgentId(agent_id)
-    record = read_destroying(parsed_id, paths, is_host_still_active=_is_host_still_active(request, parsed_id))
+    record = read_destroying(parsed_id, paths, is_host_still_active=_is_host_still_active(parsed_id))
     if record is None:
-        return Response(status_code=404, content='{"error": "No record"}', media_type="application/json")
-    return Response(
+        return make_response(status_code=404, content='{"error": "No record"}', media_type="application/json")
+    return make_response(
         content=json.dumps(
             {
                 "agent_id": agent_id,
@@ -1793,17 +1679,15 @@ def _handle_destroying_status_api(
 
 def _handle_destroying_log_api(
     agent_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
 ) -> Response:
     """GET /api/destroying/<agent_id>/log?after=<bytes>: tail the destroy log."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
-    paths: WorkspacePaths | None = request.app.state.api_v1_paths
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+    paths: WorkspacePaths | None = get_state().api_v1_paths
     if paths is None:
-        return Response(status_code=404, content='{"error": "No record"}', media_type="application/json")
+        return make_response(status_code=404, content='{"error": "No record"}', media_type="application/json")
     parsed_id = AgentId(agent_id)
-    after_str = request.query_params.get("after", "0")
+    after_str = request.args.get("after", "0")
     try:
         after = max(int(after_str), 0)
     except ValueError:
@@ -1811,8 +1695,8 @@ def _handle_destroying_log_api(
     try:
         content_bytes, next_offset = read_log_chunk(parsed_id, paths, after)
     except FileNotFoundError:
-        return Response(status_code=404, content='{"error": "No record"}', media_type="application/json")
-    return Response(
+        return make_response(status_code=404, content='{"error": "No record"}', media_type="application/json")
+    return make_response(
         content=json.dumps(
             {
                 "bytes_read": len(content_bytes),
@@ -1826,38 +1710,34 @@ def _handle_destroying_log_api(
 
 def _handle_destroying_dismiss_api(
     agent_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
 ) -> Response:
     """POST /api/destroying/<agent_id>/dismiss: remove the destroy record."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
-    paths: WorkspacePaths | None = request.app.state.api_v1_paths
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+    paths: WorkspacePaths | None = get_state().api_v1_paths
     if paths is None:
-        return Response(status_code=200, content="{}", media_type="application/json")
+        return make_response(status_code=200, content="{}", media_type="application/json")
     parsed_id = AgentId(agent_id)
     delete_destroying(parsed_id, paths)
-    return Response(status_code=200, content="{}", media_type="application/json")
+    return make_response(status_code=200, content="{}", media_type="application/json")
 
 
 def _handle_destroying_page(
     agent_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
-    backend_resolver: BackendResolverDep,
 ) -> Response:
     """GET /destroying/<agent_id>: the destroy detail / log-tail page."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content="Not authenticated")
-    paths: WorkspacePaths | None = request.app.state.api_v1_paths
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    backend_resolver = get_state().backend_resolver
+    paths: WorkspacePaths | None = get_state().api_v1_paths
     if paths is None:
-        return Response(status_code=404, content="No record")
+        return make_response(status_code=404, content="No record")
     parsed_id = AgentId(agent_id)
     record = read_destroying(
         parsed_id, paths, is_host_still_active=_host_still_active(backend_resolver, paths, parsed_id)
     )
     if record is None:
-        return Response(status_code=404, content="No record")
+        return make_response(status_code=404, content="No record")
     workspace_name = backend_resolver.get_workspace_name(parsed_id)
     if not workspace_name:
         info = backend_resolver.get_agent_display_info(parsed_id)
@@ -1868,16 +1748,14 @@ def _handle_destroying_page(
         pid=record.pid,
         status=str(record.status).lower(),
     )
-    return HTMLResponse(content=html)
+    return make_html_response(content=html)
 
 
 # -- Workspace color route handler --
 
 
-async def _handle_set_workspace_color_api(
+def _handle_set_workspace_color_api(
     agent_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
 ) -> Response:
     """POST /api/workspaces/<agent_id>/color: write the per-workspace color label.
 
@@ -1901,18 +1779,18 @@ async def _handle_set_workspace_color_api(
     new color without waiting for the discovery refresh, and returns
     ``{"agent_id": ..., "color": "#rrggbb"}``.
     """
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
 
     try:
-        body = await request.json()
+        body = _read_json_body()
     except (json.JSONDecodeError, ValueError) as exc:
         # ValueError also covers UnicodeDecodeError on a non-UTF-8 body
         # (matches the other request.json() call sites in this file).
         # External (HTTP) input: log at warning level rather than silently
         # swallowing so a buggy / hostile client's bad bodies are visible.
         logger.warning("Color write for {} got malformed JSON body: {}", agent_id, exc)
-        return Response(
+        return make_response(
             status_code=400,
             content=json.dumps({"error": "invalid_hex"}),
             media_type="application/json",
@@ -1920,21 +1798,21 @@ async def _handle_set_workspace_color_api(
     raw_hex = body.get("hex", "") if isinstance(body, dict) else ""
     normalized = normalize_workspace_color(str(raw_hex))
     if normalized is None:
-        return Response(
+        return make_response(
             status_code=400,
             content=json.dumps({"error": "invalid_hex"}),
             media_type="application/json",
         )
 
     parsed_id = AgentId(agent_id)
-    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    backend_resolver: BackendResolverInterface = get_state().backend_resolver
 
     # The minds primary-workspace filter is the "workspace" + "is_primary"
     # label pair (see backend_resolver.list_known_workspace_ids). Color writes
     # only apply to primary agents; the sibling system-services agent shares
     # the host but does not own workspace identity.
     if parsed_id not in backend_resolver.list_known_workspace_ids():
-        return Response(
+        return make_response(
             status_code=404,
             content=json.dumps({"error": "not_primary"}),
             media_type="application/json",
@@ -1943,20 +1821,20 @@ async def _handle_set_workspace_color_api(
     info = backend_resolver.get_agent_display_info(parsed_id)
     errored_provider_names = {str(name) for name in backend_resolver.get_provider_errors()}
     if _is_workspace_provider_errored(info, errored_provider_names):
-        return Response(
+        return make_response(
             status_code=409,
             content=json.dumps({"error": "stale_provider"}),
             media_type="application/json",
         )
 
-    mngr_binary: str = request.app.state.mngr_binary
-    mngr_host_dir: Path = request.app.state.mngr_host_dir
-    concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
+    mngr_binary: str = get_state().mngr_binary
+    mngr_host_dir: Path = get_state().mngr_host_dir
+    concurrency_group: ConcurrencyGroup | None = get_state().root_concurrency_group
     if concurrency_group is None:
         # The concurrency group is wired in production (see create_desktop_client
         # entrypoint); only test paths that explicitly skip it can hit this.
         logger.warning("No concurrency group available; cannot write color label for {}", parsed_id)
-        return Response(
+        return make_response(
             status_code=502,
             content=json.dumps({"error": "host_unreachable", "detail": "concurrency group unavailable"}),
             media_type="application/json",
@@ -1973,10 +1851,10 @@ async def _handle_set_workspace_color_api(
         # subprocess must run in the threadpool -- calling it inline would
         # stall the event loop (SSE, proxying, every other route) for the
         # duration of the ``mngr label`` run.
-        await asyncio.get_running_loop().run_in_executor(None, _run_mngr, concurrency_group, argv, env)
+        _run_mngr(concurrency_group, argv, env)
     except MngrCommandError as exc:
         logger.warning("mngr label failed for {}: {}", parsed_id, exc)
-        return Response(
+        return make_response(
             status_code=502,
             content=json.dumps({"error": "host_unreachable", "detail": str(exc)}),
             media_type="application/json",
@@ -1985,7 +1863,7 @@ async def _handle_set_workspace_color_api(
     if isinstance(backend_resolver, MngrCliBackendResolver):
         backend_resolver.set_workspace_color_locally(parsed_id, normalized)
 
-    return Response(
+    return make_response(
         status_code=200,
         content=json.dumps({"agent_id": agent_id, "color": normalized}),
         media_type="application/json",
@@ -1995,18 +1873,16 @@ async def _handle_set_workspace_color_api(
 # -- Telegram setup route handlers --
 
 
-async def _handle_telegram_setup(
+def _handle_telegram_setup(
     agent_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
 ) -> Response:
     """Start Telegram bot setup for an agent (POST /api/agents/{agent_id}/telegram/setup)."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
 
-    telegram_orchestrator: TelegramSetupOrchestrator | None = request.app.state.telegram_orchestrator
+    telegram_orchestrator: TelegramSetupOrchestrator | None = get_state().telegram_orchestrator
     if telegram_orchestrator is None:
-        return Response(
+        return make_response(
             status_code=501,
             content='{"error": "Telegram setup not configured"}',
             media_type="application/json",
@@ -2017,13 +1893,13 @@ async def _handle_telegram_setup(
     # Use agent_id as the agent name for bot naming (best we have without additional lookups)
     agent_name = str(parsed_id)[:8]
     try:
-        body = await request.json()
+        body = _read_json_body()
         agent_name = str(body.get("agent_name", agent_name)).strip() or agent_name
     except (json.JSONDecodeError, ValueError):
         pass
 
     telegram_orchestrator.start_setup(agent_id=parsed_id, agent_name=agent_name)
-    return Response(
+    return make_response(
         content=json.dumps({"agent_id": str(parsed_id), "status": str(TelegramSetupStatus.CHECKING_CREDENTIALS)}),
         media_type="application/json",
     )
@@ -2031,16 +1907,14 @@ async def _handle_telegram_setup(
 
 def _handle_telegram_status(
     agent_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
 ) -> Response:
     """Get Telegram setup status for an agent (GET /api/agents/{agent_id}/telegram/status)."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
 
-    telegram_orchestrator: TelegramSetupOrchestrator | None = request.app.state.telegram_orchestrator
+    telegram_orchestrator: TelegramSetupOrchestrator | None = get_state().telegram_orchestrator
     if telegram_orchestrator is None:
-        return Response(
+        return make_response(
             status_code=501,
             content='{"error": "Telegram setup not configured"}',
             media_type="application/json",
@@ -2053,11 +1927,11 @@ def _handle_telegram_status(
         # No active setup -- check if already set up
         is_active = telegram_orchestrator.agent_has_telegram(parsed_id)
         if is_active:
-            return Response(
+            return make_response(
                 content=json.dumps({"agent_id": str(parsed_id), "status": str(TelegramSetupStatus.DONE)}),
                 media_type="application/json",
             )
-        return Response(
+        return make_response(
             status_code=404,
             content='{"error": "No Telegram setup in progress for this agent"}',
             media_type="application/json",
@@ -2071,16 +1945,14 @@ def _handle_telegram_status(
         result["error"] = info.error
     if info.bot_username is not None:
         result["bot_username"] = info.bot_username
-    return Response(content=json.dumps(result), media_type="application/json")
+    return make_response(content=json.dumps(result), media_type="application/json")
 
 
 # -- Providers panel toggle route --
 
 
-async def _handle_provider_toggle(
+def _handle_provider_toggle(
     provider_name: str,
-    request: Request,
-    auth_store: AuthStoreDep,
 ) -> Response:
     """Toggle ``is_enabled`` for a provider in minds' active settings and bounce observe.
 
@@ -2092,25 +1964,25 @@ async def _handle_provider_toggle(
     by minds' ``mngr forward --observe-via-file``; the chrome's optimistic
     "waiting for refresh" state clears at that point.
     """
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
     try:
-        body = await request.json()
+        body = _read_json_body()
     except (json.JSONDecodeError, ValueError) as e:
         logger.warning("Provider toggle request body was not valid JSON: {}", e)
-        return Response(status_code=400, content='{"error": "Body must be JSON"}', media_type="application/json")
+        return make_response(status_code=400, content='{"error": "Body must be JSON"}', media_type="application/json")
     # request.json() can return any JSON value (array, string, number, null, ...),
     # not just objects. Reject non-dict bodies before calling .get() so we return
     # a structured 400 rather than a 500 from an AttributeError.
     if not isinstance(body, dict):
-        return Response(
+        return make_response(
             status_code=400,
             content='{"error": "Body must be a JSON object"}',
             media_type="application/json",
         )
     is_enabled = body.get("is_enabled")
     if not isinstance(is_enabled, bool):
-        return Response(
+        return make_response(
             status_code=400,
             content='{"error": "Body must include is_enabled: bool"}',
             media_type="application/json",
@@ -2123,8 +1995,8 @@ async def _handle_provider_toggle(
         # Bounce the single discovery observer (latchkey forward's `mngr observe`)
         # so its next snapshot reflects the new provider set; minds' `mngr forward`
         # tails the resulting shared discovery log.
-        bounce_latchkey_forward_supervisor(request.app.state.latchkey_forward_supervisor)
-    return Response(
+        bounce_latchkey_forward_supervisor(get_state().latchkey_forward_supervisor)
+    return make_response(
         content=json.dumps({"provider_name": provider_name, "is_enabled": is_enabled, "changed": changed}),
         media_type="application/json",
     )
@@ -2133,32 +2005,29 @@ async def _handle_provider_toggle(
 # -- Chrome (persistent shell) route handlers --
 
 
-def _handle_chrome_page(
-    request: Request,
-    auth_store: AuthStoreDep,
-    backend_resolver: BackendResolverDep,
-) -> Response:
+def _handle_chrome_page() -> Response:
     """Serve the persistent chrome page (title bar + sidebar + content iframe).
 
     This route is unauthenticated -- the chrome renders for all users. The sidebar
     shows an empty state for unauthenticated users; the SSE stream populates it
     after authentication.
     """
-    is_mac = _get_is_mac(request)
+    is_mac = _get_is_mac()
 
-    authenticated = _is_authenticated(cookies=request.cookies, auth_store=auth_store)
+    authenticated = _is_request_authenticated()
+    backend_resolver = get_state().backend_resolver
     initial_workspaces = _build_workspace_list(backend_resolver) if authenticated else []
 
     html = render_chrome_page(
         is_mac=is_mac,
         is_authenticated=authenticated,
-        mngr_forward_origin=_get_mngr_forward_origin(request),
+        mngr_forward_origin=_get_mngr_forward_origin(),
         initial_workspaces=initial_workspaces,
     )
-    return HTMLResponse(content=html)
+    return make_html_response(content=html)
 
 
-def _handle_chrome_sidebar(request: Request) -> Response:
+def _handle_chrome_sidebar() -> Response:
     """Serve the standalone sidebar page loaded into the shared modal WebContentsView.
 
     Position params (``trigger_x`` / ``trigger_y`` / ``trigger_w`` / ``trigger_h``
@@ -2169,20 +2038,20 @@ def _handle_chrome_sidebar(request: Request) -> Response:
     left and 2px below it).
     """
     html = render_sidebar_page(
-        mngr_forward_origin=_get_mngr_forward_origin(request),
-        trigger_x=_int_query_param(request, "trigger_x", 0),
-        trigger_y=_int_query_param(request, "trigger_y", 0),
-        trigger_w=_int_query_param(request, "trigger_w", 0),
-        trigger_h=_int_query_param(request, "trigger_h", 38),
-        offset_x=_int_query_param(request, "offset_x", -2),
-        offset_y=_int_query_param(request, "offset_y", 2),
+        mngr_forward_origin=_get_mngr_forward_origin(),
+        trigger_x=_int_query_param("trigger_x", 0),
+        trigger_y=_int_query_param("trigger_y", 0),
+        trigger_w=_int_query_param("trigger_w", 0),
+        trigger_h=_int_query_param("trigger_h", 38),
+        offset_x=_int_query_param("offset_x", -2),
+        offset_y=_int_query_param("offset_y", 2),
     )
-    return HTMLResponse(content=html)
+    return make_html_response(content=html)
 
 
 def _handle_dev_styleguide() -> Response:
     """Render the design-system styleguide page."""
-    return HTMLResponse(content=render_dev_styleguide_page())
+    return make_html_response(content=render_dev_styleguide_page())
 
 
 # How often the chrome-events stream re-asserts the current non-HEALTHY
@@ -2197,11 +2066,7 @@ def _handle_dev_styleguide() -> Response:
 _SYSTEM_INTERFACE_STATUS_REASSERT_INTERVAL_SECONDS: Final[float] = 15.0
 
 
-async def _handle_chrome_events(
-    request: Request,
-    auth_store: AuthStoreDep,
-    backend_resolver: BackendResolverDep,
-) -> Response:
+def _handle_chrome_events() -> Response:
     """SSE endpoint that streams workspace list and auth status changes to the chrome.
 
     The chrome subscribes to this on load. If unauthenticated, sends an auth_required
@@ -2209,35 +2074,35 @@ async def _handle_chrome_events(
     whenever the backend resolver's data changes (driven by MngrStreamManager's
     discovery and events streams).
     """
-    authenticated = _is_authenticated(cookies=request.cookies, auth_store=auth_store)
+    authenticated = _is_request_authenticated()
+    backend_resolver = get_state().backend_resolver
 
-    async def _event_generator() -> AsyncGenerator[str, None]:
+    def _event_generator() -> Iterator[str]:
         if not authenticated:
             yield "data: {}\n\n".format(json.dumps({"type": "auth_required"}))
             return
 
-        # Use an asyncio.Event to wake up when the resolver's data changes.
-        # The resolver fires callbacks from background threads, so we use
-        # call_soon_threadsafe to signal the event on the event loop.
-        change_event = asyncio.Event()
-        loop = asyncio.get_running_loop()
+        # Wake up when the resolver's data changes. The resolver fires callbacks
+        # from background threads; a ``threading.Event`` is set directly from
+        # those threads (set() is thread-safe), no event loop needed.
+        change_event = threading.Event()
 
         # Health transitions from the system-interface tracker arrive on
         # background threads (envelope reader, probe loop, restart endpoint).
         # We accumulate them into a per-connection queue and drain them
         # in the main generator loop so each subscriber sees every event.
-        health_queue: asyncio.Queue[tuple[str, AgentHealth]] = asyncio.Queue()
+        health_queue: queue.Queue[tuple[str, AgentHealth]] = queue.Queue()
 
         def _on_change() -> None:
-            loop.call_soon_threadsafe(change_event.set)
+            change_event.set()
 
         def _on_health_change(agent_id: AgentId, status: AgentHealth) -> None:
-            loop.call_soon_threadsafe(_enqueue_health_change, health_queue, change_event, agent_id, status)
+            _enqueue_health_change(health_queue, change_event, agent_id, status)
 
         if isinstance(backend_resolver, MngrCliBackendResolver):
             backend_resolver.add_on_change_callback(_on_change)
 
-        tracker: SystemInterfaceHealthTracker | None = request.app.state.system_interface_health_tracker
+        tracker: SystemInterfaceHealthTracker | None = get_state().system_interface_health_tracker
         if tracker is not None:
             tracker.add_on_change_callback(_on_health_change)
 
@@ -2248,8 +2113,8 @@ async def _handle_chrome_events(
         # tick recomputes and diffs the per-mind states.
         try:
             # Send initial workspace list and request count
-            session_store: MultiAccountSessionStore | None = request.app.state.session_store
-            paths: WorkspacePaths | None = request.app.state.api_v1_paths
+            session_store: MultiAccountSessionStore | None = get_state().session_store
+            paths: WorkspacePaths | None = get_state().api_v1_paths
             last_workspace_data = _build_workspace_list(backend_resolver, session_store)
             last_destroying_ids = _destroying_agent_ids(paths, backend_resolver)
             has_accounts = bool(session_store and session_store.list_accounts())
@@ -2267,12 +2132,12 @@ async def _handle_chrome_events(
             # the providers section before the first resolver change fires.
             last_providers_data = _build_providers_state_payload(backend_resolver)
             yield "data: {}\n\n".format(json.dumps({"type": "providers_state", **last_providers_data}))
-            inbox: RequestInbox | None = request.app.state.request_inbox
+            inbox: RequestInbox | None = get_state().request_inbox
             last_requests_payload = _build_requests_payload(inbox, backend_resolver)
             # ``auto_open`` is bundled with the requests payload (rather than
             # its own SSE event) so the Electron shell sees both atomically
             # when deciding whether to auto-open the panel.
-            minds_config: MindsConfig | None = request.app.state.minds_config
+            minds_config: MindsConfig | None = get_state().minds_config
             auto_open = minds_config.get_auto_open_requests_panel() if minds_config else True
             yield "data: {}\n\n".format(
                 json.dumps({"type": "requests", **last_requests_payload, "auto_open": auto_open})
@@ -2309,37 +2174,27 @@ async def _handle_chrome_events(
             # bottom-of-loop clear, leaving the queued item idle until the
             # next idle-wake timeout -- a UX regression for health-state
             # transitions like RESTARTING -> HEALTHY.
-            shutdown_event: threading.Event = request.app.state.shutdown_event
-            connected = not await request.is_disconnected()
-            while connected and not shutdown_event.is_set():
-                # Wait for a change signal or timeout. The timeout bounds both
-                # disconnect-detection latency and -- since the periodic status
-                # backstop below only runs on a loop wake -- the worst-case
-                # re-assert cadence on an otherwise-idle connection. Cap it at
-                # the re-assert interval so a steadily-stuck workspace really is
-                # re-asserted on that cadence rather than being stretched to a
-                # longer idle-wake period.
-                try:
-                    await asyncio.wait_for(
-                        change_event.wait(), timeout=_SYSTEM_INTERFACE_STATUS_REASSERT_INTERVAL_SECONDS
-                    )
-                except TimeoutError:
-                    pass
+            shutdown_event: threading.Event = get_state().shutdown_event
+            while not shutdown_event.is_set():
+                # Wait for a change signal or timeout. The timeout bounds the
+                # worst-case re-assert cadence on an otherwise-idle connection
+                # (the periodic status backstop below only runs on a loop wake).
+                # Cap it at the re-assert interval so a steadily-stuck workspace
+                # really is re-asserted on that cadence. A client that has
+                # disconnected is detected when the next ``yield`` write fails
+                # (WSGI has no proactive disconnect signal); the generator's
+                # ``finally`` then removes the callbacks.
+                change_event.wait(timeout=_SYSTEM_INTERFACE_STATUS_REASSERT_INTERVAL_SECONDS)
                 # Clear BEFORE draining so any producer firing between drain
                 # and the next ``wait()`` re-sets the event and is observed
                 # promptly. See the comment above for the full invariant.
                 change_event.clear()
 
-                # Server-side shutdown signalled (via lifespan teardown
-                # calling backend_resolver.notify_change() right after
-                # setting shutdown_event). Exit the generator cleanly so
-                # uvicorn's graceful-shutdown deadline doesn't have to
-                # cancel us mid-stream.
+                # Server-side shutdown signalled (the signal handler sets
+                # shutdown_event and pokes the resolver's change callback,
+                # which fires change_event). Exit the generator cleanly so
+                # the server's drain doesn't have to wait us out.
                 if shutdown_event.is_set():
-                    break
-
-                connected = not await request.is_disconnected()
-                if not connected:
                     break
 
                 while not health_queue.empty():
@@ -2389,7 +2244,7 @@ async def _handle_chrome_events(
                     last_providers_data = current_providers_data
                     yield "data: {}\n\n".format(json.dumps({"type": "providers_state", **current_providers_data}))
 
-                inbox = request.app.state.request_inbox
+                inbox = get_state().request_inbox
                 current_requests_payload = _build_requests_payload(inbox, backend_resolver)
                 # Diff the full payload (count + ordered pending ids), not just
                 # the count, so a change to the pending *set* at constant size
@@ -2406,7 +2261,7 @@ async def _handle_chrome_events(
             if tracker is not None:
                 tracker.remove_on_change_callback(_on_health_change)
 
-    return StreamingResponse(
+    return make_streaming_response(
         _event_generator(),
         media_type="text/event-stream",
         headers={
@@ -2780,18 +2635,16 @@ def _ssh_command_for_agent(backend_resolver: BackendResolverInterface, agent_id:
 
 def _handle_recovery_page(
     agent_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
 ) -> Response:
     """Render the workspace-recovery page (shown by the 503 redirect or by direct nav)."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return HTMLResponse(content=render_login_page(), status_code=403)
+    if not _is_request_authenticated():
+        return make_html_response(content=render_login_page(), status_code=403)
     aid = AgentId(agent_id)
-    tracker: SystemInterfaceHealthTracker | None = request.app.state.system_interface_health_tracker
+    tracker: SystemInterfaceHealthTracker | None = get_state().system_interface_health_tracker
     initial_status = tracker.get_health(aid).value if tracker is not None else AgentHealth.HEALTHY.value
     initial_error = (tracker.get_last_restart_error(aid) or "") if tracker is not None else ""
-    return_to = _sanitize_recovery_return_to(request.query_params.get("return_to", ""))
-    is_explicit_restart = request.query_params.get("intent", "") == "restart"
+    return_to = _sanitize_recovery_return_to(request.args.get("return_to", ""))
+    is_explicit_restart = request.args.get("intent", "") == "restart"
     # The recovery page renders from ``render_status`` and then auto-refreshes
     # itself while a restart is in flight; every refresh re-runs this handler,
     # so the live tracker state is re-read each tick. A HEALTHY tracker needs
@@ -2810,13 +2663,13 @@ def _handle_recovery_page(
             # before this GET landed) or the page's own post-restart refresh
             # observing success. Either way, send the user back to where they
             # were going.
-            return RedirectResponse(url=return_to, status_code=302)
+            return make_redirect_response(url=return_to, status_code=302)
         else:
             # HEALTHY with no return_to to redirect to: render with
             # render_status still HEALTHY -- the page then offers a manual
             # restart button.
             pass
-    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    backend_resolver: BackendResolverInterface = get_state().backend_resolver
     html_body = render_recovery_page(
         agent_id=aid,
         return_to=return_to,
@@ -2824,7 +2677,7 @@ def _handle_recovery_page(
         initial_error=initial_error,
         ssh_command=_ssh_command_for_agent(backend_resolver, aid),
     )
-    return HTMLResponse(content=html_body)
+    return make_html_response(content=html_body)
 
 
 def _run_mngr(concurrency_group: ConcurrencyGroup, argv: list[str], env: dict[str, str]) -> str:
@@ -3000,18 +2853,16 @@ def _run_restart_sequence(
 
 
 def _dispatch_restart(
-    request: Request,
-    auth_store: AuthStoreDep,
     agent_id: str,
     is_host_restart: bool,
 ) -> Response:
     """Shared body for the two restart endpoints: validate, mark RESTARTING, spawn the worker."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+    if not _is_request_authenticated():
         return _json_error("Not authenticated", status_code=403)
     aid = AgentId(agent_id)
-    tracker: SystemInterfaceHealthTracker | None = request.app.state.system_interface_health_tracker
-    concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
-    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    tracker: SystemInterfaceHealthTracker | None = get_state().system_interface_health_tracker
+    concurrency_group: ConcurrencyGroup | None = get_state().root_concurrency_group
+    backend_resolver: BackendResolverInterface = get_state().backend_resolver
     if tracker is None or concurrency_group is None:
         return _json_error("Workspace restart is unavailable in this configuration", status_code=503)
     # A restart is already in flight for this agent -- don't stack a second
@@ -3020,14 +2871,14 @@ def _dispatch_restart(
     # this caller won it, so this check-and-claim is atomic against concurrent
     # restart requests (recovery page, sidebar, landing page).
     if not tracker.mark_restarting(aid):
-        return Response(status_code=202, content="{}", media_type="application/json")
+        return make_response(status_code=202, content="{}", media_type="application/json")
 
     # The auto-dispatched host tier (chosen only when the host-health probe
     # found the container fully stopped) passes ``host_already_stopped=1`` so
     # the worker can skip the redundant stop step. Honored only for host
     # restarts: a manually-requested restart may target a still-running
     # container, which must be stopped first.
-    skip_stop = is_host_restart and request.query_params.get("host_already_stopped") == "1"
+    skip_stop = is_host_restart and request.args.get("host_already_stopped") == "1"
 
     # is_checked=False + on_failure: a crash of the one-shot worker is handled
     # by transitioning the tracker to RESTART_FAILED (so the recovery page does
@@ -3045,11 +2896,11 @@ def _dispatch_restart(
                 "is_host_restart": is_host_restart,
                 "tracker": tracker,
                 "backend_resolver": backend_resolver,
-                "mngr_binary": request.app.state.mngr_binary,
-                "mngr_host_dir": request.app.state.mngr_host_dir,
+                "mngr_binary": get_state().mngr_binary,
+                "mngr_host_dir": get_state().mngr_host_dir,
                 "concurrency_group": concurrency_group,
-                "mngr_forward_port": request.app.state.mngr_forward_port or 0,
-                "mngr_forward_preauth_cookie": request.app.state.mngr_forward_preauth_cookie,
+                "mngr_forward_port": get_state().mngr_forward_port or 0,
+                "mngr_forward_preauth_cookie": get_state().mngr_forward_preauth_cookie,
                 "skip_stop": skip_stop,
             },
             name=f"system-interface-restart-{aid}",
@@ -3061,25 +2912,21 @@ def _dispatch_restart(
         logger.warning("Failed to spawn restart worker for {}: {}", aid, exc)
         tracker.mark_restart_failed(aid, f"Could not start the restart worker: {exc}")
         return _json_error(f"Could not start the restart worker: {exc}", status_code=503)
-    return Response(status_code=202, content="{}", media_type="application/json")
+    return make_response(status_code=202, content="{}", media_type="application/json")
 
 
 def _handle_restart_system_interface_api(
     agent_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
 ) -> Response:
     """Dispatch a surgical restart of the system-services agent (``mngr stop`` + ``mngr start``)."""
-    return _dispatch_restart(request=request, auth_store=auth_store, agent_id=agent_id, is_host_restart=False)
+    return _dispatch_restart(agent_id=agent_id, is_host_restart=False)
 
 
 def _handle_restart_host_api(
     agent_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
 ) -> Response:
     """Dispatch a full host restart (``mngr stop --stop-host`` + ``mngr start`` of system-services)."""
-    return _dispatch_restart(request=request, auth_store=auth_store, agent_id=agent_id, is_host_restart=True)
+    return _dispatch_restart(agent_id=agent_id, is_host_restart=True)
 
 
 # -- Mind host Start / Stop --
@@ -3173,52 +3020,42 @@ def _perform_mind_host_action(
 
 
 def _dispatch_mind_host_action(
-    request: Request,
-    auth_store: AuthStoreDep,
     agent_id: str,
     action: _MindHostAction,
 ) -> Response:
     """Shared body for the stop-host / start-host endpoints: validate, run synchronously, return the outcome."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+    if not _is_request_authenticated():
         return _json_error("Not authenticated", status_code=403)
     aid = AgentId(agent_id)
-    concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
-    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    concurrency_group: ConcurrencyGroup | None = get_state().root_concurrency_group
+    backend_resolver: BackendResolverInterface = get_state().backend_resolver
     if concurrency_group is None:
         return _json_error("Mind host control is unavailable in this configuration", status_code=503)
     succeeded = _perform_mind_host_action(
         workspace_agent_id=aid,
         action=action,
         backend_resolver=backend_resolver,
-        mngr_binary=request.app.state.mngr_binary,
-        mngr_host_dir=request.app.state.mngr_host_dir,
+        mngr_binary=get_state().mngr_binary,
+        mngr_host_dir=get_state().mngr_host_dir,
         concurrency_group=concurrency_group,
     )
     if not succeeded:
         return _json_error(f"Could not {action.value.lower()} the mind host", status_code=500)
-    return Response(content="{}", media_type="application/json")
+    return make_response(content="{}", media_type="application/json")
 
 
 def _handle_stop_host_api(
     agent_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
 ) -> Response:
     """Stop a mind's host (``mngr stop --stop-host``)."""
-    return _dispatch_mind_host_action(
-        request=request, auth_store=auth_store, agent_id=agent_id, action=_MindHostAction.STOP
-    )
+    return _dispatch_mind_host_action(agent_id=agent_id, action=_MindHostAction.STOP)
 
 
 def _handle_start_host_api(
     agent_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
 ) -> Response:
     """Start a mind's stopped host (``mngr start``)."""
-    return _dispatch_mind_host_action(
-        request=request, auth_store=auth_store, agent_id=agent_id, action=_MindHostAction.START
-    )
+    return _dispatch_mind_host_action(agent_id=agent_id, action=_MindHostAction.START)
 
 
 def _running_mind_entries(backend_resolver: BackendResolverInterface) -> list[dict[str, str]]:
@@ -3241,10 +3078,7 @@ def _running_mind_entries(backend_resolver: BackendResolverInterface) -> list[di
     return running
 
 
-def _handle_running_minds_api(
-    request: Request,
-    auth_store: AuthStoreDep,
-) -> Response:
+def _handle_running_minds_api() -> Response:
     """Return the shutdown-capable minds whose containers are currently running, for the quit prompt.
 
     Derives state from the discovery snapshot's host state (plus any optimistic
@@ -3255,18 +3089,15 @@ def _handle_running_minds_api(
     snapshot may still be listed, but re-stopping it is idempotent. Each entry
     carries the agent id and human-readable workspace name.
     """
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+    if not _is_request_authenticated():
         return _json_error("Not authenticated", status_code=403)
-    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
-    return Response(
+    backend_resolver: BackendResolverInterface = get_state().backend_resolver
+    return make_response(
         content=json.dumps({"running": _running_mind_entries(backend_resolver)}), media_type="application/json"
     )
 
 
-def _handle_stop_mind_hosts_api(
-    request: Request,
-    auth_store: AuthStoreDep,
-) -> Response:
+def _handle_stop_mind_hosts_api() -> Response:
     """Stop the hosts of the given shutdown-capable minds in one ``mngr stop --stop-host``.
 
     The target agent ids come from repeated ``agent_id`` query params (the ids the
@@ -3283,13 +3114,13 @@ def _handle_stop_mind_hosts_api(
     snapshot -- which may briefly over-report a host that did stop until discovery
     catches up. A Retry re-stop is idempotent (mngr reports "already stopped").
     """
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+    if not _is_request_authenticated():
         return _json_error("Not authenticated", status_code=403)
-    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
-    concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
+    backend_resolver: BackendResolverInterface = get_state().backend_resolver
+    concurrency_group: ConcurrencyGroup | None = get_state().root_concurrency_group
     if concurrency_group is None:
         return _json_error("Mind host control is unavailable in this configuration", status_code=503)
-    requested_ids = request.query_params.getlist("agent_id")
+    requested_ids = request.args.getlist("agent_id")
     # Resolve each workspace agent to the system-services agent that shares its
     # host (the host-stop target) and remember its host for the optimistic override.
     services_agent_ids: list[AgentId] = []
@@ -3306,8 +3137,8 @@ def _handle_stop_mind_hosts_api(
             host_ids.append(host_id)
     if services_agent_ids:
         env = dict(os.environ)
-        env["MNGR_HOST_DIR"] = str(request.app.state.mngr_host_dir)
-        argv = _build_mngr_stop_hosts_argv(request.app.state.mngr_binary, services_agent_ids)
+        env["MNGR_HOST_DIR"] = str(get_state().mngr_host_dir)
+        argv = _build_mngr_stop_hosts_argv(get_state().mngr_binary, services_agent_ids)
         try:
             _run_mngr(concurrency_group, argv, env)
         except MngrCommandError as exc:
@@ -3317,13 +3148,10 @@ def _handle_stop_mind_hosts_api(
                 backend_resolver.set_host_state_override(host_id, HostState.STOPPED)
     requested_set = set(requested_ids)
     still_running = [entry for entry in _running_mind_entries(backend_resolver) if entry["id"] in requested_set]
-    return Response(content=json.dumps({"still_running": still_running}), media_type="application/json")
+    return make_response(content=json.dumps({"still_running": still_running}), media_type="application/json")
 
 
-def _handle_stop_state_container_api(
-    request: Request,
-    auth_store: AuthStoreDep,
-) -> Response:
+def _handle_stop_state_container_api() -> Response:
     """Stop this env's mngr Docker state container, to fully free local resources at quit.
 
     The docker provider keeps a singleton state container (``<MNGR_PREFIX>docker-
@@ -3334,26 +3162,24 @@ def _handle_stop_state_container_api(
     docker-specific (the state container is a docker-provider construct); a no-op
     for envs without one.
     """
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+    if not _is_request_authenticated():
         return _json_error("Not authenticated", status_code=403)
-    concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
+    concurrency_group: ConcurrencyGroup | None = get_state().root_concurrency_group
     if concurrency_group is None:
-        return Response(content=json.dumps({"stopped": False}), media_type="application/json")
+        return make_response(content=json.dumps({"stopped": False}), media_type="application/json")
     try:
         was_attempted = stop_active_env_state_container(
-            mngr_host_dir=request.app.state.mngr_host_dir,
+            mngr_host_dir=get_state().mngr_host_dir,
             parent_concurrency_group=concurrency_group,
         )
     except DockerCleanupError as exc:
         logger.warning("Failed to stop the Docker state container at shutdown: {}", exc)
         return _json_error(f"Could not stop the Docker state container: {exc}", status_code=500)
-    return Response(content=json.dumps({"stopped": was_attempted}), media_type="application/json")
+    return make_response(content=json.dumps({"stopped": was_attempted}), media_type="application/json")
 
 
 def _handle_host_health_probe_api(
     agent_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
 ) -> Response:
     """Layer-2 probe: run each recovery-diagnostics probe, classify the dispatch tier.
 
@@ -3361,15 +3187,15 @@ def _handle_host_health_probe_api(
     derived ``dispatch_tier``. The recovery page renders each probe as a
     row and keys its restart-tier branching off ``dispatch_tier``.
     """
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+    if not _is_request_authenticated():
         return _json_error("Not authenticated", status_code=403)
     aid = AgentId(agent_id)
-    concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
+    concurrency_group: ConcurrencyGroup | None = get_state().root_concurrency_group
     if concurrency_group is None:
         return _json_error("Host health probe is unavailable in this configuration", status_code=503)
-    response = _run_host_health_probe(aid, request, concurrency_group)
+    response = _run_host_health_probe(aid, concurrency_group)
     logger.info("Layer-2 host-state probe for {}: dispatch_tier={}", aid, response.dispatch_tier.value)
-    return Response(
+    return make_response(
         content=response.model_dump_json(),
         media_type="application/json",
     )
@@ -3377,7 +3203,6 @@ def _handle_host_health_probe_api(
 
 def _run_host_health_probe(
     agent_id: AgentId,
-    request: Request,
     concurrency_group: ConcurrencyGroup,
 ) -> HostHealthResponse:
     """Run the batched ``mngr exec`` probe + ``mngr list`` lookup, return the response.
@@ -3387,9 +3212,9 @@ def _run_host_health_probe(
     ``mngr exec`` probe, and the plugin's resolver-snapshot mirror.
     """
     env = dict(os.environ)
-    env["MNGR_HOST_DIR"] = str(request.app.state.mngr_host_dir)
-    mngr_binary: str = request.app.state.mngr_binary
-    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    env["MNGR_HOST_DIR"] = str(get_state().mngr_host_dir)
+    mngr_binary: str = get_state().mngr_binary
+    backend_resolver: BackendResolverInterface = get_state().backend_resolver
     services_agent_id = backend_resolver.get_system_services_agent_id(agent_id)
     display_info = backend_resolver.get_agent_display_info(agent_id)
     provider_name = display_info.provider_name if display_info is not None else None
@@ -3463,7 +3288,7 @@ def _run_host_health_probe(
             in_container_stdout = _run_mngr(concurrency_group, build_probe_argv(mngr_binary, services_agent_id), env)
         except MngrCommandError as exc:
             logger.debug("in-container probe for host-health of {} did not exit cleanly: {}", agent_id, exc)
-    consumer: EnvelopeStreamConsumer | None = request.app.state.envelope_stream_consumer
+    consumer: EnvelopeStreamConsumer | None = get_state().envelope_stream_consumer
     plugin_resolver_services: dict[str, str] = (
         consumer.get_resolver_snapshot_for_agent(agent_id) if consumer is not None else {}
     )
@@ -3489,15 +3314,12 @@ def _run_host_health_probe(
 # -- Account management routes --
 
 
-def _handle_accounts_page(
-    request: Request,
-    auth_store: AuthStoreDep,
-) -> Response:
+def _handle_accounts_page() -> Response:
     """Render the manage accounts page."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content="Not authenticated")
-    session_store: MultiAccountSessionStore | None = request.app.state.session_store
-    minds_config: MindsConfig | None = request.app.state.minds_config
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    session_store: MultiAccountSessionStore | None = get_state().session_store
+    minds_config: MindsConfig | None = get_state().minds_config
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
     enabled_by_user_id = {
@@ -3508,28 +3330,23 @@ def _handle_accounts_page(
         default_account_id=default_account_id,
         enabled_by_user_id=enabled_by_user_id,
     )
-    return HTMLResponse(content=html)
+    return make_html_response(content=html)
 
 
-async def _handle_set_default_account(
-    request: Request,
-    auth_store: AuthStoreDep,
-) -> Response:
+def _handle_set_default_account() -> Response:
     """Set the default account for new workspaces."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content="Not authenticated")
-    form = await request.form()
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    form = request.form
     user_id = str(form.get("user_id", ""))
-    minds_config: MindsConfig | None = request.app.state.minds_config
+    minds_config: MindsConfig | None = get_state().minds_config
     if minds_config and user_id:
         minds_config.set_default_account_id(user_id)
-    return Response(status_code=303, headers={"Location": "/accounts"})
+    return make_response(status_code=303, headers={"Location": "/accounts"})
 
 
-async def _handle_account_logout(
+def _handle_account_logout(
     user_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
 ) -> Response:
     """Log out a specific account.
 
@@ -3540,11 +3357,11 @@ async def _handle_account_logout(
     the cache would let the next ``auth list`` call resurrect the
     account because the plugin still holds the session on disk.
     """
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content="Not authenticated")
-    if request.app.state.session_store is not None:
-        signout_user_via_plugin(request, user_id)
-    return Response(status_code=303, headers={"Location": "/accounts"})
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    if get_state().session_store is not None:
+        signout_user_via_plugin(user_id)
+    return make_response(status_code=303, headers={"Location": "/accounts"})
 
 
 # -- Workspace settings routes --
@@ -3569,14 +3386,12 @@ def _is_leased_imbue_cloud_workspace(backend_resolver: BackendResolverInterface,
 
 def _handle_workspace_settings(
     agent_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
-    backend_resolver: BackendResolverDep,
 ) -> Response:
     """Render workspace settings page with account, sharing, telegram, and delete options."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content="Not authenticated")
-    session_store: MultiAccountSessionStore | None = request.app.state.session_store
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    backend_resolver = get_state().backend_resolver
+    session_store: MultiAccountSessionStore | None = get_state().session_store
     current_account = session_store.get_account_for_workspace(agent_id) if session_store else None
     accounts = session_store.list_accounts() if session_store else []
     is_leased_imbue_cloud = _is_leased_imbue_cloud_workspace(backend_resolver, agent_id)
@@ -3589,7 +3404,7 @@ def _handle_workspace_settings(
 
     servers = [str(s) for s in backend_resolver.list_services_for_agent(parsed_agent_id)]
 
-    telegram_orchestrator: TelegramSetupOrchestrator | None = request.app.state.telegram_orchestrator
+    telegram_orchestrator: TelegramSetupOrchestrator | None = get_state().telegram_orchestrator
     telegram_state: str | None = None
     if telegram_orchestrator is not None:
         telegram_state = "active" if telegram_orchestrator.agent_has_telegram(parsed_agent_id) else "pending"
@@ -3614,30 +3429,28 @@ def _handle_workspace_settings(
         current_color=current_color,
         is_stale=is_stale,
     )
-    return HTMLResponse(content=html)
+    return make_html_response(content=html)
 
 
-async def _handle_workspace_associate(
+def _handle_workspace_associate(
     agent_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
 ) -> Response:
     """Associate a workspace with an account."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content="Not authenticated")
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
     # Leased imbue_cloud hosts are permanently bound to their leasing account;
     # re-associating one to a different account would cause confusing account
     # mixing, so reject it here as a defense-in-depth backstop to the UI guard.
-    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    backend_resolver: BackendResolverInterface = get_state().backend_resolver
     if _is_leased_imbue_cloud_workspace(backend_resolver, agent_id):
-        return Response(
+        return make_response(
             status_code=403,
             content="Cannot change the account association of a host leased from imbue_cloud",
         )
-    form = await request.form()
+    form = request.form
     user_id = str(form.get("user_id", ""))
     redirect_url = str(form.get("redirect", ""))
-    session_store: MultiAccountSessionStore | None = request.app.state.session_store
+    session_store: MultiAccountSessionStore | None = get_state().session_store
     if session_store and user_id:
         session_store.associate_workspace(user_id, agent_id)
         # Wake the chrome SSE so the workspace tile picks up its new
@@ -3648,27 +3461,25 @@ async def _handle_workspace_associate(
         if isinstance(backend_resolver, MngrCliBackendResolver):
             backend_resolver.notify_change()
     location = redirect_url if redirect_url else f"/workspace/{agent_id}/settings"
-    return Response(status_code=303, headers={"Location": location})
+    return make_response(status_code=303, headers={"Location": location})
 
 
-async def _handle_workspace_disassociate(
+def _handle_workspace_disassociate(
     agent_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
 ) -> Response:
     """Disassociate a workspace from its account and tear down its tunnel."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content="Not authenticated")
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
     # Leased imbue_cloud hosts must stay bound to their leasing account; block
     # disassociation here as a defense-in-depth backstop to the disabled UI control.
-    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    backend_resolver: BackendResolverInterface = get_state().backend_resolver
     if _is_leased_imbue_cloud_workspace(backend_resolver, agent_id):
-        return Response(
+        return make_response(
             status_code=403,
             content="Cannot disassociate a host leased from imbue_cloud",
         )
-    session_store: MultiAccountSessionStore | None = request.app.state.session_store
-    cli: ImbueCloudCli | None = request.app.state.imbue_cloud_cli
+    session_store: MultiAccountSessionStore | None = get_state().session_store
+    cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
     if session_store:
         account = session_store.get_account_for_workspace(agent_id)
         if account:
@@ -3691,13 +3502,13 @@ async def _handle_workspace_disassociate(
             # waiting out the 30s heartbeat.
             if isinstance(backend_resolver, MngrCliBackendResolver):
                 backend_resolver.notify_change()
-    return Response(status_code=303, headers={"Location": f"/workspace/{agent_id}/settings"})
+    return make_response(status_code=303, headers={"Location": f"/workspace/{agent_id}/settings"})
 
 
 # -- Inbox routes --
 
 
-def _build_inbox_cards(request: Request) -> list[Mapping[str, str]]:
+def _build_inbox_cards() -> list[Mapping[str, str]]:
     """Build the inbox card dicts for the current pending requests.
 
     Each card carries the fields the InboxList JinjaX component reads:
@@ -3705,10 +3516,10 @@ def _build_inbox_cards(request: Request) -> list[Mapping[str, str]]:
     Order matches ``RequestInbox.get_pending_requests`` --
     most-recent-first.
     """
-    inbox: RequestInbox | None = request.app.state.request_inbox
-    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    inbox: RequestInbox | None = get_state().request_inbox
+    backend_resolver: BackendResolverInterface = get_state().backend_resolver
     pending = _displayable_pending_requests(inbox, backend_resolver)
-    handlers: tuple[RequestEventHandler, ...] = request.app.state.request_event_handlers
+    handlers: tuple[RequestEventHandler, ...] = get_state().request_event_handlers
     # Map ws_name -> "homepage agent id" so the card accent matches the
     # color the homepage tile and the titlebar use for that workspace
     # name. Each minds workspace owns two sibling mngr agents -- a
@@ -3766,7 +3577,6 @@ def _build_inbox_cards(request: Request) -> list[Mapping[str, str]]:
 
 
 def _resolve_inbox_selection(
-    request: Request,
     selected_id: str,
     backend_resolver: BackendResolverInterface,
 ) -> tuple[str, str]:
@@ -3779,14 +3589,14 @@ def _resolve_inbox_selection(
     is the empty string if the inbox is empty or no item could be
     resolved.
     """
-    inbox: RequestInbox | None = request.app.state.request_inbox
+    inbox: RequestInbox | None = get_state().request_inbox
     if inbox is None:
         return "", ""
     pending = _displayable_pending_requests(inbox, backend_resolver)
     if not pending:
         return "", ""
 
-    handlers: tuple[RequestEventHandler, ...] = request.app.state.request_event_handlers
+    handlers: tuple[RequestEventHandler, ...] = get_state().request_event_handlers
     # Only requests in the displayable set are selectable: a request whose
     # host can't be resolved is hidden from the list, so honoring a stale
     # ``selected_id`` that points at one would render the same
@@ -3813,25 +3623,22 @@ def _resolve_inbox_selection(
     detail_html = handler.render_request_detail_fragment(
         req_event=target,
         backend_resolver=backend_resolver,
-        mngr_forward_origin=_get_mngr_forward_origin(request),
+        mngr_forward_origin=_get_mngr_forward_origin(),
     )
     return str(target.event_id), detail_html
 
 
-def _handle_inbox_page(
-    request: Request,
-    auth_store: AuthStoreDep,
-    backend_resolver: BackendResolverDep,
-) -> Response:
+def _handle_inbox_page() -> Response:
     """Render the full inbox modal page (``GET /inbox``)."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return HTMLResponse(content="<p>Not authenticated</p>")
-    cards = _build_inbox_cards(request)
-    selected_query = request.query_params.get("selected", "")
-    selected_id, detail_html = _resolve_inbox_selection(request, selected_query, backend_resolver)
-    minds_config: MindsConfig | None = request.app.state.minds_config
+    if not _is_request_authenticated():
+        return make_html_response(content="<p>Not authenticated</p>")
+    backend_resolver = get_state().backend_resolver
+    cards = _build_inbox_cards()
+    selected_query = request.args.get("selected", "")
+    selected_id, detail_html = _resolve_inbox_selection(selected_query, backend_resolver)
+    minds_config: MindsConfig | None = get_state().minds_config
     auto_open = minds_config.get_auto_open_requests_panel() if minds_config else True
-    return HTMLResponse(
+    return make_html_response(
         content=render_inbox_page(
             cards=cards,
             selected_id=selected_id,
@@ -3842,90 +3649,81 @@ def _handle_inbox_page(
     )
 
 
-def _handle_inbox_list_fragment(
-    request: Request,
-    auth_store: AuthStoreDep,
-) -> Response:
+def _handle_inbox_list_fragment() -> Response:
     """Return the left-list fragment (``GET /inbox/list``)."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return HTMLResponse(content="<p>Not authenticated</p>")
-    cards = _build_inbox_cards(request)
-    return HTMLResponse(content=render_inbox_list_fragment(cards=cards, selected_id=""))
+    if not _is_request_authenticated():
+        return make_html_response(content="<p>Not authenticated</p>")
+    cards = _build_inbox_cards()
+    return make_html_response(content=render_inbox_list_fragment(cards=cards, selected_id=""))
 
 
 def _handle_inbox_detail_fragment(
     request_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
-    backend_resolver: BackendResolverDep,
 ) -> Response:
     """Return the right-pane detail fragment (``GET /inbox/detail/{id}``).
 
     Resolved or unknown ids get the "no longer available" fragment with
     HTTP 200 so the shell JS can innerHTML-swap it directly.
     """
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return HTMLResponse(content="<p>Not authenticated</p>")
-    inbox: RequestInbox | None = request.app.state.request_inbox
+    if not _is_request_authenticated():
+        return make_html_response(content="<p>Not authenticated</p>")
+    backend_resolver = get_state().backend_resolver
+    inbox: RequestInbox | None = get_state().request_inbox
     if inbox is None:
         # The InboxUnavailable heading reads "This permission request is no
         # longer available", which makes no sense when the issue is that there
         # is no inbox at all. Drop the supporting message so only the heading
         # shows; the template treats an empty message as the no-extra-copy case.
-        return HTMLResponse(content=render_inbox_unavailable_fragment())
+        return make_html_response(content=render_inbox_unavailable_fragment())
     req_event = inbox.get_request_by_id(request_id)
     if req_event is None:
-        return HTMLResponse(
+        return make_html_response(
             content=render_inbox_unavailable_fragment(
                 message="It may have expired, or it was opened from an old link.",
             ),
         )
     if inbox.is_request_resolved(request_id):
-        return HTMLResponse(
+        return make_html_response(
             content=render_inbox_unavailable_fragment(message="It has already been processed."),
         )
-    handlers: tuple[RequestEventHandler, ...] = request.app.state.request_event_handlers
+    handlers: tuple[RequestEventHandler, ...] = get_state().request_event_handlers
     handler = find_handler_for_event(handlers, req_event)
     if handler is None:
-        return HTMLResponse(
+        return make_html_response(
             content=f"<p>No handler registered for request type {req_event.request_type!r}</p>",
             status_code=500,
         )
-    return HTMLResponse(
+    return make_html_response(
         content=handler.render_request_detail_fragment(
             req_event=req_event,
             backend_resolver=backend_resolver,
-            mngr_forward_origin=_get_mngr_forward_origin(request),
+            mngr_forward_origin=_get_mngr_forward_origin(),
         )
     )
 
 
-async def _handle_requests_auto_open(
-    request: Request,
-    auth_store: AuthStoreDep,
-) -> Response:
+def _handle_requests_auto_open() -> Response:
     """Toggle the auto-open setting for the inbox modal.
 
     The route URL and on-disk setting key keep ``requests-panel`` /
     ``auto_open_requests_panel`` for backward compatibility (see
     :class:`MindsConfig`); "panel" here now refers to the inbox modal.
     """
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
-    minds_config: MindsConfig | None = request.app.state.minds_config
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+    minds_config: MindsConfig | None = get_state().minds_config
     if minds_config:
         try:
-            body = await request.json()
+            body = _read_json_body()
             enabled = body.get("enabled", True)
             minds_config.set_auto_open_requests_panel(bool(enabled))
         except (json.JSONDecodeError, ValueError):
             pass
-    return Response(status_code=200, content='{"ok": true}', media_type="application/json")
+    return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
 
 
 def _resolve_ws_name_and_account(
     agent_id: str,
-    request: Request,
     backend_resolver: BackendResolverInterface,
 ) -> tuple[str, str, bool, list[AccountSession]]:
     """Resolve workspace name, account email, has_account flag, and accounts list."""
@@ -3934,7 +3732,7 @@ def _resolve_ws_name_and_account(
     if not ws_name:
         info = backend_resolver.get_agent_display_info(parsed_id)
         ws_name = info.agent_name if info else agent_id
-    session_store: MultiAccountSessionStore | None = request.app.state.session_store
+    session_store: MultiAccountSessionStore | None = get_state().session_store
     account = session_store.get_account_for_workspace(agent_id) if session_store else None
     account_email = account.email if account else ""
     has_account = account is not None
@@ -3945,17 +3743,14 @@ def _resolve_ws_name_and_account(
 def _handle_sharing_page(
     agent_id: str,
     service_name: str,
-    request: Request,
-    auth_store: AuthStoreDep,
-    backend_resolver: BackendResolverDep,
 ) -> Response:
     """Render the sharing editor page for direct editing (from workspace settings)."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content="Not authenticated")
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
 
+    backend_resolver = get_state().backend_resolver
     ws_name, account_email, has_account, accounts = _resolve_ws_name_and_account(
         agent_id,
-        request,
         backend_resolver,
     )
 
@@ -3963,22 +3758,19 @@ def _handle_sharing_page(
         agent_id=agent_id,
         service_name=service_name,
         title=f"Sharing: {service_name}",
-        mngr_forward_origin=_get_mngr_forward_origin(request),
+        mngr_forward_origin=_get_mngr_forward_origin(),
         has_account=has_account,
         accounts=accounts,
         redirect_url=f"/sharing/{agent_id}/{service_name}",
         ws_name=ws_name,
         account_email=account_email,
     )
-    return HTMLResponse(content=html)
+    return make_html_response(content=html)
 
 
-async def _handle_sharing_enable(
+def _handle_sharing_enable(
     agent_id: str,
     service_name: str,
-    request: Request,
-    auth_store: AuthStoreDep,
-    backend_resolver: BackendResolverDep,
 ) -> Response:
     """Enable or update sharing for a service via the workspace-settings editor.
 
@@ -3990,33 +3782,31 @@ async def _handle_sharing_enable(
     sharing editor JS surfaces that inline instead of silently
     redirecting to a now-empty status page.
     """
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content="Not authenticated")
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
 
-    form = await request.form()
+    backend_resolver = get_state().backend_resolver
+    form = request.form
     emails = parse_emails_form_value(str(form.get("emails", "[]")))
     try:
         enable_sharing_via_cloudflare(
-            request=request,
             agent_id=AgentId(agent_id),
             service_name=ServiceName(service_name),
             emails=emails,
             backend_resolver=backend_resolver,
         )
     except SharingError as exc:
-        return Response(
+        return make_response(
             status_code=502,
             content=json.dumps({"error": str(exc)}),
             media_type="application/json",
         )
-    return Response(status_code=303, headers={"Location": f"/sharing/{agent_id}/{service_name}"})
+    return make_response(status_code=303, headers={"Location": f"/sharing/{agent_id}/{service_name}"})
 
 
-async def _handle_sharing_disable(
+def _handle_sharing_disable(
     agent_id: str,
     service_name: str,
-    request: Request,
-    auth_store: AuthStoreDep,
 ) -> Response:
     """Disable sharing for a service via the imbue_cloud plugin.
 
@@ -4024,13 +3814,13 @@ async def _handle_sharing_disable(
     happen connector-side). The tunnel itself stays around so re-
     enabling later doesn't re-issue a fresh token.
     """
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content="Not authenticated")
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
 
-    cli: ImbueCloudCli | None = request.app.state.imbue_cloud_cli
-    session_store: MultiAccountSessionStore | None = request.app.state.session_store
+    cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
+    session_store: MultiAccountSessionStore | None = get_state().session_store
     if cli is None:
-        return Response(
+        return make_response(
             status_code=502,
             content=json.dumps({"error": "imbue_cloud CLI is not configured."}),
             media_type="application/json",
@@ -4039,7 +3829,7 @@ async def _handle_sharing_disable(
     try:
         account_email = resolve_account_email_for_workspace(session_store, parsed_id)
     except SharingError as exc:
-        return Response(
+        return make_response(
             status_code=502,
             content=json.dumps({"error": str(exc)}),
             media_type="application/json",
@@ -4048,7 +3838,7 @@ async def _handle_sharing_disable(
     try:
         tunnel = cli.find_tunnel_for_agent(account=account_email, agent_id=str(parsed_id))
     except ImbueCloudCliError as exc:
-        return Response(
+        return make_response(
             status_code=502,
             content=json.dumps({"error": f"Failed to look up the tunnel: {exc}"}),
             media_type="application/json",
@@ -4056,24 +3846,22 @@ async def _handle_sharing_disable(
     if tunnel is None:
         # No tunnel = nothing to disable. Treat as success so the JS
         # redirect lands on the (already-disabled) status page.
-        return Response(status_code=303, headers={"Location": f"/sharing/{agent_id}/{service_name}"})
+        return make_response(status_code=303, headers={"Location": f"/sharing/{agent_id}/{service_name}"})
 
     try:
         cli.remove_service(account=account_email, tunnel_name=tunnel.tunnel_name, service_name=service_name)
     except ImbueCloudCliError as exc:
-        return Response(
+        return make_response(
             status_code=502,
             content=json.dumps({"error": f"Failed to disable sharing: {exc}"}),
             media_type="application/json",
         )
-    return Response(status_code=303, headers={"Location": f"/sharing/{agent_id}/{service_name}"})
+    return make_response(status_code=303, headers={"Location": f"/sharing/{agent_id}/{service_name}"})
 
 
 def _handle_sharing_status_api(
     agent_id: str,
     service_name: str,
-    request: Request,
-    auth_store: AuthStoreDep,
 ) -> Response:
     """JSON API to get current sharing status for the editor JS.
 
@@ -4087,13 +3875,13 @@ def _handle_sharing_status_api(
     when sharing isn't yet enabled is the workspace's associated account
     email.
     """
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
 
-    cli: ImbueCloudCli | None = request.app.state.imbue_cloud_cli
-    session_store: MultiAccountSessionStore | None = request.app.state.session_store
+    cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
+    session_store: MultiAccountSessionStore | None = get_state().session_store
     if cli is None:
-        return Response(
+        return make_response(
             content=json.dumps({"enabled": False, "url": None, "policy": {"emails": []}}),
             media_type="application/json",
         )
@@ -4107,7 +3895,7 @@ def _handle_sharing_status_api(
         # already shows the "associate an account" affordance for
         # this state.
         logger.debug("Sharing status: {}", exc)
-        return Response(
+        return make_response(
             content=json.dumps({"enabled": False, "url": None, "policy": {"emails": []}}),
             media_type="application/json",
         )
@@ -4117,12 +3905,12 @@ def _handle_sharing_status_api(
         tunnel = cli.find_tunnel_for_agent(account=account_email, agent_id=str(parsed_id))
     except ImbueCloudCliError as exc:
         logger.warning("Failed to list tunnels for {}: {}", parsed_id, exc)
-        return Response(
+        return make_response(
             content=json.dumps({"enabled": False, "url": None, "policy": default_policy}),
             media_type="application/json",
         )
     if tunnel is None or service_name not in tunnel.services:
-        return Response(
+        return make_response(
             content=json.dumps({"enabled": False, "url": None, "policy": default_policy}),
             media_type="application/json",
         )
@@ -4149,7 +3937,7 @@ def _handle_sharing_status_api(
         # email so the editor doesn't render an empty ACL.
         policy = default_policy
 
-    return Response(
+    return make_response(
         content=json.dumps(
             {
                 "enabled": True,
@@ -4164,7 +3952,7 @@ def _handle_sharing_status_api(
 _SHARE_READINESS_PROBE_TIMEOUT_SECONDS: Final[float] = 4.0
 
 
-async def _probe_share_url_readiness(http_client: httpx.AsyncClient, url: str) -> bool:
+def _probe_share_url_readiness(http_client: httpx.Client, url: str) -> bool:
     """Fetch ``url`` once and report whether the Cloudflare Access app is live.
 
     Uses the app's shared (``follow_redirects=False``) client so the Access
@@ -4172,18 +3960,16 @@ async def _probe_share_url_readiness(http_client: httpx.AsyncClient, url: str) -
     timeout is treated as "not ready yet".
     """
     try:
-        response = await http_client.get(url, timeout=_SHARE_READINESS_PROBE_TIMEOUT_SECONDS)
+        response = http_client.get(url, timeout=_SHARE_READINESS_PROBE_TIMEOUT_SECONDS)
     except httpx.HTTPError as exc:
         logger.debug("Probed share URL {} but it is not ready yet: {}", url, exc)
         return False
     return is_share_ready_from_edge_response(response.status_code, response.headers.get("location"))
 
 
-async def _handle_sharing_readiness_api(
+def _handle_sharing_readiness_api(
     agent_id: str,
     service_name: str,
-    request: Request,
-    auth_store: AuthStoreDep,
 ) -> Response:
     """Probe a shared service's hostname to see if Cloudflare Access is live yet.
 
@@ -4195,20 +3981,18 @@ async def _handle_sharing_readiness_api(
     Probing from minds keeps the connector request short and lets the browser
     drive the wait. Contract: ``{"ready": bool}``.
     """
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
-    probe_url = request.query_params.get("url", "")
-    http_client: httpx.AsyncClient | None = request.app.state.http_client
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+    probe_url = request.args.get("url", "")
+    http_client: httpx.Client | None = get_state().http_client
     if http_client is None or not is_probeable_share_url(probe_url):
-        return Response(content=json.dumps({"ready": False}), media_type="application/json")
-    is_ready = await _probe_share_url_readiness(http_client, probe_url)
-    return Response(content=json.dumps({"ready": is_ready}), media_type="application/json")
+        return make_response(content=json.dumps({"ready": False}), media_type="application/json")
+    is_ready = _probe_share_url_readiness(http_client, probe_url)
+    return make_response(content=json.dumps({"ready": is_ready}), media_type="application/json")
 
 
-async def _handle_request_grant(
+def _handle_request_grant(
     request_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
 ) -> Response:
     """Dispatch a grant to the handler that claims the event's request type.
 
@@ -4218,32 +4002,24 @@ async def _handle_request_grant(
     and forwards the rest. Per-handler differences (form parsing,
     response shape, side effects) live in the handler.
     """
-    return await _dispatch_request_action(
+    return _dispatch_request_action(
         request_id=request_id,
-        request=request,
-        auth_store=auth_store,
         action="grant",
     )
 
 
-async def _handle_request_deny(
+def _handle_request_deny(
     request_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
 ) -> Response:
     """Dispatch a deny to the handler that claims the event's request type."""
-    return await _dispatch_request_action(
+    return _dispatch_request_action(
         request_id=request_id,
-        request=request,
-        auth_store=auth_store,
         action="deny",
     )
 
 
-async def _dispatch_request_action(
+def _dispatch_request_action(
     request_id: str,
-    request: Request,
-    auth_store: AuthStoreInterface,
     action: str,
 ) -> Response:
     """Shared body of grant/deny dispatchers.
@@ -4251,9 +4027,9 @@ async def _dispatch_request_action(
     Authenticates, looks up the request event, picks the right handler,
     and forwards. ``action`` must be ``"grant"`` or ``"deny"``.
     """
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+    if not _is_request_authenticated():
         return _json_error("Not authenticated", status_code=403)
-    inbox: RequestInbox | None = request.app.state.request_inbox
+    inbox: RequestInbox | None = get_state().request_inbox
     if inbox is None:
         return _json_error("Request inbox not available", status_code=500)
     req_event = inbox.get_request_by_id(request_id)
@@ -4264,7 +4040,7 @@ async def _dispatch_request_action(
     if inbox.is_request_resolved(request_id):
         return _json_error("This request has already been approved or denied.", status_code=409)
 
-    handlers: tuple[RequestEventHandler, ...] = request.app.state.request_event_handlers
+    handlers: tuple[RequestEventHandler, ...] = get_state().request_event_handlers
     handler = find_handler_for_event(handlers, req_event)
     if handler is None:
         return _json_error(
@@ -4272,13 +4048,13 @@ async def _dispatch_request_action(
             status_code=400,
         )
     if action == "grant":
-        return await handler.apply_grant_request(request, req_event)
+        return handler.apply_grant_request(request, req_event)
     if action == "deny":
-        return await handler.apply_deny_request(request, req_event)
+        return handler.apply_deny_request(request, req_event)
     return _json_error(f"Unsupported action '{action}'", status_code=500)
 
 
-_request_event_apps: dict[int, FastAPI] = {}
+_request_event_apps: dict[int, Flask] = {}
 
 
 def _handle_request_event_callback(agent_id_str: str, raw_line: str) -> None:
@@ -4307,11 +4083,12 @@ def _handle_request_event_callback(agent_id_str: str, raw_line: str) -> None:
         )
         return
     for app in _request_event_apps.values():
-        current_inbox: RequestInbox | None = app.state.request_inbox
+        app_state = get_state(app)
+        current_inbox: RequestInbox | None = app_state.request_inbox
         if current_inbox is not None:
-            app.state.request_inbox = current_inbox.add_request(event)
+            app_state.request_inbox = current_inbox.add_request(event)
             logger.info("Request event from agent {}: {}", agent_id_str, event.request_type)
-            backend_resolver: BackendResolverInterface = app.state.backend_resolver
+            backend_resolver: BackendResolverInterface = app_state.backend_resolver
             if isinstance(backend_resolver, MngrCliBackendResolver):
                 backend_resolver.notify_change()
 
@@ -4322,7 +4099,7 @@ def _handle_request_event_callback(agent_id_str: str, raw_line: str) -> None:
 def create_desktop_client(
     auth_store: AuthStoreInterface,
     backend_resolver: BackendResolverInterface,
-    http_client: httpx.AsyncClient | None,
+    http_client: httpx.Client | None,
     agent_creator: AgentCreator | None = None,
     imbue_cloud_cli: ImbueCloudCli | None = None,
     telegram_orchestrator: TelegramSetupOrchestrator | None = None,
@@ -4344,8 +4121,8 @@ def create_desktop_client(
     mngr_host_dir: Path | None = None,
     minds_api_key: str | None = None,
     latchkey_forward_supervisor: LatchkeyForwardSupervisor | None = None,
-) -> FastAPI:
-    """Create the bare-origin minds FastAPI application.
+) -> Flask:
+    """Create the bare-origin minds Flask application.
 
     The agent-subdomain forwarding lives in the ``mngr_forward`` plugin
     (``libs/mngr_forward``) now; this app only serves minds-specific routes
@@ -4370,41 +4147,26 @@ def create_desktop_client(
     additionally requires ``notification_dispatcher`` to be provided;
     without it that endpoint returns 501.
     """
-    is_externally_managed_client = http_client is not None
+    # Static assets: Tailwind Play CDN JS + hand-written tokens.css + per-page
+    # JS, served by Flask's built-in static handler at the same ``/_static``
+    # URL. The Tailwind JS is fetched once by `just minds-tailwind` (plain curl,
+    # no build step) and is gitignored; if it's missing the route still works
+    # and the server logs a hint at startup.
+    _static_dir = Path(__file__).resolve().parent / "static"
+    if not (_static_dir / "tailwind.js").exists():
+        logger.warning("Missing static/tailwind.js. Run `just minds-tailwind` from the repo root to fetch it.")
+    app = Flask(__name__, static_folder=str(_static_dir), static_url_path="/_static")
 
-    @asynccontextmanager
-    async def _lifespan(inner_app: FastAPI) -> AsyncGenerator[None, None]:
-        async with _managed_lifespan(inner_app=inner_app, is_externally_managed_client=is_externally_managed_client):
-            yield
+    @app.errorhandler(Exception)
+    def _unhandled_exception_handler(exc: Exception) -> Response:
+        # Let werkzeug's HTTP exceptions (404, 405, abort(401), ...) keep their
+        # own status instead of collapsing them into a 500 -- matching the prior
+        # FastAPI/Starlette behavior where the catch-all only handled real 500s.
+        if isinstance(exc, HTTPException):
+            return exc
+        logger.opt(exception=exc).error("Unhandled exception on {} {}", request.method, request.path)
+        return make_response(status_code=500, content=f"Internal Server Error: {exc}")
 
-    app = FastAPI(lifespan=_lifespan)
-
-    @app.exception_handler(Exception)
-    async def _unhandled_exception_handler(request: Request, exc: Exception) -> Response:
-        logger.opt(exception=exc).error("Unhandled exception on {} {}", request.method, request.url.path)
-        return Response(status_code=500, content=f"Internal Server Error: {exc}")
-
-    app.state.auth_store = auth_store
-    app.state.backend_resolver = backend_resolver
-    app.state.envelope_stream_consumer = envelope_stream_consumer
-    # Handle to the detached ``mngr latchkey forward`` supervisor so the
-    # provider-change request handlers (provider toggle, signin/signout) can
-    # ``bounce()`` it alongside the ``mngr forward`` observe bounce, keeping
-    # latchkey's provider set in lockstep with minds' own. None in tests.
-    app.state.latchkey_forward_supervisor = latchkey_forward_supervisor
-    # Placeholder so the lifespan teardown can read this slot
-    # unconditionally; ``cli/run.py`` overwrites it with the running
-    # consumer right after starting it.
-    app.state.permission_requests_consumer = None
-    # Cross-thread flag the SSE handlers poll to exit cleanly on
-    # process shutdown. ``threading.Event`` (not ``asyncio.Event``) so
-    # tests that exercise the endpoints without invoking the lifespan
-    # context manager still see a valid, settable object on app.state
-    # -- and because the lifespan teardown setter runs in the asyncio
-    # event loop's thread but the SSE handlers read it from the same
-    # thread, so awaitability buys us nothing here.
-    app.state.shutdown_event = threading.Event()
-    app.state.agent_creator = agent_creator
     # Applies onboarding answers (Q1 local scan, Q2 chat message, Q3 memory
     # file) on a background thread. Available whenever agent creation is: it
     # reuses the agent creator's own root concurrency group to track the
@@ -4422,36 +4184,35 @@ def create_desktop_client(
             root_concurrency_group=agent_creator.root_concurrency_group,
             mngr_binary=mngr_binary,
         )
-    app.state.onboarding_applier = onboarding_applier
-    app.state.imbue_cloud_cli = imbue_cloud_cli
-    app.state.telegram_orchestrator = telegram_orchestrator
-    app.state.notification_dispatcher = notification_dispatcher
-    app.state.session_store = session_store
-    app.state.minds_config = minds_config
-    # In-memory IP-geolocation cache, populated once at startup (see the lifespan),
-    # used to default the create form's region per provider.
-    app.state.geo_location_cache = GeoLocationCache()
-    app.state.client_env_config = client_env_config
-    app.state.request_inbox = request_inbox
-    app.state.request_event_handlers = request_event_handlers
-    app.state.auth_server_port = server_port
-    app.state.mngr_forward_port = mngr_forward_port
-    app.state.mngr_forward_preauth_cookie = mngr_forward_preauth_cookie
-    app.state.auth_output_format = output_format or OutputFormat.JSONL
-    app.state.root_concurrency_group = root_concurrency_group
-    app.state.system_interface_health_tracker = system_interface_health_tracker
-    app.state.mngr_binary = mngr_binary
-    app.state.mngr_host_dir = mngr_host_dir if mngr_host_dir is not None else Path.home() / ".mngr"
-    # Always-set (possibly None) so consumers can read directly via
-    # ``app.state.api_v1_paths`` instead of using a defaulting attribute
-    # lookup -- the latter is flagged by the project ratchet.
-    app.state.api_v1_paths = paths
-    # Central minds API key. Required for ``/api/v1/...`` and the WebDAV
-    # mount; tests that don't exercise those routes can leave it as
-    # ``None`` (the bearer-auth gates fail closed when the key is None).
-    app.state.minds_api_key = minds_api_key
-    if http_client is not None:
-        app.state.http_client = http_client
+
+    state = DesktopClientState(
+        auth_store=auth_store,
+        backend_resolver=backend_resolver,
+        http_client=http_client,
+        agent_creator=agent_creator,
+        onboarding_applier=onboarding_applier,
+        imbue_cloud_cli=imbue_cloud_cli,
+        telegram_orchestrator=telegram_orchestrator,
+        notification_dispatcher=notification_dispatcher,
+        api_v1_paths=paths,
+        minds_config=minds_config,
+        client_env_config=client_env_config,
+        envelope_stream_consumer=envelope_stream_consumer,
+        session_store=session_store,
+        request_inbox=request_inbox,
+        request_event_handlers=request_event_handlers,
+        auth_server_port=server_port,
+        mngr_forward_port=mngr_forward_port,
+        mngr_forward_preauth_cookie=mngr_forward_preauth_cookie,
+        auth_output_format=output_format or OutputFormat.JSONL,
+        root_concurrency_group=root_concurrency_group,
+        system_interface_health_tracker=system_interface_health_tracker,
+        mngr_binary=mngr_binary,
+        mngr_host_dir=mngr_host_dir if mngr_host_dir is not None else Path.home() / ".mngr",
+        minds_api_key=minds_api_key,
+        latchkey_forward_supervisor=latchkey_forward_supervisor,
+    )
+    set_state(app, state)
 
     # Register callback to process incoming request events from agents
     if isinstance(backend_resolver, MngrCliBackendResolver):
@@ -4460,116 +4221,120 @@ def create_desktop_client(
 
     # Mount the auth routes (proxy to the mngr_imbue_cloud plugin's auth subcommands)
     if session_store is not None and imbue_cloud_cli is not None:
-        supertokens_router = create_supertokens_router(
-            session_store=session_store,
-            imbue_cloud_cli=imbue_cloud_cli,
-            server_port=server_port,
-            output_format=output_format or OutputFormat.JSONL,
-        )
-        app.include_router(supertokens_router)
+        app.register_blueprint(create_supertokens_blueprint())
 
-    # Mount the REST API v1 router
+    # Mount the REST API v1 blueprint
     if paths is not None:
-        api_v1_router = create_api_v1_router()
-        app.include_router(api_v1_router, prefix="/api/v1")
-        # Mount the WebDAV file server under /api/v1/files. Each share
-        # root maps URL-path == on-disk-path (``~`` and ``/tmp``); the
-        # mount itself is gated by the same central-key Bearer check
-        # that protects the rest of /api/v1, via a closure that reads
-        # ``app.state.minds_api_key`` on every request so the gate
+        app.register_blueprint(create_api_v1_blueprint())
+        # Mount the WebDAV file server (a WSGI app) under /api/v1/files via
+        # Werkzeug's dispatcher. Each share root maps URL-path == on-disk-path
+        # (``~`` and ``/tmp``); the mount is gated by the same central-key
+        # Bearer check that protects the rest of /api/v1, resolving
+        # ``minds_api_key`` from the app's state on every request so the gate
         # stays in sync if a future code path ever rotates the key.
-        app.mount("/api/v1/files", create_webdav_app(lambda: app.state.minds_api_key))
-
-    # Static assets: Tailwind Play CDN JS + hand-written tokens.css +
-    # per-page JS. The Tailwind JS is fetched once by `just minds-tailwind`
-    # (plain curl, no build step) and is gitignored; if it's missing, the
-    # mount still works and the server logs a hint at startup.
-    _static_dir = Path(__file__).resolve().parent / "static"
-    if not (_static_dir / "tailwind.js").exists():
-        logger.warning("Missing static/tailwind.js. Run `just minds-tailwind` from the repo root to fetch it.")
-    app.mount("/_static", StaticFiles(directory=str(_static_dir)), name="static")
+        webdav_app = create_webdav_app(_MindsApiKeyProvider(app=app))
+        app.wsgi_app = DispatcherMiddleware(app.wsgi_app, {"/api/v1/files": webdav_app})
 
     # Chrome (persistent shell) routes
-    app.get("/_chrome")(_handle_chrome_page)
-    app.get("/_chrome/sidebar")(_handle_chrome_sidebar)
-    app.get("/_chrome/events")(_handle_chrome_events)
+    app.add_url_rule("/_chrome", view_func=_handle_chrome_page)
+    app.add_url_rule("/_chrome/sidebar", view_func=_handle_chrome_sidebar)
+    app.add_url_rule("/_chrome/events", view_func=_handle_chrome_events)
 
-    app.get("/_dev/styleguide")(_handle_dev_styleguide)
+    app.add_url_rule("/_dev/styleguide", view_func=_handle_dev_styleguide)
 
-    # Register routes
-    app.get("/welcome")(_handle_welcome_page)
-    app.get("/login")(_handle_login)
-    app.get("/authenticate")(_handle_authenticate)
-    app.get("/")(_handle_landing_page)
-    app.get("/post-login")(_handle_post_login_redirect)
+    # Core routes
+    app.add_url_rule("/welcome", view_func=_handle_welcome_page)
+    app.add_url_rule("/login", view_func=_handle_login)
+    app.add_url_rule("/authenticate", view_func=_handle_authenticate)
+    app.add_url_rule("/", view_func=_handle_landing_page)
+    app.add_url_rule("/post-login", view_func=_handle_post_login_redirect)
 
     # Account management routes
-    app.get("/accounts")(_handle_accounts_page)
-    app.post("/accounts/set-default")(_handle_set_default_account)
-    app.post("/accounts/{user_id}/logout")(_handle_account_logout)
+    app.add_url_rule("/accounts", view_func=_handle_accounts_page)
+    app.add_url_rule("/accounts/set-default", view_func=_handle_set_default_account, methods=["POST"])
+    app.add_url_rule("/accounts/<user_id>/logout", view_func=_handle_account_logout, methods=["POST"])
 
     # Workspace settings routes
-    app.get("/workspace/{agent_id}/settings")(_handle_workspace_settings)
-    app.post("/workspace/{agent_id}/associate")(_handle_workspace_associate)
-    app.post("/workspace/{agent_id}/disassociate")(_handle_workspace_disassociate)
+    app.add_url_rule("/workspace/<agent_id>/settings", view_func=_handle_workspace_settings)
+    app.add_url_rule("/workspace/<agent_id>/associate", view_func=_handle_workspace_associate, methods=["POST"])
+    app.add_url_rule("/workspace/<agent_id>/disassociate", view_func=_handle_workspace_disassociate, methods=["POST"])
 
     # Request inbox routes
-    app.get("/inbox")(_handle_inbox_page)
-    app.get("/inbox/list")(_handle_inbox_list_fragment)
-    app.get("/inbox/detail/{request_id}")(_handle_inbox_detail_fragment)
-    app.post("/_chrome/requests-auto-open")(_handle_requests_auto_open)
-    app.post("/requests/{request_id}/grant")(_handle_request_grant)
-    app.post("/requests/{request_id}/deny")(_handle_request_deny)
+    app.add_url_rule("/inbox", view_func=_handle_inbox_page)
+    app.add_url_rule("/inbox/list", view_func=_handle_inbox_list_fragment)
+    app.add_url_rule("/inbox/detail/<request_id>", view_func=_handle_inbox_detail_fragment)
+    app.add_url_rule("/_chrome/requests-auto-open", view_func=_handle_requests_auto_open, methods=["POST"])
+    app.add_url_rule("/requests/<request_id>/grant", view_func=_handle_request_grant, methods=["POST"])
+    app.add_url_rule("/requests/<request_id>/deny", view_func=_handle_request_deny, methods=["POST"])
 
     # Sharing editor routes (used by both request approval and direct editing)
-    app.get("/sharing/{agent_id}/{service_name}")(_handle_sharing_page)
-    app.post("/sharing/{agent_id}/{service_name}/enable")(_handle_sharing_enable)
-    app.post("/sharing/{agent_id}/{service_name}/disable")(_handle_sharing_disable)
-    app.get("/api/sharing-status/{agent_id}/{service_name}")(_handle_sharing_status_api)
-    app.get("/api/sharing-readiness/{agent_id}/{service_name}")(_handle_sharing_readiness_api)
+    app.add_url_rule("/sharing/<agent_id>/<service_name>", view_func=_handle_sharing_page)
+    app.add_url_rule("/sharing/<agent_id>/<service_name>/enable", view_func=_handle_sharing_enable, methods=["POST"])
+    app.add_url_rule("/sharing/<agent_id>/<service_name>/disable", view_func=_handle_sharing_disable, methods=["POST"])
+    app.add_url_rule("/api/sharing-status/<agent_id>/<service_name>", view_func=_handle_sharing_status_api)
+    app.add_url_rule("/api/sharing-readiness/<agent_id>/<service_name>", view_func=_handle_sharing_readiness_api)
 
     # Agent creation routes
-    app.get("/create")(_handle_create_page)
-    app.post("/create")(_handle_create_form_submit)
-    app.get("/api/backup-status")(_handle_backup_status_api)
-    app.get("/api/backup-export/{agent_id}")(_handle_backup_export_api)
-    app.post("/api/create-agent")(_handle_create_agent_api)
-    app.post("/api/create-agent/{agent_id}/onboarding")(_handle_onboarding_submit)
-    app.get("/api/create-agent/{agent_id}/status")(_handle_creation_status_api)
-    app.get("/api/create-agent/{agent_id}/logs")(_handle_creation_logs_sse)
-    app.get("/creating/{agent_id}")(_handle_creating_page)
+    app.add_url_rule("/create", view_func=_handle_create_page)
+    app.add_url_rule("/create", view_func=_handle_create_form_submit, methods=["POST"])
+    app.add_url_rule("/api/backup-status", view_func=_handle_backup_status_api)
+    app.add_url_rule("/api/backup-export/<agent_id>", view_func=_handle_backup_export_api)
+    app.add_url_rule("/api/create-agent", view_func=_handle_create_agent_api, methods=["POST"])
+    app.add_url_rule("/api/create-agent/<agent_id>/onboarding", view_func=_handle_onboarding_submit, methods=["POST"])
+    app.add_url_rule("/api/create-agent/<agent_id>/status", view_func=_handle_creation_status_api)
+    app.add_url_rule("/api/create-agent/<agent_id>/logs", view_func=_handle_creation_logs_sse)
+    app.add_url_rule("/creating/<agent_id>", view_func=_handle_creating_page)
 
     # Agent destruction routes
-    app.post("/api/destroy-agent/{agent_id}")(_handle_destroy_agent_api)
-    app.get("/api/destroying/{agent_id}/status")(_handle_destroying_status_api)
-    app.get("/api/destroying/{agent_id}/log")(_handle_destroying_log_api)
-    app.post("/api/destroying/{agent_id}/dismiss")(_handle_destroying_dismiss_api)
-    app.get("/destroying/{agent_id}")(_handle_destroying_page)
+    app.add_url_rule("/api/destroy-agent/<agent_id>", view_func=_handle_destroy_agent_api, methods=["POST"])
+    app.add_url_rule("/api/destroying/<agent_id>/status", view_func=_handle_destroying_status_api)
+    app.add_url_rule("/api/destroying/<agent_id>/log", view_func=_handle_destroying_log_api)
+    app.add_url_rule("/api/destroying/<agent_id>/dismiss", view_func=_handle_destroying_dismiss_api, methods=["POST"])
+    app.add_url_rule("/destroying/<agent_id>", view_func=_handle_destroying_page)
 
     # Workspace color route
-    app.post("/api/workspaces/{agent_id}/color")(_handle_set_workspace_color_api)
+    app.add_url_rule("/api/workspaces/<agent_id>/color", view_func=_handle_set_workspace_color_api, methods=["POST"])
 
     # Telegram setup routes
-    app.post("/api/agents/{agent_id}/telegram/setup")(_handle_telegram_setup)
-    app.get("/api/agents/{agent_id}/telegram/status")(_handle_telegram_status)
+    app.add_url_rule("/api/agents/<agent_id>/telegram/setup", view_func=_handle_telegram_setup, methods=["POST"])
+    app.add_url_rule("/api/agents/<agent_id>/telegram/status", view_func=_handle_telegram_status)
 
     # Providers panel toggle (Disable / Enable buttons in the landing page panel)
-    app.post("/api/providers/{provider_name}/toggle")(_handle_provider_toggle)
+    app.add_url_rule("/api/providers/<provider_name>/toggle", view_func=_handle_provider_toggle, methods=["POST"])
 
     # System-interface recovery routes
-    app.get("/agents/{agent_id}/recovery")(_handle_recovery_page)
-    app.get("/api/agents/{agent_id}/host-health")(_handle_host_health_probe_api)
-    app.post("/api/agents/{agent_id}/restart-system-interface")(_handle_restart_system_interface_api)
-    app.post("/api/agents/{agent_id}/restart-host")(_handle_restart_host_api)
+    app.add_url_rule("/agents/<agent_id>/recovery", view_func=_handle_recovery_page)
+    app.add_url_rule("/api/agents/<agent_id>/host-health", view_func=_handle_host_health_probe_api)
+    app.add_url_rule(
+        "/api/agents/<agent_id>/restart-system-interface",
+        view_func=_handle_restart_system_interface_api,
+        methods=["POST"],
+    )
+    app.add_url_rule("/api/agents/<agent_id>/restart-host", view_func=_handle_restart_host_api, methods=["POST"])
 
     # Mind host Start / Stop + the quit-prompt running-minds lookup and bulk stop
-    app.post("/api/agents/{agent_id}/stop-host")(_handle_stop_host_api)
-    app.post("/api/agents/{agent_id}/start-host")(_handle_start_host_api)
-    app.get("/api/minds/running")(_handle_running_minds_api)
-    app.post("/api/minds/stop-hosts")(_handle_stop_mind_hosts_api)
-    app.post("/api/minds/stop-state-container")(_handle_stop_state_container_api)
+    app.add_url_rule("/api/agents/<agent_id>/stop-host", view_func=_handle_stop_host_api, methods=["POST"])
+    app.add_url_rule("/api/agents/<agent_id>/start-host", view_func=_handle_start_host_api, methods=["POST"])
+    app.add_url_rule("/api/minds/running", view_func=_handle_running_minds_api)
+    app.add_url_rule("/api/minds/stop-hosts", view_func=_handle_stop_mind_hosts_api, methods=["POST"])
+    app.add_url_rule("/api/minds/stop-state-container", view_func=_handle_stop_state_container_api, methods=["POST"])
 
     return app
+
+
+class _MindsApiKeyProvider(FrozenModel):
+    """Resolves the live central minds API key from an app's state for the WebDAV gate.
+
+    A small callable (rather than a closure/partial) so the WebDAV bearer gate can
+    look the key up fresh on each request without minds capturing a stale value.
+    """
+
+    app: Flask = Field(frozen=True, description="The Flask app whose state holds the current minds API key.")
+
+    model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
+
+    def __call__(self) -> str | None:
+        return get_state(self.app).minds_api_key
 
 
 # How often the background probe loop polls each suspect / non-HEALTHY agent.

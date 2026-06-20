@@ -17,24 +17,30 @@ authorized by the gateway as "this agent_id lives on the caller's host".
 
 Two consumer shapes are exposed:
 
-* :data:`MindsApiAuthDep` -- FastAPI dependency. Doesn't return anything
-  meaningful (the agent id, if relevant, is in the path); raises 401 on
-  failure.
+* :func:`require_minds_api_key` -- a Flask view decorator. Aborts the
+  request with 401 unless the central key is present; the view itself
+  takes no extra argument (the agent id, if relevant, is in the path).
 * :func:`is_request_authenticated` -- raw header check usable by the
-  ASGI auth gate wrapping the WebDAV mount (see
-  :mod:`imbue.minds.desktop_client.webdav`), which can't take a FastAPI
-  dependency.
+  WSGI auth gate wrapping the WebDAV mount (see
+  :mod:`imbue.minds.desktop_client.webdav`), which can't take a decorator.
 """
 
-from typing import Annotated
+from collections.abc import Callable
+from functools import wraps
+from typing import ParamSpec
+from typing import TypeVar
 
-from fastapi import Depends
-from fastapi import HTTPException
-from fastapi import Request
+from flask import Response
+from flask import abort
+from flask import request
 
 from imbue.minds.desktop_client.api_key_store import is_valid_minds_api_key
+from imbue.minds.desktop_client.state import get_state
 
 _BEARER_PREFIX = "Bearer "
+
+_ViewParams = ParamSpec("_ViewParams")
+_ViewReturn = TypeVar("_ViewReturn", bound=Response)
 
 
 def _extract_bearer_token(authorization: str | None) -> str | None:
@@ -50,9 +56,9 @@ def _extract_bearer_token(authorization: str | None) -> str | None:
 def is_request_authenticated(authorization_header_value: str | None, expected_key: str) -> bool:
     """Return ``True`` iff ``authorization_header_value`` carries the central key.
 
-    Pure function so the WebDAV ASGI gate and the FastAPI dependency
+    Pure function so the WebDAV WSGI gate and the Flask decorator
     below can share the same check. ``expected_key`` is normally
-    ``app.state.minds_api_key``; we accept it as an argument so this
+    ``get_state().minds_api_key``; we accept it as an argument so this
     module has no module-level state.
     """
     token = _extract_bearer_token(authorization_header_value)
@@ -61,16 +67,20 @@ def is_request_authenticated(authorization_header_value: str | None, expected_ke
     return is_valid_minds_api_key(token, expected_key)
 
 
-def _authenticate_minds_api(request: Request) -> None:
-    """FastAPI dependency: 401 unless the request carries the central key.
+def require_minds_api_key(view: Callable[_ViewParams, _ViewReturn]) -> Callable[_ViewParams, _ViewReturn]:
+    """Flask view decorator: abort 401 unless the request carries the central key.
 
-    Returns ``None`` because the central-key model carries no per-call
-    identity. Routes that need an agent id pick it up from the URL path
-    via the usual ``{agent_id}`` path parameter.
+    The wrapped view takes no extra argument (the central-key model carries
+    no per-call identity). Routes that need an agent id pick it up from the
+    URL path via the usual ``<agent_id>`` path parameter. Fails closed when
+    the key is unset (e.g. tests that don't populate it).
     """
-    expected_key: str = request.app.state.minds_api_key
-    if not is_request_authenticated(request.headers.get("authorization"), expected_key):
-        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
 
+    @wraps(view)
+    def wrapper(*args: _ViewParams.args, **kwargs: _ViewParams.kwargs) -> _ViewReturn:
+        expected_key = get_state().minds_api_key
+        if expected_key is None or not is_request_authenticated(request.headers.get("authorization"), expected_key):
+            abort(401, description="Missing or invalid Authorization header")
+        return view(*args, **kwargs)
 
-MindsApiAuthDep = Annotated[None, Depends(_authenticate_minds_api)]
+    return wrapper

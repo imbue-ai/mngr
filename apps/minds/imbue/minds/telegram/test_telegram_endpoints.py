@@ -2,8 +2,8 @@
 
 from pathlib import Path
 
+from flask.testing import FlaskClient
 from pydantic import SecretStr
-from starlette.testclient import TestClient
 
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.app import create_desktop_client
@@ -20,7 +20,7 @@ from imbue.mngr.primitives import AgentId
 
 def _create_test_server_with_telegram(
     tmp_path: Path,
-) -> tuple[TestClient, FileAuthStore, TelegramSetupOrchestrator, AgentId]:
+) -> tuple[FlaskClient, FileAuthStore, TelegramSetupOrchestrator, AgentId]:
     """Create a desktop client with telegram support and a test agent."""
     agent_id = AgentId()
     auth_dir = tmp_path / "auth"
@@ -42,11 +42,11 @@ def _create_test_server_with_telegram(
         http_client=None,
         telegram_orchestrator=telegram_orchestrator,
     )
-    client = TestClient(app)
+    client = app.test_client()
     return client, auth_store, telegram_orchestrator, agent_id
 
 
-def _authenticate(client: TestClient, auth_store: FileAuthStore) -> None:
+def _authenticate(client: FlaskClient, auth_store: FileAuthStore) -> None:
     """Authenticate the test client."""
     code = OneTimeCode("test-auth-code-telegram-endpoints")
     auth_store.add_one_time_code(code=code)
@@ -79,7 +79,7 @@ def test_telegram_status_returns_done_when_bot_credentials_exist(tmp_path: Path)
 
     response = client.get(f"/api/agents/{agent_id}/telegram/status")
     assert response.status_code == 200
-    data = response.json()
+    data = response.get_json()
     assert data["status"] == "DONE"
 
 
@@ -113,19 +113,19 @@ def test_telegram_setup_returns_done_immediately_when_already_configured(tmp_pat
 
     response = client.post(f"/api/agents/{agent_id}/telegram/setup")
     assert response.status_code == 200
-    data = response.json()
+    data = response.get_json()
     assert data["status"] == "CHECKING_CREDENTIALS"
 
     # Status should show DONE immediately since credentials exist
     status_response = client.get(f"/api/agents/{agent_id}/telegram/status")
     assert status_response.status_code == 200
-    status_data = status_response.json()
+    status_data = status_response.get_json()
     assert status_data["status"] == "DONE"
 
 
 def _create_test_server_with_two_agents(
     tmp_path: Path,
-) -> tuple[TestClient, FileAuthStore, TelegramSetupOrchestrator, AgentId, AgentId]:
+) -> tuple[FlaskClient, FileAuthStore, TelegramSetupOrchestrator, AgentId, AgentId]:
     """Create a desktop client with two agents so the landing page shows a list."""
     agent_id_1 = AgentId()
     agent_id_2 = AgentId()
@@ -150,7 +150,7 @@ def _create_test_server_with_two_agents(
         http_client=None,
         telegram_orchestrator=telegram_orchestrator,
     )
-    client = TestClient(app)
+    client = app.test_client()
     return client, auth_store, telegram_orchestrator, agent_id_1, agent_id_2
 
 

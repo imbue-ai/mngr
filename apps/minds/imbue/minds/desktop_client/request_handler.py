@@ -16,8 +16,8 @@ from abc import ABC
 from abc import abstractmethod
 from collections.abc import Sequence
 
-from fastapi import Request
-from fastapi.responses import Response
+from flask import Request
+from flask import Response
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
@@ -78,7 +78,7 @@ class RequestEventHandler(MutableModel, ABC):
         """
 
     @abstractmethod
-    async def apply_grant_request(
+    def apply_grant_request(
         self,
         request: Request,
         req_event: RequestEvent,
@@ -94,7 +94,7 @@ class RequestEventHandler(MutableModel, ABC):
         """
 
     @abstractmethod
-    async def apply_deny_request(
+    def apply_deny_request(
         self,
         request: Request,
         req_event: RequestEvent,

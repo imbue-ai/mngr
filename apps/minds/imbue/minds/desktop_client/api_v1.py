@@ -1,4 +1,4 @@
-"""REST API v1 router for the minds desktop client.
+"""REST API v1 blueprint for the minds desktop client.
 
 Every route under ``/api/v1/`` requires ``Authorization: Bearer <key>``
 where ``<key>`` is the central :mod:`api_key_store` minds API key. The
@@ -7,27 +7,28 @@ header on every forwarded request, so a caller (an agent in a
 workspace) reaches us by hitting ``$LATCHKEY_GATEWAY/minds-api-proxy/api/v1/...``.
 
 Agent identity, when a route needs it, comes from the URL path's
-``{agent_id}`` parameter -- *not* from the bearer token. The gateway's
+``<agent_id>`` parameter -- *not* from the bearer token. The gateway's
 per-host permissions file is what gates which agent ids a given caller
 can talk about: at agent creation time the desktop client narrows the
 host's permission rule to ``/minds-api-proxy/api/v1/agents/<agent_id>/...``,
-so a request that reaches a route with a given ``{agent_id}`` has
+so a request that reaches a route with a given ``<agent_id>`` has
 already been authorized by the gateway as "this is an agent that lives
 on the caller's host".
 """
 
 import json
 
-from fastapi import APIRouter
-from fastapi import Request
-from fastapi.responses import Response
+from flask import Blueprint
+from flask import Response
+from flask import request
 
 from imbue.minds.config.data_types import WorkspacePaths
-from imbue.minds.desktop_client.api_key_auth import MindsApiAuthDep
-from imbue.minds.desktop_client.deps import BackendResolverDep
+from imbue.minds.desktop_client.api_key_auth import require_minds_api_key
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
+from imbue.minds.desktop_client.responses import make_response
+from imbue.minds.desktop_client.state import get_state
 from imbue.minds.telegram.credential_store import load_agent_bot_credentials
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.telegram.setup import TelegramSetupStatus
@@ -35,7 +36,7 @@ from imbue.mngr.primitives import AgentId
 
 
 def _json_response(data: dict[str, object], status_code: int = 200) -> Response:
-    return Response(
+    return make_response(
         content=json.dumps(data),
         media_type="application/json",
         status_code=status_code,
@@ -49,25 +50,20 @@ def _json_error(message: str, status_code: int) -> Response:
 # -- Telegram routes --
 
 
-async def _handle_telegram_setup(
-    agent_id: str,
-    request: Request,
-    _auth: MindsApiAuthDep,
-) -> Response:
+@require_minds_api_key
+def _handle_telegram_setup(agent_id: str) -> Response:
     """Start Telegram bot setup for an agent."""
-    telegram_orchestrator: TelegramSetupOrchestrator | None = request.app.state.telegram_orchestrator
+    telegram_orchestrator: TelegramSetupOrchestrator | None = get_state().telegram_orchestrator
     if telegram_orchestrator is None:
         return _json_error("Telegram setup not configured", 501)
 
     parsed_id = AgentId(agent_id)
 
     agent_name = str(parsed_id)[:8]
-    try:
-        body = await request.json()
+    body = request.get_json(silent=True)
+    if isinstance(body, dict):
         raw_name = body.get("agent_name", agent_name)
         agent_name = str(raw_name).strip() if raw_name else agent_name
-    except (json.JSONDecodeError, ValueError, AttributeError):
-        pass
 
     telegram_orchestrator.start_setup(agent_id=parsed_id, agent_name=agent_name)
     return _json_response(
@@ -78,13 +74,10 @@ async def _handle_telegram_setup(
     )
 
 
-def _handle_telegram_status(
-    agent_id: str,
-    _auth: MindsApiAuthDep,
-    request: Request,
-) -> Response:
+@require_minds_api_key
+def _handle_telegram_status(agent_id: str) -> Response:
     """Get Telegram setup status for an agent."""
-    telegram_orchestrator: TelegramSetupOrchestrator | None = request.app.state.telegram_orchestrator
+    telegram_orchestrator: TelegramSetupOrchestrator | None = get_state().telegram_orchestrator
     if telegram_orchestrator is None:
         return _json_error("Telegram setup not configured", 501)
 
@@ -94,7 +87,7 @@ def _handle_telegram_status(
     if info is None:
         is_active = telegram_orchestrator.agent_has_telegram(parsed_id)
         if is_active:
-            paths: WorkspacePaths = request.app.state.api_v1_paths
+            paths: WorkspacePaths = get_state().api_v1_paths
             credentials = load_agent_bot_credentials(paths.data_dir, parsed_id)
             result: dict[str, object] = {
                 "agent_id": str(parsed_id),
@@ -119,22 +112,16 @@ def _handle_telegram_status(
 # -- Notification route --
 
 
-async def _handle_notification(
-    agent_id: str,
-    request: Request,
-    _auth: MindsApiAuthDep,
-    backend_resolver: BackendResolverDep,
-) -> Response:
+@require_minds_api_key
+def _handle_notification(agent_id: str) -> Response:
     """Send a notification on behalf of the named agent."""
-    dispatcher: NotificationDispatcher | None = request.app.state.notification_dispatcher
+    dispatcher: NotificationDispatcher | None = get_state().notification_dispatcher
     if dispatcher is None:
         return _json_error("Notification dispatch not configured", 501)
 
-    try:
-        body = await request.json()
-    except (json.JSONDecodeError, ValueError):
+    body = request.get_json(silent=True)
+    if body is None:
         return _json_error("Invalid JSON body", 400)
-
     if not isinstance(body, dict):
         return _json_error("Request body must be a JSON object", 400)
 
@@ -158,26 +145,30 @@ async def _handle_notification(
         urgency=urgency,
     )
 
-    agent_info = backend_resolver.get_agent_display_info(parsed_agent_id)
+    agent_info = get_state().backend_resolver.get_agent_display_info(parsed_agent_id)
     agent_display_name = agent_info.agent_name if agent_info else str(parsed_agent_id)
 
     dispatcher.dispatch(notification_request, agent_display_name)
     return _json_response({"ok": True})
 
 
-# -- Router factory --
+# -- Blueprint factory --
 
 
-def create_api_v1_router() -> APIRouter:
-    """Create the /api/v1/ router with all REST API endpoints."""
-    router = APIRouter()
+def create_api_v1_blueprint() -> Blueprint:
+    """Create the /api/v1/ blueprint with all REST API endpoints."""
+    blueprint = Blueprint("api_v1", __name__, url_prefix="/api/v1")
 
     # Telegram
-    router.post("/agents/{agent_id}/telegram")(_handle_telegram_setup)
-    router.get("/agents/{agent_id}/telegram")(_handle_telegram_status)
+    blueprint.add_url_rule(
+        "/agents/<agent_id>/telegram", view_func=_handle_telegram_setup, methods=["POST"], endpoint="telegram_setup"
+    )
+    blueprint.add_url_rule(
+        "/agents/<agent_id>/telegram", view_func=_handle_telegram_status, methods=["GET"], endpoint="telegram_status"
+    )
 
     # Notifications (per-agent so the gateway's per-host permission file
     # can restrict each caller to its own agent ids).
-    router.post("/agents/{agent_id}/notifications")(_handle_notification)
+    blueprint.add_url_rule("/agents/<agent_id>/notifications", view_func=_handle_notification, methods=["POST"])
 
-    return router
+    return blueprint
