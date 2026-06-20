@@ -806,67 +806,33 @@ create-new-mind-repo repo_name parent_dir="$HOME/project":
     [ -n "$base_url" ] && printf 'export ANTHROPIC_BASE_URL=%s\n' "$base_url" >> "$env_file"
     echo "Wrote $env_file (mode 600)"
 
-# === minds pool hosts (OVH-backed, leased mode) ===
+# === minds pool hosts (leased mode) ===
 #
 # Thin wrappers around the env-aware `minds pool {create,list,destroy}` CLI,
-# which resolves the management SSH key, OVH AK/AS/CK, AND (for staging /
-# production) the host_pool DSN from the activated tier's Vault entries
-# automatically -- so you never export creds or pass --database-url by hand.
-# dev / ci envs auto-resolve the DSN from their per-env secrets.toml. Activate a
-# minds env first:  eval "$(uv run minds env activate <name>)"
+# which resolves the pool SSH key AND (for staging / production) the host_pool
+# DSN from the activated tier's Vault entries automatically -- so you never
+# export creds or pass --database-url by hand. dev / ci envs auto-resolve the
+# DSN from their per-env secrets.toml. Activate a minds env first:
+#   eval "$(uv run minds env activate <name>)"
+#
+# Pool hosts are baked as bare-metal SLICES (recipes below). Baking new OVH
+# classic VPS pool hosts is DEPRECATED and no longer supported; existing OVH VPS
+# rows can still be listed (`just list-pool-hosts`) and destroyed
+# (`just destroy-pool-host`).
 
-# Bake pre-provisioned OVH-VPS pool host(s) for the activated minds env.
+# === minds bare-metal SLICES (carved on a pre-registered bare-metal box) ===
 #
-# The bake DERIVES the stamped identity (repo_url + repo_branch_or_tag) from its
-# source -- you no longer hand-type them, so the advertised identity always matches
-# what was baked. Two modes:
-#
-#   DEV (best-effort label): bake from a working tree; identity = its origin remote
-#     + current branch (uncommitted changes included). Use this for iteration.
-#       eval "$(uv run minds env activate staging)"
-#       just bake-pool-host-dev US-WEST-OR ~/project/forever-claude-template
-#
-#   PROD (strict, tag): clone the FCT remote at an exact tag into a fresh temp dir
-#     and bake from that; identity = remote + tag (content provably equals the tag).
-#       just bake-pool-host-prod US-WEST-OR v0.3.0
-#
-# IMPORTANT for the fast path: a desktop-client create adopts a baked host only when
-# its canonical repo + branch + region match. For a DEV fast-path test, set the create
-# form's repository to the ACTUAL git remote (not a local clone path) and the branch to
-# the same branch you baked. Extra flags forward to `minds pool create` (e.g.
-# --no-recycle, --mngr-source <monorepo-root>, --attributes '{"cpus":2}').
-bake-pool-host-dev region workspace_dir="$HOME/project/forever-claude-template" count="1" *extra_args:
-    uv run minds pool create \
-        --count "{{count}}" \
-        --region "{{region}}" \
-        --workspace-dir "{{workspace_dir}}" \
-        --skip-deferred-install-wait \
-        {{extra_args}}
-
-# Production OVH-VPS pool bake from an exact FCT tag (strict; see bake-pool-host-dev).
-bake-pool-host-prod region tag count="1" *extra_args:
-    uv run minds pool create \
-        --count "{{count}}" \
-        --region "{{region}}" \
-        --from-tag "{{tag}}" \
-        {{extra_args}}
-
-# === minds bare-metal SLICES (carved on a pre-registered OVH bare-metal box) ===
-#
-# Unlike `bake-pool-host-{dev,prod}` (which order a fresh OVH VPS per host), these
-# bake "slices": lima/QEMU VMs carved on a bare-metal box you already ordered,
-# `mngr imbue_cloud admin server register`ed, and `... prep`ped (status `ready`).
-# Slices land in the SAME pool_hosts table as OVH VPSes (backend_kind=slice) and
-# lease identically. They are thin wrappers over `minds pool create --backend
-# slice`, which resolves the tier's pool key (+ host_pool DSN for shared tiers)
-# from Vault just like the OVH path -- so the only manual difference from
-# bake-pool-host-* is the backend.
+# These bake "slices": lima/QEMU VMs carved on a bare-metal box you already
+# ordered, `mngr imbue_cloud admin server register`ed, and `... prep`ped
+# (status `ready`). They are thin wrappers over `minds pool create --backend
+# slice` (the default), which resolves the tier's pool key (+ host_pool DSN for
+# shared tiers) from Vault automatically.
 #
 # Prereqs: activate a minds env first (`eval "$(uv run minds env activate <name>)"`)
 # AND `vault login -method=oidc` (the wrapper's Vault reads need a live token).
 #
 # `region` is the lease-region LABEL stamped on each row (what the connector
-# region-matches at lease time, e.g. US-EAST-VA) -- NOT the box's raw OVH
+# region-matches at lease time, e.g. US-EAST-VA) -- NOT the box's raw
 # datacenter code. Server selection picks the `ready` box with the most free
 # slots and is not region-filtered today, so the box must have a free slot.
 

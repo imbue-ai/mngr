@@ -640,13 +640,13 @@ def pool() -> None:
 @click.option(
     "--backend",
     type=click.Choice([_BACKEND_OVH_VPS, _BACKEND_SLICE]),
-    default=_BACKEND_OVH_VPS,
+    default=_BACKEND_SLICE,
     show_default=True,
     help=(
-        "Which machine backs each pool host. ``ovh_vps`` orders an OVH classic VPS on demand; "
-        "``slice`` carves a lima VM on a pre-registered + prepped bare-metal box (see "
-        "`mngr imbue_cloud admin server`). Both bake the same FCT pool host and insert the same "
-        "kind of leasable row."
+        "Which machine backs each pool host. ``slice`` (the default) carves a lima VM on a "
+        "pre-registered + prepped bare-metal box (see `mngr imbue_cloud admin server`). ``ovh_vps`` "
+        "is DEPRECATED: baking new OVH classic VPS pool hosts is no longer supported. Existing OVH "
+        "VPS pool hosts can still be listed and destroyed."
     ),
 )
 @click.option(
@@ -796,6 +796,14 @@ def pool_create(
     account using the dev keypair" the unambiguous default and making the
     keypair-mismatch class of bake failures unreachable for the standard path.
     """
+    # Baking new OVH VPS pool hosts is deprecated -- Imbue Cloud serves agents on
+    # bare-metal slices now. Reject fast, before any activated-env / Vault / OVH
+    # credential resolution. Existing OVH VPS pool hosts stay listable/destroyable.
+    if backend == _BACKEND_OVH_VPS:
+        raise click.UsageError(
+            "Baking new OVH VPS pool hosts is deprecated -- use --backend slice (bare-metal slices). "
+            "Existing OVH VPS pool hosts can still be listed and destroyed."
+        )
     env_name = require_activated_env_name()
     if backend == _BACKEND_OVH_VPS and is_dry_run:
         raise click.UsageError("--dry-run is only supported for --backend slice")
