@@ -408,19 +408,26 @@ def test_build_create_admin_args_omits_max_concurrency_for_ovh_backend() -> None
     assert "--max-concurrency" not in args
 
 
-def test_pool_create_ovh_rejects_max_concurrency(
+def test_pool_create_backend_defaults_to_slice() -> None:
+    """The default --backend is ``slice`` -- OVH VPS baking is deprecated."""
+    backend_option = next(param for param in pool.commands["create"].params if param.name == "backend")
+    assert backend_option.default == _BACKEND_SLICE
+
+
+def test_pool_create_rejects_ovh_vps_backend(
     _isolated_env: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """--max-concurrency is slice-only; the ovh_vps backend must reject it up front."""
+    """--backend ovh_vps fails fast with a deprecation message pointing at slice."""
     monkeypatch.setenv("MINDS_ROOT_NAME", "minds")
     runner = CliRunner()
     result = runner.invoke(
         pool,
-        ["create", "--count", "1", "--region", "US-EAST-VA", "--max-concurrency", "4"],
+        ["create", "--backend", "ovh_vps", "--count", "1", "--region", "US-EAST-VA"],
     )
     assert result.exit_code != 0
-    assert "--max-concurrency is only supported for --backend slice" in result.output
+    assert "deprecated" in result.output
+    assert "--backend slice" in result.output
 
 
 def test_build_list_admin_args() -> None:
@@ -572,21 +579,6 @@ def test_pool_create_slice_rejects_no_recycle(
     )
     assert result.exit_code != 0
     assert "--no-recycle is not applicable to --backend slice" in result.output
-
-
-def test_pool_create_ovh_rejects_dry_run(
-    _isolated_env: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """--dry-run is slice-only; the ovh_vps backend must reject it up front."""
-    monkeypatch.setenv("MINDS_ROOT_NAME", "minds")
-    runner = CliRunner()
-    result = runner.invoke(
-        pool,
-        ["create", "--count", "1", "--region", "US-EAST-VA", "--dry-run"],
-    )
-    assert result.exit_code != 0
-    assert "--dry-run is only supported for --backend slice" in result.output
 
 
 def test_pool_list_requires_activated_env(_isolated_env: Path) -> None:
