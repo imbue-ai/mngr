@@ -473,20 +473,21 @@ def _run_post_host_create_outer_commands(
 
     Opens the outer host (the underlying VM/daemon host) and runs each command
     in order via ``execute_idempotent_command``; a non-zero exit raises
-    ``MngrError`` and aborts the create. When the provider exposes no outer
-    host (e.g. local, ssh, modal, docker over a local socket or tcp://), the
-    commands are skipped with a warning so a missing outer is visible rather
-    than silently ignored.
+    ``MngrError`` and aborts the create. When outer commands are configured but
+    the provider exposes no outer host (e.g. local, ssh, modal, docker over a
+    local socket or tcp://), that is a misconfiguration -- the commands can never
+    run -- so we raise rather than silently skip.
     """
     if not commands:
         return
     with host.outer_host() as outer:
         if outer is None:
-            logger.warning(
-                "Skipping {} post-host-create outer command(s): this provider exposes no outer host",
-                len(commands),
+            raise MngrError(
+                f"{len(commands)} post-host-create outer command(s) were configured, but this "
+                f"provider exposes no outer host to run them on. Remove the post_host_create_outer_command "
+                f"setting, or use a provider with an accessible outer host (e.g. docker over ssh://, "
+                f"a VPS-backed provider, or imbue_cloud)."
             )
-            return
         _run_commands_on_host(outer, commands, label="post-host-create outer")
 
 

@@ -185,19 +185,19 @@ def test_run_post_host_create_outer_commands_no_op_on_empty_tuple(
     _run_post_host_create_outer_commands(local_host, ())
 
 
-@pytest.mark.allow_warnings
-def test_run_post_host_create_outer_commands_skips_when_no_outer(
+def test_run_post_host_create_outer_commands_raises_when_no_outer(
     local_host: Host,
     temp_host_dir: Path,
     tmp_path: Path,
 ) -> None:
-    """The local provider exposes no outer host, so the commands are skipped (no error)."""
+    """Configuring outer commands on a provider with no outer host is a misconfiguration -> raise."""
     marker = tmp_path / "outer_ran.txt"
     # Sanity: the local host has no outer.
     with local_host.outer_host() as outer:
         assert outer is None
-    # The command must be skipped (not run, not raised) when there is no outer.
-    _run_post_host_create_outer_commands(local_host, (CommandString(f"touch {marker}"),))
+    # The command can never run, so we must raise (not silently skip), and must not run it.
+    with pytest.raises(MngrError, match="no outer host"):
+        _run_post_host_create_outer_commands(local_host, (CommandString(f"touch {marker}"),))
     assert not marker.exists()
 
 

@@ -857,8 +857,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         finally:
             try:
                 channel.shutdown_write()
-            except (OSError, EOFError):
-                pass
+            except (OSError, EOFError) as shutdown_error:
+                # Best-effort EOF to release the remote flock; the channel.close()
+                # below tears it down regardless. Log so a wedged teardown is visible.
+                logger.debug("Failed to send EOF when releasing remote start lock: {}", shutdown_error)
             channel.close()
             logger.trace("Released start lock (over SSH)")
 
