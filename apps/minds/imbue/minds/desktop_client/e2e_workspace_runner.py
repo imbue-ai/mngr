@@ -38,7 +38,6 @@ from loguru import logger
 from playwright.sync_api import Browser
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page
-from playwright.sync_api import Playwright
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
@@ -87,11 +86,14 @@ _CDP_READY_TIMEOUT_SECONDS: Final[int] = 120
 _BACKEND_READY_TIMEOUT_SECONDS: Final[int] = 120
 # ``connect_over_cdp`` occasionally hangs in its CDP handshake under
 # Electron-in-CI even after ``/json/version`` is up (GPU/sandbox/dbus quirks):
-# the WebSocket connects but target negotiation stalls. Retry a few times with a
-# bounded per-attempt timeout instead of waiting out Playwright's long default.
-_CDP_CONNECT_ATTEMPTS: Final[int] = 3
+# the WebSocket connects but target negotiation stalls, and it stays wedged for
+# that Electron instance (retrying the connect against the same process does not
+# recover it). So we bound a single connect attempt and instead relaunch Electron
+# from scratch -- a fresh process gets a fresh CDP endpoint. Only the launch +
+# connect is retried; once a page is obtained the create flow runs once so real
+# failures still surface.
 _CDP_CONNECT_TIMEOUT_MS: Final[float] = 60_000.0
-_CDP_CONNECT_RETRY_DELAY_SECONDS: Final[float] = 1.0
+_ELECTRON_LAUNCH_ATTEMPTS: Final[int] = 3
 _CREATE_FORM_TIMEOUT_SECONDS: Final[int] = 600
 _SYSTEM_INTERFACE_TIMEOUT_SECONDS: Final[int] = 180
 _CREATE_OUTCOME_POLL_INTERVAL_MS: Final[int] = 500
@@ -549,29 +551,14 @@ def _wait_for_cdp(debug_port: int, timeout_seconds: int) -> None:
     raise TimeoutError(f"CDP at port {debug_port} did not respond within {timeout_seconds}s (last: {last_error})")
 
 
-def _connect_over_cdp_with_retry(playwright: Playwright, debug_port: int) -> Browser:
-    """Connect Playwright to Electron's CDP endpoint, retrying transient handshake stalls.
+class _ElectronConnectError(RuntimeError):
+    """Raised when launching Electron or attaching Playwright to its CDP endpoint fails.
 
-    ``_wait_for_cdp`` has already confirmed the DevTools HTTP endpoint is up, but
-    the CDP WebSocket negotiation can intermittently hang under Electron-in-CI.
-    Retry with a bounded per-attempt timeout rather than hanging on Playwright's
-    long default; a stalled first attempt usually succeeds on the next try once
-    the renderer has finished initializing.
+    Signals a wedged Electron launch (the connect-and-attach phase), which the
+    caller recovers by relaunching a fresh Electron process -- as opposed to a
+    failure while driving the create flow, which is a real test failure and must
+    propagate.
     """
-    endpoint = f"http://127.0.0.1:{debug_port}"
-    last_error: PlaywrightError | None = None
-    for attempt in range(1, _CDP_CONNECT_ATTEMPTS + 1):
-        try:
-            return playwright.chromium.connect_over_cdp(endpoint, timeout=_CDP_CONNECT_TIMEOUT_MS)
-        except PlaywrightError as exc:
-            last_error = exc
-            logger.warning(
-                "connect_over_cdp attempt {}/{} to {} failed: {}", attempt, _CDP_CONNECT_ATTEMPTS, endpoint, exc
-            )
-            threading.Event().wait(timeout=_CDP_CONNECT_RETRY_DELAY_SECONDS)
-    raise PlaywrightTimeoutError(
-        f"connect_over_cdp to {endpoint} failed after {_CDP_CONNECT_ATTEMPTS} attempts (last error: {last_error})"
-    )
 
 
 def _pick_content_page(browser: Browser, timeout_seconds: int) -> Page:
@@ -758,6 +745,106 @@ def _wait_for_workspace_ready_or_failure(page: Page, timeout_seconds: int) -> No
     )
 
 
+def _drive_create_flow(page: Page, fct_path: Path, workspace_name: str) -> None:
+    """Drive the create form + onboarding to a ready workspace on an attached page.
+
+    Runs exactly once per successful Electron attach; any failure here is a real
+    test failure (not a wedged-launch flake) and propagates to fail the test.
+    """
+    backend_origin = _backend_origin_from_page(page)
+    logger.info("Backend origin: {}", backend_origin)
+
+    logger.info("Navigating to /create")
+    page.goto(f"{backend_origin}/create", wait_until="domcontentloaded")
+    page.wait_for_selector("#create-form", state="attached", timeout=10_000)
+
+    # The repo field lives inside the collapsed "Configure..."
+    # panel's nested "Show advanced settings" section; open both
+    # so the field is visible (and to mirror what a user setting
+    # a non-default repo would do). ``#host_name`` is top-level.
+    page.click("#configure-toggle")
+    page.wait_for_selector("#toggle-advanced:visible", timeout=5_000)
+    page.click("#toggle-advanced")
+    page.wait_for_selector("#git_url:visible", timeout=5_000)
+
+    _ensure_field_value(page, "#host_name", workspace_name)
+    _ensure_field_value(page, "#git_url", str(fct_path))
+    # Explicitly select the DOCKER compute provider: with no
+    # account selected the form now defaults to LIMA (a local VM
+    # that isn't available on the CI runner), so this test --
+    # which is specifically about local Docker -- must pin DOCKER
+    # rather than relying on the default. The select lives in the
+    # (now-open) "Configure..." panel. AI provider stays at its
+    # no-account default of SUBSCRIPTION.
+    page.select_option("#launch_mode", "DOCKER")
+
+    logger.info("Submitting create form")
+    page.click("#create-submit")
+
+    # Submitting starts creation in the background and lands on
+    # the onboarding question flow. Walk the three questions
+    # accepting their pre-selected defaults; finishing the last
+    # one enters the workspace (directly if creation already
+    # finished, otherwise via the loading screen, which redirects
+    # once creation completes).
+    page.wait_for_selector("#onboarding", state="attached", timeout=10_000)
+    # Walk the three onboarding questions, accepting each
+    # pre-selected default. q1/q2 advance to the next question
+    # screen; confirm each advance (retrying the click) to absorb
+    # the creating.js handler-attach race. The final (q3) Next runs
+    # finishQuestions(), which shows the loading screen or redirects
+    # straight to the workspace -- the workspace-ready-or-failure wait
+    # below covers that transition (and the failure case), and by q3
+    # creating.js has long since loaded.
+    _advance_onboarding_screen(page, "q1")
+    _advance_onboarding_screen(page, "q2")
+    q3_next_button = '[data-screen="q3"] .js-next'
+    page.wait_for_selector(q3_next_button, state="visible", timeout=10_000)
+    page.click(q3_next_button)
+
+    # Race the workspace-ready redirect against the create flow's
+    # failure view, so a `mngr create` failure (e.g. an unregistered
+    # docker runtime) fails this run fast with the surfaced error
+    # rather than blocking the whole navigation budget.
+    _wait_for_workspace_ready_or_failure(page, _CREATE_FORM_TIMEOUT_SECONDS)
+    logger.info("Workspace ready at {}", page.url)
+
+    page.wait_for_selector(
+        _DOCKVIEW_WORKSPACE_SELECTOR,
+        state="visible",
+        timeout=_SYSTEM_INTERFACE_TIMEOUT_SECONDS * 1000,
+    )
+    logger.info("system_interface dockview rendered; workspace creation complete")
+
+
+def _attempt_create_workspace_via_electron(
+    fct_path: Path,
+    workspace_name: str,
+    debug_port: int,
+    host_config_dir: Path | None,
+) -> None:
+    """One Electron launch + CDP attach + create-flow drive.
+
+    Raises :class:`_ElectronConnectError` if the launch/CDP-attach phase fails
+    (a wedged Electron the caller should recover by relaunching). Errors from the
+    create flow itself propagate unchanged so real test failures are not retried.
+    """
+    with _launched_electron(fct_path, workspace_name, debug_port, host_config_dir):
+        with sync_playwright() as playwright:
+            try:
+                _wait_for_cdp(debug_port, _CDP_READY_TIMEOUT_SECONDS)
+                browser = playwright.chromium.connect_over_cdp(
+                    f"http://127.0.0.1:{debug_port}", timeout=_CDP_CONNECT_TIMEOUT_MS
+                )
+                page = _pick_content_page(browser, _BACKEND_READY_TIMEOUT_SECONDS)
+            except (PlaywrightError, TimeoutError) as exc:
+                raise _ElectronConnectError(f"Electron CDP attach failed on port {debug_port}: {exc}") from exc
+            try:
+                _drive_create_flow(page, fct_path, workspace_name)
+            finally:
+                browser.close()
+
+
 def create_workspace_via_electron(
     fct_path: Path,
     workspace_name: str,
@@ -771,6 +858,11 @@ def create_workspace_via_electron(
     resulting mngr agent or its Docker container -- the caller decides
     whether to destroy or to capture the state.
 
+    Retries the Electron launch + CDP attach (with a fresh process + debug port)
+    up to ``_ELECTRON_LAUNCH_ATTEMPTS`` times to absorb a wedged Electron CDP
+    handshake (a known Electron-in-CI flake); the create flow itself runs once,
+    so a genuine creation failure fails the test immediately.
+
     Caller contract:
     - ``fct_path`` must be a populated FCT working tree (use
       :func:`resolve_fct_path`).
@@ -781,75 +873,22 @@ def create_workspace_via_electron(
     - ``host_config_dir`` is the cwd for the Electron process (see
       :func:`_launched_electron`); leave unset outside pytest.
     """
-    with _launched_electron(fct_path, workspace_name, debug_port, host_config_dir):
-        _wait_for_cdp(debug_port, _CDP_READY_TIMEOUT_SECONDS)
-        with sync_playwright() as playwright:
-            browser = _connect_over_cdp_with_retry(playwright, debug_port)
-            try:
-                page = _pick_content_page(browser, _BACKEND_READY_TIMEOUT_SECONDS)
-                backend_origin = _backend_origin_from_page(page)
-                logger.info("Backend origin: {}", backend_origin)
-
-                logger.info("Navigating to /create")
-                page.goto(f"{backend_origin}/create", wait_until="domcontentloaded")
-                page.wait_for_selector("#create-form", state="attached", timeout=10_000)
-
-                # The repo field lives inside the collapsed "Configure..."
-                # panel's nested "Show advanced settings" section; open both
-                # so the field is visible (and to mirror what a user setting
-                # a non-default repo would do). ``#host_name`` is top-level.
-                page.click("#configure-toggle")
-                page.wait_for_selector("#toggle-advanced:visible", timeout=5_000)
-                page.click("#toggle-advanced")
-                page.wait_for_selector("#git_url:visible", timeout=5_000)
-
-                _ensure_field_value(page, "#host_name", workspace_name)
-                _ensure_field_value(page, "#git_url", str(fct_path))
-                # Explicitly select the DOCKER compute provider: with no
-                # account selected the form now defaults to LIMA (a local VM
-                # that isn't available on the CI runner), so this test --
-                # which is specifically about local Docker -- must pin DOCKER
-                # rather than relying on the default. The select lives in the
-                # (now-open) "Configure..." panel. AI provider stays at its
-                # no-account default of SUBSCRIPTION.
-                page.select_option("#launch_mode", "DOCKER")
-
-                logger.info("Submitting create form")
-                page.click("#create-submit")
-
-                # Submitting starts creation in the background and lands on
-                # the onboarding question flow. Walk the three questions
-                # accepting their pre-selected defaults; finishing the last
-                # one enters the workspace (directly if creation already
-                # finished, otherwise via the loading screen, which redirects
-                # once creation completes).
-                page.wait_for_selector("#onboarding", state="attached", timeout=10_000)
-                # Walk the three onboarding questions, accepting each
-                # pre-selected default. q1/q2 advance to the next question
-                # screen; confirm each advance (retrying the click) to absorb
-                # the creating.js handler-attach race. The final (q3) Next runs
-                # finishQuestions(), which shows the loading screen or redirects
-                # straight to the workspace -- the workspace-ready-or-failure wait
-                # below covers that transition (and the failure case), and by q3
-                # creating.js has long since loaded.
-                _advance_onboarding_screen(page, "q1")
-                _advance_onboarding_screen(page, "q2")
-                q3_next_button = '[data-screen="q3"] .js-next'
-                page.wait_for_selector(q3_next_button, state="visible", timeout=10_000)
-                page.click(q3_next_button)
-
-                # Race the workspace-ready redirect against the create flow's
-                # failure view, so a `mngr create` failure (e.g. an unregistered
-                # docker runtime) fails this run fast with the surfaced error
-                # rather than blocking the whole navigation budget.
-                _wait_for_workspace_ready_or_failure(page, _CREATE_FORM_TIMEOUT_SECONDS)
-                logger.info("Workspace ready at {}", page.url)
-
-                page.wait_for_selector(
-                    _DOCKVIEW_WORKSPACE_SELECTOR,
-                    state="visible",
-                    timeout=_SYSTEM_INTERFACE_TIMEOUT_SECONDS * 1000,
-                )
-                logger.info("system_interface dockview rendered; workspace creation complete")
-            finally:
-                browser.close()
+    last_error: _ElectronConnectError | None = None
+    for attempt in range(1, _ELECTRON_LAUNCH_ATTEMPTS + 1):
+        # Reuse the caller-provided port on the first try; allocate a fresh one
+        # for each relaunch so a leftover socket from a wedged process can't clash.
+        attempt_port = debug_port if attempt == 1 else find_free_port()
+        try:
+            _attempt_create_workspace_via_electron(fct_path, workspace_name, attempt_port, host_config_dir)
+            return
+        except _ElectronConnectError as exc:
+            last_error = exc
+            logger.warning(
+                "Electron launch/CDP attempt {}/{} failed; relaunching: {}",
+                attempt,
+                _ELECTRON_LAUNCH_ATTEMPTS,
+                exc,
+            )
+    raise PlaywrightTimeoutError(
+        f"Electron CDP attach failed after {_ELECTRON_LAUNCH_ATTEMPTS} relaunch attempts (last error: {last_error})"
+    )
