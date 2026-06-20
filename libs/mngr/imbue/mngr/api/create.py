@@ -30,6 +30,7 @@ from imbue.mngr.interfaces.host import HostEnvironmentOptions
 from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.primitives import AgentId
@@ -428,6 +429,27 @@ def create(
         return result
 
 
+def _run_commands_on_host(
+    executor: OuterHostInterface,
+    commands: tuple[CommandString, ...],
+    *,
+    label: str,
+) -> None:
+    """Run a sequence of commands in order on ``executor``, aborting on the first failure.
+
+    Each command runs via ``executor.execute_idempotent_command``; a non-zero
+    exit raises ``MngrError`` (which aborts the create). Output goes through the
+    standard host exec plumbing so the user sees what ran. ``label`` is woven
+    into the log spans and error message to identify the hook that failed.
+    """
+    with log_span("Running {} commands", label, count=len(commands)):
+        for cmd in commands:
+            with log_span("{}: {}", label, cmd):
+                result = executor.execute_idempotent_command(cmd)
+                if not result.success:
+                    raise MngrError(f"{label} command failed: {cmd}\nstdout: {result.stdout}\nstderr: {result.stderr}")
+
+
 def _run_post_host_create_commands(
     host: OnlineHostInterface,
     commands: tuple[CommandString, ...],
@@ -440,14 +462,7 @@ def _run_post_host_create_commands(
     """
     if not commands:
         return
-    with log_span("Running post-host-create commands", count=len(commands)):
-        for cmd in commands:
-            with log_span("post-host-create: {}", cmd):
-                result = host.execute_idempotent_command(cmd)
-                if not result.success:
-                    raise MngrError(
-                        f"post-host-create command failed: {cmd}\nstdout: {result.stdout}\nstderr: {result.stderr}"
-                    )
+    _run_commands_on_host(host, commands, label="post-host-create")
 
 
 def _run_post_host_create_outer_commands(
@@ -472,15 +487,7 @@ def _run_post_host_create_outer_commands(
                 len(commands),
             )
             return
-        with log_span("Running post-host-create outer commands", count=len(commands)):
-            for cmd in commands:
-                with log_span("post-host-create (outer): {}", cmd):
-                    result = outer.execute_idempotent_command(cmd)
-                    if not result.success:
-                        raise MngrError(
-                            f"post-host-create outer command failed: {cmd}\n"
-                            f"stdout: {result.stdout}\nstderr: {result.stderr}"
-                        )
+        _run_commands_on_host(outer, commands, label="post-host-create outer")
 
 
 def _write_host_env_vars(
