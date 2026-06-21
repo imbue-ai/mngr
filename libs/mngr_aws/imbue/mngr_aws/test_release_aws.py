@@ -257,7 +257,7 @@ class _AwsReleaseProfile(VpsCloudReleaseProfile):
     name_prefix = AWS_TEST_NAME_PREFIX
 
     # Trip 4: AWS curates the missing-credential help text toward `aws configure` (the spec's
-    # divergence was fixed in this PR -- see `_aws_unavailable_error` in mngr_aws/backend.py).
+    # divergence was fixed in this PR -- see `_aws_not_authorized_error` in mngr_aws/backend.py).
     has_curated_unavailable_help = True
     credential_setup_command = "aws configure"
     # AWS captures host_dir to the S3 state bucket at `mngr stop`, so a stopped host's host_dir is
