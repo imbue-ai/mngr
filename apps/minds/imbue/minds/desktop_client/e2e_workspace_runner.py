@@ -795,11 +795,24 @@ def _wait_for_workspace_ready_or_failure(page: Page, timeout_seconds: int) -> No
     )
 
 
-def _drive_create_flow(page: Page, fct_path: Path, workspace_name: str) -> None:
+def _drive_create_flow(
+    page: Page,
+    fct_path: Path,
+    workspace_name: str,
+    launch_mode: str = "DOCKER",
+    account_label: str | None = None,
+    region: str | None = None,
+) -> None:
     """Drive the create form + onboarding to a ready workspace on an attached page.
 
     Runs exactly once per successful Electron attach; any failure here is a real
     test failure (not a wedged-launch flake) and propagates to fail the test.
+
+    ``launch_mode`` selects the compute provider in the create form (DOCKER,
+    LIMA, AWS, ...). ``account_label`` optionally selects an AI-provider account
+    (by visible option text) before submitting. ``region`` selects the machine
+    region for region-aware modes (aws/vultr/imbue_cloud); it is required by the
+    form for those modes and ignored (the row is hidden) for others.
     """
     backend_origin = _backend_origin_from_page(page)
     logger.info("Backend origin: {}", backend_origin)
@@ -819,14 +832,20 @@ def _drive_create_flow(page: Page, fct_path: Path, workspace_name: str) -> None:
 
     _ensure_field_value(page, "#host_name", workspace_name)
     _ensure_field_value(page, "#git_url", str(fct_path))
-    # Explicitly select the DOCKER compute provider: with no
-    # account selected the form now defaults to LIMA (a local VM
-    # that isn't available on the CI runner), so this test --
-    # which is specifically about local Docker -- must pin DOCKER
-    # rather than relying on the default. The select lives in the
-    # (now-open) "Configure..." panel. AI provider stays at its
-    # no-account default of SUBSCRIPTION.
-    page.select_option("#launch_mode", "DOCKER")
+    # Optionally select an AI-provider account (by visible label) before
+    # picking the compute mode -- some modes/tiers require a real account.
+    if account_label is not None:
+        page.select_option("#account_id", label=account_label)
+    # Select the requested compute provider. With no account selected the
+    # form defaults to LIMA; CI's local-Docker test pins DOCKER. The select
+    # lives in the (now-open) "Configure..." panel.
+    page.select_option("#launch_mode", launch_mode)
+    # Region-aware modes (aws/vultr/imbue_cloud) reveal a region select
+    # that must carry a value; the JS shows the row on the launch_mode
+    # change event, so wait for it before selecting.
+    if region is not None:
+        page.wait_for_selector("#region:visible", timeout=5_000)
+        page.select_option("#region", region)
 
     logger.info("Submitting create form")
     page.click("#create-submit")
@@ -872,6 +891,9 @@ def _attempt_create_workspace_via_electron(
     workspace_name: str,
     debug_port: int,
     host_config_dir: Path | None,
+    launch_mode: str = "DOCKER",
+    account_label: str | None = None,
+    region: str | None = None,
 ) -> None:
     """One Electron launch + CDP attach + create-flow drive.
 
@@ -897,7 +919,14 @@ def _attempt_create_workspace_via_electron(
                     page = _pick_content_page(browser, _BACKEND_READY_TIMEOUT_SECONDS)
                 except (PlaywrightError, TimeoutError) as exc:
                     raise _ElectronConnectError(f"Electron CDP attach failed on port {debug_port}: {exc}") from exc
-                _drive_create_flow(page, fct_path, workspace_name)
+                _drive_create_flow(
+                    page,
+                    fct_path,
+                    workspace_name,
+                    launch_mode=launch_mode,
+                    account_label=account_label,
+                    region=region,
+                )
             finally:
                 browser.close()
 
@@ -907,8 +936,17 @@ def create_workspace_via_electron(
     workspace_name: str,
     debug_port: int,
     host_config_dir: Path | None = None,
+    launch_mode: str = "DOCKER",
+    account_label: str | None = None,
+    region: str | None = None,
 ) -> None:
-    """Drive Electron to create a local Docker workspace from ``fct_path``.
+    """Drive Electron to create a workspace from ``fct_path``.
+
+    ``launch_mode`` selects the compute provider in the create form (DOCKER,
+    LIMA, AWS, ...). ``account_label`` optionally selects an AI-provider account
+    (by visible option text) before submitting. ``region`` selects the machine
+    region for region-aware modes (aws/vultr/imbue_cloud); it is required by the
+    form for those modes and ignored (the row is hidden) for others.
 
     Returns once the workspace's ``system_interface`` dockview UI has
     rendered through the desktop client proxy. Does NOT clean up the
@@ -936,7 +974,15 @@ def create_workspace_via_electron(
         # for each relaunch so a leftover socket from a wedged process can't clash.
         attempt_port = debug_port if attempt == 1 else find_free_port()
         try:
-            _attempt_create_workspace_via_electron(fct_path, workspace_name, attempt_port, host_config_dir)
+            _attempt_create_workspace_via_electron(
+                fct_path,
+                workspace_name,
+                attempt_port,
+                host_config_dir,
+                launch_mode=launch_mode,
+                account_label=account_label,
+                region=region,
+            )
             return
         except _ElectronConnectError as exc:
             last_error = exc

@@ -300,11 +300,10 @@ def test_generate_cloud_init_includes_gvisor_install_when_requested() -> None:
         host_public_key="ssh-ed25519 AAAA fake",
         install_gvisor_runtime=True,
     )
-    # Downloads the pinned dated gVisor release and registers it with the daemon.
+    # Downloads the pinned dated gVisor release and registers it with the daemon,
+    # with --overlay2=none so the writable layer persists across container restart.
     assert f"gvisor/releases/release/{PINNED_GVISOR_RELEASE}" in result
-    assert "runsc install" in result
-    # Guarded so it is a no-op when runsc is already registered.
-    assert "docker info" in result
+    assert "runsc install -- --overlay2=none" in result
     # gnupg is installed with the base packages (needed for the Docker apt key).
     assert "gnupg" in result
 

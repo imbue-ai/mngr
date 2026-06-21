@@ -47,6 +47,7 @@ from imbue.minds.cli._activated_env import require_activated_env_name
 from imbue.minds.cli._activated_env import require_deploy_mode_activation
 from imbue.minds.cli._activated_env import tier_for_env_name as _tier_for_env_name
 from imbue.minds.cli._activated_env import validate_modal_profile_exists_in_modal_toml
+from imbue.minds.cli.pool import tear_down_env_pool_slices
 from imbue.minds.config.loader import EnvConfigError
 from imbue.minds.config.loader import load_client_config
 from imbue.minds.config.loader import load_deploy_config
@@ -1332,6 +1333,14 @@ def env_destroy(ctx: click.Context, keep_agents: bool, yes_i_mean_staging: bool)
             credentials = _load_dev_credentials_from_vault(str(deploy_config.vault_path_prefix), cg=cg)
         except VaultReadError as exc:
             raise click.ClickException(str(exc)) from exc
+
+        # Tear down the env's unleased pool slices on their bare-metal boxes BEFORE
+        # destroy_env deletes the per-env DB (after which the slice rows -- and thus
+        # the only record of which VMs to destroy -- are gone). Leased slices are torn
+        # down by destroy_env's agent-release path, so this targets only the baked pool
+        # backlog that would otherwise leak its VMs on shared boxes. Must-succeed: a
+        # box we cannot reach raises and stops the destroy rather than leaking.
+        tear_down_env_pool_slices(env_name)
 
         try:
             destroy_env(

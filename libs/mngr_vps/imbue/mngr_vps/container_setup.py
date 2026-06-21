@@ -29,10 +29,11 @@ from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_comman
 from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
 from imbue.mngr.providers.ssh_host_setup import build_check_and_install_packages_command
 from imbue.mngr.providers.ssh_host_setup import build_configure_ssh_command
+from imbue.mngr.providers.ssh_host_setup import build_self_healing_host_entrypoint_command
+from imbue.mngr.providers.ssh_host_setup import build_start_sshd_command
 from imbue.mngr.utils.git_utils import rsync_worktree_over_clone
 from imbue.mngr_vps.errors import ContainerSetupError
 from imbue.mngr_vps.errors import VpsProvisioningError
-from imbue.mngr_vps.host_setup import build_remote_script_command
 from imbue.mngr_vps.host_store import AGENTS_SUBPATH
 
 # Label constants (same scheme as Docker provider)
@@ -54,9 +55,12 @@ HOST_VOLUME_MOUNT_PATH: Final[str] = "/mngr-vol"
 # Subdirectory inside the unified volume that backs the agent's mngr host_dir.
 HOST_DIR_SUBPATH: Final[str] = "host_dir"
 
-# Shell command for the agent container's PID 1: trap SIGTERM and stay alive
-# until SIGTERM arrives so `docker stop` (idle timeout, manual stop) exits cleanly.
-CONTAINER_ENTRYPOINT_CMD: Final[str] = "trap 'exit 0' TERM; tail -f /dev/null & wait"
+# Shell command for the agent container's PID 1. Self-heals sshd on every
+# (re)start once mngr has provisioned a host key, so the container is reachable
+# again after an out-of-band restart (VM reboot, `docker restart`) without
+# waiting for `mngr start`. Also traps SIGTERM and stays alive until SIGTERM
+# arrives so `docker stop` (idle timeout, manual stop) exits cleanly.
+CONTAINER_ENTRYPOINT_CMD: Final[str] = build_self_healing_host_entrypoint_command()
 
 # In-container path the host_backup service writes / reads snapshot
 # request and result JSON to. Backed by the per-host docker volume
@@ -391,80 +395,20 @@ def stop_container(outer: OuterHostInterface, container_name: str, timeout_secon
     run_docker(outer, ["stop", "-t", str(timeout_seconds), container_name])
 
 
-# Hard timeout for the start-container script: a plain start is quick, but the
-# recovery path adds a bounded process-reap wait plus a second start attempt.
+# Hard timeout for the container start: a plain `docker start` is quick, but
+# allow generous headroom for a slow runsc sandbox bring-up.
 _START_CONTAINER_TIMEOUT_SECONDS: Final[float] = 120.0
-
-# Single shell script that starts a stopped container and, only if the start
-# fails with the gVisor (runsc) self-overlay filestore collision, reaps the
-# stale runsc state for THIS container and retries -- all in one round-trip.
-#
-# Background: under runsc with the default ``--overlay2=root:self`` medium, the
-# rootfs overlay is backed by a ``.gvisor.filestore.*`` file placed inside the
-# container's overlay mount. If a previous run's runsc sandbox/gofer is still
-# alive (an unclean stop), it keeps that overlay mounted, so the next
-# ``docker start`` aborts with "repeated submounts are not supported with overlay
-# optimizations". Reaping that leftover process releases the mount + filestore so
-# the restart can recreate the sandbox cleanly. See
-# https://gvisor.dev/blog/2023/05/08/rootfs-overlay/.
-#
-# The reap is scoped to this container: it matches on BOTH the container id and a
-# runsc process, so it only ever kills this container's stuck gVisor processes --
-# never a broad pattern. A normal start never enters the recovery branch.
-_START_CONTAINER_SCRIPT_TEMPLATE: Final[str] = r"""set -u
-name=__CONTAINER_NAME__
-err="$(docker start "$name" 2>&1)" && exit 0
-case "$err" in
-    *gvisor.filestore*|*"repeated submounts"*) ;;
-    *) printf '%s\n' "$err" >&2; exit 1 ;;
-esac
-echo "mngr: recovering stale gVisor runsc overlay state for $name before retrying start" >&2
-cid="$(docker inspect --format '{{.Id}}' "$name" 2>/dev/null || true)"
-if [ -n "$cid" ]; then
-    for pid in $(ps -eo pid=,args= | grep -F "$cid" | grep runsc | grep -v grep | awk '{print $1}'); do
-        kill -TERM "$pid" 2>/dev/null || true
-    done
-    n=0
-    while [ "$n" -lt 25 ]; do
-        alive="$(ps -eo pid=,args= | grep -F "$cid" | grep runsc | grep -v grep | awk '{print $1}')"
-        [ -z "$alive" ] && break
-        n=$((n + 1))
-        sleep 0.2
-    done
-    for pid in $(ps -eo pid=,args= | grep -F "$cid" | grep runsc | grep -v grep | awk '{print $1}'); do
-        kill -KILL "$pid" 2>/dev/null || true
-    done
-fi
-for d in \
-    "$(docker inspect --format '{{.GraphDriver.Data.UpperDir}}' "$name" 2>/dev/null || true)" \
-    "$(docker inspect --format '{{.GraphDriver.Data.MergedDir}}' "$name" 2>/dev/null || true)"; do
-    [ -n "$d" ] && rm -f "$d"/.gvisor.filestore.* 2>/dev/null || true
-done
-docker start "$name"
-"""
-
-
-def _build_start_container_script(container_name: str) -> str:
-    """Render the start-container recovery script with the container name shell-quoted."""
-    return _START_CONTAINER_SCRIPT_TEMPLATE.replace("__CONTAINER_NAME__", shlex.quote(container_name))
 
 
 def start_container(outer: OuterHostInterface, container_name: str) -> None:
-    """Start a stopped container, recovering from stale gVisor (runsc) overlay state.
+    """Start a stopped container. Raises ``MngrError`` if it fails to start.
 
-    Runs the start, the (conditional) runsc-overlay cleanup, and the retry as a
-    single remote script so a wedged container recovers in one round-trip. A
-    normal start is just one ``docker start``; the cleanup only triggers on the
-    gVisor self-overlay filestore collision. Raises ``MngrError`` if the
-    container still fails to start. Shared by every docker-based provider
-    (mngr_vps / ovh / lima), all of which run the agent container under runsc.
+    Shared by every docker-based provider (mngr_vps / ovh / lima), all of which
+    run the agent container under runsc with ``--overlay2=none`` (so the writable
+    layer persists across restart and there is no stale self-overlay filestore to
+    recover from).
     """
-    script = _build_start_container_script(container_name)
-    result = outer.execute_idempotent_command(
-        build_remote_script_command(script), timeout_seconds=_START_CONTAINER_TIMEOUT_SECONDS
-    )
-    if not result.success:
-        raise MngrError(f"docker start {container_name} failed: {result.stderr.strip() or result.stdout.strip()}")
+    run_docker(outer, ["start", container_name], timeout_seconds=_START_CONTAINER_TIMEOUT_SECONDS)
 
 
 def remove_container(
@@ -912,7 +856,7 @@ def start_container_sshd(outer: OuterHostInterface, container_name: str) -> None
         exec_in_container(
             outer,
             container_name,
-            "mkdir -p /run/sshd && /usr/sbin/sshd -D -o MaxSessions=100 &",
+            f"{build_start_sshd_command()} &",
         )
 
 
