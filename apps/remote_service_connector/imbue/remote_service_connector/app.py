@@ -2228,27 +2228,28 @@ def _list_box_lima_names(host: str, user: str, management_key_pem: str, json_sub
     return names
 
 
-def reconcile_slice_boxes(conn: Any, env_name: str) -> tuple[int, int]:
-    """Reconcile each box's lima slices against the DB, scoped to ``env_name``'s stamped slices.
+def reconcile_slice_boxes(conn: Any, env_name: str) -> int:
+    """Audit each box's lima slices against the DB, scoped to ``env_name``'s stamped slices.
 
-    Returns ``(reaped_count, divergence_count)``. For every bare-metal box:
+    Returns the number of divergences found (and logged). Alert-only by design: for
+    every bare-metal box it logs, at error level,
 
-    * A slice resource stamped for ``env_name`` that is present on the box but has no
-      pool_hosts row is reaped (limactl delete) -- the periodic analogue of the
-      bake-time orphan reaper, catching orphans even when no bake is running.
-    * A pool_hosts row whose VM is absent from the box is a divergence: logged at
-      error level (an alert) rather than auto-deleted, since a transient SSH failure
-      must never be mistaken for a vanished VM. Boxes whose listing fails are skipped.
+    * a slice stamped for ``env_name`` present on the box with no pool_hosts row, and
+    * a pool_hosts row whose VM is absent from the box.
 
-    Other envs' slices and legacy un-stamped slices are never touched, so this is
-    safe in both per-env-DB (dev) and shared-DB (staging/prod) tiers: each
-    deployment reconciles only its own stamped slices.
+    It deliberately does NOT auto-delete. A row-less stamped slice is most often a
+    bake mid-flight (the carve creates the instance ~10-30 min before it inserts the
+    row), and this cron runs on a fixed hourly schedule independent of bakes -- so
+    auto-reaping here would race a live bake and destroy its slice. Actual reaping is
+    left to the bake-time reaper (which runs in the bake's own ``finally``, where the
+    in-flight set is known). Boxes whose listing fails are skipped (a transient SSH
+    failure must never be mistaken for vanished VMs). Other envs' slices and legacy
+    un-stamped slices are never inspected, so this is safe on a shared box.
     """
     if not env_name:
         logger.info("Slice reconcile skipped: connector has no MINDS_ENV_NAME to scope to")
-        return (0, 0)
+        return 0
     management_key_pem = os.environ["POOL_SSH_PRIVATE_KEY"]
-    reaped_count = 0
     divergence_count = 0
     with conn.cursor() as cur:
         cur.execute("SELECT id, public_address, lima_service_user FROM bare_metal_servers")
@@ -2259,58 +2260,29 @@ def reconcile_slice_boxes(conn: Any, env_name: str) -> tuple[int, int]:
         user = lima_service_user or "root"
         try:
             box_instances = _list_box_lima_names(public_address, user, management_key_pem, "list --json")
-            box_disks = _list_box_lima_names(public_address, user, management_key_pem, "disk list --json")
         except (PoolHostCleanupError, paramiko.SSHException, OSError) as exc:
             logger.warning("Slice reconcile skipped box %s (could not list lima resources): %s", public_address, exc)
             continue
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT lima_instance_name, lima_disk_name FROM pool_hosts "
-                "WHERE backend_kind = %s AND bare_metal_server_id = %s",
+                "SELECT lima_instance_name FROM pool_hosts WHERE backend_kind = %s AND bare_metal_server_id = %s",
                 (BACKEND_KIND_SLICE, str(server_id)),
             )
-            rows = cur.fetchall()
-        tracked_instances = {row[0] for row in rows if row[0]}
-        tracked_disks = {row[1] for row in rows if row[1]}
+            tracked_instances = {row[0] for row in cur.fetchall() if row[0]}
 
-        # Reap this env's stamped slices that are on the box but have no DB row.
-        orphan_instances = {
+        # This env's stamped slices on the box with no DB row (often a bake mid-flight).
+        untracked = {
             name for name in box_instances if slice_name_env_owner(name) == env_name and name not in tracked_instances
         }
-        orphan_disks = {
-            name for name in box_disks if slice_name_env_owner(name) == env_name and name not in tracked_disks
-        }
-        for instance_name in sorted(orphan_instances):
-            matching_disk = next((d for d in orphan_disks if d == f"{instance_name}{_SLICE_LIMA_DISK_SUFFIX}"), None)
-            try:
-                _run_ssh_commands_on_box(
-                    public_address,
-                    22,
-                    user,
-                    management_key_pem,
-                    build_slice_teardown_commands(instance_name, matching_disk),
-                )
-                reaped_count += 1
-                logger.info("Slice reconcile reaped untracked %s on %s", instance_name, public_address)
-            except (PoolHostCleanupError, paramiko.SSHException, OSError) as exc:
-                logger.warning("Slice reconcile could not reap %s on %s: %s", instance_name, public_address, exc)
-        # Reap orphan data disks whose instance was already gone (disk outlived VM).
-        for disk_name in sorted(orphan_disks):
-            if any(disk_name == f"{inst}{_SLICE_LIMA_DISK_SUFFIX}" for inst in orphan_instances):
-                continue
-            try:
-                _run_ssh_commands_on_box(
-                    public_address,
-                    22,
-                    user,
-                    management_key_pem,
-                    (f"{_BOX_LIMACTL_PATH_PREFIX} limactl disk delete --force {shlex.quote(disk_name)}",),
-                )
-                reaped_count += 1
-            except (PoolHostCleanupError, paramiko.SSHException, OSError) as exc:
-                logger.warning("Slice reconcile could not reap disk %s on %s: %s", disk_name, public_address, exc)
-
-        # A DB row whose VM is gone is a divergence: alert, do not auto-delete.
+        for instance_name in sorted(untracked):
+            divergence_count += 1
+            logger.error(
+                "Slice reconcile divergence on %s: stamped slice %s has no pool_hosts row "
+                "(in-flight bake, or an orphan for the bake-time reaper)",
+                public_address,
+                instance_name,
+            )
+        # A DB row whose VM is gone is the other divergence direction.
         for missing_instance in sorted(tracked_instances - box_instances):
             divergence_count += 1
             logger.error(
@@ -2318,7 +2290,7 @@ def reconcile_slice_boxes(conn: Any, env_name: str) -> tuple[int, int]:
                 public_address,
                 missing_instance,
             )
-    return (reaped_count, divergence_count)
+    return divergence_count
 
 
 def run_pool_host_cleanup_sweep(conn: Any, ovh_ops: OvhOps, region_code: str) -> tuple[int, int]:
@@ -4254,26 +4226,24 @@ def cleanup_removing_pool_hosts() -> dict[str, int]:
         success_count, failure_count = run_pool_host_cleanup_sweep(
             conn, _get_ovh_ops(), ovh_region_code_for_endpoint(_get_ovh_endpoint())
         )
-        # Reconcile this env's slices on every box against the DB (reap our orphans,
-        # alert on rows whose VM vanished). Scoped to MINDS_ENV_NAME so it is safe on
-        # a box shared by multiple dev envs. Best-effort: never fail the sweep.
+        # Audit this env's slices on every box against the DB (alert-only: it never
+        # auto-deletes, to avoid racing an in-flight bake). Scoped to MINDS_ENV_NAME so
+        # it is safe on a box shared by multiple dev envs. Best-effort: never fail the sweep.
         try:
-            reaped_count, divergence_count = reconcile_slice_boxes(conn, _current_minds_env_name())
+            divergence_count = reconcile_slice_boxes(conn, _current_minds_env_name())
         except (psycopg2.Error, paramiko.SSHException, OSError) as exc:
             logger.warning("Slice box reconcile failed (continuing): %s", exc)
-            reaped_count, divergence_count = 0, 0
+            divergence_count = 0
     finally:
         conn.close()
     logger.info(
-        "Pool host cleanup sweep done: cleaned=%d failed=%d slice_reaped=%d slice_divergences=%d",
+        "Pool host cleanup sweep done: cleaned=%d failed=%d slice_divergences=%d",
         success_count,
         failure_count,
-        reaped_count,
         divergence_count,
     )
     return {
         "cleaned": success_count,
         "failed": failure_count,
-        "slice_reaped": reaped_count,
         "slice_divergences": divergence_count,
     }
