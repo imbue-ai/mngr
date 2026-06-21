@@ -93,19 +93,18 @@ def test_startup_script_installs_pinned_docker_not_installer_script() -> None:
 
 
 def test_startup_script_wraps_steps_in_subshells_to_isolate_exit() -> None:
-    """Steps run in subshells so the gVisor ``exit 0`` can't skip the marker.
+    """Steps run in subshells so a step's early ``exit`` can't skip the ready marker.
 
-    Without isolation, the gVisor step's early ``exit 0`` (taken when runsc is
-    already registered) would terminate the whole script before the ready marker.
+    Each host-setup step is wrapped in a subshell, so even if a step exits early
+    the script still reaches the ready marker that the outer poller waits on.
     """
     result = generate_gce_startup_script(
         host_private_key="k",
         host_public_key="ssh-ed25519 AAAA fake",
         install_gvisor_runtime=True,
     )
-    # The gVisor step's ``exit 0`` is inside a subshell, and the marker follows it.
-    assert "exit 0" in result
     assert f"gvisor/releases/release/{PINNED_GVISOR_RELEASE}" in result
+    # Steps are wrapped in subshells, and the ready marker follows them.
     subshell_open_index = result.index("(\n")
     marker_index = result.index(f"touch {MNGR_READY_MARKER_PATH}")
     assert subshell_open_index < marker_index

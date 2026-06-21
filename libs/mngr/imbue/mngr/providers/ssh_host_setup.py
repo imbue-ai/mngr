@@ -115,6 +115,65 @@ def build_check_and_install_packages_command(
     return " && ".join(script_lines)
 
 
+# Options passed to sshd on startup to raise the per-connection session cap.
+# Shared by the provider's explicit start and the self-healing entrypoint so
+# both bring sshd up with identical settings.
+SSHD_START_OPTIONS: Final[str] = "-o MaxSessions=100"
+
+# Marker file mngr writes (alongside its injected host key) once it has
+# provisioned sshd. The self-healing entrypoint gates on THIS marker rather than
+# on the host key file: many base images (e.g. Debian's openssh-server, which
+# runs ``ssh-keygen -A`` in its postinst) ship a pre-generated host key, so the
+# key's mere presence does not mean mngr has provisioned this host. Gating on the
+# marker ensures the entrypoint never starts sshd with a stale image-baked key
+# before mngr has injected its own (which would mismatch the client's known_hosts
+# and is suppressed by the idempotent start guard). The name is deliberately
+# outside the ``ssh_host_*`` glob that ``build_configure_ssh_command`` removes.
+SSHD_PROVISIONED_MARKER_PATH: Final[str] = "/etc/ssh/mngr_host_provisioned"
+
+
+@pure
+def _build_sshd_not_running_check() -> str:
+    """Build a shell test that succeeds only when no sshd process is running.
+
+    Uses /proc rather than pgrep/pidof so it works on minimal images that do
+    not ship procps. Each /proc/<pid>/comm holds the process name followed by a
+    newline, so a whole-line match (grep -x) identifies sshd exactly.
+    """
+    return "! grep -lxs sshd /proc/[0-9]*/comm >/dev/null 2>&1"
+
+
+@pure
+def build_start_sshd_command() -> str:
+    """Build an idempotent command that starts sshd only if it is not already running.
+
+    Runs sshd in the foreground (``-D``) so that, when launched via a detached
+    ``docker exec`` / ``sandbox.exec``, the exec'd process stays alive as the
+    sshd master. The not-running guard makes a redundant start a clean no-op
+    (rather than a failed bind) when sshd was already brought up -- e.g. by the
+    self-healing entrypoint after an out-of-band restart.
+    """
+    return f"mkdir -p /run/sshd && ( {_build_sshd_not_running_check()} && /usr/sbin/sshd -D {SSHD_START_OPTIONS} )"
+
+
+@pure
+def build_self_healing_host_entrypoint_command() -> str:
+    """Build the PID-1 entrypoint command for mngr host containers.
+
+    On every container (re)start, if mngr has already provisioned sshd on this
+    host (indicated by the marker file), (re)start sshd in daemon mode so the
+    container becomes reachable again after an out-of-band restart
+    (``docker restart``, daemon restart, host reboot) without waiting for
+    ``mngr start`` to re-exec it. On the very first create the marker does not
+    exist yet -- even when the base image ships a pre-generated host key -- so
+    this is a no-op and mngr starts sshd during provisioning as usual. PID 1
+    then idles, trapping SIGTERM so a ``docker stop`` exits cleanly and fast.
+    """
+    start_sshd = f"mkdir -p /run/sshd; /usr/sbin/sshd {SSHD_START_OPTIONS}"
+    self_heal = f"[ -f {SSHD_PROVISIONED_MARKER_PATH} ] && {{ {start_sshd}; }}"
+    return f"trap 'exit 0' TERM; {self_heal}; tail -f /dev/null & wait"
+
+
 @pure
 def build_configure_ssh_command(
     user: str,
@@ -158,6 +217,9 @@ def build_configure_ssh_command(
         # Set correct permissions on host keys
         "chmod 600 /etc/ssh/ssh_host_ed25519_key",
         "chmod 644 /etc/ssh/ssh_host_ed25519_key.pub",
+        # Mark this host as mngr-provisioned so the self-healing entrypoint only
+        # (re)starts sshd with mngr's injected key, never a stale image-baked one.
+        f"touch '{SSHD_PROVISIONED_MARKER_PATH}'",
     ]
 
     return " && ".join(script_lines)

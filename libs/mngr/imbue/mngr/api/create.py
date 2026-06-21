@@ -30,6 +30,7 @@ from imbue.mngr.interfaces.host import HostEnvironmentOptions
 from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.primitives import AgentId
@@ -279,6 +280,13 @@ def create(
             # subsequent exec depends on.
             _run_post_host_create_commands(host, target_host.provisioning.post_host_create_commands)
 
+            # Run post-host-create commands on the outer machine (the underlying
+            # VM/daemon host). This is the only create-time hook that targets the
+            # outer rather than the host/container itself -- e.g. installing a
+            # VM-level systemd unit. Skipped (with a warning) for providers that
+            # expose no outer host.
+            _run_post_host_create_outer_commands(host, target_host.provisioning.post_host_create_outer_commands)
+
         # ``host.pre_baked_agent_id`` (default None on the base Host class,
         # populated by providers whose ``create_host`` returns a host with a
         # baked-in agent -- ``ImbueCloudHost`` is the only one today) marks
@@ -421,6 +429,27 @@ def create(
         return result
 
 
+def _run_commands_on_host(
+    executor: OuterHostInterface,
+    commands: tuple[CommandString, ...],
+    *,
+    label: str,
+) -> None:
+    """Run a sequence of commands in order on ``executor``, aborting on the first failure.
+
+    Each command runs via ``executor.execute_idempotent_command``; a non-zero
+    exit raises ``MngrError`` (which aborts the create). Output goes through the
+    standard host exec plumbing so the user sees what ran. ``label`` is woven
+    into the log spans and error message to identify the hook that failed.
+    """
+    with log_span("Running {} commands", label, count=len(commands)):
+        for cmd in commands:
+            with log_span("{}: {}", label, cmd):
+                result = executor.execute_idempotent_command(cmd)
+                if not result.success:
+                    raise MngrError(f"{label} command failed: {cmd}\nstdout: {result.stdout}\nstderr: {result.stderr}")
+
+
 def _run_post_host_create_commands(
     host: OnlineHostInterface,
     commands: tuple[CommandString, ...],
@@ -433,14 +462,33 @@ def _run_post_host_create_commands(
     """
     if not commands:
         return
-    with log_span("Running post-host-create commands", count=len(commands)):
-        for cmd in commands:
-            with log_span("post-host-create: {}", cmd):
-                result = host.execute_idempotent_command(cmd)
-                if not result.success:
-                    raise MngrError(
-                        f"post-host-create command failed: {cmd}\nstdout: {result.stdout}\nstderr: {result.stderr}"
-                    )
+    _run_commands_on_host(host, commands, label="post-host-create")
+
+
+def _run_post_host_create_outer_commands(
+    host: OnlineHostInterface,
+    commands: tuple[CommandString, ...],
+) -> None:
+    """Run the configured post-host-create commands on the host's outer machine.
+
+    Opens the outer host (the underlying VM/daemon host) and runs each command
+    in order via ``execute_idempotent_command``; a non-zero exit raises
+    ``MngrError`` and aborts the create. When outer commands are configured but
+    the provider exposes no outer host (e.g. local, ssh, modal, docker over a
+    local socket or tcp://), that is a misconfiguration -- the commands can never
+    run -- so we raise rather than silently skip.
+    """
+    if not commands:
+        return
+    with host.outer_host() as outer:
+        if outer is None:
+            raise MngrError(
+                f"{len(commands)} post-host-create outer command(s) were configured, but this "
+                f"provider exposes no outer host to run them on. Remove the post_host_create_outer_command "
+                f"setting, or use a provider with an accessible outer host (e.g. docker over ssh://, "
+                f"a VPS-backed provider, or imbue_cloud)."
+            )
+        _run_commands_on_host(outer, commands, label="post-host-create outer")
 
 
 def _write_host_env_vars(

@@ -711,6 +711,7 @@ class CreateCliOptions(CommonCliOptions):
     build_arg: tuple[str, ...]
     start_arg: tuple[str, ...]
     post_host_create_command: tuple[str, ...]
+    post_host_create_outer_command: tuple[str, ...]
     reconnect: bool
     message: str | None
     message_file: str | None
