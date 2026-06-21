@@ -45,6 +45,9 @@ from imbue.mngr.cli.output_helpers import render_format_template
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.cli.output_helpers import write_stderr_line
+from imbue.mngr.colors import ERROR_COLOR
+from imbue.mngr.colors import RESET_COLOR
+from imbue.mngr.colors import should_use_color
 from imbue.mngr.config.agent_alias_registry import list_agent_aliases
 from imbue.mngr.config.completion_writer import write_cli_completions_cache
 from imbue.mngr.config.data_types import CommonCliOptions
@@ -847,6 +850,22 @@ def _format_list_error_line(error: ErrorInfo) -> str:
     return error.message
 
 
+@pure
+def _render_list_errors_block(errors: Sequence[ErrorInfo], is_color_enabled: bool) -> str:
+    """Render the consolidated error block, in bold red when color is enabled.
+
+    Matches ``MngrError.show`` so the listing's end-of-output errors look the same as
+    every other mngr error (red on a color-capable terminal, plain when piped/NO_COLOR).
+    """
+    lines = ["Errors:"]
+    for error in errors:
+        lines.append("  " + _format_list_error_line(error))
+    block = "\n".join(lines)
+    if is_color_enabled:
+        return f"{ERROR_COLOR}{block}{RESET_COLOR}"
+    return block
+
+
 def _emit_list_errors_human(errors: Sequence[ErrorInfo]) -> None:
     """Print all listing errors to stderr in a single consistent block.
 
@@ -857,10 +876,7 @@ def _emit_list_errors_human(errors: Sequence[ErrorInfo]) -> None:
     """
     if not errors:
         return
-    lines = ["Errors:"]
-    for error in errors:
-        lines.append("  " + _format_list_error_line(error))
-    write_stderr_line("\n".join(lines))
+    write_stderr_line(_render_list_errors_block(errors, should_use_color(sys.stderr)))
 
 
 def _emit_json_output(agents: list[AgentDetails], errors: list[ErrorInfo]) -> None:
