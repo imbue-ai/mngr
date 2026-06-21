@@ -2,4 +2,6 @@ Wired the minds-workspace Modal snapshot suite into CI. A new `build-minds-snaps
 
 `scripts/snapshot_minds_e2e_state.py` gained a `--image-id-output <path>` flag so the build job can hand the snapshot image id to the test job without scraping stdout. Stale comments calling `vm_runtime` a preview were updated -- it is now generally available on Modal.
 
-`offload-modal-minds-snapshot.toml` now splits its tests into `all` (no retries) and `flaky` (retried) groups, mirroring `offload-modal.toml`, so only tests explicitly marked `@pytest.mark.flaky` are retried.
+`offload-modal-minds-snapshot.toml` runs a single non-retrying group so a real failure surfaces rather than being masked by retries. It documents how to switch to the `offload-modal.toml`-style `all`/`flaky` retry split once a `@pytest.mark.flaky` snapshot test exists (an empty group can't be added before then, since offload's per-group `--collect-only` exits non-zero when a group matches no tests).
+
+Added `scripts/cleanup_modal_snapshot_images.py`, which reclaims the Modal snapshot images the build job produces (they persist until deleted and Modal has no list-images API). It keeps a durable ledger of built image ids in a Modal `Dict` and supports `record`, `delete`, and `sweep --max-age-hours` modes. The build job records each image, the test job deletes it on a fully successful run, and the periodic `cleanup-modal-environments` job sweeps any leaked image older than an hour as a safety net.

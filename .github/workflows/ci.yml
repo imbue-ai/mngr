@@ -249,6 +249,14 @@ jobs:
       - name: Clean up old Modal test environments
         run: uv run python scripts/cleanup_old_modal_test_environments.py --max-age-hours 1.0
 
+      # Safety net for leaked minds-snapshot images: the build job records
+      # each built image in a Modal-Dict ledger and the test job deletes it
+      # on success, but a cancelled/failed run can leave one behind. This
+      # sweeps any ledger image older than the threshold (mirrors the env
+      # sweep above).
+      - name: Clean up old minds snapshot images
+        run: uv run python scripts/cleanup_modal_snapshot_images.py sweep --max-age-hours 1.0
+
 
   # Acceptance tests via offload on Modal
   test-offload-acceptance:
@@ -530,6 +538,12 @@ jobs:
           echo "image_id=$IMAGE_ID" >> "$GITHUB_OUTPUT"
           echo "Built snapshot image: $IMAGE_ID"
 
+      # Record the built image in the Modal-Dict cleanup ledger immediately,
+      # so even if the run is cancelled before the test job's delete step the
+      # periodic sweep can still reclaim it.
+      - name: Record snapshot image in cleanup ledger
+        run: uv run python scripts/cleanup_modal_snapshot_images.py record "${{ steps.snapshot.outputs.image_id }}"
+
   test-minds-snapshot:
     runs-on: ubuntu-latest
     needs: build-minds-snapshot
@@ -603,3 +617,11 @@ jobs:
           path: test-results/
           include-hidden-files: true
           retention-days: 30
+
+      # Delete the snapshot image only on a fully successful run (this step
+      # is skipped if any prior step -- including the test-result report --
+      # failed, so a failing run keeps the image around for debugging; the
+      # periodic sweep reclaims it later either way).
+      - name: Delete snapshot image after a successful run
+        if: success()
+        run: uv run python scripts/cleanup_modal_snapshot_images.py delete "${{ needs.build-minds-snapshot.outputs.image_id }}"

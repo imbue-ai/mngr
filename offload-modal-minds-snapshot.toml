@@ -64,25 +64,32 @@ type = "pytest"
 command = "bash -c '[ -d /code/mngr ] && cd /code/mngr; exec uv run pytest \"$@\"' --"
 run_args = "--no-cov -p no:xdist"
 
-# Two groups, mirroring offload-modal.toml: non-flaky tests get no
-# retries, flaky-marked tests are retried. Splitting on the `flaky`
-# mark (rather than a single blanket retry_count) keeps a genuinely
-# broken test from being silently masked by retries, while still
-# absorbing the occasional transient vm_runtime sandbox flake on a
-# test that has been explicitly marked @pytest.mark.flaky.
+# Single group, no retries: a real failure should surface, not be masked
+# by a retry. The suite currently has no @pytest.mark.flaky test.
+#
+# NOTE on retries: offload-modal.toml splits into `all`
+# (`... and not flaky`, retry_count=0) and `flaky`
+# (`... and flaky`, retry_count=N) groups so retries apply ONLY to
+# flaky-marked tests. We deliberately do NOT replicate that split yet,
+# because offload runs `pytest --collect-only` per group and a group
+# that matches zero tests exits 5 ("no tests collected"), which offload
+# treats as a discovery failure and fails the whole run. With no flaky
+# snapshot test, a `flaky` group would always be empty and break CI.
+# When the first @pytest.mark.flaky snapshot test is added, switch to the
+# two-group split below (then the `flaky` group is non-empty and safe):
+#     [groups.all]
+#     retry_count = 0
+#     filters = "-m 'minds_snapshot_resume and not flaky'"
+#     [groups.flaky]
+#     retry_count = 4
+#     filters = "-m 'minds_snapshot_resume and flaky'"
 [groups.all]
-# Snapshot-resume tests that are NOT marked flaky. Everything else is
-# scoped out of this run (and `minds_snapshot_resume` is itself scoped
-# out of the other offload configs, so a test with this mark is only
-# ever collected here).
+# Only tests carrying the snapshot-resume mark. Everything else is scoped
+# out of this run (and `minds_snapshot_resume` is itself scoped out of the
+# other offload configs, so a test with this mark is only ever collected
+# here).
 retry_count = 0
-filters = "-m 'minds_snapshot_resume and not flaky'"
-
-[groups.flaky]
-# Snapshot-resume tests explicitly marked @pytest.mark.flaky. Retried
-# so a known-transient flake does not fail the (PR-blocking) run.
-retry_count = 4
-filters = "-m 'minds_snapshot_resume and flaky'"
+filters = "-m 'minds_snapshot_resume'"
 
 [history]
 path = "offload-history-modal-minds-snapshot.jsonl"
