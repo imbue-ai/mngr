@@ -1,4 +1,6 @@
 import subprocess
+import tempfile
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -168,6 +170,47 @@ def test_build_slice_reserve_script_counts_only_slice_disks_for_capacity() -> No
     # Capacity is measured against ALL slice disks on the box (every env + legacy).
     assert '"mngr-slice-' in script
     assert "limactl disk list --json" in script
+
+
+def test_build_slice_reserve_script_reaches_the_marker_on_an_empty_box() -> None:
+    # Regression: the disk-count pipeline runs under `set -o pipefail`, so on an
+    # empty box (grep matches no slice disks and exits non-zero) it must NOT abort
+    # the script before the slot is reserved -- `disk_count` must read as 0 and the
+    # script must proceed to print MNGR_SLICE_RESERVED. We execute the rendered
+    # script with `limactl`/`ss` stubbed to simulate an empty box; the lock lines
+    # (asserted elsewhere) are stripped so the test needs no writable /home path.
+    script = build_slice_reserve_script(
+        instance_name="mngr-slice-dev-josh-abc",
+        disk_name="mngr-slice-dev-josh-abc-data",
+        disk_gib=40,
+        slot_count=6,
+        port_range_start=22000,
+        port_range_end=22002,
+        yaml_template_text="cpus: 2\n",
+        lima_service_user="limahost",
+    )
+    runnable = script.replace("exec 9>", "true # exec 9>").replace("flock 9", "true # flock 9")
+    with tempfile.TemporaryDirectory() as tmp:
+        bin_dir = Path(tmp) / "bin"
+        bin_dir.mkdir()
+        # Empty box: limactl reports no disks and succeeds for create/disk-create;
+        # ss reports no listening ports. These mimic a freshly-prepped box.
+        (bin_dir / "limactl").write_text("#!/bin/bash\nexit 0\n")
+        (bin_dir / "ss").write_text("#!/bin/bash\nexit 0\n")
+        for stub in ("limactl", "ss"):
+            (bin_dir / stub).chmod(0o755)
+        home = Path(tmp) / "home"
+        (home / ".lima").mkdir(parents=True)
+        result = subprocess.run(
+            ["bash"],
+            input=runnable,
+            text=True,
+            capture_output=True,
+            env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(home)},
+        )
+    assert result.returncode == 0, result.stderr
+    # disk_count read as 0 (empty box), so the slot was reserved and the marker printed.
+    assert "MNGR_SLICE_RESERVED 22000 22001" in result.stdout
 
 
 def test_parse_reserved_ports_reads_the_marker_line() -> None:

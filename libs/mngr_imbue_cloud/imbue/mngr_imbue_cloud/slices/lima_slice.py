@@ -228,9 +228,11 @@ export PATH=/usr/local/bin:$HOME/.local/bin:$PATH
 exec 9>{shlex.quote(lock_path)}
 flock 9
 
-# 1. Cross-env capacity guard: count ALL slice data disks on the box.
+# 1. Cross-env capacity guard: count ALL slice data disks on the box. The
+# trailing ``|| true`` keeps an empty box (grep matches nothing, exits 1) from
+# aborting the whole script under ``set -o pipefail`` -- ``wc -l`` still yields 0.
 disk_count=$(limactl disk list --json 2>/dev/null \
-    | grep -oE '"name":[[:space:]]*"{SLICE_LIMA_INSTANCE_PREFIX}[^"]*"' | wc -l | tr -d ' ')
+    | grep -oE '"name":[[:space:]]*"{SLICE_LIMA_INSTANCE_PREFIX}[^"]*"' | wc -l | tr -d ' ' || true)
 if [ "$disk_count" -ge {slot_count} ]; then
     echo "{SLICE_BOX_FULL_MARKER} $disk_count/{slot_count}" >&2
     exit 4
