@@ -195,6 +195,20 @@ class LeaseResult(FrozenModel):
     host_id: str = Field(description="Pre-baked mngr host id")
     host_name: str = Field(description="User-chosen friendly name for the leased host")
     attributes: dict[str, Any] = Field(default_factory=dict, description="Attributes the row was matched against")
+    outer_host_public_key: str | None = Field(
+        default=None,
+        description=(
+            "The VPS/VM-root sshd host public key (port ssh_port). Pinned for strict host-key "
+            "checking on the outer connection; None only against a connector too old to return it."
+        ),
+    )
+    container_host_public_key: str | None = Field(
+        default=None,
+        description=(
+            "The docker container sshd host public key (port container_ssh_port). Pinned for the "
+            "agent connection on the fast/adopt path; None only against a connector too old to return it."
+        ),
+    )
 
 
 class LeasedHostInfo(FrozenModel):
@@ -215,6 +229,12 @@ class LeasedHostInfo(FrozenModel):
     host_name: str = Field(description="User-chosen friendly name for the leased host")
     attributes: dict[str, Any] = Field(default_factory=dict)
     leased_at: str = Field(description="ISO-8601 timestamp")
+    outer_host_public_key: str | None = Field(
+        default=None, description="The VPS/VM-root sshd host public key, if known"
+    )
+    container_host_public_key: str | None = Field(
+        default=None, description="The docker container sshd host public key, if known"
+    )
 
 
 class AuthUser(FrozenModel):

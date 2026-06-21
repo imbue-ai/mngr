@@ -1076,6 +1076,8 @@ class FakeCursor:
                             row.host_name,
                             _row_attributes(row),
                             row.leased_at,
+                            row.outer_host_public_key,
+                            row.container_host_public_key,
                         )
                     )
 

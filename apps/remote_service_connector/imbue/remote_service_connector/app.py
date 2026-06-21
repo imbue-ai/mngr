@@ -471,6 +471,12 @@ class LeasedHostInfo(BaseModel):
     host_name: str = Field(description="User-chosen friendly name for the leased host")
     attributes: dict[str, Any] = Field(description="Attributes attached to the lease row")
     leased_at: str = Field(description="ISO 8601 timestamp when the host was leased")
+    outer_host_public_key: str | None = Field(
+        default=None, description="The VPS/VM-root sshd host public key, for strict host-key pinning"
+    )
+    container_host_public_key: str | None = Field(
+        default=None, description="The docker container sshd host public key, for strict host-key pinning"
+    )
 
 
 # -- LiteLLM key management models --
@@ -2892,7 +2898,7 @@ def list_leased_hosts(request: Request) -> list[dict[str, object]]:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT id, vps_address, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, "
-                    "host_name, attributes, leased_at "
+                    "host_name, attributes, leased_at, outer_host_public_key, container_host_public_key "
                     "FROM pool_hosts "
                     "WHERE status = 'leased' AND leased_to_user = %s",
                     (admin.username,),
@@ -2912,6 +2918,8 @@ def list_leased_hosts(request: Request) -> list[dict[str, object]]:
                 host_name=r[7],
                 attributes=r[8] if isinstance(r[8], dict) else {},
                 leased_at=str(r[9]) if r[9] is not None else "",
+                outer_host_public_key=r[10],
+                container_host_public_key=r[11],
             ).model_dump()
             for r in rows
         ]
