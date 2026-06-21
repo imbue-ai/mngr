@@ -77,10 +77,12 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import find_server_capacity_by_id
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_disk_name
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import build_slice_pool_host_insert_values
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import delete_pool_host_row
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_server_by_id
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_server_capacities
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_slice_disk_names_for_server
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_slice_instance_names_for_server
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_unleased_slice_teardown_targets
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import insert_bare_metal_server
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import insert_slice_pool_host
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import update_server
@@ -865,6 +867,53 @@ def destroy_slice_vm(*, server: BareMetalServer, lima_instance_name: str) -> Non
             private_key_path=str(private_key_path),
         )
         client.destroy_instance(VpsInstanceId(lima_instance_name))
+
+
+def tear_down_unleased_slices(database_url: str) -> dict[str, Any]:
+    """Tear down every unleased slice VM recorded in ``database_url`` and drop its row.
+
+    The teardown an env destroy runs (before its per-env DB is deleted) so the env's
+    baked-but-unleased pool slices don't leak their VMs on the shared boxes. Leased
+    slices are excluded: they are torn down via their agent's release path. Each VM
+    teardown is idempotent (an already-absent VM counts as success); the row is
+    dropped only after its VM is gone. Must-succeed: raises
+    ``BareMetalProvisioningError`` listing every slice whose box could not be
+    reached, so the caller can stop the destroy rather than silently leak.
+    """
+    conn = psycopg2.connect(database_url)
+    try:
+        targets = fetch_unleased_slice_teardown_targets(conn)
+    finally:
+        conn.close()
+    if not targets:
+        return {"torn_down": 0, "failed": 0}
+    torn_down_count = 0
+    failures: list[str] = []
+    with _pool_private_key_path() as private_key_path:
+        for target in targets:
+            client = LimaSliceVpsClient(
+                box_address=target.box_public_address,
+                box_ssh_user=target.lima_service_user,
+                private_key_path=str(private_key_path),
+            )
+            try:
+                client.destroy_instance(VpsInstanceId(target.lima_instance_name))
+            except (MngrError, OSError) as exc:
+                logger.warning("Failed to tear down slice {}: {}", target.lima_instance_name, exc)
+                failures.append(f"{target.lima_instance_name} on {target.box_public_address}: {exc}")
+                continue
+            conn = psycopg2.connect(database_url)
+            try:
+                delete_pool_host_row(conn, target.pool_host_row_id)
+            finally:
+                conn.close()
+            torn_down_count += 1
+            logger.info("Tore down unleased slice {} on {}", target.lima_instance_name, target.box_public_address)
+    if failures:
+        raise BareMetalProvisioningError(
+            f"failed to tear down {len(failures)} slice(s); their VMs may still be running: {'; '.join(failures)}"
+        )
+    return {"torn_down": torn_down_count, "failed": 0}
 
 
 def allocate_slices(

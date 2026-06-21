@@ -114,3 +114,58 @@ def test_server_from_row_round_trips() -> None:
     assert reconstructed.slot_count == 8
     assert str(reconstructed.status) == "ready"
     assert reconstructed.ram_gb == 64
+
+
+class _FakeCursor:
+    """Minimal cursor that returns scripted rows for the one SELECT under test."""
+
+    def __init__(self, rows: list[tuple]) -> None:
+        self._rows = rows
+        self.executed_sql: str | None = None
+
+    def __enter__(self) -> "_FakeCursor":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+    def execute(self, sql: str, params: tuple = ()) -> None:
+        self.executed_sql = sql
+
+    def fetchall(self) -> list[tuple]:
+        return self._rows
+
+
+class _FakeConn:
+    """Minimal connection yielding a scripted cursor (no real DB)."""
+
+    def __init__(self, rows: list[tuple]) -> None:
+        self._cursor = _FakeCursor(rows)
+
+    def cursor(self) -> _FakeCursor:
+        return self._cursor
+
+
+def test_fetch_unleased_slice_teardown_targets_maps_rows_to_targets() -> None:
+    from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_unleased_slice_teardown_targets
+
+    rows = [
+        ("row-1", "mngr-slice-dev-josh-aaa", "mngr-slice-dev-josh-aaa-data", "15.0.0.1", "limahost"),
+        # A row whose lima_service_user is NULL falls back to root.
+        ("row-2", "mngr-slice-dev-josh-bbb", None, "15.0.0.2", None),
+    ]
+    targets = fetch_unleased_slice_teardown_targets(_FakeConn(rows))
+    assert [t.pool_host_row_id for t in targets] == ["row-1", "row-2"]
+    assert targets[0].lima_disk_name == "mngr-slice-dev-josh-aaa-data"
+    assert targets[1].lima_disk_name is None
+    assert targets[0].box_public_address == "15.0.0.1"
+    assert targets[1].lima_service_user == "root"
+
+
+def test_fetch_unleased_slice_teardown_targets_query_excludes_leased_and_removing() -> None:
+    from imbue.mngr_imbue_cloud.slices.bare_metal_db import _SELECT_UNLEASED_SLICE_TEARDOWN_TARGETS_SQL
+
+    # Leased slices are torn down by their agent's release path; removing rows are
+    # already mid-teardown by the connector sweep -- both must be excluded here.
+    assert "NOT IN ('leased', 'removing')" in _SELECT_UNLEASED_SLICE_TEARDOWN_TARGETS_SQL
+    assert "backend_kind = 'slice'" in _SELECT_UNLEASED_SLICE_TEARDOWN_TARGETS_SQL

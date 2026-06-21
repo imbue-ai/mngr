@@ -2173,6 +2173,154 @@ def clean_up_slice_on_box(
     _run_ssh_commands_on_box(box_address, 22, lima_service_user, management_key_pem, commands)
 
 
+# Slice lima resources are named ``mngr-slice-<env>-<host-hex>`` (the data disk
+# adds a ``-data`` suffix). The host hex is a hyphen-free uuid, so the env stamp is
+# everything between the prefix and the trailing ``-<host-hex>``. Mirrors
+# ``mngr_imbue_cloud.slices.bare_metal`` (the connector has no dependency on it).
+_SLICE_LIMA_PREFIX = "mngr-slice-"
+_SLICE_LIMA_DISK_SUFFIX = "-data"
+_STAMPED_SLICE_CORE_RE = re.compile(r"^(?P<env>.+)-(?P<host>[0-9a-f]{32})$")
+# Non-login SSH may not source the lima user's profile, so set PATH explicitly
+# (limactl is extracted to /usr/local/bin by box prep).
+_BOX_LIMACTL_PATH_PREFIX = "PATH=/usr/local/bin:$HOME/.local/bin:$PATH"
+
+
+def slice_name_env_owner(name: str) -> str | None:
+    """The env a slice instance/disk name is stamped for, or None if legacy/foreign/not-a-slice."""
+    if not name.startswith(_SLICE_LIMA_PREFIX):
+        return None
+    core = name[len(_SLICE_LIMA_PREFIX) :]
+    if core.endswith(_SLICE_LIMA_DISK_SUFFIX):
+        core = core[: -len(_SLICE_LIMA_DISK_SUFFIX)]
+    match = _STAMPED_SLICE_CORE_RE.match(core)
+    return match.group("env") if match else None
+
+
+def _list_box_lima_names(host: str, user: str, management_key_pem: str, json_subcommand: str) -> set[str]:
+    """SSH the box and return the ``name`` of every lima instance or disk (per ``json_subcommand``).
+
+    ``json_subcommand`` is ``list --json`` (instances) or ``disk list --json`` (disks);
+    both emit one JSON object per line. Raises ``PoolHostCleanupError`` on a non-zero exit
+    so the caller skips this box rather than mistaking an SSH failure for "no VMs".
+    """
+    names: set[str] = set()
+    command = f"{_BOX_LIMACTL_PATH_PREFIX} limactl {json_subcommand}"
+    with _management_ssh_client(host, 22, user, management_key_pem, timeout_seconds=30) as client:
+        _stdin, stdout, stderr = client.exec_command(command)
+        exit_status = stdout.channel.recv_exit_status()
+        output = stdout.read().decode()
+        if exit_status != 0:
+            raise PoolHostCleanupError(
+                f"`limactl {json_subcommand}` on {host} failed (exit {exit_status}): {stderr.read().decode()}"
+            )
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            logger.warning("Skipping unparseable lima JSON line on %s: %r", host, stripped)
+            continue
+        name = parsed.get("name")
+        if name:
+            names.add(name)
+    return names
+
+
+def reconcile_slice_boxes(conn: Any, env_name: str) -> tuple[int, int]:
+    """Reconcile each box's lima slices against the DB, scoped to ``env_name``'s stamped slices.
+
+    Returns ``(reaped_count, divergence_count)``. For every bare-metal box:
+
+    * A slice resource stamped for ``env_name`` that is present on the box but has no
+      pool_hosts row is reaped (limactl delete) -- the periodic analogue of the
+      bake-time orphan reaper, catching orphans even when no bake is running.
+    * A pool_hosts row whose VM is absent from the box is a divergence: logged at
+      error level (an alert) rather than auto-deleted, since a transient SSH failure
+      must never be mistaken for a vanished VM. Boxes whose listing fails are skipped.
+
+    Other envs' slices and legacy un-stamped slices are never touched, so this is
+    safe in both per-env-DB (dev) and shared-DB (staging/prod) tiers: each
+    deployment reconciles only its own stamped slices.
+    """
+    if not env_name:
+        logger.info("Slice reconcile skipped: connector has no MINDS_ENV_NAME to scope to")
+        return (0, 0)
+    management_key_pem = os.environ["POOL_SSH_PRIVATE_KEY"]
+    reaped_count = 0
+    divergence_count = 0
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, public_address, lima_service_user FROM bare_metal_servers")
+        servers = cur.fetchall()
+    for server_id, public_address, lima_service_user in servers:
+        if not public_address:
+            continue
+        user = lima_service_user or "root"
+        try:
+            box_instances = _list_box_lima_names(public_address, user, management_key_pem, "list --json")
+            box_disks = _list_box_lima_names(public_address, user, management_key_pem, "disk list --json")
+        except (PoolHostCleanupError, paramiko.SSHException, OSError) as exc:
+            logger.warning("Slice reconcile skipped box %s (could not list lima resources): %s", public_address, exc)
+            continue
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT lima_instance_name, lima_disk_name FROM pool_hosts "
+                "WHERE backend_kind = %s AND bare_metal_server_id = %s",
+                (BACKEND_KIND_SLICE, str(server_id)),
+            )
+            rows = cur.fetchall()
+        tracked_instances = {row[0] for row in rows if row[0]}
+        tracked_disks = {row[1] for row in rows if row[1]}
+
+        # Reap this env's stamped slices that are on the box but have no DB row.
+        orphan_instances = {
+            name for name in box_instances if slice_name_env_owner(name) == env_name and name not in tracked_instances
+        }
+        orphan_disks = {
+            name for name in box_disks if slice_name_env_owner(name) == env_name and name not in tracked_disks
+        }
+        for instance_name in sorted(orphan_instances):
+            matching_disk = next((d for d in orphan_disks if d == f"{instance_name}{_SLICE_LIMA_DISK_SUFFIX}"), None)
+            try:
+                _run_ssh_commands_on_box(
+                    public_address,
+                    22,
+                    user,
+                    management_key_pem,
+                    build_slice_teardown_commands(instance_name, matching_disk),
+                )
+                reaped_count += 1
+                logger.info("Slice reconcile reaped untracked %s on %s", instance_name, public_address)
+            except (PoolHostCleanupError, paramiko.SSHException, OSError) as exc:
+                logger.warning("Slice reconcile could not reap %s on %s: %s", instance_name, public_address, exc)
+        # Reap orphan data disks whose instance was already gone (disk outlived VM).
+        for disk_name in sorted(orphan_disks):
+            if any(disk_name == f"{inst}{_SLICE_LIMA_DISK_SUFFIX}" for inst in orphan_instances):
+                continue
+            try:
+                _run_ssh_commands_on_box(
+                    public_address,
+                    22,
+                    user,
+                    management_key_pem,
+                    (f"{_BOX_LIMACTL_PATH_PREFIX} limactl disk delete --force {shlex.quote(disk_name)}",),
+                )
+                reaped_count += 1
+            except (PoolHostCleanupError, paramiko.SSHException, OSError) as exc:
+                logger.warning("Slice reconcile could not reap disk %s on %s: %s", disk_name, public_address, exc)
+
+        # A DB row whose VM is gone is a divergence: alert, do not auto-delete.
+        for missing_instance in sorted(tracked_instances - box_instances):
+            divergence_count += 1
+            logger.error(
+                "Slice reconcile divergence on %s: pool_hosts row for %s has no VM on the box (needs manual rebake/cleanup)",
+                public_address,
+                missing_instance,
+            )
+    return (reaped_count, divergence_count)
+
+
 def run_pool_host_cleanup_sweep(conn: Any, ovh_ops: OvhOps, region_code: str) -> tuple[int, int]:
     """Clean up every ``removing`` pool host: strip tags, cancel, delete the row.
 
@@ -4106,7 +4254,26 @@ def cleanup_removing_pool_hosts() -> dict[str, int]:
         success_count, failure_count = run_pool_host_cleanup_sweep(
             conn, _get_ovh_ops(), ovh_region_code_for_endpoint(_get_ovh_endpoint())
         )
+        # Reconcile this env's slices on every box against the DB (reap our orphans,
+        # alert on rows whose VM vanished). Scoped to MINDS_ENV_NAME so it is safe on
+        # a box shared by multiple dev envs. Best-effort: never fail the sweep.
+        try:
+            reaped_count, divergence_count = reconcile_slice_boxes(conn, _current_minds_env_name())
+        except (psycopg2.Error, paramiko.SSHException, OSError) as exc:
+            logger.warning("Slice box reconcile failed (continuing): %s", exc)
+            reaped_count, divergence_count = 0, 0
     finally:
         conn.close()
-    logger.info("Pool host cleanup sweep done: cleaned=%d failed=%d", success_count, failure_count)
-    return {"cleaned": success_count, "failed": failure_count}
+    logger.info(
+        "Pool host cleanup sweep done: cleaned=%d failed=%d slice_reaped=%d slice_divergences=%d",
+        success_count,
+        failure_count,
+        reaped_count,
+        divergence_count,
+    )
+    return {
+        "cleaned": success_count,
+        "failed": failure_count,
+        "slice_reaped": reaped_count,
+        "slice_divergences": divergence_count,
+    }

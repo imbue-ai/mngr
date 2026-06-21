@@ -742,3 +742,11 @@ def test_merge_extra_env_with_empty_overlay_returns_shell_copy() -> None:
         extra_env={},
     )
     assert merged == {"PATH": "/usr/bin"}
+
+
+def test_build_teardown_slices_admin_args_forwards_dsn_when_present() -> None:
+    from imbue.minds.cli.pool import build_teardown_slices_admin_args
+
+    assert build_teardown_slices_admin_args(database_url=None) == ["teardown-slices"]
+    args = build_teardown_slices_admin_args(database_url="postgres://example")
+    assert args == ["teardown-slices", "--database-url", "postgres://example"]

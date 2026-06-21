@@ -203,6 +203,44 @@ def build_create_admin_args(
     return args
 
 
+def build_teardown_slices_admin_args(*, database_url: str | None) -> list[str]:
+    """Compose the ``mngr imbue_cloud admin pool teardown-slices`` argv.
+
+    Forwards ``--database-url`` only when non-None (dev auto-resolves it from the
+    activated env's secrets.toml; staging/production pass the Vault-resolved DSN).
+    """
+    args = ["teardown-slices"]
+    if database_url is not None:
+        args.extend(["--database-url", database_url])
+    return args
+
+
+def tear_down_env_pool_slices(env_name: str) -> None:
+    """Tear down the env's unleased pool slices on their boxes before the env's DB is deleted.
+
+    Resolves the pool SSH key (Vault) + host_pool DSN exactly like ``pool create``,
+    then shells to ``mngr imbue_cloud admin pool teardown-slices``. Leased slices are
+    left to their agent's release path. If the env has no pool SSH key in Vault it
+    never created slices through the normal path, so teardown is skipped with a
+    warning rather than blocking the destroy; a genuine teardown failure (an
+    unreachable box) raises so the destroy stops rather than silently leak VMs.
+    """
+    try:
+        pool_private_key = read_pool_private_key_from_vault(env_name)
+    except VaultReadError as exc:
+        logger.warning(
+            "No pool SSH key in Vault for env '{}' ({}); skipping slice teardown (env likely never baked slices).",
+            env_name,
+            exc,
+        )
+        return
+    database_url = resolve_host_pool_dsn(env_name, None)
+    args = build_teardown_slices_admin_args(database_url=database_url)
+    _raise_on_failure(
+        "teardown-slices", _run_admin_command(args, extra_env={_POOL_PRIVATE_KEY_ENV_VAR: pool_private_key})
+    )
+
+
 def build_list_admin_args(*, database_url: str | None) -> list[str]:
     """Compose the ``mngr imbue_cloud admin pool list`` argv.
 
