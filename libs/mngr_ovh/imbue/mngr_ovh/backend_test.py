@@ -1,12 +1,11 @@
 """Tests for OVH provider backend registration + F1 source-position invariant."""
 
 import inspect
+import os
 import re
 from pathlib import Path
-from unittest.mock import MagicMock
-from unittest.mock import patch
 
-import ovh
+import ovh.config
 import pytest
 
 from imbue.mngr.config.data_types import MngrContext
@@ -19,8 +18,23 @@ from imbue.mngr_ovh.backend import OVH_BACKEND_NAME
 from imbue.mngr_ovh.backend import OvhProvider
 from imbue.mngr_ovh.backend import OvhProviderBackend
 from imbue.mngr_ovh.backend import register_provider_backend
-from imbue.mngr_ovh.client import OvhVpsClient
 from imbue.mngr_ovh.config import OvhProviderConfig
+
+# python-ovh resolves credentials from these fixed files (no env override exists for
+# the path). If any are present on the host, an "unconfigured" config could still pick
+# up real credentials, so the unconfigured-provider test below skips in that case.
+_OVH_CONFIG_FILE_PATHS: tuple[str, ...] = tuple(ovh.config.CONFIG_PATH)
+
+_OVH_CREDENTIAL_ENV_VARS: tuple[str, ...] = (
+    "OVH_ENDPOINT",
+    "OVH_APPLICATION_KEY",
+    "OVH_APPLICATION_SECRET",
+    "OVH_APP_KEY",
+    "OVH_APP_SECRET",
+    "OVH_CONSUMER_KEY",
+    "OVH_CLIENT_ID",
+    "OVH_CLIENT_SECRET",
+)
 
 
 def test_backend_name() -> None:
@@ -59,22 +73,21 @@ def test_register_provider_backend_returns_tuple() -> None:
     assert result[1] is OvhProviderConfig
 
 
-def test_build_provider_instance_raises_not_authorized_when_unconfigured(temp_mngr_ctx: MngrContext) -> None:
-    """An enabled-but-unconfigured OVH provider surfaces as ProviderNotAuthorizedError, not a silent empty listing.
-
-    python-ovh resolves credentials from fixed files (e.g. ~/.ovh.conf) that are not
-    env-overridable, so we patch ``build_ovh_client`` to return a placeholder
-    unconfigured client (mirroring cli_test) rather than depending on the host's state.
-    """
-    raw_client = MagicMock(spec=ovh.Client)
-    raw_client.call = MagicMock(side_effect=AssertionError("no API call should fire when unconfigured"))
-    placeholder = OvhVpsClient(ovh_client=raw_client, subsidiary="US", is_unconfigured=True)
+def test_build_provider_instance_raises_not_authorized_when_unconfigured(
+    temp_mngr_ctx: MngrContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An enabled-but-unconfigured OVH provider surfaces as ProviderNotAuthorizedError, not a silent empty listing."""
+    # Skip if the host has a real OVH config file: python-ovh would then resolve real
+    # credentials and the provider would (correctly) construct rather than raise.
+    if any(os.path.exists(path) for path in _OVH_CONFIG_FILE_PATHS):
+        pytest.skip("an OVH config file exists on this host, so credentials are resolvable")
+    for env_var in _OVH_CREDENTIAL_ENV_VARS:
+        monkeypatch.delenv(env_var, raising=False)
     name = ProviderInstanceName("ovh-no-creds")
     config = OvhProviderConfig(backend=OVH_BACKEND_NAME)
 
-    with patch("imbue.mngr_ovh.backend.build_ovh_client", return_value=placeholder):
-        with pytest.raises(ProviderNotAuthorizedError) as exc_info:
-            OvhProviderBackend.build_provider_instance(name, config, temp_mngr_ctx)
+    with pytest.raises(ProviderNotAuthorizedError) as exc_info:
+        OvhProviderBackend.build_provider_instance(name, config, temp_mngr_ctx)
 
     # A ProviderUnavailableError subclass so read paths keep the provider visible
     # (reported as unavailable) rather than dropping it from the listing.
