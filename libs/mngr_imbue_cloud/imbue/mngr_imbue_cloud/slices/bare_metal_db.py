@@ -31,9 +31,9 @@ _INSERT_SLICE_POOL_HOST_SQL: Final[str] = (
     "INSERT INTO pool_hosts "
     "(id, vps_address, vps_instance_id, agent_id, host_id, host_name, ssh_port, ssh_user, "
     "container_ssh_port, status, attributes, region, backend_kind, bare_metal_server_id, "
-    "lima_instance_name, lima_disk_name, created_at) "
+    "lima_instance_name, lima_disk_name, outer_host_public_key, container_host_public_key, created_at) "
     "VALUES (%s, %s, %s, %s, %s, %s, %s, 'root', %s, 'available', %s::jsonb, %s, "
-    "'slice', %s, %s, %s, NOW())"
+    "'slice', %s, %s, %s, %s, %s, NOW())"
 )
 
 _SELECT_SERVERS_SQL: Final[str] = (
@@ -102,6 +102,10 @@ def build_slice_pool_host_insert_values(
     bare_metal_server_id: str,
     lima_instance_name: str,
     lima_disk_name: str,
+    # Baked sshd host public keys (deterministic, from `mngr create --format json`):
+    # the VM-root key and the inner container key, persisted so leasing pins them.
+    outer_host_public_key: str,
+    container_host_public_key: str,
 ) -> tuple[Any, ...]:
     """Build the value tuple for :data:`_INSERT_SLICE_POOL_HOST_SQL`.
 
@@ -125,6 +129,8 @@ def build_slice_pool_host_insert_values(
         bare_metal_server_id,
         lima_instance_name,
         lima_disk_name,
+        outer_host_public_key,
+        container_host_public_key,
     )
 
 

@@ -92,8 +92,8 @@ _SSH_COMMAND_TIMEOUT_SECONDS: Final[int] = 60
 _INSERT_POOL_HOST_SQL: Final[str] = (
     "INSERT INTO pool_hosts "
     "(id, vps_address, vps_instance_id, agent_id, host_id, host_name, ssh_port, ssh_user, "
-    "container_ssh_port, status, attributes, region, created_at) "
-    "VALUES (%s, %s, %s, %s, %s, %s, 22, 'root', %s, 'available', %s::jsonb, %s, NOW())"
+    "container_ssh_port, status, attributes, region, outer_host_public_key, container_host_public_key, created_at) "
+    "VALUES (%s, %s, %s, %s, %s, %s, 22, 'root', %s, 'available', %s::jsonb, %s, %s, %s, NOW())"
 )
 
 
@@ -109,7 +109,11 @@ def build_pool_host_insert_values(
     # OVH datacenter code the VPS was ordered in; persisted so the connector can
     # apply region-aware lease filtering/ordering.
     region: str,
-) -> tuple[str, str, str, str, str, str, int, str, str]:
+    # Baked sshd host public keys (deterministic, from `mngr create --format json`),
+    # persisted so leasing/teardown pin them instead of scanning.
+    outer_host_public_key: str,
+    container_host_public_key: str,
+) -> tuple[str, str, str, str, str, str, int, str, str, str, str]:
     """Build the value tuple for :data:`_INSERT_POOL_HOST_SQL`.
 
     ``vps_instance_id`` MUST be the OVH service name -- it is what every
@@ -133,6 +137,8 @@ def build_pool_host_insert_values(
         container_ssh_port,
         attributes_json,
         region,
+        outer_host_public_key,
+        container_host_public_key,
     )
 
 
@@ -332,6 +338,11 @@ def _create_single_pool_host(
     )
     if not baked.ssh_host:
         raise PoolBakeError(f"baked OVH host {host_name} has no ssh_host; cannot insert pool row")
+    if not baked.outer_host_public_key or not baked.container_host_public_key:
+        raise PoolBakeError(
+            f"baked OVH host {host_name} did not surface its sshd host public keys "
+            "(needs a vps_docker provider that emits them in `mngr create --format json`); cannot insert pool row"
+        )
 
     full_address = f"{BAKED_SERVICES_AGENT_NAME}@{host_name}.ovh"
     # Let the FCT deferred-install (heavy apt + browser download, kicked off at boot)
@@ -381,6 +392,8 @@ def _create_single_pool_host(
                         container_ssh_port=_CONTAINER_SSH_PORT,
                         attributes_json=_json.dumps(attributes),
                         region=region,
+                        outer_host_public_key=baked.outer_host_public_key,
+                        container_host_public_key=baked.container_host_public_key,
                     ),
                 )
     finally:

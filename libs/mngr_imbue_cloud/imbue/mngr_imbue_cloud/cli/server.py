@@ -619,6 +619,11 @@ def _bake_one_slice(
                     f"stopping the services agent on slice {host_name} failed (exit {stop_rc}): {stop_err.strip()}"
                 )
             host_id_obj = HostId(baked.host_id)
+            if not baked.outer_host_public_key or not baked.container_host_public_key:
+                raise BareMetalProvisioningError(
+                    f"baked slice {host_name} did not surface its sshd host public keys "
+                    "(needs a slice provider that emits them in `mngr create --format json`); cannot insert pool row"
+                )
             values = build_slice_pool_host_insert_values(
                 row_id=str(uuid4()),
                 box_public_address=str(server.public_address),
@@ -632,6 +637,8 @@ def _bake_one_slice(
                 bare_metal_server_id=str(server.id),
                 lima_instance_name=slice_lima_instance_name(host_id_obj, env_name),
                 lima_disk_name=slice_lima_disk_name(host_id_obj, env_name),
+                outer_host_public_key=baked.outer_host_public_key,
+                container_host_public_key=baked.container_host_public_key,
             )
             conn = psycopg2.connect(database_url)
             try:
