@@ -14,6 +14,7 @@ parses those into typed pydantic objects.
 
 import json as _json
 import os
+import time
 from collections.abc import Mapping
 from collections.abc import Sequence
 from typing import Any
@@ -181,14 +182,28 @@ class ImbueCloudCli(MutableModel):
         env = dict(os.environ)
         env[_CONNECTOR_URL_SUBPROCESS_ENV] = str(self.connector_url).rstrip("/")
         cg = self.parent_concurrency_group.make_concurrency_group(name=cg_name)
+        # Debug timing so a slow/timed-out imbue_cloud command tells us which
+        # subcommand it was and how long it took before the timeout fired
+        # (these run as detached post-create callbacks, so a bare "exit -15" is
+        # otherwise hard to attribute).
+        logger.debug("Running imbue_cloud command (cg={}, timeout={}s): {}", cg_name, timeout_seconds, " ".join(args))
+        start_time = time.monotonic()
         with cg:
-            return cg.run_process_to_completion(
+            result = cg.run_process_to_completion(
                 command=full_command,
                 timeout=float(timeout_seconds),
                 is_checked_after=False,
                 on_output=on_output,
                 env=env,
             )
+        logger.debug(
+            "Finished imbue_cloud command (cg={}) in {:.1f}s: returncode={} timed_out={}",
+            cg_name,
+            time.monotonic() - start_time,
+            result.returncode,
+            result.is_timed_out,
+        )
+        return result
 
     def _expect_success(
         self,
