@@ -32,7 +32,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Changed: A settings *patch* field (a claude agent type's `settings_overrides`) now **accumulates across config scopes** (user < project < local) and `parent_type` inheritance instead of a higher/child scope replacing the whole value: non-overlapping keys from every scope survive and same-key `__extend`s combine. Cross-scope narrowing is surfaced at config-load (escapable via `allow_settings_key_assignment_narrowing`, `allow__extend`, or `allow__assign`).
 
-- Changed: `Static*` markers (`StaticTuple` / `StaticList` / `StaticDict`) mark an aggregate atomic so replacing it is exempt from the narrowing guard; mngr's `StringDerivedTuple` / `ScalarTuple` are now `StaticTuple` subclasses.
+- Changed: `Static*` markers (`StaticTuple` / `StaticList` / `StaticDict`) mark an aggregate atomic so replacing it is exempt from the narrowing guard. `ScalarTuple` (a tuple-typed value written as a single string, e.g. `cli_args`) is now a `StaticTuple` subclass, and the former `StringDerivedTuple` marker is folded into it.
 
 - Changed: The narrowing error's `__extend` example is now tailored to the offending key (e.g. `work_dir_extra_paths__extend = ...`, or `permissions__extend = {allow__extend = ...}` for a nested path) instead of a fixed generic example.
 
