@@ -6,7 +6,6 @@ that records issued commands and returns canned ``CommandResult``s, which
 keeps these unit tests fast and free of any real SSH/Docker dependency.
 """
 
-import base64
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,7 +25,6 @@ from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import HostId
 from imbue.mngr_vps.container_setup import LABEL_HOST_ID
-from imbue.mngr_vps.container_setup import _build_start_container_script
 from imbue.mngr_vps.container_setup import build_image_on_outer
 from imbue.mngr_vps.container_setup import build_ssh_transport_for_outer
 from imbue.mngr_vps.container_setup import check_directory_exists_on_outer
@@ -127,12 +125,6 @@ def _outer(*responses: CommandResult) -> OuterHostInterface:
 def _stub(outer: OuterHostInterface) -> _StubOuter:
     """Recover the underlying ``_StubOuter`` so tests can introspect ``recorded``."""
     return cast(_StubOuter, outer)
-
-
-def _decode_remote_sh_command(command: str) -> str:
-    """Decode the ``echo <b64> | base64 -d | sh`` wrapper back into its shell script."""
-    encoded = command.split(" | ", 1)[0].removeprefix("echo ")
-    return base64.b64decode(encoded).decode("utf-8")
 
 
 # =============================================================================
@@ -260,25 +252,13 @@ def test_stop_container_includes_timeout_arg() -> None:
     assert _stub(outer).recorded[0].command == "docker stop -t 5 my-container"
 
 
-def test_start_container_uses_docker_start() -> None:
+def test_start_container_runs_docker_start_in_one_round_trip() -> None:
     outer = _outer()
     start_container(outer, "my-container")
-    # start_container now ships a single base64-wrapped recovery script (start +
-    # conditional runsc-overlay cleanup + retry) in one round-trip; decode it and
-    # confirm it drives `docker start` for the container.
-    decoded = _decode_remote_sh_command(_stub(outer).recorded[0].command)
-    assert "name=my-container" in decoded
-    assert 'docker start "$name"' in decoded
-
-
-def test_start_container_runs_single_wrapped_script() -> None:
-    outer = _outer()
-    start_container(outer, "c1")
+    # A single `docker start` round-trip, shell-quoting the container name.
     recorded = _stub(outer).recorded
-    # The whole start+recovery script travels in a single round-trip, and the
-    # transported script matches what the builder renders for this container.
     assert len(recorded) == 1
-    assert _decode_remote_sh_command(recorded[0].command) == _build_start_container_script("c1")
+    assert recorded[0].command == "docker start my-container"
 
 
 def test_start_container_raises_on_failure() -> None:

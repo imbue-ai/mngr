@@ -75,7 +75,6 @@ from imbue.mngr.providers.docker.config import DockerProviderConfig
 from imbue.mngr.providers.docker.host_store import ContainerConfig
 from imbue.mngr.providers.docker.host_store import DockerHostStore
 from imbue.mngr.providers.docker.host_store import HostRecord
-from imbue.mngr.providers.docker.volume import CONTAINER_ENTRYPOINT_CMD
 from imbue.mngr.providers.docker.volume import DockerVolume
 from imbue.mngr.providers.docker.volume import LABEL_PREFIX
 from imbue.mngr.providers.docker.volume import LABEL_PROVIDER
@@ -88,7 +87,9 @@ from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_comman
 from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
 from imbue.mngr.providers.ssh_host_setup import build_check_and_install_packages_command
 from imbue.mngr.providers.ssh_host_setup import build_configure_ssh_command
+from imbue.mngr.providers.ssh_host_setup import build_self_healing_host_entrypoint_command
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
+from imbue.mngr.providers.ssh_host_setup import build_start_sshd_command
 from imbue.mngr.providers.ssh_host_setup import parse_warnings_from_output
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
@@ -96,8 +97,15 @@ from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
 from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
 
+# PID-1 entrypoint for host containers. Unlike the idle state-container
+# entrypoint, this self-heals sshd on every (re)start once mngr has provisioned
+# this host (tracked by a marker, so a host key pre-baked into the base image is
+# never used by mistake), so the container is reachable again after an
+# out-of-band restart without waiting for `mngr start`.
+HOST_CONTAINER_ENTRYPOINT_CMD: Final[str] = build_self_healing_host_entrypoint_command()
+
 # Container entrypoint as SDK-style command tuple (used by tests)
-CONTAINER_ENTRYPOINT: Final[tuple[str, ...]] = ("sh", "-c", CONTAINER_ENTRYPOINT_CMD)
+CONTAINER_ENTRYPOINT: Final[tuple[str, ...]] = ("sh", "-c", HOST_CONTAINER_ENTRYPOINT_CMD)
 
 # Fallback base image when no image is specified by the user or provider config.
 DEFAULT_IMAGE: Final[str] = "debian:bookworm-slim"
@@ -555,7 +563,7 @@ class DockerProviderInstance(BaseProviderInstance):
                     self._exec_in_container(container, add_authorized_keys_cmd)
 
         with log_span("Starting sshd in container"):
-            self._exec_in_container(container, "/usr/sbin/sshd -D -o MaxSessions=100", detach=True)
+            self._exec_in_container(container, build_start_sshd_command(), detach=True)
 
     def _get_container_ssh_port(self, container: docker.models.containers.Container) -> int:
         """Get the host-mapped SSH port for a container."""
@@ -873,7 +881,7 @@ kill -TERM 1
         cmd.extend(volume_mount_args)
 
         cmd.extend(list(start_args))
-        cmd.extend(["--entrypoint", "sh", image, "-c", CONTAINER_ENTRYPOINT_CMD])
+        cmd.extend(["--entrypoint", "sh", image, "-c", HOST_CONTAINER_ENTRYPOINT_CMD])
         return cmd
 
     def _run_container(

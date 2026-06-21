@@ -730,8 +730,17 @@ def create_workspace_via_electron(
     workspace_name: str,
     debug_port: int,
     host_config_dir: Path | None = None,
+    launch_mode: str = "DOCKER",
+    account_label: str | None = None,
+    region: str | None = None,
 ) -> None:
-    """Drive Electron to create a local Docker workspace from ``fct_path``.
+    """Drive Electron to create a workspace from ``fct_path``.
+
+    ``launch_mode`` selects the compute provider in the create form (DOCKER,
+    LIMA, AWS, ...). ``account_label`` optionally selects an AI-provider account
+    (by visible option text) before submitting. ``region`` selects the machine
+    region for region-aware modes (aws/vultr/imbue_cloud); it is required by the
+    form for those modes and ignored (the row is hidden) for others.
 
     Returns once the workspace's ``system_interface`` dockview UI has
     rendered through the desktop client proxy. Does NOT clean up the
@@ -772,14 +781,20 @@ def create_workspace_via_electron(
 
                 _ensure_field_value(page, "#host_name", workspace_name)
                 _ensure_field_value(page, "#git_url", str(fct_path))
-                # Explicitly select the DOCKER compute provider: with no
-                # account selected the form now defaults to LIMA (a local VM
-                # that isn't available on the CI runner), so this test --
-                # which is specifically about local Docker -- must pin DOCKER
-                # rather than relying on the default. The select lives in the
-                # (now-open) "Configure..." panel. AI provider stays at its
-                # no-account default of SUBSCRIPTION.
-                page.select_option("#launch_mode", "DOCKER")
+                # Optionally select an AI-provider account (by visible label) before
+                # picking the compute mode -- some modes/tiers require a real account.
+                if account_label is not None:
+                    page.select_option("#account_id", label=account_label)
+                # Select the requested compute provider. With no account selected the
+                # form defaults to LIMA; CI's local-Docker test pins DOCKER. The select
+                # lives in the (now-open) "Configure..." panel.
+                page.select_option("#launch_mode", launch_mode)
+                # Region-aware modes (aws/vultr/imbue_cloud) reveal a region select
+                # that must carry a value; the JS shows the row on the launch_mode
+                # change event, so wait for it before selecting.
+                if region is not None:
+                    page.wait_for_selector("#region:visible", timeout=5_000)
+                    page.select_option("#region", region)
 
                 logger.info("Submitting create form")
                 page.click("#create-submit")

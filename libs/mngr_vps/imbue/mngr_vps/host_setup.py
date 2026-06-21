@@ -96,28 +96,42 @@ systemctl enable docker
 systemctl start docker"""
 
 # Install and register the pinned gVisor runsc runtime by downloading the dated
-# release binaries and verifying their checksums. Guarded so it is a no-op when
-# runsc is already registered with the daemon (e.g. baked into the image).
+# release binaries and verifying their checksums.
+#
+# runsc is registered with ``--overlay2=none`` so the container's writable layer
+# is written through to the persistent Docker overlay2 layer and survives a
+# ``docker stop``/``start`` (and a host reboot that brings the container back via
+# its restart policy). gVisor's default overlay (``--overlay2=root:self``) keeps
+# the rootfs upper in a per-sandbox ``.gvisor.filestore`` that is recreated on
+# every start, so without this every in-container write outside a named volume --
+# the injected sshd host key, the ``/mngr`` host_dir symlink, mngr's
+# provisioning markers, etc. -- is silently lost on restart, leaving the
+# container unreachable until mngr re-provisions it.
+#
+# The binary download is skipped when runsc is already present; the daemon
+# (re)registration only runs when the ``--overlay2=none`` flag is not already in
+# the Docker config, so a correctly-configured host is a no-op (no docker bounce).
 _GVISOR_INSTALL_SCRIPT: Final[str] = f"""set -e
-if docker info 2>/dev/null | grep -q runsc; then
-    exit 0
+if ! command -v runsc >/dev/null 2>&1; then
+    ARCH="$(uname -m)"
+    URL="https://storage.googleapis.com/gvisor/releases/release/{PINNED_GVISOR_RELEASE}/${{ARCH}}"
+    GVISOR_TMP="$(mktemp -d)"
+    cd "${{GVISOR_TMP}}"
+    curl -fsSL -o runsc "${{URL}}/runsc"
+    curl -fsSL -o runsc.sha512 "${{URL}}/runsc.sha512"
+    curl -fsSL -o containerd-shim-runsc-v1 "${{URL}}/containerd-shim-runsc-v1"
+    curl -fsSL -o containerd-shim-runsc-v1.sha512 "${{URL}}/containerd-shim-runsc-v1.sha512"
+    sha512sum -c runsc.sha512
+    sha512sum -c containerd-shim-runsc-v1.sha512
+    chmod a+rx runsc containerd-shim-runsc-v1
+    mv runsc containerd-shim-runsc-v1 /usr/local/bin/
+    cd /
+    rm -rf "${{GVISOR_TMP}}"
 fi
-ARCH="$(uname -m)"
-URL="https://storage.googleapis.com/gvisor/releases/release/{PINNED_GVISOR_RELEASE}/${{ARCH}}"
-GVISOR_TMP="$(mktemp -d)"
-cd "${{GVISOR_TMP}}"
-curl -fsSL -o runsc "${{URL}}/runsc"
-curl -fsSL -o runsc.sha512 "${{URL}}/runsc.sha512"
-curl -fsSL -o containerd-shim-runsc-v1 "${{URL}}/containerd-shim-runsc-v1"
-curl -fsSL -o containerd-shim-runsc-v1.sha512 "${{URL}}/containerd-shim-runsc-v1.sha512"
-sha512sum -c runsc.sha512
-sha512sum -c containerd-shim-runsc-v1.sha512
-chmod a+rx runsc containerd-shim-runsc-v1
-mv runsc containerd-shim-runsc-v1 /usr/local/bin/
-cd /
-rm -rf "${{GVISOR_TMP}}"
-runsc install
-systemctl restart docker"""
+if ! grep -q -- '--overlay2=none' /etc/docker/daemon.json 2>/dev/null; then
+    runsc install -- --overlay2=none
+    systemctl restart docker
+fi"""
 
 # Raise sshd's session/pre-auth caps so provisioning round-trips (image build +
 # per-host setup + the imbue_cloud pool baking's many concurrent ssh/rsync/exec
