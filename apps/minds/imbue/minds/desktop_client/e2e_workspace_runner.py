@@ -789,7 +789,7 @@ def create_workspace_via_electron(
                 # form defaults to LIMA; CI's local-Docker test pins DOCKER. The select
                 # lives in the (now-open) "Configure..." panel.
                 page.select_option("#launch_mode", launch_mode)
-                # Region-aware modes (aws/vultr/imbue_cloud) reveal a #region select
+                # Region-aware modes (aws/vultr/imbue_cloud) reveal a region select
                 # that must carry a value; the JS shows the row on the launch_mode
                 # change event, so wait for it before selecting.
                 if region is not None:
