@@ -9,3 +9,5 @@ This is an internal framework swap with no user-visible behavior change: every r
 - The WebDAV file server under `/api/v1/files` is mounted directly as a WSGI app (the `a2wsgi` ASGI bridge is gone). The `/api/v1` REST API and the `/auth` SuperTokens pages are now Flask blueprints.
 
 - Removed the `fastapi`, `uvicorn`, `a2wsgi`, `python-multipart`, and `websockets` dependencies; added `flask`, `cheroot` (the keep-alive WSGI server), and a direct `werkzeug` dependency (the dispatcher mount and HTTP-exception handling import it directly).
+
+- Raised the Electron shell's initial chrome-state fetch timeout from 4s to 10s. On startup the backend computes `has_accounts` (a cold `mngr imbue_cloud auth list` subprocess that can take ~5s on the first call) before emitting the first workspace-list event; under the old 4s timeout a slow first call returned no state, which the startup path treated as unauthenticated and routed an already-signed-in user to the onboarding page instead of the create page. The longer timeout absorbs the cold-call latency.
