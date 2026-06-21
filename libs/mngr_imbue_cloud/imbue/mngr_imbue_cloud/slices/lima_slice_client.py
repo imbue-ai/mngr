@@ -227,7 +227,6 @@ class LimaSliceVpsClient(VpsClientInterface):
             instance_name=instance_name,
             disk_name=disk_name,
             disk_gib=disk_gib,
-            boot_disk_gib=boot_disk_gib,
             slot_count=slot_count,
             port_range_start=port_range_start,
             port_range_end=port_range_end,

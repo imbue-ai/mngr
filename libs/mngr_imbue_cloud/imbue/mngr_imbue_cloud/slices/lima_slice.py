@@ -191,7 +191,6 @@ def build_slice_reserve_script(
     instance_name: str,
     disk_name: str,
     disk_gib: int,
-    boot_disk_gib: int,
     slot_count: int,
     port_range_start: int,
     port_range_end: int,
