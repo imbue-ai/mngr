@@ -45,7 +45,16 @@ _DOCKER_STATE_MARKER: Final[str] = "docker-state"
 _SYSTEM_INTERFACE_PORT: Final[int] = 8000
 _MNGR_START_TIMEOUT_SECONDS: Final[int] = 300
 _SYSTEM_INTERFACE_READY_TIMEOUT_SECONDS: Final[int] = 120
-_PROBE_TIMEOUT_SECONDS: Final[int] = 90
+_PROBE_TIMEOUT_SECONDS: Final[int] = 120
+
+# mngr lifecycle states that mean the agent's tmux window is alive (as opposed
+# to STOPPED / DONE). The system-services agent's window-0 command is
+# ``sleep infinity && claude`` -- claude is unreachable by design (see the
+# minds README), so mngr observes a non-claude process occupying the window
+# and reports REPLACED rather than RUNNING. Both indicate the agent is up.
+_ALIVE_AGENT_STATES: Final[frozenset[str]] = frozenset(
+    {"RUNNING", "WAITING", "REPLACED", "RUNNING_UNKNOWN_AGENT_TYPE"}
+)
 
 
 class _ResumedWorkspace(NamedTuple):
@@ -157,7 +166,9 @@ def _run_minds_in_container_probe(container_name: str) -> dict:
     carries ``curl_status`` (system_interface health), ``inner_port``,
     ``services_toml_declares_system_interface``, etc.
     """
-    result = _exec_in_container(container_name, f"cd /code && {build_probe_shell_command()}", timeout=120)
+    result = _exec_in_container(
+        container_name, f"cd /code && {build_probe_shell_command()}", timeout=_PROBE_TIMEOUT_SECONDS
+    )
     assert PROBE_SENTINEL in result.stdout, (
         f"minds recovery probe sentinel missing; stdout={result.stdout!r} stderr={result.stderr!r}"
     )
@@ -301,15 +312,23 @@ def test_resumed_workspace_serves_system_interface(running_workspace: _ResumedWo
 @pytest.mark.minds_snapshot_resume
 @pytest.mark.docker
 @pytest.mark.timeout(300)
-def test_resumed_workspace_system_services_agent_is_running(running_workspace: _ResumedWorkspace) -> None:
-    """After resume, the primary system-services agent is in the RUNNING state."""
+def test_resumed_workspace_system_services_agent_is_alive(running_workspace: _ResumedWorkspace) -> None:
+    """After resume, the primary system-services agent's tmux window is alive.
+
+    The services agent runs ``sleep infinity && claude`` (claude unreachable by
+    design), so mngr reports it as ``REPLACED`` -- a non-claude process holding
+    the window -- rather than ``RUNNING``. Both are "alive"; only STOPPED/DONE
+    would mean the resume failed to bring the agent back.
+    """
     agents = _list_agents_in_container(running_workspace.container_name)
     services_agents = [agent for agent in agents if agent["id"] == running_workspace.services_agent_id]
     assert services_agents, (
         f"system-services agent {running_workspace.services_agent_id} vanished from `mngr list` after resume."
     )
     state = services_agents[0]["state"]
-    assert state == "RUNNING", f"Expected system-services RUNNING after resume; got {state!r}."
+    assert state in _ALIVE_AGENT_STATES, (
+        f"Expected the system-services agent alive after resume (one of {sorted(_ALIVE_AGENT_STATES)}); got {state!r}."
+    )
 
 
 @pytest.mark.minds_snapshot_resume
