@@ -19,20 +19,13 @@ wall clock per run, 4/4 successive runs green.
 
 A couple of vm_runtime sandboxes did fail intermittently with
 exit_code=137 + missing junit.xml during early testing on
-2026-05-27. We could not reproduce that on a retry under the same
-conditions, so the working hypothesis is a transient Modal-side
-vm_runtime flake (the runtime is preview-stage and the operator
-warned about capacity issues). If you hit it, just retry; if it
-turns into a pattern, capture the failing batch's verbose offload
-log and check the modal_sandbox.py exec path before assuming
-offload's at fault.
+2026-05-27, before vm_runtime went generally available. If you hit
+a transient failure like that, just retry; if it turns into a
+pattern, capture the failing batch's verbose offload log and check
+the modal_sandbox.py exec path before assuming offload's at fault.
 
-PREREQUISITE: ``experimental_options={"vm_runtime": True}`` requires the
-caller's active Modal profile to have the VM-runtime preview enabled. If
-``Sandbox.create`` fails with ``MODAL_FUNCTION_RUNTIME must be set to
-'gvisor'`` or ``experimental_options['vm_runtime']=True conflicts with
-runtime=...``, your profile lacks the preview -- switch to one that
-has it (``modal profile activate <name>`` / ``MODAL_PROFILE=<name>``).
+vm_runtime is now generally available on Modal, so no profile-level
+preview opt-in is required.
 
 This is a one-off demonstration script for the test-efficiency groundwork.
 The flow is:
@@ -56,8 +49,9 @@ The flow is:
    and print the Modal image ID so it can be plumbed into offload as
    ``offload run --override-image-id <ID>``.
 
-We do NOT switch the general mngr_modal provider to ``vm_runtime``: Modal
-has capacity issues with it, so it's opt-in for this snapshot workflow only.
+We do NOT switch the general mngr_modal provider to ``vm_runtime``: the
+rest of mngr does not need a true VM, so this remains scoped to the
+snapshot workflow only.
 
 Usage:
     uv run python scripts/snapshot_minds_e2e_state.py
@@ -489,6 +483,17 @@ def _parse_args() -> argparse.Namespace:
             "workspace-creation cost."
         ),
     )
+    parser.add_argument(
+        "--image-id-output",
+        type=Path,
+        default=None,
+        help=(
+            "If set, write the resulting snapshot image id (bare, no trailing "
+            "newline) to this file once the snapshot succeeds. Used by CI to "
+            "hand the image id from the build job to the test job without "
+            "scraping it out of stdout."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -515,10 +520,11 @@ def main() -> None:
             cpu=4.0,
             memory=8 * 1024,
             # The whole point of this script: opt in to Modal's VM runtime so
-            # Docker-in-sandbox state survives snapshot_filesystem(). We are
-            # NOT enabling this in the general mngr_modal provider -- Modal
-            # has capacity issues with vm_runtime, so this is scoped to the
-            # snapshot workflow only.
+            # Docker-in-sandbox state survives snapshot_filesystem(). vm_runtime
+            # is now generally available on Modal. We still scope it to this
+            # snapshot workflow rather than flipping the general mngr_modal
+            # provider over to it, since the rest of mngr does not need a true
+            # VM and we don't want to change that behavior as a side effect.
             experimental_options={"vm_runtime": True},
         )
 
@@ -533,6 +539,13 @@ def main() -> None:
         else:
             _create_workspace_in_sandbox(sandbox)
         snapshot_image_id = _snapshot_sandbox(sandbox)
+        # Write the bare image id for CI consumption before printing the
+        # human-facing hint, so a downstream job can read it from a known
+        # path. Done inside the try so the file only appears when the
+        # snapshot actually succeeded.
+        if args.image_id_output is not None:
+            args.image_id_output.write_text(snapshot_image_id)
+            print(f"Wrote snapshot image id to {args.image_id_output}", flush=True)
         # Printed inside the try so it only fires when the snapshot
         # actually succeeded. Any failure in the try block propagates
         # through the finally below as the real exception, which is

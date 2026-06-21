@@ -21,7 +21,6 @@
 # as more @pytest.mark.minds_snapshot_resume tests get added.
 max_parallel = 10
 test_timeout_secs = 600
-retry_count = 0
 stream_output = true
 sandbox_project_root = "/code/mngr"
 
@@ -65,12 +64,25 @@ type = "pytest"
 command = "bash -c '[ -d /code/mngr ] && cd /code/mngr; exec uv run pytest \"$@\"' --"
 run_args = "--no-cov -p no:xdist"
 
+# Two groups, mirroring offload-modal.toml: non-flaky tests get no
+# retries, flaky-marked tests are retried. Splitting on the `flaky`
+# mark (rather than a single blanket retry_count) keeps a genuinely
+# broken test from being silently masked by retries, while still
+# absorbing the occasional transient vm_runtime sandbox flake on a
+# test that has been explicitly marked @pytest.mark.flaky.
 [groups.all]
-# Only tests carrying the snapshot-resume mark. Everything else is
+# Snapshot-resume tests that are NOT marked flaky. Everything else is
 # scoped out of this run (and `minds_snapshot_resume` is itself scoped
 # out of the other offload configs, so a test with this mark is only
 # ever collected here).
-filters = "-m 'minds_snapshot_resume'"
+retry_count = 0
+filters = "-m 'minds_snapshot_resume and not flaky'"
+
+[groups.flaky]
+# Snapshot-resume tests explicitly marked @pytest.mark.flaky. Retried
+# so a known-transient flake does not fail the (PR-blocking) run.
+retry_count = 4
+filters = "-m 'minds_snapshot_resume and flaky'"
 
 [history]
 path = "offload-history-modal-minds-snapshot.jsonl"

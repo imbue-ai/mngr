@@ -1,0 +1,5 @@
+Wired the minds-workspace Modal snapshot suite into CI. A new `build-minds-snapshot` job builds a fresh `vm_runtime` snapshot image (Docker-in-Docker + a real Electron-created FCT workspace, docker-stopped for a clean state) once per run and exposes its image id; a dependent `test-minds-snapshot` job boots straight from that image via offload's `--override-image-id` and runs the `minds_snapshot_resume` suite. Both jobs run on every PR (blocking) and can be turned off in one click by setting the `DISABLE_MINDS_SNAPSHOT_CI` repo variable to `true`.
+
+`scripts/snapshot_minds_e2e_state.py` gained a `--image-id-output <path>` flag so the build job can hand the snapshot image id to the test job without scraping stdout. Stale comments calling `vm_runtime` a preview were updated -- it is now generally available on Modal.
+
+`offload-modal-minds-snapshot.toml` now splits its tests into `all` (no retries) and `flaky` (retried) groups, mirroring `offload-modal.toml`, so only tests explicitly marked `@pytest.mark.flaky` are retried.

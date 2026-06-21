@@ -467,3 +467,139 @@ jobs:
         # `@pytest.mark.timeout(900)`, so the suite budget cannot kill
         # the pytest run before the per-test marker fires.
         run: xvfb-run -a env PYTEST_MAX_DURATION_SECONDS=900 uv run pytest -n 0 --timeout 900 --no-cov --cov-fail-under=0 -v --tb=short -m 'minds_electron and not release'
+
+  # Build a fresh minds-workspace Modal snapshot image, then run the
+  # `minds_snapshot_resume` suite against it. Two jobs so the expensive
+  # vm_runtime image build (Docker-in-Docker + Electron workspace
+  # creation, multi-minute) happens once per run and the test job fans
+  # out from the baked image via offload's `--override-image-id` -- no
+  # per-test Docker/image setup. See scripts/snapshot_minds_e2e_state.py
+  # and offload-modal-minds-snapshot.toml.
+  #
+  # Both jobs are gated on the `DISABLE_MINDS_SNAPSHOT_CI` repo variable:
+  # they run by default (blocking on every PR), but setting that variable
+  # to "true" turns them off in one click without a code change -- a kill
+  # switch in case Modal vm_runtime capacity ever wedges the merge queue.
+  build-minds-snapshot:
+    runs-on: ubuntu-latest
+    if: vars.DISABLE_MINDS_SNAPSHOT_CI != 'true'
+    permissions:
+      contents: read
+    # Exposes the freshly-built snapshot image id to the dependent test job.
+    outputs:
+      image_id: ${{ steps.snapshot.outputs.image_id }}
+    env:
+      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+
+    steps:
+      # The snapshot script rsyncs the checked-out working tree into the
+      # Modal image (it excludes .git), so a default shallow single-ref
+      # checkout is all it needs -- no history deepening required.
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+
+      - name: Install Python dependencies
+        run: uv sync --all-packages
+
+      - name: Build and snapshot the minds e2e Modal image
+        id: snapshot
+        # The script builds the vm_runtime image, drives the real Electron
+        # workspace-creation flow inside it, docker-stops the container for
+        # a clean state, snapshots the filesystem, and writes the bare
+        # image id to the --image-id-output file for this job's output.
+        # No Job-A retry by design: a build failure here should surface,
+        # not be silently masked.
+        run: |
+          set -euo pipefail
+          uv run python scripts/snapshot_minds_e2e_state.py --image-id-output snapshot-image-id.txt
+          IMAGE_ID="$(cat snapshot-image-id.txt)"
+          if [ -z "$IMAGE_ID" ]; then
+            echo "Snapshot script did not produce an image id" >&2
+            exit 1
+          fi
+          echo "image_id=$IMAGE_ID" >> "$GITHUB_OUTPUT"
+          echo "Built snapshot image: $IMAGE_ID"
+
+  test-minds-snapshot:
+    runs-on: ubuntu-latest
+    needs: build-minds-snapshot
+    if: vars.DISABLE_MINDS_SNAPSHOT_CI != 'true'
+    # `checks: write` is required by the report-flaky-aware-tests composite
+    # action. No `contents: write` here: this job boots from the prebuilt
+    # snapshot image via --override-image-id and never builds or caches an
+    # offload checkpoint, so it has no image-cache git notes to push.
+    permissions:
+      contents: read
+      checks: write
+    env:
+      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+
+      - name: Install Python dependencies
+        run: uv sync --all-packages
+
+      - name: Install just
+        uses: extractions/setup-just@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache offload binary
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/offload
+          key: cargo-offload-0.9.7-${{ runner.os }}
+
+      - name: Install offload
+        run: |
+          if ! command -v offload &> /dev/null || ! offload --version | grep -q '0.9.7'; then
+            cargo install offload@0.9.7 --force
+          fi
+
+      - name: Run minds snapshot-resume tests via offload
+        id: tests
+        run: just test-offload-minds-snapshot "${{ needs.build-minds-snapshot.outputs.image_id }}"
+
+      - name: Report test results
+        if: always()
+        uses: ./.github/actions/report-flaky-aware-tests
+        with:
+          check-name: Minds Snapshot Resume Tests
+          junit-path: test-results/junit.xml
+          tests-outcome: ${{ steps.tests.outcome }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results-minds-snapshot
+          path: test-results/
+          include-hidden-files: true
+          retention-days: 30
