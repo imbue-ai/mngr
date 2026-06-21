@@ -13,3 +13,8 @@
   container unreachable until mngr re-provisioned it. Applies to every provider
   that installs runsc via the shared VPS host-setup (aws, vultr, ovh, gcp,
   azure, imbue_cloud).
+
+- Removed the now-dead gVisor self-overlay filestore-collision recovery from
+  `start_container` (the reap-and-retry path only existed for the `root:self`
+  overlay that `--overlay2=none` eliminates); `start_container` is now a plain
+  `docker start`.
