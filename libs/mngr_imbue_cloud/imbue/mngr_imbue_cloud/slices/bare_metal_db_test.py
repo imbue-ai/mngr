@@ -7,9 +7,11 @@ from imbue.mngr_imbue_cloud.primitives import BareMetalServerStatus
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_READY
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import _INSERT_BARE_METAL_SERVER_SQL
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import _INSERT_SLICE_POOL_HOST_SQL
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import _SELECT_UNLEASED_SLICE_TEARDOWN_TARGETS_SQL
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import _server_from_row
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import build_bare_metal_server_insert_values
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import build_slice_pool_host_insert_values
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_unleased_slice_teardown_targets
 
 
 def _ready_server() -> BareMetalServer:
@@ -147,8 +149,6 @@ class _FakeConn:
 
 
 def test_fetch_unleased_slice_teardown_targets_maps_rows_to_targets() -> None:
-    from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_unleased_slice_teardown_targets
-
     rows = [
         ("row-1", "mngr-slice-dev-josh-aaa", "mngr-slice-dev-josh-aaa-data", "15.0.0.1", "limahost"),
         # A row whose lima_service_user is NULL falls back to root.
@@ -163,8 +163,6 @@ def test_fetch_unleased_slice_teardown_targets_maps_rows_to_targets() -> None:
 
 
 def test_fetch_unleased_slice_teardown_targets_query_excludes_leased_and_removing() -> None:
-    from imbue.mngr_imbue_cloud.slices.bare_metal_db import _SELECT_UNLEASED_SLICE_TEARDOWN_TARGETS_SQL
-
     # Leased slices are torn down by their agent's release path; removing rows are
     # already mid-teardown by the connector sweep -- both must be excluded here.
     assert "NOT IN ('leased', 'removing')" in _SELECT_UNLEASED_SLICE_TEARDOWN_TARGETS_SQL

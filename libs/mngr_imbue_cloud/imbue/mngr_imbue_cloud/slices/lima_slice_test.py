@@ -1,6 +1,12 @@
+import subprocess
 from typing import Any
 
+import pytest
+
+from imbue.mngr_imbue_cloud.errors import SliceReserveOutputError
 from imbue.mngr_imbue_cloud.slices.lima_slice import build_slice_lima_yaml
+from imbue.mngr_imbue_cloud.slices.lima_slice import build_slice_reserve_script
+from imbue.mngr_imbue_cloud.slices.lima_slice import parse_reserved_ports
 
 _ROOT_PUBKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITESTKEYrootclient mngr-slice"
 _HOST_PRIV = "-----BEGIN OPENSSH PRIVATE KEY-----\nTESTHOSTKEY\n-----END OPENSSH PRIVATE KEY-----"
@@ -123,10 +129,6 @@ def test_slice_yaml_omits_extra_key_script_when_none_given() -> None:
 
 
 def test_build_slice_reserve_script_is_valid_bash_and_holds_the_box_lock() -> None:
-    import subprocess
-
-    from imbue.mngr_imbue_cloud.slices.lima_slice import build_slice_reserve_script
-
     script = build_slice_reserve_script(
         instance_name="mngr-slice-dev-josh-abc",
         disk_name="mngr-slice-dev-josh-abc-data",
@@ -154,8 +156,6 @@ def test_build_slice_reserve_script_is_valid_bash_and_holds_the_box_lock() -> No
 
 
 def test_build_slice_reserve_script_counts_only_slice_disks_for_capacity() -> None:
-    from imbue.mngr_imbue_cloud.slices.lima_slice import build_slice_reserve_script
-
     script = build_slice_reserve_script(
         instance_name="mngr-slice-dev-josh-abc",
         disk_name="mngr-slice-dev-josh-abc-data",
@@ -173,17 +173,10 @@ def test_build_slice_reserve_script_counts_only_slice_disks_for_capacity() -> No
 
 
 def test_parse_reserved_ports_reads_the_marker_line() -> None:
-    from imbue.mngr_imbue_cloud.slices.lima_slice import parse_reserved_ports
-
     assert parse_reserved_ports("noise\nMNGR_SLICE_RESERVED 22001 22002\nmore noise") == (22001, 22002)
 
 
 def test_parse_reserved_ports_raises_when_marker_missing_or_malformed() -> None:
-    import pytest
-
-    from imbue.mngr_imbue_cloud.errors import SliceReserveOutputError
-    from imbue.mngr_imbue_cloud.slices.lima_slice import parse_reserved_ports
-
     with pytest.raises(SliceReserveOutputError):
         parse_reserved_ports("no marker here")
     with pytest.raises(SliceReserveOutputError):

@@ -1,5 +1,7 @@
 import pytest
 
+from imbue.mngr.primitives import HostId
+from imbue.mngr_imbue_cloud.errors import SliceCapacityError
 from imbue.mngr_imbue_cloud.slices.lima_slice_client import LimaSliceVpsClient
 from imbue.mngr_imbue_cloud.slices.lima_slice_client import parse_listening_ports
 from imbue.mngr_lima.errors import LimaCommandError
@@ -139,8 +141,6 @@ def test_parse_listening_ports_extracts_ipv4_ipv6_and_wildcard() -> None:
 
 
 def test_provision_slice_vm_reserves_under_lock_then_starts_and_returns_box_chosen_ports() -> None:
-    from imbue.mngr.primitives import HostId
-
     host_id = HostId.generate()
     # The reserve runs as one base64'd bash command (it holds the box lock); it prints
     # the ports it chose. The long boot is a separate, unlocked `limactl start`.
@@ -177,9 +177,6 @@ def test_provision_slice_vm_reserves_under_lock_then_starts_and_returns_box_chos
 
 
 def test_provision_slice_vm_raises_slice_capacity_error_when_box_is_full() -> None:
-    from imbue.mngr.primitives import HostId
-    from imbue.mngr_imbue_cloud.errors import SliceCapacityError
-
     client = _recording_client({"base64 -d | bash": (4, "", "MNGR_SLICE_BOX_FULL 6/6")})
     with pytest.raises(SliceCapacityError):
         client.provision_slice_vm(
