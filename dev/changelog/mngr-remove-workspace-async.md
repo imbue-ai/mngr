@@ -1,0 +1,1 @@
+Added a `blueprint/` planning document (`blueprint/remove-system-interface-asyncio/`) capturing the implementation plan for migrating the Minds app's system interface off asyncio (FastAPI -> Flask + flask-sock, served by a threaded Werkzeug HTTP/1.1 server). The migration itself is implemented in the `forever-claude-template` repo, not in this monorepo.
