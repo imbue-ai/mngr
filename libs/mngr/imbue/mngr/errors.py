@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Any
+from typing import Final
 from typing import IO
 
 from click import ClickException
@@ -502,6 +503,9 @@ class PluginMngrError(MngrError):
     """
 
 
+_DEFAULT_MODAL_PROVIDER_NAME: Final[ProviderInstanceName] = ProviderInstanceName("modal")
+
+
 class ModalAuthError(ProviderNotAuthorizedError):
     """Modal authentication failed due to missing or invalid token.
 
@@ -511,8 +515,7 @@ class ModalAuthError(ProviderNotAuthorizedError):
     providers, while preserving the Modal-specific message and remediation.
     """
 
-    def __init__(self, provider_name: ProviderInstanceName | None = None) -> None:
-        resolved_provider_name = provider_name if provider_name is not None else ProviderInstanceName("modal")
+    def __init__(self, provider_name: ProviderInstanceName = _DEFAULT_MODAL_PROVIDER_NAME) -> None:
         message = (
             "Modal authentication failed. Token missing or invalid. "
             "You can disable the modal plugin by running "
@@ -523,7 +526,7 @@ class ModalAuthError(ProviderNotAuthorizedError):
         # Initialize the ProviderError base directly so the Modal-specific message and
         # guidance are preserved verbatim (the ProviderUnavailableError base would
         # otherwise rewrite the message into the generic "is not available" shape).
-        ProviderError.__init__(self, resolved_provider_name, message)
+        ProviderError.__init__(self, provider_name, message)
         self.short_reason = "Modal token missing or invalid"
         self.short_remediation = "run `uvx modal token set`"
         # The message already carries full remediation, so no separate help text.
