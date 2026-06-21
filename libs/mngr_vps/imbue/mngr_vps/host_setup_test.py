@@ -86,9 +86,13 @@ def test_build_host_setup_steps_includes_gvisor_when_requested() -> None:
     steps = build_host_setup_steps(install_gvisor_runtime=True, is_qemu_purge_enabled=False)
     gvisor_step = next(step for step in steps if "gVisor" in step.description)
     assert f"gvisor/releases/release/{PINNED_GVISOR_RELEASE}" in gvisor_step.script
-    assert "runsc install" in gvisor_step.script
-    # Guarded so it is a no-op when runsc is already registered.
-    assert "docker info" in gvisor_step.script
+    # runsc is registered with --overlay2=none so the container's writable layer
+    # persists across a docker restart (the default per-sandbox overlay loses it).
+    assert "runsc install -- --overlay2=none" in gvisor_step.script
+    # The binary download is skipped when runsc is already present, and the
+    # daemon (re)registration is skipped when the flag is already configured.
+    assert "command -v runsc" in gvisor_step.script
+    assert "--overlay2=none' /etc/docker/daemon.json" in gvisor_step.script
 
 
 def test_build_host_setup_steps_includes_qemu_purge_when_requested() -> None:

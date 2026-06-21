@@ -847,6 +847,11 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         on exit sends that EOF, so the remote shell exits, the fd closes, and
         the lock releases.
         """
+        # Establish the SSH connection before grabbing the transport: it is
+        # opened lazily, and the start lock can be the first thing to touch it
+        # (so the transport would otherwise be None). Mirrors every other
+        # transport user (read_file, exec, ...).
+        self._ensure_connected()
         transport = self._get_paramiko_transport()
         channel = transport.open_session()
         try:
