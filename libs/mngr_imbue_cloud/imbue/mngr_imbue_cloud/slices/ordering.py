@@ -7,6 +7,7 @@ The eco line (RISE/SYS/KS) is ordered through a different cart product than VPSe
 client-driven steps are exercised live against a real order.
 """
 
+import base64
 from collections import defaultdict
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -17,9 +18,12 @@ from typing import Final
 from urllib.parse import urlencode
 
 from loguru import logger
+from pydantic import Field
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
+from imbue.mngr.providers.ssh_utils import generate_ed25519_host_keypair
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_imbue_cloud.errors import BareMetalConfigError
 from imbue.mngr_imbue_cloud.errors import BareMetalProvisioningError
@@ -379,27 +383,70 @@ def wait_for_dedicated_server_address(
     return address
 
 
+def build_box_host_key_postinstall_script(host_private_key_pem: str, host_public_key_openssh: str) -> str:
+    """Render the OVH post-install bash that installs our generated ed25519 host key.
+
+    Writes the private key + its ``.pub`` into ``/etc/ssh``, removes OVH's other
+    host key types so only our pinned ed25519 key is ever offered (ed25519-only),
+    and restarts sshd. Delivered inline (base64) in the authenticated reinstall
+    request body, so the private key never travels over a public URL.
+    """
+    return f"""\
+#!/bin/bash
+set -eu
+umask 077
+cat > /etc/ssh/ssh_host_ed25519_key <<'MNGR_BOX_HOSTKEY'
+{host_private_key_pem.strip()}
+MNGR_BOX_HOSTKEY
+chmod 600 /etc/ssh/ssh_host_ed25519_key
+cat > /etc/ssh/ssh_host_ed25519_key.pub <<'MNGR_BOX_HOSTPUB'
+{host_public_key_openssh.strip()}
+MNGR_BOX_HOSTPUB
+chmod 644 /etc/ssh/ssh_host_ed25519_key.pub
+chown root:root /etc/ssh/ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key.pub
+# ed25519-only: drop the other host key types so only our pinned key is offered.
+rm -f /etc/ssh/ssh_host_rsa_key* /etc/ssh/ssh_host_ecdsa_key* /etc/ssh/ssh_host_dsa_key*
+systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || service ssh restart 2>/dev/null || true
+"""
+
+
+class BoxReinstallStart(FrozenModel):
+    """The result of kicking off an OVH box OS reinstall: the install task + the injected host key."""
+
+    task_id: int = Field(description="OVH reinstall task id to poll for completion")
+    box_host_public_key: str = Field(description="The ed25519 host public key we injected; pin it (no scan)")
+
+
 def start_os_reinstall(
     client: OvhVpsClient,
     *,
     service_name: str,
     ssh_public_key: str,
     os_template: str = DEFAULT_REINSTALL_OS_TEMPLATE,
-) -> int:
-    """Reinstall the box's OS with our SSH key (default RAID1 partitioning) and return the install task id."""
+) -> BoxReinstallStart:
+    """Reinstall the box's OS with our SSH key, injecting a host key we generated.
+
+    Generates an ed25519 host keypair and ships the private half in an inline
+    base64 ``postInstallationScript`` (authenticated request body), so after
+    install the box serves a host key we already know -- pinned downstream with no
+    trust-on-first-use. Returns the install task id and the injected host PUBLIC key.
+    """
+    host_private_key_pem, host_public_key_openssh = generate_ed25519_host_keypair()
+    postinstall_script = build_box_host_key_postinstall_script(host_private_key_pem, host_public_key_openssh)
+    postinstall_b64 = base64.b64encode(postinstall_script.encode()).decode()
     with log_span("Reinstalling {} with OS {}", service_name, os_template):
         task = client.call_api(
             "POST",
             f"/dedicated/server/{service_name}/reinstall",
             operatingSystem=os_template,
-            customizations={"sshKey": ssh_public_key},
+            customizations={"sshKey": ssh_public_key, "postInstallationScript": postinstall_b64},
         )
     task_id = task.get("taskId") if isinstance(task, dict) else None
     if task_id is None and isinstance(task, dict):
         task_id = task.get("id")
     if task_id is None:
         raise BareMetalProvisioningError(f"OVH reinstall of {service_name} returned no task id: {task!r}")
-    return int(task_id)
+    return BoxReinstallStart(task_id=int(task_id), box_host_public_key=host_public_key_openssh)
 
 
 def _poll_reinstall_task_status(client: OvhVpsClient, service_name: str, task_id: int) -> str | None:

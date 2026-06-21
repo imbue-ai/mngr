@@ -40,7 +40,7 @@ _SELECT_SERVERS_SQL: Final[str] = (
     "SELECT id, ovh_order_id, ovh_service_name, plan_code, region, public_address, "
     "cpu_cores, cpu_threads, ram_gb, disk_gb, memory_per_slice_gb, cpu_overcommit_ratio, "
     "slot_count, raid_level, lima_service_user, status, "
-    "created_at, updated_at FROM bare_metal_servers ORDER BY created_at ASC"
+    "created_at, updated_at, box_host_public_key FROM bare_metal_servers ORDER BY created_at ASC"
 )
 
 # Count the baked slices currently on a server (any non-removed pool_hosts row);
@@ -160,6 +160,7 @@ def _server_from_row(row: tuple[Any, ...]) -> BareMetalServer:
         status=BareMetalServerStatus(str(row[15])),
         created_at=_as_datetime(row[16]),
         updated_at=_as_datetime(row[17]),
+        box_host_public_key=row[18],
     )
 
 
@@ -240,7 +241,8 @@ def insert_slice_pool_host(conn: Any, values: tuple[Any, ...]) -> None:
 # path (`mngr destroy` -> connector release), and tearing their VM down here would
 # race that path. ``removing`` rows are already mid-teardown by the connector sweep.
 _SELECT_UNLEASED_SLICE_TEARDOWN_TARGETS_SQL: Final[str] = (
-    "SELECT p.id, p.lima_instance_name, p.lima_disk_name, s.public_address, s.lima_service_user "
+    "SELECT p.id, p.lima_instance_name, p.lima_disk_name, s.public_address, s.lima_service_user, "
+    "s.box_host_public_key "
     "FROM pool_hosts p JOIN bare_metal_servers s ON p.bare_metal_server_id = s.id "
     "WHERE p.backend_kind = 'slice' AND p.status NOT IN ('leased', 'removing') "
     "AND p.lima_instance_name IS NOT NULL AND s.public_address IS NOT NULL"
@@ -259,6 +261,7 @@ def fetch_unleased_slice_teardown_targets(conn: Any) -> list[SliceTeardownTarget
             lima_disk_name=str(row[2]) if row[2] else None,
             box_public_address=str(row[3]),
             lima_service_user=str(row[4]) if row[4] else "root",
+            box_host_public_key=row[5],
         )
         for row in rows
     ]

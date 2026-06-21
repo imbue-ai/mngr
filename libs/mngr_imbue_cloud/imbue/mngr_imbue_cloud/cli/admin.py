@@ -25,6 +25,7 @@ is not involved in pool provisioning at all.
 import json as _json
 import os
 import shlex
+import tempfile
 from enum import auto
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.pure import pure
+from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr_imbue_cloud.bake.bake_source import BakeSourceError
 from imbue.mngr_imbue_cloud.bake.bake_source import DEFAULT_FCT_REPO_URL
 from imbue.mngr_imbue_cloud.bake.bake_source import merge_bake_identity_attributes
@@ -157,31 +159,42 @@ def _run_ssh_command(
     ssh_key_path: str,
     port: int,
     command: str,
+    host_public_key: str,
 ) -> bool:
-    """Run a command on a host via SSH. Returns True on success."""
-    ssh_command = [
-        "ssh",
-        "-o",
-        "StrictHostKeyChecking=no",
-        "-o",
-        "UserKnownHostsFile=/dev/null",
-        "-o",
-        "ConnectTimeout=15",
-        "-i",
-        ssh_key_path,
-        "-p",
-        str(port),
-        f"root@{vps_address}",
-        command,
-    ]
-    logger.info("  SSH {}:{}: {}", vps_address, port, command)
-    cg = ConcurrencyGroup(name="pool-ssh")
-    with cg:
-        result = cg.run_process_to_completion(
-            command=ssh_command,
-            timeout=float(_SSH_COMMAND_TIMEOUT_SECONDS),
-            is_checked_after=False,
-        )
+    """Run a command on a host via SSH, pinning ``host_public_key``. Returns True on success.
+
+    The host key is the one we baked into the VPS (deterministic), so we pin it
+    strictly (no trust-on-first-use) via a throwaway known_hosts file.
+    """
+    known_hosts_fd, known_hosts_path = tempfile.mkstemp(prefix="mngr_vps_known_hosts_")
+    os.close(known_hosts_fd)
+    try:
+        add_host_to_known_hosts(Path(known_hosts_path), vps_address, port, host_public_key)
+        ssh_command = [
+            "ssh",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            f"UserKnownHostsFile={known_hosts_path}",
+            "-o",
+            "ConnectTimeout=15",
+            "-i",
+            ssh_key_path,
+            "-p",
+            str(port),
+            f"root@{vps_address}",
+            command,
+        ]
+        logger.info("  SSH {}:{}: {}", vps_address, port, command)
+        cg = ConcurrencyGroup(name="pool-ssh")
+        with cg:
+            result = cg.run_process_to_completion(
+                command=ssh_command,
+                timeout=float(_SSH_COMMAND_TIMEOUT_SECONDS),
+                is_checked_after=False,
+            )
+    finally:
+        Path(known_hosts_path).unlink(missing_ok=True)
     if result.returncode != 0:
         logger.warning("SSH command failed: {}", result.stderr.strip())
         return False
@@ -222,14 +235,16 @@ def _ufw_provision_commands(container_ssh_port: int) -> tuple[str, ...]:
     )
 
 
-def _checked_ssh_command(vps_address: str, ssh_key_path: str, port: int, command: str, *, label: str) -> None:
+def _checked_ssh_command(
+    vps_address: str, ssh_key_path: str, port: int, command: str, *, label: str, host_public_key: str
+) -> None:
     """Run an SSH command and raise on non-zero exit.
 
     Used for steps that MUST succeed (ufw install/configure, management key
     install). The bake aborts on failure rather than continuing with a
     half-configured host that would silently land in the pool.
     """
-    if not _run_ssh_command(vps_address, ssh_key_path, port, command):
+    if not _run_ssh_command(vps_address, ssh_key_path, port, command, host_public_key):
         raise PoolBakeError(f"{label} failed on VPS {vps_address}; aborting bake")
 
 
@@ -246,14 +261,24 @@ def _harden_ovh_vps(management_public_key: str, baked: BakedPoolHost, full_addre
     """
     if not baked.ssh_host or not baked.ssh_key_path:
         raise PoolBakeError("`mngr create --format json` did not expose the VPS ssh endpoint for hardening")
+    if not baked.outer_host_public_key:
+        raise PoolBakeError("`mngr create --format json` did not expose the VPS host key for strict SSH hardening")
     vps_address = baked.ssh_host
     vps_key_path = str(Path(baked.ssh_key_path).parent / "vps_ssh_key")
+    vps_host_public_key = baked.outer_host_public_key
     # Install + configure ufw on the VPS. Each step must succeed; we bail on the
     # whole bake if anything fails (otherwise the host would land in the pool with
     # no firewall and a half-applied policy).
     logger.info("  Installing + configuring ufw on VPS {}", vps_address)
     for ufw_command in _ufw_provision_commands(_CONTAINER_SSH_PORT):
-        _checked_ssh_command(vps_address, vps_key_path, 22, ufw_command, label=f"ufw step {ufw_command!r}")
+        _checked_ssh_command(
+            vps_address,
+            vps_key_path,
+            22,
+            ufw_command,
+            label=f"ufw step {ufw_command!r}",
+            host_public_key=vps_host_public_key,
+        )
 
     key_line = shlex.quote(management_public_key.strip())
     install_cmd = (
@@ -261,7 +286,14 @@ def _harden_ovh_vps(management_public_key: str, baked: BakedPoolHost, full_addre
         + key_line
         + " >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
     )
-    _checked_ssh_command(vps_address, vps_key_path, 22, install_cmd, label="install management key on VPS")
+    _checked_ssh_command(
+        vps_address,
+        vps_key_path,
+        22,
+        install_cmd,
+        label="install management key on VPS",
+        host_public_key=vps_host_public_key,
+    )
     logger.info("  Installing management key in container via mngr exec")
     container_install = run_mngr_command(["exec", full_address, install_cmd], timeout=60)
     if container_install.returncode != 0:

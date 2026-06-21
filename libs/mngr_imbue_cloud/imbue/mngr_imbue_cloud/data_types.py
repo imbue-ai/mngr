@@ -29,6 +29,9 @@ class SliceTeardownTarget(FrozenModel):
     lima_disk_name: str | None = Field(default=None, description="The slice's lima data-disk name, if recorded")
     box_public_address: str = Field(description="SSH-reachable address of the bare-metal box hosting the slice")
     lima_service_user: str = Field(description="The box's non-root lima user that owns the VMs")
+    box_host_public_key: str | None = Field(
+        default=None, description="The box's sshd host public key, pinned for the teardown SSH"
+    )
 
 
 class PaidListEntry(FrozenModel):
@@ -365,6 +368,14 @@ class BareMetalServer(FrozenModel):
     slot_count: int = Field(description="Number of slices this box holds (floor(ram_gb / memory_per_slice_gb))")
     raid_level: str | None = Field(default=None, description="RAID level set at OS-install time (e.g. 'RAID1')")
     lima_service_user: str | None = Field(default=None, description="Non-root OS user that owns the box's lima VMs")
+    box_host_public_key: str | None = Field(
+        default=None,
+        description=(
+            "The box's sshd host public key (port 22), injected by us at OS reinstall so it is "
+            "deterministically known. Pinned by admin tooling, the lima slice client, and the connector's "
+            "slice teardown. None until set at provision (or by the one-time keyscan backfill)."
+        ),
+    )
     status: BareMetalServerStatus = Field(description="Lifecycle state: ordered/delivered/installing/ready/failed")
     created_at: datetime = Field(description="When the row was created")
     updated_at: datetime = Field(description="When the row was last updated")
