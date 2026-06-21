@@ -2593,3 +2593,20 @@ def test_paid_lists_migration_declares_both_tables() -> None:
     assert "create table paid_emails" in migration_sql
     for column in ("is_paid", "created_at", "updated_at"):
         assert column in migration_sql, f"paid-lists migration is missing column {column!r}"
+
+
+def test_slice_name_env_owner_parses_stamped_instance_and_disk_names() -> None:
+    host_hex = "0123456789abcdef0123456789abcdef"
+    assert app_mod.slice_name_env_owner(f"mngr-slice-dev-josh-foo-{host_hex}") == "dev-josh-foo"
+    # The env is recoverable from the data-disk name too (the -data suffix is stripped).
+    assert app_mod.slice_name_env_owner(f"mngr-slice-dev-josh-foo-{host_hex}-data") == "dev-josh-foo"
+
+
+def test_slice_name_env_owner_returns_none_for_legacy_and_non_slice_names() -> None:
+    host_hex = "0123456789abcdef0123456789abcdef"
+    # Legacy un-stamped slice names have no env owner (must be left untouched).
+    assert app_mod.slice_name_env_owner(f"mngr-slice-{host_hex}") is None
+    assert app_mod.slice_name_env_owner(f"mngr-slice-{host_hex}-data") is None
+    # Non-slice lima names are never attributed to an env.
+    assert app_mod.slice_name_env_owner("default") is None
+    assert app_mod.slice_name_env_owner("some-other-vm") is None

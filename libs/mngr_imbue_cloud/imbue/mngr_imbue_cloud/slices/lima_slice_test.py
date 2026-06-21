@@ -1,6 +1,14 @@
+import subprocess
+import tempfile
+from pathlib import Path
 from typing import Any
 
+import pytest
+
+from imbue.mngr_imbue_cloud.errors import SliceReserveOutputError
 from imbue.mngr_imbue_cloud.slices.lima_slice import build_slice_lima_yaml
+from imbue.mngr_imbue_cloud.slices.lima_slice import build_slice_reserve_script
+from imbue.mngr_imbue_cloud.slices.lima_slice import parse_reserved_ports
 
 _ROOT_PUBKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITESTKEYrootclient mngr-slice"
 _HOST_PRIV = "-----BEGIN OPENSSH PRIVATE KEY-----\nTESTHOSTKEY\n-----END OPENSSH PRIVATE KEY-----"
@@ -120,3 +128,99 @@ def test_slice_yaml_omits_extra_key_script_when_none_given() -> None:
     config = _build()
     joined = "\n".join(step["script"] for step in config["provision"])
     assert "grep -qxF" not in joined
+
+
+def test_build_slice_reserve_script_is_valid_bash_and_holds_the_box_lock() -> None:
+    script = build_slice_reserve_script(
+        instance_name="mngr-slice-dev-josh-abc",
+        disk_name="mngr-slice-dev-josh-abc-data",
+        disk_gib=40,
+        slot_count=6,
+        port_range_start=22000,
+        port_range_end=32000,
+        yaml_template_text="cpus: 2\n",
+        lima_service_user="limahost",
+    )
+    # The reserve must be syntactically valid bash.
+    syntax_check = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True)
+    assert syntax_check.returncode == 0, syntax_check.stderr
+    # It serializes under the box lock, enforces capacity, and claims the slot WITHOUT
+    # booting (disk create + limactl create), so the lock is held only briefly.
+    assert "flock 9" in script
+    assert "/home/limahost/.mngr-slice-alloc.lock" in script
+    assert "-ge 6" in script
+    # shlex.quote leaves these simple names unquoted.
+    assert "limactl disk create mngr-slice-dev-josh-abc-data --size 40GiB" in script
+    assert "limactl create --name=mngr-slice-dev-josh-abc" in script
+    # It must NOT boot the VM (that long step runs after the lock is released).
+    assert "limactl start" not in script
+
+
+def test_build_slice_reserve_script_counts_only_slice_disks_for_capacity() -> None:
+    script = build_slice_reserve_script(
+        instance_name="mngr-slice-dev-josh-abc",
+        disk_name="mngr-slice-dev-josh-abc-data",
+        disk_gib=40,
+        slot_count=6,
+        port_range_start=22000,
+        port_range_end=32000,
+        yaml_template_text="cpus: 2\n",
+        lima_service_user="limahost",
+    )
+    # Capacity is measured against ALL slice disks on the box (every env + legacy).
+    assert '"mngr-slice-' in script
+    assert "limactl disk list --json" in script
+
+
+def test_build_slice_reserve_script_reaches_the_marker_on_an_empty_box() -> None:
+    # Regression: the disk-count pipeline runs under `set -o pipefail`, so on an
+    # empty box (grep matches no slice disks and exits non-zero) it must NOT abort
+    # the script before the slot is reserved -- `disk_count` must read as 0 and the
+    # script must proceed to print MNGR_SLICE_RESERVED. We execute the rendered
+    # script with `limactl`/`ss` stubbed to simulate an empty box; the lock lines
+    # (asserted elsewhere) are stripped so the test needs no writable /home path.
+    script = build_slice_reserve_script(
+        instance_name="mngr-slice-dev-josh-abc",
+        disk_name="mngr-slice-dev-josh-abc-data",
+        disk_gib=40,
+        slot_count=6,
+        port_range_start=22000,
+        port_range_end=22002,
+        yaml_template_text="cpus: 2\n",
+        lima_service_user="limahost",
+    )
+    # Drop the lock acquisition (asserted elsewhere) so the test needs no writable
+    # /home path: replace the fd open and the flock call with harmless no-ops.
+    runnable = script.replace("exec 9>", "true 9>/dev/null ").replace("flock 9", "true")
+    with tempfile.TemporaryDirectory() as tmp:
+        bin_dir = Path(tmp) / "bin"
+        bin_dir.mkdir()
+        # Empty box: limactl reports no disks and succeeds for create/disk-create;
+        # ss reports no listening ports. These mimic a freshly-prepped box.
+        (bin_dir / "limactl").write_text("#!/bin/bash\nexit 0\n")
+        (bin_dir / "ss").write_text("#!/bin/bash\nexit 0\n")
+        for stub in ("limactl", "ss"):
+            (bin_dir / stub).chmod(0o755)
+        home = Path(tmp) / "home"
+        (home / ".lima").mkdir(parents=True)
+        result = subprocess.run(
+            ["bash"],
+            input=runnable,
+            text=True,
+            capture_output=True,
+            env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(home)},
+        )
+    assert result.returncode == 0, result.stderr
+    # disk_count read as 0 (empty box), so the slot was reserved and the marker printed.
+    assert "MNGR_SLICE_RESERVED 22000 22001" in result.stdout
+
+
+def test_parse_reserved_ports_reads_the_marker_line() -> None:
+    assert parse_reserved_ports("noise\nMNGR_SLICE_RESERVED 22001 22002\nmore noise") == (22001, 22002)
+
+
+def test_parse_reserved_ports_raises_when_marker_missing_or_malformed() -> None:
+    with pytest.raises(SliceReserveOutputError):
+        parse_reserved_ports("no marker here")
+    with pytest.raises(SliceReserveOutputError):
+        parse_reserved_ports("MNGR_SLICE_RESERVED only-one")
