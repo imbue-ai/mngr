@@ -29,14 +29,13 @@ Denial reuses the legacy ``DELETE /permission-requests/<id>`` path so
 the gateway forgets the pending entry.
 """
 
-import asyncio
 import json
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
 
-from fastapi import Request
-from fastapi.responses import Response
+from flask import Request
+from flask import Response
 from loguru import logger
 from pydantic import Field
 
@@ -56,6 +55,8 @@ from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import append_response_event
 from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
+from imbue.minds.desktop_client.responses import make_response
+from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.webdav import get_file_sharing_roots
 from imbue.mngr.primitives import AgentId
 
@@ -160,7 +161,7 @@ def _format_denied_message(file_path: str, access: str) -> str:
 
 
 def _json_error(message: str, status_code: int) -> Response:
-    return Response(
+    return make_response(
         content=json.dumps({"error": message}),
         media_type="application/json",
         status_code=status_code,
@@ -257,7 +258,7 @@ class FileSharingGrantHandler(RequestEventHandler):
             mngr_forward_origin=mngr_forward_origin,
         )
 
-    async def apply_grant_request(
+    def apply_grant_request(
         self,
         request: Request,
         req_event: RequestEvent,
@@ -272,7 +273,7 @@ class FileSharingGrantHandler(RequestEventHandler):
         # back to the agent-requested path when the field is absent (e.g.
         # an older client). Validate it up front for a friendly error; the
         # gateway re-validates on approve.
-        form = await request.form()
+        form = request.form
         raw_override = form.get(_FILE_PATH_FIELD)
         try:
             effective_path = (
@@ -288,12 +289,9 @@ class FileSharingGrantHandler(RequestEventHandler):
         # effect verbatim (and we avoid recomputation for the common case).
         override_path = effective_path if effective_path != req_event.path else None
         try:
-            await asyncio.get_running_loop().run_in_executor(
-                None,
-                lambda: self.gateway_client.approve_permission_request(
-                    request_event_id,
-                    override_path=override_path,
-                ),
+            self.gateway_client.approve_permission_request(
+                request_event_id,
+                override_path=override_path,
             )
         except LatchkeyGatewayClientError as e:
             logger.warning(
@@ -314,13 +312,13 @@ class FileSharingGrantHandler(RequestEventHandler):
             status=RequestStatus.GRANTED,
             message=message,
         )
-        self._mirror_response_into_inbox(request, response_event)
-        return Response(
+        self._mirror_response_into_inbox(response_event)
+        return make_response(
             content=json.dumps({"outcome": "GRANTED", "message": message}),
             media_type="application/json",
         )
 
-    async def apply_deny_request(
+    def apply_deny_request(
         self,
         request: Request,
         req_event: RequestEvent,
@@ -332,10 +330,7 @@ class FileSharingGrantHandler(RequestEventHandler):
         # DELETE tolerates 404 -- if the request is already gone we still
         # want to write the response event and notify the agent.
         try:
-            await asyncio.get_running_loop().run_in_executor(
-                None,
-                lambda: self.gateway_client.delete_permission_request(request_event_id),
-            )
+            self.gateway_client.delete_permission_request(request_event_id)
         except LatchkeyGatewayClientError as e:
             logger.warning(
                 "Could not DELETE file-sharing request {} from gateway; will rely on next-restart cleanup: {}",
@@ -351,8 +346,8 @@ class FileSharingGrantHandler(RequestEventHandler):
             status=RequestStatus.DENIED,
             message=message,
         )
-        self._mirror_response_into_inbox(request, response_event)
-        return Response(
+        self._mirror_response_into_inbox(response_event)
+        return make_response(
             content=json.dumps({"outcome": "DENIED", "message": message}),
             media_type="application/json",
         )
@@ -387,7 +382,6 @@ class FileSharingGrantHandler(RequestEventHandler):
 
     def _mirror_response_into_inbox(
         self,
-        request: Request,
         response_event: RequestResponseEvent,
     ) -> None:
         """Mirror the on-disk response event into the in-memory inbox.
@@ -397,10 +391,10 @@ class FileSharingGrantHandler(RequestEventHandler):
         chrome SSE so the new ``requests`` payload is pushed without
         waiting for the 30s heartbeat.
         """
-        inbox: RequestInbox | None = request.app.state.request_inbox
+        inbox: RequestInbox | None = get_state().request_inbox
         if inbox is None:
             return
-        request.app.state.request_inbox = inbox.add_response(response_event)
-        backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+        get_state().request_inbox = inbox.add_response(response_event)
+        backend_resolver: BackendResolverInterface = get_state().backend_resolver
         if isinstance(backend_resolver, MngrCliBackendResolver):
             backend_resolver.notify_change()

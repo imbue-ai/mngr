@@ -20,13 +20,12 @@ from collections.abc import Sequence
 from typing import Final
 from urllib.parse import urlparse
 
-from fastapi import Request
-
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import TunnelInfo
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.tunnel_token_injection import inject_tunnel_token_into_agent
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
@@ -125,7 +124,6 @@ def resolve_account_email_for_workspace(
 
 
 def enable_sharing_via_cloudflare(
-    request: Request,
     agent_id: AgentId,
     service_name: ServiceName,
     emails: Sequence[str],
@@ -139,10 +137,10 @@ def enable_sharing_via_cloudflare(
     no backend URL, plugin error -- raises :class:`SharingError` with a
     user-presentable message.
     """
-    cli: ImbueCloudCli | None = request.app.state.imbue_cloud_cli
+    cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
     if cli is None:
         raise SharingError("imbue_cloud CLI is not configured on this app.")
-    session_store: MultiAccountSessionStore | None = request.app.state.session_store
+    session_store: MultiAccountSessionStore | None = get_state().session_store
     account_email = resolve_account_email_for_workspace(session_store, agent_id)
 
     backend_url = backend_resolver.get_backend_url(agent_id, service_name)

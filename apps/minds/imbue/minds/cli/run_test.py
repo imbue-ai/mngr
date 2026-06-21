@@ -4,14 +4,18 @@
 
 from pathlib import Path
 
-from fastapi import FastAPI
+from flask import Flask
 
 from imbue.imbue_common.model_update import to_update
 from imbue.minds.cli.run import _StreamedPermissionRequestHandler
+from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import create_latchkey_predefined_permission_request_event
+from imbue.minds.desktop_client.state import DesktopClientState
+from imbue.minds.desktop_client.state import get_state
+from imbue.minds.desktop_client.state import set_state
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
@@ -25,19 +29,36 @@ from imbue.mngr_latchkey.testing import make_full_fake_latchkey
 # -- _StreamedPermissionRequestHandler -------------------------------------
 
 
+def _make_app_with_inbox(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    inbox: RequestInbox | None,
+) -> Flask:
+    """Build a Flask app carrying a desktop-client state with the given inbox + resolver."""
+    app = Flask(__name__)
+    set_state(
+        app,
+        DesktopClientState(
+            auth_store=FileAuthStore(data_directory=tmp_path / "auth"),
+            backend_resolver=resolver,
+            request_inbox=inbox,
+        ),
+    )
+    return app
+
+
 def _make_streamed_permission_handler(
     tmp_path: Path,
     latchkey: FakeLatchkey | None = None,
-) -> tuple[_StreamedPermissionRequestHandler, FastAPI, MngrCliBackendResolver, list[int]]:
-    """Build a handler against a real FastAPI + resolver, plus a notify-count list.
+) -> tuple[_StreamedPermissionRequestHandler, Flask, MngrCliBackendResolver, list[int]]:
+    """Build a handler against a real Flask app + resolver, plus a notify-count list.
 
     The list grows by one each time ``backend_resolver.notify_change()``
     fires; tests assert on its length to verify the dedup-or-not
     behaviour without poking the resolver's internals.
     """
-    app = FastAPI()
-    app.state.request_inbox = RequestInbox()
     resolver = MngrCliBackendResolver()
+    app = _make_app_with_inbox(tmp_path, resolver, RequestInbox())
     notify_counts: list[int] = []
     resolver.add_on_change_callback(lambda: notify_counts.append(1))
     handler = _StreamedPermissionRequestHandler(
@@ -56,7 +77,7 @@ def test_streamed_permission_handler_records_first_delivery(tmp_path: Path) -> N
 
     handler(event)
 
-    inbox = app.state.request_inbox
+    inbox = get_state(app).request_inbox
     assert isinstance(inbox, RequestInbox)
     assert len(inbox.requests) == 1
     assert str(inbox.requests[0].event_id) == str(event.event_id)
@@ -78,7 +99,7 @@ def test_streamed_permission_handler_dedupes_redelivery_by_event_id(tmp_path: Pa
     for _ in range(5):
         handler(event)
 
-    inbox = app.state.request_inbox
+    inbox = get_state(app).request_inbox
     assert isinstance(inbox, RequestInbox)
     # Only the first delivery appended; the subsequent four were
     # recognized as redeliveries and skipped.
@@ -100,7 +121,7 @@ def test_streamed_permission_handler_records_distinct_events(tmp_path: Path) -> 
     handler(first)
     handler(second)
 
-    inbox = app.state.request_inbox
+    inbox = get_state(app).request_inbox
     assert isinstance(inbox, RequestInbox)
     assert len(inbox.requests) == 2
     assert len(notify_counts) == 2
@@ -108,9 +129,8 @@ def test_streamed_permission_handler_records_distinct_events(tmp_path: Path) -> 
 
 def test_streamed_permission_handler_noop_when_inbox_not_initialised(tmp_path: Path) -> None:
     """If ``state.request_inbox`` is ``None`` (boot order), the handler silently no-ops."""
-    app = FastAPI()
-    app.state.request_inbox = None
     resolver = MngrCliBackendResolver()
+    app = _make_app_with_inbox(tmp_path, resolver, None)
     notify_counts: list[int] = []
     resolver.add_on_change_callback(lambda: notify_counts.append(1))
     handler = _StreamedPermissionRequestHandler(
@@ -122,7 +142,7 @@ def test_streamed_permission_handler_noop_when_inbox_not_initialised(tmp_path: P
 
     handler(event)
 
-    assert app.state.request_inbox is None
+    assert get_state(app).request_inbox is None
     assert notify_counts == []
 
 
@@ -178,6 +198,6 @@ def test_streamed_permission_handler_recovers_missing_host_permissions(tmp_path:
     # The requesting agent was registered into the host's allowlist.
     assert str(agent_id) in canonical.read_text()
     # The request was still surfaced to the inbox.
-    inbox = app.state.request_inbox
+    inbox = get_state(app).request_inbox
     assert isinstance(inbox, RequestInbox)
     assert len(inbox.requests) == 1
