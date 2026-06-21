@@ -20,11 +20,15 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.api.list import ErrorInfo
+from imbue.mngr.api.list import ProviderErrorInfo
 from imbue.mngr.api.list import build_agent_cel_context
 from imbue.mngr.api.list import list_agents as api_list_agents
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.completion_install import write_managed_completion_scripts
+from imbue.mngr.cli.exit_codes import EXIT_CODE_ERROR
+from imbue.mngr.cli.exit_codes import EXIT_CODE_PROVIDER_INACCESSIBLE
+from imbue.mngr.cli.exit_codes import EXIT_CODE_SUCCESS
 from imbue.mngr.cli.field_catalog import FieldContext
 from imbue.mngr.cli.field_catalog import build_list_field_catalog
 from imbue.mngr.cli.field_catalog import catalog_rows_as_dicts
@@ -40,11 +44,13 @@ from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import render_format_template
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.output_helpers import write_json_line
+from imbue.mngr.cli.output_helpers import write_stderr_line
 from imbue.mngr.config.agent_alias_registry import list_agent_aliases
 from imbue.mngr.config.completion_writer import write_cli_completions_cache
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
@@ -205,7 +211,14 @@ def list_command(ctx: click.Context, **kwargs) -> None:
         _list_impl(ctx, **kwargs)
     except AbortError as e:
         logger.error("Aborted: {}", e.message)
-        ctx.exit(1)
+        ctx.exit(EXIT_CODE_ERROR)
+    except ProviderUnavailableError as e:
+        # Abort mode (the default): a single unreachable or unauthenticated provider
+        # propagated out of discovery. Show its clean, attributable message and exit
+        # with the granular provider-inaccessible code (same code used in continue mode
+        # and by gc), rather than the generic exit code Click would use otherwise.
+        e.show()
+        ctx.exit(EXIT_CODE_PROVIDER_INACCESSIBLE)
 
 
 def _refresh_completion_artifacts(**kwargs: Any) -> None:
@@ -420,9 +433,10 @@ def _list_jsonl(
         on_error=_emit_jsonl_error,
         is_streaming=False,
     )
-    # Exit with non-zero code if there were errors (per error_handling.md spec)
+    # Errors were already streamed as structured JSONL records via _emit_jsonl_error;
+    # exit non-zero (provider-inaccessible code when all errors are auth/unavailable).
     if result.errors:
-        ctx.exit(1)
+        ctx.exit(_exit_code_for_list_errors(result.errors))
 
 
 def _list_streaming_human(
@@ -456,9 +470,8 @@ def _list_streaming_human(
         renderer.finish()
 
     if result.errors:
-        for error in result.errors:
-            logger.warning("{}: {}", error.exception_type, error.message)
-        ctx.exit(1)
+        _emit_list_errors_human(result.errors)
+        ctx.exit(_exit_code_for_list_errors(result.errors))
 
 
 def _list_streaming_template(
@@ -485,9 +498,8 @@ def _list_streaming_template(
     )
 
     if result.errors:
-        for error in result.errors:
-            logger.warning("{}: {}", error.exception_type, error.message)
-        ctx.exit(1)
+        _emit_list_errors_human(result.errors)
+        ctx.exit(_exit_code_for_list_errors(result.errors))
 
 
 class _LimitedJsonlEmitter(MutableModel):
@@ -739,10 +751,6 @@ def _run_list_iteration(params: _ListIterationParams, ctx: click.Context) -> Non
         is_streaming=False,
     )
 
-    if result.errors:
-        for error in result.errors:
-            logger.warning("{}: {}", error.exception_type, error.message)
-
     # Apply sorting to results
     agents_to_display = _sort_agents_by_cel(result.agents, params.compiled_sort_keys)
 
@@ -767,9 +775,7 @@ def _run_list_iteration(params: _ListIterationParams, ctx: click.Context) -> Non
         else:
             # JSONL is handled above with streaming, so this should be unreachable
             raise AssertionError(f"Unexpected output format: {params.output_opts.output_format}")
-        # Exit with non-zero code if there were errors (per error_handling.md spec)
-        if result.errors:
-            ctx.exit(1)
+        _report_list_errors_and_exit(ctx, params.output_opts.output_format, result.errors)
         return
 
     # Template output takes precedence over format-based dispatch
@@ -783,9 +789,78 @@ def _run_list_iteration(params: _ListIterationParams, ctx: click.Context) -> Non
         # JSONL is handled above with streaming, so this should be unreachable
         raise AssertionError(f"Unexpected output format: {params.output_opts.output_format}")
 
-    # Exit with non-zero code if there were errors (per error_handling.md spec)
-    if result.errors:
-        ctx.exit(1)
+    _report_list_errors_and_exit(ctx, params.output_opts.output_format, result.errors)
+
+
+def _report_list_errors_and_exit(
+    ctx: click.Context,
+    output_format: OutputFormat,
+    errors: Sequence[ErrorInfo],
+) -> None:
+    """Report any listing errors and exit non-zero (no-op when there were none).
+
+    JSON output already carries the errors in its structured ``errors`` array, so
+    only non-JSON formats get the consistent human-readable error block on stderr.
+    """
+    if not errors:
+        return
+    if output_format != OutputFormat.JSON:
+        _emit_list_errors_human(errors)
+    ctx.exit(_exit_code_for_list_errors(errors))
+
+
+def _exit_code_for_list_errors(errors: Sequence[ErrorInfo]) -> int:
+    """Pick the process exit code for a completed listing.
+
+    SUCCESS when there were no errors; the granular provider-inaccessible code
+    when *every* error was a provider that could not be reached or authenticated;
+    otherwise the generic error code.
+    """
+    if not errors:
+        return EXIT_CODE_SUCCESS
+    if all(error.is_provider_inaccessible for error in errors):
+        return EXIT_CODE_PROVIDER_INACCESSIBLE
+    return EXIT_CODE_ERROR
+
+
+@pure
+def _format_provider_error_line(error: ProviderErrorInfo) -> str:
+    """Render one provider failure as a single consistent line.
+
+    Shape: ``<provider>: <reason> — <remediation> (disable: mngr config set ...)``.
+    Falls back to the full message when no concise reason was supplied.
+    """
+    # Keep it to a single glanceable line even if the underlying message is multi-line.
+    full_reason = error.short_reason or error.message
+    reason = full_reason.splitlines()[0] if full_reason else error.exception_type
+    line = f"{error.provider_name}: {reason}"
+    if error.short_remediation:
+        line = f"{line} — {error.short_remediation}"
+    return f"{line} (disable: mngr config set --scope user providers.{error.provider_name}.is_enabled false)"
+
+
+@pure
+def _format_list_error_line(error: ErrorInfo) -> str:
+    """Render one listing error as a single line for the human-facing error block."""
+    if isinstance(error, ProviderErrorInfo):
+        return _format_provider_error_line(error)
+    return error.message
+
+
+def _emit_list_errors_human(errors: Sequence[ErrorInfo]) -> None:
+    """Print all listing errors to stderr in a single consistent block.
+
+    Used by every non-JSON human-facing list path (table, template, --ids/--addrs)
+    so unauthenticated or unreachable providers are reported the same way at the very
+    end of the output, after all successfully listed agents. JSON/JSONL paths instead
+    carry the same errors in their structured ``errors`` channel.
+    """
+    if not errors:
+        return
+    lines = ["Errors:"]
+    for error in errors:
+        lines.append("  " + _format_list_error_line(error))
+    write_stderr_line("\n".join(lines))
 
 
 def _emit_json_output(agents: list[AgentDetails], errors: list[ErrorInfo]) -> None:

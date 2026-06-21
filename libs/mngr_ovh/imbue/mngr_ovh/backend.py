@@ -15,6 +15,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import HostId
@@ -117,14 +118,9 @@ class OvhProvider(VpsProvider):
         """
         if self._vps_iam_cache is not None:
             return list(self._vps_iam_cache)
-        if self.ovh_client.is_unconfigured:
-            # No credentials anywhere (config, OVH_* env, ~/.ovh.conf): don't
-            # bother making a doomed API call. Silently return empty so that
-            # `mngr list` / `mngr usage` / etc. don't dump a WARNING into
-            # stdout for users who haven't set up OVH. A real failure with
-            # real credentials still surfaces through the except branch below.
-            self._vps_iam_cache = []
-            return []
+        # No is_unconfigured guard here: the backend raises ProviderNotAuthorizedError
+        # at construction when OVH has no resolvable credentials, so a constructed
+        # provider always has credentials to attempt the listing with.
         # Deliberately do NOT catch IAM-listing errors here. Swallowing to an
         # empty list would make a transient OVH outage / expired credentials
         # look like "this provider has zero hosts" -- which the discovery layer
@@ -641,6 +637,17 @@ class OvhProviderBackend(ProviderBackendInterface):
         if not isinstance(config, OvhProviderConfig):
             raise MngrError(f"Expected OvhProviderConfig, got {type(config).__name__}")
         ovh_client = build_ovh_client(config)
+        # An enabled-but-unauthenticated provider is an error, not a silent
+        # zero-result listing: if no credentials are resolvable anywhere (config,
+        # OVH_* env, ~/.ovh.conf), surface it consistently with the other cloud
+        # providers. ProviderNotAuthorizedError is a ProviderUnavailableError, so
+        # read paths still treat it as unavailable rather than empty.
+        if ovh_client.is_unconfigured:
+            raise ProviderNotAuthorizedError(
+                name,
+                reason="OVH credentials not configured",
+                short_remediation="set OVH_* env vars, configure ~/.ovh.conf, or set credentials in [providers.<name>]",
+            )
         return OvhProvider(
             name=name,
             host_dir=config.host_dir,

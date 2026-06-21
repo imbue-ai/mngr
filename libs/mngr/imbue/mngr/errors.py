@@ -231,14 +231,31 @@ class ProviderUnavailableError(ProviderError):
     Commands that query multiple providers catch this and continue with
     the providers that *are* available, so a single offline backend does
     not block the entire operation.
+
+    Carries structured fields so callers can render a consistent one-line
+    summary (``short_reason`` + ``short_remediation``) without re-parsing the
+    full message, while ``user_help_text`` keeps the verbose guidance.
     """
+
+    # A concise phrase describing why the provider is unavailable (e.g. "AWS
+    # credentials not configured"). Distinct from the verbose ``user_help_text``.
+    short_reason: str
+    # A concise next step the user can take (e.g. "run `aws configure`"), or None.
+    short_remediation: str | None
 
     def __init__(
         self,
         provider_name: ProviderInstanceName,
         reason: str,
         user_help_text: str | None = None,
+        short_remediation: str | None = None,
+        # An explicit concise, single-line reason for the rendered summary. Defaults to
+        # ``reason``; pass it when ``reason`` is long or multi-line (e.g. a cloud SDK
+        # message) so the one-line-per-provider listing stays glanceable.
+        short_reason: str | None = None,
     ) -> None:
+        self.short_reason = short_reason or reason
+        self.short_remediation = short_remediation
         super().__init__(
             provider_name,
             f"Provider '{provider_name}' is not available: {reason}. "
@@ -295,18 +312,35 @@ class ProviderInstanceNotFoundError(ProviderError):
         super().__init__(provider_name, f"Provider {provider_name} not found")
 
 
-class ProviderNotAuthorizedError(ProviderError):
-    """Provider instance is not authorized/authenticated."""
+class ProviderNotAuthorizedError(ProviderUnavailableError):
+    """Provider instance is not authenticated/authorized (missing or invalid credentials).
 
-    def __init__(self, provider_name: ProviderInstanceName, auth_help: str | None = None) -> None:
-        message = f"Provider '{provider_name}' is not authorized."
-        if auth_help:
-            message = f"{message} {auth_help}"
-        super().__init__(provider_name, message)
-        self.user_help_text = (
+    A specialization of ``ProviderUnavailableError``: the backend may be reachable
+    in principle, but without valid credentials its state is unknown, so read paths
+    (``mngr list`` / ``mngr gc`` / discovery) treat it identically to any other
+    unavailable provider. The dedicated type lets callers and tests recognize the
+    "not authenticated" case specifically.
+    """
+
+    def __init__(
+        self,
+        provider_name: ProviderInstanceName,
+        reason: str = "not authenticated",
+        short_remediation: str | None = None,
+        user_help_text: str | None = None,
+        short_reason: str | None = None,
+    ) -> None:
+        default_help = (
             f"To disable this provider, run:\n"
             f"  mngr config set --scope user providers.{provider_name}.is_enabled false\n"
             f"Or disable the provider backend entirely by removing it from enabled_backends in your config."
+        )
+        super().__init__(
+            provider_name,
+            reason,
+            user_help_text=user_help_text or default_help,
+            short_remediation=short_remediation,
+            short_reason=short_reason,
         )
 
 
@@ -468,17 +502,32 @@ class PluginMngrError(MngrError):
     """
 
 
-class ModalAuthError(PluginMngrError):
-    """Modal authentication failed due to missing or invalid token."""
+class ModalAuthError(ProviderNotAuthorizedError):
+    """Modal authentication failed due to missing or invalid token.
 
-    def __init__(self) -> None:
-        super().__init__(
+    A ``ProviderNotAuthorizedError`` (hence ``ProviderUnavailableError``) so read
+    paths (``mngr list`` / ``gc`` / discovery) categorize it as a provider-
+    inaccessible / unauthenticated failure consistently with the other cloud
+    providers, while preserving the Modal-specific message and remediation.
+    """
+
+    def __init__(self, provider_name: ProviderInstanceName | None = None) -> None:
+        resolved_provider_name = provider_name if provider_name is not None else ProviderInstanceName("modal")
+        message = (
             "Modal authentication failed. Token missing or invalid. "
             "You can disable the modal plugin by running "
             "'mngr config set --scope user plugins.modal.enabled false', "
             "or by passing --disable-plugin modal to individual commands. "
             "To configure modal credentials, see https://modal.com/docs/reference/modal.config"
         )
+        # Initialize the ProviderError base directly so the Modal-specific message and
+        # guidance are preserved verbatim (the ProviderUnavailableError base would
+        # otherwise rewrite the message into the generic "is not available" shape).
+        ProviderError.__init__(self, resolved_provider_name, message)
+        self.short_reason = "Modal token missing or invalid"
+        self.short_remediation = "run `uvx modal token set`"
+        # The message already carries full remediation, so no separate help text.
+        self.user_help_text = None
 
 
 class ConfigError(MngrError):

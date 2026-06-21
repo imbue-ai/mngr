@@ -41,7 +41,11 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    rc.check_bare_print(_DIR, snapshot(33), excluded_patterns=("_kqueue_tty_test_script.py",))
+    # 34 includes the blessed `write_stderr_line` helper in cli/output_helpers.py -- the
+    # stderr sibling of `write_human_line`, used for the `mngr list` end-of-output error
+    # block so piped stdout stays clean. Call sites route through it rather than writing
+    # to sys.stderr directly.
+    rc.check_bare_print(_DIR, snapshot(34), excluded_patterns=("_kqueue_tty_test_script.py",))
 
 
 # --- Exception handling ---
@@ -52,7 +56,12 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    rc.check_broad_exception_catch(_DIR, snapshot(8))
+    # 9 includes utils/timeouts.py's `call_with_timeout` worker, which catches broad
+    # Exception to *capture and re-raise* the wrapped callable's failure to the joining
+    # caller (the same capture-and-reraise pattern as concurrent.futures). The wrapper is
+    # generic, so it cannot know which exception types the callable raises; the catch
+    # propagates rather than swallows, so it honors the ratchet's intent.
+    rc.check_broad_exception_catch(_DIR, snapshot(9))
 
 
 def test_prevent_base_exception_catch() -> None:

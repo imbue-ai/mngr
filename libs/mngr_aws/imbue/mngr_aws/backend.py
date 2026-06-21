@@ -15,12 +15,13 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.utils.timeouts import call_with_timeout
 from imbue.mngr_aws import hookimpl
 from imbue.mngr_aws.cli import aws_cli_group
 from imbue.mngr_aws.client import AwsVpsClient
@@ -347,12 +348,16 @@ class AwsProvider(OfflineCapableVpsProvider):
         return instance.get("state") in _HOST_DOWN_STATES
 
 
-def _aws_unavailable_error(name: ProviderInstanceName, reason: str) -> ProviderUnavailableError:
-    """Build a ``ProviderUnavailableError`` with AWS-specific, actionable help text.
+def _aws_not_authorized_error(
+    name: ProviderInstanceName, reason: str, short_remediation: str
+) -> ProviderNotAuthorizedError:
+    """Build a ``ProviderNotAuthorizedError`` with AWS-specific, actionable help text.
 
-    The generic ``ProviderUnavailableError`` help text tells the user to "start Docker", which is
-    wrong advice for an AWS credential failure -- so we curate the guidance toward resolving the
-    boto3 credential chain.
+    The generic unavailable help text tells the user to "start Docker", which is wrong
+    advice for an AWS credential failure -- so we curate the guidance toward resolving
+    the boto3 credential chain. ``ProviderNotAuthorizedError`` is a
+    ``ProviderUnavailableError`` subclass, so read paths (``mngr list`` / ``gc`` /
+    discovery) still treat the provider as unavailable rather than silently empty.
     """
     help_text = (
         "AWS could not be reached. Check, in order:\n"
@@ -361,7 +366,9 @@ def _aws_unavailable_error(name: ProviderInstanceName, reason: str) -> ProviderU
         "  - one-time setup: run `mngr aws prepare` if you have not yet.\n"
         f"Or disable the provider: mngr config set --scope user providers.{name}.is_enabled false"
     )
-    return ProviderUnavailableError(name, reason, user_help_text=help_text)
+    return ProviderNotAuthorizedError(
+        name, reason=reason, short_remediation=short_remediation, user_help_text=help_text
+    )
 
 
 class AwsProviderBackend(ProviderBackendInterface):
@@ -416,10 +423,9 @@ class AwsProviderBackend(ProviderBackendInterface):
 
         # A missing/unresolvable AWS session means EC2 was never reached: the
         # state is *unknown* (agents may still exist on a configured account we
-        # transiently couldn't auth to). That is ProviderUnavailableError, NOT
-        # ProviderEmptyError -- read paths (mngr list / gc) catch it via the
-        # generic catch-all in mngr.api.list._construct_and_discover_for_provider
-        # and log at error level, so a misconfigured provider stays visible
+        # transiently couldn't auth to). That is ProviderNotAuthorizedError (a
+        # ProviderUnavailableError), NOT ProviderEmptyError -- read paths (mngr
+        # list / gc) treat it as an unavailable provider that stays visible
         # rather than silently vanishing from the listing. Host-creation paths
         # surface this same error directly (no override -- create just calls
         # build_provider_instance first), so we use a single exit shape for
@@ -427,10 +433,30 @@ class AwsProviderBackend(ProviderBackendInterface):
         # is a create-only concern and is deliberately NOT validated here --
         # see AwsProvider._create_vps_instance for the just-in-time resolution
         # and the rationale.
+        #
+        # Resolving credentials is bounded by credential_timeout_seconds: boto3's
+        # default chain probes the EC2 instance metadata service (IMDS) when no
+        # other source resolves, which can hang on a non-AWS host. The timeout
+        # turns that hang into a fast ProviderNotAuthorizedError.
         try:
-            session = config.get_session()
+            session = call_with_timeout(
+                config.get_session,
+                timeout_seconds=config.credential_timeout_seconds,
+                concurrency_group=mngr_ctx.concurrency_group,
+                description=f"resolving AWS credentials for provider {name}",
+            )
+        except TimeoutError as e:
+            raise _aws_not_authorized_error(
+                name,
+                reason=f"timed out resolving AWS credentials after {config.credential_timeout_seconds:g}s",
+                short_remediation="check your network and credentials, or raise credential_timeout_seconds",
+            ) from e
         except (ValueError, BotoCoreError) as e:
-            raise _aws_unavailable_error(name, str(e)) from e
+            raise _aws_not_authorized_error(
+                name,
+                reason="AWS credentials not configured",
+                short_remediation="run `aws configure` (or set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY, or AWS_PROFILE)",
+            ) from e
 
         aws_client = AwsVpsClient(
             session=session,
