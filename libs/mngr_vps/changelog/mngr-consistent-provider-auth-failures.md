@@ -1,3 +1,0 @@
-Add a `credential_timeout_seconds` setting (default 10s) to the cloud VPS provider config base shared by AWS, GCP, and Azure.
-
-This bounds credential / metadata resolution at provider construction. Without valid credentials, a cloud SDK's default chain can probe the instance metadata service (IMDS) and hang on a non-cloud host; the timeout caps that wait so an unauthenticated provider fails fast (as `ProviderNotAuthorizedError`) instead of stalling discovery. Raise it (e.g. `mngr config set --scope user providers.<name>.credential_timeout_seconds 30`) if legitimate credential resolution is slow on your network.

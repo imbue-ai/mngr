@@ -247,6 +247,12 @@ def handle_modal_auth_error(func: Callable[P, T]) -> Callable[P, T]:
         try:
             return func(*args, **kwargs)
         except ModalProxyAuthError as e:
+            # The wrapped callables are all ModalProviderInstance methods, so the first
+            # positional arg is the instance; surface its name so the error (and its
+            # disable hint) reference the actual provider instance rather than the default.
+            instance = args[0] if args else None
+            if isinstance(instance, ModalProviderInstance):
+                raise ModalAuthError(instance.name) from e
             raise ModalAuthError() from e
 
     return wrapper
@@ -2298,7 +2304,7 @@ log "=== Shutdown script completed ==="
             sandboxes = sandboxes_future.result()
             all_host_records = host_records_future.result()
         except ModalProxyAuthError as e:
-            raise ModalAuthError() from e
+            raise ModalAuthError(self.name) from e
 
         # Map running sandboxes by host_id
         running_sandbox_by_host_id: dict[HostId, SandboxInterface] = {}
@@ -2494,7 +2500,7 @@ log "=== Shutdown script completed ==="
                     running_host_ids = running_ids_future.result()
                     all_host_records, agent_data_by_host_id = host_and_agent_future.result()
             except ModalProxyAuthError as e:
-                raise ModalAuthError() from e
+                raise ModalAuthError(self.name) from e
             logger.debug(
                 "Modal discovery: {} running host(s), {} host record(s), {} host(s) with agent data",
                 len(running_host_ids),
