@@ -18,7 +18,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Changed: Cross-scope `settings_overrides` narrowing is now caught at config-load. A higher scope whose bare key dropped a non-empty aggregate set by a lower scope previously dropped the entries silently; the config loader now surfaces these through the standard narrowing error, escapable via `allow_settings_key_assignment_narrowing` or `key__extend` / `key__assign`.
 
-- Changed: The Claude response-streaming snapshot watcher and Claude agent tmux session name now target the agent's primary tmux window by name (`tmux.primary_window_name`, default `agent`) instead of the literal `:0` index, so they work regardless of the user's tmux `base-index`.
+- Changed: The Claude response-streaming snapshot watcher now captures the agent's tmux pane by the configured primary window name (`tmux.primary_window_name`, default `agent`) instead of the literal `:0` index, so response streaming works regardless of the user's tmux `base-index`.
 
 ### Fixed
 
