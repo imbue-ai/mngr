@@ -66,17 +66,41 @@ async def _delete_images_by_id(image_ids: Sequence[str]) -> set[str]:
     """
     client = await _Client.from_env()
     deleted_image_ids: set[str] = set()
-    for image_id in image_ids:
-        try:
-            await client.stub.ImageDelete(api_pb2.ImageDeleteRequest(image_id=image_id))
-        except modal.exception.NotFoundError:
-            logger.debug("Image {} was already gone; nothing to delete", image_id)
-            continue
-        except modal.exception.InvalidError:
-            logger.warning("Ledger entry {!r} is not a valid image id; dropping it", image_id)
-            continue
-        deleted_image_ids.add(image_id)
+    # Close the client in a finally: _Client.from_env() opens a TaskContext
+    # bound to this event loop, and leaving it open makes asyncio.run() hang
+    # at loop teardown waiting on the client's background tasks.
+    try:
+        for image_id in image_ids:
+            try:
+                await client.stub.ImageDelete(api_pb2.ImageDeleteRequest(image_id=image_id))
+            except modal.exception.NotFoundError:
+                logger.debug("Image {} was already gone; nothing to delete", image_id)
+                continue
+            except modal.exception.InvalidError:
+                logger.warning("Ledger entry {!r} is not a valid image id; dropping it", image_id)
+                continue
+            deleted_image_ids.add(image_id)
+    finally:
+        await client._close()
     return deleted_image_ids
+
+
+def _delete_images(image_ids: Sequence[str]) -> set[str]:
+    """Delete images on an isolated event loop; return those actually deleted.
+
+    Image deletes go through the low-level `_Client` over `asyncio.run()`,
+    while the ledger uses the high-level `modal.Dict` (which runs on Modal's
+    background synchronicity event loop). Both share `from_env()`'s cached
+    client, so a Dict op done first leaves that singleton bound to the
+    background loop and the subsequent `ImageDelete` hangs ("RPC made outside
+    of task context"). Resetting the cached client makes `from_env()` build a
+    fresh one bound to THIS `asyncio.run()` loop; `_delete_images_by_id`
+    closes it afterward so the loop tears down cleanly and the next Dict op
+    rebuilds its own client. Keep all ledger (Dict) operations either before
+    or after this call -- never spanning it.
+    """
+    _Client.set_env_client(None)
+    return asyncio.run(_delete_images_by_id(image_ids))
 
 
 def _record_image(image_id: str) -> None:
@@ -87,9 +111,10 @@ def _record_image(image_id: str) -> None:
 
 
 def _delete_image(image_id: str) -> None:
-    deleted_image_ids = asyncio.run(_delete_images_by_id([image_id]))
-    ledger = _get_ledger()
-    ledger.pop(image_id, None)
+    # Delete first (resets + uses its own client), then drop from a freshly
+    # fetched ledger so the Dict op runs on a clean client.
+    deleted_image_ids = _delete_images([image_id])
+    _get_ledger().pop(image_id, None)
     if image_id in deleted_image_ids:
         logger.info("Deleted snapshot image {} and dropped it from the ledger", image_id)
     else:
@@ -97,23 +122,24 @@ def _delete_image(image_id: str) -> None:
 
 
 def _sweep_images(max_age_hours: float) -> int:
-    ledger = _get_ledger()
     max_age_seconds = max_age_hours * _SECONDS_PER_HOUR
     now = time.time()
 
-    # Collect everything past the age threshold first, then delete in one
-    # shared-client batch and drop all of them from the ledger.
+    # Read the ledger (Dict op) to find expired ids, then delete the images
+    # (isolated event loop), then re-fetch the ledger to drop them -- the
+    # re-fetch is what keeps the post-delete Dict op off the now-closed client.
     expired_image_ids = tuple(
-        image_id for image_id, created_at in ledger.items() if (now - created_at) > max_age_seconds
+        image_id for image_id, created_at in _get_ledger().items() if (now - created_at) > max_age_seconds
     )
     if not expired_image_ids:
         logger.info("No snapshot images older than {} hours to sweep", max_age_hours)
         return 0
 
     logger.info("Sweeping {} snapshot image(s) older than {} hours", len(expired_image_ids), max_age_hours)
-    asyncio.run(_delete_images_by_id(expired_image_ids))
+    _delete_images(expired_image_ids)
+    fresh_ledger = _get_ledger()
     for image_id in expired_image_ids:
-        ledger.pop(image_id, None)
+        fresh_ledger.pop(image_id, None)
     return len(expired_image_ids)
 
 
