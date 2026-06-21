@@ -21,7 +21,6 @@ from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.utils.timeouts import call_with_timeout
 from imbue.mngr_aws import hookimpl
 from imbue.mngr_aws.cli import aws_cli_group
 from imbue.mngr_aws.client import AwsVpsClient
@@ -433,24 +432,8 @@ class AwsProviderBackend(ProviderBackendInterface):
         # is a create-only concern and is deliberately NOT validated here --
         # see AwsProvider._create_vps_instance for the just-in-time resolution
         # and the rationale.
-        #
-        # Resolving credentials is bounded by credential_timeout_seconds: boto3's
-        # default chain probes the EC2 instance metadata service (IMDS) when no
-        # other source resolves, which can hang on a non-AWS host. The timeout
-        # turns that hang into a fast ProviderNotAuthorizedError.
         try:
-            session = call_with_timeout(
-                config.get_session,
-                timeout_seconds=config.credential_timeout_seconds,
-                concurrency_group=mngr_ctx.concurrency_group,
-                description=f"resolving AWS credentials for provider {name}",
-            )
-        except TimeoutError as e:
-            raise _aws_not_authorized_error(
-                name,
-                reason=f"timed out resolving AWS credentials after {config.credential_timeout_seconds:g}s",
-                short_remediation="check your network and credentials, or raise credential_timeout_seconds",
-            ) from e
+            session = config.get_session()
         except (ValueError, BotoCoreError) as e:
             raise _aws_not_authorized_error(
                 name,

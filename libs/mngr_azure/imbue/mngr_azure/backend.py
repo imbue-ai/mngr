@@ -27,7 +27,6 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.utils.timeouts import call_with_timeout
 from imbue.mngr_azure import hookimpl
 from imbue.mngr_azure.cli import azure_cli_group
 from imbue.mngr_azure.client import AzureVpsClient
@@ -594,21 +593,9 @@ class AzureProviderBackend(ProviderBackendInterface):
         # DefaultAzureCredential constructs lazily and never validates, so eagerly
         # request a management-scope token here to surface an unauthenticated
         # environment *now* (instead of as a confusing API error on the first
-        # discovery call). The probe may walk IMDS managed-identity, which can hang
-        # on a non-Azure host, so it is bounded by credential_timeout_seconds.
+        # discovery call), matching how AWS/GCP resolve credentials at construction.
         try:
-            credential = call_with_timeout(
-                lambda: _resolve_and_validate_azure_credential(config),
-                timeout_seconds=config.credential_timeout_seconds,
-                concurrency_group=mngr_ctx.concurrency_group,
-                description=f"resolving Azure credentials for provider {name}",
-            )
-        except TimeoutError as e:
-            raise _azure_not_authorized_error(
-                name,
-                f"timed out resolving Azure credentials after {config.credential_timeout_seconds:g}s",
-                "check your network and credentials, or raise credential_timeout_seconds",
-            ) from e
+            credential = _resolve_and_validate_azure_credential(config)
         except AzureError as e:
             # A credential we couldn't obtain/validate leaves Azure's state unknown, so
             # this is unauthorized (surfaced), not empty (silently skipped).

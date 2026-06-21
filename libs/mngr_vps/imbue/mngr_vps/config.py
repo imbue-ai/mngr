@@ -156,16 +156,6 @@ class OfflineCapableVpsProviderConfig(VpsProviderConfig):
             "Replaced, not merged, across config layers."
         ),
     )
-    credential_timeout_seconds: float = Field(
-        default=10.0,
-        description=(
-            "Hard timeout (in seconds) bounding cloud credential / metadata resolution at provider "
-            "construction. Without valid credentials, the SDK's default chain may probe the instance "
-            "metadata service (IMDS) and hang on a non-cloud host; this caps that wait so an "
-            "unauthenticated provider fails fast (as ProviderNotAuthorizedError) instead of stalling "
-            "discovery. Used by the AWS / GCP / Azure providers."
-        ),
-    )
 
 
 class PublicIpVpsProviderConfig(OfflineCapableVpsProviderConfig):

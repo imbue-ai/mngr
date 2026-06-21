@@ -56,12 +56,7 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    # 9 includes utils/timeouts.py's `call_with_timeout` worker, which catches broad
-    # Exception to *capture and re-raise* the wrapped callable's failure to the joining
-    # caller (the same capture-and-reraise pattern as concurrent.futures). The wrapper is
-    # generic, so it cannot know which exception types the callable raises; the catch
-    # propagates rather than swallows, so it honors the ratchet's intent.
-    rc.check_broad_exception_catch(_DIR, snapshot(9))
+    rc.check_broad_exception_catch(_DIR, snapshot(8))
 
 
 def test_prevent_base_exception_catch() -> None:

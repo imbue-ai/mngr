@@ -28,7 +28,6 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.ssh_utils import wait_for_expected_host_key
-from imbue.mngr.utils.timeouts import call_with_timeout
 from imbue.mngr_gcp import hookimpl
 from imbue.mngr_gcp.cli import gcp_cli_group
 from imbue.mngr_gcp.client import GcpVpsClient
@@ -135,26 +134,11 @@ def _resolve_credentials_project_and_zone_or_unavailable(
     instead of silently dropping the provider, and ``mngr gc`` skips it rather
     than treating its hosts as garbage.
     """
-    # Resolving ADC is bounded by credential_timeout_seconds: google.auth.default()
-    # probes the GCE metadata server as a credential/project source, which can hang
-    # on a non-GCE host. The timeout turns that hang into a fast
-    # ProviderNotAuthorizedError.
     try:
         gcloud_zone = None if config.default_zone else get_gcloud_compute_zone(concurrency_group)
         zone, _region = config.resolve_zone_and_region(gcloud_zone)
-        credentials, adc_project = call_with_timeout(
-            config.get_credentials_and_resolved_project,
-            timeout_seconds=config.credential_timeout_seconds,
-            concurrency_group=concurrency_group,
-            description=f"resolving GCP credentials for provider {name}",
-        )
+        credentials, adc_project = config.get_credentials_and_resolved_project()
         project_id = config.resolve_project_id(adc_project)
-    except TimeoutError as e:
-        raise _gcp_not_authorized_error(
-            name,
-            f"timed out resolving GCP credentials after {config.credential_timeout_seconds:g}s",
-            "check your network and credentials, or raise credential_timeout_seconds",
-        ) from e
     except (ValueError, google_auth_exceptions.GoogleAuthError) as e:
         raise _gcp_not_authorized_error(
             name,
