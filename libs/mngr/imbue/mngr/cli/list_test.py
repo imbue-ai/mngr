@@ -34,10 +34,13 @@ from imbue.mngr.cli.list import _get_header_label
 from imbue.mngr.cli.list import _is_streaming_eligible
 from imbue.mngr.cli.list import _parse_slice_spec
 from imbue.mngr.cli.list import _render_format_template
+from imbue.mngr.cli.list import _render_list_errors_block
 from imbue.mngr.cli.list import _should_use_streaming_mode
 from imbue.mngr.cli.list import _sort_agents_by_cel
 from imbue.mngr.cli.list import _truncate_to_width
 from imbue.mngr.cli.list import list_command
+from imbue.mngr.colors import ERROR_COLOR
+from imbue.mngr.colors import RESET_COLOR
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.primitives import AgentLifecycleState
@@ -1799,6 +1802,24 @@ def test_format_list_error_line_falls_back_to_message_for_non_provider_errors() 
     """A plain ErrorInfo (not provider-scoped) renders its message verbatim."""
     error = ErrorInfo(exception_type="RuntimeError", message="something broke")
     assert _format_list_error_line(error) == "something broke"
+
+
+def test_render_list_errors_block_is_plain_when_color_disabled() -> None:
+    """Without color the block is the Errors: heading plus one indented line per error, no ANSI codes."""
+    errors = [_provider_error("aws", is_inaccessible=True, short_reason="creds", remediation="run x")]
+    block = _render_list_errors_block(errors, is_color_enabled=False)
+    assert block.startswith("Errors:\n  aws: creds")
+    assert ERROR_COLOR not in block
+    assert RESET_COLOR not in block
+
+
+def test_render_list_errors_block_is_red_when_color_enabled() -> None:
+    """With color enabled the whole block is wrapped in the bold-red error color, matching MngrError.show."""
+    errors = [_provider_error("aws", is_inaccessible=True, short_reason="creds", remediation="run x")]
+    block = _render_list_errors_block(errors, is_color_enabled=True)
+    assert block.startswith(ERROR_COLOR)
+    assert block.endswith(RESET_COLOR)
+    assert "Errors:" in block
 
 
 def test_exit_code_for_list_errors_success_when_empty() -> None:
