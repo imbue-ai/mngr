@@ -187,10 +187,10 @@ def _bind_listen_socket(host: str, requested_port: int | None) -> socket.socket:
     "--on-error",
     type=click.Choice(["abort", "continue"], case_sensitive=False),
     default="abort",
-    help="What to do when a provider errors during the `--no-observe` startup snapshot: abort (fail "
-    "fast, the default) or continue (tolerate unauthenticated/unreachable providers and forward the "
-    "agents the healthy providers reported). Has no effect in the observe / --observe-via-file modes, "
-    "which always tolerate provider errors.",
+    help="What to do when a provider errors during the `--no-observe` `mngr list` snapshot (both the "
+    "startup snapshot and SIGHUP re-snapshots): abort (fail fast, the default) or continue (tolerate "
+    "unauthenticated/unreachable providers and forward the agents the healthy providers reported). Has "
+    "no effect in the observe / --observe-via-file modes, which always tolerate provider errors.",
 )
 @click.option(
     "--agent-include",
