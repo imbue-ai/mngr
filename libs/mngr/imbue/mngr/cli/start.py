@@ -33,6 +33,7 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import AgentNotFoundOnHostError
+from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import require_interactive_agent
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -250,7 +251,7 @@ def _start_agents(
             # not a full host revalidation) so a doomed start fails with a clear
             # error instead of trying to boot an agent gc already removed.
             for match in agent_list:
-                agent_state_dir = online_host.host_dir / "agents" / str(match.agent_id)
+                agent_state_dir = get_agent_state_dir_path(online_host.host_dir, match.agent_id)
                 if not online_host.path_exists(agent_state_dir):
                     raise AgentNotFoundOnHostError(match.agent_id, online_host.id)
 
