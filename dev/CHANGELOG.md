@@ -22,7 +22,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Added: Blueprint plan under `blueprint/remote-mind-recovery/` for extending minds' workspace-recovery flow to remote (Imbue Cloud) minds.
 
-- Added: `google-cloud-storage>=2.18` as a new runtime dependency at the repo root, used by the GCP provider's new offline `host_dir` GCS state bucket.
+- Added: `google-cloud-storage>=2.18` as a new runtime dependency (declared in `libs/mngr_gcp/pyproject.toml`, propagating to the root `uv.lock`), used by the GCP provider's new offline `host_dir` GCS state bucket.
 
 - Added: New `overlay` workspace library registered in the root `pyproject.toml` (`[tool.uv.sources]` source + `--cov=imbue.overlay` in shared coverage flags).
 
