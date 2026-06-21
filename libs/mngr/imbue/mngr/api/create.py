@@ -46,9 +46,10 @@ from imbue.mngr.utils.git_utils import remove_worktree
 _MAX_HOST_NAME_GENERATION_ATTEMPTS: Final[int] = 100
 _MAX_HOST_NAME_CONFLICT_RETRIES: Final[int] = 3
 
-# Set to "1" to retain a host whose create failed (skip both the host-lock
-# removal in ``Host.lock_cooperatively`` and the host teardown below), so it can
-# be inspected. Mirrors the flag used in ``hosts/host.py``.
+# Set to "1" to retain a host whose create failed (a detached on-host holder
+# re-grabs the ``Host.lock_cooperatively`` flock to suppress idle-shutdown, and
+# the host teardown below is skipped), so it can be inspected. Mirrors the flag
+# used in ``hosts/host.py``.
 _RETAIN_FAILED_HOSTS_ENV_VAR: Final[str] = "MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE"
 
 
@@ -60,7 +61,7 @@ def destroy_new_host_on_create_failure(
 
     ``provider`` is the provider that created the host for a ``--new-host``
     create, or ``None`` for an existing host the caller already had (which is
-    never torn down). ``Host.lock_cooperatively`` removes the host lock on
+    never torn down). ``Host.lock_cooperatively``'s flock auto-releases on
     failure so *idle-shutdown* providers reclaim the host on their own, but
     providers that never idle-shut-down (e.g. imbue_cloud pool leases, which set
     ``idle_mode=disabled``) would otherwise leak the host and its connector
