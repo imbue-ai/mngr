@@ -185,8 +185,10 @@ class ImbueCloudCli(MutableModel):
         # Debug timing so a slow/timed-out imbue_cloud command tells us which
         # subcommand it was and how long it took before the timeout fired
         # (these run as detached post-create callbacks, so a bare "exit -15" is
-        # otherwise hard to attribute).
-        logger.debug("Running imbue_cloud command (cg={}, timeout={}s): {}", cg_name, timeout_seconds, " ".join(args))
+        # otherwise hard to attribute). cg_name already uniquely identifies the
+        # subcommand; the raw args are deliberately not logged because some
+        # callsites (e.g. auth signin/signup) pass secrets like --password.
+        logger.debug("Running imbue_cloud command (cg={}, timeout={}s)", cg_name, timeout_seconds)
         start_time = time.monotonic()
         with cg:
             result = cg.run_process_to_completion(
