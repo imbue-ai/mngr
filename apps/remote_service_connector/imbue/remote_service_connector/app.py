@@ -2249,11 +2249,16 @@ def reconcile_slice_boxes(conn: Any, env_name: str) -> int:
     if not env_name:
         logger.info("Slice reconcile skipped: connector has no MINDS_ENV_NAME to scope to")
         return 0
-    management_key_pem = os.environ["POOL_SSH_PRIVATE_KEY"]
-    divergence_count = 0
     with conn.cursor() as cur:
         cur.execute("SELECT id, public_address, lima_service_user FROM bare_metal_servers")
         servers = cur.fetchall()
+    # Read the pool key only once we know there are boxes to inspect: a deployment
+    # with no slice infrastructure (no boxes, no POOL_SSH_PRIVATE_KEY) must not fail
+    # here just because the cron also covers the OVH pool-host cleanup.
+    if not servers:
+        return 0
+    management_key_pem = os.environ["POOL_SSH_PRIVATE_KEY"]
+    divergence_count = 0
     for server_id, public_address, lima_service_user in servers:
         if not public_address:
             continue
@@ -4231,7 +4236,9 @@ def cleanup_removing_pool_hosts() -> dict[str, int]:
         # it is safe on a box shared by multiple dev envs. Best-effort: never fail the sweep.
         try:
             divergence_count = reconcile_slice_boxes(conn, _current_minds_env_name())
-        except (psycopg2.Error, paramiko.SSHException, OSError) as exc:
+        except (psycopg2.Error, paramiko.SSHException, OSError, KeyError) as exc:
+            # KeyError: POOL_SSH_PRIVATE_KEY unset on a deployment that does have
+            # boxes; still degrade to a warning rather than failing the whole sweep.
             logger.warning("Slice box reconcile failed (continuing): %s", exc)
             divergence_count = 0
     finally:
