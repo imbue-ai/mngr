@@ -1,8 +1,29 @@
+import base64
 import shlex
 from typing import Any
 from typing import Final
 
+from imbue.mngr_imbue_cloud.errors import SliceReserveOutputError
+from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_LIMA_INSTANCE_PREFIX
 from imbue.mngr_lima.lima_yaml import generate_default_lima_yaml
+
+# Placeholder tokens for the two box host ports in a slice YAML *template*. The
+# real ports are chosen on the box under the reservation lock and substituted for
+# these tokens (see ``build_slice_reserve_script``), so the YAML built off-box need
+# not know them. They are plain scalars so PyYAML emits them unquoted.
+VM_SSH_PORT_PLACEHOLDER: Final[str] = "__MNGR_VM_SSH_PORT__"
+CONTAINER_SSH_PORT_PLACEHOLDER: Final[str] = "__MNGR_CONTAINER_SSH_PORT__"
+
+# Box-wide advisory lock file (under the lima service user's home) serializing the
+# brief slice reservation critical section across all bakes (any env) on one box.
+SLICE_ALLOC_LOCK_RELPATH: Final[str] = ".mngr-slice-alloc.lock"
+
+# Marker the reserve script prints on success, followed by the two chosen ports.
+SLICE_RESERVED_MARKER: Final[str] = "MNGR_SLICE_RESERVED"
+# Marker the reserve script prints to stderr when the box is already at capacity.
+SLICE_BOX_FULL_MARKER: Final[str] = "MNGR_SLICE_BOX_FULL"
+# Marker the reserve script prints to stderr when no free port pair remains.
+SLICE_NO_PORTS_MARKER: Final[str] = "MNGR_SLICE_NO_PORTS"
 
 # Inside the slice VM, the vps_docker bake publishes the agent container's sshd on
 # this guest port (matches VpsProviderConfig.container_ssh_port). Each is
@@ -100,11 +121,15 @@ def build_slice_lima_yaml(
     root_authorized_public_key: str,
     host_private_key_pem: str,
     host_public_key_openssh: str,
-    vm_ssh_host_port: int,
-    container_ssh_host_port: int,
+    vm_ssh_host_port: int | str,
+    container_ssh_host_port: int | str,
     extra_root_authorized_keys: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Build the Lima YAML for a VPS-parity slice VM.
+
+    ``vm_ssh_host_port`` / ``container_ssh_host_port`` are normally the concrete
+    box host ports, but may be placeholder tokens (str) when the YAML is a template
+    whose ports are chosen and substituted on the box under the reservation lock.
 
     Produces a VM that, from the rest of the stack's perspective, looks like a
     freshly-delivered OVH VPS: reachable as root over SSH, with Docker installed
@@ -159,3 +184,106 @@ def build_slice_lima_yaml(
             {"mode": "system", "script": _append_root_authorized_keys_script(extra_root_authorized_keys)},
         ]
     return config
+
+
+def build_slice_reserve_script(
+    *,
+    instance_name: str,
+    disk_name: str,
+    disk_gib: int,
+    boot_disk_gib: int,
+    slot_count: int,
+    port_range_start: int,
+    port_range_end: int,
+    yaml_template_text: str,
+    lima_service_user: str,
+) -> str:
+    """Render the bash that atomically reserves one slice's box slot + host ports.
+
+    Run as a single SSH command on the box (so the ``flock`` it holds is released the
+    instant the command exits -- no stale locks). Under the lock it:
+
+    1. counts all ``mngr-slice-`` data disks on the box (every env + legacy) and
+       refuses if the box is already at ``slot_count`` -- the authoritative,
+       cross-env over-allocation guard;
+    2. computes the host ports already in use -- bound TCP ports PLUS the ports
+       recorded in every existing lima instance's ``portForwards`` -- so a slot
+       reserved-but-not-yet-started by another bake is respected;
+    3. picks two free ports in ``[start, end)``, substitutes them into the shipped
+       YAML template, then claims the slot WITHOUT booting: ``limactl disk create``
+       + ``limactl create`` (which records the chosen ``portForwards`` into
+       LIMA_HOME). The long ``limactl start`` runs later, after the lock is released.
+
+    Prints ``MNGR_SLICE_RESERVED <vm_port> <container_port>`` on success.
+    """
+    encoded_yaml = base64.b64encode(yaml_template_text.encode()).decode()
+    lock_path = f"/home/{lima_service_user}/{SLICE_ALLOC_LOCK_RELPATH}"
+    return f"""\
+#!/bin/bash
+set -euo pipefail
+export PATH=/usr/local/bin:$HOME/.local/bin:$PATH
+
+# Serialize the whole reservation across every bake on this box (any env). The lock
+# is held only for this short critical section and auto-released when this command
+# exits; the long VM boot happens afterwards, unlocked.
+exec 9>{shlex.quote(lock_path)}
+flock 9
+
+# 1. Cross-env capacity guard: count ALL slice data disks on the box.
+disk_count=$(limactl disk list --json 2>/dev/null \
+    | grep -oE '"name":[[:space:]]*"{SLICE_LIMA_INSTANCE_PREFIX}[^"]*"' | wc -l | tr -d ' ')
+if [ "$disk_count" -ge {slot_count} ]; then
+    echo "{SLICE_BOX_FULL_MARKER} $disk_count/{slot_count}" >&2
+    exit 4
+fi
+
+# 2. Host ports already in use: bound TCP ports + every existing instance's forwards.
+used_ports_file=$(mktemp)
+yaml_file=$(mktemp)
+trap 'rm -f "$used_ports_file" "$yaml_file"' EXIT
+ss -Htln 2>/dev/null | awk '{{print $4}}' | sed 's/.*://' | grep -E '^[0-9]+$' >> "$used_ports_file" || true
+for inst_yaml in "$HOME"/.lima/*/lima.yaml; do
+    [ -f "$inst_yaml" ] || continue
+    grep -oE 'hostPort:[[:space:]]*[0-9]+' "$inst_yaml" | grep -oE '[0-9]+' >> "$used_ports_file" || true
+done
+
+pick_port() {{
+    local p
+    for ((p={port_range_start}; p<{port_range_end}; p++)); do
+        if ! grep -qx "$p" "$used_ports_file"; then
+            echo "$p"
+            return 0
+        fi
+    done
+    return 1
+}}
+
+vm_port=$(pick_port) || {{ echo "{SLICE_NO_PORTS_MARKER}" >&2; exit 3; }}
+echo "$vm_port" >> "$used_ports_file"
+container_port=$(pick_port) || {{ echo "{SLICE_NO_PORTS_MARKER}" >&2; exit 3; }}
+
+# 3. Materialize the YAML (0600: it embeds the VM's SSH host private key) with the
+#    chosen ports, claim the slot + record the ports without booting.
+umask 077
+echo {shlex.quote(encoded_yaml)} | base64 -d > "$yaml_file"
+sed -i "s/{VM_SSH_PORT_PLACEHOLDER}/$vm_port/g; s/{CONTAINER_SSH_PORT_PLACEHOLDER}/$container_port/g" "$yaml_file"
+limactl disk create {shlex.quote(disk_name)} --size {disk_gib}GiB
+limactl create --name={shlex.quote(instance_name)} "$yaml_file"
+
+echo "{SLICE_RESERVED_MARKER} $vm_port $container_port"
+"""
+
+
+def parse_reserved_ports(stdout: str) -> tuple[int, int]:
+    """Parse the ``MNGR_SLICE_RESERVED <vm> <container>`` line from a reserve run's stdout.
+
+    Raises ``SliceReserveOutputError`` if the marker line is missing or malformed.
+    """
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(SLICE_RESERVED_MARKER):
+            parts = stripped.split()
+            if len(parts) == 3 and parts[1].isdigit() and parts[2].isdigit():
+                return int(parts[1]), int(parts[2])
+            raise SliceReserveOutputError(f"malformed {SLICE_RESERVED_MARKER} line: {stripped!r}")
+    raise SliceReserveOutputError(f"no {SLICE_RESERVED_MARKER} line in reserve output: {stdout[-500:]!r}")

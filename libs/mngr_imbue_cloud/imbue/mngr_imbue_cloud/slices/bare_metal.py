@@ -1,4 +1,5 @@
 import math
+import re
 from collections.abc import Sequence
 from typing import AbstractSet
 from typing import Final
@@ -187,61 +188,132 @@ def choose_raid_level(disk_count: int) -> str:
     )
 
 
-# Lima instance-name prefix for slices (embeds the mngr host id). Used both to
-# derive a slice's deterministic instance name and to recognize slice VMs on the
-# box when reaping orphans, so reconciliation never touches a non-slice lima VM.
+# Lima instance-name prefix for slices. Used both to derive a slice's
+# deterministic instance name and to recognize slice VMs on the box, so
+# reconciliation never touches a non-slice lima VM.
 SLICE_LIMA_INSTANCE_PREFIX: Final[str] = "mngr-slice-"
 
+# Suffix appended to a slice's instance name to name its btrfs data disk.
+SLICE_LIMA_DISK_SUFFIX: Final[str] = "-data"
+
+# A slice's host id is a uuid hex (exactly 32 lowercase hex chars, no hyphens), so
+# it cleanly delimits the optional env stamp that precedes it in a stamped name.
+_SLICE_HOST_ID_PATTERN: Final[str] = r"[0-9a-f]{32}"
+_STAMPED_SLICE_CORE_RE: Final[re.Pattern[str]] = re.compile(rf"^(?P<env>.+)-(?P<host>{_SLICE_HOST_ID_PATTERN})$")
+
 
 @pure
-def slice_lima_instance_name(host_id: HostId) -> str:
-    """Deterministic lima instance name for a slice, embedding the mngr host id."""
-    return f"{SLICE_LIMA_INSTANCE_PREFIX}{host_id.get_uuid().hex}"
+def slice_lima_instance_name(host_id: HostId, env_name: str | None = None) -> str:
+    """Deterministic lima instance name for a slice, embedding the mngr host id.
+
+    When ``env_name`` is given the owning env is stamped in
+    (``mngr-slice-<env>-<host-hex>``) so the box can attribute the slice to an
+    environment and reconciliation can scope itself to one env's slices. Without it
+    the legacy un-stamped name (``mngr-slice-<host-hex>``) is produced, for
+    backwards compatibility with slices baked before env stamping.
+    """
+    host_hex = host_id.get_uuid().hex
+    if env_name is None:
+        return f"{SLICE_LIMA_INSTANCE_PREFIX}{host_hex}"
+    return f"{SLICE_LIMA_INSTANCE_PREFIX}{env_name}-{host_hex}"
 
 
 @pure
-def slice_lima_disk_name(host_id: HostId) -> str:
+def slice_lima_disk_name(host_id: HostId, env_name: str | None = None) -> str:
     """Deterministic lima additional-disk name (the slice's btrfs data disk)."""
-    return f"{SLICE_LIMA_INSTANCE_PREFIX}{host_id.get_uuid().hex}-data"
+    return f"{slice_lima_instance_name(host_id, env_name)}{SLICE_LIMA_DISK_SUFFIX}"
+
+
+@pure
+def _slice_resource_core(name: str) -> str | None:
+    """The identity part of a slice instance/disk name: prefix and optional ``-data`` stripped.
+
+    Returns None for any name that is not a slice resource (wrong prefix), so a
+    non-slice lima resource is never misclassified.
+    """
+    if not name.startswith(SLICE_LIMA_INSTANCE_PREFIX):
+        return None
+    core = name[len(SLICE_LIMA_INSTANCE_PREFIX) :]
+    if core.endswith(SLICE_LIMA_DISK_SUFFIX):
+        core = core[: -len(SLICE_LIMA_DISK_SUFFIX)]
+    return core
+
+
+@pure
+def slice_name_env_owner(name: str) -> str | None:
+    """The env a slice instance/disk name is stamped for, or None if legacy/foreign/not-a-slice.
+
+    A stamped name is ``mngr-slice-<env>-<host-hex>``; a legacy name
+    (``mngr-slice-<host-hex>``) and any non-slice name both return None. The host
+    hex is a hyphen-free uuid, so the env is everything between the prefix and the
+    trailing ``-<host-hex>``.
+    """
+    core = _slice_resource_core(name)
+    if core is None:
+        return None
+    match = _STAMPED_SLICE_CORE_RE.match(core)
+    return match.group("env") if match else None
+
+
+@pure
+def is_slice_owned_by_env(name: str, env_name: str) -> bool:
+    """Whether a slice instance/disk name is stamped for exactly ``env_name``."""
+    return slice_name_env_owner(name) == env_name
+
+
+@pure
+def count_slice_resource_names(names: AbstractSet[str]) -> int:
+    """Count slice resources (``mngr-slice-`` prefix) regardless of env stamp.
+
+    Used to derive a box's TRUE occupancy from its lima resources -- every env's
+    slices plus any legacy un-stamped ones -- so independent envs sharing the box
+    cannot collectively over-subscribe it.
+    """
+    return sum(1 for name in names if name.startswith(SLICE_LIMA_INSTANCE_PREFIX))
 
 
 @pure
 def _orphan_slice_resource_names(
     box_names: AbstractSet[str],
     tracked_names: AbstractSet[str],
+    env_name: str,
 ) -> set[str]:
-    """Slice-owned lima resource names on the box (``mngr-slice-`` prefix) with no pool DB row.
+    """Slice resources on the box stamped for ``env_name`` with no pool DB row.
 
-    Shared by the instance and disk reconciliation: filter to slice-owned names so we
-    never touch an unrelated lima resource, then subtract the tracked set.
+    Shared by the instance and disk reconciliation: only names stamped for this env
+    are candidates, so reconciliation never touches another env's slices or legacy
+    (un-stamped) slices; the tracked set (this env's rows) is then subtracted.
     """
-    return {name for name in box_names if name.startswith(SLICE_LIMA_INSTANCE_PREFIX) and name not in tracked_names}
+    return {name for name in box_names if is_slice_owned_by_env(name, env_name) and name not in tracked_names}
 
 
 @pure
 def compute_orphan_slice_instance_names(
     box_instance_names: AbstractSet[str],
     tracked_instance_names: AbstractSet[str],
+    env_name: str,
 ) -> set[str]:
-    """Slice VMs present on the box but absent from the pool DB -- safe to reap.
+    """This env's slice VMs present on the box but absent from the pool DB -- safe to reap.
 
-    Filters to slice-owned instances (the ``mngr-slice-`` prefix) so reconciliation
-    never touches an unrelated lima VM, then subtracts the tracked set (every
-    instance that has a pool_hosts row, any status). A ``mngr create`` killed by its
-    own timeout after carving the VM but before the row insert leaves exactly such
-    an orphan -- the provider's rollback never ran. Assumes no other bake invocation
-    is concurrently mid-carve against the same box (an in-flight VM not yet inserted
-    would otherwise look like an orphan).
+    Filters to instances stamped for ``env_name`` so reconciliation never touches
+    another env's slices, a legacy un-stamped slice, or an unrelated lima VM, then
+    subtracts the tracked set (every instance that has a pool_hosts row in this env's
+    DB, any status). A ``mngr create`` killed by its own timeout after carving the VM
+    but before the row insert leaves exactly such an orphan -- the provider's rollback
+    never ran. Assumes no other bake invocation of this same env is concurrently
+    mid-carve against the box (an in-flight VM not yet inserted would otherwise look
+    like an orphan); other envs' in-flight carves are stamped differently and ignored.
     """
-    return _orphan_slice_resource_names(box_instance_names, tracked_instance_names)
+    return _orphan_slice_resource_names(box_instance_names, tracked_instance_names, env_name)
 
 
 @pure
 def compute_orphan_slice_disk_names(
     box_disk_names: AbstractSet[str],
     tracked_disk_names: AbstractSet[str],
+    env_name: str,
 ) -> set[str]:
-    """Slice data disks present on the box but absent from the pool DB -- safe to reap.
+    """This env's slice data disks present on the box but absent from the pool DB -- safe to reap.
 
     The disk analogue of :func:`compute_orphan_slice_instance_names`. Reaped separately
     because a disk can outlive its instance: if a failed carve's rollback ``limactl
@@ -249,7 +321,7 @@ def compute_orphan_slice_disk_names(
     before deleting the disk, leaving the disk behind even though the VM is gone -- and
     a leaked disk permanently holds the box slot until reclaimed.
     """
-    return _orphan_slice_resource_names(box_disk_names, tracked_disk_names)
+    return _orphan_slice_resource_names(box_disk_names, tracked_disk_names, env_name)
 
 
 @pure

@@ -519,6 +519,17 @@ def _create_single_pool_host(
     ),
 )
 @click.option(
+    "--slice-env-name",
+    "slice_env_name",
+    default=None,
+    help=(
+        "[slice only] Owning environment name stamped into each slice's lima instance + disk names "
+        "(mngr-slice-<env>-<host-hex>). Lets multiple dev envs share one bare-metal box: occupancy is read "
+        "from the box, and the post-bake reap only ever touches this env's own slices. Usually forwarded by "
+        "`minds pool create` from the activated env; omit only for legacy un-stamped baking."
+    ),
+)
+@click.option(
     "--dry-run",
     "is_dry_run",
     is_flag=True,
@@ -563,6 +574,7 @@ def pool_create(
     mngr_source: str | None,
     is_recycle_enabled: bool,
     server_id: str | None,
+    slice_env_name: str | None,
     is_dry_run: bool,
     max_concurrency: int,
     is_deferred_install_wait_skipped: bool,
@@ -644,6 +656,7 @@ def pool_create(
                     server_id=server_id,
                     lease_attributes=attributes,
                     region=region,
+                    env_name=slice_env_name,
                     workspace_dir=bake_source.workspace_dir,
                     mngr_source=mngr_source,
                     database_url=resolved_database_url,

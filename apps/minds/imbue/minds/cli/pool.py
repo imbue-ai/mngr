@@ -136,11 +136,12 @@ def build_create_admin_args(
 
     For the ``ovh_vps`` backend, auto-injects ``--tag minds_env=<env_name>`` (so
     ``minds env destroy`` can enumerate the VPSes the env owns) and forwards
-    ``--management-public-key-file``. For the ``slice`` backend it emits neither --
-    slices are not OVH-IAM-tagged and authorize the pool key from
-    POOL_SSH_PRIVATE_KEY at carve time. Every other user-supplied flag forwards
-    verbatim. Split out from the click command so tests can exercise the wiring
-    without faking a subprocess.
+    ``--management-public-key-file``. For the ``slice`` backend it instead forwards
+    ``--slice-env-name <env_name>`` (stamped into each slice's lima names, so a
+    shared box can attribute the slice to this env) -- slices are not OVH-IAM-tagged
+    and authorize the pool key from POOL_SSH_PRIVATE_KEY at carve time. Every other
+    user-supplied flag forwards verbatim. Split out from the click command so tests
+    can exercise the wiring without faking a subprocess.
 
     The bake source is exactly one of ``--from-tag`` (production, clones a tag)
     or ``--workspace-dir`` (dev, a working tree); the admin CLI derives the
@@ -187,6 +188,10 @@ def build_create_admin_args(
         args.extend(["--mngr-source", mngr_source])
     if backend == _BACKEND_OVH_VPS and not is_recycle_enabled:
         args.append("--no-recycle")
+    if backend == _BACKEND_SLICE:
+        # Stamp the owning env into each slice's lima names so multiple dev envs can
+        # share one bare-metal box (occupancy read from the box; reap scoped to this env).
+        args.extend(["--slice-env-name", env_name])
     if backend == _BACKEND_SLICE and server_id is not None:
         args.extend(["--server-id", server_id])
     if backend == _BACKEND_SLICE and is_dry_run:
