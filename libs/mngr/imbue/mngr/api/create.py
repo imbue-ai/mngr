@@ -297,8 +297,9 @@ def create(
         # before the lock is acquired.
         pre_baked_agent_id: AgentId | None = host.pre_baked_agent_id
 
-        # While we are deploying an agent, lock the host.
-        with host.lock_cooperatively():
+        # While we are deploying an agent, lock the host. Block indefinitely (a
+        # contended create waits for the other operation rather than failing).
+        with host.lock_cooperatively(timeout_seconds=None):
             # Prevent duplicate agent names on the same host. The tmux session name
             # is derived from the agent name, so two agents with the same name would
             # collide on the same tmux session. This check must be inside the lock to

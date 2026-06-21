@@ -32,6 +32,7 @@ from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import require_interactive_agent
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -237,12 +238,22 @@ def _start_agents(
 
         agent_ids = [match.agent_id for match in agent_list]
 
-        # Serialize agent (re)launch against any other `mngr start` for this host
-        # -- e.g. the minds desktop client (remote, over SSH) racing a VM/container
-        # boot hook (local). The lock blocks indefinitely; once it is held, an
-        # already-running agent's launch is a no-op (the start command exits early
-        # when its tmux session exists), so the loser cleanly does nothing.
-        with online_host.lock_for_starting():
+        # Serialize agent (re)launch against any other operation on this host via
+        # the shared host lock -- e.g. the minds desktop client (remote, over SSH)
+        # racing a VM/container boot hook (local), or a concurrent `mngr gc`. The
+        # lock blocks indefinitely; once it is held, an already-running agent's
+        # launch is a no-op (the start command exits early when its tmux session
+        # exists), so the loser cleanly does nothing.
+        with online_host.lock_cooperatively(timeout_seconds=None):
+            # gc shares this lock, so a gc that tore down the host/agent is now
+            # serialized before us. Lightweight check (just the agent state dir,
+            # not a full host revalidation) so a doomed start fails with a clear
+            # error instead of trying to boot an agent gc already removed.
+            for match in agent_list:
+                agent_state_dir = online_host.host_dir / "agents" / str(match.agent_id)
+                if not online_host.path_exists(agent_state_dir):
+                    raise AgentNotFoundOnHostError(match.agent_id, online_host.id)
+
             # Stop agents first when restarting
             if is_restart:
                 with log_span("Stopping {} agent(s) for restart", len(agent_ids)):
