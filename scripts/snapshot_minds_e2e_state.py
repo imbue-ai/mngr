@@ -135,6 +135,14 @@ _IN_SANDBOX_RUNNER_PROGRAM: Final[str] = textwrap.dedent(
     # Snapshot builds are test infrastructure, not a real install, so they
     # must not count toward Latchkey's usage.
     _write_to_os_environ("LATCHKEY_DISABLE_COUNTING", "1")
+    # FCT's [providers.docker] block sets docker_runtime = "runsc" to harden
+    # the agent container with gVisor, but the dockerd inside this Modal
+    # vm_runtime sandbox only has the default runc registered, so
+    # `docker run --runtime runsc` fails with "unknown or invalid runtime
+    # name: runsc". Force runc here -- the Modal VM is already the isolation
+    # boundary for this throwaway snapshot. Mirrors the same override the
+    # pytest path applies in apps/minds/test_desktop_client_e2e.py.
+    _write_to_os_environ("MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME", "runc")
     with tempfile.TemporaryDirectory(prefix="snapshot-fct-") as scratch:
         fct_path = resolve_fct_path(Path(scratch))
         workspace_name = f"forever-{get_short_random_string()}"
