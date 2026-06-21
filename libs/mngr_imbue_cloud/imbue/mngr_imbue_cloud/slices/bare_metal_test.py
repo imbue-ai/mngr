@@ -194,12 +194,14 @@ def test_is_slice_owned_by_env_only_matches_exact_env_stamp() -> None:
 def test_count_slice_resource_names_counts_all_slices_regardless_of_stamp() -> None:
     host_a = HostId.generate()
     host_b = HostId.generate()
+    # A mix of this env's slice, another env's slice, a legacy un-stamped slice, and
+    # two non-slice disks.
     names = {
-        slice_lima_disk_name(host_a, "dev-josh-foo"),  # this env
-        slice_lima_disk_name(host_b, "dev-alice-bar"),  # another env
-        slice_lima_disk_name(HostId.generate()),  # legacy un-stamped
-        "default",  # not a slice
-        "some-other-disk",  # not a slice
+        slice_lima_disk_name(host_a, "dev-josh-foo"),
+        slice_lima_disk_name(host_b, "dev-alice-bar"),
+        slice_lima_disk_name(HostId.generate()),
+        "default",
+        "some-other-disk",
     }
     # True box occupancy is every slice (every env + legacy), excluding non-slice disks.
     assert count_slice_resource_names(names) == 3

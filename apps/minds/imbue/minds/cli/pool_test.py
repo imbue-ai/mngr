@@ -21,6 +21,7 @@ from imbue.minds.cli.pool import _SECRET_BEARING_FLAGS
 from imbue.minds.cli.pool import build_create_admin_args
 from imbue.minds.cli.pool import build_destroy_admin_args
 from imbue.minds.cli.pool import build_list_admin_args
+from imbue.minds.cli.pool import build_teardown_slices_admin_args
 from imbue.minds.cli.pool import derive_public_key_from_private
 from imbue.minds.cli.pool import merge_extra_env_into_subprocess_env
 from imbue.minds.cli.pool import pool
@@ -745,8 +746,6 @@ def test_merge_extra_env_with_empty_overlay_returns_shell_copy() -> None:
 
 
 def test_build_teardown_slices_admin_args_forwards_dsn_when_present() -> None:
-    from imbue.minds.cli.pool import build_teardown_slices_admin_args
-
     assert build_teardown_slices_admin_args(database_url=None) == ["teardown-slices"]
     args = build_teardown_slices_admin_args(database_url="postgres://example")
     assert args == ["teardown-slices", "--database-url", "postgres://example"]
