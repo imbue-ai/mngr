@@ -189,7 +189,9 @@ def test_build_slice_reserve_script_reaches_the_marker_on_an_empty_box() -> None
         yaml_template_text="cpus: 2\n",
         lima_service_user="limahost",
     )
-    runnable = script.replace("exec 9>", "true # exec 9>").replace("flock 9", "true # flock 9")
+    # Drop the lock acquisition (asserted elsewhere) so the test needs no writable
+    # /home path: replace the fd open and the flock call with harmless no-ops.
+    runnable = script.replace("exec 9>", "true 9>/dev/null ").replace("flock 9", "true")
     with tempfile.TemporaryDirectory() as tmp:
         bin_dir = Path(tmp) / "bin"
         bin_dir.mkdir()
