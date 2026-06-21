@@ -85,8 +85,13 @@ _SANDBOX_TIMEOUT_SECONDS: Final[int] = 60 * 60
 _SNAPSHOT_TIMEOUT_SECONDS: Final[int] = 600
 _DOCKER_VERSION: Final[str] = "27.5.1"
 _RUNC_VERSION: Final[str] = "v1.3.0"
-_NODE_MAJOR: Final[str] = "20"
-_PNPM_VERSION: Final[str] = "10"
+# apps/minds pins an EXACT Node + pnpm version (engines in package.json with
+# engine-strict=true in its .npmrc), so the image must install those exact
+# versions or `pnpm install --frozen-lockfile` aborts with an engine error.
+# Keep these in sync with apps/minds/.nvmrc, apps/minds/package.json engines,
+# and the test-docker-electron job in .github/workflows/ci.yml.
+_NODE_VERSION: Final[str] = "24.15.0"
+_PNPM_VERSION: Final[str] = "10.33.4"
 _CLAUDE_CODE_VERSION: Final[str] = "2.1.141"
 
 # In-sandbox entrypoint that invokes the shared e2e workspace runner the
@@ -309,10 +314,15 @@ def _build_snapshot_image(staged_repo: Path) -> modal.Image:
             "update-alternatives --set iptables /usr/sbin/iptables-legacy",
             "update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy",
         )
-        # Node 20 + pnpm -- for the apps/minds Electron app.
+        # Node + pnpm -- for the apps/minds Electron app. apps/minds pins an
+        # EXACT Node version with engine-strict=true, so install that exact
+        # version from the official tarball rather than NodeSource's
+        # setup_<major>.x (which tracks the latest minor and would trip the
+        # engine check). Use the .tar.gz build so plain `tar -xz` works
+        # without pulling in xz-utils.
         .run_commands(
-            f"curl -fsSL https://deb.nodesource.com/setup_{_NODE_MAJOR}.x | bash -",
-            "apt-get install -y nodejs",
+            f"curl -fsSL https://nodejs.org/dist/v{_NODE_VERSION}/node-v{_NODE_VERSION}-linux-x64.tar.gz "
+            "| tar -xz -C /usr/local --strip-components=1",
             f"npm install -g pnpm@{_PNPM_VERSION}",
         )
         # uv + claude code, matching the versions the mngr Dockerfile pins.
@@ -500,34 +510,45 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
 
-    # Stage the repo into a temp dir BEFORE building the image so the
-    # Modal upload reads from a frozen tree. The staging dir lives for
-    # the whole image-build phase; we clean it up after Sandbox.create
-    # returns (Modal has already materialized the image at that point,
-    # so the staged copy is no longer referenced).
-    with tempfile.TemporaryDirectory(prefix="mngr-snapshot-stage-") as staging_dir_str:
-        staging_dir = Path(staging_dir_str)
-        staged_repo = _stage_repo_to_temp_dir(staging_dir)
+    # Stream Modal's own output (image-build logs + sandbox logs) to this
+    # process. Without it, a failed image build surfaces only as an opaque
+    # `RemoteError: Image build ... failed` with no indication of which RUN
+    # step broke -- useless in CI. enable_output() is what turns that into
+    # the actual build transcript.
+    with modal.enable_output():
+        # Stage the repo into a temp dir BEFORE building the image so the
+        # Modal upload reads from a frozen tree. The staging dir lives for
+        # the whole image-build phase; we clean it up after Sandbox.create
+        # returns (Modal has already materialized the image at that point,
+        # so the staged copy is no longer referenced).
+        with tempfile.TemporaryDirectory(prefix="mngr-snapshot-stage-") as staging_dir_str:
+            staging_dir = Path(staging_dir_str)
+            staged_repo = _stage_repo_to_temp_dir(staging_dir)
 
-        image = _build_snapshot_image(staged_repo)
-        app = modal.App.lookup(args.app_name, create_if_missing=True)
+            image = _build_snapshot_image(staged_repo)
+            app = modal.App.lookup(args.app_name, create_if_missing=True)
 
-        print(f"Creating sandbox in app {args.app_name!r} with vm_runtime=True", flush=True)
-        sandbox = modal.Sandbox.create(
-            image=image,
-            app=app,
-            timeout=_SANDBOX_TIMEOUT_SECONDS,
-            cpu=4.0,
-            memory=8 * 1024,
-            # The whole point of this script: opt in to Modal's VM runtime so
-            # Docker-in-sandbox state survives snapshot_filesystem(). vm_runtime
-            # is now generally available on Modal. We still scope it to this
-            # snapshot workflow rather than flipping the general mngr_modal
-            # provider over to it, since the rest of mngr does not need a true
-            # VM and we don't want to change that behavior as a side effect.
-            experimental_options={"vm_runtime": True},
-        )
+            print(f"Creating sandbox in app {args.app_name!r} with vm_runtime=True", flush=True)
+            sandbox = modal.Sandbox.create(
+                image=image,
+                app=app,
+                timeout=_SANDBOX_TIMEOUT_SECONDS,
+                cpu=4.0,
+                memory=8 * 1024,
+                # The whole point of this script: opt in to Modal's VM runtime so
+                # Docker-in-sandbox state survives snapshot_filesystem(). vm_runtime
+                # is now generally available on Modal. We still scope it to this
+                # snapshot workflow rather than flipping the general mngr_modal
+                # provider over to it, since the rest of mngr does not need a true
+                # VM and we don't want to change that behavior as a side effect.
+                experimental_options={"vm_runtime": True},
+            )
 
+        _run_sandbox_workflow(sandbox, args)
+
+
+def _run_sandbox_workflow(sandbox: modal.Sandbox, args: argparse.Namespace) -> None:
+    """Bring up dockerd, optionally create the workspace, snapshot, clean up."""
     try:
         print(f"Sandbox {sandbox.object_id} created.", flush=True)
         _start_dockerd(sandbox)
