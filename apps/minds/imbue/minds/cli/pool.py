@@ -220,20 +220,17 @@ def tear_down_env_pool_slices(env_name: str) -> None:
 
     Resolves the pool SSH key (Vault) + host_pool DSN exactly like ``pool create``,
     then shells to ``mngr imbue_cloud admin pool teardown-slices``. Leased slices are
-    left to their agent's release path. If the env has no pool SSH key in Vault it
-    never created slices through the normal path, so teardown is skipped with a
-    warning rather than blocking the destroy; a genuine teardown failure (an
-    unreachable box) raises so the destroy stops rather than silently leak VMs.
+    left to their agent's release path. A missing pool SSH key is a bad state, not a
+    "nothing to clean up" signal -- it raises (failing the destroy) so we never
+    silently leak the env's slice VMs; a genuine teardown failure (an unreachable
+    box) likewise raises rather than leaking.
     """
     try:
         pool_private_key = read_pool_private_key_from_vault(env_name)
     except VaultReadError as exc:
-        logger.warning(
-            "No pool SSH key in Vault for env '{}' ({}); skipping slice teardown (env likely never baked slices).",
-            env_name,
-            exc,
-        )
-        return
+        raise click.ClickException(
+            f"Could not read the pool SSH private key from Vault for env '{env_name}': {exc}"
+        ) from exc
     database_url = resolve_host_pool_dsn(env_name, None)
     args = build_teardown_slices_admin_args(database_url=database_url)
     _raise_on_failure(

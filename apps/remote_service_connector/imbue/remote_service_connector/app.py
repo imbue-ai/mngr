@@ -2242,8 +2242,9 @@ def reconcile_slice_boxes(conn: Any, env_name: str) -> int:
     row), and this cron runs on a fixed hourly schedule independent of bakes -- so
     auto-reaping here would race a live bake and destroy its slice. Actual reaping is
     left to the bake-time reaper (which runs in the bake's own ``finally``, where the
-    in-flight set is known). Boxes whose listing fails are skipped (a transient SSH
-    failure must never be mistaken for vanished VMs). Other envs' slices and legacy
+    in-flight set is known). If a box's lima resources cannot be listed, this raises:
+    a box we could not inspect was NOT reconciled, and that failure must surface
+    rather than be mistaken for a clean audit. Other envs' slices and legacy
     un-stamped slices are never inspected, so this is safe on a shared box.
     """
     if not env_name:
@@ -2263,11 +2264,10 @@ def reconcile_slice_boxes(conn: Any, env_name: str) -> int:
         if not public_address:
             continue
         user = lima_service_user or "root"
-        try:
-            box_instances = _list_box_lima_names(public_address, user, management_key_pem, "list --json")
-        except (PoolHostCleanupError, paramiko.SSHException, OSError) as exc:
-            logger.warning("Slice reconcile skipped box %s (could not list lima resources): %s", public_address, exc)
-            continue
+        # If we cannot list a box's lima resources we did NOT reconcile it; let the
+        # failure propagate rather than silently skipping (which would look like a
+        # clean audit and could mask vanished/leaked VMs).
+        box_instances = _list_box_lima_names(public_address, user, management_key_pem, "list --json")
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT lima_instance_name FROM pool_hosts WHERE backend_kind = %s AND bare_metal_server_id = %s",
@@ -4233,14 +4233,10 @@ def cleanup_removing_pool_hosts() -> dict[str, int]:
         )
         # Audit this env's slices on every box against the DB (alert-only: it never
         # auto-deletes, to avoid racing an in-flight bake). Scoped to MINDS_ENV_NAME so
-        # it is safe on a box shared by multiple dev envs. Best-effort: never fail the sweep.
-        try:
-            divergence_count = reconcile_slice_boxes(conn, _current_minds_env_name())
-        except (psycopg2.Error, paramiko.SSHException, OSError, KeyError) as exc:
-            # KeyError: POOL_SSH_PRIVATE_KEY unset on a deployment that does have
-            # boxes; still degrade to a warning rather than failing the whole sweep.
-            logger.warning("Slice box reconcile failed (continuing): %s", exc)
-            divergence_count = 0
+        # it is safe on a box shared by multiple dev envs. A reconcile failure (DB,
+        # SSH, or a missing POOL_SSH_PRIVATE_KEY while boxes exist) is a real failure:
+        # let it propagate and fail the cron run rather than silently swallowing it.
+        divergence_count = reconcile_slice_boxes(conn, _current_minds_env_name())
     finally:
         conn.close()
     logger.info(
