@@ -6,6 +6,16 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: Modal now raises the contract `ProviderUnavailableError` (was a plain `MngrError`) when credentials cannot be resolved, with curated help text pointing at `uvx modal token set`.
+
+- Changed: Agent lifecycle detection targets the agent's primary tmux window by name (`tmux.primary_window_name`, default `agent`) instead of the literal `:0` index, so it works regardless of the user's tmux `base-index`.
+
+### Fixed
+
+- Fixed: Dead relative link in the README so it resolves on the PyPI project page.
+
 ## [v0.2.17] - 2026-06-18
 
 ## [v0.2.16] - 2026-06-16

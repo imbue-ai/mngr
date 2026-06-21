@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: `[plugins.kanpan]` cross-scope merge now follows the standard config-merge semantics: the six dict fields (`commands`, `data_sources`, `shell_commands`, `columns`, `on_before_refresh`, `on_after_refresh`) assign-by-default and a higher scope dropping a lower scope's keys raises the standard narrowing error instead of silently unioning. Use `__extend` to merge additively or `allow_settings_key_assignment_narrowing` / `key__assign` to opt out.
+
 ## [v0.2.17] - 2026-06-18
 
 ## [v0.2.16] - 2026-06-16

@@ -6,6 +6,62 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Shared `AgentUpdatePolicy` (`AUTO` / `ASK` / `NEVER`) used by the agent plugins to govern an agent CLI's self-updater. When unset, the default is `NEVER` (block self-update) so a managed agent stays on its installed version; an attended agent with an interactive update flow defaults to `ASK`.
+
+- Added: Shared `verify_pinned_cli_version` installation helper that lets agent plugins verify an installed CLI matches a pinned version (matches the user's pinned string verbatim against the `--version` banner, so pre-release / four-component pins work).
+
+- Added: `[tmux]` configuration section for customizing the tmux sessions mngr runs agents in: `tmux.attach_args` (extra flags inserted before `attach`, e.g. `["-CC"]` for iTerm2 control mode), `tmux.additional_config_path` (a stable place for mngr-session-specific tmux config that mngr never overwrites), and `tmux.primary_window_name` (default `agent`). mngr now names the agent's primary window and targets it by name instead of the literal `:0` index, so mngr works regardless of the user's tmux `base-index` setting. Agents that were already running before this change are self-healed on first inspect.
+
+- Added: `mngr config assign <key> <value>` command, mirroring `mngr config extend`: writes a `key__assign` entry (replace without the narrowing guard), or on a `settings_overrides` path a `__mngr_merge` `assign` directive. `mngr config set key__assign <value>` routes to it, and `mngr config get` resolves the `__assign` form.
+
+- Added: `extract_agent_data_from_parsed_listing` helper in the shared `providers/listing_utils`, the natural companion to `parse_listing_collection_output`. An entry whose `data` is present but not a JSON object is now skipped with a WARNING rather than silently.
+
+- Added: `write_json_dict_via_host`, the write-side counterpart to `read_json_dict_via_host`, used by the Claude plugins for settings/hooks writes instead of the hand-rolled `json.dumps + mkdir -p` dance.
+
+- Added: Shared operator-command output helpers in `mngr.cli.output_helpers` (`emit_operator_result`, `write_event_line`) used by the `mngr aws` / `mngr azure` / `mngr gcp` prepare/cleanup commands to render structured + human output uniformly.
+
+### Changed
+
+- Changed: `mngr imbue_cloud admin pool create` now defaults `--backend` to `slice` (bare-metal slices) instead of `ovh_vps`. Baking new OVH classic VPS pool hosts is deprecated: passing `--backend ovh_vps` fails with a deprecation error pointing at `--backend slice`. Existing OVH VPS pool hosts can still be listed and destroyed.
+
+- Changed: `build_add_authorized_keys_command` (the shared SSH-key seeding helper) is now idempotent (each entry is appended only if not already present), so re-running it does not accumulate duplicate `authorized_keys` lines.
+
+- Changed: mngr config now merges with the explicit operator algebra from the new standalone `overlay` library: bare `key` assigns (narrowing-checked), `key__extend` merges onto the layer below (now **recursively** -- a nested `key__extend` merges deeper while a nested bare key still replaces), and the new `key__assign` assigns without the narrowing warning. Within a single layer, resolution is two-phase and order-independent.
+
+- Changed: A settings *patch* field (a claude agent type's `settings_overrides`) now **accumulates across config scopes** (user < project < local) and `parent_type` inheritance instead of a higher/child scope replacing the whole value: non-overlapping keys from every scope survive and same-key `__extend`s combine. Cross-scope narrowing is surfaced at config-load (escapable via `allow_settings_key_assignment_narrowing`, `allow__extend`, or `allow__assign`).
+
+- Changed: `Static*` markers (`StaticTuple` / `StaticList` / `StaticDict`) mark an aggregate atomic so replacing it is exempt from the narrowing guard; mngr's `StringDerivedTuple` / `ScalarTuple` are now `StaticTuple` subclasses.
+
+- Changed: The narrowing error's `__extend` example is now tailored to the offending key (e.g. `work_dir_extra_paths__extend = ...`, or `permissions__extend = {allow__extend = ...}` for a nested path) instead of a fixed generic example.
+
+- Changed: The `mngr config` command is now exempt from the settings-narrowing guard, so a config that would otherwise narrow can still be loaded in order to *edit* it with `mngr config set` / `unset`. Previously a narrowing config could not be edited via mngr config without first hand-editing the file.
+
+- Changed: Merge intent for an agent type's `settings_overrides` is now declared with a Claude-compatible `__mngr_merge` map (keyed by dotted path) instead of the `__extend` / `__assign` key suffixes -- because `settings_overrides` is folded into a file the external AI CLI also reads, the suffixes would surface there as junk literal keys. Raw `__extend` / `__assign` suffix keys under `settings_overrides` are a hard error pointing to `__mngr_merge`. mngr's own (non-`settings_overrides`) config is unchanged.
+
+- Changed: `mngr config set` / `extend` / `assign` now let configuration errors render through the central CLI error handler (a `ConfigParseError` is a `MngrError`) instead of a local catch.
+
+### Removed
+
+- Removed: `TagLimitExceededError`. It existed only to flag the EC2 50-tag ceiling for the AWS provider's offline tag mirror, which the S3 state bucket replaces.
+
+### Fixed
+
+- Fixed: `mngr event --follow` no longer polls the persisted files of an offline (stopped-but-not-destroyed) agent every second. The per-source tail threads now gate their I/O on a shared online/offline signal and park while the target is offline. Each thread now lives for the whole follow session and switches the target on transition rather than being torn down and recreated. Previously a handful of stopped Docker agents could push the shared state container to ~90% CPU. Affects every `mngr event --follow` consumer (the CLI, `mngr forward`, and the minds desktop app).
+
+- Fixed: `mngr plugin list` no longer mislabels opt-in plugins (e.g. `claude_subagent_proxy`) as `enabled=true` when they are actually blocked. Underlying this, `config.disabled_plugins` now faithfully includes opt-in plugins disabled by default, so every consumer sees the correct effective disabled set.
+
+- Fixed: `mngr transcript` failing with "Unknown agent type" for config-defined agent subtypes (a custom `[agent_types.X]` with a `parent_type`). The command now resolves the type through its parent chain like every other command.
+
+- Fixed: A latent crash in `MngrConfig.merge_with` that raised `AttributeError` when the base config's `retry` / `logging` was `None` and the override set them.
+
+- Fixed: A config-merge bug where a partial override of a nested sub-model field (`logging`, `retry`, or a provider's `security_group`) silently reverted the base scope's other sub-fields to their defaults. Sub-model fields are now detected by their live value being a `BaseModel`, and merge field-by-field across scopes carrying through unset sub-fields.
+
+- Fixed: A `settings_overrides` `key__assign` now reliably suppresses the cross-scope narrowing guard even when a lower scope already set the key -- previously the deferred `__assign` collapsed to a bare assign at config-load whenever a lower scope had set the key, and the guard still errored on the opted-out key.
+
+- Fixed: An expected `MngrError` raised during agent provisioning (e.g. a settings-narrowing `ConfigParseError`) now surfaces as a clean one-line error instead of an "Unexpected error" with a full traceback. The `create` flow unwraps a single expected error from the provisioning concurrency group's `ConcurrencyExceptionGroup`.
+
 ## [v0.2.17] - 2026-06-18
 
 ### Added

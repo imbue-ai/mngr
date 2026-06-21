@@ -6,6 +6,22 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: `mngr list` discovery now reports a transport-level failure reaching the Imbue Cloud connector (connection refused, DNS failure, timeout) as a typed `ProviderUnavailableError` rather than a bare httpx error, so callers can distinguish "the provider is unreachable" from auth / account-configuration problems.
+
+- Changed: `mngr imbue_cloud admin pool list` now emits every `pool_hosts` column (including `region`, `backend_kind`, and the slice identifiers `bare_metal_server_id` / `lima_instance_name` / `lima_disk_name`). It previously printed a hand-maintained 10-column subset, so a baked slice host showed up looking like a region-less OVH VPS.
+
+- Changed: Agent lifecycle detection targets the agent's primary tmux window by name (`tmux.primary_window_name`, default `agent`) instead of the literal `:0` index, so it works regardless of the user's tmux `base-index`.
+
+### Deprecated
+
+- Deprecated: Baking new OVH classic VPS pool hosts in `mngr imbue_cloud admin pool create`. The `--backend` default is now `slice` (bare-metal slices); passing `--backend ovh_vps` fails fast with a deprecation error pointing at `--backend slice`. Existing OVH VPS pool hosts can still be listed and destroyed.
+
+### Fixed
+
+- Fixed: Restarting a stopped `imbue_cloud` (leased pool) mind left it in a broken, unrecoverable state -- the subsequent `mngr start` SSH into the container failed. Two parts: `ImbueCloudProvider.get_host` now probes the inner container's running state over the outer root SSH and returns an offline host when the container is stopped (so `mngr start` routes through `start_host`), and `start_host` now re-bootstraps the container's sshd (relaunches sshd, re-seeds the per-host authorized key, waits for sshd to accept connections, and re-records the served host key) instead of doing a bare `docker start`. A stopped leased mind can now be brought back to life.
+
 ## [v0.1.6] - 2026-06-18
 
 ### Added

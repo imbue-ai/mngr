@@ -14,6 +14,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Provisioning artifacts moved under `mngr-proxy/` subdirs -- PROXY-mode agent at `.claude/agents/mngr-proxy/proxy.md` and DENY-mode skill at `.claude/skills/mngr-proxy/SKILL.md` (renamed from `mngr-subagents`); each path is covered by a single `.gitignore` line. Discovery is unaffected (Claude Code identifies the subagent by its frontmatter `name:` field).
 - Changed: At provisioning, the plugin now refuses to write either artifact into a git-tracked worktree where the path is not gitignored, raising a clear error instead of leaving an untracked file. The error tells you to either gitignore the path or disable the plugin for the repository (`mngr config set --scope project plugins.claude_subagent_proxy.enabled false`).
 
+- Changed: The proxy's own hooks (PROXY spawn/cleanup/reap, DENY deny/reap, and proxy-child permission auto-allow) now go into the agent's per-agent config-dir `settings.json` instead of the project's `.claude/settings.local.json`, matching where `mngr_claude` bakes its own hooks. The plugin still writes to `settings.local.json` only to wrap user-defined Stop/SubagentStop hooks with the proxy-child guard, and the gitignored-`settings.local.json` requirement now applies only at that write site (and only when there is a user Stop hook to wrap).
+
 ## [v0.2.8] - 2026-05-13
 
 ### Added
