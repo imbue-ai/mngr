@@ -136,3 +136,64 @@ def test_parse_listening_ports_extracts_ipv4_ipv6_and_wildcard() -> None:
         "garbage line with too few fields\n"
     )
     assert parse_listening_ports(ss_output) == {22, 5432, 22001}
+
+
+def test_provision_slice_vm_reserves_under_lock_then_starts_and_returns_box_chosen_ports() -> None:
+    from imbue.mngr.primitives import HostId
+
+    host_id = HostId.generate()
+    # The reserve runs as one base64'd bash command (it holds the box lock); it prints
+    # the ports it chose. The long boot is a separate, unlocked `limactl start`.
+    client = _recording_client(
+        {
+            "base64 -d | bash": (0, "MNGR_SLICE_RESERVED 22001 22002\n", ""),
+            "limactl --log-level=info start": (0, "", ""),
+        }
+    )
+    result = client.provision_slice_vm(
+        host_id=host_id,
+        env_name="dev-josh",
+        vcpus=2,
+        memory_mib=8192,
+        disk_gib=40,
+        host_dir="/mngr",
+        root_authorized_public_key="ssh-ed25519 AAAA",
+        host_private_key_pem="PEM",
+        host_public_key_openssh="ssh-ed25519 BBBB",
+        boot_disk_gib=32,
+        slot_count=6,
+        port_range_start=22000,
+        port_range_end=32000,
+    )
+    # The ports come from the box reservation, and the instance/disk names are env-stamped.
+    assert result.vm_ssh_host_port == 22001
+    assert result.container_ssh_host_port == 22002
+    assert result.instance_name == f"mngr-slice-dev-josh-{host_id.get_uuid().hex}"
+    assert result.disk_name == f"mngr-slice-dev-josh-{host_id.get_uuid().hex}-data"
+    # The reserve happened before the boot, and the boot was a separate command.
+    reserve_idx = next(i for i, cmd in enumerate(client.recorded_commands) if "base64 -d | bash" in cmd)
+    start_idx = next(i for i, cmd in enumerate(client.recorded_commands) if "limactl --log-level=info start" in cmd)
+    assert reserve_idx < start_idx
+
+
+def test_provision_slice_vm_raises_slice_capacity_error_when_box_is_full() -> None:
+    from imbue.mngr.primitives import HostId
+    from imbue.mngr_imbue_cloud.errors import SliceCapacityError
+
+    client = _recording_client({"base64 -d | bash": (4, "", "MNGR_SLICE_BOX_FULL 6/6")})
+    with pytest.raises(SliceCapacityError):
+        client.provision_slice_vm(
+            host_id=HostId.generate(),
+            env_name="dev-josh",
+            vcpus=2,
+            memory_mib=8192,
+            disk_gib=40,
+            host_dir="/mngr",
+            root_authorized_public_key="ssh-ed25519 AAAA",
+            host_private_key_pem="PEM",
+            host_public_key_openssh="ssh-ed25519 BBBB",
+            boot_disk_gib=32,
+            slot_count=6,
+            port_range_start=22000,
+            port_range_end=32000,
+        )

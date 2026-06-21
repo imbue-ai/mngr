@@ -120,3 +120,71 @@ def test_slice_yaml_omits_extra_key_script_when_none_given() -> None:
     config = _build()
     joined = "\n".join(step["script"] for step in config["provision"])
     assert "grep -qxF" not in joined
+
+
+def test_build_slice_reserve_script_is_valid_bash_and_holds_the_box_lock() -> None:
+    import subprocess
+
+    from imbue.mngr_imbue_cloud.slices.lima_slice import build_slice_reserve_script
+
+    script = build_slice_reserve_script(
+        instance_name="mngr-slice-dev-josh-abc",
+        disk_name="mngr-slice-dev-josh-abc-data",
+        disk_gib=40,
+        boot_disk_gib=32,
+        slot_count=6,
+        port_range_start=22000,
+        port_range_end=32000,
+        yaml_template_text="cpus: 2\n",
+        lima_service_user="limahost",
+    )
+    # The reserve must be syntactically valid bash.
+    syntax_check = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True)
+    assert syntax_check.returncode == 0, syntax_check.stderr
+    # It serializes under the box lock, enforces capacity, and claims the slot WITHOUT
+    # booting (disk create + limactl create), so the lock is held only briefly.
+    assert "flock 9" in script
+    assert "/home/limahost/.mngr-slice-alloc.lock" in script
+    assert "-ge 6" in script
+    # shlex.quote leaves these simple names unquoted.
+    assert "limactl disk create mngr-slice-dev-josh-abc-data --size 40GiB" in script
+    assert "limactl create --name=mngr-slice-dev-josh-abc" in script
+    # It must NOT boot the VM (that long step runs after the lock is released).
+    assert "limactl start" not in script
+
+
+def test_build_slice_reserve_script_counts_only_slice_disks_for_capacity() -> None:
+    from imbue.mngr_imbue_cloud.slices.lima_slice import build_slice_reserve_script
+
+    script = build_slice_reserve_script(
+        instance_name="mngr-slice-dev-josh-abc",
+        disk_name="mngr-slice-dev-josh-abc-data",
+        disk_gib=40,
+        boot_disk_gib=32,
+        slot_count=6,
+        port_range_start=22000,
+        port_range_end=32000,
+        yaml_template_text="cpus: 2\n",
+        lima_service_user="limahost",
+    )
+    # Capacity is measured against ALL slice disks on the box (every env + legacy).
+    assert '"mngr-slice-' in script
+    assert "limactl disk list --json" in script
+
+
+def test_parse_reserved_ports_reads_the_marker_line() -> None:
+    from imbue.mngr_imbue_cloud.slices.lima_slice import parse_reserved_ports
+
+    assert parse_reserved_ports("noise\nMNGR_SLICE_RESERVED 22001 22002\nmore noise") == (22001, 22002)
+
+
+def test_parse_reserved_ports_raises_when_marker_missing_or_malformed() -> None:
+    import pytest
+
+    from imbue.mngr_imbue_cloud.errors import SliceReserveOutputError
+    from imbue.mngr_imbue_cloud.slices.lima_slice import parse_reserved_ports
+
+    with pytest.raises(SliceReserveOutputError):
+        parse_reserved_ports("no marker here")
+    with pytest.raises(SliceReserveOutputError):
+        parse_reserved_ports("MNGR_SLICE_RESERVED only-one")

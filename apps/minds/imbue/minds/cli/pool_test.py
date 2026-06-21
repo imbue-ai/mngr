@@ -252,6 +252,53 @@ def test_build_create_admin_args_slice_omits_ovh_only_flags() -> None:
     assert "--tag" not in args
     assert "--management-public-key-file" not in args
     assert args[args.index("--from-tag") + 1] == "minds-v0.3.1"
+    # The owning env is stamped into each slice's lima names instead of an OVH tag.
+    assert args[args.index("--slice-env-name") + 1] == "alice"
+
+
+def test_build_create_admin_args_slice_stamps_the_env_name() -> None:
+    """The slice backend forwards --slice-env-name so slices on a shared box are env-attributable."""
+    args = build_create_admin_args(
+        env_name="dev-josh-foo",
+        backend=_BACKEND_SLICE,
+        count=1,
+        region="US-WEST-OR",
+        from_tag="minds-v0.3.1",
+        repo_url=None,
+        repo_branch_or_tag_override=None,
+        attributes_json=None,
+        workspace_dir=None,
+        management_public_key_file=None,
+        database_url="postgres://example",
+        mngr_source=None,
+        is_recycle_enabled=True,
+        is_dry_run=False,
+        is_deferred_install_wait_skipped=False,
+        server_id="feb11eae-a20a-4d9e-a0a3-ce06a526956c",
+    )
+    assert args[args.index("--slice-env-name") + 1] == "dev-josh-foo"
+
+
+def test_build_create_admin_args_ovh_backend_does_not_stamp_slice_env_name() -> None:
+    """--slice-env-name is slice-only; the ovh_vps path uses the minds_env tag instead."""
+    args = build_create_admin_args(
+        env_name="alice",
+        backend=_BACKEND_OVH_VPS,
+        count=1,
+        region="US-EAST-VA",
+        from_tag="minds-v0.3.1",
+        repo_url=None,
+        repo_branch_or_tag_override=None,
+        attributes_json=None,
+        workspace_dir=None,
+        management_public_key_file="/tmp/key.pub",
+        database_url="postgres://example",
+        mngr_source=None,
+        is_recycle_enabled=True,
+        is_dry_run=False,
+        is_deferred_install_wait_skipped=False,
+    )
+    assert "--slice-env-name" not in args
 
 
 def test_build_create_admin_args_slice_forwards_dry_run() -> None:
