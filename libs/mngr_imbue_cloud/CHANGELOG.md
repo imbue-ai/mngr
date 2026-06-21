@@ -20,7 +20,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Fixed
 
-- Fixed: Restarting a stopped `imbue_cloud` (leased pool) mind left it in a broken, unrecoverable state -- the subsequent `mngr start` SSH into the container failed. Two parts: `ImbueCloudProvider.get_host` now probes the inner container's running state over the outer root SSH and returns an offline host when the container is stopped (so `mngr start` routes through `start_host`), and `start_host` now re-bootstraps the container's sshd (relaunches sshd, re-seeds the per-host authorized key, waits for sshd to accept connections, and re-records the served host key) instead of doing a bare `docker start`. A stopped leased mind can now be brought back to life.
+- Fixed: Restarting a stopped `imbue_cloud` (leased pool) mind left it in a broken, unrecoverable state -- the subsequent `mngr start` SSH into the container failed. Two parts: `ImbueCloudProvider.get_host` now probes the inner container's running state over the outer root SSH and returns an offline host when the container is stopped (so `mngr start` routes through `start_host`), and `start_host` now relaunches the in-container sshd over the outer root SSH and waits for it to accept connections, instead of doing a bare `docker start` (the container's CMD is just a sleep, so sshd -- launched via `docker exec` -- does not survive a stop/start). A stopped leased mind can now be brought back to life.
 
 ## [v0.1.6] - 2026-06-18
 
