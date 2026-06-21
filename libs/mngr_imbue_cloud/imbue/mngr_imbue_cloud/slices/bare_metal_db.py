@@ -6,6 +6,7 @@ from typing import Final
 from imbue.imbue_common.pure import pure
 from imbue.mngr_imbue_cloud.data_types import BareMetalServer
 from imbue.mngr_imbue_cloud.data_types import BareMetalServerCapacity
+from imbue.mngr_imbue_cloud.data_types import SliceTeardownTarget
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerStatus
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_capacity
@@ -224,4 +225,41 @@ def insert_slice_pool_host(conn: Any, values: tuple[Any, ...]) -> None:
     """Insert a slice pool_hosts row (values from build_slice_pool_host_insert_values)."""
     with conn.cursor() as cur:
         cur.execute(_INSERT_SLICE_POOL_HOST_SQL, values)
+    conn.commit()
+
+
+# Unleased slice rows (and the box that hosts each) -- the pool backlog that an env
+# destroy must tear down so it does not leak VMs once the env's DB is gone. Leased
+# slices are deliberately excluded: they are torn down via their agent's release
+# path (`mngr destroy` -> connector release), and tearing their VM down here would
+# race that path. ``removing`` rows are already mid-teardown by the connector sweep.
+_SELECT_UNLEASED_SLICE_TEARDOWN_TARGETS_SQL: Final[str] = (
+    "SELECT p.id, p.lima_instance_name, p.lima_disk_name, s.public_address, s.lima_service_user "
+    "FROM pool_hosts p JOIN bare_metal_servers s ON p.bare_metal_server_id = s.id "
+    "WHERE p.backend_kind = 'slice' AND p.status NOT IN ('leased', 'removing') "
+    "AND p.lima_instance_name IS NOT NULL AND s.public_address IS NOT NULL"
+)
+
+
+def fetch_unleased_slice_teardown_targets(conn: Any) -> list[SliceTeardownTarget]:
+    """Return every unleased slice in the DB paired with the box that hosts it."""
+    with conn.cursor() as cur:
+        cur.execute(_SELECT_UNLEASED_SLICE_TEARDOWN_TARGETS_SQL)
+        rows = cur.fetchall()
+    return [
+        SliceTeardownTarget(
+            pool_host_row_id=str(row[0]),
+            lima_instance_name=str(row[1]),
+            lima_disk_name=str(row[2]) if row[2] else None,
+            box_public_address=str(row[3]),
+            lima_service_user=str(row[4]) if row[4] else "root",
+        )
+        for row in rows
+    ]
+
+
+def delete_pool_host_row(conn: Any, row_id: str) -> None:
+    """Delete a single pool_hosts row by id (committing immediately)."""
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM pool_hosts WHERE id = %s", (row_id,))
     conn.commit()

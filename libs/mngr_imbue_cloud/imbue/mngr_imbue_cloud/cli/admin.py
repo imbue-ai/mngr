@@ -58,6 +58,7 @@ from imbue.mngr_imbue_cloud.cli._common import resolve_pool_database_url
 from imbue.mngr_imbue_cloud.cli.server import DEFAULT_SLICE_BAKE_CONCURRENCY
 from imbue.mngr_imbue_cloud.cli.server import allocate_slices
 from imbue.mngr_imbue_cloud.cli.server import destroy_slice_vm
+from imbue.mngr_imbue_cloud.cli.server import tear_down_unleased_slices
 from imbue.mngr_imbue_cloud.errors import RepoIdentityError
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_server_by_id
@@ -519,6 +520,17 @@ def _create_single_pool_host(
     ),
 )
 @click.option(
+    "--slice-env-name",
+    "slice_env_name",
+    default=None,
+    help=(
+        "[slice only] Owning environment name stamped into each slice's lima instance + disk names "
+        "(mngr-slice-<env>-<host-hex>). Lets multiple dev envs share one bare-metal box: occupancy is read "
+        "from the box, and the post-bake reap only ever touches this env's own slices. Usually forwarded by "
+        "`minds pool create` from the activated env; omit only for legacy un-stamped baking."
+    ),
+)
+@click.option(
     "--dry-run",
     "is_dry_run",
     is_flag=True,
@@ -563,6 +575,7 @@ def pool_create(
     mngr_source: str | None,
     is_recycle_enabled: bool,
     server_id: str | None,
+    slice_env_name: str | None,
     is_dry_run: bool,
     max_concurrency: int,
     is_deferred_install_wait_skipped: bool,
@@ -644,6 +657,7 @@ def pool_create(
                     server_id=server_id,
                     lease_attributes=attributes,
                     region=region,
+                    env_name=slice_env_name,
                     workspace_dir=bake_source.workspace_dir,
                     mngr_source=mngr_source,
                     database_url=resolved_database_url,
@@ -982,3 +996,30 @@ def pool_destroy(pool_host_id: str, database_url: str | None, force: bool, skip_
             "slice_vm_destroyed": teardown == PoolHostUnderlyingTeardown.SLICE_VM,
         }
     )
+
+
+@pool.command(name="teardown-slices")
+@click.option(
+    "--database-url",
+    required=False,
+    default=None,
+    type=str,
+    help=(
+        "Neon PostgreSQL direct connection string for the pool DB. Defaults to "
+        "MINDS_HOST_POOL_DSN env var, or the activated minds env's secrets.toml "
+        "NEON_HOST_POOL_DSN field. Pass explicitly when operating outside an activated env."
+    ),
+)
+def pool_teardown_slices(database_url: str | None) -> None:
+    """Tear down every unleased slice VM in the pool DB and drop its row.
+
+    Used by ``minds env destroy`` (before the per-env DB is deleted) so the env's
+    baked-but-unleased pool slices don't leak their VMs on the shared bare-metal
+    boxes. Leased slices are excluded -- they are torn down via their agent's release
+    path. Needs POOL_SSH_PRIVATE_KEY in the environment to SSH the boxes (the minds
+    wrapper injects it from Vault). Idempotent per VM; fails (non-zero) if any box
+    could not be reached, so the caller can stop rather than silently leak.
+    """
+    resolved_database_url = resolve_pool_database_url(database_url)
+    result = tear_down_unleased_slices(resolved_database_url)
+    emit_json(result)
