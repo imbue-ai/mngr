@@ -3,7 +3,6 @@ import pytest
 from imbue.mngr.primitives import HostId
 from imbue.mngr_imbue_cloud.errors import SliceCapacityError
 from imbue.mngr_imbue_cloud.slices.lima_slice_client import LimaSliceVpsClient
-from imbue.mngr_imbue_cloud.slices.lima_slice_client import parse_listening_ports
 from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_vps.primitives import VpsInstanceId
 
@@ -127,17 +126,6 @@ def test_destroy_disk_raises_on_genuine_delete_failure() -> None:
     client = _recording_client({"limactl disk delete": (1, "", "permission denied")})
     with pytest.raises(LimaCommandError):
         client.destroy_disk("mngr-slice-abc-data")
-
-
-def test_parse_listening_ports_extracts_ipv4_ipv6_and_wildcard() -> None:
-    ss_output = (
-        "LISTEN 0      128          0.0.0.0:22         0.0.0.0:*\n"
-        "LISTEN 0      128             [::]:22            [::]:*\n"
-        "LISTEN 0      128       127.0.0.1:5432       0.0.0.0:*\n"
-        "LISTEN 0      128                *:22001              *:*\n"
-        "garbage line with too few fields\n"
-    )
-    assert parse_listening_ports(ss_output) == {22, 5432, 22001}
 
 
 def test_provision_slice_vm_reserves_under_lock_then_starts_and_returns_box_chosen_ports() -> None:

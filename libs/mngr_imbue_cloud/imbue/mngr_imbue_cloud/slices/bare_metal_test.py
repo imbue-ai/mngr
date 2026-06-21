@@ -16,7 +16,6 @@ from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_ORDERED
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_READY
 from imbue.mngr_imbue_cloud.slices.bare_metal import DISK_RESERVE_GB
 from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_BOOT_DISK_GIB
-from imbue.mngr_imbue_cloud.slices.bare_metal import allocate_slice_ports
 from imbue.mngr_imbue_cloud.slices.bare_metal import choose_raid_level
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_capacity
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_orphan_slice_disk_names
@@ -31,7 +30,6 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import find_server_capacity_by_id
 from imbue.mngr_imbue_cloud.slices.bare_metal import is_slice_owned_by_env
 from imbue.mngr_imbue_cloud.slices.bare_metal import is_valid_status_transition
 from imbue.mngr_imbue_cloud.slices.bare_metal import next_server_status
-from imbue.mngr_imbue_cloud.slices.bare_metal import partition_port_range
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_disk_name
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_name_env_owner
@@ -205,52 +203,6 @@ def test_count_slice_resource_names_counts_all_slices_regardless_of_stamp() -> N
     }
     # True box occupancy is every slice (every env + legacy), excluding non-slice disks.
     assert count_slice_resource_names(names) == 3
-
-
-def test_allocate_slice_ports_returns_two_lowest_free_ports() -> None:
-    first, second = allocate_slice_ports(used_ports={22000, 22001}, port_range_start=22000, port_range_end=22010)
-    assert (first, second) == (22002, 22003)
-    assert first != second
-
-
-def test_allocate_slice_ports_raises_when_fewer_than_two_free() -> None:
-    with pytest.raises(SliceCapacityError):
-        allocate_slice_ports(used_ports={22000}, port_range_start=22000, port_range_end=22002)
-
-
-def test_allocate_slice_ports_rejects_empty_range() -> None:
-    with pytest.raises(BareMetalConfigError):
-        allocate_slice_ports(used_ports=set(), port_range_start=22000, port_range_end=22000)
-
-
-def test_partition_port_range_gives_disjoint_covering_windows() -> None:
-    windows = [partition_port_range(22000, 32000, 4, idx) for idx in range(4)]
-    # Each window holds plenty of ports for a slice's two forwards.
-    for start, end in windows:
-        assert end - start >= 2
-    # Windows are disjoint and ordered (no two concurrent bakes share a port).
-    for (_, prev_end), (next_start, _) in zip(windows, windows[1:], strict=False):
-        assert next_start >= prev_end
-    # The last window absorbs the remainder so the whole range is covered.
-    assert windows[0][0] == 22000
-    assert windows[-1][1] == 32000
-
-
-def test_partition_port_range_single_partition_is_the_whole_range() -> None:
-    assert partition_port_range(22000, 32000, 1, 0) == (22000, 32000)
-
-
-def test_partition_port_range_rejects_window_too_small_for_a_slice() -> None:
-    # 3 ports across 2 partitions -> 1 port each, too few for a slice's two forwards.
-    with pytest.raises(SliceCapacityError):
-        partition_port_range(22000, 22003, 2, 0)
-
-
-def test_partition_port_range_rejects_bad_index_and_count() -> None:
-    with pytest.raises(BareMetalConfigError):
-        partition_port_range(22000, 32000, 0, 0)
-    with pytest.raises(BareMetalConfigError):
-        partition_port_range(22000, 32000, 4, 4)
 
 
 def test_next_server_status_walks_the_forward_chain() -> None:

@@ -51,24 +51,6 @@ _LIMA_RESERVE_TIMEOUT_SECONDS: Final[float] = 600.0
 _BOX_CONNECT_TIMEOUT_SECONDS: Final[int] = 30
 
 
-def parse_listening_ports(ss_output: str) -> set[int]:
-    """Parse TCP listening ports from ``ss -Htln`` output (numeric, no header).
-
-    The local-address field is the 4th whitespace-separated column; the port is
-    whatever follows its last ``:`` (handles IPv6 ``[::]:<port>`` and ``*:<port>``).
-    Lines that don't parse are skipped. Pure so it can be unit-tested without a box.
-    """
-    ports: set[int] = set()
-    for line in ss_output.splitlines():
-        fields = line.split()
-        if len(fields) < 4:
-            continue
-        port_text = fields[3].rsplit(":", 1)[-1]
-        if port_text.isdigit():
-            ports.add(int(port_text))
-    return ports
-
-
 def _is_already_absent_error(stderr: str) -> bool:
     """True if a limactl delete failure stderr indicates the target was already gone.
 
@@ -392,19 +374,6 @@ class LimaSliceVpsClient(VpsClientInterface):
             if instance.get("name") == str(instance_id):
                 return _LIMA_STATUS_MAP.get(str(instance.get("status", "")), VpsInstanceStatus.UNKNOWN)
         return VpsInstanceStatus.UNKNOWN
-
-    def get_listening_ports(self) -> set[int]:
-        """Return the set of TCP ports currently in LISTEN state on the box.
-
-        Used by the slice provider to pick free box-forwarded ports for a new VM.
-        Parses ``ss -Htln`` (numeric, no header): the local-address field is the
-        4th column; the port is whatever follows its last ``:`` (handles IPv6
-        ``[::]:<port>`` too).
-        """
-        rc, out, err = self._run_on_box("ss -Htln", timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="ss")
-        if rc != 0:
-            raise LimaCommandError("ss -Htln", rc or 1, err)
-        return parse_listening_ports(out)
 
     def get_instance_ip(self, instance_id: VpsInstanceId) -> str:
         # The slice's sshd is forwarded on the box's own interface; external
