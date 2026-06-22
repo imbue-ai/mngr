@@ -6,4 +6,6 @@ Add uploading of log files and traceback-with-locals attachments to S3 for Sentr
 
 Select the Sentry DSN and S3 bucket from the activated minds env (`minds env activate`): production reports to the production Sentry project and bucket, staging to the staging project and bucket, and every other env (dev-*, ci-*, or no activated env) to the dev Sentry project with no S3 uploads (so dev machines never ship potentially-sensitive attachments off-box).
 
+S3 attachment uploads remain opt-in via the `MINDS_SENTRY_S3_UPLOADS` env var (default off, even in production and staging), since the uploaded logs and traceback-with-locals attachments can carry potentially-sensitive data. When enabled, the bucket follows the environment; development never uploads regardless of the flag.
+
 Bump the bundled latchkey CLI to 2.17.2.

@@ -176,18 +176,23 @@ def run(
 
     # Initialize Sentry for the minds backend process. ``setup_logging`` already ran
     # in the CLI group callback, so the loguru sinks Sentry layers on top of exist.
-    # The activated minds env (from `minds env activate`) selects the Sentry DSN and
-    # the S3 attachment bucket: production and staging each get their own, while every
-    # other env (dev-*, ci-*, or no activated env) reports to the dev project with no
-    # S3 uploads. We treat "not activated" as dev so an un-activated `minds run` never
-    # accidentally reports to the production project.
+    # The activated minds env (from `minds env activate`) selects the Sentry DSN and,
+    # for production/staging, which S3 attachment bucket: production and staging each
+    # get their own, while every other env (dev-*, ci-*, or no activated env) reports
+    # to the dev project. We treat "not activated" as dev so an un-activated
+    # `minds run` never accidentally reports to the production project.
+    # S3 attachment uploads are additionally opt-in via MINDS_SENTRY_S3_UPLOADS
+    # (default off, even in production/staging) since they can carry
+    # potentially-sensitive data; development never uploads regardless.
     # TODO: thread through the real release id + git sha instead of these placeholders.
     activated_env_name = env_name_from_root_name(root_name) if is_minds_root_name_set_to_active_env() else None
+    is_sentry_s3_upload_enabled = os.environ.get("MINDS_SENTRY_S3_UPLOADS", "").strip().lower() in ("1", "true", "yes")
     setup_sentry(
         environment=SentryDeployEnvironment.from_minds_env_name(activated_env_name),
         release_id="0.0.0-dev",
         git_commit_sha="unknown",
         log_folder=paths.log_dir,
+        is_s3_upload_enabled=is_sentry_s3_upload_enabled,
     )
     client_config_path = config_file
     client_env_config = load_client_config(client_config_path)

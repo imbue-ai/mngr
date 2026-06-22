@@ -497,15 +497,20 @@ def setup_sentry(
     git_commit_sha: str,
     log_folder: Path,
     global_user_context: Mapping[str, str] | None = None,
+    is_s3_upload_enabled: bool = False,
 ) -> None:
     """Sets up the main Sentry instance for this process.
 
     This should be done *after* setting up normal loguru loggers, to ensure that sentry handling happens after normal logging.
     In case the sentry stuff hangs or something odd, we want to make sure to at least get regular log output.
 
-    The ``environment`` selects both the Sentry DSN and the S3 attachment bucket:
-    ``production`` and ``staging`` each report to their own project + bucket, while
-    ``development`` reports to the shared dev project and uploads nothing to S3.
+    The ``environment`` selects the Sentry DSN (``production`` and ``staging`` each
+    report to their own project; everything else to the shared dev project) and,
+    for ``production``/``staging``, *which* S3 bucket attachments would go to.
+
+    S3 attachment uploads are additionally gated by ``is_s3_upload_enabled`` (off by
+    default): they only happen when it is true *and* the environment is
+    ``production`` or ``staging``. ``development`` never uploads to S3.
     """
     assert "SENTRY_DSN" not in os.environ, ("Please `unset SENTRY_DSN` in your environment.")
 
@@ -552,18 +557,20 @@ def setup_sentry(
     )
     logger.info("Sentry initialized")
 
-    # The S3 attachment bucket follows the environment: production and staging
-    # each upload log files + the traceback-with-locals attachment to their own
-    # bucket; development uploads nothing (those attachments can carry
-    # potentially-sensitive data, so dev machines never ship them off-box).
-    if environment is SentryDeployEnvironment.PRODUCTION:
+    # S3 attachment uploads are opt-in (off by default, even in production/staging),
+    # because the uploaded log files + traceback-with-locals can carry
+    # potentially-sensitive data. When enabled, the bucket follows the environment;
+    # development never uploads regardless of the flag.
+    if not is_s3_upload_enabled:
+        logger.info("Sentry S3 attachment uploads disabled (not enabled via MINDS_SENTRY_S3_UPLOADS)")
+    elif environment is SentryDeployEnvironment.PRODUCTION:
         setup_s3_uploads(is_production=True)
         logger.info("Sentry S3 attachment uploads enabled (production bucket)")
     elif environment is SentryDeployEnvironment.STAGING:
         setup_s3_uploads(is_production=False)
         logger.info("Sentry S3 attachment uploads enabled (staging bucket)")
     else:
-        logger.info("Sentry S3 attachment uploads disabled (environment={})", environment.value)
+        logger.info("Sentry S3 attachment uploads disabled (environment={} has no bucket)", environment.value)
 
     if global_user_context is not None:
         sentry_sdk.set_user(dict(global_user_context))
