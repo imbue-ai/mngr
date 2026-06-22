@@ -7,10 +7,11 @@ import pytest
 from moto import mock_aws
 
 from imbue.mngr.config.data_types import ScalarTuple
-from imbue.mngr.config.data_types import detect_settings_narrowing
+from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import AwsProviderConfig
+from imbue.mngr_aws.config import DEFAULT_AMI_BY_REGION
 from imbue.mngr_aws.testing import clear_aws_env
 
 
@@ -113,23 +114,20 @@ def test_get_ami_id_for_region_uses_default_ami_id() -> None:
     assert config.get_ami_id_for_region("eu-west-1") == "ami-deadbeef"
 
 
-def test_get_ami_id_for_region_uses_region_map() -> None:
-    config = AwsProviderConfig(default_ami_by_region={"us-east-1": "ami-east", "eu-west-1": "ami-eu"})
-    assert config.get_ami_id_for_region("us-east-1") == "ami-east"
-    assert config.get_ami_id_for_region("eu-west-1") == "ami-eu"
+def test_get_ami_id_for_region_uses_pinned_region_default() -> None:
+    config = AwsProviderConfig()
+    for region, ami_id in DEFAULT_AMI_BY_REGION.items():
+        assert config.get_ami_id_for_region(region) == ami_id
 
 
 def test_get_ami_id_for_region_raises_when_missing() -> None:
-    config = AwsProviderConfig(default_ami_by_region={})
+    config = AwsProviderConfig()
     with pytest.raises(ValueError, match="No AMI configured"):
-        config.get_ami_id_for_region("us-east-1")
+        config.get_ami_id_for_region("ap-south-1")
 
 
-def test_get_ami_id_explicit_takes_precedence_over_region_map() -> None:
-    config = AwsProviderConfig(
-        default_ami_id="ami-override",
-        default_ami_by_region={"us-east-1": "ami-region-specific"},
-    )
+def test_get_ami_id_explicit_takes_precedence_over_region_default() -> None:
+    config = AwsProviderConfig(default_ami_id="ami-override")
     assert config.get_ami_id_for_region("us-east-1") == "ami-override"
 
 
@@ -156,15 +154,24 @@ def test_local_layer_tightening_allowed_ssh_cidrs_does_not_narrow() -> None:
     The committed ``[providers.aws]`` block carries the non-empty default
     ``("0.0.0.0/0",)``; a local layer overrides it with a single IP. Because the
     field is a ``ScalarStrTuple``, the validated override is a ``ScalarTuple`` and
-    ``detect_settings_narrowing`` treats it as scalar replacement. A plain-tuple
+    the overlay narrowing guard treats it as scalar replacement (the pipeline
+    re-marks the ``Static*`` value stripped by ``model_dump``). A plain-tuple
     override of the same shape (no marker -- e.g. via ``model_construct``) still
     narrows, proving the marker is the discriminator and not some incidental
     property.
     """
     project = AwsProviderConfig.model_validate({"backend": "aws"})
     local_override = AwsProviderConfig.model_validate({"backend": "aws", "allowed_ssh_cidrs": ["203.0.113.4/32"]})
-    assert detect_settings_narrowing(project, local_override) == []
+    assert _provider_narrowing_paths(project, local_override) == []
     unmarked_override = AwsProviderConfig.model_construct(
         backend=ProviderBackendName("aws"), allowed_ssh_cidrs=("203.0.113.4/32",)
     )
-    assert detect_settings_narrowing(project, unmarked_override) == ["allowed_ssh_cidrs"]
+    assert _provider_narrowing_paths(project, unmarked_override) == ["allowed_ssh_cidrs"]
+
+
+def _provider_narrowing_paths(base: AwsProviderConfig, override: AwsProviderConfig) -> list[str]:
+    """The narrowing paths the production overlay merge surfaces for one provider config
+    over another -- the same path the loader's cross-scope guard uses, exercised at the
+    provider-config level."""
+    _, narrowings = merge_models_via_overlay(base, override)
+    return narrowings

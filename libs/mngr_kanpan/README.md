@@ -91,7 +91,7 @@ Shell commands run once per agent in parallel. The stdout (trimmed) becomes the 
 | `MNGR_FIELD_CI_STATUS` | CI status (from cached fields) |
 | `MNGR_FIELD_<KEY>` | Display text for any other cached field, uppercased key (e.g. `MNGR_FIELD_COMMITS_AHEAD`) |
 
-If your script consumes any of the `MNGR_FIELD_<KEY>` env vars, declare those keys in `inputs` so staleness propagates correctly: the produced cell's `created` is the oldest `created` of the declared inputs (taint propagation). When `inputs` is unset (default), the produced cell is stamped with the current time.
+If your script consumes any `MNGR_FIELD_<KEY>` env vars, declare those keys in `inputs` so the cell is marked stale whenever the inputs it depends on are stale. When `inputs` is unset (default), the cell is treated as freshly produced.
 
 ```toml
 [plugins.kanpan.shell_commands.pr_age]
@@ -102,7 +102,7 @@ if [ -n "$MNGR_FIELD_PR_NUMBER" ]; then
   echo "PR #$MNGR_FIELD_PR_NUMBER"
 fi
 '''
-inputs = ["pr"]  # tainted by the cached `pr` field's `created`
+inputs = ["pr"]  # marked stale when the cached `pr` field is stale
 ```
 
 ### Label-backed columns
@@ -202,9 +202,7 @@ retry_cooldown_seconds = 60.0
 
 ## Staleness
 
-Each cached field tracks a `created` timestamp. Cells whose `created` is older than `staleness_threshold_seconds` are rendered in dark grey to signal that the value may be out of date.
-
-When a value is computed from cached inputs (rather than directly from the world), `created` is the oldest `created` of the inputs it consumed -- staleness propagates through the dependency chain. For example, a PR cell whose lookup fell back to a stale cached `repo_path` (because the agent's labels no longer carry a remote) is itself rendered as stale.
+Cells whose underlying value is older than `staleness_threshold_seconds` are rendered in dark grey to signal that the value may be out of date.
 
 ```toml
 [plugins.kanpan]
@@ -213,5 +211,3 @@ When a value is computed from cached inputs (rather than directly from the world
 # updated by the most recent refresh cycle shows as stale.
 # staleness_threshold_seconds = 540.0
 ```
-
-Note that stale cells share their colour with muted-agent rows; they're both "de-emphasized." A muted row flattens its entire row to grey, while staleness applies per-cell on non-muted rows.

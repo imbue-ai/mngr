@@ -210,6 +210,48 @@ def _get_ssh_transport(pyinfra_host: Any) -> Transport | None:
     return None
 
 
+# Dedicated lock file (separate from the idle-suppression "host_lock") used to
+# serialize concurrent `mngr start` runs for a host via flock(2). It is never
+# deleted so its inode stays stable across local and remote (over-SSH) holders.
+_START_LOCK_FILENAME: Final[str] = "host_start_lock"
+
+# Printed by the remote lock holder once flock(2) has been acquired, so the
+# local side knows it may proceed (the remote flock blocks until then).
+_START_LOCK_ACQUIRED_MARKER: Final[str] = "__MNGR_START_LOCK_ACQUIRED__"
+
+
+@pure
+def _build_remote_start_lock_command(lock_file_path: Path) -> str:
+    """Build the remote shell command that holds a flock(2) until stdin closes.
+
+    Opens the lock fd, blocks on ``flock`` until acquired, prints a marker, then
+    reads stdin until EOF. When the controlling channel is closed, stdin hits
+    EOF, the loop ends, the shell exits, the fd closes, and the lock releases.
+    """
+    quoted_path = shlex.quote(str(lock_file_path))
+    quoted_dir = shlex.quote(str(lock_file_path.parent))
+    quoted_marker = shlex.quote(_START_LOCK_ACQUIRED_MARKER)
+    return (
+        f"mkdir -p {quoted_dir} && exec 9>{quoted_path} && flock 9 && "
+        f"printf '%s\\n' {quoted_marker} && while IFS= read -r _; do :; done"
+    )
+
+
+def _wait_for_lock_acquired_marker(channel: Any) -> None:
+    """Block until the remote lock holder prints the acquired marker.
+
+    Raises LockNotHeldError if the channel closes first (e.g. ``flock`` missing
+    on the host or the lock command failed before acquiring the lock).
+    """
+    marker_bytes = _START_LOCK_ACQUIRED_MARKER.encode()
+    buffer = b""
+    while marker_bytes not in buffer:
+        chunk = channel.recv(4096)
+        if not chunk:
+            raise LockNotHeldError("Remote start lock channel closed before the lock was acquired")
+        buffer += chunk
+
+
 def install_packaged_script_on_host(
     host: OnlineHostInterface,
     *,
@@ -257,6 +299,26 @@ def read_json_dict_via_host(host: OnlineHostInterface, path: Path) -> dict[str, 
         logger.warning("Could not parse {} as JSON ({}); treating as empty.", path, e)
         return {}
     return loaded if isinstance(loaded, dict) else {}
+
+
+def write_json_dict_via_host(
+    host: OnlineHostInterface, path: Path, data: dict[str, Any], *, make_parent: bool = False
+) -> None:
+    """Write-side counterpart to ``read_json_dict_via_host``.
+
+    Serializes ``data`` as pretty-printed JSON (two-space indent, trailing
+    newline) and writes it to ``path`` via the host (works for local or
+    remote hosts). When ``make_parent`` is True, creates the parent directory
+    first so the write does not depend on something else having created it.
+
+    Lives here rather than in ``file_utils`` because it needs
+    ``OnlineHostInterface``, which would create a circular import via
+    ``config.data_types``.
+    """
+    text = json.dumps(data, indent=2) + "\n"
+    if make_parent:
+        host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(path.parent))}", timeout_seconds=5.0)
+    host.write_text_file(path, text)
 
 
 def _git_command_stdout(host: OnlineHostInterface, command: str, cwd: Path) -> str | None:
@@ -741,6 +803,71 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             finally:
                 lock_file.close()
             logger.trace("Released host lock")
+
+    @contextmanager
+    def lock_for_starting(self) -> Iterator[None]:
+        """Hold an exclusive, cross-actor lock that serializes ``mngr start`` for this host.
+
+        Uses a real ``flock(2)`` on a dedicated lock file (separate from the
+        idle-suppression ``host_lock``) so that a start running *locally* inside
+        the host -- e.g. a VM/container boot hook -- and a start running
+        *remotely* over SSH -- e.g. the minds desktop client -- mutually
+        exclude. Both hold ``flock(2)`` on the same path, so they coordinate
+        even though one is local and the other is over SSH.
+
+        Blocks indefinitely until the lock is acquired (wrap the CLI in
+        ``timeout`` if a deadline is needed). The lock file is intentionally
+        never deleted so its inode stays stable across local and remote holders.
+        """
+        lock_file_path = self.host_dir / _START_LOCK_FILENAME
+        if self.is_local:
+            lock_file_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_file = open(str(lock_file_path), "w")
+            try:
+                with log_span("acquiring start lock at {}", lock_file_path):
+                    # Blocking exclusive flock: waits indefinitely for any other holder.
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                yield
+            finally:
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                finally:
+                    lock_file.close()
+                logger.trace("Released start lock")
+        else:
+            with self._hold_remote_start_lock(lock_file_path):
+                yield
+
+    @contextmanager
+    def _hold_remote_start_lock(self, lock_file_path: Path) -> Iterator[None]:
+        """Hold a real flock(2) on the host over SSH for the duration of the block.
+
+        A long-lived exec channel opens the lock fd, blocks on ``flock`` until
+        the lock is acquired, and then waits for stdin EOF. Closing the channel
+        on exit sends that EOF, so the remote shell exits, the fd closes, and
+        the lock releases.
+        """
+        # Establish the SSH connection before grabbing the transport: it is
+        # opened lazily, and the start lock can be the first thing to touch it
+        # (so the transport would otherwise be None). Mirrors every other
+        # transport user (read_file, exec, ...).
+        self._ensure_connected()
+        transport = self._get_paramiko_transport()
+        channel = transport.open_session()
+        try:
+            with log_span("acquiring start lock at {} (over SSH)", lock_file_path):
+                channel.exec_command(_build_remote_start_lock_command(lock_file_path))
+                _wait_for_lock_acquired_marker(channel)
+            yield
+        finally:
+            try:
+                channel.shutdown_write()
+            except (OSError, EOFError) as shutdown_error:
+                # Best-effort EOF to release the remote flock; the channel.close()
+                # below tears it down regardless. Log so a wedged teardown is visible.
+                logger.debug("Failed to send EOF when releasing remote start lock: {}", shutdown_error)
+            channel.close()
+            logger.trace("Released start lock (over SSH)")
 
     def get_reported_lock_time(self) -> datetime | None:
         """Get the mtime of the lock file."""

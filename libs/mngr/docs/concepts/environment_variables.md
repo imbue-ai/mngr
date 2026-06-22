@@ -34,7 +34,7 @@ MNGR__AGENT_TYPES__MY_CLAUDE__CLI_ARGS='["--model","opus"]' mngr create my-agent
 
 ### Assigning vs extending
 
-The bare key is **always** an assignment — the override replaces whatever the lower-precedence layers produced. To opt into additive behavior (append for lists/tuples, shallow key-merge for dicts, union for sets), add `__extend` (or `__EXTEND` for env vars) to the leaf key:
+The bare key is **always** an assignment — the override replaces whatever the lower-precedence layers produced. To opt into additive behavior (append for lists/tuples, recursive key-merge for dicts, union for sets), add `__extend` (or `__EXTEND` for env vars) to the leaf key:
 
 ```bash
 # Replace the entire cli_args list:
@@ -47,6 +47,8 @@ MNGR__AGENT_TYPES__MY_CLAUDE__CLI_ARGS__EXTEND='["--debug"]' mngr create
 ```
 
 The same `__extend` suffix is recognised in TOML, in `--setting`, and in `mngr config set / extend` — one rule, four call sites.
+
+Dict extension is **recursive**: a nested `key__extend` inside an `__extend` value merges deeper (extending `base[key]`), while a nested bare `key` replaces at that level (preserving its siblings). This is backward-compatible — any value that nests no inner `__extend` marker merges exactly as the previous one-level operator did (bare nested keys replace, siblings survive).
 
 `__extend` on a scalar field raises `ConfigParseError`. A shape mismatch (e.g. a string value used to extend a list field) also raises.
 
@@ -74,7 +76,7 @@ Create templates (applied at command time via `--template <name>`) also follow t
 
 Adding a brand-new entry under any of these (e.g. defining `[agent_types.my_other_claude]` in `settings.local.toml` when only `[agent_types.my_claude]` was in `settings.toml`) is a pure addition and never narrows; the container-level merge is per-key additive by design.
 
-The default value of `allow_settings_key_assignment_narrowing` is expected to change to `true` in a future version, and support for `false` may be removed entirely. Migrate your configs ahead of the flip so the eventual default change is a no-op.
+Besides setting `allow_settings_key_assignment_narrowing = true` to allow assign-by-default narrowing globally, you can opt a specific key out per layer: `key__extend` keeps the additive (merge) behavior, and `key__assign` replaces the value without the narrowing error.
 
 CLI flags that supply tuple/list values (e.g. `--env X=6`) always extend the merged settings value rather than replace it — the result is `<config values> + <template result> + <CLI values>` for the `create` command (CLI extends after templates apply), and `<config values> + <CLI values>` for everything else. The safety net only applies to the settings-file / env-var / `--setting` / template merge, not to CLI flag merging — the CLI is always the user's final, additive word.
 

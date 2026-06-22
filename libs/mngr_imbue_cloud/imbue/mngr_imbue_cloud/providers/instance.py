@@ -40,6 +40,7 @@ from typing import Any
 from typing import Final
 from typing import assert_never
 
+import httpx
 import paramiko
 from loguru import logger
 from pydantic import ConfigDict
@@ -52,6 +53,7 @@ from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
@@ -122,9 +124,11 @@ from imbue.mngr_imbue_cloud.providers.rebuild import build_delegated_vps_provide
 from imbue.mngr_imbue_cloud.providers.rebuild import build_slice_rebuild_provider
 from imbue.mngr_imbue_cloud.providers.wipe import build_pool_host_wipe_script
 from imbue.mngr_imbue_cloud.repo_identity import canonicalize_repo_source
-from imbue.mngr_vps_docker.host_setup import apply_host_setup_on_outer
-from imbue.mngr_vps_docker.instance import VpsDockerProvider
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps.container_setup import docker_inspect_running
+from imbue.mngr_vps.container_setup import start_container_sshd
+from imbue.mngr_vps.host_setup import apply_host_setup_on_outer
+from imbue.mngr_vps.instance import VpsProvider
+from imbue.mngr_vps.primitives import VpsInstanceId
 
 _SSH_WAIT_TIMEOUT_SECONDS: Final[float] = 120.0
 
@@ -399,14 +403,35 @@ class ImbueCloudProvider(BaseProviderInstance):
         if self._leased_hosts_cache is not None:
             return self._leased_hosts_cache
         account = self._require_account()
-        token = self._get_access_token(account)
         # Do NOT swallow a discovery failure to an empty list: a transient
         # connector outage / expired token would then look like "this account
         # has zero leased hosts", which the discovery layer cannot distinguish
         # from a real empty result (and which defeats mngr's mark-UNKNOWN-on-
         # provider-failure safeguard). Let it propagate -- this method already
         # raises (via _require_account), so callers tolerate it.
-        self._leased_hosts_cache = self.client.list_hosts(token)
+        #
+        # Narrow the propagated type by cause so consumers can tell "the
+        # connector is unreachable" apart from "auth/account problem": a
+        # transport-level httpx failure (connection refused, DNS, timeout --
+        # the flaky-wifi / connector-down case) becomes ProviderUnavailableError,
+        # which recovery UIs treat as "don't bother restarting, just retry". A
+        # connector status error (ImbueCloudConnectorError) or an auth failure
+        # (ImbueCloudAuthError) keeps its own type and falls through to the
+        # generic "can't reach your workspace" handling instead. The curated
+        # user_help_text keeps ProviderUnavailableError from telling a cloud user
+        # to "start Docker".
+        try:
+            token = self._get_access_token(account)
+            self._leased_hosts_cache = self.client.list_hosts(token)
+        except httpx.HTTPError as exc:
+            raise ProviderUnavailableError(
+                self.name,
+                f"could not reach Imbue Cloud: {exc}",
+                user_help_text=(
+                    "Check your internet connection and try again. If the problem persists, "
+                    "Imbue Cloud may be temporarily unavailable."
+                ),
+            ) from exc
         return self._leased_hosts_cache
 
     def discover_hosts(
@@ -803,7 +828,7 @@ class ImbueCloudProvider(BaseProviderInstance):
     ) -> AgentDetails | None:
         """Construct one ``AgentDetails`` from the parsed listing output.
 
-        Mirrors ``mngr_vps_docker``'s implementation -- the fields are
+        Mirrors ``mngr_vps``'s implementation -- the fields are
         identical because both providers consume the same shared listing
         script. We pull idle/activity-source metadata off the per-agent
         ``data.json`` that the script captured rather than off a
@@ -923,14 +948,47 @@ class ImbueCloudProvider(BaseProviderInstance):
     def get_host(
         self,
         host: HostId | HostName,
-    ) -> Host:
-        leased = self._list_leased_hosts_cached()
-        for entry in leased:
-            if isinstance(host, HostId) and entry.host_id == str(host):
-                return self._build_host_object(entry)
-            if isinstance(host, HostName) and entry.host_name == str(host):
-                return self._build_host_object(entry)
+    ) -> HostInterface:
+        """Resolve a leased host, returning an offline host when its container is stopped.
+
+        Mirrors ``VpsDockerProvider.get_host``: a leased host whose inner
+        container is stopped must surface as an ``OfflineHost`` so that
+        ``ensure_host_started`` routes ``mngr start`` through ``start_host``
+        (which re-bootstraps the container's SSH). Returning an online ``Host``
+        unconditionally -- as this did before -- makes the start command skip
+        ``start_host`` and SSH straight into the dead container, leaving a
+        stopped leased mind unrecoverable.
+        """
+        for entry in self._list_leased_hosts_cached():
+            is_match = (isinstance(host, HostId) and entry.host_id == str(host)) or (
+                isinstance(host, HostName) and entry.host_name == str(host)
+            )
+            if is_match:
+                host_id = HostId(entry.host_id)
+                if self._is_container_running(host_id):
+                    return self._build_host_object(entry)
+                return self.to_offline_host(host_id)
         raise HostNotFoundError(self.name, host)
+
+    def _is_container_running(self, host_id: HostId) -> bool:
+        """Return True iff the leased container is running on its outer VPS.
+
+        Probed over the outer root SSH, which works independently of the
+        container's own sshd. When the per-host key is not on this machine
+        (e.g. the host was leased elsewhere), the outer cannot be opened, so we
+        cannot prove the container is down and report it as running -- preserving
+        the prior always-online behavior for that path. A container that no
+        longer exists (lease torn down out from under us) reports as not running.
+        """
+        private_key_path, _ = self._host_keypair_paths(host_id)
+        if not private_key_path.exists():
+            return True
+        with self.outer_host_for(host_id) as outer:
+            assert outer is not None
+            container_id = self._resolve_container_id_on_outer(outer, host_id)
+            if container_id is None:
+                return False
+            return docker_inspect_running(outer, container_id)
 
     def to_offline_host(self, host_id: HostId) -> OfflineHost:
         """Build an OfflineHost from the connector's lease metadata.
@@ -1000,7 +1058,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         - ``fast_mode=prevent`` -- the slow path. Lease any adequately-sized
           available host (resource attributes only; ``repo_branch_or_tag`` /
           ``repo_url`` are dropped), destroy its baked container, and rebuild
-          the host from scratch via the shared ``mngr_vps_docker`` setup path,
+          the host from scratch via the shared ``mngr_vps`` setup path,
           so mngr's standard create pipeline then does full client-side setup.
 
         Two address forms work for both paths:
@@ -1227,7 +1285,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         """Tear down the leased VPS's baked container and rebuild it from the FCT Dockerfile.
 
         Delegates both teardown and rebuild to the single canonical
-        ``mngr_vps_docker`` setup path, run over the root SSH the lease granted.
+        ``mngr_vps`` setup path, run over the root SSH the lease granted.
         The per-host public key is added to the rebuilt container's
         ``authorized_keys`` so the returned ``ImbueCloudHost`` (which uses the
         per-host key) can reach it.
@@ -1238,7 +1296,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         # one. Detected by the lease's container port differing from the standard
         # publish port -- true only for slices (forwarded ports), never OVH VPSes.
         is_slice = lease_result.container_ssh_port != self.config.container_ssh_port
-        delegated_provider: VpsDockerProvider = (
+        delegated_provider: VpsProvider = (
             build_slice_rebuild_provider(
                 name=self.name, config=self.config, mngr_ctx=self.mngr_ctx, lease_result=lease_result
             )
@@ -1463,7 +1521,7 @@ class ImbueCloudProvider(BaseProviderInstance):
 
         Returns None when no container with that label exists. Containers are
         identified by ``com.imbue.mngr.host-id=<host_id>`` (the canonical
-        ``LABEL_HOST_ID`` from ``mngr_vps_docker``).
+        ``LABEL_HOST_ID`` from ``mngr_vps``).
         """
         result = outer.execute_idempotent_command(
             f"docker ps -aq --filter label=com.imbue.mngr.host-id={shlex.quote(str(host_id))} | head -1"
@@ -1522,7 +1580,19 @@ class ImbueCloudProvider(BaseProviderInstance):
         host: HostInterface | HostId,
         snapshot_id: SnapshotId | None = None,
     ) -> Host:
-        """Start the previously-stopped docker container via the outer host and return the Host."""
+        """Start the previously-stopped docker container, relaunch its sshd, and return the Host.
+
+        A bare ``docker start`` is not enough to bring a leased mind back: the
+        in-container sshd is launched via ``docker exec`` (the container's CMD is
+        just a sleep), so the sshd *process* does not survive the stop. The
+        container filesystem -- including the per-host authorized key and the
+        served host key -- is preserved across a ``docker stop``/``docker
+        start``, so only sshd needs re-establishing; without it the subsequent
+        ``mngr start`` SSH into the container hangs until timeout and the mind is
+        left dead and UI-unrecoverable. So, over the outer root SSH (which works
+        independently of the container's sshd), we relaunch sshd and wait for it
+        to accept connections.
+        """
         host_id = host.id if isinstance(host, HostInterface) else host
         leased = self._find_leased(host_id)
         if leased is None:
@@ -1540,7 +1610,18 @@ class ImbueCloudProvider(BaseProviderInstance):
                 outer, f"start {shlex.quote(container_id)}", host_id=host_id, label="docker-start"
             )
             logger.debug("Started container {} for host {}", container_id, host_id)
+            # The container's CMD is just a sleep, so a freshly started container
+            # is not running sshd (it is launched via ``docker exec``, never the
+            # entrypoint); launch it. Otherwise the wait below (and the later
+            # ``mngr start`` SSH) would hang until timeout and the mind would be
+            # unrecoverable.
+            start_container_sshd(outer, container_id)
+            self._wait_for_container_sshd(leased)
         return self._build_host_object(leased)
+
+    def _wait_for_container_sshd(self, leased: LeasedHostInfo) -> None:
+        """Wait for the container's sshd to accept connections on the leased VPS's port."""
+        wait_for_sshd(leased.vps_address, leased.container_ssh_port, _SSH_WAIT_TIMEOUT_SECONDS)
 
     def destroy_host(self, host: HostInterface | HostId) -> None:
         """Wipe user data on the leased VPS and release the lease back to the pool.
@@ -1837,9 +1918,15 @@ class ImbueCloudProvider(BaseProviderInstance):
         self,
         host: HostInterface | HostId,
     ) -> Any:
+        # Build the online host object directly from the lease rather than via
+        # get_host: the connector is needed regardless of the container's
+        # running state, and get_host now returns an OfflineHost (which has no
+        # connector) for a stopped container.
         host_id = host.id if isinstance(host, HostInterface) else host
-        host_obj = self.get_host(host_id)
-        return host_obj.connector.host
+        leased = self._find_leased(host_id)
+        if leased is None:
+            raise HostNotFoundError(self.name, host_id)
+        return self._build_host_object(leased).connector.host
 
 
 def _rm_tree(path: Path) -> None:

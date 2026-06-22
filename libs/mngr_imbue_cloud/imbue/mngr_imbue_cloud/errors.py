@@ -91,6 +91,10 @@ class BareMetalProvisioningError(ImbueCloudError):
     """Raised when ordering, installing, or carving a bare-metal server / slice fails."""
 
 
+class SliceReserveOutputError(BareMetalProvisioningError):
+    """Raised when the on-box slice reservation script produces no/garbled port output."""
+
+
 class InvalidBuildArgError(ImbueCloudError, ValueError):
     """Raised when a recognized imbue_cloud build arg has a malformed value."""
 

@@ -24,7 +24,7 @@ def test_build_pool_host_wipe_script_ends_with_exit_zero() -> None:
 
 
 def test_build_pool_host_wipe_script_filters_container_by_host_id_label() -> None:
-    """Container lookup must filter on the canonical mngr_vps_docker host-id label.
+    """Container lookup must filter on the canonical mngr_vps host-id label.
 
     ``shlex.quote`` is a no-op for the alphanumeric-with-dashes HostId so the
     rendered filter is unquoted; that's still valid shell because the value

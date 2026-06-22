@@ -212,25 +212,26 @@ def test_pool_host_insert_writes_service_name_into_vps_instance_id() -> None:
     assert column_to_value["vps_address"] == "vps-deadbeef.vps.ovh.us"
 
 
-def test_pool_create_rejects_malformed_tag(tmp_path: Any) -> None:
-    """A ``--tag`` value without ``=`` aborts the bake before any subprocess work."""
-    runner = CliRunner()
+def test_pool_create_backend_defaults_to_slice() -> None:
+    """The default --backend is ``slice`` -- OVH VPS baking is deprecated."""
+    backend_option = next(param for param in pool.commands["create"].params if param.name == "backend")
+    assert backend_option.default == "slice"
+
+
+def test_pool_create_rejects_ovh_vps_backend(tmp_path: Any) -> None:
+    """Explicitly requesting --backend ovh_vps fails with a deprecation message pointing at slice."""
     key_file = tmp_path / "mgmt.pub"
     key_file.write_text("ssh-ed25519 AAAA... operator@host\n")
-    result = runner.invoke(
+    result = CliRunner().invoke(
         pool,
         [
             "create",
+            "--backend",
+            "ovh_vps",
             "--count",
             "1",
             "--region",
             "US-EAST-VA",
-            "--tag",
-            "no-equals",
-            "--attributes",
-            "{}",
-            "--workspace-dir",
-            str(tmp_path),
             "--management-public-key-file",
             str(key_file),
             "--database-url",
@@ -238,7 +239,8 @@ def test_pool_create_rejects_malformed_tag(tmp_path: Any) -> None:
         ],
     )
     assert result.exit_code != 0
-    assert "KEY=VALUE" in result.output or "KEY=VALUE" in str(result.exception)
+    assert "deprecated" in result.output
+    assert "--backend slice" in result.output
 
 
 def _slice_create_args(extra: list[str]) -> list[str]:
@@ -283,32 +285,6 @@ def test_pool_create_slice_backend_requires_server_id() -> None:
     assert "--server-id is required for --backend slice" in result.output
 
 
-def test_pool_create_ovh_backend_rejects_server_id(tmp_path: Any) -> None:
-    """``--server-id`` is slice-only; passing it to the OVH backend is a usage error."""
-    key_file = tmp_path / "mgmt.pub"
-    key_file.write_text("ssh-ed25519 AAAA... operator@host\n")
-    result = CliRunner().invoke(
-        pool,
-        [
-            "create",
-            "--backend",
-            "ovh_vps",
-            "--count",
-            "1",
-            "--region",
-            "US-EAST-VA",
-            "--database-url",
-            "postgres://example",
-            "--management-public-key-file",
-            str(key_file),
-            "--server-id",
-            "11111111-1111-1111-1111-111111111111",
-        ],
-    )
-    assert result.exit_code != 0
-    assert "--server-id is only supported for --backend slice" in result.output
-
-
 def test_pool_create_requires_a_bake_source_selector() -> None:
     """Neither --from-tag nor --workspace-dir is a usage error (exactly one is required)."""
     result = CliRunner().invoke(pool, _slice_create_args([]))
@@ -337,28 +313,6 @@ def test_pool_create_slice_backend_rejects_management_key(tmp_path: Any) -> None
     result = CliRunner().invoke(pool, _slice_create_args(["--management-public-key-file", str(key_file)]))
     assert result.exit_code != 0
     assert "--management-public-key-file is not applicable to --backend slice" in result.output
-
-
-def test_pool_create_ovh_backend_requires_management_key() -> None:
-    """The OVH backend still requires the management public key (now validated, not click-required)."""
-    result = CliRunner().invoke(
-        pool,
-        [
-            "create",
-            "--count",
-            "1",
-            "--region",
-            "US-EAST-VA",
-            "--attributes",
-            "{}",
-            "--workspace-dir",
-            ".",
-            "--database-url",
-            "postgres://example",
-        ],
-    )
-    assert result.exit_code != 0
-    assert "--management-public-key-file is required for --backend ovh_vps" in result.output
 
 
 def test_resolve_underlying_teardown_slice_destroys_vm() -> None:

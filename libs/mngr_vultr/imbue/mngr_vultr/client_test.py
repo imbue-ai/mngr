@@ -8,10 +8,10 @@ from unittest.mock import patch
 import pytest
 from pydantic import SecretStr
 
-from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.errors import VpsProvisioningError
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
-from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.errors import VpsProvisioningError
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsInstanceStatus
 from imbue.mngr_vultr.client import VultrVpsClient
 
 

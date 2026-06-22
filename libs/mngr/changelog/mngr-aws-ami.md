@@ -1,0 +1,1 @@
+Updated the `mngr create` help docs for `--aws-ami=` to reflect that the AWS provider now falls back to a pinned per-region default when `default_ami_id` is unset (the separate `default_ami_by_region` config field was removed).

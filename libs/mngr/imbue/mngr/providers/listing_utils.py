@@ -23,6 +23,7 @@ There are two variants:
 
 import json
 import shlex
+from collections.abc import Mapping
 from typing import Any
 from typing import Final
 
@@ -336,3 +337,25 @@ def parse_listing_collection_output(stdout: str) -> dict[str, Any]:
 
     result["agents"] = agents
     return result
+
+
+def extract_agent_data_from_parsed_listing(parsed_listing: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Pull each agent's ``data.json`` dict out of a parsed listing.
+
+    An entry whose ``data`` is present but not a JSON object (a list/scalar from a
+    corrupt or hand-edited ``data.json``) is skipped with a warning rather than
+    silently, matching the other listing skip-sites (host_store "Skipped invalid
+    agent record file"; the Modal provider's "Skipped agent ..."). A genuine JSON
+    parse failure was already warned and dropped upstream in ``_parse_agent_section``.
+    """
+    agent_data: list[dict[str, Any]] = []
+    for agent in parsed_listing.get("agents", []):
+        data = agent.get("data")
+        if isinstance(data, dict):
+            agent_data.append(data)
+        else:
+            logger.warning(
+                "Skipping agent entry with missing or non-object 'data' in listing output (found {})",
+                type(data).__name__,
+            )
+    return agent_data

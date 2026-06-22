@@ -17,6 +17,7 @@ via the standard entry-point mechanism and exposes:
 mngr latchkey forward            # long-running supervisor: gateway + reverse tunnels
 mngr latchkey create-agent-env   # emit LATCHKEY_* env vars + opaque permissions handle as JSON
 mngr latchkey link-permissions   # swing the opaque handle's symlink to the canonical host path
+mngr latchkey register-agent     # register an agent so it can reach the Minds API proxy
 mngr latchkey admin-jwt          # mint a wildcard permissions-override JWT for the gateway
 mngr latchkey gateway-info       # print the running gateway's URL + listen password as JSON
 ```
@@ -59,7 +60,7 @@ mngr latchkey link-permissions --host-id "$HOST_ID" --opaque-path "$OPAQUE_PATH"
 mngr latchkey register-agent --host-id "$HOST_ID" --agent-id "$AGENT_ID"
 ```
 
-### Settings
+## Settings
 
 ```toml
 [plugins.latchkey]
@@ -72,7 +73,7 @@ Both fields are overridable via the matching env vars
 CLI flags (`--latchkey-directory`, `--latchkey-binary`). Precedence is
 CLI flag > env var > settings.toml > built-in default.
 
-### Logs
+## Logs
 
 `mngr latchkey forward` writes its logs under the plugin data directory
 (`<latchkey_directory>/mngr_latchkey/`):
@@ -96,89 +97,20 @@ CLI flag > env var > settings.toml > built-in default.
   or a pre-logging traceback) that never reaches the structured log -- so
   it is the place to look if the supervisor dies before it starts logging.
 
-## Embedding
-
-Embedders (such as the minds desktop client) typically want a single
-detached ``mngr latchkey forward`` supervisor that survives embedder
-restarts and adopts the existing one instead of double-spawning. The
-:class:`LatchkeyForwardSupervisor` does exactly that:
-
-```python
-from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
-
-supervisor = LatchkeyForwardSupervisor(
-    mngr_binary="/path/to/mngr",          # default: ``mngr`` on PATH
-    latchkey_binary="/path/to/latchkey",  # default: ``latchkey`` on PATH
-    latchkey_directory=root_dir,
-)
-supervisor.ensure_running()  # idempotent; spawns or adopts as needed
-# ... do whatever the embedder does ...
-# Optional: ``supervisor.stop()`` to terminate the detached process and
-# tear down the gateway. Omitting this leaves the supervisor running
-# detached, which is what minds does so the gateway survives a
-# desktop-client restart.
-```
-
-## Python API
-
-Every CLI subcommand is a thin wrapper around the library; the library
-remains importable for embedders such as the minds desktop client.
-
-```python
-from imbue.mngr_latchkey.core import Latchkey
-from imbue.mngr_latchkey.agent_setup import (
-    prepare_agent_latchkey,
-    finalize_host_permissions,
-)
-from imbue.mngr_latchkey.discovery import (
-    LatchkeyDiscoveryHandler,
-    LatchkeyDestructionHandler,
-)
-from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
-
-latchkey = Latchkey(
-    latchkey_binary="/path/to/latchkey",  # default: "latchkey" on PATH
-    latchkey_directory=root_dir,
-)
-latchkey.initialize()
-
-# (a) Pre-create env vars + opaque permissions handle for a new host.
-setup = prepare_agent_latchkey(latchkey, is_tunneled=True)
-# setup.env: LATCHKEY_GATEWAY[_SECONDARY,_PASSWORD,_PERMISSIONS_OVERRIDE,_DISABLE_COUNTING]
-#   LATCHKEY_GATEWAY_SECONDARY (tunneled mode only) is the agent's URL for the
-#   per-VPS gateway: http://127.0.0.1:<INNER_PORT>
-# setup.opaque_permissions_path: pass to finalize_host_permissions later
-
-# ... mngr create returns the canonical host id ...
-
-# (b) Point the opaque handle at the canonical host permissions path.
-finalize_host_permissions(latchkey, setup.opaque_permissions_path, host_id)
-# Raises LatchkeyStoreError on failure -- callers decide whether to abort
-# or just surface a warning.
-
-# (c) Plug the discovery and destruction handlers into your agent
-# discovery stream so reverse tunnels are opened on discovery and
-# closed on destruction.
-tunnel_manager = SSHTunnelManager()
-tunnel_manager.start_reverse_tunnel_health_check()
-on_discovered = LatchkeyDiscoveryHandler(
-    latchkey=latchkey, tunnel_manager=tunnel_manager, concurrency_group=cg
-)
-on_destroyed = LatchkeyDestructionHandler(tunnel_manager=tunnel_manager)
-```
-
-The `latchkey_directory` is used both as the upstream `LATCHKEY_DIRECTORY`
-for spawned `latchkey` subprocesses and as the root of this package's own
-metadata subdirectory (`<latchkey_directory>/mngr_latchkey/`, accessible
-via `Latchkey.plugin_data_dir`).
-
 ## Permissions config
 
 The package owns the `latchkey_permissions.json` schema (a subset of
 detent's rule format). Per-host edits go through the gateway's
-bundled `permissions` extension (see below); only the deny-all
-default, the admin file, and the per-agent opaque baseline are
-written directly via `imbue.mngr_latchkey.store.save_permissions`.
+bundled `permissions` extension (see [Gateway HTTP extensions](#gateway-http-extensions));
+only the deny-all default, the admin file, and the per-agent opaque
+baseline are written directly via `imbue.mngr_latchkey.store.save_permissions`.
+
+---
+
+# Reference
+
+The sections below are deeper detail for power users, front-end authors,
+and embedders. Most callers only need the CLI above.
 
 ## Gateway HTTP extensions
 
@@ -348,3 +280,79 @@ curl -X POST "${auth[@]}" \
 # Clear the pending request now that it has been resolved.
 curl -X DELETE "${auth[@]}" "$GATEWAY_URL/permission-requests/$REQUEST_ID"
 ```
+
+## Embedding
+
+Embedders (such as the minds desktop client) typically want a single
+detached ``mngr latchkey forward`` supervisor that survives embedder
+restarts and adopts the existing one instead of double-spawning. The
+:class:`LatchkeyForwardSupervisor` does exactly that:
+
+```python
+from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
+
+supervisor = LatchkeyForwardSupervisor(
+    mngr_binary="/path/to/mngr",          # default: ``mngr`` on PATH
+    latchkey_binary="/path/to/latchkey",  # default: ``latchkey`` on PATH
+    latchkey_directory=root_dir,
+)
+supervisor.ensure_running()  # idempotent; spawns or adopts as needed
+# ... do whatever the embedder does ...
+# Optional: ``supervisor.stop()`` to terminate the detached process and
+# tear down the gateway. Omitting this leaves the supervisor running
+# detached, which is what minds does so the gateway survives a
+# desktop-client restart.
+```
+
+## Python API
+
+Every CLI subcommand is a thin wrapper around the library; the library
+remains importable for embedders such as the minds desktop client.
+
+```python
+from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.agent_setup import (
+    prepare_agent_latchkey,
+    finalize_host_permissions,
+)
+from imbue.mngr_latchkey.discovery import (
+    LatchkeyDiscoveryHandler,
+    LatchkeyDestructionHandler,
+)
+from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
+
+latchkey = Latchkey(
+    latchkey_binary="/path/to/latchkey",  # default: "latchkey" on PATH
+    latchkey_directory=root_dir,
+)
+latchkey.initialize()
+
+# (a) Pre-create env vars + opaque permissions handle for a new host.
+setup = prepare_agent_latchkey(latchkey, is_tunneled=True)
+# setup.env: LATCHKEY_GATEWAY[_SECONDARY,_PASSWORD,_PERMISSIONS_OVERRIDE,_DISABLE_COUNTING]
+#   LATCHKEY_GATEWAY_SECONDARY (tunneled mode only) is the agent's URL for the
+#   per-VPS gateway: http://127.0.0.1:<INNER_PORT>
+# setup.opaque_permissions_path: pass to finalize_host_permissions later
+
+# ... mngr create returns the canonical host id ...
+
+# (b) Point the opaque handle at the canonical host permissions path.
+finalize_host_permissions(latchkey, setup.opaque_permissions_path, host_id)
+# Raises LatchkeyStoreError on failure -- callers decide whether to abort
+# or just surface a warning.
+
+# (c) Plug the discovery and destruction handlers into your agent
+# discovery stream so reverse tunnels are opened on discovery and
+# closed on destruction.
+tunnel_manager = SSHTunnelManager()
+tunnel_manager.start_reverse_tunnel_health_check()
+on_discovered = LatchkeyDiscoveryHandler(
+    latchkey=latchkey, tunnel_manager=tunnel_manager, concurrency_group=cg
+)
+on_destroyed = LatchkeyDestructionHandler(tunnel_manager=tunnel_manager)
+```
+
+The `latchkey_directory` is used both as the upstream `LATCHKEY_DIRECTORY`
+for spawned `latchkey` subprocesses and as the root of this package's own
+metadata subdirectory (`<latchkey_directory>/mngr_latchkey/`, accessible
+via `Latchkey.plugin_data_dir`).

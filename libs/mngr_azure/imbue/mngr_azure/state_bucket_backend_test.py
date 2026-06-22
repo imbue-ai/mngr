@@ -23,8 +23,8 @@ from imbue.mngr_azure.testing import FakeNetworkClient
 from imbue.mngr_azure.testing import FakeResourceClient
 from imbue.mngr_azure.testing import _StubbedAzureVpsClient
 from imbue.mngr_azure.testing import _StubbedBlobStateBucket
-from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
-from imbue.mngr_vps_docker.testing import seed_stopped_host_record
+from imbue.mngr_vps.host_store import VpsHostRecord
+from imbue.mngr_vps.testing import seed_stopped_host_record
 
 _ACCOUNT_NAME = "mngrststateacct1234"
 
@@ -110,7 +110,7 @@ def test_bucket_mode_mirrors_host_record_and_reconstructs_offline_host(temp_mngr
         updated_at=datetime.now(timezone.utc),
         stop_reason=HostState.STOPPED.value,
     )
-    record = VpsDockerHostRecord(certified_host_data=certified)
+    record = VpsHostRecord(certified_host_data=certified)
 
     provider._persist_host_record_externally(record)
 

@@ -14,6 +14,7 @@ from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import ProviderResourceInfo
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_azure.backend import AzureProvider
@@ -30,9 +31,11 @@ from imbue.mngr_azure.testing import FakeNetworkClient
 from imbue.mngr_azure.testing import FakeResourceClient
 from imbue.mngr_azure.testing import _StubbedAzureVpsClient
 from imbue.mngr_azure.testing import _StubbedBlobStateBucket
-from imbue.mngr_vps_docker.host_state_store import BucketHostStateStore
-from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
-from imbue.mngr_vps_docker.testing import seed_stopped_host_record
+from imbue.mngr_vps.host_state_store import BucketHostStateStore
+from imbue.mngr_vps.host_store import VpsHostConfig
+from imbue.mngr_vps.host_store import VpsHostRecord
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.testing import seed_stopped_host_record
 
 
 class _SubnetStubClient(AzureVpsClient):
@@ -416,8 +419,10 @@ def test_no_bucket_discovery_of_deallocated_vm_raises_prepare_pointer(temp_mngr_
 def test_offline_discovered_host_from_instance_builds_stopped_host(temp_mngr_ctx: MngrContext) -> None:
     """A deallocated VM with mngr-host-id + mngr-host-name tags yields a STOPPED DiscoveredHost.
 
-    Reads only the cheap identity tags (never the bucket), so this works regardless
-    of whether a state bucket exists.
+    Exercises the shared ``OfflineCapableVpsProvider._offline_discovered_host_from_instance``
+    default through Azure's ``_host_name_tag_key()`` hook (``mngr-host-name``). Reads
+    only the cheap identity tags (never the bucket), so this works regardless of
+    whether a state bucket exists.
     """
     provider, _compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
@@ -544,12 +549,63 @@ def test_to_offline_host_reconstructs_stopped_host_from_bucket(temp_mngr_ctx: Mn
         updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         stop_reason=HostState.STOPPED.value,
     )
-    bucket.write_host_record_json(host_id, VpsDockerHostRecord(certified_host_data=certified).model_dump_json())
+    bucket.write_host_record_json(host_id, VpsHostRecord(certified_host_data=certified).model_dump_json())
 
     offline = provider.to_offline_host(host_id)
     assert offline.id == host_id
     assert str(offline.get_certified_data().host_name) == "recovered-host"
     assert offline.get_state() == HostState.STOPPED
+
+
+def test_remirror_host_name_restamps_tag_preserving_other_tags(temp_mngr_ctx: MngrContext) -> None:
+    """A rename re-stamps the mngr-host-name VM tag, merging into (not replacing) the VM's other tags.
+
+    Offline discovery reads the host name off this cheap index tag, so without the
+    re-stamp a renamed-then-stopped host lists under its old name. The merge is the
+    key correctness property: the other index tags (mngr-host-id, mngr-provider)
+    must survive Azure's whole-dict tag replacement.
+    """
+    provider, compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
+    compute.virtual_machines.get_result = SimpleNamespace(
+        tags={"mngr-host-id": "host-1", "mngr-provider": "azure-test", "mngr-host-name": "mngr-old"}
+    )
+    host_id = HostId.generate()
+    certified = CertifiedHostData(
+        host_id=str(host_id),
+        host_name="old",
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    record = VpsHostRecord(
+        certified_host_data=certified,
+        config=VpsHostConfig(vps_instance_id=VpsInstanceId("vm1"), region="westus", plan="Standard_B2s"),
+    )
+
+    provider._remirror_host_name(record, HostName("new"))
+
+    assert len(compute.virtual_machines.updated) == 1
+    vm_name, parameters = compute.virtual_machines.updated[0]
+    assert vm_name == "vm1"
+    assert parameters.tags == {
+        "mngr-host-id": "host-1",
+        "mngr-provider": "azure-test",
+        "mngr-host-name": "mngr-new",
+    }
+
+
+def test_remirror_host_name_is_noop_without_config(temp_mngr_ctx: MngrContext) -> None:
+    """A record without VPS config (no instance id) skips the re-stamp rather than erroring."""
+    provider, compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
+    certified = CertifiedHostData(
+        host_id=str(HostId.generate()),
+        host_name="old",
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+    provider._remirror_host_name(VpsHostRecord(certified_host_data=certified), HostName("new"))
+
+    assert compute.virtual_machines.updated == []
 
 
 # =============================================================================

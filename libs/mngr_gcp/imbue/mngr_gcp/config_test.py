@@ -1,17 +1,51 @@
 """Tests for GCP provider configuration."""
 
 import pytest
+from google.auth.credentials import AnonymousCredentials
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr_gcp.config import GcpProviderConfig
 from imbue.mngr_gcp.config import get_gcloud_compute_zone
 from imbue.mngr_gcp.errors import GcpProjectError
 from imbue.mngr_gcp.errors import GcpZoneRegionMismatchError
+from imbue.mngr_gcp.state_bucket import GcsStateBucket
 
 
 def test_backend_name_defaults_to_gcp() -> None:
     config = GcpProviderConfig(project_id="my-project")
     assert str(config.backend) == "gcp"
+
+
+def test_resolve_state_bucket_name_derives_from_project_when_unset() -> None:
+    """Without an explicit name, the bucket is derived from the project id."""
+    config = GcpProviderConfig(project_id="my-project")
+    assert config.resolve_state_bucket_name("my-project") == "mngr-state-my-project"
+
+
+def test_resolve_state_bucket_name_prefers_explicit_override() -> None:
+    """An explicit ``state_bucket_name`` wins over the derived name."""
+    config = GcpProviderConfig(project_id="my-project", state_bucket_name="custom-bucket")
+    assert config.resolve_state_bucket_name("my-project") == "custom-bucket"
+
+
+def test_is_offline_host_dir_enabled_defaults_on() -> None:
+    """The offline host_dir feature is on by default (matches AWS / Azure)."""
+    config = GcpProviderConfig(project_id="my-project")
+    assert config.is_offline_host_dir_enabled is True
+
+
+def test_build_state_bucket_returns_gcs_state_bucket() -> None:
+    """``build_state_bucket`` constructs a ``GcsStateBucket`` with the resolved name."""
+    config = GcpProviderConfig(project_id="my-project")
+    bucket = config.build_state_bucket(
+        credentials=AnonymousCredentials(),
+        project_id="my-project",
+        region="us-west1",
+    )
+    assert isinstance(bucket, GcsStateBucket)
+    assert bucket.bucket_name == "mngr-state-my-project"
+    assert bucket.project_id == "my-project"
+    assert bucket.region == "us-west1"
 
 
 def test_resolve_project_id_prefers_configured_over_adc_fallback() -> None:

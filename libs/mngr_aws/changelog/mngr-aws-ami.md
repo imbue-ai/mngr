@@ -1,0 +1,1 @@
+Collapsed the AWS provider's two AMI config knobs into one. The `default_ami_by_region` field is gone; `default_ami_id` now defaults to `None`, and when unset the pinned per-region default (`DEFAULT_AMI_BY_REGION`, Debian 12 amd64) for the chosen region is used. Behavior is unchanged -- only the configuration surface is simpler.

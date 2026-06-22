@@ -194,6 +194,8 @@ def run_local_command_modern_version(
     shutdown_timeout_sec: float = 30.0,
     poll_time: float = 0.01,
     env: Mapping[str, str] | None = None,
+    # Open file descriptors to keep open in (and inherit into) the spawned child, by their fd numbers.
+    pass_fds: Sequence[int] = (),
     on_initialization_complete: Callable[[BaseException | None], None] = lambda success: None,
 ) -> FinishedProcess:
     """
@@ -214,6 +216,7 @@ def run_local_command_modern_version(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env=env if env is not None else os.environ.copy(),
+                pass_fds=tuple(pass_fds),
             )
         except (OSError, ValueError) as e:
             raise ProcessSetupError(
