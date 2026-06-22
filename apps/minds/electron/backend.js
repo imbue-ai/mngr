@@ -257,6 +257,16 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         };
       }
 
+      // The FCT template's `[providers.docker]` block sets
+      // `docker_runtime = "runsc"` to harden the local-docker provider with
+      // gVisor. runsc is Linux-only and is not present in Docker Desktop's VM
+      // on macOS, so `mngr create` would fail with "unknown or invalid runtime
+      // name: runsc". Force the default runtime on darwin (unless the user has
+      // explicitly set it). The env is inherited by the spawned `mngr create`.
+      if (process.platform === 'darwin' && !process.env.MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME) {
+        env.MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME = 'runc';
+      }
+
       const child = spawn(uvBin, args, {
         env,
         cwd,
