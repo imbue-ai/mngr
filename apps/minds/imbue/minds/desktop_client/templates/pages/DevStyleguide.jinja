@@ -572,7 +572,7 @@
         cards; <code>shadow-overlay</code> is the soft floating shadow for
         surfaces above the page -- menus, modals, tooltips.
       </p>
-      <div class="bg-fill-subtle rounded-lg p-8 grid grid-cols-1 sm:grid-cols-2 gap-6">
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
         <div class="flex flex-col items-center gap-2">
           <div class="w-full h-16 rounded-lg bg-surface-primary border border-default shadow-raised"></div>
           <code class="type-helper font-mono text-secondary">shadow-raised</code>
@@ -596,7 +596,7 @@
        primitive ramp like the color / type tokens above. #}
     <section id="icons-24" class="scroll-mt-8 mb-6">
       <h2 class="type-heading text-primary mb-1">Icons -- 24x24 (Icon24)</h2>
-      <div class="bg-surface-primary border border-default rounded-lg p-4 flex flex-wrap items-center gap-4 text-primary mt-4">
+      <div class="flex flex-wrap items-center gap-4 text-primary mt-4">
         <div class="flex flex-col items-center gap-1 w-16">
           <Icon24 name="menu" />
           <code class="type-helper font-mono text-secondary">menu</code>
@@ -681,7 +681,7 @@
         mngr <code>color</code> label). Pick a color; everything below that
         uses <code>--workspace-accent</code> updates live.
       </p>
-      <div class="bg-surface-primary border border-default rounded-lg p-4 shadow-raised">
+      <div>
         <div class="flex items-center gap-4">
           <div class="accent-swatch w-12 h-12 rounded-md border border-default shrink-0"></div>
           <div class="flex-1">
@@ -798,7 +798,7 @@
     {# Focus ring -- the accent ring shared by TextInput, Select, Textarea via INPUT_BASE #}
     <section id="form-controls" class="scroll-mt-8 mb-6">
       <div class="type-section text-secondary mb-2">Form controls (TextInput / Select / Textarea)</div>
-      <div class="bg-surface-primary border border-default rounded-lg p-4 flex flex-col gap-3">
+      <div class="flex flex-col gap-3">
         <TextInput name="styleguide-accent-input" placeholder="TextInput -- click to focus" />
         <div class="flex items-center gap-2">
           <Select name="styleguide-select" width="w-48">
@@ -817,7 +817,7 @@
     {# Spinner #}
     <section id="spinner" class="scroll-mt-8 mb-6">
       <div class="type-section text-secondary mb-2">Spinner</div>
-      <div class="bg-surface-primary border border-default rounded-lg p-4 flex items-center gap-6">
+      <div class="flex items-center gap-6">
         <div class="flex items-center gap-3">
           <Spinner size="sm" />
           <Spinner size="md" />
@@ -835,7 +835,7 @@
     {# Buttons #}
     <section id="buttons" class="scroll-mt-8 mb-6">
       <div class="type-section text-secondary mb-2">Buttons -- variants</div>
-      <div class="bg-surface-primary border border-default rounded-lg p-4 flex flex-wrap items-center gap-2">
+      <div class="flex flex-wrap items-center gap-2">
         <Button variant="primary">Primary</Button>
         <Button variant="secondary">Secondary</Button>
         <Button variant="danger">Danger</Button>
@@ -848,7 +848,7 @@
     {# Button sizes #}
     <section id="button-sizes" class="scroll-mt-8 mb-6">
       <div class="type-section text-secondary mb-2">Buttons -- sizes</div>
-      <div class="bg-surface-primary border border-default rounded-lg p-4 flex flex-col gap-3">
+      <div class="flex flex-col gap-3">
         <div class="flex flex-wrap items-center gap-2">
           <Button variant="primary" size="md">Default (md)</Button>
           <Button variant="primary" size="lg">Large (lg, prominent CTA)</Button>
@@ -864,7 +864,7 @@
        optional ``weight="medium"`` for prominent auth-flow affordances. #}
     <section id="links" class="scroll-mt-8 mb-6">
       <div class="type-section text-secondary mb-2">Links</div>
-      <div class="bg-surface-primary border border-default rounded-lg p-4 flex flex-wrap items-center gap-4">
+      <div class="flex flex-wrap items-center gap-4">
         <Link href="#">Back to projects</Link>
         <Link href="#" weight="medium">Sign in</Link>
         <Link href="#" extra="type-helper">Forgot password</Link>
@@ -885,7 +885,7 @@
        keyboard focus and accessibility are cleaner on a plain anchor. #}
     <section id="button-links" class="scroll-mt-8 mb-6">
       <div class="type-section text-secondary mb-2">Buttons -- link style (via extra=)</div>
-      <div class="bg-surface-primary border border-default rounded-lg p-4 flex flex-wrap items-center gap-4">
+      <div class="flex flex-wrap items-center gap-4">
         <Button variant="ghost"
                 extra="!p-0 !bg-transparent !type-helper !text-accent hover:!bg-transparent hover:underline">
           Configure&hellip;
@@ -904,7 +904,7 @@
     {# Notices #}
     <section id="notices" class="scroll-mt-8 mb-6">
       <div class="type-section text-secondary mb-2">Notices</div>
-      <div class="bg-surface-primary border border-default rounded-lg p-4">
+      <div>
         <Notice variant="info">Heads up: informational message.</Notice>
         <Notice variant="warn">Careful: something may need attention.</Notice>
         <Notice variant="success">All set: action completed.</Notice>
@@ -954,7 +954,7 @@
     {# Opt (onboarding option card) #}
     <section id="opt" class="scroll-mt-8 mb-6">
       <div class="type-section text-secondary mb-2">Opt (onboarding option)</div>
-      <div class="bg-surface-primary border border-default rounded-lg p-4 flex flex-col gap-2">
+      <div class="flex flex-col gap-2">
         <Opt val="example-a" title="Example option" desc="Non-editable selectable card." />
         <Opt val="example-b" title="Selected" desc="Marker for the chosen option." selected />
         <Opt val="example-c" title="Editable" desc="Expands a textarea when selected." editable preset="prefilled text" placeholder="placeholder text" />
@@ -965,7 +965,7 @@
     {# OAuth icons #}
     <section id="oauth-icons" class="scroll-mt-8 mb-6">
       <div class="type-section text-secondary mb-2">OAuth icons</div>
-      <div class="bg-surface-primary border border-default rounded-lg p-4 flex items-center gap-6">
+      <div class="flex items-center gap-6">
         <span class="inline-flex items-center gap-2 type-body text-primary">
           <auth.OauthIcon provider="google" /> Google
         </span>
@@ -979,7 +979,7 @@
     {# Status badges #}
     <section id="status-badges" class="scroll-mt-8 mb-6">
       <div class="type-section text-secondary mb-2">Status badges</div>
-      <div class="bg-surface-primary border border-default rounded-lg p-4 flex flex-wrap items-center gap-3">
+      <div class="flex flex-wrap items-center gap-3">
         <StatusBadge>Neutral</StatusBadge>
         <StatusBadge variant="success">Done</StatusBadge>
         <StatusBadge variant="error">Failed</StatusBadge>
@@ -993,7 +993,7 @@
     {# Section header #}
     <section id="section-header" class="scroll-mt-8 mb-6">
       <div class="type-section text-secondary mb-2">Section header</div>
-      <div class="bg-surface-primary border border-default rounded-lg p-4">
+      <div>
         <SectionHeader>Plain</SectionHeader>
         <p class="type-body text-primary mb-2">Content under the plain header.</p>
         <SectionHeader divider>With divider</SectionHeader>
@@ -1005,7 +1005,7 @@
     {# Dialog close button #}
     <section id="dialog-close" class="scroll-mt-8 mb-6">
       <div class="type-section text-secondary mb-2">Dialog close button</div>
-      <div class="bg-surface-primary border border-default rounded-lg p-4 relative h-16">
+      <div class="relative h-16">
         <DialogCloseButton onclick="void(0)" />
         <p class="type-body text-secondary">Top-right X used by overlay dialogs.</p>
       </div>
