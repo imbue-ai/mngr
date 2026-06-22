@@ -1357,8 +1357,13 @@ class ImbueCloudProvider(BaseProviderInstance):
             )
         # The rebuilt container's host key is the delegated provider's own
         # (injected into the container at rebuild), so it is known locally without
-        # any scan.
-        _container_host_key_path, rebuilt_container_public_key = delegated_provider._get_container_host_keypair()
+        # any scan. Read it via the provider's public host-key accessor (second
+        # element is the container key) rather than the private keypair method.
+        _outer_host_public_key, rebuilt_container_public_key = delegated_provider.get_ssh_host_public_keys(host_id)
+        if not rebuilt_container_public_key:
+            raise MngrError(
+                f"rebuilt container for host {host_id} did not surface its sshd host public key; cannot pin it"
+            )
         return rebuilt_container_public_key
 
     @contextmanager
