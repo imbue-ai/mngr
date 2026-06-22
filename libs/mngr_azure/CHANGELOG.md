@@ -13,7 +13,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Changed
 
 - Changed: `stop_host` / `start_host` moved to the shared base `OfflineCapableVpsProvider`; Azure now supplies only the deallocate/start hooks plus the static-IP known_hosts rebind no-ops. The shared base is what now guarantees the resume-mirror happens on every provider.
-- Changed: Idle-watcher install, host_dir-to-bucket sync daemon install/before-pause, and the best-effort `_on_host_finalized` step runner moved to the shared `OfflineCapableVpsProvider`. The host-side systemd unit names changed from `mngr-azure-idle-watcher` / `mngr-azure-host-dir-sync` to the shared `mngr-idle-watcher` / `mngr-host-dir-sync`.
+- Changed: Idle-watcher install, the operator-driven host_dir-to-bucket capture before pause, and the best-effort `_on_host_finalized` step runner moved to the shared `OfflineCapableVpsProvider`. The host-side idle-watcher systemd unit name changed from `mngr-azure-idle-watcher` to the shared `mngr-idle-watcher`.
 - Changed: `mngr azure prepare` / `cleanup` now resolve their `[providers.<name>]` block and refuse-on-existing-VMs via the shared `mngr_vps.cli_helpers`. `AzureProviderConfig` lifts `allowed_ssh_cidrs` / `associate_public_ip` into shared config bases. The cleanup refusal when VMs still exist now raises the unified `ManagedResourcesExistError` (previously `AzureProviderError`) so the message matches the other clouds. `allowed_ssh_cidrs` is now typed `ScalarStrTuple` (matching AWS), so a higher-precedence config layer that sets it replaces the whole list rather than being flagged as narrowing.
 
 ### Fixed

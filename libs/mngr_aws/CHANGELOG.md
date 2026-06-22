@@ -13,7 +13,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Changed
 
 - Changed: Collapsed the AWS provider's two AMI config knobs into one. The `default_ami_by_region` field is gone; `default_ami_id` now defaults to `None`, and when unset the pinned per-region default (`DEFAULT_AMI_BY_REGION`, Debian 12 amd64) for the chosen region is used. Behavior is unchanged — only the configuration surface is simpler.
-- Changed: `stop_host` / `start_host` moved to the shared base `OfflineCapableVpsProvider`; AWS now supplies only the EC2 `_pause_cloud_instance` / `_resume_cloud_instance` hooks (and the final host_dir-to-bucket sync before pause). The host-side systemd unit names changed from `mngr-aws-idle-watcher` / `mngr-aws-host-dir-sync` to the shared `mngr-idle-watcher` / `mngr-host-dir-sync`.
+- Changed: `stop_host` / `start_host` moved to the shared base `OfflineCapableVpsProvider`; AWS now supplies only the EC2 `_pause_cloud_instance` / `_resume_cloud_instance` hooks (the operator-driven host_dir-to-bucket capture before pause is also in the shared base). The host-side idle-watcher systemd unit name changed from `mngr-aws-idle-watcher` to the shared `mngr-idle-watcher`.
 - Changed: `mngr aws prepare` / `cleanup` now resolve their `[providers.<name>]` block and refuse-on-existing-instances via the shared `mngr_vps.cli_helpers`. `AwsProviderConfig` lifts `allowed_ssh_cidrs` / `associate_public_ip` into shared config bases. The cleanup refusal when instances still exist now raises the unified `ManagedResourcesExistError` (a `MngrError`) so the message matches the other clouds.
 
 ### Fixed
