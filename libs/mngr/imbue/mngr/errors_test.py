@@ -28,6 +28,7 @@ from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import ProviderError
 from imbue.mngr.errors import ProviderInstanceNotFoundError
 from imbue.mngr.errors import ProviderNotAuthorizedError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.errors import SnapshotsNotSupportedError
@@ -221,15 +222,30 @@ def test_provider_not_authorized_error_sets_provider_name() -> None:
     provider_name = ProviderInstanceName("modal")
     error = ProviderNotAuthorizedError(provider_name)
     assert error.provider_name == provider_name
-    assert "not authorized" in str(error).lower()
+    assert "not authenticated" in str(error).lower()
 
 
-def test_provider_not_authorized_error_includes_auth_help() -> None:
-    """ProviderNotAuthorizedError should include auth_help in message when provided."""
+def test_provider_not_authorized_error_is_provider_unavailable_error() -> None:
+    """ProviderNotAuthorizedError should be a ProviderUnavailableError so read paths treat it as unavailable."""
+    error = ProviderNotAuthorizedError(ProviderInstanceName("modal"))
+    assert isinstance(error, ProviderUnavailableError)
+
+
+def test_provider_not_authorized_error_includes_reason() -> None:
+    """ProviderNotAuthorizedError should include the reason in the message when provided."""
     provider_name = ProviderInstanceName("modal")
-    auth_help = "Run 'modal token set' to authenticate."
-    error = ProviderNotAuthorizedError(provider_name, auth_help=auth_help)
-    assert auth_help in str(error)
+    reason = "Modal token missing or invalid"
+    error = ProviderNotAuthorizedError(provider_name, reason=reason)
+    assert reason in str(error)
+    assert error.short_reason == reason
+
+
+def test_provider_not_authorized_error_carries_short_remediation() -> None:
+    """ProviderNotAuthorizedError should expose short_remediation for consistent rendering."""
+    error = ProviderNotAuthorizedError(
+        ProviderInstanceName("modal"), reason="Modal token missing", short_remediation="run `modal token set`"
+    )
+    assert error.short_remediation == "run `modal token set`"
 
 
 def test_provider_not_authorized_error_has_user_help_text() -> None:

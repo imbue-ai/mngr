@@ -231,7 +231,7 @@ def test_shutdown_popen_terminates_with_sigterm_and_returns_signal_returncode() 
         stderr=subprocess.PIPE,
     )
 
-    returncode = _shutdown_popen(process, f"sleep {LONG_SLEEP_SECONDS}", shutdown_timeout_sec=5.0)
+    returncode = _shutdown_popen(process, shutdown_timeout_sec=5.0, reason="the test requested shutdown")
 
     assert returncode == -signal.SIGTERM
     assert process.poll() == -signal.SIGTERM

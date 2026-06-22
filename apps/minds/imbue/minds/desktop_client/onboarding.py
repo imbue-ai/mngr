@@ -77,7 +77,7 @@ EXPECTED_CREATION_DURATION_SECONDS_BY_LAUNCH_MODE: Final[dict[LaunchMode, float]
 # Fallback when the launch mode is somehow not in the map above.
 DEFAULT_EXPECTED_CREATION_DURATION_SECONDS: Final[float] = 60.0
 
-_MNGR_EXEC_TIMEOUT_SECONDS: Final[float] = 30.0
+_MNGR_EXEC_TIMEOUT_SECONDS: Final[float] = 60.0
 _GIT_CONFIG_TIMEOUT_SECONDS: Final[float] = 10.0
 
 

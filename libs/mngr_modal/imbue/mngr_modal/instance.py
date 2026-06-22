@@ -247,6 +247,12 @@ def handle_modal_auth_error(func: Callable[P, T]) -> Callable[P, T]:
         try:
             return func(*args, **kwargs)
         except ModalProxyAuthError as e:
+            # The wrapped callables are all ModalProviderInstance methods, so the first
+            # positional arg is the instance; surface its name so the error (and its
+            # disable hint) reference the actual provider instance rather than the default.
+            instance = args[0] if args else None
+            if isinstance(instance, ModalProviderInstance):
+                raise ModalAuthError(instance.name) from e
             raise ModalAuthError() from e
 
     return wrapper
@@ -2298,7 +2304,7 @@ log "=== Shutdown script completed ==="
             sandboxes = sandboxes_future.result()
             all_host_records = host_records_future.result()
         except ModalProxyAuthError as e:
-            raise ModalAuthError() from e
+            raise ModalAuthError(self.name) from e
 
         # Map running sandboxes by host_id
         running_sandbox_by_host_id: dict[HostId, SandboxInterface] = {}
@@ -2494,7 +2500,7 @@ log "=== Shutdown script completed ==="
                     running_host_ids = running_ids_future.result()
                     all_host_records, agent_data_by_host_id = host_and_agent_future.result()
             except ModalProxyAuthError as e:
-                raise ModalAuthError() from e
+                raise ModalAuthError(self.name) from e
             logger.debug(
                 "Modal discovery: {} running host(s), {} host record(s), {} host(s) with agent data",
                 len(running_host_ids),
@@ -2714,10 +2720,14 @@ log "=== Shutdown script completed ==="
         # Resources from cached host record (no remote call)
         resource = self.get_host_resources(host)
 
-        # Lock status from SSH-collected data
+        # Lock status from SSH-collected data. The lock file persists after release
+        # (its inode must stay stable across local and remote holders), so its mtime
+        # alone does not indicate "held"; use the real flock held-probe.
         lock_mtime = raw.get("lock_mtime")
-        is_locked = lock_mtime is not None
-        locked_time = datetime.fromtimestamp(lock_mtime, tz=timezone.utc) if lock_mtime is not None else None
+        is_locked = bool(raw.get("is_lock_held"))
+        locked_time = (
+            datetime.fromtimestamp(lock_mtime, tz=timezone.utc) if is_locked and lock_mtime is not None else None
+        )
 
         # Certified data from SSH-collected data (parsed from data.json)
         certified_data: CertifiedHostData | None = None

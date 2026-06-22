@@ -18,7 +18,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import DiscoveredHost
@@ -85,12 +85,16 @@ _HOST_NAME_PREFIX: Final[str] = "mngr-"
 # is large enough for those JSON blobs and always available with no prepare step).
 
 
-def _gcp_unavailable_error(name: ProviderInstanceName, reason: str) -> ProviderUnavailableError:
-    """Build a ``ProviderUnavailableError`` with GCP-specific, actionable help text.
+def _gcp_not_authorized_error(
+    name: ProviderInstanceName, reason: str, short_remediation: str, short_reason: str | None = None
+) -> ProviderNotAuthorizedError:
+    """Build a ``ProviderNotAuthorizedError`` with GCP-specific, actionable help text.
 
-    The generic ``ProviderUnavailableError`` help text tells the user to "start Docker", which is
-    wrong advice for a GCP ADC / project failure -- so we curate the guidance toward resolving
-    Application Default Credentials and the project.
+    The generic unavailable help text tells the user to "start Docker", which is wrong
+    advice for a GCP ADC / project failure -- so we curate the guidance toward resolving
+    Application Default Credentials and the project. ``ProviderNotAuthorizedError`` is a
+    ``ProviderUnavailableError`` subclass, so read paths still treat the provider as
+    unavailable rather than silently empty.
     """
     help_text = (
         "GCP could not be reached. Check, in order:\n"
@@ -100,7 +104,13 @@ def _gcp_unavailable_error(name: ProviderInstanceName, reason: str) -> ProviderU
         "  - one-time setup: run `mngr gcp prepare` if you have not yet.\n"
         f"Or disable the provider: mngr config set --scope user providers.{name}.is_enabled false"
     )
-    return ProviderUnavailableError(name, reason, user_help_text=help_text)
+    return ProviderNotAuthorizedError(
+        name,
+        reason=reason,
+        short_remediation=short_remediation,
+        user_help_text=help_text,
+        short_reason=short_reason,
+    )
 
 
 def _resolve_credentials_project_and_zone_or_unavailable(
@@ -130,7 +140,12 @@ def _resolve_credentials_project_and_zone_or_unavailable(
         credentials, adc_project = config.get_credentials_and_resolved_project()
         project_id = config.resolve_project_id(adc_project)
     except (ValueError, google_auth_exceptions.GoogleAuthError) as e:
-        raise _gcp_unavailable_error(name, str(e)) from e
+        raise _gcp_not_authorized_error(
+            name,
+            str(e),
+            "run `gcloud auth application-default login` (and set project_id)",
+            short_reason="GCP credentials or project not configured",
+        ) from e
     return credentials, project_id, zone
 
 

@@ -326,6 +326,9 @@ def test_handle_modal_auth_error_decorator_converts_auth_error_to_modal_auth_err
     assert "Modal authentication failed" in error_message
     assert "--disable-plugin modal" in error_message
     assert "https://modal.com/docs/reference/modal.config" in error_message
+    # The error must carry the actual provider instance name (not the default "modal"),
+    # so a custom-named Modal instance is attributed correctly in `mngr list`.
+    assert exc_info.value.provider_name == ProviderInstanceName("modal-test-expired")
 
 
 # =============================================================================

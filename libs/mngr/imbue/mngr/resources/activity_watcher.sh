@@ -123,10 +123,10 @@ get_tmux_session_prefix() {
 #   - No agent directories exist yet (host is still in initial setup)
 #   - An agent directory was created recently (within grace period)
 #
-# Note: The host lock check in the main loop (checking HOST_LOCK_PATH) already
-# prevents this function from being called during agent creation/provisioning,
-# since create() holds the lock. The grace period below is an additional safety
-# net for any edge cases outside the lock.
+# Note: The host lock check in the main loop (a non-blocking flock probe of
+# HOST_LOCK_PATH) already prevents this function from being called during agent
+# creation/provisioning, since create() holds the lock. The grace period below is
+# an additional safety net for any edge cases outside the lock.
 #
 # Grace period (seconds) after the most recent agent directory creation.
 # This prevents false positives when an agent dir exists but the tmux
@@ -309,8 +309,11 @@ main() {
             echo "shutdown.sh NOT found at $SHUTDOWN_SCRIPT"
         fi
 
-        # If the host is locked, don't shut down
-        if [ -f "$HOST_LOCK_PATH" ]; then
+        # If the host lock is currently held, don't shut down. The lock is a real
+        # flock that persists as a file after release, so test the flock (a
+        # non-blocking acquire that fails iff someone else holds it) rather than
+        # mere file existence. Guard on existence so the probe never creates it.
+        if [ -e "$HOST_LOCK_PATH" ] && ! flock -n "$HOST_LOCK_PATH" -c true 2>/dev/null; then
             sleep "$CHECK_INTERVAL"
             continue
         fi

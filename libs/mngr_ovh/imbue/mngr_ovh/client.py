@@ -194,9 +194,11 @@ class OvhVpsClient(VpsClientInterface):
         default=False,
         description=(
             "True iff this client was constructed with placeholder credentials because no "
-            "OVH credentials were configured. Used by OvhProvider to short-circuit "
-            "discovery silently in environments (e.g. CI for unrelated tests) that "
-            "merely enumerate registered backends."
+            "OVH credentials were configured. OvhProviderBackend.build_provider_instance "
+            "detects this and raises ProviderNotAuthorizedError instead of constructing a "
+            "provider whose API calls would all fail; the placeholder keeps build_ovh_client "
+            "total so environments (e.g. CI for unrelated tests) that merely enumerate "
+            "registered backends still work."
         ),
     )
 
@@ -591,13 +593,12 @@ def build_ovh_client(config: OvhProviderConfig) -> "OvhVpsClient":
     If no credentials are configured anywhere, ``python-ovh`` raises
     ``InvalidConfiguration`` at construction time. We catch that and
     substitute placeholder credentials so the client is still
-    constructible -- any actual API call will then fail with a clear
-    auth error rather than the provider blowing up at registration
-    time. This mirrors how ``mngr_vultr`` accepts an empty API key when
-    none is configured, and lets unrelated tests that merely enumerate
-    registered backends run without OVH credentials. The returned
-    client has ``is_unconfigured=True`` so ``OvhProvider`` can
-    short-circuit discovery without emitting log noise.
+    constructible -- this lets ``build_ovh_client`` itself stay total
+    (e.g. so unrelated tests that merely enumerate registered backends
+    run without OVH credentials). The returned client has
+    ``is_unconfigured=True``, which ``OvhProviderBackend.build_provider_instance``
+    detects and turns into a clear ``ProviderNotAuthorizedError`` rather than
+    constructing a provider whose every API call is doomed to fail.
     """
     kwargs = config.resolve_python_ovh_kwargs()
     try:
