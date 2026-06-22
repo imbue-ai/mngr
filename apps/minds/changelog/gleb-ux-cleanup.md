@@ -154,6 +154,6 @@ All buttons now scale to 98% on `:active` (a subtle press-in), animated via `tra
 
 Tuned the button press feedback: the scale-down now animates over 100ms on the standard ease-in-out curve (`duration-100 ease-in-out`, i.e. `cubic-bezier(0.4, 0, 0.2, 1)`), and the press (`:active`) no longer changes color/opacity on any variant -- the press is now scale-only, so the scale carries the whole press feedback.
 
-The Manage Accounts page now spaces its account cards with an 8px gap instead of letting them touch: the card loop is wrapped in a `flex flex-col gap-2` container, so the spacing is owned by the parent rather than added as margin on the `Card`.
+Listed cards no longer touch: the Manage Accounts page's account cards and the workspace-settings Sharing section's list of shareable chats/interfaces now sit in a `flex flex-col gap-2` container (8px gap), so the spacing is owned by the parent rather than added as margin on the `Card`.
 
 The "Back to projects" back-link now renders at the `type-helper` size (12px) instead of inheriting the larger default body size, so it matches the link-style affordance scale -- applied on the Manage Accounts, Workspace Settings, and Destroying pages.

@@ -137,14 +137,18 @@
       </div>
 
       <SectionHeader divider>Sharing</SectionHeader>
-      {% for server in servers %}
-        <Card layout="row-spread">
-          <span class="font-semibold">{{ server }}</span>
-          <ButtonLink href={{ "/sharing/" ~ agent_id ~ "/" ~ server }} variant="secondary">Manage sharing</ButtonLink>
-        </Card>
+      {% if servers %}
+        <div class="flex flex-col gap-2">
+        {% for server in servers %}
+          <Card layout="row-spread">
+            <span class="font-semibold">{{ server }}</span>
+            <ButtonLink href={{ "/sharing/" ~ agent_id ~ "/" ~ server }} variant="secondary">Manage sharing</ButtonLink>
+          </Card>
+        {% endfor %}
+        </div>
       {% else %}
         <p class="text-secondary">No servers discovered for this workspace.</p>
-      {% endfor %}
+      {% endif %}
 
       {% if telegram_state %}
         <SectionHeader divider>Telegram</SectionHeader>
