@@ -1272,12 +1272,13 @@ def test_elevation_uses_shadow_roles_not_raw_steps() -> None:
 
 
 def test_notice_renders_each_variant() -> None:
+    # Each variant paints a per-mode surface token (--c-*-surface): a faint tint
+    # in light, a higher-opacity tint in dark so the shape stays visible on black.
     variants_to_class = {
-        "info": "bg-info/8",
-        # warn uses the yellow caution surface, not a tint of the brown warning hue.
+        "info": "--c-info-surface",
         "warn": "--c-warning-surface",
-        "success": "bg-success/8",
-        "error": "bg-important/8",
+        "success": "--c-success-surface",
+        "error": "--c-important-surface",
     }
     for variant, css_class in variants_to_class.items():
         html = CATALOG.render("Notice", variant=variant, _content="msg")
