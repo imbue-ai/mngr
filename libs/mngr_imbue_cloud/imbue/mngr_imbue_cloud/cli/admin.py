@@ -1068,3 +1068,109 @@ def pool_teardown_slices(database_url: str | None) -> None:
     resolved_database_url = resolve_pool_database_url(database_url)
     result = tear_down_unleased_slices(resolved_database_url)
     emit_json(result)
+
+
+_KEYSCAN_TIMEOUT_SECONDS: Final[int] = 15
+
+# SELECT pool rows still missing either pinned host key (pre-host-key-column bakes).
+_SELECT_POOL_HOSTS_MISSING_KEYS_SQL: Final[str] = (
+    "SELECT id, vps_address, ssh_port, container_ssh_port, outer_host_public_key, container_host_public_key "
+    "FROM pool_hosts WHERE outer_host_public_key IS NULL OR container_host_public_key IS NULL"
+)
+_SELECT_BOXES_MISSING_KEY_SQL: Final[str] = (
+    "SELECT id, public_address FROM bare_metal_servers "
+    "WHERE box_host_public_key IS NULL AND public_address IS NOT NULL"
+)
+
+
+def _keyscan_host_public_key(host: str, port: int) -> str | None:
+    """One-time TOFU scan of a host's ed25519 sshd key, for the migration backfill only.
+
+    Returns ``"ssh-ed25519 <base64>"`` or None on failure. This is the single
+    sanctioned trust-on-first-use in the system; all steady-state SSH pins a
+    recorded key.
+    """
+    cg = ConcurrencyGroup(name="keyscan")
+    with cg:
+        result = cg.run_process_to_completion(
+            command=["ssh-keyscan", "-t", "ed25519", "-T", str(_KEYSCAN_TIMEOUT_SECONDS), "-p", str(port), host],
+            timeout=float(_KEYSCAN_TIMEOUT_SECONDS + 5),
+            is_checked_after=False,
+        )
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = stripped.split()
+        # ssh-keyscan prints "<hostspec> ssh-ed25519 <base64>"; we want the key only.
+        if len(parts) >= 3 and parts[1] == "ssh-ed25519":
+            return f"{parts[1]} {parts[2]}"
+    return None
+
+
+@pool.command(name="backfill-host-keys")
+@click.option(
+    "--database-url",
+    required=False,
+    default=None,
+    type=str,
+    help=(
+        "Neon PostgreSQL direct connection string for the pool DB. Defaults to "
+        "MINDS_HOST_POOL_DSN env var, or the activated minds env's secrets.toml "
+        "NEON_HOST_POOL_DSN field. Pass explicitly when operating outside an activated env."
+    ),
+)
+def pool_backfill_host_keys(database_url: str | None) -> None:
+    """One-time: keyscan + record SSH host public keys for pre-existing pool rows and boxes.
+
+    The single sanctioned trust-on-first-use in the system, used ONLY to migrate
+    rows baked before the host-key columns existed. Run once after deploying the
+    host-key-pinning version of the connector; afterward leasing and teardown
+    enforce strict pinning with no scan fallback. Idempotent: rows that already have
+    keys are skipped, and a row whose host cannot be scanned is left null (logged)
+    for a later re-run.
+    """
+    resolved_database_url = resolve_pool_database_url(database_url)
+    conn = psycopg2.connect(resolved_database_url)
+    # Keyscans are slow network ops; autocommit each UPDATE rather than hold one
+    # long transaction open across them.
+    conn.autocommit = True
+    pool_updated = 0
+    box_updated = 0
+    skipped: list[str] = []
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_SELECT_POOL_HOSTS_MISSING_KEYS_SQL)
+            pool_rows = cur.fetchall()
+        for row_id, vps_address, ssh_port, container_ssh_port, outer_key, container_key in pool_rows:
+            new_outer = outer_key or _keyscan_host_public_key(vps_address, ssh_port)
+            new_container = container_key or _keyscan_host_public_key(vps_address, container_ssh_port)
+            if new_outer and new_container:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE pool_hosts SET outer_host_public_key = %s, container_host_public_key = %s WHERE id = %s",
+                        (new_outer, new_container, str(row_id)),
+                    )
+                pool_updated += 1
+            else:
+                skipped.append(f"pool host {row_id} ({vps_address})")
+                logger.warning("Could not keyscan host keys for pool host {} ({}); left null", row_id, vps_address)
+
+        with conn.cursor() as cur:
+            cur.execute(_SELECT_BOXES_MISSING_KEY_SQL)
+            box_rows = cur.fetchall()
+        for server_id, public_address in box_rows:
+            box_key = _keyscan_host_public_key(public_address, 22)
+            if box_key:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE bare_metal_servers SET box_host_public_key = %s, updated_at = NOW() WHERE id = %s",
+                        (box_key, str(server_id)),
+                    )
+                box_updated += 1
+            else:
+                skipped.append(f"box {server_id} ({public_address})")
+                logger.warning("Could not keyscan box key for server {} ({}); left null", server_id, public_address)
+    finally:
+        conn.close()
+    emit_json({"pool_hosts_backfilled": pool_updated, "boxes_backfilled": box_updated, "skipped": skipped})
