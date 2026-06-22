@@ -144,7 +144,7 @@ This is cheap *because of the collapse*: with host-health now a resolver read (n
 `REACHABILITY_UNCONFIRMED` is, functionally, a *loading* state: it exists only for the brief window where discovery has not yet confirmed reachability, and it collapses into a real tier within one poll cycle. Expressing it as a peer of the actionable recovery tiers (`HOST_UNRESPONSIVE`, `PROVIDER_UNAVAILABLE`, ...) — with its own page, its own `reachability_confirmed` boolean threaded through the classifier, and its own client convergence loop — is more structure than the state deserves. Worse, it conflates two different concerns:
 
 - a **transient** "discovery hasn't caught up yet" (cold start, or the ≤one-cycle post-outage window), and
-- a **persistent** "the discovery pipeline itself is broken" — which is app-global infrastructure health, not a per-workspace recovery condition, and belongs in its own surface with its own monitoring/auto-restart (see the **discovery-watchdog follow-up**, branch `gabriel/discovery-watchdog`).
+- a **persistent** "the discovery pipeline itself is broken" — which is app-global infrastructure health, not a per-workspace recovery condition.
 
 A cleaner cut: don't send the user to the recovery page at all until discovery is fresh. Then the recovery page can *assume* fresh discovery, and the whole `reachability_confirmed` / `REACHABILITY_UNCONFIRMED` / convergence apparatus disappears.
 
@@ -159,10 +159,6 @@ A cleaner cut: don't send the user to the recovery page at all until discovery i
 - **Gate the `STUCK` redirect signal on discovery freshness, server-side.** In the chrome-events SSE (`_handle_chrome_events`), suppress emitting `system_interface_status` with status `stuck` for an agent while discovery is stale (`_is_discovery_fresh` is false) — at all three emission points (the connect-time snapshot, the per-transition drain, and the 15s re-assert backstop). While stale, the chrome receives no `stuck` event and stays on the plugin's auto-refreshing loader. Once a fresh snapshot lands (or the next re-assert tick after one does), the `stuck` event is emitted and the chrome redirects. No `chrome.js` change is required — the existing "redirect on `stuck`" logic is unchanged; it simply isn't told `stuck` until discovery is fresh.
 - **Remove `reachability_confirmed` and `REACHABILITY_UNCONFIRMED`.** `_classify_dispatch_tier` returns `HOST_UNRESPONSIVE` unconditionally for the "host claims RUNNING but unreachable" case; `build_host_health_response` / the classifier no longer take a `reachability_confirmed` argument. The in-container exec gate keeps only its meaningful checks — fire the exec when `provider_error is None and host_state == RUNNING` — dropping the freshness conjunct (the page is only reached fresh).
 - **Remove the client convergence loop.** Delete `scheduleConvergence` / `isAwaitingFreshDiscovery` / the `CONVERGE_*` constants / `renderReachabilityUnconfirmed`. `provider_unavailable` keeps auto-returning the user via the existing `scheduleHealthyPoll` 302-watch (the health tracker flips HEALTHY → the page 302s to `return_to`); it no longer needs to re-classify, because it was reached with fresh discovery.
-
-### Accepted failure mode (deliberately punted)
-
-If the discovery pipeline is **persistently broken**, the redirect is gated forever and the user is left on the auto-refreshing "Loading workspace" loader indefinitely. This is accepted **for this branch** to keep the logic here simple; it is the exact failure mode the **discovery-watchdog follow-up** (branch `gabriel/discovery-watchdog`) exists to fix (detect a stalled pipeline via snapshot-age, auto-restart the pipeline, and surface a distinct app-global "lost track of your workspaces" state). We add no max-wait fallback here.
 
 ### Safety note (residual, accepted)
 
@@ -180,7 +176,6 @@ The destructive-restart safety gate that `REACHABILITY_UNCONFIRMED` provided now
 - With imbue_cloud unreachable (discovery fresh-with-error), the redirect fires promptly and the recovery page classifies `PROVIDER_UNAVAILABLE` (no stale-window Retry state in the normal flow).
 - The host-health endpoint no longer takes or computes `reachability_confirmed`, and there is no `REACHABILITY_UNCONFIRMED` tier; `HOST_UNRESPONSIVE` is returned for the host-claims-RUNNING-but-unreachable case.
 - The recovery-page client has no convergence loop; `provider_unavailable` still auto-returns the user once the workspace recovers, via the 302 healthy-watch.
-- With a persistently broken discovery pipeline, the user remains on the loader (no redirect) — the accepted, follow-up-handled failure mode.
 - Existing tiers (`HOST_OFFLINE`, `INTERFACE_UNRESPONSIVE`, `WORKSPACE_MISCONFIGURED`, `HOST_UNRESPONSIVE`, `PROVIDER_UNAVAILABLE`, `WORKSPACE_UNREACHABLE`) still classify correctly.
 
 ### Changelog (revision)

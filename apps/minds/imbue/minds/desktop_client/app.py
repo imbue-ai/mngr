@@ -231,6 +231,13 @@ def _should_emit_system_interface_status(backend_resolver: BackendResolverInterf
         return True
     if not isinstance(backend_resolver, MngrCliBackendResolver):
         return True
+    # FIXME: when discovery is *persistently* stale -- the producer/consumer
+    # pipeline has stalled, not merely a provider being down -- this gate never
+    # lets the STUCK redirect through, so the user is stranded on the "Loading
+    # workspace" loader indefinitely with no recourse. A discovery-health
+    # watchdog should detect a stalled pipeline (snapshot age), auto-restart it,
+    # and surface a distinct app-level state; once that exists this gate gains an
+    # escape and this FIXME should be removed.
     _, last_full_snapshot_at = backend_resolver.get_freshness_timestamps()
     return _is_discovery_fresh(last_full_snapshot_at)
 
