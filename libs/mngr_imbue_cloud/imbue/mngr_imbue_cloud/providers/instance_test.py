@@ -279,11 +279,11 @@ class _FakeImbueCloudProvider(ImbueCloudProvider):
 
     Overrides only the boundaries that would otherwise do real I/O: the lease
     cache, the outer-SSH connection, the on-disk keypair location, the
-    sshd-readiness wait and host-key re-scan (both real network round-trips to
-    the container), and the final host construction (pyinfra wiring). Everything
-    in between -- the container lookup, the ``docker inspect`` running-state
-    probe, ``docker start`` and the sshd relaunch -- runs for real against
-    ``_outer``. Mirrors the sibling vps_docker tests.
+    sshd-readiness wait (a real network round-trip to the container), and the
+    final host construction (pyinfra wiring). Everything in between -- the
+    container lookup, the ``docker inspect`` running-state probe, ``docker
+    start`` and the sshd relaunch -- runs for real against ``_outer``. Mirrors
+    the sibling vps_docker tests.
     """
 
     _lease: LeasedHostInfo | None = None
