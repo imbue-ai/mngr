@@ -1,6 +1,6 @@
 # Discovery-pipeline health watchdog (minds desktop client)
 
-> Branch `gabriel/discovery-watchdog`. Follow-up to PR #2236 / `gabriel/recovery-redundancy` ("option A"), which gates the per-workspace recovery redirect on a *fresh* discovery snapshot. Option A deliberately leaves one gap: if discovery is *persistently* broken, the redirect is gated forever and the user is stuck on "Loading workspace" indefinitely. This watchdog closes that gap.
+> Branch `gabriel/discovery-watchdog`. Follow-up to the `gabriel/recovery-redundancy` work, which gates the per-workspace recovery redirect on a *fresh* discovery snapshot. That gating deliberately leaves one gap: if discovery is *persistently* broken, the redirect is gated forever and the user is stuck on "Loading workspace" indefinitely. This watchdog closes that gap.
 
 ## Overview
 
@@ -8,7 +8,7 @@
 - A *stale* `last_full_snapshot_at` is a clean signal that the pipeline **itself** is broken — not that a provider is down — because a provider outage keeps discovery *fresh* (snapshots keep flowing with the failure folded into `error_by_provider_name`). The watchdog monitors that freshness age plus the existing consumer-process-death signal.
 - Remediation targets the **producer** via a cheap→heavy ladder, never the consumer (the one `mngr forward` subprocess is *also* the HTTP traffic proxy, and its bound port is baked into app state / `AgentCreator` / the health probe / the Electron shell, so respawning it is heavyweight and risks a port rebind). Re-kicking the producer is non-disruptive and lets the still-running consumer's file-tail recover freshness on its own.
 - Impact (and therefore urgency) splits by which side broke and where the user is, so the watchdog surfaces **two tiers**: a silent **"reconnecting"** tier (producer stalled, consumer/proxy alive → the loaded workspace still works, heal in the background) and an urgent **"blocked"** tier (consumer dead, ladder exhausted, or cold-start that never produced a first snapshot → forwarding down / app unusable → redirect the whole app to an error screen).
-- The watchdog is the **escape bound** option A relies on: once it heals the pipeline, option A's freshness gate re-opens on its own; if it can't heal, it replaces the indefinite hang with an explicit, actionable "restart the app" screen.
+- The watchdog is the **escape bound** the freshness-gated recovery redirect relies on: once it heals the pipeline, that gate re-opens on its own; if it can't heal, it replaces the indefinite hang with an explicit, actionable "restart the app" screen.
 
 ## Expected behavior
 
@@ -17,13 +17,13 @@
   1. `LatchkeyForwardSupervisor.bounce()` (SIGHUP → respawns only the `mngr observe` child; the shared gateway + reverse tunnels stay up). Fixes a dead/stuck observe producer.
   2. If freshness still doesn't recover within ~one poll, `LatchkeyForwardSupervisor.restart()` (heavier: bounces the gateway + tunnels, fixes a wedged *supervisor*; minds re-resolves the gateway via `invalidate_initialization`).
   3. If still stale after the bounded attempts, stop and escalate to the **blocked** tier.
-- On recovery at any rung, the watchdog returns to idle silently; the workspace list, liveness dots, providers panel, and option A's redirect gate all resume from the fresh snapshots with no user action.
+- On recovery at any rung, the watchdog returns to idle silently; the workspace list, liveness dots, providers panel, and the freshness-gated recovery redirect all resume from the fresh snapshots with no user action.
 - **Consumer process death** (high urgency): detected immediately by the existing process-exit watcher (not by the freshness timer). The producer ladder cannot fix a dead consumer and consumer respawn is out of scope for v1, so this goes **straight to blocked**.
 - **Blocked tier**: the whole app is redirected to the existing Electron `shell.html` error takeover — "Can't reach your workspaces — restart the app" — with a **"Restart Minds"** button that drives Electron's existing relaunch path. It is **terminal**: once shown it stays until the user acts (no auto-clear), avoiding ambiguous half-recovered states.
 - The current CRITICAL "forwarding subprocess died — restart minds" OS notification is **removed**; the blocked error screen replaces it (death and persistent-stall now look identical to the user).
 - **Cold start** (no first snapshot yet): unchanged in the normal case — the app stays on the existing "MINDS" loading takeover / "Discovering agents…" state until the first snapshot arrives. **Backstop:** if the healing ladder runs and a first snapshot *still* never arrives, that escalates into the same **blocked** screen, so a discovery-broken-from-boot launch can no longer hang forever.
-- **Thresholds** (constants; tune later): producer stall detected at ~35s of no fresh snapshot (≈3 missed ~10s polls — above option A's 30s freshness threshold so the two don't fight over a single slow poll); each ladder rung waits ~one poll (~15s) for freshness to return before escalating; ~3 attempts total before blocked. Consumer-death bypasses the timer entirely.
-- The watchdog and option A are **separate mechanisms** reading the same freshness signal: option A holds the per-workspace recovery redirect during a stall; the watchdog heals the pipeline and owns the app-global blocked screen. They may share the freshness-threshold constant/derivation but are otherwise independent.
+- **Thresholds** (constants; tune later): producer stall detected at ~35s of no fresh snapshot (≈3 missed ~10s polls — above the recovery redirect's 30s freshness threshold so the two don't fight over a single slow poll); each ladder rung waits ~one poll (~15s) for freshness to return before escalating; ~3 attempts total before blocked. Consumer-death bypasses the timer entirely.
+- The watchdog and the freshness-gated recovery redirect are **separate mechanisms** reading the same freshness signal: the redirect gating holds the per-workspace recovery page during a stall; the watchdog heals the pipeline and owns the app-global blocked screen. They may share the freshness-threshold constant/derivation but are otherwise independent.
 
 ## Changes
 
