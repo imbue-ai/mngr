@@ -279,17 +279,6 @@ class SentryEventHandler(_BaseHandler):
             executor.shutdown()
             return event, hint, callbacks
         except TimeoutError as e:
-            from imbue_core.sculptor.telemetry import ProductComponent
-            from imbue_core.sculptor.telemetry import SculptorPosthogEvent
-            from imbue_core.sculptor.telemetry import send_exception_to_posthog
-
-            send_exception_to_posthog(
-                SculptorPosthogEvent.SENTRY_EXCEPTION_DATA_COLLECTION_TOO_SLOW,
-                e,
-                component=ProductComponent.CROSS_COMPONENT,
-            )
-            # this will leave the thread still running; there's no real way to cancel it.
-            # we'll at least set this flag so future errors don't try to run the (bugged?) hook again.
             executor.shutdown(wait=False)
             self.add_extra_info_previously_timed_out = True
 
