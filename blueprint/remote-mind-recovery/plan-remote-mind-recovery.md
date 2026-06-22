@@ -7,6 +7,7 @@
 - Provider reachability is read from the `mngr list` the probe already runs (it round-trips the connector for imbue_cloud and the daemon for docker); imbue_cloud starts raising the specific `ProviderUnavailableError` so the signal is typed. No new probe and no new top-level CLI command.
 - The destructive container stop is backstopped by giving the provider-unavailable tier precedence over the manual-restart tier, so you're never offered a destructive restart while the provider is unreachable. Note an unreachable host can't be destructively stopped anyway — the stop physically can't run over its SSH — so the only residual danger is "host reachable + mind actually fine." (A live pre-stop interface re-probe to catch that residual case was prototyped but descoped; see "Descoped during implementation".)
 - Behavior applies uniformly across providers (a down local docker daemon is treated the same: don't offer a restart that can't help).
+- **Follow-up (this branch, `gabriel/recovery-redundancy`):** the synchronous `mngr list` reachability probe described above is itself redundant with the passive discovery state and is being removed — the recovery page reads provider/host state from the resolver instead. The shipped behavior below stands as context; see **"Follow-up: collapse redundant provider/host state"** at the end of this document for the current plan.
 
 ## Descoped during implementation
 
@@ -28,9 +29,9 @@ These items appear in the plan below but were prototyped and then dropped from t
 
 ## Changes
 
-- Feed provider-reachability into recovery classification, derived from the `mngr list` probe (now carrying a typed `ProviderUnavailableError` in its `errors[]`); the existing host-state / in-container exec probes continue to drive the existing tiers. No separate active reachability probe is added.
+- Feed provider-reachability into recovery classification, derived from the `mngr list` probe (now carrying a typed `ProviderUnavailableError` in its `errors[]`); the existing host-state / in-container exec probes continue to drive the existing tiers. No separate active reachability probe is added. *(Superseded by the follow-up section — the synchronous `mngr list` is removed and reachability is read from the passive discovery store.)*
 - imbue_cloud raises the specific `ProviderUnavailableError` when the connector is unreachable (today it raises nothing provider-specific from the discovery path).
-- minds parses the `mngr list` JSON even when the command exits non-zero (today the stdout is discarded on a non-zero exit), so the typed `errors[]` is available to classification; scope this to the recovery probe rather than changing the shared mngr-runner globally.
+- minds parses the `mngr list` JSON even when the command exits non-zero (today the stdout is discarded on a non-zero exit), so the typed `errors[]` is available to classification; scope this to the recovery probe rather than changing the shared mngr-runner globally. *(Superseded by the follow-up section — with the synchronous `mngr list` removed, the typed error is consumed from `get_provider_errors()`, populated by discovery's `error_by_provider_name`.)*
 - Add one classification tier, provider-unavailable, with precedence **above** the existing host/interface tiers (notably the manual-restart `HOST_UNRESPONSIVE` tier). Because it takes precedence, the recovery page shows the provider-unavailable page — and nothing auto-dispatches — when the provider is unreachable, without wrapping each dispatch path individually.
 - The provider-unavailable tier keys on `errors[].exception_type == "ProviderUnavailableError"`, which works **only if imbue_cloud raises that error narrowly** — for genuine connector-unreachability, never for auth/account-config failures (those must keep raising their own distinct types so they fall into the generic bucket below).
 - Distinguish connector-unreachable (→ provider-unavailable: retry, no restart) from auth/account-config failures (→ generic "can't reach — <reason>": no restart, no dedicated recovery flow). Do not lump all of `errors[]` into provider-unavailable.
@@ -41,3 +42,74 @@ These items appear in the plan below but were prototyped and then dropped from t
 - Apply the new classification and page uniformly to local providers (docker daemon down → provider-unavailable page, restart suppressed).
 - Explicitly out of scope: a dedicated "host is down" page for the rare provider-reachable-but-host-unreachable case (a server-side VPS fault mngr can't fix anyway) — such a host keeps classifying as offline and falls through to existing behavior; the destructive stop can't run against it, so nothing is lost on safety. Also out of scope: the `CRASHED`-reconfirmation cleanup (no longer needed without the host-down page).
 - Add a changelog entry under `apps/minds` (and `libs/mngr_imbue_cloud` / `libs/mngr` for the `ProviderUnavailableError` and list-error changes) per the repo's per-project changelog rule.
+
+## Follow-up: collapse redundant provider/host state
+
+> Branch `gabriel/recovery-redundancy`. This section revises the approach above. The shipped work landed the provider-unavailable tier and imbue_cloud's typed `ProviderUnavailableError`; this follow-up removes the redundant *second* sampler of provider/host state that the recovery probe introduced.
+
+### Motivation
+
+The shipped implementation reads provider reachability from a synchronous `mngr list` that the recovery host-health probe runs on demand. That is a **second independent sampler** of provider + host state, polled on its own clock, separate from the passive discovery polling (`mngr observe --discovery-only`) that already feeds the `MngrCliBackendResolver` and drives the rest of the UI (workspace list, providers panel). Two samplers of the same state layer can disagree — the recovery page can show host/provider state that conflicts with the sidebar — which is a latent source of races and inconsistent UI. The goal of this follow-up is **one source of truth per state layer**: read outer state from the passive store instead of re-sampling it.
+
+### State layers
+
+- **Layer A — outer state** ("is the provider reachable, and what is the host's lifecycle?"). Owned passively by the resolver, fed by discovery: `get_host_state()`, `get_provider_errors()`, `get_system_services_agent_id()`. The workspace list and providers panel already read Layer A from here.
+- **Layer B — inner state** ("*why* isn't the interface answering?"): can-exec, `services.toml` declares the interface, inner port listening, inner `curl /`. Lives only in the on-demand `mngr exec` probe; discovery never collects it.
+- **Trigger — `SystemInterfaceHealthTracker` STUCK**: sustained HTTP-probe failure (~5s) is the redirect trigger. A temporal reachability concern, not a state store; leave as-is. It does not conflict with discovery — "outer up, inner down" is two layers, not two truths.
+
+### Per-signal disposition
+
+| Recovery signal | Layer | Source today | In the passive store? | Disposition |
+|---|---|---|---|---|
+| host.state (probe 1) | A | synchronous `mngr list` | Yes — `get_host_state()` | Redundant → read from resolver |
+| services-agent exists (probe 2) | A | synchronous `mngr list` | Yes — `get_system_services_agent_id()` | Redundant → read from resolver |
+| provider error (`errors[]`) | A | synchronous `mngr list` | Yes — `get_provider_errors()` (typed, per-provider) | Redundant → read from resolver |
+| can-exec (probe 3) | B | exec probe | No | Keep (only inner-reachability source) |
+| services.toml declares interface (probe 4) | B | exec probe | No | Keep |
+| inner port listening (probe 5) | B | exec probe | No | Keep |
+| inner curl `/` (probe 6) | B | exec probe | No (tracker probes end-to-end, not inner) | Keep (complementary) |
+| plugin resolver snapshot (probe 7) | B | passive (forward stream) | Yes — already single-source | Keep as-is |
+
+The redundancy is entirely in Layer A. Layer B is not duplicated (probe 7 already reads the passive store; the inner `curl` and the tracker's end-to-end HTTP probe are different facts — inner-up-but-plugin-route-broken is a real, distinct diagnosis).
+
+### Changes (this follow-up)
+
+- `_run_host_health_probe` no longer builds or runs `_build_mngr_host_state_argv` / `mngr list`. Layer-A inputs (host state, services-agent id, provider error) are read from `backend_resolver` plus discovery freshness.
+- The provider-unavailable signal comes from `get_provider_errors()[provider_name]` — the same typed `ProviderUnavailableError` imbue_cloud already raises through the discovery path (`error_by_provider_name`), now read from the passive store instead of re-sampled. (imbue_cloud's typed-error change from the shipped work stays; only the consumption point moves.)
+- The `mngr exec` probe stays, but **purely** for Layer-B decomposition, and fires **only when Layer A is "provider reachable + host RUNNING"** — so an outage never pays a provider round-trip on this path.
+- `build_host_health_response` keeps producing the same `dispatch_tier` and probe rows; its Layer-A inputs are now resolver-sourced rather than parsed from `list_json`.
+
+### Discipline: one sampler per layer
+
+The exec probe **incidentally touches Layer A** — it calls `provider.get_host()` to reach the container. Its outcome is **Layer-B evidence only** ("could/couldn't reach the inner interface, plus the decomposition"). Layer-A classification (`PROVIDER_UNAVAILABLE` / `HOST_OFFLINE`) comes **solely** from the resolver. Do **not** parse the exec failure as a provider-state signal: `mngr exec` per-agent failures are emitted as untyped strings (`exec_error` events carry `{"agent","error":<str>}`, not a typed `exception_type`), so keying on them would recreate a *worse* second Layer-A sampler through the back door.
+
+### Safety: gate the destructive tier on freshness
+
+Reading Layer A from the resolver means the recovery page inherits discovery freshness (≤ one ~10s poll cycle). In the **post-outage window** — the first ~30-40s after connectivity drops, before the next discovery poll surfaces the typed error — the resolver may still show a stale `host=RUNNING` with no provider error yet, which would otherwise classify as the destructive `HOST_UNRESPONSIVE` tier. The destructive tier must be **gated on discovery freshness**: if discovery is stale/unconfirmed and reachability is not positively established, do not offer a destructive host restart — fall to the non-destructive / retry path. This preserves the safety property the shipped synchronous-timeout-as-signal provided, without a second sampler. (Composes with the provider-unavailable precedence from the shipped work.)
+
+### Latency cross-check (do not reintroduce the 2-minute wait)
+
+- The original 2-minute "Loading workspace…" wait was the host-health endpoint blocking on the synchronous `mngr list` at the default `_RESTART_COMMAND_TIMEOUT_SECONDS = 120s`; commit `470f0bbee` capped that path at `_HOST_HEALTH_PROBE_TIMEOUT_SECONDS = 30s`. The STUCK → recovery redirect itself is fast (~5s).
+- Removing the synchronous list makes the Layer-A read effectively **instant** (a resolver lookup, no network) — strictly better than 30s and never 120s.
+- **Landmine:** the exec probe also touches the provider (`get_host` → the connector's ~30s httpx) and currently runs via `_run_mngr` at the 120s default, saved today only by being skipped when the list times out. With the list gone, the retained exec probe must (a) carry an explicit 30s-class cap (never inherit the 120s `_RESTART_COMMAND_TIMEOUT_SECONDS`), and (b) fire only when Layer A is healthy (provider reachable + host RUNNING), so an outage never stacks or pays a provider round-trip here.
+
+### Freshness trade (explicit)
+
+The synchronous list's only genuine advantage was *fresher* Layer-A state — but "fresher **and** independently sampled" is exactly the conflicting second truth we're removing. We accept the resolver's ≤one-cycle freshness in exchange for a single consistent view shared with the rest of minds.
+
+### Acceptance criteria
+
+- The recovery host-health path issues **no** synchronous `mngr list`; Layer-A state is read from `backend_resolver`.
+- With imbue_cloud unreachable (e.g. wifi off) and discovery having surfaced the typed error, the recovery page classifies `PROVIDER_UNAVAILABLE` and the host-health endpoint returns well under 30s (target: ~instant).
+- In the post-outage window (provider error not yet surfaced, stale `RUNNING` host), the page does **not** offer a destructive restart.
+- A docker mind's recovery during a simultaneous imbue_cloud outage is **not** misclassified as provider-unavailable (per-provider keying via `get_provider_errors()[provider_name]`).
+- The recovery page's host/provider state matches the workspace list / providers panel for the same agent (single-source consistency).
+- The existing tiers (`HOST_OFFLINE`, `INTERFACE_UNRESPONSIVE`, `WORKSPACE_MISCONFIGURED`, `HOST_UNRESPONSIVE`) still classify correctly when the provider is reachable.
+
+### Open question to resolve before/during implementation
+
+- **Post-outage window handling:** gate the destructive tier on staleness and return *instantly* (accepting a "can't confirm yet — retry" state for up to ~one poll cycle until discovery surfaces the typed error), **vs.** fire one 30s-capped provider touch to get a definitive `PROVIDER_UNAVAILABLE` immediately. Both stay ≤30s; the first is faster but shows a softer message for a few seconds. Leaning toward the instant/staleness-gated path to keep a single sampler, but confirm.
+
+### Changelog
+
+- `apps/minds` changelog entry for the recovery host-health refactor (remove the synchronous `mngr list`; read Layer-A state from the resolver). No `libs/mngr*` change is required by this follow-up — the typed `ProviderUnavailableError` and the discovery `error_by_provider_name` plumbing already landed.
