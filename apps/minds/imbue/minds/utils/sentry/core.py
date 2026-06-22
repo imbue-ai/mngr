@@ -667,6 +667,11 @@ def _n_newest_files(files: Iterable[Path], n: int) -> Iterable[Path]:
     return sorted(files, key=lambda f: f.stat().st_mtime)[-n:]
 
 
+# Callbacks returned by ``collect_external_attachments``: each is a pre-bound
+# ``functools.partial`` that performs one S3 upload when invoked with no arguments.
+_UploadCallback = Callable[[], None]
+
+
 class ErrorAttachmentsS3Uploader(MutableModel):
     # FIXME: use a local instance of s3_uploader instead of the global one?
 
@@ -697,7 +702,7 @@ class ErrorAttachmentsS3Uploader(MutableModel):
 
     def collect_external_attachments(
         self, *, exception: BaseException | None, logs_folder: Path | None
-    ) -> tuple[Mapping[str, Collection[str]], tuple[Callable, ...]]:
+    ) -> tuple[Mapping[str, Collection[str | None]], tuple[_UploadCallback, ...]]:
         """Prepares external uploads that will be attached to the error report.
 
         Returns external urls grouped by their logical names and the callbacks that need to be invoked which will
@@ -707,7 +712,7 @@ class ErrorAttachmentsS3Uploader(MutableModel):
         a live ``*.jsonl`` Python backend log, timestamp-suffixed ``*.jsonl.<ts>`` rotated logs, and
         the Electron ``*.log``. All are gzip-compressed on upload.
         """
-        uploads: dict[tuple[str, str], Callable | None] = {}
+        uploads: dict[tuple[str, str], _UploadCallback | None] = {}
 
         if exception is not None:
             # this traceback is from the logger call site!
@@ -744,7 +749,7 @@ class ErrorAttachmentsS3Uploader(MutableModel):
                     compress=True,
                 )
 
-        grouped_uris = defaultdict(list)
+        grouped_uris: defaultdict[str, list[str | None]] = defaultdict(list)
         for group, key in uploads.keys():
             grouped_uris[group].append(get_s3_upload_url(key))
 
@@ -760,7 +765,7 @@ class ErrorAttachmentsS3Uploader(MutableModel):
 _ATTACHMENTS_UPLOADER = ErrorAttachmentsS3Uploader()
 
 
-def add_extra_info_hook(event: Event, hint: Hint) -> tuple[Event, Hint, tuple[Callable, ...]]:
+def add_extra_info_hook(event: Event, hint: Hint) -> tuple[Event, Hint, tuple[_UploadCallback, ...]]:
     """The add_extra_info_hook gets called in the SentryEventHandler. This seems a little too early in the process for
     sending things to s3.
 
