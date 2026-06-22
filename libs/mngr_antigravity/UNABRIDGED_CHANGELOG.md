@@ -4,6 +4,29 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-19
+
+No production behavior change. The Antigravity agent-config merge test now exercises the unified overlay merge pipeline (`merge_models_via_overlay`) instead of the removed `AgentTypeConfig.merge_with` helper. The behavior it locks in is unchanged: an override's `cli_args` replaces (rather than concatenates onto) the base.
+
+Trimmed the README to user-relevant content (removed internal implementation details and roadmap notes) and tightened it for concision.
+
+`settings_overrides` now folds onto the base with the same principled merge as mngr_claude: a bare key assigns with a narrowing guard (errors if it would silently drop a non-empty list/dict/set from the base), and a top-level `__mngr_merge` map declares per-key `extend` (merge onto the base) or `assign` (replace without the guard).
+
+```toml
+[agent_types.my_antigravity.settings_overrides.permissions]
+allow = ["command(git)"]
+[agent_types.my_antigravity.settings_overrides.__mngr_merge]
+"permissions.allow" = "extend"
+```
+
+`__mngr_merge` is ignored by vanilla antigravity, so the generated `settings.json` stays clean. Raw `__extend` / `__assign` suffix keys are rejected in `settings_overrides`, and a `__mngr_merge` key in the synced home settings base is stripped. On a narrowing, the error prints the exact `__mngr_merge` patch to add (the full nested patch: `extend` for a dict that would drop a sibling key, `assign` for a replaced list/value). Previously `settings_overrides` replaced top-level keys wholesale with no narrowing guard.
+
+## 2026-06-18
+
+Added an `update_policy` field to the antigravity agent type that governs agy's background self-updater. `NEVER` sets `AGY_CLI_DISABLE_AUTO_UPDATE=true` in the agent environment so the installed build stays put; `AUTO` leaves agy's self-updater enabled; `ASK` behaves like `AUTO`. When unset, it defaults to `NEVER` (auto-update disabled) -- set `AUTO` to leave the self-updater on.
+
+Note: agy has no version-pinning capability -- Google's installer always installs the latest build (no version argument or env var) -- so there is no `version` field. The default `update_policy = "NEVER"` freezes whatever build was installed.
+
 ## 2026-06-17
 
 The agent now declares the `HasSessionPreservationMixin` capability mixin: its `on_destroy` session-preservation step was extracted into a `preserve_session_state` method, so preserving session/transcript files on destroy is a code-detectable capability in the agent capability matrix rather than a hand-tracked fact. Behavior is unchanged.

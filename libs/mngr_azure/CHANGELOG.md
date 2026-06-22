@@ -6,6 +6,23 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Bare placement support (`[providers.azure].isolation = "NONE"`). Since an Azure OS shutdown does not halt compute billing, the bare agent's idle `shutdown.sh` runs the ARM self-deallocate directly (the same call the container idle watcher uses), keeping the self-deallocate role assignment and skipping the host-side sentinel watcher. Added bare-placement release tests.
+
+### Changed
+
+- Changed: `stop_host` / `start_host` moved to the shared base `OfflineCapableVpsProvider`; Azure now supplies only the deallocate/start hooks plus the static-IP known_hosts rebind no-ops. The shared base is what now guarantees the resume-mirror happens on every provider.
+- Changed: Idle-watcher install, host_dir-to-bucket sync daemon install/before-pause, and the best-effort `_on_host_finalized` step runner moved to the shared `OfflineCapableVpsProvider`. The host-side systemd unit names changed from `mngr-azure-idle-watcher` / `mngr-azure-host-dir-sync` to the shared `mngr-idle-watcher` / `mngr-host-dir-sync`.
+- Changed: `mngr azure prepare` / `cleanup` now resolve their `[providers.<name>]` block and refuse-on-existing-VMs via the shared `mngr_vps.cli_helpers`. `AzureProviderConfig` lifts `allowed_ssh_cidrs` / `associate_public_ip` into shared config bases. The cleanup refusal when VMs still exist now raises the unified `ManagedResourcesExistError` (previously `AzureProviderError`) so the message matches the other clouds. `allowed_ssh_cidrs` is now typed `ScalarStrTuple` (matching AWS), so a higher-precedence config layer that sets it replaces the whole list rather than being flagged as narrowing.
+
+### Fixed
+
+- Fixed: `mngr start` of a deallocated Azure host now re-mirrors the resumed host record to the external (Blob bucket) store, so offline / `mngr list` reads no longer report a just-resumed Azure VM as STOPPED until the next mirroring write.
+- Fixed: A running bare (`isolation=NONE`) host is now discoverable and reachable with the default provider config — `mngr conn`/`list`/`stop`/`start`/`destroy` no longer need `-S providers.<name>.isolation=NONE` at connect time. Instances now carry a `mngr-isolation` tag stamped at create.
+- Fixed: `rename_host` now re-stamps the cheap `mngr-host-name` VM tag that offline discovery reads (previously stamped only at create), so a renamed-then-stopped host lists under its new name. The re-stamp merges into the VM's existing tags rather than replacing them.
+- Fixed: `start_host` for a bare host. It read the host record via the Docker volume, which a bare host does not have, so it now resolves the store through the realizer.
+
 ## [v0.1.1] - 2026-06-18
 
 ### Added

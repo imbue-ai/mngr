@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: The kanpan plugin's cross-scope config merge now follows the same standard config-merge semantics as every other config field. Previously `KanpanPluginConfig` carried a custom `merge_with` that automatically *unioned* its six dict fields (`commands`, `data_sources`, `shell_commands`, `columns`, `on_before_refresh`, `on_after_refresh`) across config scopes (user < project < local). That method is removed and the merge now runs through the standard overlay pipeline: these fields assign-by-default, guarded by the cross-scope narrowing detector. User-visible: a higher-precedence scope's `[plugins.kanpan]` block that drops a key set by a lower scope now raises the standard flag-gated settings-narrowing error (use `__extend` to merge additively, or `allow_settings_key_assignment_narrowing = true` / `key__assign` to drop keys without warning). Pure additions still apply unchanged.
+
 ## [v0.2.17] - 2026-06-18
 
 ## [v0.2.16] - 2026-06-16

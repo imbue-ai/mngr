@@ -6,6 +6,22 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Bare placement support (`[providers.aws].isolation = "NONE"`) — the idle agent runs `shutdown -P now` as the VM's root, which stops the EC2 instance via `InstanceInitiatedShutdownBehavior`, so the container-only sentinel + host-side systemd watcher is skipped for bare. Added bare-placement release tests.
+
+### Changed
+
+- Changed: Collapsed the AWS provider's two AMI config knobs into one. The `default_ami_by_region` field is gone; `default_ami_id` now defaults to `None`, and when unset the pinned per-region default (`DEFAULT_AMI_BY_REGION`, Debian 12 amd64) for the chosen region is used. Behavior is unchanged — only the configuration surface is simpler.
+- Changed: `stop_host` / `start_host` moved to the shared base `OfflineCapableVpsProvider`; AWS now supplies only the EC2 `_pause_cloud_instance` / `_resume_cloud_instance` hooks (and the final host_dir-to-bucket sync before pause). The host-side systemd unit names changed from `mngr-aws-idle-watcher` / `mngr-aws-host-dir-sync` to the shared `mngr-idle-watcher` / `mngr-host-dir-sync`.
+- Changed: `mngr aws prepare` / `cleanup` now resolve their `[providers.<name>]` block and refuse-on-existing-instances via the shared `mngr_vps.cli_helpers`. `AwsProviderConfig` lifts `allowed_ssh_cidrs` / `associate_public_ip` into shared config bases. The cleanup refusal when instances still exist now raises the unified `ManagedResourcesExistError` (a `MngrError`) so the message matches the other clouds.
+
+### Fixed
+
+- Fixed: A running bare (`isolation=NONE`) host is now discoverable and reachable with the default provider config — `mngr conn`/`list`/`stop`/`start`/`destroy` no longer need `-S providers.<name>.isolation=NONE` at connect time. Instances now carry a `mngr-isolation` tag stamped at create, so discovery reads the host's placement from the cloud API without SSH. Pre-existing hosts have no tag and default to container, preserving prior behavior.
+- Fixed: `mngr rename` now re-stamps the EC2 `Name` identity tag (read by offline discovery) so a renamed-then-stopped host lists under its new name in `mngr list`. Previously the `Name` tag was stamped only at create.
+- Fixed: `start_host` for a bare host. It read the host record via the Docker volume, which a bare host does not have, so it now resolves the store through the realizer.
+
 ## [v0.1.4] - 2026-06-18
 
 ### Changed

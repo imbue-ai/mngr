@@ -4,6 +4,44 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-06-21
+
+### Added
+
+- Added: Design blueprint for the sshd / agent restart-robustness work under `blueprint/sshd-restart-robustness/`.
+- Added: Implementation plan for sharing a bare-metal slice box across developer environments under `blueprint/share-bare-metal-across-dev-envs/`.
+
+## 2026-06-20
+
+### Removed
+
+- Removed: `bake-pool-host-{dev,prod}` justfile recipes (they baked OVH classic VPS pool hosts, now deprecated). Pool hosts are baked as bare-metal slices via the `bake-slice-{dev,prod}` recipes; `list-pool-hosts` and `destroy-pool-host` are unchanged and still cover legacy OVH VPS rows. The `minds-justfile` and `minds-dev-workflow` skill docs were updated to match.
+
+## 2026-06-19
+
+### Added
+
+- Added: Design specs and blueprints — `blueprint/remote-mind-recovery/` (extending minds' workspace-recovery flow to remote Imbue Cloud minds); `specs/bare-providers/` (spec.md + concise.md + extraction_design.md) for running agents directly on a cloud VM with no Docker container via a substrate-x-realizer architecture; and provider specs under `specs/` covering all nine `mngr` provider plugins (`provider-uniformity-review.md`, `provider-shape.md`, `implementing-a-provider.md`, plus a `provider-release-tests.md` proposal vendored into the tree and condensed to a remaining-gaps tracker).
+- Added: `make_cli_docs.py` now also generates the provider/agent config tables in each plugin README from the Pydantic field descriptions (the source of truth, also shown by `mngr config`), spliced between markers and verified by the docs `--check` gate so the tables can no longer drift from the code. A field added to a config model now appears in its table automatically.
+- Added: Registered the new `overlay` workspace library in the root `pyproject.toml` (`[tool.uv.sources]` workspace source, `--cov=imbue.overlay` in the shared coverage flags). Added `google-cloud-storage>=2.18` as a root dependency for the GCP provider's offline `host_dir` GCS state bucket. Updated root pytest coverage config to track the renamed `imbue.mngr_vps` package (was `imbue.mngr_vps_docker`).
+
+### Changed
+
+- Changed: The `regenerate-cli-docs` pre-commit hook now runs `make_cli_docs.py --check` (non-mutating, covering every generated file) instead of regenerating in place and diffing only the mngr command docs. Its trigger now also includes the provider/agent `config.py` / `plugin.py` sources and generated provider READMEs, so drift in the generated provider README tables can no longer slip past the hook.
+- Changed: Trimmed a monorepo-development-only paragraph (the `~/.local/bin` pre-commit shim note) from the top-level README so the published PyPI README stays focused on user-relevant content.
+
+## 2026-06-18
+
+### Added
+
+- Added: New `identify-suspicious-edge-cases` skill that flags over-broad exception catches, fallback `else` branches, defensive guards, and unnecessary `| None` types under a given path.
+- Added: Design spec `specs/provider-state-bucket/` for giving the AWS and Azure providers a cloud object-storage bucket (S3 / Azure Blob) that holds mngr control-plane state, so a stopped instance's host record, agent metadata, and `host_dir` are all readable offline without hitting the 256-char EC2/VM tag-value limit.
+- Added: `moto[s3]` in the root dev dependency group for in-memory S3 unit tests of the new AWS state bucket.
+
+### Changed
+
+- Changed: The `identify-*` skills (`identify-doc-code-disagreements`, `identify-inconsistencies`, `identify-outdated-docstrings`, `identify-style-issues`) now accept a `target_path` argument instead of a bare library name. You can scope them to a whole library (`libs/mngr` or just `mngr`) or to any subdirectory within one (e.g. `libs/mngr/imbue/mngr/cli`). Each skill resolves the scan scope and its containing library, gathers the containing library's context, and writes findings to the containing library's `_tasks/` folder.
+
 ## 2026-06-17
 
 ### Added

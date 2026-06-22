@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: The ttyd web-terminal attach now targets the agent's primary tmux window by name (`tmux.primary_window_name`, default `agent`, read from `MNGR_PRIMARY_WINDOW_NAME`) instead of the literal `:0` index, so attaching to an agent's terminal in the browser works regardless of the user's tmux `base-index` setting.
+
 ## [v0.1.14] - 2026-06-18
 
 ## [v0.1.13] - 2026-06-16

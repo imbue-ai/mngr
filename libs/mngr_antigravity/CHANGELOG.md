@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: `settings_overrides` now folds onto the base with the same principled merge as `mngr_claude`: a bare key assigns with the narrowing guard (errors if it would silently drop a non-empty list/dict/set from the base), and a top-level `__mngr_merge` map declares per-key `extend` (merge onto the base) or `assign` (replace without the guard). `__mngr_merge` is ignored by vanilla antigravity, so the generated `settings.json` stays clean. Raw `__extend` / `__assign` suffix keys are rejected; on a narrowing the error prints the exact `__mngr_merge` patch to add. Previously `settings_overrides` replaced top-level keys wholesale with no narrowing guard.
+
 ## [v0.1.8] - 2026-06-18
 
 ### Added

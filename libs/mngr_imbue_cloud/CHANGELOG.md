@@ -6,6 +6,20 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Multiple developer environments can now safely share a single bare-metal slice box. Each slice's lima instance and data-disk names are stamped with the owning environment (`mngr-slice-<env>-<host-hex>`); `admin pool create --backend slice` takes a new `--slice-env-name`. Slice baking now derives free-slot capacity from the box's real occupancy (every env's slices plus any legacy ones), so independent envs cannot collectively over-subscribe a box. Each slice carve reserves its slot and host ports under a brief box-wide lock. The post-bake orphan reaper only ever deletes the active env's own stamped slices — never another env's slices or legacy un-stamped ones.
+- Added: `admin pool teardown-slices` command that tears down every unleased slice VM recorded in the pool DB (used by `minds env destroy` so a destroyed env doesn't leak its baked pool slices on shared boxes).
+
+### Deprecated
+
+- Deprecated: Baking new OVH classic VPS pool hosts in `mngr imbue_cloud admin pool create`. The `--backend` default is now `slice`; passing `--backend ovh_vps` fails fast with a deprecation error pointing at `--backend slice`. Existing OVH VPS pool hosts are unaffected and can still be listed and destroyed (`admin pool list` / `admin pool destroy`, the connector's release + cleanup paths).
+
+### Fixed
+
+- Fixed: Restarting a stopped `imbue_cloud` (leased pool) mind left it in a broken, unrecoverable state — the subsequent `mngr start` SSH into the container failed ("Start step of host restart failed"). Two parts: (1) `ImbueCloudProvider.get_host` previously returned an online host unconditionally without checking whether the inner container was actually running; it now probes the container's running state over outer root SSH (mirroring `VpsDockerProvider.get_host`) and returns an offline host when the container is stopped, so `mngr start` routes through `start_host`. (2) `start_host` previously did a bare `docker start` and returned, but the in-container sshd is launched via `docker exec` and does not survive a stop/start; it now re-bootstraps the container's SSH (relaunches sshd, re-seeds the per-host authorized key, waits for sshd, re-scans and re-records the served host key).
+- Fixed: `mngr list` discovery now reports a transport-level failure reaching the Imbue Cloud connector (connection refused, DNS failure, timeout — the flaky-network / connector-down case) as a typed `ProviderUnavailableError` rather than a bare httpx error. Lets the minds recovery flow tell "provider is unreachable, retry" apart from "your workspace can't be reached for another reason".
+
 ## [v0.1.6] - 2026-06-18
 
 ### Added

@@ -6,6 +6,16 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Generalized `mngr usage` cost/usage tracking beyond Claude. A new `TokenSnapshot` data type and a `pricing` module (`compute_cost`) lets usage sources that report token counts rather than a pre-computed dollar cost be priced centrally by the reader. Anthropic prices mirror `apps/modal_litellm`; OpenAI / Codex prices (`gpt-5.x`, `*-codex`, `o3`/`o4-mini`, ...) are mirrored from litellm directly. An unknown model resolves to no estimate rather than a misleading `$0`.
+- Added: Per-source aggregation now lives behind a reader hook (`aggregate_usage_source`, contributed via `register_hookspecs`) so a usage plugin can ship its own reader. Three reusable strategies are provided: `aggregate_process_cumulative` (Claude), `aggregate_session_cumulative` (Codex), and `aggregate_session_incremental` (OpenCode and pi). The session strategies derive cost from tokens when the harness reports none, flagging each session `REPORTED` vs `ESTIMATED`.
+- Added: `mngr usage` JSON / CEL surface now exposes the token side too — `subscription_tokens` / `api_tokens` aggregates, an `is_estimated` flag inside each `*_cost` block (true when any contributing session's dollars were token-derived), and per-session `tokens` / `model` / `cost_provenance`. The human `api cost:` line is marked `(estimated)` when its dollars were derived from tokens; the `subscription cost:` line is marked `(imputed, estimated)` in the same case.
+
+### Changed
+
+- Changed: Renamed the `--max-age` flag (and the `max_age_seconds` plugin-config option) to `--stale-after` (`stale_after_seconds`), so the name reflects that it only controls the snapshot stale-warning threshold and is not an event-age filter. No alias is kept for the old name.
+
 ## [v0.1.6] - 2026-06-18
 
 ## [v0.1.5] - 2026-06-16
