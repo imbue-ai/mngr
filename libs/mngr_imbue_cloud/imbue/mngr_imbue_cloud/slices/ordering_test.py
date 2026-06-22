@@ -3,9 +3,11 @@ import pytest
 from imbue.mngr_imbue_cloud.errors import BareMetalConfigError
 from imbue.mngr_imbue_cloud.errors import BareMetalProvisioningError
 from imbue.mngr_imbue_cloud.slices.ordering import _looks_like_service_name
+from imbue.mngr_imbue_cloud.slices.ordering import build_box_host_key_postinstall_script
 from imbue.mngr_imbue_cloud.slices.ordering import derive_server_specs
 from imbue.mngr_imbue_cloud.slices.ordering import extract_order_id
 from imbue.mngr_imbue_cloud.slices.ordering import select_eco_option_codes
+from imbue.mngr_imbue_cloud.slices.ordering import start_os_reinstall
 from imbue.mngr_imbue_cloud.slices.ordering import summarize_checkout_prices
 
 
@@ -223,8 +225,6 @@ def test_derive_server_specs_raises_when_cpu_specs_absent() -> None:
 
 
 def test_build_box_host_key_postinstall_script_installs_ed25519_and_drops_other_types() -> None:
-    from imbue.mngr_imbue_cloud.slices.ordering import build_box_host_key_postinstall_script
-
     script = build_box_host_key_postinstall_script(
         "-----BEGIN OPENSSH PRIVATE KEY-----\nFAKEKEYBODY\n-----END OPENSSH PRIVATE KEY-----",
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5FAKE box",
@@ -253,8 +253,6 @@ class _FakeReinstallClient:
 
 
 def test_start_os_reinstall_injects_a_known_host_key_and_returns_its_public_half() -> None:
-    from imbue.mngr_imbue_cloud.slices.ordering import start_os_reinstall
-
     client = _FakeReinstallClient()
     result = start_os_reinstall(client, service_name="ns1.example", ssh_public_key="ssh-ed25519 AAAAclient")
     assert result.task_id == 4242
