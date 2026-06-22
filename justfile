@@ -647,7 +647,9 @@ forward-system-interface agent_name:
     # hostname uniqueness, so the full id is what we want here -- not the
     # short name (which would let two agents with the same name across
     # different hosts collide in the tunnel namespace).
-    AGENT_ID=$(uv run mngr list --format jsonl 2>/dev/null \
+    # --on-error continue: this is a blanket listing, so an unauthenticated
+    # provider should not abort the lookup of a local agent.
+    AGENT_ID=$(uv run mngr list --format jsonl --on-error continue 2>/dev/null \
         | jq -r --arg n "$AGENT_NAME" 'select(.resource_type == "agent" and .name == $n) | .id' \
         | head -1)
     if [ -z "$AGENT_ID" ]; then
