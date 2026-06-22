@@ -363,12 +363,17 @@ minds-install:
     . apps/minds/scripts/select_node_version.sh || exit 2
     cd apps/minds && pnpm install
 
-# Override agent_name / branch via positional args:
+# Override agent_name / branch / fct (FCT worktree path) via positional args:
 #   just minds-start agent_name=foo branch=some-branch
+#   just minds-start fct=.external_worktrees/my-fct-worktree
+# `fct` defaults to .external_worktrees/forever-claude-template; an absolute
+# path is used as-is, a relative one is resolved against the mngr root. This
+# is what gets synced (vendor/mngr/) and exported as MINDS_WORKSPACE_GIT_URL,
+# so point it at whichever FCT worktree/branch you want to launch against.
 # Refuses to start if another minds-start is already running in this
 # worktree (PID file under /tmp keyed by worktree path). Use `just
 # minds-stop` to kill the running instance first.
-minds-start agent_name="mindtest" branch="":
+minds-start agent_name="mindtest" branch="" fct="":
     #!/bin/bash
     set -ueo pipefail
     if [ -z "${MINDS_ROOT_NAME:-}" ]; then
@@ -382,7 +387,14 @@ minds-start agent_name="mindtest" branch="":
         echo "       settings.toml than its bootstrap writes to." >&2
         exit 2
     fi
-    fct_wt="$(pwd)/.external_worktrees/forever-claude-template"
+    if [ -n "{{fct}}" ]; then
+        case "{{fct}}" in
+            /*) fct_wt="{{fct}}" ;;
+            *)  fct_wt="$(pwd)/{{fct}}" ;;
+        esac
+    else
+        fct_wt="$(pwd)/.external_worktrees/forever-claude-template"
+    fi
     if [ ! -e "$fct_wt/.git" ]; then
         echo "error: no FCT worktree at $fct_wt" >&2
         echo "       run \`git -C ~/project/forever-claude-template worktree add -b <branch> $fct_wt <base>\`" >&2
