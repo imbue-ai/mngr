@@ -117,3 +117,7 @@ Aligned form inputs (TextInput / Select / Textarea) with Figma's text field (nod
 Lifted the accent color in dark mode to a brighter blue (`#0069d9` -> `#4d9bff`). On the pure-black dark surface the original accent read too dark: low-opacity tints (`accent/15`, `/40`) nearly vanished and link text was hard to read. The brighter dark-mode value keeps links, focus rings, selection tints, and progress legible (and clears WCAG AA as link text on black). Light mode is unchanged.
 
 Decluttered the dev styleguide previews: dropped the redundant "Light" / "Dark" labels from the dual-mode token previews (the white/black cards are self-evident), removed the decorative card frame (border / background / padding) from the single-mode previews (Type ramp, Spacing, Corner radius) so the samples sit directly on the page, and dropped the borders from the corner-radius demo shapes (each is now just its filled shape).
+
+Gave the primary button a pressed state: it now dims to 70% opacity on `:active` (its hover is 80%), so a press reads distinctly from a hover.
+
+Gave the styleguide's floating light/dark toggle an opaque surface background (`.styleguide-toggle` in app.css) so it stays legible while floating over page content; the hover/active fills are composited over that surface as a background-image gradient rather than replacing it (a translucent fill background-color would let content show through).

@@ -526,3 +526,24 @@ html {
 .styleguide-toc-link[aria-current="page"] {
   color: var(--color-primary);
 }
+
+/*
+ * Dev styleguide light/dark toggle. It's fixed (floats over page content), so
+ * it needs an opaque surface rather than the secondary button's transparent
+ * base. Pin background-color to the surface in every state (overriding the
+ * secondary variant's translucent hover/active fills, which would otherwise
+ * let content show through), and layer the hover/active fill as a
+ * background-image gradient OVER that surface so the control tints while
+ * staying opaque.
+ */
+.styleguide-toggle,
+.styleguide-toggle:hover,
+.styleguide-toggle:active {
+  background-color: var(--c-surface-primary);
+}
+.styleguide-toggle:hover {
+  background-image: linear-gradient(var(--c-fill-hover), var(--c-fill-hover));
+}
+.styleguide-toggle:active {
+  background-image: linear-gradient(var(--c-fill-active), var(--c-fill-active));
+}

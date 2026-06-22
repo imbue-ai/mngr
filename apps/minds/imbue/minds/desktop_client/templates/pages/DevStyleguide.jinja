@@ -66,10 +66,12 @@
   {# Dev-only light/dark toggle. Fixed top-right so it stays reachable at any
      scroll position; it floats over the page (no backing bar). Flips `.dark`
      on <html> + persists to localStorage (wired in dev_styleguide.js); every
-     minds page honors it via Base.jinja's pre-paint script. The Button
-     primitive carries the look -- no bespoke button styling on this page. #}
+     minds page honors it via Base.jinja's pre-paint script. Built on the
+     Button secondary primitive; the `.styleguide-toggle` recipe (app.css)
+     gives it an opaque surface so floating over content stays legible, with
+     the hover/active fills composited over that surface. #}
   <Button id="styleguide-theme-toggle" variant="secondary"
-          extra="fixed top-4 right-4 z-50 shadow-overlay">
+          extra="styleguide-toggle fixed top-4 right-4 z-50 shadow-overlay">
     Switch to dark
   </Button>
 
