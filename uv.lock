@@ -3233,6 +3233,8 @@ version = "0.1.0"
 source = { editable = "apps/minds" }
 dependencies = [
     { name = "a2wsgi" },
+    { name = "boto3" },
+    { name = "botocore" },
     { name = "click" },
     { name = "click-option-group" },
     { name = "concurrency-group" },
@@ -3255,6 +3257,7 @@ dependencies = [
     { name = "psycopg2-binary" },
     { name = "pydantic" },
     { name = "python-multipart" },
+    { name = "sentry-sdk" },
     { name = "telethon" },
     { name = "tenacity" },
     { name = "tomlkit" },
@@ -3266,6 +3269,8 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "a2wsgi", specifier = ">=1.10" },
+    { name = "boto3", specifier = ">=1.34" },
+    { name = "botocore", specifier = ">=1.34" },
     { name = "click", specifier = ">=8.0" },
     { name = "click-option-group", specifier = ">=0.5.6" },
     { name = "concurrency-group", editable = "libs/concurrency_group" },
@@ -3288,6 +3293,7 @@ requires-dist = [
     { name = "psycopg2-binary", specifier = ">=2.9" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "python-multipart", specifier = ">=0.0.9" },
+    { name = "sentry-sdk", specifier = ">=2.59.0" },
     { name = "telethon", specifier = ">=1.40.0" },
     { name = "tenacity" },
     { name = "tomlkit", specifier = ">=0.12.0" },

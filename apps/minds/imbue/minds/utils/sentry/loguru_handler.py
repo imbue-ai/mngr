@@ -37,14 +37,15 @@ from sentry_sdk.utils import current_stacktrace
 from sentry_sdk.utils import event_from_exception
 from sentry_sdk.utils import to_string
 
-from imbue_core.constants import HIGH_PRIORITY_LEVEL
-from imbue_core.constants import LOW_PRIORITY_LEVEL
-from imbue_core.constants import MEDIUM_PRIORITY_LEVEL
-from imbue_core.s3_uploader import EXTRAS_UPLOADED_FILES_KEY
+from imbue.minds.utils.sentry.s3_uploader import EXTRAS_UPLOADED_FILES_KEY
 
 # for formatting the log message. we don't want the timestamp/level because sentry already tracks that,
 # and it messes up event grouping since this string becomes the event title.
 SENTRY_LOG_FORMAT = "{name}:{function}:{line} - {message}"
+
+LOW_PRIORITY_LEVEL = 37
+MEDIUM_PRIORITY_LEVEL = 38
+HIGH_PRIORITY_LEVEL = 39
 
 
 class SentryLoguruLoggingLevels(enum.IntEnum):

@@ -1,6 +1,5 @@
 import threading
 import time
-import typing
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -11,15 +10,7 @@ from botocore import UNSIGNED
 from botocore.config import Config
 from loguru import logger
 
-if typing.TYPE_CHECKING:
-    # type: ignore[import-not-found]: pyre on modal does't believe in mypy_boto3_s3
-    from mypy_boto3_s3 import Client
-else:
-    Client = object
-
 from pydantic import PrivateAttr
-
-from imbue_core.pydantic_serialization import FrozenModel
 
 EXTRAS_UPLOADED_FILES_KEY = "uploaded_files"
 
