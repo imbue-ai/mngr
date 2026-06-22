@@ -68,6 +68,11 @@ COMPRESSED_LOG_EXTENSION = "gz"
 MAX_SENTRY_ATTACHMENT_SIZE = 10 * 1024 * 1024
 
 
+SENTRY_DSN_PRODUCTION = 'https://d8658891db0c1246864df82eefd74b6d@o4504335315501056.ingest.us.sentry.io/4511609235636224'
+SENTRY_DSN_STAGING = 'https://221f676a7e3c99733e85dc5c8dd6d6e2@o4504335315501056.ingest.us.sentry.io/4511609241862145'
+SENTRY_DSN_DEV = 'https://0a66e5894c00f701e3c1b7c2daae4650@o4504335315501056.ingest.us.sentry.io/4511609244811264'
+
+
 def truncate_string(s: str, max_length: int) -> str:
     if len(s) <= max_length:
         return s
