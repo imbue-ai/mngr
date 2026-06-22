@@ -1,0 +1,5 @@
+Fix the `test_create_copy` release e2e test (and harden the e2e fixture for every release test).
+
+The e2e fixture left all installed provider backends enabled. With the cloud provider plugins (aws, azure, gcp, ...) now installed, each registers a default instance that `mngr list` discovers, and a backend with no credentials raises `ProviderUnavailableError`. Because `mngr list` defaults to `--on-error abort`, a single unconfigured/unavailable backend (or a host without Docker) failed every list-based assertion, even for tests that only created a local agent. The fixture now pins `enabled_backends` to just the backends a test declares via its `@pytest.mark.docker` / `@pytest.mark.modal` markers (always including `local`), so local-only tests no longer depend on whether Docker or cloud credentials happen to be present on the runner.
+
+Also removed the incorrect `@pytest.mark.rsync` marker from `test_create_copy`: with `--transfer=git-mirror` in a git repository the work_dir is built purely via git, so rsync is never invoked and the resource guard's NEVER_INVOKED check rightly failed once the discovery failure above was resolved.

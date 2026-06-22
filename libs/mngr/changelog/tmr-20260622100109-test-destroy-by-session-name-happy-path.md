@@ -1,0 +1,3 @@
+Fixed the `test_destroy_by_session_name_happy_path` e2e release test so it passes in environments where unconfigured cloud-provider plugins (e.g. aws) are enabled by default.
+
+The post-destroy verification now lists `mngr list --provider local` (the provider the agent actually lives on) instead of a bare `mngr list`. A bare list enumerates every enabled provider and exits non-zero if any is unreachable, which is unrelated to whether the agent was destroyed. The superfluous `@pytest.mark.rsync` was also removed: the test only creates a local agent (transferred via git-worktree) and never invokes rsync.

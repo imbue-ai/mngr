@@ -1,0 +1,1 @@
+Raised the per-test timeout on the `mngr config get` missing-key e2e test to 60s, matching the other mngr-subprocess config tests, so a slow cold-start invocation no longer trips the default 10s pytest-timeout.

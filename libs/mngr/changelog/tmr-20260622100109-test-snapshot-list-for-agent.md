@@ -1,0 +1,1 @@
+Strengthen the `test_snapshot_list_for_agent` e2e tutorial test. It now cross-checks the human-readable `mngr snapshot list my-task` table against the structured `--format json` output, asserting that the auto-created "initial" snapshot is a real snapshot whose concrete id also appears in the table (rather than just matching the literal word "initial").

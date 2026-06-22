@@ -1,0 +1,1 @@
+Added an e2e release test (`test_create_modal_host_env_direct`) covering the direct `--host-env KEY=VALUE` form of setting host-level environment variables on a Modal host. It complements the existing `--pass-host-env` test by exercising the inline (non-shell-passthrough) resolution path and verifying the value reaches the host.

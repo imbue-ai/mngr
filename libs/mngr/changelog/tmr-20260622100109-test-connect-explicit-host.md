@@ -1,0 +1,3 @@
+Fixed the `test_connect_explicit_host` e2e tutorial test, which timed out instead of asserting on the `mngr conn my-task@my-host` error path.
+
+The test never created a local `my-task` agent, so the discovery event-stream optimization could not scope resolution to the local provider. mngr then fell back to a full provider scan, which constructs the Modal provider and makes a real `app_lookup` network call before disabling itself -- pushing the command past the default 10s per-test timeout. The test now creates a local `my-task` first (so resolution stays local-only and the Modal provider is never constructed) and is marked `@pytest.mark.tmux` with a longer timeout, mirroring the other connect tests. The tutorial block is unchanged.

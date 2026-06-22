@@ -1,0 +1,1 @@
+Added a `@pytest.mark.timeout(120)` override to the `test_config_set_headless_globally` release test. The default 10s pytest timeout was too short for the cold-start cost of the first `mngr` invocation in the test (~14s), causing spurious timeout failures.

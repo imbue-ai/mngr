@@ -1,0 +1,3 @@
+Removed the spurious `@pytest.mark.rsync` mark from the e2e tutorial test `test_connect_no_start_fails_when_stopped`. That unhappy path refuses to connect before the rsync-backed tmux attach is ever reached, so rsync is never invoked and the resource guard correctly flagged the mark as superfluous. The test now passes.
+
+Also strengthened the same test to verify the state-level effect of `--no-start`: after the connect refuses, it confirms via `mngr list --stopped --provider local` that the agent is still stopped (i.e. was not auto-started behind the scenes), not merely that the error message looked right.

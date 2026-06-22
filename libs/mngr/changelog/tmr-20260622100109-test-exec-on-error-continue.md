@@ -1,0 +1,3 @@
+Fix the `test_exec_on_error_continue` tutorial e2e test so it runs to completion.
+
+The test lacked a `@pytest.mark.timeout` override, so the global 10s pytest timeout fired during agent creation; it now uses `@pytest.mark.timeout(180)` like its sibling exec tests. The piped multi-agent `mngr list --ids | mngr exec - --on-error continue ...` command also enumerates every enabled provider (including unreachable ones), which exceeds the default 30s subprocess budget, so that command now uses a 90s timeout. Finally, the spurious `@pytest.mark.rsync` mark was removed: the test drives a local git-backed command agent, which never invokes rsync, so the resource guard correctly flagged the mark as superfluous.

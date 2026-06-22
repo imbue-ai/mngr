@@ -1,0 +1,1 @@
+Raised the per-test timeout on the `mngr config path` e2e tutorial test (`test_config_path`) to 60s, matching the other multi-subprocess config tests. A single `mngr config path` cold start plus the per-scope `test -e` existence checks can exceed the default 10s func-only timeout.

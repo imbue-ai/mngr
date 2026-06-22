@@ -1,0 +1,1 @@
+Strengthened the `test_create_reuse_and_message` e2e tutorial test: it now verifies the message was actually delivered to the agent (rather than only that the chained command exited 0, which can happen even when `mngr message` matches zero agents), confirms exactly one `worker` agent was created, and captures the agent's tmux pane to assert the message text landed there.

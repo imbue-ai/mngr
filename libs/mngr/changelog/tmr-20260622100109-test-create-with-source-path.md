@@ -1,0 +1,1 @@
+Hardened the `mngr create --from <path>` release test (`test_create_with_source_path`): added a 120s timeout matching its sibling tests and scoped its verification `mngr list` to `--provider local` so the local-agent check no longer fails when a credential-requiring cloud provider (e.g. AWS) reports unavailable during cross-provider discovery.

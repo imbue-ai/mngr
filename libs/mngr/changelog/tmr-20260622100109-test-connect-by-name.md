@@ -1,0 +1,1 @@
+Removed the spurious `@pytest.mark.rsync` mark from the `test_connect_by_name` e2e tutorial test. Connecting to a local agent created from a clean git repo uses a git-worktree transfer (not rsync), and the standalone connect command is a local `tmux attach`, so rsync is never invoked. The resource guard was correctly flagging the mark as superfluous.

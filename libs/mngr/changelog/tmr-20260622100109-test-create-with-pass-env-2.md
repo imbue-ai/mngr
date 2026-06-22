@@ -1,0 +1,1 @@
+Removed a superfluous `@pytest.mark.rsync` from the `test_create_with_pass_env` e2e tutorial test. The test creates an agent from a clean git repo, which never triggers an rsync file transfer, so the resource guard flagged the mark as unused and failed the test.

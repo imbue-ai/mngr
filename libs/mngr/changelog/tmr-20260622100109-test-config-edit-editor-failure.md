@@ -1,0 +1,3 @@
+Test-only: raised the per-test timeout on the e2e tutorial test `test_config_edit_editor_failure` from the default 10s to 60s (a single `mngr config edit` cold-start subprocess can exceed 10s, matching the sibling `test_config_edit`).
+
+Test-only: strengthened `test_config_edit_editor_failure` to drive `mngr config edit` with a fake editor that exits with a distinctive code (42) instead of `/bin/false` (exit 1). Exit code 1 collides with the generic abort code, so the test now genuinely verifies that `config edit` propagates the editor's *exact* exit code rather than coercing every failure to 1.

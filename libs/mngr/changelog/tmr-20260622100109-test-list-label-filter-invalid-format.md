@@ -1,0 +1,1 @@
+Strengthened the `mngr list --label` malformed-value e2e test (`test_list_label_filter_invalid_format`) to assert the click usage exit code (2) and to verify the error message echoes back both the offending flag (`--label`) and value (`TEAM`), confirming the rejection happens during argument parsing before any provider discovery runs.

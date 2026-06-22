@@ -1,0 +1,3 @@
+Test-only: fixed the `mngr list --provider <unknown>` release test (`test_list_unknown_provider_filter`) so it passes when run on its own. An unknown provider name selects no providers and does no discovery work, but the single `mngr` invocation still pays the full process startup cost (~10s), which alone exceeded the 10s default per-test timeout; added an explicit `@pytest.mark.timeout(60)` (matching `test_list_local_filter`).
+
+Test-only: strengthened the same test to assert via `--format json` that an unknown provider yields both an empty `agents` list and an empty `errors` list, directly verifying that an unknown provider name is not an error condition rather than only checking the human-readable "No agents found" output.

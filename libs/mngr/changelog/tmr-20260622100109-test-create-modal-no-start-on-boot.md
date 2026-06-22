@@ -1,0 +1,3 @@
+Scope the verification listing in the `test_create_modal_no_start_on_boot` tutorial e2e test to `mngr list --provider modal --format json` (instead of an unfiltered `mngr list`).
+
+The unfiltered listing enumerates all default provider backends, including `aws`. With no AWS credentials configured the AWS backend raises `ProviderUnavailableError`, which aborts the listing under the default `--on-error abort`, causing the verification step to fail even though the `mngr create --provider modal --no-start-on-boot` command under test succeeded. Filtering to the modal provider matches the convention used by the other create-modal tests and keeps the test focused on the modal agent it created.

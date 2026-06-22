@@ -1,0 +1,1 @@
+Removed the superfluous `@pytest.mark.rsync` mark from the `test_troubleshoot_recent_events` e2e tutorial test. The test creates a local command agent (which uses a git worktree, not rsync) and runs `mngr event`, so it never invokes rsync; the resource guard was correctly failing the test for carrying a mark it never exercised.

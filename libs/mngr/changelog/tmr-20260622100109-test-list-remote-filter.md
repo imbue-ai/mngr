@@ -1,0 +1,5 @@
+Harden the shared mngr e2e test fixture against optional cloud provider backends.
+
+A full-discovery `mngr list` (e.g. the `mngr list --remote` tutorial command exercised by `test_list_remote_filter`) probes every enabled provider. In a `uv sync --all-packages` checkout the credential-requiring cloud backends (aws, azure, gcp) are installed, so they were loaded and probed during every e2e listing; lacking credentials they raise `ProviderUnavailableError`, which under the default `--on-error abort` aborts the whole listing with a non-zero exit code. The e2e profile now disables those plugins, which (because plugins are blocked before their setuptools entry points are imported) also skips importing their heavy SDKs and roughly halves each `mngr` subprocess's startup cost.
+
+Additionally, the e2e fixture now disables the docker provider when no Docker daemon socket is present, so the tutorial tests that do not target docker pass in environments without a running daemon (the release sandbox still starts one and keeps docker enabled). This is test-infrastructure only; there is no change to shipped behavior.

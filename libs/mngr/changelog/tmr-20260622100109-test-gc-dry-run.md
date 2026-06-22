@@ -1,0 +1,1 @@
+Fixed the `test_gc_dry_run` e2e tutorial test so its post-dry-run verification scopes `mngr list` to the Modal provider (`mngr list --provider modal`). The previous bare `mngr list` queried every provider and exited non-zero whenever an unrelated provider (e.g. AWS) was unconfigured, failing the test even though the dry run correctly left the Modal agent untouched.

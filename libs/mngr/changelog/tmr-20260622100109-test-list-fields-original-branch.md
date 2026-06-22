@@ -1,0 +1,3 @@
+Fixed the `test_list_fields_original_branch` e2e tutorial test (covering `mngr list --fields "name,state,initial_branch"`).
+
+The test was failing for two reasons: it lacked a `@pytest.mark.timeout` so the slow remote-discovery path tripped the default 10s pytest timeout, and the bare `mngr list` queried the AWS backend, which is registered-but-unconfigured in CI and therefore raised `ProviderUnavailableError`, making the command exit non-zero per the error-handling spec. The test now scopes the listing to `--provider local` (the convention already used across the e2e suite) and carries a generous timeout marker, so it exercises the `--fields`/`initial_branch` rendering deterministically and exits cleanly.

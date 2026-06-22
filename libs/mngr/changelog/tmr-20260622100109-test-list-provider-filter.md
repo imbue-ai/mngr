@@ -1,0 +1,1 @@
+Fixed the `test_list_provider_filter` e2e release test, which was timing out under the default 10s per-test limit. `mngr list --provider modal` runs the full provider-discovery path (including an authenticated Modal lookup) that routinely takes longer, so the test now uses a 60s timeout override, matching the sibling `--local`/`--remote` filter tests.

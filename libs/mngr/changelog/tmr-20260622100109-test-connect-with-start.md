@@ -1,0 +1,1 @@
+Removed a spurious `@pytest.mark.rsync` from the `test_connect_with_start` e2e test. Connecting to an already-running local agent with `--start` only performs a no-op start followed by a tmux attach, so rsync is never invoked; the resource guard rightly failed the test for carrying a mark it never exercised.

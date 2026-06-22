@@ -1,0 +1,1 @@
+Strengthened the `mngr snapshot create` checkpoint release test so it ties the snapshot id reported by `snapshot create` to the one returned by `snapshot list` (verifying create -> list consistency) and confirms the agent -> host resolution by checking the created agent name in the command output.

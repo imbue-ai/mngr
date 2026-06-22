@@ -1,0 +1,5 @@
+Hardened the tutorial e2e test fixture and the `test_get_json_into_var` scripting test (internal test-only changes; no user-facing behavior change).
+
+The e2e fixture now pins the provider backends each test discovers to the set it actually needs, derived from the test's markers: `local`, `ssh`, and `modal` are always enabled, and `docker` is enabled only for tests marked `@pytest.mark.docker`. Previously the monorepo test venv (which installs every provider plugin via `uv sync --all-packages`) left every backend enabled, so a plain `mngr list` fanned out to credential-gated cloud backends (e.g. aws) and to docker. Those raise `ProviderUnavailableError` when unconfigured or when the docker daemon is unreachable, which -- by design -- aborts a default `mngr list`, failing tests that have nothing to do with those providers. The new scoping mirrors a realistic install (`imbue-mngr` core depends on none of the provider plugins).
+
+`test_get_json_into_var` now echoes the captured `AGENT_INFO` variable and parses it, asserting it is a JSON object with the documented `agents` and `errors` arrays, instead of only checking that the captured string is non-empty.

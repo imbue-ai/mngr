@@ -8,7 +8,6 @@ from imbue.mngr.e2e.conftest import E2eSession
 from imbue.skitwright.expect import expect
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 # `mngr exec` runs the agent's command and waits for the agent's activity
@@ -79,8 +78,11 @@ def test_command_agent_data_pipeline(e2e: E2eSession) -> None:
     # Verify the pipeline command and the idle configuration were actually
     # applied to the created agent (not silently dropped). The idle settings are
     # the distinctive feature of this tutorial line, so assert they round-trip.
+    # Scope the listing to the modal provider (where this agent runs): an
+    # unscoped list reaches out to every configured provider and fails if any
+    # (e.g. aws) lacks credentials in the test environment.
     list_result = e2e.run(
-        "mngr list --format json",
+        "mngr list --provider modal --format json",
         comment="verify the etl-job agent's command and idle configuration",
         timeout=120.0,
     )
@@ -90,14 +92,21 @@ def test_command_agent_data_pipeline(e2e: E2eSession) -> None:
     assert len(matching) == 1, f"expected exactly one etl-job agent, got {matching}"
     etl_job = matching[0]
     assert etl_job["command"] == "sleep 100991", etl_job
+    assert etl_job["host"]["provider_name"] == "modal", etl_job
     # IdleMode serializes as an upper-case enum value (see primitives.IdleMode).
     assert etl_job["idle_mode"] == "RUN", etl_job
     assert etl_job["idle_timeout_seconds"] == 60, etl_job
 
 
-@pytest.mark.rsync
+# No @pytest.mark.rsync: this test creates a purely local command agent in the
+# fixture's git repo, so the transfer uses GIT_WORKTREE (git, not rsync), and it
+# never runs `mngr exec` (the only sibling operation that would invoke rsync).
+# With the mark, the resource guard's NEVER_INVOKED check fails the passing test.
 @pytest.mark.release
 @pytest.mark.tmux
+# Creating a command agent (spinning up its tmux session and extra windows)
+# takes ~30s, pushing the test past the default 10s per-test timeout.
+@pytest.mark.timeout(60)
 def test_command_agent_dev_server_extra_windows(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # run a dev server with extra tmux windows for logs
@@ -185,5 +194,14 @@ def test_command_agent_batch_job_modal(e2e: E2eSession) -> None:
     # assert on the substrings rather than an exact string match.
     assert "echo train" in batch_job["command"], batch_job
     assert "echo evaluate" in batch_job["command"], batch_job
+    # The host must have provisioned cleanly: a failure_reason here would mean the
+    # modal host errored out even though `create` happened to exit 0.
+    assert batch_job["host"]["failure_reason"] is None, batch_job["host"]
+    # The tutorial promises the container "will be automatically snapshotted ... so
+    # you can later come back and connect (and start) to see the results". That
+    # reconnect story depends on at least one snapshot existing for the host, so
+    # assert one was actually created rather than trusting the prose.
+    snapshots = batch_job["host"]["snapshots"]
+    assert len(snapshots) >= 1, f"Expected at least one snapshot enabling reconnect, got: {snapshots}"
 
     expect(e2e.run("mngr conn batch-job", comment="connect back to the batch job")).to_succeed()

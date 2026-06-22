@@ -1,0 +1,5 @@
+Fix the `test_recipe_multi_agent_parallel_workflow` e2e release test (and harden the shared e2e fixture) so it passes in the all-packages monorepo environment.
+
+The e2e fixture now pins `enabled_backends` to the providers a test is actually marked for (always `local`, plus `modal`/`docker` only when the matching mark is present). Without this, `uv sync --all-packages` registers every bundled cloud provider (aws, gcp, azure, vultr, ...), and a bare `mngr list` enumerates all of them and exits non-zero on the first unreachable one (e.g. missing AWS credentials or an absent Docker daemon) -- even for tests that never touch those providers.
+
+The test's timeout was raised from 120s to 300s (matching the sibling recipe test): each `mngr` startup eagerly imports heavy provider SDKs and costs several seconds, and this recipe issues ~13 sequential invocations plus a multi-agent destroy. The stale `@pytest.mark.rsync` mark was also removed, since the local command-agent stand-ins set up worktrees via `git-worktree`, not rsync.

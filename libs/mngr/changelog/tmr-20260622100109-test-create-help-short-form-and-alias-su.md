@@ -1,0 +1,1 @@
+Fixed the `test_create_help_short_form_and_alias_succeed` e2e release test, which was timing out under the default 10s pytest timeout. The test runs two `mngr` invocations (`mngr create -h` and `mngr c --help`) back-to-back, each paying the ~10s CLI startup cost, so it now carries an explicit `@pytest.mark.timeout(60)` like the other e2e tutorial tests.

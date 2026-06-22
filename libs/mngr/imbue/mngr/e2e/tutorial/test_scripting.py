@@ -1,15 +1,16 @@
 """Tests for the SCRIPTING AND AUTOMATION tutorial section."""
 
+import json
 import tomllib
 from pathlib import Path
 
 import pytest
 
 from imbue.mngr.e2e.conftest import E2eSession
+from imbue.mngr.utils.polling import poll_until
 from imbue.skitwright.expect import expect
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
@@ -27,13 +28,32 @@ def test_create_headless_no_connect_message(e2e: E2eSession) -> None:
     ).to_succeed()
 
     # Verify the agent was actually created and is discoverable, not just that
-    # the headless create command exited 0.
-    list_result = e2e.run("mngr list", comment="verify the headless agent appears in the list")
+    # the headless create command exited 0. Scope the listing to the local
+    # provider (where a no-`--provider` create runs): `--provider` controls which
+    # providers are *queried*, so this keeps the check from depending on whatever
+    # remote providers happen to be enabled-but-unconfigured in the environment
+    # (e.g. an enabled AWS provider without credentials would otherwise make the
+    # full listing exit non-zero, unrelated to the headless agent under test).
+    list_result = e2e.run(
+        "mngr list --provider local", comment="verify the headless agent appears in the list"
+    )
     expect(list_result).to_succeed()
     expect(list_result.stdout).to_contain("my-task")
 
+    # Beyond mere discoverability: confirm the headless agent's host is actually
+    # live and reachable by running a command on it -- this is how a human would
+    # verify the agent is running, not just registered. `--no-connect` means no
+    # session was ever attached, yet the agent's host must still be reachable and
+    # `mngr exec` runs `pwd` in the agent's work_dir, which is an absolute path.
+    exec_result = e2e.run("mngr exec my-task pwd", comment="confirm the headless agent's host is reachable")
+    expect(exec_result).to_succeed()
+    assert exec_result.stdout.strip().startswith("/"), (
+        f"expected `pwd` to print an absolute work_dir, got {exec_result.stdout!r}"
+    )
+
 
 @pytest.mark.release
+@pytest.mark.timeout(120)
 def test_config_set_headless_globally(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # or set headless globally
@@ -61,6 +81,7 @@ def test_config_set_headless_globally(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+@pytest.mark.timeout(120)
 def test_config_set_rejects_unknown_key(e2e: E2eSession) -> None:
     """Unhappy path for the same `mngr config set` command: unknown keys are rejected.
 
@@ -104,14 +125,61 @@ def test_create_reuse_and_message(e2e: E2eSession) -> None:
         # idempotent creation: reuse an existing agent if it already exists
         mngr create worker --reuse --provider modal --no-connect && mngr message worker -m "Process the queue"
     """)
-    expect(
-        e2e.run(
-            "mngr create worker --reuse --provider modal --no-connect --no-ensure-clean --type command -- sleep 101200"
-            ' && mngr message worker -m "Process the queue"',
-            comment="idempotent create + message",
-            timeout=180.0,
-        )
-    ).to_succeed()
+    result = e2e.run(
+        "mngr create worker --reuse --provider modal --no-connect --no-ensure-clean --type command -- sleep 101200"
+        ' && mngr message worker -m "Process the queue"',
+        comment="idempotent create + message",
+        timeout=180.0,
+    )
+    expect(result).to_succeed()
+    # `mngr message` exits 0 even when it matches *zero* agents (it prints "No
+    # agents found to send message to" and preserves a historical exit-0). So
+    # the success of the chained command above is not by itself proof the message
+    # was delivered -- assert on the delivery output that is printed only when the
+    # message actually reached the agent.
+    expect(result.stdout).to_contain("Message sent to: worker")
+    expect(result.stdout).to_contain("Successfully sent message to 1 agent(s)")
+
+    # The create half must have produced exactly one running `worker` agent (and
+    # not, e.g., silently created a duplicate or none). `--ids` prints one agent
+    # ID per line, so a single non-empty token confirms exactly one match.
+    # Scope the query to the modal provider: the isolated env may have other
+    # providers enabled but unreachable (e.g. AWS/Vultr), which would otherwise
+    # make `mngr list` exit non-zero on a partial failure unrelated to the worker.
+    listing = e2e.run(
+        "mngr list --provider modal --include 'name == \"worker\"' --ids",
+        comment="confirm exactly one worker agent was created",
+        timeout=120.0,
+    )
+    expect(listing).to_succeed()
+    worker_ids = listing.stdout.split()
+    assert len(worker_ids) == 1, f"Expected exactly one worker agent, got: {listing.stdout!r}"
+
+    # Verify the concrete effect of the message, the way a human would when
+    # debugging: the text is delivered as literal keystrokes into the agent's
+    # tmux pane (a `command`-type agent just echoes them, since `sleep` ignores
+    # stdin), so capturing that pane must show the message. Poll because the
+    # send and the terminal echo are not instantaneous over the network.
+    # The agent runs in the session's primary window, which mngr renames to
+    # `agent` (config `tmux.primary_window_name`); target that window by name so
+    # the capture is robust to extra windows (ttyd, watchers).
+    capture_cmd = (
+        "mngr exec worker '"
+        'SESSION=$(tmux list-sessions -F "#{session_name}" 2>/dev/null | head -1); '
+        'tmux capture-pane -p -t "$SESSION:agent" 2>&1 || echo no-pane'
+        "'"
+    )
+    last_capture = ""
+
+    def _pane_shows_message() -> bool:
+        nonlocal last_capture
+        capture = e2e.run(capture_cmd, comment="capture the worker agent's tmux pane", timeout=60.0)
+        last_capture = capture.stdout + capture.stderr
+        return "Process the queue" in last_capture
+
+    assert poll_until(_pane_shows_message, timeout=30.0, poll_interval=3.0), (
+        f"message 'Process the queue' never appeared in the worker agent's tmux pane; last capture:\n{last_capture}"
+    )
 
 
 @pytest.mark.release
@@ -134,18 +202,26 @@ def test_get_json_into_var(e2e: E2eSession) -> None:
     # to be reachable -- it returns an empty list either way -- so marking it
     # @pytest.mark.modal would only trigger a spurious "never invoked modal"
     # guard failure.
+    # Echo the captured variable back out so the test can prove it holds the
+    # actual JSON document (not just that the command exited 0). This mirrors the
+    # tutorial's intent: the value is captured into a shell variable for later
+    # parsing in scripts.
     result = e2e.run(
-        'AGENT_INFO=$(mngr list --format json) && echo "${#AGENT_INFO}"',
+        'AGENT_INFO=$(mngr list --format json) && echo "$AGENT_INFO"',
         comment="get JSON output for parsing in scripts",
         timeout=120.0,
     )
     expect(result).to_succeed()
-    # Verify the variable actually captured the JSON document rather than an
-    # empty string: a well-formed `mngr list --format json` payload is an object
-    # with `agents` and `errors` arrays, so the echoed character count is
-    # comfortably non-trivial.
-    captured_length = int(result.stdout.strip())
-    assert captured_length > 0, f"expected AGENT_INFO to capture JSON, got length {captured_length}"
+    # The captured variable must be a well-formed JSON document with the shape
+    # `mngr list --format json` documents: a top-level object carrying `agents`
+    # and `errors` arrays. Parsing it here is exactly what a script consuming the
+    # captured value would do, so a successful parse plus the expected structure
+    # confirms the variable is usable downstream -- a far stronger guarantee than
+    # a non-empty character count.
+    parsed = json.loads(result.stdout)
+    assert isinstance(parsed, dict), f"expected AGENT_INFO to hold a JSON object, got {type(parsed).__name__}"
+    assert isinstance(parsed.get("agents"), list), f"expected an 'agents' array, got {parsed!r}"
+    assert isinstance(parsed.get("errors"), list), f"expected an 'errors' array, got {parsed!r}"
 
 
 # NOTE: deliberately NOT marked @pytest.mark.modal. `mngr observe --discovery-only`
@@ -156,7 +232,7 @@ def test_get_json_into_var(e2e: E2eSession) -> None:
 # Marking this @pytest.mark.modal would therefore always fail the "marked but
 # never invoked modal" guard check.
 @pytest.mark.release
-@pytest.mark.timeout(120)
+@pytest.mark.timeout(240)
 def test_observe_discovery_pipe_python(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # use discovery stream for streaming results into other tools
@@ -166,21 +242,51 @@ def test_observe_discovery_pipe_python(e2e: E2eSession) -> None:
     """)
     # Warm the discovery cache first. `mngr list` runs an unfiltered listing,
     # which writes a full discovery snapshot to disk; that lets the `observe`
-    # below emit the cached snapshot instantly on its fast path instead of
-    # racing the (provider-querying) initial sync against the timeout. The raw
-    # snapshot is real discovery JSONL: it carries the DISCOVERY_FULL event type.
-    expect(e2e.run("mngr list", comment="warm the discovery cache")).to_succeed()
+    # below emit the cached snapshot from its fast path (Phase 1) immediately
+    # after startup, instead of having to run its own provider-querying sync
+    # before it can emit anything. The raw snapshot is real discovery JSONL: it
+    # carries the DISCOVERY_FULL event type.
+    #
+    # The listing MUST stay unfiltered: a `--provider` filter would make this a
+    # partial listing, which deliberately does not write a snapshot, so the
+    # cache would never warm.
+    #
+    # `mngr list` queries every enabled remote provider (Modal, plus any whose
+    # backend is installed), which can take well over the default 30s e2e
+    # timeout, so give the warm-up matching headroom (the sibling
+    # `test_get_json_into_var` does the same for the same reason).
+    #
+    # `--on-error continue` is essential: an unconfigured-but-enabled provider
+    # (e.g. AWS without credentials) raises during construction, and in the
+    # default abort mode that exception propagates out of the listing *before*
+    # the discovery snapshot is written -- leaving the cache cold. In continue
+    # mode the failure is recorded as a per-provider error instead, so the
+    # snapshot is still written (with the failure surfaced via
+    # `error_by_provider_name`) and `observe`'s fast path can replay it.
+    #
+    # Do NOT assert exit 0 here: continue mode still exits non-zero whenever any
+    # provider errored. The real verification that the warm-up worked is the
+    # `DISCOVERY_FULL` assertion on the raw stream below, which only passes if
+    # the snapshot reached disk.
+    e2e.run("mngr list --on-error continue", comment="warm the discovery cache", timeout=120.0)
+    # `observe` streams forever, so each invocation is wrapped in `timeout` to
+    # bound it. The window must comfortably exceed mngr's process startup cost
+    # (import + plugin/provider-backend loading), which dominates the runtime of
+    # a fast-path observe: the cached snapshot is emitted essentially the moment
+    # the stream loop starts, but reaching that point can take ~20s of cold
+    # startup in an isolated test environment. A short (e.g. 5s) window kills the
+    # process mid-startup, before it ever emits, so use a generous one.
     raw = e2e.run(
-        "timeout 5 mngr observe --discovery-only || true",
+        "timeout 30 mngr observe --discovery-only || true",
         comment="capture the raw discovery stream",
-        timeout=45.0,
+        timeout=60.0,
     )
     expect(raw.stdout).to_contain("DISCOVERY_FULL")
     # observe blocks indefinitely; wrap with timeout so the while-loop exits.
     result = e2e.run(
-        'timeout 5 bash -c \'mngr observe --discovery-only | while read -r line; do echo "$line" | python -c "import sys, json; d=json.load(sys.stdin); print(d.get(\\"name\\", \\"unknown\\"))"; done\' || true',
+        'timeout 30 bash -c \'mngr observe --discovery-only | while read -r line; do echo "$line" | python -c "import sys, json; d=json.load(sys.stdin); print(d.get(\\"name\\", \\"unknown\\"))"; done\' || true',
         comment="pipe discovery stream into python (timeout-capped)",
-        timeout=45.0,
+        timeout=60.0,
     )
     expect(result).to_succeed()
     # Each discovery event is valid JSON the one-liner parses with json.load;
@@ -223,7 +329,17 @@ def test_usage_wait_and_create(e2e: E2eSession) -> None:
     expect(result.stdout).to_contain("Timed out")
 
     # Verify the concrete effect: the gated create was skipped, so no `chore`
-    # agent exists.
-    listing = e2e.run("mngr list --format json", comment="confirm the gated create was skipped", timeout=120.0)
+    # agent exists. Scope the listing to the providers the gated `chore@.modal`
+    # create could have landed on (local + modal). An unscoped `mngr list`
+    # queries every enabled-by-default backend, including aws/gcp/azure, which
+    # raise ProviderUnavailableError when their credentials are not configured
+    # (the e2e env only configures local/modal/docker); `mngr list` exits 1 on
+    # any provider discovery error, so the unrelated aws failure would otherwise
+    # mask this check. Both local and modal discover cleanly here.
+    listing = e2e.run(
+        "mngr list --provider local --provider modal --format json",
+        comment="confirm the gated create was skipped",
+        timeout=120.0,
+    )
     expect(listing).to_succeed()
     expect(listing.stdout).not_to_contain("chore")

@@ -1,0 +1,1 @@
+Test-only: raised the per-test timeout on the e2e tutorial test `test_plugin_list_shows_installed` from the default 10s to 60s. Like the other subprocess-driven `mngr plugin` e2e tests, it pays the ~10s mngr cold-start cost (importing and registering all plugins), which alone exceeds the default 10s timeout and caused the test to time out.

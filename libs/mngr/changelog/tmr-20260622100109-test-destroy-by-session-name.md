@@ -1,0 +1,1 @@
+Added a `@pytest.mark.timeout(60)` decorator to the `test_destroy_by_session_name` e2e release test so it no longer fails under the default 10s pytest timeout during mngr CLI cold-start, matching the convention used by the other destroy tests.

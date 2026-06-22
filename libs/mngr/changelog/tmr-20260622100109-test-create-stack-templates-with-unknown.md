@@ -1,0 +1,1 @@
+Strengthened the e2e test for stacking an unknown `--template` name: it now also asserts the error lists the valid template as available, and confirms (via `mngr list --provider local --ids`) that the failed `create` leaves no partially-created agent behind.

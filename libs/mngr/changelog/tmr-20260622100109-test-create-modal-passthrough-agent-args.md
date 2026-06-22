@@ -1,0 +1,1 @@
+Strengthened the `test_create_modal_passthrough_agent_args` e2e test: it now also confirms the passthrough args (`--dangerously-skip-permissions`, `--append-system-prompt`) reach a genuine `claude` agent running on a provisioned, RUNNING Modal host, rather than only checking that the recorded command string contains them.

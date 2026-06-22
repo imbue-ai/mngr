@@ -1,0 +1,1 @@
+Added a release test (`test_create_modal_volume_persists_across_destroy`) that exercises the core promise of mounting a persistent Modal volume: data written to the volume survives host destruction. It writes a sentinel through the volume on one host, destroys that host, creates a second host that mounts the same named volume, and confirms the sentinel is still readable.

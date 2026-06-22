@@ -1,0 +1,1 @@
+Raised the per-test timeout on the `test_invalid_provider_fails` e2e release test. The `mngr create` subprocess cold-starts and imports every registered provider backend SDK before it can report an unknown provider, which pushed the single command just past the default 10s timeout and caused spurious failures.

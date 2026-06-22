@@ -1,0 +1,3 @@
+Test-only: fixed the `test_create_with_env_vars` e2e tutorial test (ENVIRONMENT VARIABLES section). It was being killed mid-create by the default 10s per-test timeout, so it now carries `@pytest.mark.timeout(180)` and an explicit `timeout=120.0` on the follow-up `mngr exec`. Also removed its superfluous `@pytest.mark.rsync` mark: the create runs against a local git repo, so the default transfer mode is git-worktree and rsync is never invoked, which made the resource guard fail the otherwise-passing test.
+
+Test-only: added `test_create_with_malformed_env_is_rejected`, an unhappy-path test for the same tutorial block, verifying that `mngr create --env DEBUG` (a value with no `=`) is rejected with a `KEY=VALUE` format error and that no agent is created.

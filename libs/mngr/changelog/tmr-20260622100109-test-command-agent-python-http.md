@@ -1,0 +1,1 @@
+Removed the superfluous `@pytest.mark.rsync` mark from the `test_command_agent_python_http` e2e tutorial test. The test creates a purely-local command agent with `--no-connect`, which never invokes rsync (rsync requires exactly one remote endpoint), so the resource guard failed the otherwise-passing test with a NEVER_INVOKED violation.

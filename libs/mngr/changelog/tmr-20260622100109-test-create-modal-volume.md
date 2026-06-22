@@ -1,0 +1,1 @@
+Increased the timeouts for the `test_create_modal_volume` e2e release test. The remote `mngr create` command's final "initial snapshot" step is slow and variable in the Modal-in-Modal (offload) environment, so the per-command and overall test timeouts now match the more generous values already used by `test_create_modal_idle_timeout_60`, avoiding flaky timeout failures.

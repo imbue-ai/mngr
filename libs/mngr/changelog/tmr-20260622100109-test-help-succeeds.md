@@ -1,0 +1,1 @@
+Strengthened the `mngr --help` e2e test (`test_help_succeeds`) to verify that the advertised push/pull functionality is discoverable: the help output must list the `git` command and its "Push or pull git commits" summary, fully honoring the tutorial comment that advertises `push, pull`.

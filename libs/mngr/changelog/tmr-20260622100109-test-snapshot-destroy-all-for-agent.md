@@ -1,0 +1,1 @@
+Strengthened the `test_snapshot_destroy_all_for_agent` release test to assert that `mngr snapshot destroy --all-snapshots` reports destroying exactly the number of snapshots that existed beforehand, rather than just checking that the word "Destroyed" appears in the output.

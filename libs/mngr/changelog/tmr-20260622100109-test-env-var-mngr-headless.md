@@ -1,0 +1,3 @@
+Fixed the `test_env_var_mngr_headless` e2e tutorial test so its `mngr list` invocation is scoped to the local provider (`--provider local`). Previously it queried every configured provider, so an installed-but-unconfigured cloud provider (e.g. AWS without credentials) surfaced a provider error and made `mngr list` exit non-zero, failing the test for reasons unrelated to the `MNGR_HEADLESS` env var it is meant to verify.
+
+Added `test_env_var_mngr_headless_explicit_false`, covering the same tutorial block: it verifies that `MNGR_HEADLESS=false` resolves `headless` to false, confirming the env var's value is parsed rather than treated as a mere presence flag.

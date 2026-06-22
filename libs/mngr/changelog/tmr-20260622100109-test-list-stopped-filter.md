@@ -1,0 +1,5 @@
+Make the tutorial e2e suite robust against provider backends that are installed in the monorepo workspace but unusable in the test environment.
+
+The credential-backed cloud providers (AWS, Azure, GCP, Vultr, OVH, imbue_cloud) are enabled by default once their backends are installed, but the e2e environment has no credentials for them. An enabled-but-unreachable provider raises a hard `ProviderUnavailableError` during discovery, which makes plain `mngr list` exit non-zero in a fresh environment and breaks every tutorial test that legitimately expects "No agents found". The e2e fixture now disables those providers, and additionally disables the Docker provider when no Docker daemon is reachable (detected via a standard-library socket probe, so it does not trip the `docker_sdk` resource guard). Docker stays enabled wherever a daemon exists.
+
+The `test_list_stopped_filter` release test also gains an explicit `@pytest.mark.timeout(60)`, matching its sibling `test_list_local_filter`: a single `mngr list` runs the full provider-discovery path (an authenticated Modal lookup), which routinely exceeds the 10s default per-test timeout.

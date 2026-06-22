@@ -1,0 +1,3 @@
+Fixed the `test_troubleshoot_gc_dry_run_then_gc` e2e tutorial test, which failed because it carried `@pytest.mark.modal` even though `mngr gc` in a fresh environment skips the (nonexistent) Modal environment and never invokes the `modal` CLI -- the only Modal usage the resource guard can observe across the e2e subprocess boundary -- so the guard's "marked but never invoked modal" check tripped. Removed the spurious mark.
+
+Also strengthened the test to verify the actual behavioral distinction the tutorial teaches: `mngr gc --dry-run` is labeled as a dry run, the real `mngr gc` reports its results without the dry-run label, and both report that nothing was found to destroy in a clean environment.

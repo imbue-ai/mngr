@@ -1,0 +1,1 @@
+Fixed the `test_create_duplicate_name_fails` e2e release test: the intactness check now lists with `mngr list --provider local --format json` so discovery of unconfigured remote providers (e.g. AWS) cannot make the verification step exit non-zero, and removed the spurious `@pytest.mark.rsync` mark since the test never exercises rsync.

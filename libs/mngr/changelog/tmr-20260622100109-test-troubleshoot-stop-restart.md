@@ -1,0 +1,1 @@
+Removed the spurious `@pytest.mark.rsync` mark from the `test_troubleshoot_stop_restart` e2e tutorial test. The test exercises a local `command` agent (stop/restart of a `sleep` process), which never invokes rsync, so the resource guard failed the otherwise-passing test with "marked with @pytest.mark.rsync but never invoked rsync".

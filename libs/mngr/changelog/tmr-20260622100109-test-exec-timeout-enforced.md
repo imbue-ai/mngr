@@ -1,0 +1,1 @@
+Removed the spurious `@pytest.mark.rsync` mark from the `test_exec_timeout_enforced` e2e tutorial test. A command terminated by its `--timeout` is killed before `mngr exec` ever syncs files back, so rsync is never invoked and the resource guard correctly flagged the unused mark.

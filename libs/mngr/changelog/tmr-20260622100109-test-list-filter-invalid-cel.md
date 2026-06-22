@@ -1,0 +1,3 @@
+Fixed the `test_list_filter_invalid_cel` e2e tutorial test, which exercises the unhappy path for `mngr list --include` (a syntactically invalid CEL expression). The test was being killed by the global 10s pytest timeout because the `mngr` CLI subprocess startup alone exceeds 10s; it now carries an explicit `@pytest.mark.timeout(120)` (matching the generous timeouts on its sibling list tests) and a 60s subprocess timeout on the command.
+
+Also strengthened the test's assertions: it now verifies that the rejected expression is echoed back to the user and that the failure is a clean error message rather than a Python traceback.

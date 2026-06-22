@@ -1,0 +1,1 @@
+Strengthened the `mngr snapshot list --limit` release test so the tutorial command (`--limit 5`) now asserts that a generous limit shows all snapshots (including the auto-recorded "initial" snapshot), rather than only checking that the command exits cleanly.

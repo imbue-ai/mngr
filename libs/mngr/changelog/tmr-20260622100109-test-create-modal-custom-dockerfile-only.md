@@ -1,0 +1,1 @@
+Added an unhappy-path e2e test (`test_create_modal_custom_dockerfile_missing`) that verifies `mngr create --provider modal -b file=<path>` fails with a clear error (and leaves no phantom agent behind) when the referenced Dockerfile does not exist.

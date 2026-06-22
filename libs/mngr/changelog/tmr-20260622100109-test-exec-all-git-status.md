@@ -1,0 +1,3 @@
+Fixed the `test_exec_all_git_status` GIT tutorial e2e test. The read-only fan-out command (`mngr list --ids | mngr exec - "git status --short"`) runs entirely on a local agent and never transfers files, so the test no longer carries a superfluous `@pytest.mark.rsync` mark (which the resource guard rejected). Agent creation in this test now also gets extra per-command timeout headroom to avoid a flaky 30s timeout when host setup spikes.
+
+The test was also strengthened: it introduces a deterministic uncommitted change in the agent and asserts that the fanned-out `git status --short` surfaces that change's porcelain line, verifying the status content (not merely the per-agent success header) flows back through the fan-out.

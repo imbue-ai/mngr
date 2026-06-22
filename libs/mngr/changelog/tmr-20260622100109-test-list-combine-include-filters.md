@@ -1,0 +1,7 @@
+Test-only: fixed and strengthened the LABELS tutorial e2e test `test_list_combine_include_filters`.
+
+The shared e2e fixture now pins `enabled_backends` (via the `MNGR__ENABLED_BACKENDS` env layer) to just the backends each test declares through its resource-guard marks: `local` always, plus `docker`/`modal` when the test carries `@pytest.mark.docker` / `@pytest.mark.modal`. Previously full-discovery commands like `mngr list` enumerated every backend plugin installed in the monorepo venv (aws, azure, gcp, ovh, vultr, ...); a backend that is unreachable in the test environment (a cloud plugin with no credentials, or Docker with no running daemon) raised `ProviderUnavailableError`, which under `mngr list`'s default `--on-error abort` aborted the whole listing with a non-zero exit. This also removes the slow-discovery timeout pressure those unreachable providers caused.
+
+Dropped the inaccurate `@pytest.mark.rsync` mark from `test_list_combine_include_filters`: its agents are created from a git repo on the local host, so the transfer mode resolves to `git-worktree` and rsync is never invoked.
+
+Tightened the assertions: the baseline now pins the agent states (idle `sleep` agents settle into `WAITING`, not `RUNNING`), and the combined `team == backend AND state == RUNNING` filter is now asserted to return an empty set for the documented reason, rather than relying on a vacuous loop over an empty result.

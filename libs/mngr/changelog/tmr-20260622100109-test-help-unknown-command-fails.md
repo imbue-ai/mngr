@@ -1,0 +1,1 @@
+Fixed the CLI help e2e tests (`test_help.py`) to set an explicit `@pytest.mark.timeout(120)`, matching the convention used by every other e2e test module. Without it these tests inherited the default 10s timeout, which the ~12s `mngr` CLI startup exceeds, causing spurious timeout failures (e.g. `test_help_unknown_command_fails`).

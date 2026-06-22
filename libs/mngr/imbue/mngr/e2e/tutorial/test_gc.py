@@ -3,6 +3,8 @@
 Each test corresponds 1:1 to a tutorial script block.
 """
 
+import json
+
 import pytest
 
 from imbue.mngr.e2e.conftest import E2eSession
@@ -38,13 +40,19 @@ def test_gc_default(e2e: E2eSession) -> None:
         )
     ).to_succeed()
 
-    result = e2e.run("mngr gc", comment="garbage collect all unused resources")
+    # gc scans every configured provider, and the Modal discovery path is a slow
+    # network round-trip, so the default 30s e2e timeout is too tight here (the
+    # same reason test_gc_provider_modal bumps its gc timeout). The 240s pytest
+    # timeout on this test leaves ample room.
+    result = e2e.run("mngr gc", comment="garbage collect all unused resources", timeout=90.0)
     expect(result).to_succeed()
     expect(result.stdout).to_contain("Garbage Collection Results")
 
     # gc must only clean *unused* resources: the still-active agent and its
-    # Modal host must survive a default gc run.
-    list_after = e2e.run("mngr list", comment="verify the active agent survived gc")
+    # Modal host must survive a default gc run. Scope the listing to the Modal
+    # provider so the check does not depend on other providers (e.g. AWS) being
+    # reachable in the test environment -- the agent we created is Modal-backed.
+    list_after = e2e.run("mngr list --provider modal", comment="verify the active agent survived gc")
     expect(list_after).to_succeed()
     expect(list_after.stdout).to_contain("my-task")
 
@@ -80,8 +88,10 @@ def test_gc_dry_run(e2e: E2eSession) -> None:
     expect(result.stdout).to_contain("Garbage Collection (Dry Run)")
 
     # The whole point of --dry-run is that it changes nothing: the active agent
-    # and its Modal host must still be present after the dry run.
-    list_after = e2e.run("mngr list", comment="verify the dry run destroyed nothing")
+    # and its Modal host must still be present after the dry run. Scope the
+    # listing to the Modal provider so the check verifies the agent survived
+    # without depending on every other provider (e.g. AWS) being reachable.
+    list_after = e2e.run("mngr list --provider modal", comment="verify the dry run destroyed nothing")
     expect(list_after).to_succeed()
     expect(list_after.stdout).to_contain("dry-run-task")
 
@@ -120,13 +130,35 @@ def test_gc_provider_modal(e2e: E2eSession) -> None:
     )
     expect(result).to_succeed()
     # The running agent's machine is active, so gc must not tear it down: it
-    # should still be listed after garbage collection.
-    list_after = e2e.run("mngr list --format json", comment="confirm the Modal agent survived gc", timeout=60.0)
+    # should still be listed after garbage collection. Scope the listing to the
+    # modal provider (where the agent lives): an unscoped `mngr list` would also
+    # try to discover every other enabled backend, and any backend that is
+    # enabled-but-unconfigured in this environment (e.g. AWS with no
+    # credentials) raises ProviderUnavailableError, which aborts the whole list
+    # under the default --on-error abort. Scoping to modal mirrors the gc
+    # command above and keeps the verification focused on the relevant provider.
+    list_after = e2e.run(
+        "mngr list --provider modal --format json",
+        comment="confirm the Modal agent survived gc",
+        timeout=60.0,
+    )
     expect(list_after).to_succeed()
     expect(list_after.stdout).to_contain("gc-modal-task")
+    # Surviving gc means more than just appearing in the listing: the active
+    # agent's host must not have been torn down. Parse the JSON and assert the
+    # agent is present with its Modal host still RUNNING, which is the concrete
+    # invariant gc must uphold for an active machine.
+    listing = json.loads(list_after.stdout)
+    surviving = [agent for agent in listing["agents"] if agent["name"] == "gc-modal-task"]
+    assert len(surviving) == 1, f"expected exactly one gc-modal-task agent, got {listing['agents']}"
+    assert surviving[0]["host"]["provider_name"] == "modal"
+    assert surviving[0]["host"]["state"] == "RUNNING", (
+        f"gc must not tear down the active agent's host, but its state is {surviving[0]['host']['state']}"
+    )
 
 
 @pytest.mark.release
+@pytest.mark.timeout(120)
 def test_gc_background_watch(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # if you wanted, you could disable automatic garbage collection on destroy by setting the appropriate setting:
@@ -135,12 +167,26 @@ def test_gc_background_watch(e2e: E2eSession) -> None:
         watch -n60 mngr gc
         # this would have the effect of making your calls to "mngr destroy" somewhat faster, at the cost of needing to have this background process running
     """)
-    expect(
-        e2e.run(
-            "mngr config set commands.destroy.gc false",
-            comment="disable automatic gc on destroy",
-        )
-    ).to_succeed()
+    set_result = e2e.run(
+        "mngr config set commands.destroy.gc false",
+        comment="disable automatic gc on destroy",
+    )
+    expect(set_result).to_succeed()
+    # `config set` should report exactly what it wrote and to which scope.
+    expect(set_result.stdout).to_contain("commands.destroy.gc")
+    expect(set_result.stdout).to_contain("false")
+    expect(set_result.stdout).to_contain("project")
+    # The point of `config set` is that the value is persisted. The project
+    # scope writes to .<root>/settings.toml; read it back the way a human would
+    # when debugging rather than via a follow-up `mngr` command (a freshly
+    # written project file does not carry the pytest opt-in, so a follow-up
+    # mngr command would be rejected by the test guard).
+    settings = e2e.run(
+        "cat .$MNGR_ROOT_NAME/settings.toml",
+        comment="inspect the written project settings file",
+    )
+    expect(settings).to_succeed()
+    expect(settings.stdout).to_contain("gc = false")
     # `watch -n60 mngr gc` would block indefinitely; cap it with `timeout 1`
     # so the test only confirms watch can start.
     expect(

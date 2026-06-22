@@ -1,0 +1,1 @@
+Test-only: strengthened the `test_snapshot_create_named` e2e tutorial test for `mngr snapshot create --name`. It now captures the concrete snapshot id from the create output and verifies, via the `--format json` listing, that *that exact* snapshot carries the given name, rather than relying solely on a loose substring match against the rendered table.

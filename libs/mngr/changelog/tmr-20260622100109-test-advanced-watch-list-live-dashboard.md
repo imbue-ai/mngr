@@ -1,0 +1,1 @@
+Fixed the `test_advanced_watch_list_live_dashboard` e2e tutorial test, which timed out because its content-verification `mngr list` exercised the full provider discovery path (contacting Modal). The check is now scoped to `--provider local`, matching the fan-out test, so it stays fast and does not depend on (or contact) Modal.

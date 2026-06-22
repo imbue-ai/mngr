@@ -1,0 +1,1 @@
+Strengthened the `mngr plugin list --active` e2e test to assert the precise filter semantics: `--active` lists exactly the enabled subset of the unfiltered plugin list, the unfiltered list is a strict superset that includes disabled plugins, and disabling a plugin removes exactly that one plugin from `--active` while it remains in the unfiltered list as disabled.

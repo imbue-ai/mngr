@@ -1,0 +1,1 @@
+Marked the `test_create_with_pass_host_env` e2e release test as flaky: the remote Modal create path occasionally drops the SSH session mid-create ("Error reading SSH protocol banner" while writing agent state), which is an infrastructure transient rather than a test or implementation defect. Offload now retries it automatically, matching the sibling Modal create tests.

@@ -1,0 +1,1 @@
+Strengthened the `mngr transcript --tail 1` release test to verify the "most recent event" semantic: it now confirms the single tailed event matches the last event of the full transcript and that the human-readable output renders that event's text, instead of only checking that exactly one event is returned.

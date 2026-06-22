@@ -1,0 +1,3 @@
+Fixed the `test_list_host_label_filter_invalid_format` e2e release test, which timed out under the default 10s per-test limit because the cold-start `mngr` subprocess invocation alone takes ~9s. Added an explicit `@pytest.mark.timeout(60)` marker (matching the convention used by other e2e tutorial tests) so the malformed `--host-label` validation has room to run.
+
+Strengthened the test's assertions to verify the rejection is actionable: it now checks for click's usage-error exit code (2) and that the error message names the offending `--host-label` flag and echoes the bad value, in addition to citing the required `KEY=VALUE` format.

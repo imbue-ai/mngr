@@ -1,0 +1,5 @@
+Hardened the output-format e2e tests against unconfigured cloud providers.
+
+The `test_default_output_human_readable` release test (which runs `mngr ls`) was failing in two ways. First, it inherited the default 10s pytest timeout, but `mngr ls` runs Modal discovery that exceeds 10s when credentials are present; it now carries `@pytest.mark.timeout(180)` like its sibling jsonl test, with a note explaining why it is not marked `@pytest.mark.modal`.
+
+Second, the e2e fixture left every registered provider backend enabled. The monorepo dev/test environment has the aws, azure, gcp, ovh, vultr, and imbue_cloud backends installed but unconfigured, and the AWS backend deliberately raises `ProviderUnavailableError` (rather than a silently-skipped `ProviderEmptyError`) when its credentials are missing. Because a read path like `mngr ls`/`mngr list` exits non-zero whenever any enabled provider reports an error, an enabled-but-unconfigured AWS provider made `mngr ls` exit 1. The e2e fixture now disables those external-cloud providers (none of which the tutorial tests exercise) so discovery stays hermetic and only the intended Modal/Docker remote providers are reached.

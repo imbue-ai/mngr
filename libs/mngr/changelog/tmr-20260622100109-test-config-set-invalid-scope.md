@@ -1,0 +1,1 @@
+Tightened the `test_config_set_invalid_scope` e2e tutorial test to assert the exact exit code (2, Click's usage-error code) for an invalid `--scope` value, instead of accepting any non-zero exit. This confirms the failure is an argument-validation rejection rather than an unrelated runtime error.

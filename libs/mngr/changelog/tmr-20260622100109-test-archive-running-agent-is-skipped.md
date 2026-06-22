@@ -1,0 +1,3 @@
+Fixed the `test_archive_running_agent_is_skipped` e2e tutorial test: gave it an explicit 180s timeout (it previously inherited the 10s default and timed out during agent creation), scoped its archived-listing verification to the local provider so it no longer fails when cloud-provider discovery (e.g. AWS) is unavailable, and dropped the now-unused `rsync`/`modal` resource marks since the test only exercises a local command agent.
+
+Strengthened the same test to also assert that the skipped agent is still listed as active afterwards, confirming the running agent is left untouched rather than torn down.

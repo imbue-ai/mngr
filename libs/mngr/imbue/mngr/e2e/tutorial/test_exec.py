@@ -4,6 +4,8 @@ Each test corresponds 1:1 to a tutorial script block. Each test creates real
 agents with the names the block references so the exec command has a target.
 """
 
+import getpass
+
 import pytest
 
 from imbue.mngr.e2e.conftest import E2eSession
@@ -19,9 +21,9 @@ def _create_my_task(e2e: E2eSession, sleep_value: int) -> None:
     ).to_succeed()
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(120)
 def test_exec_basic(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # run a command on a specific agent's host
@@ -44,7 +46,6 @@ def test_exec_basic(e2e: E2eSession) -> None:
     expect(result.stdout).to_contain("total")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -67,20 +68,34 @@ def test_exec_short_form(e2e: E2eSession) -> None:
     expect(result.stdout).to_contain("On branch")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_exec_all_agents(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
-        # run a command on all agents
-        mngr exec -a "whoami"
+        # run a command on all agents (pipe the ids from "mngr list" into "mngr exec -")
+        mngr list --ids | mngr exec - "whoami"
     """)
     _create_my_task(e2e, 100402)
-    expect(e2e.run('mngr exec -a "whoami"', comment="run a command on all agents")).to_succeed()
+    # `mngr exec` has no --all/-a flag; the documented way to run on every agent
+    # is to pipe the ids from `mngr list --ids` into `mngr exec -` (the `-`
+    # placeholder reads agent names from stdin, one per line).
+    #
+    # `mngr list` attempts remote (Modal) discovery in addition to the local
+    # agent, so the piped command can exceed the default run_command timeout;
+    # give it ample headroom.
+    result = e2e.run(
+        'mngr list --ids | mngr exec - "whoami"',
+        comment="run a command on all agents",
+        timeout=90.0,
+    )
+    expect(result).to_succeed()
+    # Verify the command actually ran on the agent host and streamed its output
+    # back rather than just exiting 0: `whoami` prints the host user, which for
+    # the local command agent is the user running the test.
+    expect(result.stdout).to_contain(getpass.getuser())
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -103,7 +118,6 @@ def test_exec_as_other_user(e2e: E2eSession) -> None:
     expect(result.stdout).to_match(r"(?m)^\s*\d+\s*$")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(300)
@@ -118,15 +132,18 @@ def test_exec_cwd(e2e: E2eSession) -> None:
     result = e2e.run('mngr exec my-task --cwd /tmp "pwd"', comment="run a command in a specific working directory")
     expect(result).to_succeed()
     expect(result.stdout).to_match(r"(?m)^/tmp$")
-    # Without --cwd, the command runs in the agent's work_dir, which is not /tmp.
-    # This confirms --cwd actually changed the directory rather than matching a
-    # default that happened to already be /tmp (the work_dir lives under /tmp).
+    # Without --cwd, the command runs in the agent's work_dir. Positively assert
+    # that the default pwd is the agent's worktree (the tutorial's documented
+    # default) -- a local command agent runs on its own ``mngr/my-task`` branch
+    # in a ``.mngr/worktrees/my-task-<id>`` directory. This both verifies the
+    # documented default and proves --cwd actually changed the directory rather
+    # than matching a default that happened to already be /tmp.
     default_result = e2e.run('mngr exec my-task "pwd"', comment="by default, commands are run in the agent's work_dir")
     expect(default_result).to_succeed()
+    expect(default_result.stdout).to_match(r"(?m)/\.mngr/worktrees/my-task-")
     expect(default_result.stdout).not_to_match(r"(?m)^/tmp$")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(300)
@@ -155,9 +172,13 @@ def test_exec_cwd_nonexistent(e2e: E2eSession) -> None:
     # The command must not have run in the default work_dir: a real /tmp-rooted
     # work_dir path in stdout would mean the bad --cwd was silently ignored.
     expect(result.stdout).not_to_match(r"(?m)^/tmp/")
+    # The failure must actually be about the missing --cwd directory, not some
+    # unrelated error: the requested path should appear in exec's error output.
+    # This ties the nonzero exit to the bad directory rather than accepting any
+    # failure (e.g. the agent being unreachable).
+    expect(result.stderr).to_contain("/nonexistent-dir-xyz")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -179,7 +200,9 @@ def test_exec_timeout(e2e: E2eSession) -> None:
     expect(result.stdout).to_contain("done")
 
 
-@pytest.mark.rsync
+# Unlike the other exec tests, this one is NOT marked @pytest.mark.rsync: the
+# command is terminated by its --timeout before exec ever syncs files back, so
+# rsync is genuinely never invoked and the resource guard would flag the mark.
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -203,7 +226,12 @@ def test_exec_timeout_enforced(e2e: E2eSession) -> None:
     expect(result.stdout).not_to_contain("Command succeeded")
 
 
-@pytest.mark.rsync
+# No @pytest.mark.rsync: this is a local command agent, so create uses a
+# git-worktree transfer and exec runs on the local host -- neither path invokes
+# rsync (it would only fire for a remote target, or when there are uncommitted
+# files to copy into the worktree, of which there are none here). The clean
+# source tree makes this deterministic, so the rsync resource guard would flag
+# the mark as "marked rsync but never invoked rsync".
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
@@ -225,9 +253,9 @@ def test_exec_with_start(e2e: E2eSession) -> None:
     expect(result.stdout).to_contain("ID=")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(180)
 def test_exec_no_start(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # and you can disable auto-starting as well (fails if agent is stopped):
@@ -246,9 +274,9 @@ def test_exec_no_start(e2e: E2eSession) -> None:
     expect(result.stdout).to_contain("NAME=")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(180)
 def test_exec_on_error_continue(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # control error handling when running on multiple agents
@@ -261,6 +289,7 @@ def test_exec_on_error_continue(e2e: E2eSession) -> None:
     result = e2e.run(
         'mngr list --ids | mngr exec - --on-error continue "git log --oneline -5 || true"',
         comment="control error handling when running on multiple agents",
+        timeout=90.0,
     )
     expect(result).to_succeed()
     # Confirm the command actually ran on the agent's host rather than just

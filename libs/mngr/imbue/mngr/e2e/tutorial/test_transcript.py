@@ -159,7 +159,6 @@ def _create_claude_task_with_transcript(e2e: E2eSession, host_dir: Path, sleep_v
     )
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(600)
@@ -183,6 +182,35 @@ def test_transcript_default(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(600)
+def test_transcript_default_rejects_command_agent(e2e: E2eSession) -> None:
+    # Unhappy path for the same tutorial block: `mngr transcript` only supports
+    # agent types that emit a common transcript. A plain `command` agent has
+    # none, so the command must fail fast with a clear, type-specific error
+    # rather than printing an empty (or misleading) transcript.
+    e2e.write_tutorial_block("""
+        # view the transcript of an agent's conversation
+        mngr transcript my-task
+    """)
+    expect(
+        e2e.run(
+            "mngr create my-task --type command --no-ensure-clean --no-connect -- sleep 100803",
+            comment="create a command agent (no common transcript)",
+        )
+    ).to_succeed()
+    result = e2e.run("mngr transcript my-task", comment="view the transcript")
+    expect(result).to_fail()
+    # The error must explain that this agent type does not produce a transcript,
+    # naming both the agent and its type, rather than failing opaquely.
+    assert "command" in result.stderr, f"Expected the agent type in the error, got:\n{result.stderr}"
+    assert "common transcript" in result.stderr, (
+        f"Expected a 'common transcript' explanation in the error, got:\n{result.stderr}"
+    )
+    assert result.stdout.strip() == "", f"Expected no transcript output on failure, got:\n{result.stdout}"
+
+
+@pytest.mark.release
+@pytest.mark.tmux
 def test_transcript_assistant_only(e2e: E2eSession, temp_host_dir: Path) -> None:
     e2e.write_tutorial_block("""
         # view only assistant messages
@@ -198,7 +226,6 @@ def test_transcript_assistant_only(e2e: E2eSession, temp_host_dir: Path) -> None
     assert "TOOL_RESULT_MARKER" not in result.stdout, result.stdout
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(600)
@@ -215,6 +242,16 @@ def test_transcript_tail(e2e: E2eSession) -> None:
     expect(tail_events).to_succeed()
     tail_lines = [line for line in tail_events.stdout.splitlines() if line.strip()]
     assert 0 < len(tail_lines) <= 5, f"Expected between 1 and 5 tailed events, got {len(tail_lines)}"
+    # --tail N must return the *suffix* of the transcript (the most recent
+    # events, in order) -- not an arbitrary subset. Derive the expectation from
+    # the full transcript so the assertion stays robust as the agent evolves.
+    full_events = e2e.run("mngr transcript my-task --format jsonl", comment="full transcript as JSONL")
+    expect(full_events).to_succeed()
+    full_lines = [line for line in full_events.stdout.splitlines() if line.strip()]
+    assert tail_lines == full_lines[-len(tail_lines) :], (
+        "Expected --tail 5 to return the most recent events in order.\n"
+        f"  tail: {tail_lines}\n  full: {full_lines}"
+    )
 
 
 @pytest.mark.release
@@ -234,8 +271,30 @@ def test_transcript_tail_one(e2e: E2eSession) -> None:
     tail_lines = [line for line in tail_events.stdout.splitlines() if line.strip()]
     assert len(tail_lines) == 1, f"Expected exactly 1 tailed event, got {len(tail_lines)}"
 
+    # The tailed event must be the *most recent* event, i.e. the last line of the
+    # full (untailed) transcript -- that "most recent" semantic is the whole
+    # point of --tail 1. Compare against the full JSONL to confirm.
+    full_events = e2e.run("mngr transcript my-task --format jsonl", comment="full transcript as JSONL")
+    expect(full_events).to_succeed()
+    full_lines = [line for line in full_events.stdout.splitlines() if line.strip()]
+    assert len(full_lines) >= 1, "Expected the full transcript to contain at least one event"
+    tail_event = json.loads(tail_lines[0])
+    last_event = json.loads(full_lines[-1])
+    assert tail_event["event_id"] == last_event["event_id"], (
+        f"--tail 1 should return the most recent event {last_event['event_id']!r}, "
+        f"but returned {tail_event['event_id']!r}"
+    )
 
-@pytest.mark.rsync
+    # The human-readable --tail 1 output (the actual tutorial command) must
+    # render that same most-recent event's content, not just exit cleanly.
+    most_recent_text = last_event.get("text") or last_event.get("content") or ""
+    assert most_recent_text.strip() != "", f"Expected the most recent event to carry text, got: {last_event}"
+    assert most_recent_text in result.stdout, (
+        f"Expected the most recent event's text {most_recent_text!r} in the human-readable "
+        f"--tail 1 output, got:\n{result.stdout}"
+    )
+
+
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(600)
@@ -250,6 +309,17 @@ def test_transcript_format_jsonl(e2e: E2eSession) -> None:
     # Every non-blank line must be a standalone JSON object (true JSONL).
     lines = [line for line in result.stdout.splitlines() if line.strip()]
     assert lines, "Expected at least one JSONL event"
+    events = []
     for line in lines:
         event = json.loads(line)
         assert isinstance(event, dict), f"Expected each JSONL line to be a JSON object, got: {line!r}"
+        events.append(event)
+    # The JSONL must faithfully carry the actual conversation (this is the point
+    # of --format jsonl: machine-readable consumption). Verify the user message
+    # we sent is present and that the agent's assistant reply is too.
+    user_messages = [event for event in events if event.get("type") == "user_message"]
+    assistant_messages = [event for event in events if event.get("type") == "assistant_message"]
+    assert any(_INITIAL_MESSAGE in event.get("content", "") for event in user_messages), (
+        f"Expected a user_message event containing the initial message, got events:\n{events}"
+    )
+    assert assistant_messages, f"Expected at least one assistant_message event, got events:\n{events}"

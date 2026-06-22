@@ -1,0 +1,1 @@
+Raised the per-test timeout on the `test_control_mngr_via_env_rejects_invalid_value` e2e tutorial test to 120s, matching its happy-path sibling. The `mngr create` invocation pays mngr's full startup cost (~10s) before rejecting the invalid provider, which exceeded the default 10s timeout.

@@ -1,0 +1,1 @@
+Strengthened the `test_create_modal_provision_append_file` e2e test so it actually verifies append (`>>`) semantics: it now seeds a baseline line via a first provision command, then appends the tutorial's PATH line, and asserts the baseline survives and precedes the appended line (proving the append did not truncate the file).

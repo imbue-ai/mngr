@@ -1,0 +1,1 @@
+Fixed the `test_exec_basic` e2e tutorial test: added a `@pytest.mark.timeout(120)` override (the global 10s default tripped during agent creation) and removed the superfluous `@pytest.mark.rsync` mark, since exec on a local command agent never invokes rsync.

@@ -1,0 +1,1 @@
+Made the `test_create_rejects_unknown_option` e2e tutorial test robust by giving it an explicit `@pytest.mark.timeout(120)`. The test invokes `mngr create` with an unknown option, and even though Click rejects the option before any host work, paying the CLI's import/startup cost alone can exceed the global 10s pytest timeout, causing spurious timeout failures.

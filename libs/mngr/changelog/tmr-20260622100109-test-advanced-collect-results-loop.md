@@ -1,0 +1,1 @@
+Dropped the superfluous `@pytest.mark.rsync` mark from the `test_advanced_collect_results_loop` e2e tutorial test. The test runs entirely against local command agents, which invoke tmux but never rsync, so the stale mark tripped the resource guard and failed the otherwise-passing test. The `@pytest.mark.tmux` mark is kept since mngr does invoke tmux when running the agent.

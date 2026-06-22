@@ -1,0 +1,1 @@
+Strengthened the `test_config_get` release test: in addition to reading a `commands.create.*` default back from the raw scoped TOML, it now also reads the same value from the default (merged) view via the resolved `commands.create.defaults.provider` path, covering the merged read branch and documenting the scoped-vs-merged key-namespace difference for command defaults.

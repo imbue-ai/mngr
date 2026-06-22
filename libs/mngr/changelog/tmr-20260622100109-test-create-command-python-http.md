@@ -1,0 +1,1 @@
+Scoped the `mngr list` verification in the `command` agent-type tutorial e2e test (`test_create_command_python_http`) to `--provider local`, so it no longer hard-fails when an unrelated remote provider (e.g. aws) is configured but its credentials are unavailable in the test environment.

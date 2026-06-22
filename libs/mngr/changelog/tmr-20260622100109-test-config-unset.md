@@ -1,0 +1,3 @@
+Fix the `test_config_unset` e2e tutorial test so it no longer fails on the pytest config opt-in guard.
+
+The test sets `commands.create.provider` at the default (project) scope and then runs a follow-up `mngr config unset` for the same key. The e2e fixture deliberately leaves the project `settings.toml` unseeded, so the bare `config set` wrote a fresh file lacking `is_allowed_in_pytest = true`; the subsequent `config unset` reloaded that merged config and was rejected by the pytest opt-in guard. The test now pre-seeds the project `settings.toml` with the opt-in (mirroring `test_config_unset_missing_key`), which `config set` preserves, so the follow-up `config unset` is permitted. This is a test-harness artifact only; real users do not have the opt-in requirement.

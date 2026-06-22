@@ -1,0 +1,1 @@
+Removed the superfluous `@pytest.mark.rsync` mark from the `test_connect_short_form` e2e tutorial test. Connecting to a local command agent (which lives in a git worktree) never invokes rsync, so the resource guard correctly flagged the mark as never exercised.

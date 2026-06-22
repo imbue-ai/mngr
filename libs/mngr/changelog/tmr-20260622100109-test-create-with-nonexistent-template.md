@@ -1,0 +1,1 @@
+Added a per-test timeout to the `test_create_with_nonexistent_template` e2e test so it no longer trips the default 10s per-test timeout. The test exercises `mngr create --template <unknown>` failing with a helpful error and verifies no agent is provisioned; both `mngr create` and the follow-up `mngr list` pay mngr's cold-start cost, which alone exceeds 10s.

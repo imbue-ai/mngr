@@ -1,0 +1,3 @@
+Add explicit `@pytest.mark.timeout` markers to the e2e help tutorial tests (`test_help.py`).
+
+These help-only tests (`mngr --help`, `mngr create --help`, `mngr create -h`, `mngr c --help`, and the unknown-command error path) previously relied on the 10s global pytest timeout. Because mngr's plugin discovery and per-provider build-argument enumeration take ~15-20s of startup before any help output is produced, the tests could time out before the command finished. They now carry generous per-test timeouts (60s for single-command tests, 90s for the test that runs two help invocations), matching the explicit timeouts the other e2e tutorial test files already use.

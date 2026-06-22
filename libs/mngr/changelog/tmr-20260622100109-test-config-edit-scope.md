@@ -1,0 +1,1 @@
+Fixed the `test_config_edit_scope` e2e tutorial test, which was timing out at the default 10s. It runs three mngr subprocesses (`config path`, `config edit`, `cat`), each with a multi-second cold start, so it now carries the same `@pytest.mark.timeout(60)` extension as the other multi-command tests in that file.

@@ -1,0 +1,1 @@
+Fixed the `test_config_edit_scope_missing_editor` e2e tutorial test, which could time out under the default 10s per-test budget because a single `mngr` cold start alone approaches that limit. It now carries the same `@pytest.mark.timeout(60)` headroom as the sibling config tests, and additionally asserts that the missing-editor failure is reported without a Python traceback.

@@ -1,0 +1,1 @@
+Fixed the `test_create_codex_explicit_type` e2e tutorial test: creating a codex agent now disables codex's installation check (`-S agent_types.codex.check_installation=false`) so provisioning no longer attempts `npm i -g @openai/codex` on hosts without npm. Also dropped the superfluous `@pytest.mark.rsync` mark, since this `--no-auto-start` create never invokes rsync.

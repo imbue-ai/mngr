@@ -1,0 +1,1 @@
+Strengthened the `test_create_with_snapshot_fictional` e2e test so it verifies the snapshot-id failure originates in the Modal host-creation path (asserting on mngr's `Failed to create Modal host` wrapper) rather than only checking that the snapshot id appears somewhere in the output.

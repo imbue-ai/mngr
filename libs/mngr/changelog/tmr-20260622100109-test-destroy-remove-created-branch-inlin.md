@@ -1,0 +1,3 @@
+Fixed the release test `test_destroy_remove_created_branch_inline` by removing the spurious `@pytest.mark.modal` and `@pytest.mark.rsync` marks: the test exercises a local agent (`mngr create --no-connect`) and only invokes tmux, so the resource guard failed it for declaring resources it never used.
+
+Strengthened the `mngr destroy --remove-created-branch` test coverage: the existing test now also asserts the agent itself is destroyed, and a new test (`test_destroy_without_remove_created_branch_keeps_branch`) verifies that destroying *without* `--remove-created-branch` keeps the agent's created branch, confirming the flag is what drives branch removal.

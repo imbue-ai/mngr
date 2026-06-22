@@ -1,0 +1,1 @@
+Strengthened the `mngr create --provider modal --edit-message` release test: it now also asserts that an empty editor buffer short-circuits delivery (no "Sending initial message" line), confirming no empty message is sent.

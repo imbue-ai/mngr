@@ -1,0 +1,1 @@
+Removed a spurious `@pytest.mark.rsync` from the `test_create_with_pass_env_skips_unset_var` e2e tutorial test. The test creates a local command agent, which transfers its work dir via git mirror and never invokes rsync, so the resource guard correctly flagged the mark as superfluous. The mark had been copied from the git/data sibling tests that genuinely use rsync.

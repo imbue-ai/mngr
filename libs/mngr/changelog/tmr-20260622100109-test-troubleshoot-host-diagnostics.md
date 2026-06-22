@@ -1,0 +1,5 @@
+Removed the incorrect `@pytest.mark.rsync` mark from the `test_troubleshoot_host_diagnostics` e2e tutorial test. The test exercises a local `command` agent, whose work dir is created via git-worktree and whose `mngr exec` runs on localhost, so rsync is never invoked. Declaring the mark tripped the resource guard's "marked rsync but never invoked rsync" check, failing an otherwise-passing test.
+
+Disabled the AWS provider backend in the e2e test fixture so the suite stays hermetic: unlike the other cloud backends, the AWS backend raises a fatal error when no credentials are configured, which would make read paths like `mngr list` fail on any runner without ambient AWS credentials.
+
+Added an unhappy-path e2e test (`test_troubleshoot_host_diagnostics_missing_agent`) covering the host-diagnostics tutorial block: running `mngr exec` against a nonexistent agent fails fast at target resolution with a clear "not found" error naming the missing agent, rather than running the diagnostic on the wrong host or hanging.

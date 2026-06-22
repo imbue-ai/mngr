@@ -1,0 +1,5 @@
+Fixed the `test_create_with_plugin_flags` e2e tutorial test (covers `mngr create --plugin ... --disable-plugin ...`).
+
+The test inherited the global 10s pytest timeout because it was missing a `@pytest.mark.timeout(...)` override (every other create test in the module sets one), so `mngr create` was killed mid-run before it could report the expected "plugin not registered" failure. Added `@pytest.mark.timeout(120)` to match the sibling expected-failure create test.
+
+The post-failure "no partial agent left behind" check ran a bare `mngr list`, which performs enumerate-all discovery and aborts loudly when any enabled provider is unreachable. In environments where a credentialed cloud provider (e.g. aws) is enabled-but-unconfigured, that made the assertion fail for reasons unrelated to the test's intent. Scoped the verification to `mngr list --provider local` -- a `--type command` agent is registered on the default `local` provider, so this checks the intent precisely without coupling the assertion to unrelated cloud-provider credentials.

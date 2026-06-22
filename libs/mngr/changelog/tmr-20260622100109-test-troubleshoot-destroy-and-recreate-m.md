@@ -1,0 +1,5 @@
+Fixed the `test_troubleshoot_destroy_and_recreate_modal` e2e tutorial test (`mngr destroy my-task --force` + `mngr create my-task --provider modal`).
+
+The verification `mngr list` calls now scope to `--provider modal`. An unscoped full-discovery `mngr list` also queries every other registered backend (aws, azure, ...), which raise `ProviderUnavailableError` when their credentials are absent (by design, so a misconfigured provider stays visible) and make `mngr list` exit non-zero in environments without those creds. Scoping keeps this modal-focused test independent of unrelated cloud credentials and faster, matching the `--provider` scoping pattern already used by the agent-type tests.
+
+The `mngr destroy` command now gets a 120s per-command timeout, and the test-level timeout was raised to 420s. Destroy runs the default post-destroy garbage-collection pass, which scans every provider (including Modal) over the network and routinely exceeds the default 30s command timeout, so the destroy command was being killed (exit 124) after the agent itself was already torn down.

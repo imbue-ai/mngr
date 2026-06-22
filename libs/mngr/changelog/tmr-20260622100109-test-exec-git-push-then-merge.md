@@ -1,0 +1,1 @@
+Removed the inaccurate `@pytest.mark.rsync` mark from the `test_exec_git_push_then_merge` e2e tutorial test. The test creates a local git-worktree agent and its only `mngr exec` (a `git push` to a non-existent `origin`) fails, so rsync is never invoked; the resource guard was correctly failing the otherwise-passing test for carrying a mark it never satisfied.

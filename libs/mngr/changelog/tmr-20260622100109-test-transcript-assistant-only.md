@@ -1,0 +1,1 @@
+Fixed the `test_transcript_assistant_only` release test, which was missing the `@pytest.mark.timeout(600)` mark that its sibling transcript tests carry. Without it the test inherited the 10s global default timeout and failed while `mngr create` was still running.

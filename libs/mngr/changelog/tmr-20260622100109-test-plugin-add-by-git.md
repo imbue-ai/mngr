@@ -1,0 +1,1 @@
+Fixed the `test_plugin_add_by_git` release e2e test, which timed out under the default 10s per-test limit because every `mngr` invocation pays a ~10s cold-start cost. Added a 60s timeout to match the other subprocess-driven plugin `add` e2e tests, and tightened the test to also assert the error path emits no Python traceback.

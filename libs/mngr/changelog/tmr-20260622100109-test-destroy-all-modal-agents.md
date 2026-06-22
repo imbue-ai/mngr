@@ -1,0 +1,5 @@
+Test-only: fixed and strengthened the `test_destroy_all_modal_agents` tutorial e2e test.
+
+The standalone before/after listing checks now use `mngr list --provider modal` instead of `mngr list --include 'host.provider == "modal"'`. A bare `mngr list` (and the `--include` post-filter) queries every enabled provider and exits 1 if any is unreachable (e.g. an unconfigured `aws` backend, or a Docker daemon that is not running in a Modal-only test sandbox), which made those assertions brittle. Scoping the verification to `--provider modal` only queries the modal backend. The tutorial's destroy pipeline (`mngr list --include 'host.provider == "modal"' --ids | mngr destroy -f -`) still runs verbatim and is robust to unreachable providers, since the matching modal ids go to stdout while the unreachable-provider error goes to stderr.
+
+Added explicit remote timeouts to the list/destroy round-trips and raised the overall test timeout to 360s so the remote Modal host teardown does not hit the short default timeout. Also added assertions on the destroy output so the test cannot pass vacuously when the filter produces no ids.

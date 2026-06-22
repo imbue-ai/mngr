@@ -7,10 +7,12 @@ tutorial_matcher script.
 """
 
 import json
+import re
 
 import pytest
 
 from imbue.mngr.e2e.conftest import E2eSession
+from imbue.mngr.utils.polling import wait_for
 from imbue.skitwright.expect import expect
 
 _REMOTE_TIMEOUT = 120.0
@@ -48,8 +50,18 @@ def test_create_provider_modal(e2e: E2eSession) -> None:
         comment="confirm the agent is running on the modal provider",
     )
     expect(list_result).to_succeed()
-    modal_agent_names = [agent["name"] for agent in json.loads(list_result.stdout)["agents"]]
-    assert "my-task" in modal_agent_names, f"Expected 'my-task' among modal agents, got: {modal_agent_names}"
+    agents_by_name = {agent["name"]: agent for agent in json.loads(list_result.stdout)["agents"]}
+    assert "my-task" in agents_by_name, f"Expected 'my-task' among modal agents, got: {list(agents_by_name)}"
+    # Tie the agent to its host so we confirm *that* agent is genuinely hosted on
+    # Modal (rather than relying solely on the --provider modal listing filter),
+    # and that a real Modal host was actually provisioned and is running.
+    my_task = agents_by_name["my-task"]
+    assert my_task["host"]["provider_name"] == "modal", (
+        f"Expected my-task on the modal provider, got: {my_task['host']['provider_name']!r}"
+    )
+    assert my_task["host"]["state"] == "RUNNING", (
+        f"Expected the modal host to be RUNNING, got: {my_task['host']['state']!r}"
+    )
 
 
 @pytest.mark.release
@@ -92,6 +104,29 @@ def test_create_modal_no_connect_message(e2e: E2eSession) -> None:
     # line to stderr right before it sends the message to the started agent.
     assert "Sending initial message" in result.stderr, (
         f"Expected the create output to show the initial message being sent, got:\n{result.stderr}"
+    )
+
+    # The create-side log line above only proves mngr *attempted* to send the
+    # message. Confirm the agent-side effect too: the agent actually received the
+    # prompt. claude records the submitted prompt to its session log, which the
+    # agent's background converter turns into a ``user_message`` event, so the
+    # user-facing ``mngr transcript --role user`` surfaces it. The conversion runs
+    # asynchronously on the remote host shortly after submission, so poll until
+    # the message shows up (and tolerate the transient "no transcript yet" error
+    # that mngr returns before the first event is written).
+    def _initial_message_received() -> bool:
+        transcript_result = e2e.run(
+            "mngr transcript my-task --role user",
+            comment="confirm the agent actually received the initial message",
+            timeout=_REMOTE_TIMEOUT,
+        )
+        return transcript_result.exit_code == 0 and "Speed up one of my tests" in transcript_result.stdout
+
+    wait_for(
+        _initial_message_received,
+        timeout=180.0,
+        poll_interval=5.0,
+        error_message="The initial message never appeared in the agent's transcript (--role user).",
     )
 
     # Verify the concrete effect of the command: the agent was actually created
@@ -137,7 +172,17 @@ def test_create_modal_edit_message(e2e: E2eSession) -> None:
     # there was nothing to send. This message only appears when the editor was
     # launched in parallel with creation and its (empty) exit was handled -- i.e.
     # the full --edit-message flow was exercised.
-    expect(result.stdout + result.stderr).to_match(r"(?i)no message to send")
+    combined_output = result.stdout + result.stderr
+    expect(combined_output).to_match(r"(?i)no message to send")
+    # ...and conversely, since the (empty) editor buffer means there is nothing to
+    # deliver, create must NOT have entered its message-send path. The "Sending
+    # initial message" progress line is what create logs right before it delivers a
+    # message (see test_create_modal_no_connect_message), so its absence confirms
+    # the empty edit-message buffer short-circuited delivery rather than sending an
+    # empty message.
+    assert "Sending initial message" not in combined_output, (
+        f"Expected no message to be sent for an empty edit-message buffer, got:\n{combined_output}"
+    )
 
     # Verify an agent was genuinely created on the Modal provider (not just that
     # the command exited 0). Filtering the listing by --provider modal means a
@@ -228,11 +273,24 @@ def test_create_modal_passthrough_agent_args(e2e: E2eSession) -> None:
     expect(list_result).to_succeed()
     matching = [agent for agent in json.loads(list_result.stdout)["agents"] if agent["name"] == "my-task"]
     assert len(matching) == 1, f"expected exactly one 'my-task' agent, got: {matching}"
-    command = matching[0]["command"]
+    agent = matching[0]
+    # The tutorial block specifically passes these flags "to claude", so confirm
+    # the passthrough landed on a real claude agent (not some other agent type).
+    assert agent["type"] == "claude", f"expected a claude agent, got: {agent['type']}"
+    command = agent["command"]
     assert "--dangerously-skip-permissions" in command, command
     assert "--append-system-prompt" in command, command
     # The system prompt text survives shlex-quoting (only the apostrophe is escaped).
     assert "ask me any questions" in command, command
+
+    # The args weren't just recorded -- they reached an agent on a genuinely
+    # provisioned, running Modal host (create blocks until the host is up and the
+    # agent is started). This rules out the passthrough surviving only in metadata
+    # while host provisioning silently failed.
+    assert agent["host"]["provider_name"] == "modal", agent["host"]
+    assert agent["host"]["state"] == "RUNNING", (
+        f"expected the modal host to be RUNNING, got: {agent['host']['state']!r}"
+    )
 
 
 @pytest.mark.release
@@ -271,6 +329,40 @@ def test_create_modal_idle_timeout(e2e: E2eSession) -> None:
     )
 
 
+# No @pytest.mark.modal here: an invalid --idle-timeout value is rejected while
+# parsing the create options, before any Modal API call is made (mirroring
+# test_create_address_syntax_existing_host), so the modal resource guard would
+# fire ("marked modal but never invoked modal") if the marker were present.
+@pytest.mark.release
+@pytest.mark.timeout(120)
+def test_create_modal_idle_timeout_invalid(e2e: E2eSession) -> None:
+    # Unhappy-path companion to test_create_modal_idle_timeout: the same tutorial
+    # block, but exercising what happens when the user passes a value that is not
+    # a valid duration. This must be rejected with a clear error rather than
+    # silently provisioning a host with a bogus (or default) idle timeout.
+    e2e.write_tutorial_block("""
+    # running agents remotely is really cool because you can create an unlimited number of them, but it comes with some downsides
+    # one of the main downsides is cost--remote hosts aren't free, and if you forget about them, they can rack up a big bill.
+    # mngr makes it really easy to deal with this by automatically shutting down hosts when their agents are idle:
+    mngr create my-task --provider modal --idle-timeout 60
+    # that command shuts down the Modal host (and agent) after 1 minute of inactivity.
+    """)
+    result = e2e.run(
+        "mngr create my-task --provider modal --idle-timeout not-a-duration --no-connect --no-ensure-clean",
+        comment="an invalid --idle-timeout value is rejected before any host is provisioned",
+        timeout=_REMOTE_TIMEOUT,
+    )
+    expect(result).to_fail()
+    # The error must name the offending value and explain it is an invalid
+    # duration (this is the UserInputError raised by parse_duration_to_seconds).
+    # The value is rejected while parsing the create options, before any host is
+    # provisioned, so a clear message -- rather than a silently-created host with
+    # a bogus/default timeout -- is the behavior under test.
+    combined = result.stdout + result.stderr
+    expect(combined).to_match(r"(?i)invalid duration")
+    expect(combined).to_contain("not-a-duration")
+
+
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
@@ -299,7 +391,7 @@ def test_create_modal_idle_mode_ssh(e2e: E2eSession) -> None:
     # idle_mode (it is only reported while the host is up). idle_timeout is left
     # at its default here, so we only assert on the idle_mode the flag set.
     list_result = e2e.run(
-        "mngr list --format json",
+        "mngr list --provider modal --format json",
         comment="that command will only consider agents as idle when you are not connected to them",
         timeout=_REMOTE_TIMEOUT,
     )
@@ -343,6 +435,81 @@ def test_create_address_syntax_existing_host(e2e: E2eSession) -> None:
     # and that this specific host is what could not be resolved.
     expect(combined).to_contain("my-dev-box")
 
+    # The failed create must not leave a half-created agent behind. Host
+    # resolution fails before any agent is registered, so listing the local
+    # provider (the only one that could hold a leaked agent in this fresh env)
+    # must show no `my-task` agent -- confirming the failure was clean rather
+    # than only checking the error message.
+    list_result = e2e.run(
+        "mngr list --provider local --format json",
+        comment="confirm the failed create left no orphan agent behind",
+    )
+    expect(list_result).to_succeed()
+    leaked = [agent["name"] for agent in json.loads(list_result.stdout)["agents"] if agent["name"] == "my-task"]
+    assert not leaked, f"Expected no 'my-task' agent after a failed create, found: {leaked}"
+
+
+@pytest.mark.release
+@pytest.mark.tmux
+# No @pytest.mark.modal here: this happy-path variant creates only local
+# (`--type command`) agents and scopes every listing to --provider local, so the
+# modal CLI is never invoked and the modal resource guard would fire if marked.
+# No @pytest.mark.rsync either: local creates default to the git-mirror transfer
+# mode, which does not shell out to rsync unless `--rsync` is passed (it is not).
+@pytest.mark.timeout(120)
+def test_create_address_syntax_targets_existing_host(e2e: E2eSession) -> None:
+    # Shares the tutorial block with test_create_address_syntax_existing_host but
+    # exercises the happy path: the `name@host` address resolves to a host that
+    # actually exists, so the agent is placed on it (rather than failing lookup).
+    e2e.write_tutorial_block("""
+    # you can specify which existing host to run on using the address syntax (eg, if you have multiple Modal hosts or SSH servers):
+    mngr create my-task@my-dev-box
+    """)
+    # First create a local agent so a real host exists to target. All local
+    # agents share the single `localhost` host, which is what the address syntax
+    # below resolves against. `--type command -- sleep` stands in for the
+    # tutorial's default (claude) agent so no claude install / API key is needed.
+    setup = e2e.run(
+        "mngr create host-owner --type command --no-ensure-clean --no-connect -- sleep 100322",
+        comment="create an initial agent so an existing host is available to target",
+    )
+    expect(setup).to_succeed()
+
+    # Discover the existing host's name from the listing rather than hardcoding
+    # it, so the test targets whatever host mngr actually registered.
+    pre_list = e2e.run(
+        "mngr list --provider local --format json",
+        comment="discover the existing host to target",
+    )
+    expect(pre_list).to_succeed()
+    owner_agent = {a["name"]: a for a in json.loads(pre_list.stdout)["agents"]}["host-owner"]
+    existing_host = owner_agent["host"]["name"]
+
+    # Create a second agent that targets that existing host via the `name@host`
+    # address syntax -- this is the behavior the tutorial block demonstrates.
+    result = e2e.run(
+        f"mngr create my-task@{existing_host} --type command --no-ensure-clean --no-connect -- sleep 100323",
+        comment="you can specify which existing host to run on using the address syntax",
+        timeout=_REMOTE_TIMEOUT,
+    )
+    expect(result).to_succeed()
+
+    # Verify the address actually placed the agent on the targeted existing host:
+    # my-task must land on the *same* host as host-owner (a real reuse of the
+    # existing host), not a freshly provisioned one. Comparing host ids proves
+    # the `name@host` address resolved to the existing host.
+    post_list = e2e.run(
+        "mngr list --provider local --format json",
+        comment="confirm the agent landed on the targeted existing host",
+    )
+    expect(post_list).to_succeed()
+    agents_by_name = {a["name"]: a for a in json.loads(post_list.stdout)["agents"]}
+    assert "my-task" in agents_by_name, f"my-task not found in agents: {list(agents_by_name)}"
+    assert agents_by_name["my-task"]["host"]["id"] == owner_agent["host"]["id"], (
+        "Expected my-task to share host-owner's existing host, got "
+        f"{agents_by_name['my-task']['host']['id']} vs {owner_agent['host']['id']}"
+    )
+
 
 @pytest.mark.release
 @pytest.mark.modal
@@ -356,13 +523,17 @@ def test_create_modal_build_args(e2e: E2eSession) -> None:
     # see "mngr create --help" for all provider-specific build args
     # some other useful Modal build args: --region, --timeout, --offline (blocks network), --secret, --cidr-allowlist, --context-dir
     """)
-    # The tutorial block relies on the user's configured default agent type
-    # (stored under `[commands.create] type`, set during install). The isolated
-    # e2e profile has no default, so pass `--type claude` explicitly (the
-    # install-time default) as an extra flag -- matching the convention used by
-    # the other create tests (e.g. test_create_basic.py).
+    # The tutorial block relies on the user's configured default agent type; the
+    # isolated test profile has none, so pin a lightweight `--type command -- sleep`
+    # agent (needs no claude install or API key) to exercise the build args without
+    # provisioning a real coding agent. The build args under test (image, cpu,
+    # memory) are independent of the agent type, and a command agent keeps the
+    # host up so the exec/list verification below works -- mirroring the sibling
+    # custom-build tests (test_create_modal_custom_dockerfile_only,
+    # test_create_modal_dockerfile_and_context).
     result = e2e.run(
-        "mngr create my-task --provider modal --type claude -b cpu=4 -b memory=16 -b image=python:3.12 --no-connect --no-ensure-clean",
+        "mngr create my-task --provider modal --type command -b cpu=4 -b memory=16 -b image=python:3.12"
+        " --no-connect --no-ensure-clean -- sleep 100301",
         comment="build arguments let you customize that new remote host",
         timeout=_REMOTE_TIMEOUT_CUSTOM_IMAGE,
     )
@@ -472,8 +643,11 @@ def test_create_named_host_new_host(e2e: E2eSession) -> None:
     # host explicitly named `my-modal-box` under the modal provider, not an
     # auto-generated host name. `mngr list --addrs` prints each agent's
     # `name@host.name.provider` address, so the created agent should appear
-    # verbatim as `my-task@my-modal-box.modal`.
-    listing = e2e.run("mngr list --addrs", comment="verify the named host was created")
+    # verbatim as `my-task@my-modal-box.modal`. Scope the listing to the modal
+    # provider so it does not fan out to other (unconfigured) providers such as
+    # AWS, whose discovery errors would make `mngr list` exit non-zero in the
+    # test environment even though the modal listing itself is correct.
+    listing = e2e.run("mngr list --provider modal --addrs", comment="verify the named host was created")
     expect(listing).to_succeed()
     expect(listing.stdout).to_contain("my-task@my-modal-box.modal")
 
@@ -481,7 +655,11 @@ def test_create_named_host_new_host(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(180)
+# This test does a remote create plus an exec round-trip, and the create's final
+# "initial snapshot" step is slow and variable in the Modal-in-Modal (offload)
+# environment, so the overall timeout is generous (matching
+# test_create_modal_idle_timeout_60).
+@pytest.mark.timeout(420)
 def test_create_modal_volume(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can mount persistent Modal volumes in order to share data between hosts, or have it be available even when they are offline (or after they are destroyed):
@@ -494,7 +672,10 @@ def test_create_modal_volume(e2e: E2eSession) -> None:
     result = e2e.run(
         "mngr create my-task --provider modal -b volume=my-data:/data --type command --no-connect --no-ensure-clean -- sleep 100985",
         comment="you can mount persistent Modal volumes",
-        timeout=_REMOTE_TIMEOUT,
+        # The create's final "initial snapshot" step is slow and variable in the
+        # Modal-in-Modal (offload) environment, so give it a more generous timeout
+        # than the default _REMOTE_TIMEOUT to avoid flaky timeouts.
+        timeout=_REMOTE_TIMEOUT_CUSTOM_IMAGE,
     )
     expect(result).to_succeed()
 
@@ -534,7 +715,15 @@ def test_create_modal_target_path(e2e: E2eSession) -> None:
 
     # Verify the target path was actually honored, not just that create exited 0.
     # mngr's own metadata should record the requested mount point as the work dir...
-    list_result = e2e.run("mngr list --format json", comment="inspect the agent's recorded work directory")
+    # Scope the listing to the modal provider: a bare ``mngr list`` enumerates
+    # every enabled backend and (by default, ``--on-error abort``) fails loudly if
+    # any is unavailable -- e.g. the AWS backend with no credentials configured in
+    # the isolated e2e environment. The agent under test lives on modal, so
+    # ``--provider modal`` keeps discovery targeted (the documented way to avoid an
+    # unrelated provider aborting the listing) and matches the rest of this file.
+    list_result = e2e.run(
+        "mngr list --provider modal --format json", comment="inspect the agent's recorded work directory"
+    )
     expect(list_result).to_succeed()
     agents_by_name = {a["name"]: a for a in json.loads(list_result.stdout)["agents"]}
     assert "my-task" in agents_by_name, f"my-task not found in agents: {list(agents_by_name)}"
@@ -542,14 +731,24 @@ def test_create_modal_target_path(e2e: E2eSession) -> None:
         f"Expected work_dir '/workspace', got: {agents_by_name['my-task']['work_dir']!r}"
     )
 
-    # ...and the directory should really be where the agent runs on the remote host.
-    # mngr exec appends a "Command succeeded on agent ..." status line, so check
-    # that the command's own output (pwd) is the target path.
-    pwd_result = e2e.run("mngr exec my-task pwd", comment="confirm the agent runs in the target path on the host")
+    # ...and the directory should really be where the agent runs on the remote
+    # host, with the transferred git repository actually mounted there (proving
+    # the *work directory* -- not merely the shell cwd string -- landed at the
+    # target path). The single exec keeps remote round-trips down: it prints the
+    # agent's pwd and, only if /workspace contains the mounted repo's .git dir,
+    # a sentinel. mngr exec appends a "Command succeeded on agent ..." status
+    # line, so assert on the command's own output lines.
+    pwd_result = e2e.run(
+        "mngr exec my-task 'pwd && test -d /workspace/.git && echo WORKDIR_REPO_MOUNTED'",
+        comment="confirm the agent runs in the target path on the host",
+    )
     expect(pwd_result).to_succeed()
     pwd_output_lines = pwd_result.stdout.splitlines()
     assert "/workspace" in pwd_output_lines, (
         f"Expected agent pwd '/workspace' in exec output, got: {pwd_result.stdout!r}"
+    )
+    assert "WORKDIR_REPO_MOUNTED" in pwd_output_lines, (
+        f"Expected the git repo to be mounted at the target path /workspace, got: {pwd_result.stdout!r}"
     )
 
 
@@ -567,20 +766,30 @@ def test_create_modal_upload_and_extra_provision_command(e2e: E2eSession) -> Non
     # package), so the test substitutes a harmless command but still exercises
     # the upload-file + extra-provision-command flags end to end.
     #
+    # The tutorial block omits an explicit agent type (relying on the user's
+    # configured default, claude). Substitute a lightweight `--type command --
+    # sleep` agent (the convention used by the rest of this file): the
+    # upload-file + extra-provision-command behavior runs during host
+    # provisioning and is independent of the agent type, so this exercises the
+    # same code path without the slow claude install (and its "no API
+    # credentials" warning) the default type would trigger.
+    #
     # Seed the source file with a sentinel and have the provision command drop a
     # marker file so we can verify both flags actually took effect on the remote
     # host (rather than only asserting the command exited 0). The sentinel must
     # be a valid SSH config line because the upload target (/root/.ssh/config) is
     # the host's real SSH client config -- a comment line is parsed-and-ignored
-    # by every SSH config reader, so it is safe while still being verifiable.
+    # by every SSH config reader, so it is safe while still being verifiable. The
+    # provision command also records the user it ran as ($(whoami)) so we can
+    # verify the tutorial's documented "runs as the host's default user" claim.
     e2e.run(
         "mkdir -p ~/.ssh && echo '# upload-sentinel-12345' > ~/.ssh/config",
         comment="create ssh config for upload test",
     )
     result = e2e.run(
         "mngr create my-task --provider modal --upload-file ~/.ssh/config:/root/.ssh/config"
-        ' --extra-provision-command "echo provision-marker-67890 > /tmp/mngr_provision_marker"'
-        " --no-connect --no-ensure-clean",
+        ' --extra-provision-command "echo provision-marker-67890 ran-as-$(whoami) > /tmp/mngr_provision_marker"'
+        " --type command --no-connect --no-ensure-clean -- sleep 100563",
         comment="you can upload files and run custom commands during host provisioning",
         timeout=_REMOTE_TIMEOUT,
     )
@@ -605,6 +814,31 @@ def test_create_modal_upload_and_extra_provision_command(e2e: E2eSession) -> Non
     )
     expect(provisioned).to_succeed()
     expect(provisioned.stdout).to_contain("provision-marker-67890")
+
+    # Verify the tutorial's documented behavior that "provision commands run as
+    # the host's default user": the user captured in the marker during
+    # provisioning must match the user the agent's own commands run as on the
+    # host. Comparing against the live `whoami` (rather than hardcoding "root")
+    # keeps the assertion robust to the provider's default-user choice.
+    whoami_result = e2e.run(
+        "mngr exec my-task whoami",
+        comment="determine the host's default user the agent runs as",
+        timeout=_REMOTE_TIMEOUT,
+    )
+    expect(whoami_result).to_succeed()
+    # exec appends a "Command succeeded on agent ..." status line, so pick the
+    # username out of the remaining (command) output.
+    whoami_lines = [
+        line.strip()
+        for line in whoami_result.stdout.splitlines()
+        if line.strip() and "Command succeeded" not in line
+    ]
+    assert whoami_lines, f"Expected whoami output, got: {whoami_result.stdout!r}"
+    host_user = whoami_lines[0]
+    assert f"ran-as-{host_user}" in provisioned.stdout, (
+        f"Expected the provision command to have run as the host's default user {host_user!r}, "
+        f"but the marker recorded: {provisioned.stdout!r}"
+    )
 
 
 @pytest.mark.release
@@ -631,9 +865,13 @@ def test_create_modal_no_start_on_boot(e2e: E2eSession) -> None:
 
     # Verify the flag actually took effect: the agent must be persisted with
     # start_on_boot disabled (exit code 0 alone would not distinguish this from
-    # a normal create).
+    # a normal create). Scope the listing to the modal provider (matching the
+    # other create-modal tests): the agent under test lives on modal, and
+    # filtering avoids discovering unconfigured default cloud backends (e.g.
+    # aws), whose ProviderUnavailableError would otherwise abort an unfiltered
+    # listing under the default --on-error abort.
     list_result = e2e.run(
-        "mngr list --format json",
+        "mngr list --provider modal --format json",
         comment="verify the agent was created with start-on-boot disabled",
         timeout=_REMOTE_TIMEOUT,
     )
@@ -681,6 +919,45 @@ def test_create_modal_pass_host_env(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
+@pytest.mark.timeout(360)
+def test_create_modal_host_env_direct(e2e: E2eSession) -> None:
+    # Same tutorial block as test_create_modal_pass_host_env, but exercising the
+    # direct ``--host-env KEY=VALUE`` form the block's trailing comment documents
+    # ("if you really need to you can use --host-env to specify host env vars
+    # directly"). Unlike --pass-host-env, this does not read the value from the
+    # surrounding shell -- it is supplied inline -- so it goes through a distinct
+    # resolution path (resolve_env_vars' explicit_env_var_strings branch).
+    e2e.write_tutorial_block("""
+    # you can also set host-level environment variables (separate from agent env vars):
+    mngr create my-task --provider modal --pass-host-env MY_VAR
+    # --host-env-file and --pass-host-env work the same as their agent counterparts, and again, you should generally prefer those forms (but if you really need to you can use --host-env to specify host env vars directly)
+    """)
+    # No default agent type is configured in the isolated test profile, so pass
+    # --type command (with a long sleep) to stand in for the tutorial's default
+    # agent. The host env var is supplied inline via --host-env (not forwarded
+    # from the shell), so MY_VAR is intentionally absent from the command's env.
+    result = e2e.run(
+        "mngr create my-task --provider modal --host-env MY_VAR=direct-value --type command --no-connect --no-ensure-clean -- sleep 100983",
+        comment="if you really need to you can use --host-env to specify host env vars directly",
+        timeout=_REMOTE_TIMEOUT,
+    )
+    expect(result).to_succeed()
+
+    # Verify the directly-specified host env var actually reached the host. exec
+    # sources the host env file before running the command, so MY_VAR must
+    # resolve to the inline value -- not anything inherited from the shell.
+    env_result = e2e.run(
+        "mngr exec my-task -- 'echo MY_VAR=$MY_VAR'",
+        comment="confirm the directly-specified host env var is set on the host",
+        timeout=_REMOTE_TIMEOUT,
+    )
+    expect(env_result).to_succeed()
+    expect(env_result.stdout).to_contain("MY_VAR=direct-value")
+
+
+@pytest.mark.release
+@pytest.mark.modal
+@pytest.mark.rsync
 @pytest.mark.timeout(600)
 def test_create_modal_reuse(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
@@ -704,6 +981,12 @@ def test_create_modal_reuse(e2e: E2eSession) -> None:
         timeout=_REMOTE_TIMEOUT,
     )
     expect(first).to_succeed()
+    # The first run must genuinely *create* the agent (it does not exist yet), so
+    # it reports starting a fresh agent and must NOT report reusing one. This pins
+    # the observable signal of the "create" branch of --reuse rather than only
+    # inferring it later from agent-id equality.
+    expect(first.stdout + first.stderr).to_match(r"(?i)starting agent sisyphus")
+    expect((first.stdout + first.stderr).lower()).not_to_contain("reusing existing agent")
 
     after_first = e2e.run(
         "mngr list --provider modal --format json",
@@ -726,6 +1009,13 @@ def test_create_modal_reuse(e2e: E2eSession) -> None:
         timeout=_REMOTE_TIMEOUT,
     )
     expect(second).to_succeed()
+    # The defining behavior of --reuse on the second run is that it reuses the
+    # existing agent instead of creating a new one. Assert on the observable
+    # signal create emits when it takes the reuse branch ("Reusing existing agent:
+    # sisyphus"), which is the direct, human-visible proof that reuse happened --
+    # not just that the command exited 0 or that an agent with the same id exists.
+    expect(second.stdout + second.stderr).to_match(r"(?i)reusing existing agent")
+    expect(second.stdout + second.stderr).to_contain("sisyphus")
 
     after_second = e2e.run(
         "mngr list --provider modal --format json",
@@ -744,6 +1034,11 @@ def test_create_modal_reuse(e2e: E2eSession) -> None:
     )
     assert second_agent["host"]["id"] == first_agent["host"]["id"], (
         f"Expected reuse to keep the same host: first={first_agent['host']['id']} second={second_agent['host']['id']}"
+    )
+    # The tutorial promises the existing agent is reused "(and started)", so the
+    # reused agent's host must be running afterwards (not left stopped).
+    assert second_agent["host"]["state"] == "RUNNING", (
+        f"Expected the reused agent's host to be RUNNING, got: {second_agent['host']['state']!r}"
     )
 
 
@@ -768,10 +1063,16 @@ def test_create_modal_basic_recap(e2e: E2eSession) -> None:
     )
     expect(result).to_succeed()
     # Verify the agent actually landed on a running Modal host, rather than only
-    # checking the create command's exit code. Parse the JSON listing and tie the
-    # my-task agent to its host so we confirm *that* agent is hosted on modal (not
-    # just that "my-task" and "modal" both appear somewhere in the output).
-    list_result = e2e.run("mngr list --format json", comment="verify the agent is running on Modal")
+    # checking the create command's exit code. Scope the listing to --provider
+    # modal: a bare `mngr list` fans out to every installed provider plugin and
+    # aborts (default --on-error abort) if any unconfigured one (e.g. an installed
+    # but credential-less AWS plugin) raises during discovery -- noise unrelated to
+    # what this test exercises. Filtering to modal sidesteps that, and we still
+    # parse the JSON and tie the my-task agent to its host to confirm it is RUNNING
+    # on a real Modal host.
+    list_result = e2e.run(
+        "mngr list --provider modal --format json", comment="verify the agent is running on Modal"
+    )
     expect(list_result).to_succeed()
     agents_by_name = {a["name"]: a for a in json.loads(list_result.stdout)["agents"]}
     assert "my-task" in agents_by_name, f"my-task not found in agents: {list(agents_by_name)}"
@@ -784,6 +1085,11 @@ def test_create_modal_basic_recap(e2e: E2eSession) -> None:
     assert my_task["host"]["state"] == "RUNNING", (
         f"Expected the modal host to be RUNNING, got: {my_task['host']['state']!r}"
     )
+    # The create's own arguments must have taken effect, not just that *some*
+    # agent was provisioned: the substituted `--type command -- sleep 100205`
+    # should be reflected in the persisted agent record.
+    assert my_task["type"] == "command", f"Expected a command-type agent, got: {my_task['type']!r}"
+    assert "sleep 100205" in my_task["command"], f"Expected the sleep command, got: {my_task['command']!r}"
 
 
 @pytest.mark.release
@@ -821,6 +1127,51 @@ def test_create_modal_cpu_memory_gpu(e2e: E2eSession) -> None:
     expect(listing.stdout).to_contain("RES:my-task|4|16.0")
 
 
+# No @pytest.mark.rsync here: this create is rejected during build-arg parsing,
+# before the git-transfer (rsync) stage runs, so the rsync resource guard would
+# fire. The modal mark still holds -- provider initialization invokes the Modal
+# CLI (environment_create) before create_host parses the build args.
+@pytest.mark.release
+@pytest.mark.modal
+@pytest.mark.timeout(240)
+def test_create_modal_invalid_resource_build_arg(e2e: E2eSession) -> None:
+    # Same tutorial block as test_create_modal_cpu_memory_gpu, exercised on the
+    # unhappy path: the block teaches that CPU/memory/GPU are specified via `-b`
+    # build args, so a malformed resource value (here a non-numeric cpu) must be
+    # rejected with a clear error rather than silently ignored or producing a
+    # confusing downstream failure. This fails during build-arg parsing, before
+    # any host is provisioned, so it is cheap relative to the happy-path test.
+    e2e.write_tutorial_block("""
+        # specify CPU, memory, and GPU resources
+        mngr create my-task --provider modal -b cpu=4 -b memory=16 -b gpu=A10G
+    """)
+    result = e2e.run(
+        "mngr create my-task --provider modal -b cpu=not-a-number -b memory=16 --no-connect --no-ensure-clean",
+        comment="a malformed resource build arg must be rejected with a clear error",
+        timeout=_REMOTE_TIMEOUT,
+    )
+    expect(result).to_fail()
+    # The error must name the build-arg parsing failure and the offending arg, so
+    # the user can tell which `-b` value was wrong (not just that something failed).
+    combined = result.stdout + result.stderr
+    expect(combined).to_match(r"(?i)invalid build argument")
+    expect(combined).to_contain("cpu")
+
+    # The failed create must not leave a phantom agent behind: parsing failed
+    # before provisioning, so `my-task` should not appear in the listing at all.
+    # Scope to --provider modal (as the happy-path test does) so the listing does
+    # not fan out to other providers (e.g. aws) that are unconfigured in the e2e
+    # environment and would otherwise make `mngr list` exit non-zero.
+    list_result = e2e.run(
+        "mngr list --provider modal --format json",
+        comment="confirm the rejected create left no agent behind",
+        timeout=_REMOTE_TIMEOUT,
+    )
+    expect(list_result).to_succeed()
+    agent_names = [agent["name"] for agent in json.loads(list_result.stdout)["agents"]]
+    assert "my-task" not in agent_names, f"Expected no 'my-task' agent after a rejected create, got: {agent_names}"
+
+
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
@@ -830,13 +1181,22 @@ def test_create_modal_custom_image_base(e2e: E2eSession) -> None:
         # use a custom Docker image as the base
         mngr create my-task --provider modal -b image=python:3.12
     """)
-    expect(
-        e2e.run(
-            "mngr create my-task --provider modal -b image=python:3.12 --no-connect --no-ensure-clean",
-            comment="use a custom Docker image as the base",
-            timeout=_REMOTE_TIMEOUT_CUSTOM_IMAGE,
-        )
-    ).to_succeed()
+    create_result = e2e.run(
+        "mngr create my-task --provider modal -b image=python:3.12 --no-connect --no-ensure-clean",
+        comment="use a custom Docker image as the base",
+        timeout=_REMOTE_TIMEOUT_CUSTOM_IMAGE,
+    )
+    expect(create_result).to_succeed()
+    # Confirm the host genuinely booted from the *custom* base image rather than
+    # silently falling back to mngr's default. mngr bakes its required host
+    # packages (openssh-server, tmux, rsync, ...) into the default debian_slim
+    # base, but a user-supplied registry image does not have them, so create
+    # installs them at runtime and warns about it. That warning appears if and
+    # only if a custom base image is in use. This is a stronger check than the
+    # Python version alone: mngr's default base resolves its Python version to
+    # the local interpreter, which is also 3.12 in this test environment, so a
+    # version check by itself would pass even if the `-b image=` flag were ignored.
+    expect(create_result.stdout + create_result.stderr).to_match(r"(?i)not pre-installed in the base image")
     # Verify the custom image was actually used as the base (not just that the
     # command exited 0): the python:3.12 image ships Python 3.12 as `python`, so
     # exec'ing into the host proves the requested base image is what booted.
@@ -891,6 +1251,54 @@ def test_create_modal_custom_dockerfile_only(e2e: E2eSession) -> None:
     expect(exec_result.stdout).to_contain("dockerfile-only-marker")
 
 
+# No @pytest.mark.rsync here: the create fails during the image build, before the
+# git/rsync transfer step ever runs, so the rsync resource guard would fire.
+@pytest.mark.release
+@pytest.mark.modal
+@pytest.mark.timeout(240)
+def test_create_modal_custom_dockerfile_missing(e2e: E2eSession) -> None:
+    # Unhappy-path companion to test_create_modal_custom_dockerfile_only, sharing
+    # the same tutorial block: when `-b file=<path>` points at a Dockerfile that
+    # does not exist, the create must fail (rather than silently falling back to
+    # the default base image) and surface the offending path. This guards the
+    # error-handling behavior of the same `--file` build arg the tutorial shows.
+    e2e.write_tutorial_block("""
+        # use a custom Dockerfile
+        mngr create my-task --provider modal -b file=./Dockerfile.agent
+    """)
+    # Deliberately do NOT create ./Dockerfile.agent, so the referenced Dockerfile
+    # is missing. `--type command -- sleep` matches the happy-path test (no claude
+    # install / API key needed); the create should error out during the image
+    # build, well before any agent would run.
+    result = e2e.run(
+        "mngr create my-task --provider modal -b file=./Dockerfile.agent --type command --no-connect --no-ensure-clean -- sleep 100438",
+        comment="custom Dockerfile path that does not exist should fail",
+        timeout=_REMOTE_TIMEOUT_CUSTOM_IMAGE,
+    )
+    expect(result).to_fail()
+    # The error must name the missing Dockerfile so the user can tell what went
+    # wrong, and it must be a clean message -- not a raw Python traceback.
+    combined = result.stdout + result.stderr
+    expect(combined).to_match(r"(?i)dockerfile not found")
+    expect(combined).to_contain("Dockerfile.agent")
+    assert "Traceback (most recent call last)" not in combined, (
+        f"Expected a clean error message, not a Python traceback, got:\n{combined}"
+    )
+
+    # The failed create must not leave a phantom agent behind in the listing.
+    # Scope to --provider modal: a bare `mngr list` would fan out to every
+    # configured provider (including aws/vultr, which are unconfigured in the
+    # test env and make the command exit non-zero), whereas this create only ever
+    # targeted modal.
+    list_result = e2e.run(
+        "mngr list --provider modal --format json",
+        comment="confirm no agent was created from the failed custom-Dockerfile create",
+    )
+    expect(list_result).to_succeed()
+    agent_names = [agent["name"] for agent in json.loads(list_result.stdout)["agents"]]
+    assert "my-task" not in agent_names, f"Expected no 'my-task' agent after a failed create, got: {agent_names}"
+
+
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
@@ -931,6 +1339,68 @@ def test_create_modal_volume_simple(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
+# Two host creations plus a destroy and two exec round-trips, so this needs more
+# headroom than the single-create volume tests.
+@pytest.mark.timeout(600)
+def test_create_modal_volume_persists_across_destroy(e2e: E2eSession) -> None:
+    # Shares the tutorial block with test_create_modal_volume_simple, but
+    # exercises the property the comment actually claims -- that the data
+    # "survives host destruction" -- rather than only that the mount is writable.
+    e2e.write_tutorial_block("""
+        # mount a persistent volume for data that survives host destruction
+        mngr create my-task --provider modal -b volume=my-data:/data
+    """)
+    # Create the first agent on a fresh host and write a sentinel into the volume.
+    expect(
+        e2e.run(
+            "mngr create my-task --provider modal -b volume=my-data:/data --no-connect --no-ensure-clean",
+            comment="mount a persistent volume and create the first host",
+            timeout=_REMOTE_TIMEOUT,
+        )
+    ).to_succeed()
+    expect(
+        e2e.run(
+            "mngr exec my-task 'echo mngr-volume-survives-destroy > /data/persisted.txt'",
+            comment="write a sentinel into the persistent volume",
+            timeout=_REMOTE_TIMEOUT,
+        )
+    ).to_succeed()
+
+    # Destroy the agent and its host. A Modal volume is a named resource that
+    # lives independently of the sandbox, so destroying the host must not take
+    # the volume (or its contents) with it.
+    expect(
+        e2e.run(
+            "mngr destroy my-task --force",
+            comment="destroy the first host (the volume should outlive it)",
+            timeout=_REMOTE_TIMEOUT,
+        )
+    ).to_succeed()
+
+    # Create a *second*, independent agent on a brand-new host that mounts the
+    # same named volume. This is the cross-host sharing / persistence guarantee.
+    expect(
+        e2e.run(
+            "mngr create my-task-redux --provider modal -b volume=my-data:/data --no-connect --no-ensure-clean",
+            comment="create a new host mounting the same persistent volume",
+            timeout=_REMOTE_TIMEOUT,
+        )
+    ).to_succeed()
+
+    # The sentinel written by the (now destroyed) first host must still be
+    # readable from the new host, proving the volume's data survived destruction.
+    read_back = e2e.run(
+        "mngr exec my-task-redux 'cat /data/persisted.txt'",
+        comment="confirm the data written before destruction is still present",
+        timeout=_REMOTE_TIMEOUT,
+    )
+    expect(read_back).to_succeed()
+    expect(read_back.stdout).to_contain("mngr-volume-survives-destroy")
+
+
+@pytest.mark.release
+@pytest.mark.modal
+@pytest.mark.rsync
 @pytest.mark.timeout(240)
 def test_create_modal_idle_timeout_120(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
@@ -953,7 +1423,13 @@ def test_create_modal_idle_timeout_120(e2e: E2eSession) -> None:
         comment="confirm the requested idle timeout was applied to the host",
     )
     expect(listing).to_succeed()
-    expect(listing.stdout).to_contain("my-task=120")
+    # Match on the exact rendered line rather than a substring: a plain
+    # `to_contain("my-task=120")` would also pass for a stray 1200 or 1209, so
+    # assert there is exactly one my-task row and that it reports precisely 120.
+    agent_lines = [line.strip() for line in listing.stdout.splitlines() if line.strip().startswith("my-task=")]
+    assert agent_lines == ["my-task=120"], (
+        f"Expected exactly one 'my-task=120' line, got: {agent_lines}"
+    )
 
 
 @pytest.mark.release
@@ -976,22 +1452,39 @@ def test_snapshot_create_checkpoint(e2e: E2eSession) -> None:
             timeout=_REMOTE_TIMEOUT,
         )
     ).to_succeed()
-    expect(
-        e2e.run(
-            'mngr snapshot create my-task --name "checkpoint-1"',
-            comment="create a snapshot for checkpointing",
-        )
-    ).to_succeed()
-    # Verify the snapshot actually exists and carries the requested name,
-    # rather than trusting the create command's exit code alone.
+    create_result = e2e.run(
+        'mngr snapshot create my-task --name "checkpoint-1"',
+        comment="create a snapshot for checkpointing",
+    )
+    expect(create_result).to_succeed()
+    # The create command reports the id of the snapshot it made and the agent(s)
+    # whose host was snapshotted (snapshots operate at the host level, resolved
+    # from the agent). Capturing that id lets us tie the created snapshot to the
+    # one the listing returns below -- proving create -> list consistency rather
+    # than just that *some* snapshot named "checkpoint-1" exists. The agent name
+    # in the message confirms the my-task -> host resolution actually happened.
+    create_output = create_result.stdout + create_result.stderr
+    id_match = re.search(r"Created snapshot (\S+) for host", create_output)
+    assert id_match is not None, f"Expected create to report the new snapshot id, got:\n{create_output}"
+    created_snapshot_id = id_match.group(1)
+    assert "agents: my-task" in create_output, (
+        f"Expected create to report it snapshotted my-task's host, got:\n{create_output}"
+    )
+
+    # Verify the snapshot actually exists, carries the requested name, and is the
+    # exact snapshot the create command reported -- rather than trusting the
+    # create command's exit code alone.
     list_result = e2e.run(
         "mngr snapshot list my-task --format json",
         comment="verify the checkpoint snapshot was created",
     )
     expect(list_result).to_succeed()
     snapshots = json.loads(list_result.stdout)["snapshots"]
-    assert any(s.get("name") == "checkpoint-1" for s in snapshots), (
-        f"Expected a snapshot named 'checkpoint-1', got: {snapshots}"
+    checkpoint_snapshots = [s for s in snapshots if s.get("name") == "checkpoint-1"]
+    assert len(checkpoint_snapshots) == 1, f"Expected exactly one snapshot named 'checkpoint-1', got: {snapshots}"
+    assert checkpoint_snapshots[0]["id"] == created_snapshot_id, (
+        f"Expected the listed 'checkpoint-1' snapshot id to match the created id "
+        f"{created_snapshot_id!r}, got: {checkpoint_snapshots[0]['id']!r}"
     )
 
 
@@ -1032,11 +1525,28 @@ def test_list_provider_modal(e2e: E2eSession) -> None:
         f"Expected the 'my-task' row to show the modal provider, got rows: {matching_rows}"
     )
 
+    # Prove the --provider flag actually discriminates rather than printing
+    # everything: it is a fan-out control that selects which providers to query.
+    # Querying a *different* provider (local) must therefore NOT surface the
+    # modal-hosted agent. This is a cheap, local-only listing (no extra Modal
+    # provisioning) that confirms the modal-hosted agent is excluded when a
+    # non-modal provider is requested.
+    local_only = e2e.run(
+        "mngr list --provider local",
+        comment="confirm --provider filters: a local-only listing excludes the modal agent",
+    )
+    expect(local_only).to_succeed()
+    expect(local_only.stdout).not_to_contain("my-task")
+
 
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(240)
+# Generous overall budget: this test does a remote modal create, a list, a
+# remote modal destroy (host teardown), and a final list -- each a network
+# round-trip, and destroy in particular is slow in the Modal-in-Modal offload
+# environment.
+@pytest.mark.timeout(360)
 def test_destroy_all_modal_agents(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # destroy all Modal agents (be careful!)  Useful for cleaning up while prototyping
@@ -1053,23 +1563,44 @@ def test_destroy_all_modal_agents(e2e: E2eSession) -> None:
         )
     ).to_succeed()
     # Confirm the agent is present among Modal agents before destroying it.
+    # The verification steps scope the listing to `--provider modal` (rather than
+    # the tutorial's `--include 'host.provider == "modal"'` post-filter): a bare
+    # `mngr list` queries *every* enabled provider and exits 1 if any is
+    # unreachable (e.g. an unconfigured aws backend, or a docker daemon that is
+    # not running in a Modal-only test sandbox). `--provider modal` only queries
+    # the modal backend, so these standalone assertions stay robust regardless of
+    # which other providers happen to be available in the test environment. The
+    # destroy pipeline below still runs the tutorial command verbatim.
     before = e2e.run(
-        "mngr list --include 'host.provider == \"modal\"'",
+        "mngr list --provider modal",
         comment="list Modal agents before destroying",
+        timeout=_REMOTE_TIMEOUT,
     )
     expect(before).to_succeed()
     expect(before.stdout).to_contain("doomed-agent")
     # Destroy all Modal agents via the filter+stdin pipeline from the tutorial.
-    expect(
-        e2e.run(
-            "mngr list --include 'host.provider == \"modal\"' --ids | mngr destroy -f -",
-            comment="destroy all Modal agents via filter+stdin",
-        )
-    ).to_succeed()
+    # `mngr list --include ... --ids` prints the matching modal ids to stdout
+    # (any unreachable-provider error goes to stderr), so the pipe still feeds
+    # the modal ids to `mngr destroy`, whose exit code is what the shell returns.
+    # The pipeline tears down a remote Modal host, so it needs the remote timeout
+    # rather than the short default.
+    destroy_result = e2e.run(
+        "mngr list --include 'host.provider == \"modal\"' --ids | mngr destroy -f -",
+        comment="destroy all Modal agents via filter+stdin",
+        timeout=_REMOTE_TIMEOUT,
+    )
+    expect(destroy_result).to_succeed()
+    # The filter+stdin pipeline must have actually fed the modal agent's id to
+    # `mngr destroy` and destroyed it -- assert on the destroy output so the test
+    # does not pass vacuously if `mngr list --ids` ever produced no ids (which
+    # would leave `mngr destroy -f -` reading empty stdin and still exiting 0).
+    expect(destroy_result.stdout).to_contain("doomed-agent")
+    expect(destroy_result.stdout).to_match(r"(?i)destroyed 1 agent")
     # The agent should no longer appear among active Modal agents.
     after = e2e.run(
-        "mngr list --include 'host.provider == \"modal\"'",
+        "mngr list --provider modal",
         comment="list Modal agents after destroying",
+        timeout=_REMOTE_TIMEOUT,
     )
     expect(after).to_succeed()
     expect(after.stdout).not_to_contain("doomed-agent")
@@ -1163,6 +1694,52 @@ def test_create_modal_idle_mode_ssh_timeout_300(e2e: E2eSession) -> None:
     )
 
 
+# No @pytest.mark.modal here: an invalid --idle-mode value is rejected by click's
+# option parsing (exit code 2) before the command body runs, so no Modal API call
+# is ever made and the modal resource guard would otherwise fire.
+@pytest.mark.release
+@pytest.mark.timeout(120)
+def test_create_modal_idle_mode_invalid(e2e: E2eSession) -> None:
+    """Unhappy path for the --idle-mode tutorial block: an unsupported mode is rejected."""
+    e2e.write_tutorial_block("""
+        # control what counts as "activity" with --idle-mode:
+        #   "agent" (default) -- idle when the agent process is idle
+        #   "ssh" -- idle when no SSH sessions are connected
+        #   "run" -- idle when the main process exits (useful for non-agent commands)
+        #   ...
+        # see the idle_detection.md file for more details on idle detection strategies
+        mngr create my-task --provider modal --idle-mode ssh --idle-timeout 300
+    """)
+    # The tutorial only documents a fixed set of idle modes; passing anything else
+    # must be rejected up front (a typo'd mode should not silently create a host).
+    result = e2e.run(
+        "mngr create my-task --provider modal --idle-mode bogus --idle-timeout 300"
+        " --no-connect --no-ensure-clean --type command -- sleep 100982",
+        comment="an unsupported --idle-mode value is rejected before any host is created",
+        timeout=_REMOTE_TIMEOUT,
+    )
+    expect(result).to_fail()
+    combined = result.stdout + result.stderr
+    # The error must name the offending option and reject the bad value...
+    expect(combined).to_contain("--idle-mode")
+    expect(combined).to_contain("bogus")
+    # ...while pointing the user at the valid modes the tutorial documents.
+    expect(combined).to_contain("ssh")
+    expect(combined).to_contain("agent")
+    expect(combined).to_contain("run")
+    # The bad mode must not have leaked into a created agent.
+    list_result = e2e.run(
+        "mngr list --provider modal --format json",
+        comment="confirm no agent was created for the rejected idle mode",
+        timeout=_REMOTE_TIMEOUT,
+    )
+    expect(list_result).to_succeed()
+    agents = json.loads(list_result.stdout)["agents"]
+    assert not [agent for agent in agents if agent["name"] == "my-task"], (
+        f"Expected no 'my-task' agent after a rejected --idle-mode, got: {agents}"
+    )
+
+
 # Flaky: the remote Modal create path occasionally drops the SSH session
 # mid-create (observed as an error in the `_ensure_shared_shell_libs` thread,
 # "SSH error (No existing session)") or hits a transient Modal permission error
@@ -1193,8 +1770,13 @@ def test_create_modal_idle_mode_run(e2e: E2eSession) -> None:
 
     # Verify the concrete effect: a command-type agent really exists, runs our
     # command, and carries the requested idle configuration (run mode, 60s).
+    # Scope the listing to --provider modal: a bare `mngr list` would discover
+    # every enabled backend, and any backend that is enabled-but-unconfigured in
+    # the environment (e.g. aws without credentials) hard-fails the whole command
+    # with a ProviderDiscoveryError. We only care about the modal agent here, so
+    # filtering keeps the verification robust to unrelated providers.
     list_result = e2e.run(
-        "mngr list --format json",
+        "mngr list --provider modal --format json",
         comment="confirm the command agent was created with run idle mode",
         timeout=_REMOTE_TIMEOUT,
     )
@@ -1336,33 +1918,37 @@ def test_create_modal_provision_pip_install(e2e: E2eSession) -> None:
         # run a setup command during host provisioning
         mngr create my-task --provider modal --extra-provision-command "pip install numpy pandas"
     """)
-    # `pip install numpy pandas` from the tutorial would pull large packages at
-    # provision time, so the test substitutes a quick command that drops a marker
-    # file. Reading that marker back via `mngr exec` (below) proves the
-    # --extra-provision-command actually ran on the host, rather than only
-    # asserting the create command exited 0. Use --type command -- sleep (the
-    # convention shared with the other create tests) so the agent stays up for
-    # the exec round-trip without needing claude installed/authenticated.
-    marker_path = "/tmp/mngr_provision_marker"
+    # `pip install numpy pandas` from the tutorial pulls large packages, which is
+    # slow at provision time. Substitute the smallest possible stand-in that still
+    # exercises the tutorial's headline behavior -- installing a Python package via
+    # a provision command: `six` is a tiny, dependency-free, pure-Python package.
+    # Importing it back via `mngr exec` (below) proves the --extra-provision-command
+    # actually ran pip during provisioning, not just that the create command exited
+    # 0. Use --type command -- sleep (the convention shared with the other create
+    # tests) so the agent stays up for the exec round-trip without needing claude
+    # installed/authenticated.
     expect(
         e2e.run(
             "mngr create my-task --provider modal"
-            f' --extra-provision-command "echo provisioned > {marker_path}"'
+            ' --extra-provision-command "pip install six"'
             " --type command --no-connect --no-ensure-clean -- sleep 100156",
-            comment="run a setup command during host provisioning (substituted for a quick marker)",
+            comment="run a setup command during host provisioning (install a small package)",
             timeout=_REMOTE_TIMEOUT,
         )
     ).to_succeed()
 
-    # Verify the provision command actually ran on the host and wrote the marker;
-    # exit code 0 alone would not prove the --extra-provision-command took effect.
-    marker_result = e2e.run(
-        f"mngr exec my-task 'cat {marker_path}'",
-        comment="confirm the extra provision command ran on the host",
+    # Verify the provision command actually installed the package: the module must
+    # be importable on the host. Exit code 0 of the create alone would not prove the
+    # pip install ran. Printing the version records concrete evidence in the
+    # transcript that the package is genuinely installed (a stand-in for verifying
+    # numpy/pandas would import in the real tutorial command).
+    import_result = e2e.run(
+        "mngr exec my-task 'python -c \"import six; print(six.__version__)\"'",
+        comment="confirm the pip-installed package is importable on the host",
         timeout=_REMOTE_TIMEOUT,
     )
-    expect(marker_result).to_succeed()
-    expect(marker_result.stdout).to_contain("provisioned")
+    expect(import_result).to_succeed()
+    expect(import_result.stdout).to_match(r"\d+\.\d+")
 
 
 @pytest.mark.release
@@ -1423,10 +2009,19 @@ def test_create_modal_provision_append_file(e2e: E2eSession) -> None:
     # verification below. Mirror the tutorial's "append to a file" behavior, but
     # target a throwaway path instead of /root/.bashrc so we never mutate the
     # host's shell config.
+    #
+    # The headline of this block is the append operator (``>>``), as opposed to
+    # the sibling pip-install/sudo tests which overwrite with ``>``. To prove the
+    # append semantics rather than just that *some* content landed, seed the file
+    # with a baseline line via a first (repeatable) --extra-provision-command, then
+    # append the tutorial's PATH line with ``>>``. If ``>>`` were behaving like
+    # ``>`` (truncate), the baseline line would be gone -- so asserting that the
+    # baseline survives *and* precedes the appended line confirms a real append.
     marker_path = "/tmp/mngr_provision_marker"
     expect(
         e2e.run(
             "mngr create my-task --provider modal"
+            f" --extra-provision-command \"echo provision-baseline-line > {marker_path}\""
             f" --extra-provision-command \"echo 'export PATH=/opt/bin:\\$PATH' >> {marker_path}\""
             " --type command --no-connect --no-ensure-clean -- sleep 100985",
             comment="append to a file on the host (targeting a throwaway path instead of bashrc)",
@@ -1441,8 +2036,20 @@ def test_create_modal_provision_append_file(e2e: E2eSession) -> None:
         timeout=_REMOTE_TIMEOUT,
     )
     expect(marker_result).to_succeed()
-    assert "export PATH=/opt/bin:$PATH" in marker_result.stdout, (
+    appended_line = "export PATH=/opt/bin:$PATH"
+    assert appended_line in marker_result.stdout, (
         f"Expected the appended line in {marker_path}, got: {marker_result.stdout!r}"
+    )
+    # The baseline line must still be present (proving ``>>`` appended rather than
+    # truncated) and must precede the appended PATH line (proving the append went
+    # to the end of the existing content).
+    assert "provision-baseline-line" in marker_result.stdout, (
+        f"Expected the pre-existing baseline line to survive the append in {marker_path}, "
+        f"got: {marker_result.stdout!r}"
+    )
+    assert marker_result.stdout.index("provision-baseline-line") < marker_result.stdout.index(appended_line), (
+        f"Expected the baseline line to precede the appended line (real append, not truncate), "
+        f"got: {marker_result.stdout!r}"
     )
 
 
@@ -1462,8 +2069,12 @@ def test_create_modal_combined_setup_steps(e2e: E2eSession) -> None:
     # Substitute the slow apt-get/pip steps with quick provision commands that each
     # append a marker line to a host file. This keeps the test fast while making
     # the core behavior of the tutorial block observable: that --extra-provision-command
-    # is repeatable and runs in the order given. The test still exercises
-    # --upload-file alongside two repeated --extra-provision-command flags.
+    # is repeatable and runs in the order given. Crucially, the second provision
+    # command *reads the uploaded file* (`cat /workspace/requirements.txt`), exactly
+    # as the tutorial's `pip install -r /workspace/requirements.txt` does. This
+    # makes the test faithful to the real dependency the tutorial block relies on:
+    # --upload-file must land before the extra-provision-commands run, otherwise a
+    # provision step that consumes the uploaded file would fail.
     # The tutorial block omits --type because it assumes onboarding configured a
     # default agent type; the isolated test profile has none, so we pass an
     # explicit type here. We use the lightweight `command` agent (running a long
@@ -1474,7 +2085,8 @@ def test_create_modal_combined_setup_steps(e2e: E2eSession) -> None:
             "mngr create my-task --provider modal --type command"
             " --upload-file ./requirements.txt:/workspace/requirements.txt"
             ' --extra-provision-command "echo build-step >> /tmp/provision_order.log"'
-            ' --extra-provision-command "echo provision-step >> /tmp/provision_order.log"'
+            ' --extra-provision-command "cat /workspace/requirements.txt >> /tmp/provision_order.log'
+            ' && echo provision-step >> /tmp/provision_order.log"'
             " --no-connect --no-ensure-clean -- sleep 600",
             comment="combine upload + repeated extra-provision (substituted for speed)",
             timeout=_REMOTE_TIMEOUT,
@@ -1500,6 +2112,15 @@ def test_create_modal_combined_setup_steps(e2e: E2eSession) -> None:
     expect(provision_check).to_succeed()
     expect(provision_check.stdout).to_contain("build-step")
     expect(provision_check.stdout).to_contain("provision-step")
-    assert provision_check.stdout.index("build-step") < provision_check.stdout.index("provision-step"), (
-        f"Expected 'build-step' to run before 'provision-step', got: {provision_check.stdout!r}"
+    # The second provision command catted the uploaded requirements.txt into the
+    # log, so its contents appearing here proves the --upload-file completed
+    # *before* the extra-provision-commands ran -- the exact ordering dependency
+    # the tutorial relies on when it pairs --upload-file with `pip install -r`.
+    expect(provision_check.stdout).to_contain("requests==2.32.0")
+    build_index = provision_check.stdout.index("build-step")
+    requirements_index = provision_check.stdout.index("requests==2.32.0")
+    provision_index = provision_check.stdout.index("provision-step")
+    assert build_index < requirements_index < provision_index, (
+        "Expected provision steps to run in order with the uploaded requirements.txt read by the "
+        f"second step, got: {provision_check.stdout!r}"
     )

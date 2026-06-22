@@ -10,7 +10,6 @@ from imbue.mngr.e2e.conftest import E2eSession
 from imbue.skitwright.expect import expect
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(60)
@@ -44,7 +43,6 @@ def test_create_and_destroy_agent(e2e: E2eSession) -> None:
     expect(list_result.stdout).not_to_contain("my-task")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -77,6 +75,10 @@ def test_destroy_all_via_stdin(e2e: E2eSession) -> None:
     # input).
     expect(destroy_result.stdout).to_contain("Destroyed agent: agent-x")
     expect(destroy_result.stdout).to_contain("Destroyed agent: agent-y")
+    # The summary line confirms the *count*: piping the full id list must tear
+    # down exactly the two agents that existed, not a subset. This guards against
+    # a regression where only the first piped id is consumed.
+    expect(destroy_result.stdout).to_contain("Successfully destroyed 2 agent(s)")
 
     list_after = e2e.run("mngr list", comment="Verify no agents remain")
     expect(list_after).to_succeed()
@@ -92,7 +94,6 @@ def _create_my_task(e2e: E2eSession, sleep_value: int) -> None:
     ).to_succeed()
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
@@ -116,7 +117,12 @@ def test_destroy_specific(e2e: E2eSession) -> None:
     expect(list_result.stdout).not_to_contain("my-task")
 
 
-@pytest.mark.rsync
+# No @pytest.mark.rsync: this test creates a local (`--type command`) agent with
+# the default git-worktree transfer, which is an entirely local git operation.
+# Local file provisioning copies in-process rather than shelling out to rsync
+# (see imbue.mngr.hosts.file_upload: "rsync is unnecessary since writes are
+# local"), so the test never invokes rsync and the resource guard would flag the
+# mark as never-invoked.
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -139,7 +145,6 @@ def test_destroy_short_form(e2e: E2eSession) -> None:
     expect(list_result.stdout).not_to_contain("my-task")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -147,6 +152,13 @@ def test_destroy_short_form_running_requires_force(e2e: E2eSession) -> None:
     # Unhappy path for the same tutorial block: without --force, the short-form
     # `rm` is safe by default and refuses to destroy a still-running agent even
     # after the confirmation prompt is answered "y".
+    #
+    # Unlike the happy-path siblings, this test deliberately never completes a
+    # destroy: the running-agent guard rejects `rm` before any preservation runs,
+    # and creating a local command agent uses a git worktree rather than an rsync
+    # transfer. rsync is therefore never invoked here, so this test carries no
+    # @pytest.mark.rsync (the resource guard fails a test that declares the mark
+    # but never exercises it).
     e2e.write_tutorial_block("""
         # short form
         mngr rm my-task
@@ -162,10 +174,9 @@ def test_destroy_short_form_running_requires_force(e2e: E2eSession) -> None:
     expect(list_result.stdout).to_contain("my-task")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(60)
+@pytest.mark.timeout(180)
 def test_destroy_remove_branch(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # destroy and also remove the git branch that was created for the agent
@@ -184,9 +195,15 @@ def test_destroy_remove_branch(e2e: E2eSession) -> None:
     expect(branch_before).to_succeed()
     expect(branch_before.stdout).to_contain("mngr/my-task")
 
+    # Branch deletion runs *after* the default post-destroy GC pass (see
+    # cli/destroy.py), and that pass scans every provider -- including Modal --
+    # over the network, which routinely takes longer than the default 30s
+    # e2e.run timeout. Give it a generous timeout so the command can finish GC
+    # and reach the branch-removal step it is being tested for.
     destroy_result = e2e.run(
         "mngr destroy my-task --force --remove-created-branch",
         comment="destroy and remove the created git branch",
+        timeout=120.0,
     )
     expect(destroy_result).to_succeed()
     expect(destroy_result.stdout).to_contain("Destroyed agent: my-task")
@@ -202,10 +219,21 @@ def test_destroy_remove_branch(e2e: E2eSession) -> None:
     expect(branch_after.stdout).not_to_contain("mngr/my-task")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(60)
+# This test exercises only a local git-worktree agent: create writes the worktree
+# locally, `mngr destroy --force --no-gc` does no file sync, and `mngr list
+# --provider local` stays local -- none of which shell out to rsync (rsync is only
+# used for remote hosts / non-git RSYNC transfers). The @pytest.mark.rsync mark
+# carried by the other destroy tests is therefore omitted here; with it present the
+# resource guard correctly flags "marked rsync but never invoked rsync".
+# Unlike its sibling test_destroy_remove_branch (which only inspects `git branch`),
+# this test also runs `mngr list` to confirm the agent is gone. Even with the
+# remote-provider fan-out avoided (the destroy uses --no-gc and the list is scoped
+# to --provider local), the create + destroy + list sequence is longer than the
+# branch-only sibling; 120s matches the other create+list destroy tests
+# (test_destroy_multiple_at_once) and leaves headroom for a slow agent create.
+@pytest.mark.timeout(120)
 def test_destroy_keeps_branch_by_default(e2e: E2eSession) -> None:
     # Companion to test_destroy_remove_branch for the same tutorial block: the
     # block's comment states that removing the branch is *not* the default
@@ -228,8 +256,14 @@ def test_destroy_keeps_branch_by_default(e2e: E2eSession) -> None:
     expect(branch_before.stdout).to_contain("mngr/my-task")
 
     # Destroy WITHOUT --remove-created-branch: the documented safe default.
+    # --no-gc is an extra flag that skips the post-destroy garbage-collection
+    # pass. That pass sweeps every provider (Modal, Docker) over the network and
+    # is slow/flaky in the e2e environment, yet it is entirely orthogonal to the
+    # branch-keeping behavior under test here (gc is already covered by
+    # test_destroy_with_gc / test_destroy_no_gc). Skipping it keeps this test
+    # fast and deterministic while still exercising the documented safe default.
     destroy_result = e2e.run(
-        "mngr destroy my-task --force",
+        "mngr destroy my-task --force --no-gc",
         comment="destroy the agent but keep its git branch (the safe default)",
     )
     expect(destroy_result).to_succeed()
@@ -237,8 +271,13 @@ def test_destroy_keeps_branch_by_default(e2e: E2eSession) -> None:
     # The safe default must not report deleting the branch.
     expect(destroy_result.stdout).not_to_contain("Deleted branch")
 
-    # The agent is gone...
-    list_result = e2e.run("mngr list", comment="verify the agent was destroyed")
+    # The agent is gone... Scope discovery to the local provider (the agent was
+    # created locally): a bare `mngr list` fans out to every configured provider,
+    # which is slow and, for a remote provider whose credentials are not set up in
+    # the e2e environment (e.g. AWS), errors out and fails the command. The
+    # `--provider local` scoping mirrors the pattern in test_config.py /
+    # test_errors.py.
+    list_result = e2e.run("mngr list --provider local", comment="verify the agent was destroyed")
     expect(list_result).to_succeed()
     expect(list_result.stdout).not_to_contain("my-task")
 
@@ -251,7 +290,6 @@ def test_destroy_keeps_branch_by_default(e2e: E2eSession) -> None:
     expect(branch_after.stdout).to_contain("mngr/my-task")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -293,6 +331,47 @@ def test_destroy_multiple_at_once(e2e: E2eSession) -> None:
         expect(list_after.stdout).not_to_contain(name)
 
 
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.timeout(120)
+def test_destroy_multiple_aborts_on_unknown_agent(e2e: E2eSession) -> None:
+    # Unhappy path for the same tutorial block: when one of the several names
+    # does not match any agent, a forced `mngr destroy` reports the error and
+    # destroys *nothing* -- the multi-target destroy is all-or-nothing rather
+    # than partially applied (it would be surprising for `destroy a b c --force`
+    # to silently tear down a and c when b is a typo).
+    e2e.write_tutorial_block("""
+        # destroy multiple agents at once
+        mngr destroy agent-1 agent-2 agent-3 --force
+    """)
+    for name, sleep_value in [("agent-1", 100613), ("agent-2", 100614)]:
+        expect(
+            e2e.run(
+                f"mngr create {name} --type command --no-ensure-clean --no-connect -- sleep {sleep_value}",
+                comment=f"create {name}",
+            )
+        ).to_succeed()
+
+    # "no-such-agent" is a typo that matches nothing; it sits between two real
+    # agents to prove the whole command aborts rather than destroying the names
+    # that come before the bad one.
+    destroy_result = e2e.run(
+        "mngr destroy agent-1 no-such-agent agent-2 --force",
+        comment="destroy multiple agents at once",
+    )
+    # The forced destroy reports the unmatched name and then destroys nothing
+    # (it resets its target list to empty rather than partially applying).
+    expect(destroy_result.stdout).to_contain("no-such-agent")
+    expect(destroy_result.stdout).to_contain("No agents found to destroy")
+    expect(destroy_result.stdout).not_to_contain("Destroyed agent")
+
+    # Both real agents must still be present, confirming nothing was torn down.
+    list_result = e2e.run("mngr list", comment="verify no agents were destroyed")
+    expect(list_result).to_succeed()
+    expect(list_result.stdout).to_contain("agent-1")
+    expect(list_result.stdout).to_contain("agent-2")
+
+
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
@@ -322,7 +401,6 @@ def test_destroy_dry_run(e2e: E2eSession) -> None:
     expect(list_result.stdout).to_contain("my-task")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -332,9 +410,14 @@ def test_destroy_with_gc(e2e: E2eSession) -> None:
         mngr destroy my-task --force --gc
     """)
     _create_my_task(e2e, 100607)
+    # The post-destroy gc pass queries every configured provider (including the
+    # remote modal provider in this e2e environment), which routinely takes
+    # longer than the 30s default e2e.run timeout. Give it a generous budget
+    # within the test's 120s timeout so the documented `--gc` flow can finish.
     destroy_result = e2e.run(
         "mngr destroy my-task --force --gc",
         comment="destroy and run garbage collection afterward",
+        timeout=90.0,
     )
     expect(destroy_result).to_succeed()
     # The agent itself must be destroyed.
@@ -350,7 +433,10 @@ def test_destroy_with_gc(e2e: E2eSession) -> None:
     expect(list_result.stdout).not_to_contain("my-task")
 
 
-@pytest.mark.rsync
+# No @pytest.mark.rsync: this test creates a localhost command agent (a git
+# worktree, not a file transfer) and destroys it, so it never invokes rsync. The
+# resource guard fails an otherwise-passing test that is marked rsync but never
+# uses it ("marked rsync but never invoked rsync").
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -377,12 +463,19 @@ def test_destroy_no_gc(e2e: E2eSession) -> None:
     # post-destroy gc pass must not appear -- this is what proves --no-gc took effect.
     expect(destroy_result.stdout).not_to_contain("Garbage collecting")
 
-    list_result = e2e.run("mngr list", comment="verify the agent was destroyed")
+    # Scope the verification listing to the local provider: the agent was created
+    # with the default local provider (`--type command`, no `--provider`), so the
+    # local listing is sufficient to confirm it is gone. A plain `mngr list`
+    # enumerates every enabled provider and fails if any remote provider (e.g.
+    # Docker) is unreachable, which the e2e environment does not guarantee -- see
+    # the same `--provider local` pattern in e2e/test_errors.py.
+    list_result = e2e.run("mngr list --provider local", comment="verify the agent was destroyed")
     expect(list_result).to_succeed()
     expect(list_result.stdout).not_to_contain("my-task")
 
 
 @pytest.mark.release
+@pytest.mark.timeout(60)
 def test_destroy_by_session_name(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # destroy has a special variant for finding an agent by its tmux session name:
@@ -404,7 +497,11 @@ def test_destroy_by_session_name(e2e: E2eSession) -> None:
     )
 
 
-@pytest.mark.rsync
+# NOTE: no @pytest.mark.rsync. This test only creates a *local* agent (default
+# provider) and targets it by its local tmux session name. A same-host local git
+# repo transfers via git-worktree, and rsync only ever runs for local<->remote
+# transfers, so this test never invokes rsync (the resource guard rejects a
+# superfluous rsync mark on a passing test).
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(60)
@@ -436,6 +533,13 @@ def test_destroy_by_session_name_happy_path(e2e: E2eSession) -> None:
     expect(destroy_result).to_succeed()
     expect(destroy_result.stdout).to_contain("Destroyed agent: my-task")
 
-    list_result = e2e.run("mngr list", comment="verify the agent was actually destroyed")
+    # Scope the verification listing to the local provider (where the agent
+    # lives -- it was created on the default local provider and targeted by its
+    # local tmux session name). A bare `mngr list` enumerates every enabled
+    # provider and exits non-zero if any is unreachable (per error_handling.md);
+    # in this checkout the unconfigured cloud-provider plugins (e.g. aws) are
+    # enabled-by-default and report as unreachable, which is unrelated to whether
+    # the agent was destroyed.
+    list_result = e2e.run("mngr list --provider local", comment="verify the agent was actually destroyed")
     expect(list_result).to_succeed()
     expect(list_result.stdout).not_to_contain("my-task")

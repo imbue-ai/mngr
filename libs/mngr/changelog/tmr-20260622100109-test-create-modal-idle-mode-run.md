@@ -1,0 +1,3 @@
+Made the `test_create_modal_idle_mode_run` e2e release test robust to unrelated providers by scoping its verification listing to `mngr list --provider modal --format json`.
+
+Previously the test used a bare `mngr list --format json`, which discovers every enabled backend. In environments where another backend is enabled but unconfigured (e.g. aws without credentials), discovery hard-fails the whole command with a `ProviderDiscoveryError`, even though the test only cares about the modal agent it just created. Filtering to the modal provider mirrors the convention already used by the sibling idle-mode tests.

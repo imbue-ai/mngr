@@ -1,0 +1,1 @@
+Tightened the `test_create_modal_idle_timeout_120` release test assertion: it now matches the exact rendered `my-task=120` line (and asserts there is exactly one such row) instead of a substring containment that would also have passed for stray values like `1200` or `1209`.

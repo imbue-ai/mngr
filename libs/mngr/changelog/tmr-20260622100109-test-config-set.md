@@ -1,0 +1,1 @@
+Added a release test (`test_config_set_overwrites_existing_value`) covering the `mngr config set` tutorial block: re-setting an already-set key updates the value in place rather than duplicating the key or leaving the old value behind.

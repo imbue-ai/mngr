@@ -1,0 +1,1 @@
+Raised the per-test timeout for the `mngr plugin list --active` tutorial e2e test (`test_plugin_list_active_to_see_types`) to 120s. Plugin enumeration plus import overhead can exceed the default 10s timeout, which made the test flaky; the longer timeout matches the other tests in the agent-types tutorial suite.

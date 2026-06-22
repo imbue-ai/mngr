@@ -1,0 +1,1 @@
+Strengthened the `test_config_path_scope` e2e tutorial test to assert that the value written at the user scope round-trips into the resolved config file (`headless = true`) rather than only checking that the key name appears.

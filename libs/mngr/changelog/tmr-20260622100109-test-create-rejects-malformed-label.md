@@ -1,0 +1,1 @@
+Made the `test_create_rejects_malformed_label` e2e tutorial test robust to environments without cloud-provider credentials: its post-create verification now scopes `mngr list` to the local provider (where `mngr create` defaults), so the check no longer aborts when an unconfigured cloud backend (e.g. AWS) reports itself unavailable under `mngr list`'s default `--on-error=abort`.

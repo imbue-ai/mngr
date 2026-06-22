@@ -1,0 +1,1 @@
+Dropped the stale `@pytest.mark.rsync` mark from the `test_advanced_fan_out_create` release test. The fan-out test runs entirely against local command agents (created as git worktrees), which never invoke rsync, so the mark tripped the resource guard and failed the otherwise-passing test. `@pytest.mark.tmux` is retained because mngr does invoke tmux when running the agents.

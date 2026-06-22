@@ -8,9 +8,15 @@ from imbue.mngr.e2e.conftest import E2eSession
 from imbue.skitwright.expect import expect
 
 
-@pytest.mark.rsync
+# No @pytest.mark.rsync: the create runs against a local git repo, so the
+# default transfer mode is git-worktree (see _resolve_transfer_mode) which never
+# shells out to rsync. The resource guard fails a passing test that carries the
+# mark without invoking rsync, so the mark must not be present here.
 @pytest.mark.release
 @pytest.mark.tmux
+# The create plus the follow-up `mngr exec` exceed the default 10s per-test
+# timeout, so override it (mirrors test_create_with_pass_env).
+@pytest.mark.timeout(180)
 def test_create_with_env_vars(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # set environment variables for the agent at creation time
@@ -27,15 +33,50 @@ def test_create_with_env_vars(e2e: E2eSession) -> None:
     env_result = e2e.run(
         "mngr exec my-task 'printenv DEBUG LOG_LEVEL'",
         comment="confirm the agent received the env vars",
+        timeout=120.0,
     )
     expect(env_result).to_succeed()
     expect(env_result.stdout).to_contain("true")
     expect(env_result.stdout).to_contain("verbose")
 
 
+@pytest.mark.release
+# Two mngr invocations (the rejected create plus the follow-up `mngr list`)
+# exceed the default 10s per-test timeout, so override it.
+@pytest.mark.timeout(120)
+def test_create_with_malformed_env_is_rejected(e2e: E2eSession) -> None:
+    """Unhappy path for the same tutorial block: ``--env`` expects KEY=VALUE, so
+    a value with no ``=`` is rejected up front (see ``EnvVar.from_string``),
+    proving the flag genuinely parses the assignment rather than accepting any
+    string. No agent is created when the value is malformed.
+    """
+    e2e.write_tutorial_block("""
+        # set environment variables for the agent at creation time
+        mngr create my-task --env DEBUG=true --env LOG_LEVEL=verbose
+    """)
+    # Pass --env without an '=' so it cannot be parsed into KEY=VALUE.
+    result = e2e.run(
+        "mngr create my-task --env DEBUG --type command --no-ensure-clean --no-connect -- sleep 100966",
+        comment="reject a malformed --env value (missing '=')",
+    )
+    expect(result).to_fail()
+    # The error must name the expected format and echo the offending value, not
+    # be a generic create failure.
+    expect(result.stderr).to_contain("KEY=VALUE")
+    expect(result.stderr).to_contain("DEBUG")
+    # The agent must not have been created when the env value is malformed.
+    list_result = e2e.run("mngr list --provider local --format json", comment="confirm no agent was created")
+    expect(list_result).to_succeed()
+    agents = json.loads(list_result.stdout)["agents"]
+    assert not any(a["name"] == "my-task" for a in agents), f"Expected no 'my-task' agent, got: {agents}"
+
+
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+# The `mngr create` (real host setup) exceeds the default 10s per-test timeout,
+# so override it (mirrors the sibling create-based tests in this file).
+@pytest.mark.timeout(120)
 def test_create_with_env_file(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # load environment variables from a file (recommended for sensitive values, eg, secrets/api keys/tokens/etc)
@@ -65,8 +106,22 @@ def test_create_with_env_file(e2e: E2eSession) -> None:
     expect(env_file_result).to_succeed()
     expect(env_file_result.stdout).to_contain("FOO=bar")
 
+    # Beyond the on-disk env file, confirm the variable is actually present in the
+    # agent's *runtime* environment the way a user would observe it: `mngr exec`
+    # sources the agent's env file, so printenv inside the agent reflects the
+    # value loaded from the --env-file (mirrors the sibling --env happy path).
+    exec_result = e2e.run(
+        "mngr exec my-task 'printenv FOO'",
+        comment="confirm the env-file variable reached the running agent's environment",
+    )
+    expect(exec_result).to_succeed()
+    expect(exec_result.stdout).to_contain("bar")
+
 
 @pytest.mark.release
+# The create plus the follow-up `mngr list` exceed the default 10s per-test
+# timeout, so override it (mirrors test_control_mngr_via_env).
+@pytest.mark.timeout(120)
 def test_create_with_missing_env_file_is_rejected(e2e: E2eSession) -> None:
     """Unhappy path for the same tutorial block: pointing ``--env-file`` at a
     file that does not exist is rejected up front (the option is declared with
@@ -94,7 +149,6 @@ def test_create_with_missing_env_file_is_rejected(e2e: E2eSession) -> None:
     assert not any(a["name"] == "my-task" for a in agents), f"Expected no 'my-task' agent, got: {agents}"
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
@@ -124,7 +178,6 @@ def test_create_with_pass_env(e2e: E2eSession) -> None:
     expect(env_result.stdout).to_contain("sk-ant-test")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
@@ -162,6 +215,12 @@ def test_create_with_pass_env_skips_unset_var(e2e: E2eSession) -> None:
     expect(env_result.stdout).not_to_contain("PRESENT")
 
 
+# Flaky: the remote Modal create path occasionally drops the SSH session
+# mid-create (observed as "SSH error (Error reading SSH protocol banner)" while
+# writing agent state to the freshly booted host). This is an infrastructure
+# transient in the create/SSH layer, not in this test's logic, so let offload
+# retry rather than fail the run.
+@pytest.mark.flaky
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
@@ -195,8 +254,10 @@ def test_create_with_pass_host_env(e2e: E2eSession) -> None:
 # default provider and therefore query Modal during host discovery), this test
 # pins the create provider to "local" via MNGR__COMMANDS__CREATE__PROVIDER, so
 # Modal is never invoked and the resource guard would flag the mark as
-# superfluous.
-@pytest.mark.rsync
+# superfluous. Likewise no @pytest.mark.rsync: this test only runs `mngr create`
+# (local provider uses a git worktree, not rsync) and `mngr list` -- unlike the
+# sibling tests, it never runs `mngr exec`, so rsync is never invoked and the
+# mark would be flagged as superfluous.
 @pytest.mark.release
 @pytest.mark.tmux
 # The create plus the follow-up `mngr list` exceed the default 10s per-test
@@ -250,6 +311,10 @@ def test_control_mngr_via_env(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# The `mngr create` invocation pays mngr's full startup cost (~10s) before it
+# reaches provider resolution and rejects the bad value, which exceeds the
+# default 10s per-test timeout (mirrors test_control_mngr_via_env).
+@pytest.mark.timeout(120)
 def test_control_mngr_via_env_rejects_invalid_value(e2e: E2eSession) -> None:
     """Unhappy path for the same tutorial block: an invalid value set via the
     MNGR__* env var is rejected exactly like an invalid ``--provider`` flag,
@@ -278,3 +343,9 @@ def test_control_mngr_via_env_rejects_invalid_value(e2e: E2eSession) -> None:
     # rather than merely that some error mentioning "nonexistent" occurred.
     expect(result.stderr).to_contain("Unknown provider backend")
     expect(result.stderr).to_contain("nonexistent")
+    # Beyond the error message, verify the concrete effect: a rejected provider
+    # must leave no agent behind (mirrors test_create_with_missing_env_file_is_rejected).
+    list_result = e2e.run("mngr list --provider local --format json", comment="confirm no agent was created")
+    expect(list_result).to_succeed()
+    agents = json.loads(list_result.stdout)["agents"]
+    assert not any(a["name"] == "my-task" for a in agents), f"Expected no 'my-task' agent, got: {agents}"

@@ -1,0 +1,3 @@
+Fix the e2e tutorial listing tests (e.g. `test_list_fields_and_sort`) failing in the dev monorepo.
+
+The monorepo installs every provider plugin, but the e2e environment only holds Modal/Docker credentials. The `aws`, `azure`, and `gcp` backends raise `ProviderUnavailableError` whenever their credentials are absent, which a plain `mngr list` records as an error and exits non-zero on -- breaking the listing tutorial tests even though none of them exercise those providers. The e2e fixture now disables the `aws`, `azure`, and `gcp` plugins so they are never loaded, mirroring a real user who only installs the providers they use. Vultr (also uncredentialed in this environment) is left enabled because it skips discovery gracefully with a warning instead of raising.

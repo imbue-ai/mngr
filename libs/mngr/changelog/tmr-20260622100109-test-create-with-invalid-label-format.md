@@ -1,0 +1,1 @@
+Scoped the `mngr list` verification in the `test_create_with_invalid_label_format` e2e tutorial test to `--provider local`, so the "no agent was created" check no longer aborts on unrelated remote-provider discovery failures (e.g. AWS credentials not configured on the test host).

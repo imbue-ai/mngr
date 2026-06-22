@@ -8,6 +8,9 @@ from imbue.mngr.e2e.conftest import E2eSession
 from imbue.skitwright.expect import expect
 
 
+# Creating an agent and exec-ing into it runs several mngr subprocesses that far
+# exceed the default 10s func-only timeout, so allow more headroom.
+@pytest.mark.timeout(300)
 @pytest.mark.release
 @pytest.mark.tmux
 def test_create_with_template(e2e: E2eSession) -> None:
@@ -51,7 +54,14 @@ def test_create_with_template(e2e: E2eSession) -> None:
     expect(pwd_result.stdout).to_contain(work_dir)
 
 
+# The create command fails fast here, but it plus the follow-up list still run
+# multiple mngr subprocesses that can exceed the default 10s func-only timeout.
+@pytest.mark.timeout(120)
 @pytest.mark.release
+# `mngr create` and the follow-up `mngr list` each pay mngr's cold-start import
+# cost (well over the default 10s per-test timeout on its own), so give the test
+# the same headroom the other create-failure e2e tests use.
+@pytest.mark.timeout(120)
 def test_create_with_nonexistent_template(e2e: E2eSession) -> None:
     """Unhappy path: creating with an unknown template fails with a helpful error.
 

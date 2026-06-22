@@ -1,0 +1,1 @@
+Fixed the `test_create_with_custom_branch_pattern` e2e tutorial test: added a `@pytest.mark.timeout(120)` marker (matching its sibling create tests) so the `mngr create` step is no longer killed by the 10s default timeout, and removed the incorrect `@pytest.mark.rsync` marker (the test uses the default git-worktree transfer, which does not invoke rsync).

@@ -423,8 +423,8 @@ mngr exec my-task "ls -la /workspace"
 # short form
 mngr x my-task "git status"
 
-# run a command on all agents
-mngr exec -a "whoami"
+# run a command on all agents (pipe the ids from "mngr list" into "mngr exec -")
+mngr list --ids | mngr exec - "whoami"
 
 # run a command as a specific user as you normally would on that host (ex: sudo -u other-user)
 mngr exec my-task "sudo -u other-user apt-get update"

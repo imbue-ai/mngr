@@ -1,0 +1,1 @@
+Strengthened the troubleshooting tutorial test for `mngr event` against a missing agent: it now asserts the error names the specific agent the user typed and that no traceback leaks to the user, confirming a typo'd agent name produces a clean, actionable diagnostic rather than a crash.

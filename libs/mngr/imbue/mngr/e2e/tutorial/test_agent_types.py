@@ -10,11 +10,12 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 @pytest.mark.tmux
-# Creating a command agent and the subsequent `mngr list`/`mngr exec` calls
-# enumerate every configured provider; that discovery (plus agent startup) can
-# exceed the default 10s per-test timeout when a remote provider (e.g. Docker)
-# is unreachable and the client waits on a connection. Allow extra headroom so
-# the verification below is robust across environments.
+# Creating a command agent and the subsequent `mngr list`/`mngr exec` calls can
+# exceed the default 10s per-test timeout (agent startup plus provider
+# discovery), so allow extra headroom. The command agent is created on the local
+# provider, so `mngr list` below is scoped to `--provider local`: this keeps the
+# check fast and avoids hard-failing when an unrelated remote provider (e.g. aws)
+# is configured but its credentials are unavailable in the test environment.
 @pytest.mark.timeout(120)
 def test_create_command_python_http(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
@@ -35,7 +36,9 @@ def test_create_command_python_http(e2e: E2eSession) -> None:
 
     # Verify the agent was actually created with the custom command (not just
     # that the create command exited 0).
-    list_result = e2e.run("mngr list --format json", comment="verify the command agent was created")
+    list_result = e2e.run(
+        "mngr list --provider local --format json", comment="verify the command agent was created"
+    )
     expect(list_result).to_succeed()
     agents = json.loads(list_result.stdout)["agents"]
     matching = [a for a in agents if a["name"] == "my-server"]
@@ -75,8 +78,13 @@ def test_create_command_custom_script(e2e: E2eSession) -> None:
 
     # Verify the custom command was actually forwarded to a running command
     # agent (the whole point of the tutorial block), not just that create
-    # exited 0.
-    list_result = e2e.run("mngr list --format json", comment="verify the custom command was forwarded")
+    # exited 0. Scope discovery to the local provider (where the agent was
+    # created): an unscoped `mngr list` fans out to every configured provider
+    # and hard-fails if any one is unreachable (e.g. exit 1 when AWS
+    # credentials are absent), which would mask the local result we care about.
+    list_result = e2e.run(
+        "mngr list --provider local --format json", comment="verify the custom command was forwarded"
+    )
     expect(list_result).to_succeed()
     agents = json.loads(list_result.stdout)["agents"]
     matching = [a for a in agents if a["name"] == "my-task"]
@@ -97,6 +105,11 @@ def test_create_command_custom_script(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# `mngr plugin list --active` loads and enumerates every installed plugin
+# (agent types, provider backends, command plugins); that discovery plus the
+# import overhead can exceed the default 10s per-test timeout. Allow extra
+# headroom so the verification below is robust across environments.
+@pytest.mark.timeout(120)
 def test_plugin_list_active_to_see_types(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # agent types are provided by plugins -- see MANAGING PLUGINS above
@@ -129,13 +142,13 @@ def test_plugin_list_active_to_see_types(e2e: E2eSession) -> None:
         )
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-# Agent creation (provisioning, rsync, ttyd install attempt) can exceed the
-# default 10s per-test timeout, so allow extra headroom. Verification scopes
-# `mngr list` to the local provider (`--provider local`), so this never queries
-# Modal.
+# Agent creation (provisioning, ttyd install attempt) can exceed the default 10s
+# per-test timeout, so allow extra headroom. Verification scopes `mngr list` to
+# the local provider (`--provider local`), so this never queries Modal. The agent
+# is created with --no-auto-start in a git repo (git-worktree transfer), so rsync
+# is never invoked -- hence no @pytest.mark.rsync.
 @pytest.mark.timeout(120)
 def test_create_codex_positional(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
@@ -147,6 +160,17 @@ def test_create_codex_positional(e2e: E2eSession) -> None:
     # (--no-auto-start) and auto-approve workspace trust (-y), which exercises the
     # positional-argument type resolution without needing a codex binary or auth
     # on this host. The real codex run is covered by the mngr_codex release test.
+    # Provisioning would otherwise try to `npm i -g @openai/codex` (codex's
+    # install command), which fails on hosts without npm (e.g. CI), so disable the
+    # install check -- type resolution is what this test exercises, not the binary.
+    # Use the local scope: its settings.local.toml carries is_allowed_in_pytest =
+    # true, so the agent-type config we add here is loaded by the subsequent create.
+    expect(
+        e2e.run(
+            "mngr config set --scope local agent_types.codex.check_installation false",
+            comment="skip codex CLI install (no codex binary needed for type resolution)",
+        )
+    ).to_succeed()
     expect(
         e2e.run(
             "mngr create my-task codex -y --no-auto-start --no-ensure-clean --no-connect",
@@ -165,13 +189,11 @@ def test_create_codex_positional(e2e: E2eSession) -> None:
     assert matching[0]["type"] == "codex", f"expected agent type 'codex', got: {matching[0]}"
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-# Agent creation (provisioning, rsync, ttyd install attempt) can exceed the
-# default 10s per-test timeout, so allow extra headroom. Verification scopes
-# `mngr list` to the local provider (`--provider local`), so this never queries
-# Modal.
+# Agent creation (provisioning, ttyd install attempt) can exceed the default 10s
+# per-test timeout, so allow extra headroom. Verification scopes `mngr list` to
+# the local provider (`--provider local`), so this never queries Modal.
 @pytest.mark.timeout(120)
 def test_create_codex_explicit_type(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
@@ -183,9 +205,13 @@ def test_create_codex_explicit_type(e2e: E2eSession) -> None:
     # (--no-auto-start) and auto-approve workspace trust (-y): this verifies
     # `--type codex` resolves to the codex agent type without needing a codex
     # binary or auth. The real codex run is covered by the mngr_codex release test.
+    # Disable check_installation so provisioning doesn't try to `npm i -g
+    # @openai/codex` (npm isn't guaranteed on the test host); we only exercise
+    # `--type codex` type resolution here, not the codex binary itself.
     expect(
         e2e.run(
-            "mngr create my-task --type codex -y --no-auto-start --no-ensure-clean --no-connect",
+            "mngr create my-task --type codex -S agent_types.codex.check_installation=false "
+            "-y --no-auto-start --no-ensure-clean --no-connect",
             comment="agent type via --type",
         )
     ).to_succeed()
@@ -230,20 +256,27 @@ def test_create_custom_yolo_agent_type(e2e: E2eSession) -> None:
             comment="open project config",
         )
     ).to_succeed()
-    # Define the yolo agent type via config set so the create command resolves.
-    # The tutorial uses parent_type = "claude"; we use the built-in `command`
-    # parent instead so the test doesn't need claude installed, and give it a
-    # `command` to run (mirroring the tutorial's cli_args override on the parent).
+    # Simulate the in-editor edit by appending the custom agent type to the
+    # project config that `config edit` just created. The tutorial uses
+    # parent_type = "claude"; we use the built-in `command` parent instead so
+    # the test doesn't need claude installed, and give it a `command` to run
+    # (mirroring the tutorial's cli_args override on the parent).
+    #
+    # The edit is written directly to the file (rather than via `mngr config
+    # set`) because a freshly-created project config does not carry the
+    # ``is_allowed_in_pytest`` opt-in, so any follow-up `mngr` command that loads
+    # it would be rejected by the pytest guard. Appending the opt-in here opts
+    # this newly created project config into the run so the subsequent `mngr
+    # create` can load it.
+    project_cfg = ".$MNGR_ROOT_NAME/settings.toml"
     expect(
         e2e.run(
-            "mngr config set agent_types.yolo.parent_type command",
-            comment="point the custom yolo type at the built-in command parent",
-        )
-    ).to_succeed()
-    expect(
-        e2e.run(
-            "mngr config set agent_types.yolo.command 'sleep 100954'",
-            comment="configure yolo command for test environment",
+            f"echo '' >> {project_cfg}"
+            f" && echo 'is_allowed_in_pytest = true' >> {project_cfg}"
+            f" && echo '[agent_types.yolo]' >> {project_cfg}"
+            f' && echo \'parent_type = "command"\' >> {project_cfg}'
+            f" && echo 'command = \"sleep 100954\"' >> {project_cfg}",
+            comment="in the editor, add the custom yolo agent type (command parent substituted for the local test)",
         )
     ).to_succeed()
     expect(
@@ -275,3 +308,43 @@ def test_create_custom_yolo_agent_type(e2e: E2eSession) -> None:
     )
     expect(ps_result).to_succeed()
     expect(ps_result.stdout).to_contain("sleep 100954")
+
+
+@pytest.mark.release
+# No @pytest.mark.tmux: type resolution fails before any agent is launched, so
+# tmux is never invoked. The generous timeout only guards against
+# provider-discovery stalls in the verifying `mngr list` below.
+@pytest.mark.timeout(120)
+def test_create_undefined_agent_type_fails(e2e: E2eSession) -> None:
+    # Unhappy path for the custom-agent-type tutorial block: referencing a type
+    # that was never defined in any config (the user forgot the `config edit`
+    # step, or typo'd the type name) must fail with a clear error rather than
+    # silently creating an agent of some default type.
+    e2e.write_tutorial_block("""
+        # you can also create your own custom agent types by defining them in a config:
+        # here's how to set one up using the config command:
+        mngr config edit --scope project
+        # in the editor, add something like:
+        #   [agent_types.yolo]
+        #   parent_type = "claude"
+        #   cli_args = "--dangerously-skip-permissions"
+        # then you can create agents of that type:
+        mngr create my-task yolo
+        # you'll have to look at the agent config class for each agent type to know what config options are supported
+    """)
+    result = e2e.run(
+        "mngr create my-task not-a-real-type --no-connect",
+        comment="creating an agent of an undefined type fails with a clear error",
+    )
+    expect(result).to_fail()
+    expect(result.stderr).to_contain("Unknown agent type 'not-a-real-type'")
+
+    # The failed create must not leave a dangling agent behind. Scope discovery
+    # to the local provider so the check stays fast and never queries remote
+    # providers (create defaults to the local provider).
+    list_result = e2e.run("mngr list --provider local --format json", comment="confirm no agent was created")
+    expect(list_result).to_succeed()
+    agents = json.loads(list_result.stdout)["agents"]
+    assert not [agent for agent in agents if agent["name"] == "my-task"], (
+        f"undefined-type create should not have produced an agent, got {agents}"
+    )

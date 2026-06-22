@@ -30,9 +30,12 @@ def _parse_jsonl_events(stdout: str) -> list[dict[str, object]]:
 
 def _create_my_task(e2e: E2eSession, sleep_value: int) -> None:
     # Use the default (local) provider, matching the provider-agnostic tutorial.
-    # A local agent runs inside a local tmux session (`tmux` mark) and rsyncs its
-    # work dir into place (`rsync` mark). The default provider never touches
-    # Modal, so these tests deliberately do NOT carry the `modal` mark.
+    # A local agent runs inside a local tmux session (`tmux` mark). The source is
+    # the fixture's git repo with a clean working tree, so creation uses the
+    # git-mirror transfer (rsync is only used for unclean/extra files, of which
+    # there are none here) -- these tests therefore do NOT carry the `rsync`
+    # mark. The default provider never touches Modal, so they also deliberately
+    # do NOT carry the `modal` mark.
     expect(
         e2e.run(
             f"mngr create my-task --type command --no-ensure-clean --no-connect -- sleep {sleep_value}",
@@ -42,7 +45,6 @@ def _create_my_task(e2e: E2eSession, sleep_value: int) -> None:
     ).to_succeed()
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -68,7 +70,6 @@ def test_event_default(e2e: E2eSession) -> None:
             assert field in event, f"Event missing guaranteed field {field!r}: {event!r}"
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -87,7 +88,6 @@ def test_event_follow(e2e: E2eSession) -> None:
     expect(result).to_have_exit_code(124)
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -113,7 +113,6 @@ def test_event_follow_filter_source(e2e: E2eSession) -> None:
     expect(result.stdout).to_be_empty()
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -135,11 +134,23 @@ def test_event_tail(e2e: E2eSession) -> None:
         for field in _GUARANTEED_EVENT_FIELDS:
             assert field in event, f"Event missing guaranteed field {field!r}: {event!r}"
 
+    # --tail selects the LAST events; the full stream is a superset whose
+    # trailing suffix matches --tail exactly. Mirror the test_event_head check
+    # (which verifies the leading prefix) by comparing against the unfiltered
+    # stream, so a regression that returned the head instead of the tail -- or
+    # reordered events -- is caught.
+    unfiltered = e2e.run("mngr event my-task", comment="read the full unfiltered event stream")
+    expect(unfiltered).to_succeed()
+    all_events = _parse_jsonl_events(unfiltered.stdout)
+    tail_ids = [event["event_id"] for event in events]
+    all_ids = [event["event_id"] for event in all_events]
+    assert tail_ids == all_ids[len(all_ids) - len(tail_ids) :], (
+        f"--tail 20 must return the trailing suffix of the full stream; got {tail_ids!r} vs {all_ids!r}"
+    )
 
-# Creating a local command agent (rsync + tmux) plus reading its events takes
-# well over the default 10s pytest-timeout; give it ample headroom. The agent is
-# created locally, so this test never invokes modal (no @pytest.mark.modal).
-@pytest.mark.rsync
+# Creating a local command agent (tmux) plus reading its events takes well over
+# the default 10s pytest-timeout; give it ample headroom. The agent is created
+# locally, so this test never invokes modal (no @pytest.mark.modal).
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -149,7 +160,10 @@ def test_event_head(e2e: E2eSession) -> None:
         mngr event my-task --head 10
     """)
     _create_my_task(e2e, 100704)
-    result = e2e.run("mngr event my-task --head 10", comment="show only the first 10 events")
+    # Reading events right after creating a local agent involves a cold mngr
+    # invocation (state load + host connection + source discovery), which can run
+    # past the 30s default; match the 60s headroom used by test_event_default.
+    result = e2e.run("mngr event my-task --head 10", comment="show only the first 10 events", timeout=60.0)
     expect(result).to_succeed()
     # A freshly created `sleep` command agent may not have produced any events
     # yet, so we don't require output. But whatever --head emits must respect
@@ -164,7 +178,7 @@ def test_event_head(e2e: E2eSession) -> None:
     # --head selects the FIRST events; the full stream is a superset whose
     # leading prefix matches --head exactly. Verify --head returns the earliest
     # events (not the tail) by comparing against the unfiltered stream.
-    unfiltered = e2e.run("mngr event my-task", comment="read the full unfiltered event stream")
+    unfiltered = e2e.run("mngr event my-task", comment="read the full unfiltered event stream", timeout=60.0)
     expect(unfiltered).to_succeed()
     all_events = _parse_jsonl_events(unfiltered.stdout)
     head_ids = [event["event_id"] for event in events]
@@ -176,7 +190,6 @@ def test_event_head(e2e: E2eSession) -> None:
 
 # Unhappy path for the --head block: --head and --tail select opposite ends of
 # the stream, so combining them is rejected before any events are read.
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -197,7 +210,6 @@ def test_event_head_conflicts_with_tail(e2e: E2eSession) -> None:
     expect(result.stdout).to_be_empty()
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -228,7 +240,6 @@ def test_event_include_filter(e2e: E2eSession) -> None:
     assert {event["event_id"] for event in filtered_events} <= unfiltered_ids
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)

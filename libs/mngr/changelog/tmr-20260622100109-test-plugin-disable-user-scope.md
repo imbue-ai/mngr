@@ -1,0 +1,1 @@
+Strengthened the `mngr plugin disable --scope user` e2e test to verify scope isolation: after disabling a plugin at the user scope, reading the same key back at the project scope must report "Key not found", confirming the setting landed only in the user scope and did not leak into the project scope.

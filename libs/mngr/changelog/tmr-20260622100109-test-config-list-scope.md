@@ -1,0 +1,1 @@
+Strengthened the `mngr config list --scope` e2e test to verify each scope reports its actual config file (local reads `settings.local.toml`; user/project read `settings.toml`), and added a new unhappy-path test asserting that an unsupported `--scope` value is rejected with a clear "Invalid value" error rather than falling back to the merged view.

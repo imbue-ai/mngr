@@ -1,0 +1,1 @@
+Strengthened the `test_snapshot_destroy_dry_run` e2e test to assert that the "Would destroy N snapshot(s)" count reported by the dry-run matches the actual number of snapshots present, rather than only checking that the phrase appears.

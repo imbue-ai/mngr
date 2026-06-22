@@ -1,0 +1,5 @@
+Make the `test_create_with_real_plugin_flags` tutorial e2e test robust and environment-independent.
+
+The test creates a *local* command agent with `--plugin usage --disable-plugin modal`, but its verification used a plain `mngr list` and `mngr exec my-task`. Both fan out to every enabled provider backend; because this dev monorepo installs all provider plugins, discovery also queried credential-requiring cloud backends (e.g. AWS) and remote backends whose daemon may be down (e.g. Docker), making the verification abort non-zero for reasons unrelated to the plugin flags under test. The verification now scopes to the local provider (`mngr list --provider local` and `mngr exec my-task@localhost.local`), which is exactly the provider hosting the agent.
+
+Also removed the spurious `@pytest.mark.rsync` mark: a local command agent's worktree is populated by `git worktree` alone, and rsync is only invoked for remote provider build contexts (docker/modal). The mark was never validated before because the test failed earlier at `mngr list`; on a passing run the rsync resource guard correctly flags it as superfluous.

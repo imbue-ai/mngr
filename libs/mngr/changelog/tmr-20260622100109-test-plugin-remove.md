@@ -1,0 +1,1 @@
+Raised the per-test timeout for the `mngr plugin remove` tutorial e2e test (`test_plugin_remove`) to 60s, matching its sibling subprocess-driven tests, so the ~10s mngr cold-start cost no longer trips the 10s default timeout.

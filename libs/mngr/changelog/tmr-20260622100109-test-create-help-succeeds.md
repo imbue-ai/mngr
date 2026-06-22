@@ -1,0 +1,1 @@
+Raised the per-test timeout on the `test_create_help_succeeds` e2e tutorial test. Rendering `mngr create --help` requires spawning the mngr subprocess and importing the package, which alone takes ~10s -- right at the global 10s pytest timeout -- making the test intermittently fail. It now has a 60s timeout for comfortable headroom.

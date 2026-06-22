@@ -1,0 +1,3 @@
+Fix the `test_config_set_headless` tutorial e2e test so it passes under the per-file pytest config opt-in guard.
+
+The test previously ran `mngr config get headless` after `mngr config set headless true` to verify persistence. Because the e2e fixture deliberately does not seed the project `settings.toml`, `config set` writes a fresh project config file that lacks `is_allowed_in_pytest = true`. Any follow-up `mngr` command then loads that file and is rejected by the opt-in guard. The test now verifies persistence by reading the file directly with `cat` (the design-intended check for `config set`/`config edit` tutorial tests), and its comment is corrected to describe the actual fixture behavior.

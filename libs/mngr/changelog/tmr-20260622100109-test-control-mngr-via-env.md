@@ -1,0 +1,1 @@
+Test-only: removed the superfluous `@pytest.mark.rsync` from the e2e release test `test_control_mngr_via_env`. That test only runs `mngr create` (which uses a git worktree on the local provider, not rsync) and `mngr list`, so it never invokes rsync, and the resource guard flagged the mark as superfluous.

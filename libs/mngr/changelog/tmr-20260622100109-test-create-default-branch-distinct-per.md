@@ -1,0 +1,1 @@
+Removed the superfluous `@pytest.mark.rsync` mark from the e2e tutorial test `test_create_default_branch_distinct_per_agent`. The default `mngr create` in a local git repo uses the `git-worktree` transfer (not rsync), so the resource guard failed the test for carrying an rsync mark it never exercised.

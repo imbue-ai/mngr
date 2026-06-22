@@ -8,7 +8,6 @@ from imbue.mngr.e2e.conftest import E2eSession
 from imbue.skitwright.expect import expect
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(300)
@@ -22,7 +21,13 @@ def test_multiple_agents_coexist(e2e: E2eSession) -> None:
             )
         ).to_succeed()
 
-    list_result = e2e.run("mngr list", comment="Verify all three agents appear")
+    # Scope discovery to the local provider: all three agents are local, and a
+    # plain `mngr list` fans out to every enabled provider. An enabled-but-
+    # unconfigured cloud provider (e.g. AWS without credentials) raises a
+    # ProviderUnavailableError, which makes `mngr list` exit non-zero even
+    # though the local agents are listed correctly -- unrelated noise for this
+    # test. Sibling e2e tests (test_errors, test_config) scope the same way.
+    list_result = e2e.run("mngr list --provider local", comment="Verify all three agents appear")
     expect(list_result).to_succeed()
     for name in ["agent-a", "agent-b", "agent-c"]:
         expect(list_result.stdout).to_match(rf"{name}\s+(RUNNING|WAITING)")
@@ -56,7 +61,6 @@ def test_multiple_agents_coexist(e2e: E2eSession) -> None:
     assert len(set(work_dirs.values())) == 3, f"agents must occupy distinct working directories: {work_dirs}"
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(300)

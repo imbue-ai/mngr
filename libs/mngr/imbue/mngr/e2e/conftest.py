@@ -505,7 +505,25 @@ def _setup_test_profile(host_dir: Path) -> str:
     # PYTEST_CURRENT_TEST and loads this profile's settings.toml, so without
     # is_allowed_in_pytest = true (it defaults to False) the config loader would
     # refuse to run.
-    (profile_dir / "settings.toml").write_text("is_allowed_in_pytest = true\n")
+    #
+    # Disable the credential-requiring cloud providers (aws, gcp, azure, vultr,
+    # ovh, imbue_cloud). These backends are registered from installed plugins and
+    # picked up by the full `mngr list` discovery path, but the e2e environment
+    # has no credentials for them. Some (e.g. aws) raise ProviderUnavailableError
+    # when credentials are missing, which makes `mngr list` exit non-zero for a
+    # reason unrelated to the behavior under test. This mirrors the established
+    # pattern in the per-provider release tests, which disable every other remote
+    # provider for the same reason (see mngr_aws/test_release_aws.py). Modal and
+    # Docker are left enabled because the e2e tests exercise them directly.
+    (profile_dir / "settings.toml").write_text(
+        "is_allowed_in_pytest = true\n"
+        "\n[providers.aws]\nis_enabled = false\n"
+        "\n[providers.gcp]\nis_enabled = false\n"
+        "\n[providers.azure]\nis_enabled = false\n"
+        "\n[providers.vultr]\nis_enabled = false\n"
+        "\n[providers.ovh]\nis_enabled = false\n"
+        "\n[providers.imbue_cloud]\nis_enabled = false\n"
+    )
 
     # Build a user_id that produces a Modal environment name matching the
     # mngr_test-YYYY-MM-DD-HH-MM-SS-{identifier} pattern (recognized by

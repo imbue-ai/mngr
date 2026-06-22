@@ -1,0 +1,5 @@
+Made the tutorial e2e test suite hermetic against provider availability and fixed a stale resource-guard mark on the destroy short-form test.
+
+- The e2e fixture now restricts `enabled_backends` to the providers the tutorial commands actually exercise (`local`, `modal`, and `docker` only when a Docker daemon socket is present). Previously every installed provider plugin (AWS, Azure, GCP, ...) registered a default instance that `mngr list` queried, and the credential-gated cloud backends raised a fatal `ProviderUnavailableError` when no credentials were configured -- making a plain `mngr list` exit non-zero on any runner lacking ambient cloud credentials or a Docker daemon, even when it listed every agent correctly.
+
+- Removed the inaccurate `@pytest.mark.rsync` from `test_destroy_short_form`. It creates a local (`--type command`) agent with the default git-worktree transfer, which never shells out to rsync, so the resource guard flagged the mark as never-invoked once the provider failure above was fixed.

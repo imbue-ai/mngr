@@ -10,7 +10,15 @@ from imbue.mngr.e2e.conftest import E2eSession
 from imbue.skitwright.expect import expect
 
 
+# mngr's plugin discovery and per-provider build-arg enumeration make even a
+# pure `--help` invocation take ~15-20s of startup before any output, which
+# exceeds the 10s global pytest timeout. Give these help-only tests headroom
+# (matching the explicit timeouts the other e2e tutorial test files carry).
+@pytest.mark.timeout(60)
 @pytest.mark.release
+# The default 10s per-test timeout is too tight: the first ``mngr`` invocation
+# pays the CLI's import/startup cost (~10s), which alone can exceed it.
+@pytest.mark.timeout(120)
 def test_help_succeeds(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # or see the other commands--list, destroy, message, connect, git, clone, and more!  These other commands are covered in their own sections below.
@@ -21,6 +29,9 @@ def test_help_succeeds(e2e: E2eSession) -> None:
         comment="or see the other commands--list, destroy, message, connect, git, clone, and more!",
     )
     expect(result).to_succeed()
+    # Help is informational output: it must go to stdout and not emit any
+    # warnings or deprecation notices on stderr.
+    expect(result.stderr).to_be_empty()
     expect(result.stdout).to_contain("Usage")
     # Verify the commands mentioned in the tutorial comment are present
     expect(result.stdout).to_contain("create")
@@ -32,7 +43,9 @@ def test_help_succeeds(e2e: E2eSession) -> None:
     expect(result.stdout).to_contain("clone")
 
 
+@pytest.mark.timeout(60)
 @pytest.mark.release
+@pytest.mark.timeout(120)
 def test_help_unknown_command_fails(e2e: E2eSession) -> None:
     # Unhappy path for the same tutorial block: the tutorial points users to
     # `mngr --help` to discover commands. Invoking a command that does not exist
@@ -55,7 +68,9 @@ def test_help_unknown_command_fails(e2e: E2eSession) -> None:
     expect(combined).not_to_contain("Traceback")
 
 
+@pytest.mark.timeout(60)
 @pytest.mark.release
+@pytest.mark.timeout(120)
 def test_create_help_succeeds(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # tons more arguments for anything you could want! As always, you can learn more via --help
@@ -79,7 +94,12 @@ def test_create_help_succeeds(e2e: E2eSession) -> None:
     expect(result.stdout).to_contain("--type")
 
 
+# Runs two help invocations, so allow extra headroom over the single-command tests.
+@pytest.mark.timeout(90)
 @pytest.mark.release
+# Two ``mngr create`` help invocations, each paying the ~10s CLI startup cost,
+# so the default 10s per-test timeout is far too tight.
+@pytest.mark.timeout(120)
 def test_create_help_short_form_and_alias_succeed(e2e: E2eSession) -> None:
     # Shares the "mngr create --help" tutorial block, but covers the abbreviated
     # forms advertised in the help's own SYNOPSIS line ("mngr [create|c] ... -h"):

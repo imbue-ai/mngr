@@ -1,0 +1,1 @@
+Strengthened the `mngr config unset` e2e tutorial tests. The missing-key test now also verifies that a failed unset is a no-op (the existing config file is left byte-for-byte unchanged), and a new sibling test covers the distinct case where the target scope has no config file at all, confirming it reports the same "Key not found" error rather than crashing on the missing file.

@@ -1,0 +1,5 @@
+Fixed the `test_tips_exec_filtered_hosts` e2e tutorial test (the "exec across filtered hosts" tip).
+
+The test's standalone cross-check `mngr list` is now scoped to modal via `--provider modal` instead of the tutorial's `--include 'host.provider == "modal"'` CEL filter. In the e2e environment every cloud-provider backend (aws, azure, ...) is installed and enabled-but-unconfigured, so an unscoped `mngr list` reaches out to them, hits "AWS credentials not configured", records a provider error, and exits 1 -- even though the modal id is still printed. The tutorial command itself is unaffected because it pipes the list into `mngr exec` (sh has no `pipefail`, so the list's exit code is discarded); the test still runs that exact piped command and asserts on its behavior.
+
+The assertions were also strengthened to verify both halves of the demonstrated command ran on the modal host: that `echo $MNGR_AGENT_ID` printed the id on its own line (proving the remote shell expanded the variable), and that `env | sort` dumped the injected agent-identifying variables (`MNGR_AGENT_ID`, `MNGR_AGENT_NAME`).

@@ -1,0 +1,1 @@
+Added a happy-path e2e test (`test_stop_by_session_name_happy_path`) for `mngr stop --session`, covering the case where the session name maps to a real running agent that gets stopped (the behavior the ctrl-t tmux hotkey relies on). The existing test only exercised the unhappy path (a session name that does not match the configured prefix).

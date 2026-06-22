@@ -1,0 +1,3 @@
+Made the `test_create_with_no_ensure_clean` e2e tutorial test robust to unconfigured cloud provider backends: the post-create verification now scopes `mngr list` to the local provider (where the agent runs), so a bundled-but-unconfigured backend (e.g. the `aws` plugin with no credentials) no longer aborts the default `--on-error abort` listing during verification.
+
+Strengthened the same test to verify real behavior rather than mere presence: it now asserts the created agent's command and provider, and confirms the agent is actually running in its create-time worktree via `mngr exec my-task pwd`.

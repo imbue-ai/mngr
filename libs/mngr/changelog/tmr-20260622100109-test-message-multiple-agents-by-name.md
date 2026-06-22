@@ -1,0 +1,1 @@
+Removed a spurious `@pytest.mark.rsync` from the `test_message_multiple_agents_by_name` e2e tutorial test. Messaging local command-type agents in a git project uses git worktrees (not rsync) for file setup, so the test never invoked the rsync binary and tripped the resource guard's "marked but never invoked" check.

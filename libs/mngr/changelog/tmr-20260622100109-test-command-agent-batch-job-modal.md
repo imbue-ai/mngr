@@ -1,0 +1,1 @@
+Strengthened the `test_command_agent_batch_job_modal` e2e release test: it now also asserts the modal host provisioned without a failure_reason and that at least one snapshot was created, backing the tutorial's promise that a completed batch job can be reconnected to later.

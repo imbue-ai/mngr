@@ -1,0 +1,1 @@
+Fixed the `test_create_with_template_modal_disabled` e2e tutorial test so its "no agent left behind" verification scopes `mngr list` to `--provider local`. Previously the unscoped `mngr list` queried all registered backends and exited non-zero when a cloud provider (e.g. aws) was unreachable for lack of credentials, which is unrelated to what the test asserts.

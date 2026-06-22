@@ -1,0 +1,3 @@
+Removed the superfluous `@pytest.mark.rsync` mark from the `test_start_stopped_agent` release test (STARTING AND STOPPING AGENTS tutorial coverage). Local git command agents are created via `git-worktree` transfer (rsync disabled), and stopping/starting/exec-ing a `sleep` command agent never invokes rsync, so the resource guard failed the test for claiming a resource it never used.
+
+Strengthened `test_start_stopped_agent` to observe concrete effects rather than just exit codes: it now confirms the agent is reported as STOPPED before the start, that it is no longer stopped afterwards, and that `mngr exec` on the restarted agent lands in the agent's own worktree. List queries are scoped to `--provider local` to avoid enumerating unconfigured remote providers.

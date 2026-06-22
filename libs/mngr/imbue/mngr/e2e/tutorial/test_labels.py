@@ -8,7 +8,6 @@ from imbue.mngr.e2e.conftest import E2eSession
 from imbue.skitwright.expect import expect
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -36,7 +35,6 @@ def test_create_with_multiple_labels(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.rsync
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
 def test_list_filter_by_label_cel(e2e: E2eSession) -> None:
@@ -45,9 +43,15 @@ def test_list_filter_by_label_cel(e2e: E2eSession) -> None:
         mngr list --include 'labels.priority == "high"'
     """)
     # Set up two agents with different priority labels so the CEL filter has
-    # something to both include and exclude. These run on the local provider:
-    # the command never creates Modal state, so it does not invoke the Modal
-    # CLI and must not carry @pytest.mark.modal.
+    # something to both include and exclude. Both run on the local provider, so
+    # the verification list below is scoped to `--provider local`: `mngr list`
+    # otherwise fans out to every configured backend (Modal, Docker, AWS, ...),
+    # and in this environment that discovery either aborts (AWS has no
+    # credentials and --on-error defaults to abort) or stalls past the per-command
+    # timeout waiting on an unreachable remote daemon. Scoping to local keeps the
+    # CEL label filter -- the actual subject of this test -- intact while avoiding
+    # that unrelated remote-provider flakiness, and is why this test does not
+    # carry @pytest.mark.modal.
     expect(
         e2e.run(
             "mngr create high-pri --type command --no-ensure-clean --no-connect --label priority=high -- sleep 100933",
@@ -62,7 +66,7 @@ def test_list_filter_by_label_cel(e2e: E2eSession) -> None:
     ).to_succeed()
 
     result = e2e.run(
-        "mngr list --include 'labels.priority == \"high\"'",
+        "mngr list --include 'labels.priority == \"high\"' --provider local",
         comment="filter by label using CEL",
     )
     expect(result).to_succeed()
@@ -71,7 +75,6 @@ def test_list_filter_by_label_cel(e2e: E2eSession) -> None:
     expect(result.stdout).not_to_contain("low-pri")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
@@ -80,8 +83,11 @@ def test_list_combine_include_filters(e2e: E2eSession) -> None:
         # combine multiple filters (AND logic for --include, all must match)
         mngr list --include 'labels.team == "backend"' --include 'state == "RUNNING"'
     """)
-    # Set up agents that exercise both clauses of the AND filter:
-    #   - backend-running:  labels.team == backend, still running
+    # Set up agents that exercise both clauses of the AND filter. Note that an
+    # idle `sleep` command agent settles into the WAITING state (not RUNNING),
+    # exactly as test_list_compound_cel documents -- so the state == "RUNNING"
+    # clause below ends up matching none of them:
+    #   - backend-running:  labels.team == backend, idle -> WAITING
     #   - frontend-running: labels.team == frontend (fails the team clause)
     #   - backend-stopped:  labels.team == backend but STOPPED (fails the state clause)
     # Pin a unique sleep value per agent so leaked processes trace back to the create call.
@@ -106,12 +112,21 @@ def test_list_combine_include_filters(e2e: E2eSession) -> None:
         comment="filter on the team clause alone",
     )
     expect(team_only).to_succeed()
-    team_only_names = {agent["name"] for agent in json.loads(team_only.stdout)["agents"]}
-    assert team_only_names == {"backend-running", "backend-stopped"}, team_only_names
+    team_only_by_name = {agent["name"]: agent for agent in json.loads(team_only.stdout)["agents"]}
+    assert set(team_only_by_name) == {"backend-running", "backend-stopped"}, team_only_by_name
+    # Pin the states the next two filters depend on: neither backend agent is
+    # RUNNING (the idle sleep settled into WAITING; backend-stopped was stopped).
+    # This is what makes the state == "RUNNING" clause below match nothing while
+    # the state == "STOPPED" clause matches exactly backend-stopped.
+    assert team_only_by_name["backend-running"]["state"] == "WAITING", team_only_by_name["backend-running"]
+    assert team_only_by_name["backend-stopped"]["state"] == "STOPPED", team_only_by_name["backend-stopped"]
 
-    # The combined filter ANDs both clauses, so every returned agent must match
-    # team == backend AND state == RUNNING. frontend-running fails the team
-    # clause and backend-stopped fails the state clause, so neither may appear.
+    # The combined filter ANDs both clauses. No agent satisfies team == backend
+    # AND state == RUNNING: frontend-running fails the team clause, backend-stopped
+    # is STOPPED, and backend-running idled into WAITING. The AND intersection is
+    # therefore empty -- proving a clause that nothing matches drops the whole set,
+    # rather than the filter degrading to just the first clause (which would have
+    # returned the two backend agents).
     combined = e2e.run(
         "mngr list --include 'labels.team == \"backend\"' --include 'state == \"RUNNING\"' --format json",
         comment="combine multiple --include filters (AND)",
@@ -119,12 +134,7 @@ def test_list_combine_include_filters(e2e: E2eSession) -> None:
     expect(combined).to_succeed()
     combined_agents = json.loads(combined.stdout)["agents"]
     combined_names = {agent["name"] for agent in combined_agents}
-    assert "frontend-running" not in combined_names, combined_names
-    assert "backend-stopped" not in combined_names, combined_names
-    # Whatever survives the AND must satisfy both clauses simultaneously.
-    for agent in combined_agents:
-        assert agent["labels"]["team"] == "backend", agent
-        assert agent["state"] == "RUNNING", agent
+    assert combined_names == set(), combined_names
 
     # Positive AND case: with a second clause that one backend agent does
     # satisfy, the intersection is exactly that agent. backend-stopped matches
@@ -140,9 +150,9 @@ def test_list_combine_include_filters(e2e: E2eSession) -> None:
     assert combined_stopped_names == {"backend-stopped"}, combined_stopped_names
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(180)
 def test_list_exclude_filter(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # exclude agents matching a filter
@@ -185,7 +195,6 @@ def test_list_exclude_filter(e2e: E2eSession) -> None:
 
 
 @pytest.mark.timeout(180)
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 def test_list_combine_exclude_filters(e2e: E2eSession) -> None:
@@ -210,9 +219,14 @@ def test_list_combine_exclude_filters(e2e: E2eSession) -> None:
         comment="combine multiple --exclude filters (OR)",
     )
     expect(result).to_succeed()
+    listing = json.loads(result.stdout)
+    # Discovery must have completed cleanly: a partial provider failure would
+    # populate `errors` and could silently drop agents, making the exclusion
+    # assertion below pass for the wrong reason.
+    assert listing["errors"] == [], listing["errors"]
     # --exclude uses OR logic: an agent is dropped if it matches ANY filter, so both
     # the frontend and devops agents are excluded while the backend agent remains.
-    remaining = {agent["name"] for agent in json.loads(result.stdout)["agents"]}
+    remaining = {agent["name"] for agent in listing["agents"]}
     assert remaining == {"backend-svc"}, f"expected only backend-svc to remain, got {remaining}"
 
 
@@ -269,7 +283,6 @@ def test_list_compound_cel(e2e: E2eSession) -> None:
     assert "frontend-task" not in result.stdout, result.stdout
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
@@ -296,15 +309,20 @@ def test_message_filtered_backend(e2e: E2eSession) -> None:
         timeout=120.0,
     )
     expect(result).to_succeed()
-    # The message must reach the backend agent and skip the frontend agent.
-    expect(result.stdout).to_contain("backend-agent")
+    # The message must reach the backend agent and skip the frontend agent. The
+    # per-agent delivery line names the recipient, and the aggregate count of
+    # exactly one proves the frontend agent was filtered out of the pipeline
+    # (messaging zero agents would instead print "No agents found to send
+    # message to", and messaging both would report a count of 2).
+    expect(result.stdout).to_contain("Message sent to: backend-agent")
+    expect(result.stdout).to_contain("Successfully sent message to 1 agent(s)")
     expect(result.stdout).not_to_contain("frontend-agent")
 
 
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(300)
 def test_exec_filtered_remote_disk(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # use filters with exec: check disk usage on remote agents only
@@ -326,6 +344,7 @@ def test_exec_filtered_remote_disk(e2e: E2eSession) -> None:
     result = e2e.run(
         'mngr list --include \'host.provider == "modal"\' --ids | mngr exec - "df -h /workspace"',
         comment="exec across remote agents only",
+        timeout=120.0,
     )
     expect(result).to_succeed()
     # Verify the exec actually ran df on the remote host: df -h prints a header
@@ -337,9 +356,9 @@ def test_exec_filtered_remote_disk(e2e: E2eSession) -> None:
     expect(result.stdout).to_contain("Command succeeded on agent my-task")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(180)
 def test_destroy_filtered_dry_run(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # use filters with destroy: clean up all stopped agents for a team
@@ -357,25 +376,44 @@ def test_destroy_filtered_dry_run(e2e: E2eSession) -> None:
         )
     ).to_succeed()
     expect(e2e.run("mngr stop backend-task", comment="stop it so its state becomes STOPPED")).to_succeed()
-    expect(e2e.run("mngr list", comment="confirm the agent is STOPPED").stdout).to_match(r"backend-task\s+STOPPED")
+    # The setup/verification listings only need to observe the local agent, so
+    # scope them to `--provider local`. A bare `mngr list` reconciles across
+    # every enabled provider, and in the e2e environment an uncredentialed cloud
+    # provider (e.g. AWS, whose boto3 credential chain probes the EC2 metadata
+    # endpoint) makes discovery both slow and non-zero-exit -- noise unrelated to
+    # what this test verifies. The tutorial command below is deliberately left
+    # unscoped to match the documented command exactly.
+    expect(
+        e2e.run("mngr list --provider local", comment="confirm the agent is STOPPED").stdout
+    ).to_match(r"backend-task\s+STOPPED")
 
     # The actual tutorial command: dry-run destroy of all stopped backend agents.
+    # The unscoped `mngr list` probes every enabled provider, which can be slow
+    # in the e2e environment, so give the piped command a generous budget. The
+    # provider errors land on stderr while the matched local agent id still
+    # reaches `mngr destroy` on stdout, and `destroy --dry-run` (the last stage
+    # of the pipe, which sets the exit code) succeeds.
     dry_run_result = e2e.run(
         "mngr list --include 'labels.team == \"backend\"' --include 'state == \"STOPPED\"' --ids | mngr destroy - --force --dry-run",
         comment="dry-run destroy via filter+stdin",
+        timeout=120.0,
     )
     expect(dry_run_result).to_succeed()
-    # The dry-run must preview the matched agent...
+    # The dry-run must PREVIEW the destroy of the matched agent rather than
+    # perform it. The conditional "Would destroy" phrasing is the signal that
+    # distinguishes a dry-run from a real destroy ("Destroyed agent: ..."), so
+    # assert on it alongside the agent name.
+    expect(dry_run_result.stdout).to_contain("Would destroy")
     expect(dry_run_result.stdout).to_contain("backend-task")
 
     # ...but must NOT actually destroy it: the agent still exists afterward.
-    list_after = e2e.run("mngr list", comment="verify the dry-run left the agent intact")
+    list_after = e2e.run("mngr list --provider local", comment="verify the dry-run left the agent intact")
     expect(list_after).to_succeed()
     expect(list_after.stdout).to_match(r"backend-task\s+STOPPED")
 
 
 @pytest.mark.release
-@pytest.mark.modal
+@pytest.mark.timeout(180)
 def test_list_jq_filter(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # you can also just list agents by filtering using jq:
@@ -389,8 +427,11 @@ def test_list_jq_filter(e2e: E2eSession) -> None:
     ).to_succeed()
 
 
+# Not marked @pytest.mark.rsync: this test scopes `mngr list` to --provider local
+# (see below), so it never fans out to remote providers and therefore never
+# invokes rsync -- carrying the mark would trip the "marked but never invoked"
+# resource guard.
 @pytest.mark.release
-@pytest.mark.rsync
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
 def test_list_jsonl_jq_stream(e2e: E2eSession) -> None:
@@ -416,8 +457,14 @@ def test_list_jsonl_jq_stream(e2e: E2eSession) -> None:
             comment="seed a low-priority agent the filter must drop",
         )
     ).to_succeed()
+    # Scope the list to the local provider. The seeded agents all live there, and
+    # the surrounding e2e environment leaves remote providers (aws/vultr/...)
+    # enabled but uncredentialed, so a bare `mngr list` fans out to them and the
+    # default --on-error abort makes the whole listing fail (jsonl batch mode then
+    # emits no agent lines at all). --provider local keeps the listing deterministic
+    # and lets the streaming jq filter act on the real seeded agents.
     result = e2e.run(
-        "mngr list --format jsonl | jq --unbuffered 'select(.labels.priority == \"high\")'",
+        "mngr list --provider local --format jsonl | jq --unbuffered 'select(.labels.priority == \"high\")'",
         comment="stream jq filter via jsonl",
     )
     expect(result).to_succeed()
@@ -425,3 +472,10 @@ def test_list_jsonl_jq_stream(e2e: E2eSession) -> None:
     # must NOT contain the low-priority one -- proving the label filter matched.
     expect(result.stdout).to_contain("high-task")
     expect(result.stdout).not_to_contain("low-task")
+    # Substring checks alone are weak: "high-task" also appears in the agent's
+    # work_dir/branch, so confirm the object jq actually emitted IS the
+    # high-priority agent. jq pretty-prints one JSON object per match and exactly
+    # one local agent matches, so the whole stdout parses as that single object.
+    selected = json.loads(result.stdout)
+    assert selected["name"] == "high-task", selected
+    assert selected["labels"]["priority"] == "high", selected

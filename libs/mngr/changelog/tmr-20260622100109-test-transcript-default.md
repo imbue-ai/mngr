@@ -1,0 +1,3 @@
+Removed the superfluous `@pytest.mark.rsync` mark from the `test_transcript_default` e2e release test. The test creates a local claude agent and never invokes rsync, so the resource guard failed the otherwise-passing test with "marked with @pytest.mark.rsync but never invoked rsync". This mirrors the earlier cleanup of the sibling transcript tests.
+
+Added an unhappy-path e2e release test (`test_transcript_default_rejects_command_agent`) covering the same `mngr transcript` tutorial block: it verifies that running `mngr transcript` against a `command` agent (which produces no common transcript) fails fast with a clear, type-specific error and emits no transcript output.

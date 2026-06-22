@@ -1,0 +1,3 @@
+Fixed the `test_message_filtered_backend` e2e tutorial test, which was failing the resource guard because it carried `@pytest.mark.rsync` but never invoked rsync: the test creates local-provider command agents and messages them, and local file writes never go through rsync. Removed the spurious mark.
+
+Strengthened the test's delivery assertions to match the convention used by the other `mngr message` tests: it now asserts on the per-agent delivery line (`Message sent to: backend-agent`) and the aggregate count (`Successfully sent message to 1 agent(s)`), which together prove the message reached exactly the backend agent and that the frontend agent was filtered out.

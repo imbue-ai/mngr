@@ -1,0 +1,1 @@
+Strengthened the `test_snapshot_create_all_via_stdin` e2e test to verify that the exact snapshot id produced by the `mngr list --ids | mngr snapshot create -` pipeline actually persists in `mngr snapshot list`, rather than only checking that some snapshot exists (the agent already has an "initial" snapshot from creation).

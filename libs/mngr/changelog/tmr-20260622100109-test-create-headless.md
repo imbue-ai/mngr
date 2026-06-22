@@ -1,0 +1,1 @@
+Hardened the `test_create_headless` e2e release test so it no longer depends on remote provider backends being reachable: the post-create verification now scopes `mngr list` and `mngr exec` to the local provider (the agent is created locally), and the inapplicable `@pytest.mark.rsync` mark was removed since local git-repo agents use a git worktree rather than an rsync copy.

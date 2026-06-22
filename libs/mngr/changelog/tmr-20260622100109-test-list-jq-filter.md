@@ -1,0 +1,3 @@
+Fixed the `test_list_jq_filter` release test (in the LABELS AND FILTERING tutorial section) so it runs reliably.
+
+The test was marked `@pytest.mark.modal` even though `mngr list` against an empty fleet never actually invokes Modal, so its resource guard would fail once the `mngr list | jq` command completed. It also lacked a `@pytest.mark.timeout` override and therefore fell back to the 10s default, which was too short for the full provider-discovery pass `mngr list` performs and caused the test to time out. The unused `modal` mark is removed and a `@pytest.mark.timeout(180)` is added (matching the other list-based tests in this section).

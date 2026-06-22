@@ -1,0 +1,1 @@
+Strengthened the `test_config_set_scope` e2e test so it verifies `mngr config set --scope user` echoes the key and value it wrote (not just the scope), mirroring the sibling `test_config_set` assertions.
