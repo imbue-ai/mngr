@@ -91,3 +91,15 @@ Reorganized the dev styleguide page (`/_dev/styleguide`) into two labeled groups
 - Moved the 24px / 12px icon catalogs up into the Design System group (icons are a shared primitive ramp, like the color and type tokens); moved the workspace-accent picker and the color swatches down into Patterns & Components.
 
 - Each section is a scroll anchor carrying a `scroll-mt` offset, so a TOC jump lands the heading below the viewport top rather than flush against it. `dev_styleguide.js` adds an `IntersectionObserver` scrollspy that marks the active section's link via `aria-current="page"` (styled in `app.css`).
+
+Aligned the `Button` primitive with the Figma button component (node 342-4059). The default (md) size now uses the Figma padding -- `px-4 py-2` (16px / 8px) instead of `px-3 py-2` -- and the variant recipes were reworked:
+
+- **Secondary** has no fill at rest: it's a `border-strong` outline with `text-primary`, and only tints (`bg-fill-hover` on hover, `bg-fill-active` on press) on interaction.
+
+- **Ghost** is now exactly secondary minus the border (transparent at rest, same hover/press fills).
+
+- **Danger** is a solid semantic fill -- `bg-important` with white text -- replacing the previous subtle red tint; it dims slightly on hover/press.
+
+- **Primary** (solid inverse surface) and **success** (solid green) keep their fills and now dim via opacity on hover/press to match. Every variant carries a 1px border (visible only on secondary, transparent elsewhere) so all variants render at the same height. Disabled opacity moved from 30% to 40% to match Figma.
+
+- Button corner radius stays on the design-system scale (`rounded-md`, 4px); Figma specifies 6px, which is off our 2/4/8/16 radius scale, so it was not introduced.

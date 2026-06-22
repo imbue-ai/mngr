@@ -54,20 +54,25 @@ TEMPLATE_DIR: Final[Path] = Path(__file__).resolve().parent / "templates"
 # restart / settings icons in the Landing project row).
 _BTN_BASE: Final[str] = (
     "inline-flex items-center justify-center gap-1.5 leading-tight "
-    "transition-colors disabled:opacity-30 disabled:cursor-not-allowed "
+    "transition-colors disabled:opacity-40 disabled:cursor-not-allowed "
     "cursor-pointer no-underline whitespace-nowrap"
 )
 _BTN_SIZES: Final[Mapping[str, str]] = {
-    "md": "px-3 py-2 rounded-md type-label",
+    "md": "px-4 py-2 rounded-md type-label",
     "lg": "px-4 py-3 rounded-lg type-label",
     "icon": "p-1.5 rounded-md type-label",
 }
+# Variant recipes (Figma "Button" component, node 342-4059). Every variant
+# carries a 1px border -- visible on secondary, transparent elsewhere -- so all
+# variants share the exact same box height (border-box) regardless of border.
+# Solid variants (primary / danger / success) dim via opacity on hover/press;
+# the no-fill variants (secondary / ghost) tint with the fill tokens instead.
 _BTN_VARIANTS: Final[Mapping[str, str]] = {
-    "primary": "bg-surface-inverse text-inverse-primary border border-transparent hover:opacity-90",
-    "secondary": "bg-fill-subtle text-primary border border-default hover:bg-fill-hover",
-    "danger": "bg-important/10 text-important border border-important/25 hover:bg-important/20",
-    "success": "bg-success text-white border border-transparent hover:opacity-90",
-    "ghost": "bg-transparent text-primary border border-transparent hover:bg-fill-hover hover:text-primary",
+    "primary": "bg-surface-inverse text-inverse-primary border border-transparent hover:opacity-80",
+    "secondary": "bg-transparent text-primary border border-strong hover:bg-fill-hover active:bg-fill-active",
+    "danger": "bg-important text-white border border-transparent hover:opacity-90 active:opacity-75",
+    "success": "bg-success text-white border border-transparent hover:opacity-90 active:opacity-75",
+    "ghost": "bg-transparent text-primary border border-transparent hover:bg-fill-hover active:bg-fill-active",
 }
 
 # Shared Tailwind class string for the three form-control components

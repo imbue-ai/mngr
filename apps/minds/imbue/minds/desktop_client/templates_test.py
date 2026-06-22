@@ -804,11 +804,12 @@ def test_button_link_renders_anchor_with_href() -> None:
 
 
 def test_button_renders_each_variant_class_set() -> None:
-    # The five variants should each contribute their own background class.
+    # Each variant contributes a defining class: solid variants a fill,
+    # secondary its border (it has no resting fill), ghost its transparent base.
     variants_to_class = {
         "primary": "bg-surface-inverse",
-        "secondary": "bg-fill-subtle",
-        "danger": "bg-important/10",
+        "secondary": "border-strong",
+        "danger": "bg-important",
         "success": "bg-success",
         "ghost": "bg-transparent",
     }
@@ -825,8 +826,8 @@ def test_button_submit_has_form_attribute_when_passed() -> None:
 
 def test_button_default_size_uses_md_geometry() -> None:
     html = CATALOG.render("Button", variant="primary", _content="X")
-    # md size = px-3 py-2 rounded-md type-label
-    assert "px-3" in html
+    # md size = px-4 py-2 rounded-md type-label (Figma default: 16px / 8px padding)
+    assert "px-4" in html
     assert "py-2" in html
     assert "rounded-md" in html
     assert "type-label" in html
