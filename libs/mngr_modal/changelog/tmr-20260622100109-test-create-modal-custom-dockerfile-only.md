@@ -1,0 +1,1 @@
+Creating a Modal host with `-b file=<path>` now fails with a clear error ("Dockerfile not found: <path>") when the referenced Dockerfile does not exist, instead of surfacing a raw Python `FileNotFoundError` traceback. The build context directory (`-b context-dir=<path>`) is validated the same way.

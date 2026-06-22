@@ -528,6 +528,30 @@ def test_get_modal_image_definition_from_dockerfile(
     assert image.get_object_id() is not None
 
 
+def test_get_modal_image_definition_missing_dockerfile(
+    testing_provider: ModalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    # A -b file= path that does not exist must fail with a clean MngrError that
+    # names the missing Dockerfile, rather than a raw FileNotFoundError.
+    missing = tmp_path / "Dockerfile.agent"
+    with pytest.raises(MngrError, match=r"Dockerfile not found.*Dockerfile\.agent"):
+        testing_provider._get_modal_image_definition(dockerfile=missing)
+
+
+def test_get_modal_image_definition_missing_context_dir(
+    testing_provider: ModalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    # A valid Dockerfile paired with a -b context-dir= that does not exist must
+    # fail with a clean MngrError naming the missing context directory.
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text("FROM debian:bookworm-slim\nRUN echo hello\n")
+    missing_context = tmp_path / "no-such-context"
+    with pytest.raises(MngrError, match=r"context directory not found.*no-such-context"):
+        testing_provider._get_modal_image_definition(dockerfile=dockerfile, context_dir=missing_context)
+
+
 def test_get_modal_image_definition_with_secrets(
     testing_provider: ModalProviderInstance,
     monkeypatch: pytest.MonkeyPatch,

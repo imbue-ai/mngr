@@ -874,11 +874,19 @@ class ModalProviderInstance(BaseProviderInstance):
         modal_secrets = _build_modal_secrets_from_env(secrets, modal_interface)
 
         if dockerfile is not None:
+            # Surface a clean error (rather than a raw FileNotFoundError traceback)
+            # when the user points -b file= at a Dockerfile that does not exist.
+            if not dockerfile.is_file():
+                raise MngrError(f"Dockerfile not found: {dockerfile}")
+            effective_context_dir = context_dir if context_dir is not None else dockerfile.parent
+            # Likewise, fail clearly if the build context directory is missing,
+            # since the Dockerfile's COPY/ADD instructions resolve against it.
+            if context_dir is not None and not effective_context_dir.is_dir():
+                raise MngrError(f"Build context directory not found: {effective_context_dir}")
             dockerfile_contents = dockerfile.read_text()
             # Substitute docker build args into ARG defaults
             if docker_build_args:
                 dockerfile_contents = _substitute_dockerfile_build_args(dockerfile_contents, docker_build_args)
-            effective_context_dir = context_dir if context_dir is not None else dockerfile.parent
             image = _build_image_from_dockerfile_contents(
                 dockerfile_contents,
                 modal_interface=modal_interface,
