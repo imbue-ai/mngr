@@ -721,7 +721,7 @@ class ErrorAttachmentsS3Uploader(MutableModel):
                 uploads[("live_logs", key)] = partial(self._upload_file_cb, key=key, file_path=log_file, compress=True)
 
             # Rotated Python backend logs (immutable -- upload once and reuse the cached key).
-            for log_file in _n_newest_files(logs_folder.glob(_ROTATED_LOG_GLOB), n=MAX_SENTRY_LIST_SIZE):
+            for log_file in _n_newest_files(logs_folder.glob(_ROTATED_LOG_GLOB), n=1):
                 with self._lock:
                     existing_key = self._immutable_logs_keys.get(log_file)
 
