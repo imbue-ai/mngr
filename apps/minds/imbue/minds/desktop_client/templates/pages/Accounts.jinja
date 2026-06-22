@@ -15,6 +15,7 @@
     <h1 class="type-heading text-primary mb-4">Manage Accounts</h1>
 
     {% if accounts %}
+      <div class="flex flex-col gap-2">
       {% for acct in accounts %}
         {% set acct_enabled = enabled_by_user_id.get(acct.user_id | string, True) %}
         <Card layout="row-spread">
@@ -48,6 +49,7 @@
           </div>
         </Card>
       {% endfor %}
+      </div>
     {% else %}
       <p class="text-secondary">No accounts logged in.</p>
     {% endif %}
@@ -55,6 +57,6 @@
     <div class="mt-4">
       <ButtonLink href="/auth/login" variant="primary">Add account</ButtonLink>
     </div>
-    <div class="mt-4"><Link href="/">&larr; Back to projects</Link></div>
+    <div class="mt-4"><Link href="/" extra="type-helper">&larr; Back to projects</Link></div>
   </PageContainer>
 </Base>
