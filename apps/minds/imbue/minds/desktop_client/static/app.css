@@ -59,11 +59,13 @@
   --c-text-inverse-primary: #ffffff;
   --c-text-inverse-secondary: rgb(255 255 255 / 0.70);
   --c-text-inverse-tertiary: rgb(255 255 255 / 0.50);
-  /* borders -- black at three alpha steps in light mode (10 / 17 / 25%;
-     default nudged up from Figma's 16% for a touch more definition) */
+  /* borders -- black at four alpha steps in light mode (10 / 17 / 25 / 40%;
+     default nudged up from Figma's 16% for a touch more definition; stronger is
+     the input-hover cue -- a darker edge in place of a fill tint) */
   --c-border-subtle: rgb(0 0 0 / 0.10);
   --c-border-default: rgb(0 0 0 / 0.17);
   --c-border-strong: rgb(0 0 0 / 0.25);
+  --c-border-stronger: rgb(0 0 0 / 0.40);
   /* surfaces -- solid backgrounds; primary and inverse are exact mirrors */
   --c-surface-primary: #ffffff;
   --c-surface-inverse: #000000;
@@ -87,6 +89,7 @@
   --c-border-subtle: rgb(255 255 255 / 0.10);
   --c-border-default: rgb(255 255 255 / 0.17);
   --c-border-strong: rgb(255 255 255 / 0.25);
+  --c-border-stronger: rgb(255 255 255 / 0.40);
   /* surfaces -- pure black base in dark; inverse + overlay mirror to white */
   --c-surface-primary: #000000;
   --c-surface-inverse: #ffffff;
@@ -103,10 +106,11 @@
   --color-inverse-primary: var(--c-text-inverse-primary);
   --color-inverse-secondary: var(--c-text-inverse-secondary);
   --color-inverse-tertiary: var(--c-text-inverse-tertiary);
-  /* borders: utilities border-subtle / border-default / border-strong */
+  /* borders: utilities border-subtle / -default / -strong / -stronger */
   --color-subtle: var(--c-border-subtle);
   --color-default: var(--c-border-default);
   --color-strong: var(--c-border-strong);
+  --color-stronger: var(--c-border-stronger);
   /* surfaces: bg-surface-primary / -inverse / -overlay */
   --color-surface-primary: var(--c-surface-primary);
   --color-surface-inverse: var(--c-surface-inverse);

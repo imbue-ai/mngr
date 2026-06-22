@@ -19,12 +19,13 @@
   Any HTML attribute (id=, disabled, data-*) flows through via JinjaX's
   attrs passthrough. The visual shell (border, padding, text size, focus
   ring) comes from the shared ``INPUT_BASE`` catalog global; ``pr-8`` leaves
-  room for the chevron.
+  room for the chevron. As a single-line control it adds ``leading-tight``
+  to match TextInput's height.
 #}
-{%- set _cls = "appearance-none w-full pr-8 " ~ INPUT_BASE ~ " rounded-md " ~ extra -%}
+{%- set _cls = "appearance-none w-full pr-8 leading-tight " ~ INPUT_BASE ~ " rounded-md " ~ extra -%}
 <div class="relative {{ width }}">
   <select {{ attrs.render(name=name, classes=_cls) }}>{{ content }}</select>
-  <span class="pointer-events-none absolute inset-y-0 right-3 flex items-center text-secondary">
+  <span class="pointer-events-none absolute inset-y-0 right-2 flex items-center text-secondary">
     <Icon24 name="chevron-down" />
   </span>
 </div>

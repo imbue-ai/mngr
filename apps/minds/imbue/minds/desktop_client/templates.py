@@ -88,14 +88,17 @@ _BTN_VARIANTS: Final[Mapping[str, str]] = {
 # Shared Tailwind class string for the three form-control components
 # (TextInput.jinja, Select.jinja, Textarea.jinja). Exposed as a Catalog
 # global so the focus ring, border, padding and text size live in exactly one
-# place. Width and border-radius vary per-component so they are NOT included
-# here -- each component sets its own. Matches Figma's text field (node
-# 345-4059): 12px padding, border-strong, tertiary placeholder, a subtle
-# fill-tint on hover, and a focus ring drawn OUTSIDE the field (outline-offset)
-# so it keeps the border rather than recoloring it.
+# place. Width, border-radius and line-height vary per-component so they are NOT
+# included here -- each sets its own (the single-line TextInput / Select add
+# ``leading-tight``; Textarea keeps ``type-body``'s roomier 1.5 leading so its
+# wrapped lines stay legible). Matches Figma's text field (node 345-4059): 8px
+# padding, a tertiary placeholder, and a border-strong edge that darkens to
+# border-stronger on hover (a quieter cue than a fill tint), with a focus ring
+# drawn OUTSIDE the field (outline-offset) so it keeps the border rather than
+# recoloring it.
 _INPUT_BASE: Final[str] = (
-    "p-3 type-body border border-strong bg-surface-primary text-primary "
-    "placeholder:text-tertiary transition hover:bg-fill-subtle "
+    "p-2 type-body border border-strong bg-surface-primary text-primary "
+    "placeholder:text-tertiary transition hover:border-stronger "
     "focus:outline-2 focus:outline-offset-2 focus:outline-accent"
 )
 

@@ -161,3 +161,15 @@ The "Back to projects" back-link now renders at the `type-helper` size (12px) in
 Lifted the titlebar's red notification dot into a reusable `Badge` component (`templates/Badge.jinja`, from Figma node 330-4472). It has two shapes: the bare 8px `important` dot (the default, shown when no count is passed -- what the requests button uses today) and a count pill that shows a number in a solid `important` capsule (`min-w-[16px]` keeps a single digit circular; it grows for wider numbers and caps at "99+"). The count form isn't wired into the app yet but is demoed in the styleguide. Added a `type-badge` type role (10px / bold / 12 line-height) for the count text -- the one deliberate sub-12px role, reserved for the compact pill. The styleguide's "Notification badge" section now shows both shapes (the 4 / 12 / 99+ pills and the dot) alongside the in-context titlebar example.
 
 Removed the decorative color/state transitions so interface state changes flip instantly, keeping motion only where it's intrinsic to a component. Hover, focus, and selected-state color/border/background changes no longer fade: the secondary/ghost button fills, form-input hover tint and focus ring, titlebar buttons, interactive `Card` hover, the inbox row + close buttons, the dialog close button, the create-flow account `Select`, and the onboarding `Opt` cards/textarea all switch immediately. The button press is now scoped to `transition-transform`, so the 98% press scale still eases over 100ms while its hover/press color + opacity changes flip instantly. Genuine component motion is untouched: the spinner spin, the creating-screen progress bar and pulse dot, the inbox drawer slide-in, and the disclosure chevron rotation.
+
+Tightened and refined the shared form-control shell (`INPUT_BASE`, used by TextInput / Select / Textarea):
+
+- Padding drops from 12px to 8px (`p-3` -> `p-2`).
+
+- The single-line TextInput / Select gain tight leading (`leading-tight`) for a more compact field; the multi-line Textarea keeps `type-body`'s roomier 1.5 leading so its wrapped lines stay legible.
+
+- The hover cue changes from a fill tint (`hover:bg-fill-subtle`) to a darker border edge (`hover:border-stronger`) -- a quieter signal than tinting the whole field. This adds a fourth border token, `border-stronger` (40% black in light / white in dark, vs `border-strong`'s 25%), surfaced in the styleguide's border-token section.
+
+- The Select dropdown chevron moves 4px closer to the field edge (12px -> 8px inset).
+
+The styleguide's Textarea sample is now a natural two-line sentence instead of three meta lines of class names.

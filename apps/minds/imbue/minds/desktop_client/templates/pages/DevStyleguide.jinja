@@ -257,14 +257,15 @@
       <p class="type-helper text-secondary mb-4">
         Themeable borders (<code>app.css</code>): <code>border-subtle</code>
         (faint dividers), <code>border-default</code> (standard card / input
-        border), <code>border-strong</code> (emphasis). Black in light, white in
-        dark, same alpha steps.
+        border), <code>border-strong</code> (emphasis, the input rest edge),
+        <code>border-stronger</code> (the darker input-hover edge). Black in
+        light, white in dark, same alpha steps.
       </p>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
 
         {# Light #}
         <div>
-          <div class="light rounded-lg border border-default bg-surface-primary p-4 grid grid-cols-3 gap-3">
+          <div class="light rounded-lg border border-default bg-surface-primary p-4 grid grid-cols-4 gap-3">
             <div data-token="--color-subtle" class="flex flex-col items-center gap-2">
               <div class="w-full h-12 rounded-md border border-subtle"></div>
               <code class="type-helper font-mono text-secondary">border-subtle</code>
@@ -277,12 +278,16 @@
               <div class="w-full h-12 rounded-md border border-strong"></div>
               <code class="type-helper font-mono text-secondary">border-strong</code>
             </div>
+            <div data-token="--color-stronger" class="flex flex-col items-center gap-2">
+              <div class="w-full h-12 rounded-md border border-stronger"></div>
+              <code class="type-helper font-mono text-secondary">border-stronger</code>
+            </div>
           </div>
         </div>
 
         {# Dark (scoped via `.dark`) #}
         <div>
-          <div class="dark rounded-lg border border-default bg-surface-primary p-4 grid grid-cols-3 gap-3">
+          <div class="dark rounded-lg border border-default bg-surface-primary p-4 grid grid-cols-4 gap-3">
             <div class="flex flex-col items-center gap-2">
               <div class="w-full h-12 rounded-md border border-subtle"></div>
               <code class="type-helper font-mono text-secondary">border-subtle</code>
@@ -295,11 +300,15 @@
               <div class="w-full h-12 rounded-md border border-strong"></div>
               <code class="type-helper font-mono text-secondary">border-strong</code>
             </div>
+            <div class="flex flex-col items-center gap-2">
+              <div class="w-full h-12 rounded-md border border-stronger"></div>
+              <code class="type-helper font-mono text-secondary">border-stronger</code>
+            </div>
           </div>
         </div>
 
       </div>
-      <div class="mt-2 type-helper text-secondary font-mono">app.css :: --color-subtle / -default / -strong (border-*)</div>
+      <div class="mt-2 type-helper text-secondary font-mono">app.css :: --color-subtle / -default / -strong / -stronger (border-*)</div>
     </section>
 
     {# Surface & fill tokens. Surfaces are solid backgrounds (primary/inverse
@@ -829,9 +838,9 @@
           </Select>
           <span class="type-helper text-secondary">Select width="w-48"</span>
         </div>
-        <Textarea name="styleguide-textarea" rows="3" extra="font-mono" :value="'shared focus ring\\nshared border\\nshared px-3 py-2'" />
+        <Textarea name="styleguide-textarea" rows="3" :value="'This is a sample of multi-line text in a textarea. It is long enough to wrap onto a second line, so the leading and padding are easy to judge.'" />
       </div>
-      <div class="mt-1 type-helper text-secondary font-mono">TextInput.jinja / Select.jinja / Textarea.jinja :: INPUT_BASE (p-3, border-strong, placeholder-tertiary; focus ring drawn outside via outline-offset, keeping the border)</div>
+      <div class="mt-1 type-helper text-secondary font-mono">TextInput.jinja / Select.jinja / Textarea.jinja :: INPUT_BASE (p-2, border-strong -> border-stronger on hover, placeholder-tertiary; focus ring drawn outside via outline-offset, keeping the border). Single-line TextInput / Select add leading-tight; Textarea keeps type-body's 1.5.</div>
     </section>
 
 
