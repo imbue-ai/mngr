@@ -77,7 +77,8 @@ The redundancy is entirely in Layer A. Layer B is not duplicated (probe 7 alread
 - `_run_host_health_probe` no longer builds or runs `_build_mngr_host_state_argv` / `mngr list`. Layer-A inputs (host state, services-agent id, provider error) are read from `backend_resolver` plus discovery freshness.
 - The provider-unavailable signal comes from `get_provider_errors()[provider_name]` — the same typed `ProviderUnavailableError` imbue_cloud already raises through the discovery path (`error_by_provider_name`), now read from the passive store instead of re-sampled. (imbue_cloud's typed-error change from the shipped work stays; only the consumption point moves.)
 - The `mngr exec` probe stays, but **purely** for Layer-B decomposition, and fires **only when Layer A is "provider reachable + host RUNNING"** — so an outage never pays a provider round-trip on this path.
-- `build_host_health_response` keeps producing the same `dispatch_tier` and probe rows; its Layer-A inputs are now resolver-sourced rather than parsed from `list_json`.
+- `build_host_health_response` keeps producing the same `dispatch_tier` and probe rows; its Layer-A inputs are now resolver-sourced rather than parsed from `list_json`. Add the transient **reachability-unconfirmed** outcome for the stale-discovery window (renders Retry, never the destructive restart).
+- Recovery page client (`_RECOVERY_SCRIPT`): re-run the host-health classification on a backed-off interval while in a non-terminal awaiting-fresh-discovery state, so the affordance updates as the single sampler catches up (see "Decision: single sampler, with a reactive recovery page"). This is the "make sure it updates properly" requirement.
 
 ### Discipline: one sampler per layer
 
@@ -85,7 +86,7 @@ The exec probe **incidentally touches Layer A** — it calls `provider.get_host(
 
 ### Safety: gate the destructive tier on freshness
 
-Reading Layer A from the resolver means the recovery page inherits discovery freshness (≤ one ~10s poll cycle). In the **post-outage window** — the first ~30-40s after connectivity drops, before the next discovery poll surfaces the typed error — the resolver may still show a stale `host=RUNNING` with no provider error yet, which would otherwise classify as the destructive `HOST_UNRESPONSIVE` tier. The destructive tier must be **gated on discovery freshness**: if discovery is stale/unconfirmed and reachability is not positively established, do not offer a destructive host restart — fall to the non-destructive / retry path. This preserves the safety property the shipped synchronous-timeout-as-signal provided, without a second sampler. (Composes with the provider-unavailable precedence from the shipped work.)
+Reading Layer A from the resolver means the recovery page inherits discovery freshness (≤ one ~10s poll cycle). In the **post-outage window** — the first ~30-40s after connectivity drops, before the next discovery poll surfaces the typed error — the resolver may still show a stale `host=RUNNING` with no provider error yet, which would otherwise classify as the destructive `HOST_UNRESPONSIVE` tier. The destructive tier must be **gated on discovery freshness**: if discovery is stale/unconfirmed and reachability is not positively established, do not offer a destructive host restart — fall to a transient **reachability-unconfirmed** outcome that renders the non-destructive **Retry** affordance (reusing the provider-unavailable page's Retry + background-poll treatment, without asserting the provider is down). This preserves the safety property the shipped synchronous-timeout-as-signal provided, without a second sampler. (Composes with the provider-unavailable precedence from the shipped work.)
 
 ### Latency cross-check (do not reintroduce the 2-minute wait)
 
@@ -101,14 +102,34 @@ The synchronous list's only genuine advantage was *fresher* Layer-A state — bu
 
 - The recovery host-health path issues **no** synchronous `mngr list`; Layer-A state is read from `backend_resolver`.
 - With imbue_cloud unreachable (e.g. wifi off) and discovery having surfaced the typed error, the recovery page classifies `PROVIDER_UNAVAILABLE` and the host-health endpoint returns well under 30s (target: ~instant).
-- In the post-outage window (provider error not yet surfaced, stale `RUNNING` host), the page does **not** offer a destructive restart.
+- In the post-outage window (provider error not yet surfaced, stale `RUNNING` host), the page does **not** offer a destructive restart — it shows Retry.
+- From a cold post-outage load that renders Retry, the affordance **updates on its own** (no manual reload) within ~one discovery poll cycle to the real tier: "Restart workspace" once discovery confirms provider-reachable + host needs a restart, or the provider-unavailable page if the typed error surfaces.
 - A docker mind's recovery during a simultaneous imbue_cloud outage is **not** misclassified as provider-unavailable (per-provider keying via `get_provider_errors()[provider_name]`).
 - The recovery page's host/provider state matches the workspace list / providers panel for the same agent (single-source consistency).
 - The existing tiers (`HOST_OFFLINE`, `INTERFACE_UNRESPONSIVE`, `WORKSPACE_MISCONFIGURED`, `HOST_UNRESPONSIVE`) still classify correctly when the provider is reachable.
 
-### Open question to resolve before/during implementation
+### Decision: single sampler, with a reactive recovery page
 
-- **Post-outage window handling:** gate the destructive tier on staleness and return *instantly* (accepting a "can't confirm yet — retry" state for up to ~one poll cycle until discovery surfaces the typed error), **vs.** fire one 30s-capped provider touch to get a definitive `PROVIDER_UNAVAILABLE` immediately. Both stay ≤30s; the first is faster but shows a softer message for a few seconds. Leaning toward the instant/staleness-gated path to keep a single sampler, but confirm.
+Resolved: **keep a single sampler** (no synchronous provider touch). The recovery page reads Layer A from the resolver and returns *instantly*; in the post-outage window it shows the **Retry** affordance briefly and then updates to the real tier (e.g. **Restart workspace**) once discovery catches up. The brief "Retry" is acceptable **provided the page actually updates** without a manual reload — which the current client does **not** do, so this follow-up must add the reactive update below.
+
+#### The gap in the current client
+
+The recovery page JS (`_RECOVERY_SCRIPT` in `templates.py`) fetches `/api/agents/<id>/host-health` **once** per page entry via `runProbe()`, classifies `dispatch_tier`, and renders the matching affordance. Its background polls do **not** re-classify:
+
+- `scheduleProviderPoll` (provider-unavailable) and `scheduleHealthyPoll` (restart-failed) only watch `pollUrl()` (the recovery page) for a **302 → return_to**, which the server emits when the *health tracker* flips HEALTHY — i.e. they detect **full recovery**, not a tier change.
+- `scheduleRefresh` (restarting) is a full-page reload.
+
+So a page that first renders **Retry** (reachability-unconfirmed) would sit on Retry indefinitely: the workspace isn't going to flip HEALTHY on its own (it needs a restart), so no 302 ever fires, and `runProbe()` is never re-invoked to discover that discovery has since confirmed `host_unresponsive` (→ "Restart workspace") or surfaced a provider error (→ provider-unavailable). This is the "make sure it updates properly" requirement.
+
+#### Required reactive update
+
+While the page is in a **non-terminal, awaiting-fresh-discovery** state — the new reachability-unconfirmed outcome, and `provider_unavailable` (so it can also de-escalate as discovery changes) — the client must **re-run the host-health classification on a (backed-off) interval**, re-rendering the tier each tick, in addition to the existing 302 recovery-watch. Concretely:
+
+- Re-invoke `runProbe(true)` on a timer for these states (not just watch for a 302), so `dispatch_tier` is recomputed from the latest resolver state and the affordance transitions: **Retry → Restart workspace** (discovery confirmed provider-reachable + host needs restart), **Retry → provider-unavailable** (typed error surfaced), or **Retry → auto-dispatch** (`host_offline`/`interface_unresponsive`).
+- Keep the existing 302 → `return_to` watch for the full-recovery transition (workspace came back on its own → return the user to it).
+- Guard against stacking timers (single in-flight poll, like the existing `providerPollTimer`).
+
+This is cheap *because of the collapse*: with host-health now a resolver read (no provider round-trip), re-polling every ~1-2s costs nothing — unlike today, where re-running `runProbe` meant a fresh ≤30s synchronous `mngr list`. Making host-health cheap is precisely what makes smooth reactive updates viable. (A push-based variant — subscribe the recovery page to a resolver on-change SSE and re-fetch on change — is a possible refinement, but the interval re-poll of the now-cheap endpoint is simpler and self-contained, and is the baseline requirement.)
 
 ### Changelog
 
