@@ -60,6 +60,7 @@ from imbue.minds.errors import MngrCommandError
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
@@ -525,6 +526,7 @@ def _build_mngr_create_command(
     region: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
     color: str | None = None,
+    docker_runtime: DockerRuntime = DockerRuntime.RUNC,
 ) -> list[str]:
     """Build the ``mngr create`` command for a freshly-provisioned workspace.
 
@@ -535,7 +537,10 @@ def _build_mngr_create_command(
     id anyway, and pre-generating one led to bugs (e.g. keying gateway
     state under a fictional id).
 
-    DOCKER mode: --template main --template docker (runs in Docker container)
+    DOCKER mode: --template main --template docker (runs in a Docker container);
+        for ``docker_runtime == RUNSC`` the gVisor overlay is stacked on top
+        (--template docker_runsc) so the container runs under runsc. RUNC is the
+        docker template's default, so it adds no extra template.
     LIMA mode: --template main --template lima (runs in Lima VM)
     VULTR mode: --template main --template vultr (runs in Docker on a Vultr VPS)
     AWS mode: --new-host on the aws-<region> provider, --template main
@@ -674,6 +679,11 @@ def _build_mngr_create_command(
     match launch_mode:
         case LaunchMode.DOCKER:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "docker"])
+            if docker_runtime is DockerRuntime.RUNSC:
+                # gVisor overlay: reuses the docker template body and only flips
+                # the container runtime to runsc. runc is the docker template's
+                # default, so RUNC needs no extra template.
+                mngr_command.extend(["--template", "docker_runsc"])
             mngr_command.extend(_remote_host_env_flags())
         case LaunchMode.LIMA:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "lima"])
@@ -888,6 +898,7 @@ def run_mngr_create(
     anthropic_base_url: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
     color: str | None = None,
+    docker_runtime: DockerRuntime = DockerRuntime.RUNC,
     *,
     parent_cg: ConcurrencyGroup | None = None,
 ) -> tuple[AgentId, HostId]:
@@ -924,6 +935,7 @@ def run_mngr_create(
         region=region,
         latchkey_env=latchkey_env,
         color=color,
+        docker_runtime=docker_runtime,
     )
 
     # Build the subprocess env from the parent's env + any secrets we inject
@@ -1047,6 +1059,7 @@ class _MngrCreateAttemptParams(FrozenModel):
     anthropic_base_url: str | None
     parent_cg: ConcurrencyGroup | None
     color: str | None
+    docker_runtime: DockerRuntime
 
 
 def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams) -> tuple[AgentId, HostId]:
@@ -1080,6 +1093,7 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         anthropic_api_key=params.anthropic_api_key,
         anthropic_base_url=params.anthropic_base_url,
         color=params.color,
+        docker_runtime=params.docker_runtime,
         parent_cg=params.parent_cg,
     )
 
@@ -1263,6 +1277,7 @@ class AgentCreator(MutableModel):
         on_created: Callable[[AgentId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
+        docker_runtime: DockerRuntime = DockerRuntime.RUNC,
     ) -> CreationId:
         """Start creating an agent from a git URL or local path in a background thread.
 
@@ -1277,6 +1292,10 @@ class AgentCreator(MutableModel):
           talks to the official Anthropic API.
         - ``SUBSCRIPTION`` -- inject neither; the user signs in to Claude
           interactively in the workspace.
+
+        ``docker_runtime`` selects the container runtime for
+        ``LaunchMode.DOCKER`` (runc vs gVisor's runsc); it is ignored by every
+        other launch mode, which pin their own runtime.
 
         For ``LaunchMode.IMBUE_CLOUD``, the agent runs on a leased pool host
         via the ``imbue_cloud_<account-slug>`` provider; the plugin's
@@ -1334,6 +1353,7 @@ class AgentCreator(MutableModel):
                 on_created,
                 backup_request,
                 color,
+                docker_runtime,
             ),
             daemon=True,
             name="agent-creator-{}".format(creation_id),
@@ -1395,6 +1415,7 @@ class AgentCreator(MutableModel):
         on_created: Callable[[AgentId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
+        docker_runtime: DockerRuntime = DockerRuntime.RUNC,
     ) -> None:
         """Background thread that resolves the repo source and creates an mngr agent.
 
@@ -1621,6 +1642,7 @@ class AgentCreator(MutableModel):
                     anthropic_base_url=effective_anthropic_base_url,
                     parent_cg=self.root_concurrency_group,
                     color=color,
+                    docker_runtime=docker_runtime,
                 )
 
                 if launch_mode is LaunchMode.IMBUE_CLOUD:

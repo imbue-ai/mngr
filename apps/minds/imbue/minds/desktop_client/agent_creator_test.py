@@ -52,6 +52,7 @@ from imbue.minds.errors import MngrCommandError
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
@@ -324,6 +325,51 @@ def test_build_mngr_create_command_ignores_region_for_docker() -> None:
     )
     joined = " ".join(command)
     assert "region=" not in joined and "vultr-region" not in joined
+
+
+def test_build_mngr_create_command_docker_runsc_stacks_gvisor_overlay() -> None:
+    """``DockerRuntime.RUNSC`` stacks the ``docker_runsc`` overlay on the docker template.
+
+    The overlay reuses the docker template body and only flips the provider's
+    container runtime to runsc, so the host runs under gVisor.
+    """
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
+        host_name=HostName("hello"),
+        docker_runtime=DockerRuntime.RUNSC,
+    )
+    # The base docker template is always present; the runsc overlay is stacked
+    # immediately after it.
+    assert command.count("--template") >= 3
+    docker_idx = command.index("docker")
+    assert command[docker_idx - 1] == "--template"
+    runsc_idx = command.index("docker_runsc")
+    assert command[runsc_idx - 1] == "--template"
+    # Order matters: the overlay must come AFTER the base so its provider
+    # setting wins the stack.
+    assert runsc_idx > docker_idx
+
+
+def test_build_mngr_create_command_docker_runc_omits_gvisor_overlay() -> None:
+    """``DockerRuntime.RUNC`` (the docker template's default) adds no extra template."""
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
+        host_name=HostName("hello"),
+        docker_runtime=DockerRuntime.RUNC,
+    )
+    assert "docker" in command
+    assert "docker_runsc" not in command
+
+
+@pytest.mark.parametrize("docker_runtime", [DockerRuntime.RUNC, DockerRuntime.RUNSC])
+def test_build_mngr_create_command_runtime_ignored_for_non_docker(docker_runtime: DockerRuntime) -> None:
+    """The runsc overlay is docker-only -- other launch modes never receive it."""
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.LIMA,
+        host_name=HostName("hello"),
+        docker_runtime=docker_runtime,
+    )
+    assert "docker_runsc" not in command
 
 
 def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:

@@ -32,8 +32,10 @@ from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupEncryptionMethod
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
+from imbue.minds.primitives import default_docker_runtime
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_forward.loading_page import render_loading_page
 
@@ -287,6 +289,7 @@ def render_create_form(
     branch: str = "",
     launch_mode: LaunchMode | None = None,
     ai_provider: AIProvider | None = None,
+    docker_runtime: DockerRuntime | None = None,
     backup_provider: BackupProvider | None = None,
     backup_encryption_method: BackupEncryptionMethod | None = None,
     backup_api_key_env: str = "",
@@ -337,6 +340,10 @@ def render_create_form(
         if ai_provider is not None
         else (AIProvider.IMBUE_CLOUD if has_account else AIProvider.SUBSCRIPTION)
     )
+    # The Docker container-runtime select defaults to the platform-appropriate
+    # value (runc on macOS, runsc on Linux). Only consumed when the compute
+    # provider is Docker; the form hides it otherwise.
+    effective_docker_runtime = docker_runtime if docker_runtime is not None else default_docker_runtime()
     effective_backup_provider = (
         backup_provider
         if backup_provider is not None
@@ -354,6 +361,8 @@ def render_create_form(
         selected_launch_mode=effective_launch_mode.value,
         ai_providers=list(AIProvider),
         selected_ai_provider=effective_ai_provider.value,
+        docker_runtimes=list(DockerRuntime),
+        selected_docker_runtime=effective_docker_runtime.value,
         backup_providers=list(BackupProvider),
         selected_backup_provider=effective_backup_provider.value,
         backup_encryption_methods=list(BackupEncryptionMethod),

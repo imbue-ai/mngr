@@ -1,4 +1,4 @@
-{#def git_url, host_name, branch, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, backup_providers, selected_backup_provider, backup_encryption_methods, selected_backup_encryption_method, backup_api_key_env, has_saved_backup_password, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, color="#0b292b", palette={} #}
+{#def git_url, host_name, branch, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, docker_runtimes, selected_docker_runtime, backup_providers, selected_backup_provider, backup_encryption_methods, selected_backup_encryption_method, backup_api_key_env, has_saved_backup_password, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, color="#0b292b", palette={} #}
 {#
   Workspace creation form. The compute provider, AI provider, and backup
   provider defaults depend on whether an account is selected; the page-level
@@ -113,6 +113,8 @@
     var summaryEl = document.getElementById('config-summary');
     var regionRow = document.getElementById('region-row');
     var regionSelect = document.getElementById('region');
+    var runtimeRow = document.getElementById('runtime-row');
+    var runtimeSelect = document.getElementById('runtime');
     var REGION_OPTIONS = {{ region_options_by_launch_mode | tojson }};
     var REGION_SELECTED = {{ region_selected_by_launch_mode | tojson }};
 
@@ -205,6 +207,15 @@
       regionRow.classList.remove('hidden');
     }
 
+    function updateRuntime() {
+      // The container-runtime select only applies to the local Docker provider;
+      // every other compute provider pins its own runtime. Hide + disable it
+      // otherwise so no runtime value is submitted.
+      var isDocker = launchSelect.value === 'DOCKER';
+      runtimeRow.classList.toggle('hidden', !isDocker);
+      runtimeSelect.disabled = !isDocker;
+    }
+
     function update() {
       var hasAccount = accountSelect.value !== '';
 
@@ -239,6 +250,7 @@
       submitBtn.disabled = launchInvalid || aiInvalid || backupInvalid;
 
       updateRegion();
+      updateRuntime();
       updateSummary();
     }
 
@@ -391,6 +403,17 @@
               <Select id="region" name="region" width="w-48"></Select>
             </div>
             <p class="mt-1 text-xs text-zinc-400 text-right">Where the machine is created. If a region is out of capacity, try another.</p>
+          </div>
+          <div id="runtime-row" class="hidden">
+            <div class="flex items-center justify-between gap-3">
+              <FormLabel target="runtime" inline>Container runtime</FormLabel>
+              <Select id="runtime" name="runtime" width="w-48">
+                {% for rt in docker_runtimes %}
+                  <option value="{{ rt.value }}"{% if rt.value == selected_docker_runtime %} selected{% endif %}>{{ rt.value | lower }}</option>
+                {% endfor %}
+              </Select>
+            </div>
+            <p class="mt-1 text-xs text-zinc-400 text-right">runc runs everywhere. runsc (gVisor) sandboxes the container for extra isolation but needs gVisor installed on the host (Linux).</p>
           </div>
           <div>
             <FormLabel target="git_url">Repository</FormLabel>

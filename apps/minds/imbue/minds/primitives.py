@@ -1,3 +1,4 @@
+import platform
 from enum import auto
 from typing import Final
 
@@ -67,6 +68,34 @@ class LaunchMode(UpperCaseStrEnum):
     LIMA = auto()
     IMBUE_CLOUD = auto()
     AWS = auto()
+
+
+class DockerRuntime(UpperCaseStrEnum):
+    """Container runtime for the local Docker compute provider (``LaunchMode.DOCKER``).
+
+    - ``RUNC`` -- Docker's default runtime. Works everywhere, including macOS.
+    - ``RUNSC`` -- gVisor, which intercepts the container's syscalls to shrink
+      the host kernel attack surface for untrusted agents. Requires ``runsc`` to
+      be installed and registered with the local Docker daemon (Linux in
+      practice); it is unavailable on macOS.
+
+    Only meaningful for the Docker compute provider; the other launch modes pin
+    their own runtime. The create form defaults this to the platform-appropriate
+    value (see :func:`default_docker_runtime`) and lets the user override it
+    under advanced settings.
+    """
+
+    RUNC = auto()
+    RUNSC = auto()
+
+
+def default_docker_runtime() -> DockerRuntime:
+    """Return the platform-appropriate default Docker container runtime.
+
+    macOS has no gVisor, so it must use runc; Linux defaults to the
+    gVisor-hardened runsc (which the minds app assumes is installed there).
+    """
+    return DockerRuntime.RUNC if platform.system() == "Darwin" else DockerRuntime.RUNSC
 
 
 class AIProvider(UpperCaseStrEnum):

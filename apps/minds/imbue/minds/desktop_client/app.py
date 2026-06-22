@@ -156,11 +156,13 @@ from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupEncryptionMethod
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.primitives import ServiceName
 from imbue.minds.primitives import UserDataPreference
+from imbue.minds.primitives import default_docker_runtime
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.telegram.setup import TelegramSetupStatus
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
@@ -954,6 +956,13 @@ def _handle_create_form_submit() -> Response:
     is_save_backup_password = str(form.get("backup_save_password", "")).strip() != ""
     backup_api_key_env = str(form.get("backup_api_key_env", ""))
     submitted_region = str(form.get("region", "")).strip()
+    # Docker container runtime (runc vs gVisor's runsc); only consumed for
+    # LaunchMode.DOCKER. Defaults to the platform-appropriate value so macOS
+    # (no gVisor) gets runc and Linux gets the hardened runsc.
+    try:
+        docker_runtime = DockerRuntime(str(form.get("runtime", default_docker_runtime().value)))
+    except ValueError:
+        docker_runtime = default_docker_runtime()
 
     session_store_inst: MultiAccountSessionStore | None = get_state().session_store
     minds_config: MindsConfig | None = get_state().minds_config
@@ -971,6 +980,7 @@ def _handle_create_form_submit() -> Response:
             branch=branch,
             launch_mode=launch_mode,
             ai_provider=ai_provider,
+            docker_runtime=docker_runtime,
             accounts=accounts_list,
             region_options_by_launch_mode=region_options,
             region_selected_by_launch_mode=region_selected,
@@ -1072,6 +1082,7 @@ def _handle_create_form_submit() -> Response:
         on_created=on_created,
         backup_request=backup_request,
         color=color,
+        docker_runtime=docker_runtime,
     )
 
     creating_url = "/creating/{}".format(creation_id)
@@ -1170,6 +1181,14 @@ def _handle_create_agent_api() -> Response:
     anthropic_api_key = str(body.get("anthropic_api_key", "")).strip()
     account_id = str(body.get("account_id", "")).strip()
     submitted_region = str(body.get("region", "")).strip()
+    try:
+        docker_runtime = DockerRuntime(str(body.get("runtime", default_docker_runtime().value)))
+    except ValueError:
+        return make_response(
+            status_code=400,
+            content='{"error": "Invalid runtime"}',
+            media_type="application/json",
+        )
     color = _color_for_new_workspace(body.get("color", ""))
     if not git_url:
         return make_response(
@@ -1286,6 +1305,7 @@ def _handle_create_agent_api() -> Response:
         on_created=_persist_region_on_created,
         backup_request=backup_request,
         color=color,
+        docker_runtime=docker_runtime,
     )
 
     # Apply any onboarding answers supplied inline by the API caller. Absent
