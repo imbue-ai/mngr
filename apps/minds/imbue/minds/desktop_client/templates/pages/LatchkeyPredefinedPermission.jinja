@@ -28,11 +28,7 @@
                    description sits below, indented to line up under the
                    name (icon width + gap = 26px). #}
                 <div class="flex items-center gap-2">
-                  <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"
-                       class="w-4 h-4 shrink-0 text-success">
-                    <path fill-rule="evenodd" clip-rule="evenodd"
-                          d="M16.704 4.153a.75.75 0 0 1 .143 1.052l-8 10.5a.75.75 0 0 1-1.127.075l-4.5-4.5a.75.75 0 1 1 1.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 0 1 1.05-.143Z" />
-                  </svg>
+                  <Icon16 name="check" extra="shrink-0 text-success" />
                   <code class="type-body font-mono text-primary">{{ wildcard_label if permission == wildcard_permission else permission }}</code>
                 </div>
                 {% set permission_description = description_by_permission_name.get(permission) %}

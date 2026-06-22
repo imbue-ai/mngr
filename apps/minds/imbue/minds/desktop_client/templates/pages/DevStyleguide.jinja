@@ -33,11 +33,10 @@
   ("radius", "Corner radius"),
   ("spacing", "Spacing"),
   ("elevation", "Elevation"),
-  ("icons-24", "Icons (24px)"),
+  ("icons-16", "Icons (16px)"),
   ("icons-12", "Icons (12px)"),
 ] %}
 {% set _pattern_sections = [
-  ("workspace-accent", "Workspace accent"),
   ("color-swatches", "Color swatches"),
   ("titlebar-buttons", "Titlebar buttons"),
   ("notification-badge", "Notification badge"),
@@ -112,7 +111,7 @@
         <h2 class="type-heading-lg text-primary">Design System</h2>
         <p class="type-helper text-secondary mt-1">
           The foundational tokens -- type, color, border, surface, radius,
-          spacing, elevation -- plus the shared stroke-icon set.
+          spacing, elevation -- plus the shared icon set.
         </p>
       </div>
 
@@ -599,77 +598,105 @@
       <div class="mt-2 type-helper text-secondary font-mono">app.css :: --shadow-raised / --shadow-overlay</div>
     </section>
 
-    {# Icons -- 24x24 lucide-style stroke icons + 12x12 chrome glyphs.
+    {# Icons -- 16x16 fill-based icons (Figma node 857-5091) + 12px chrome glyphs.
        Brand marks (Google / GitHub) live in auth/OauthIcon.jinja
        because they are multi-color and don't share the stroke shell.
        The 20x20 filled icons (DialogCloseButton X, Latchkey check)
        stay inline next to their use sites. Icons live in the design
        system: though each is a JinjaX component, the set is a shared
        primitive ramp like the color / type tokens above. #}
-    <section id="icons-24" class="scroll-mt-8 mb-6">
-      <h2 class="type-heading text-primary mb-1">Icons -- 24x24 (Icon24)</h2>
-      <div class="flex flex-wrap items-center gap-4 text-primary mt-4">
-        <div class="flex flex-col items-center gap-1 w-16">
-          <Icon24 name="menu" />
+    <section id="icons-16" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-1">Icons -- 16px (Icon16)</h2>
+      <div class="flex flex-wrap items-start gap-4 text-primary mt-4">
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="menu" />
           <code class="type-helper font-mono text-secondary">menu</code>
         </div>
-        <div class="flex flex-col items-center gap-1 w-16">
-          <Icon24 name="home" />
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="home" />
           <code class="type-helper font-mono text-secondary">home</code>
         </div>
-        <div class="flex flex-col items-center gap-1 w-16">
-          <Icon24 name="back" />
-          <code class="type-helper font-mono text-secondary">back</code>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="user" />
+          <code class="type-helper font-mono text-secondary">user</code>
         </div>
-        <div class="flex flex-col items-center gap-1 w-16">
-          <Icon24 name="forward" />
-          <code class="type-helper font-mono text-secondary">forward</code>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="inbox" />
+          <code class="type-helper font-mono text-secondary">inbox</code>
         </div>
-        <div class="flex flex-col items-center gap-1 w-16">
-          <Icon24 name="messages" />
-          <code class="type-helper font-mono text-secondary">messages</code>
-        </div>
-        <div class="flex flex-col items-center gap-1 w-16">
-          <Icon24 name="restart" />
-          <code class="type-helper font-mono text-secondary">restart</code>
-        </div>
-        <div class="flex flex-col items-center gap-1 w-16">
-          <Icon24 name="settings" />
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="settings" />
           <code class="type-helper font-mono text-secondary">settings</code>
         </div>
-        <div class="flex flex-col items-center gap-1 w-16">
-          <Icon24 name="external" />
-          <code class="type-helper font-mono text-secondary">external</code>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="chevron-right" />
+          <code class="type-helper font-mono text-secondary">chevron-right</code>
         </div>
-        <div class="flex flex-col items-center gap-1 w-16">
-          <Icon24 name="arrow-up-right" />
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="chevron-left" />
+          <code class="type-helper font-mono text-secondary">chevron-left</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="chevron-down" />
+          <code class="type-helper font-mono text-secondary">chevron-down</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="chevron-up" />
+          <code class="type-helper font-mono text-secondary">chevron-up</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="chevron-down-small" />
+          <code class="type-helper font-mono text-secondary">chevron-down-small</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="plus" />
+          <code class="type-helper font-mono text-secondary">plus</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="close" />
+          <code class="type-helper font-mono text-secondary">close</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="restart" />
+          <code class="type-helper font-mono text-secondary">restart</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="arrow-up-right" />
           <code class="type-helper font-mono text-secondary">arrow-up-right</code>
         </div>
-        <div class="flex flex-col items-center gap-1 w-16">
-          <Icon24 name="chevron-down" />
-          <code class="type-helper font-mono text-secondary">chevron-down</code>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="check" />
+          <code class="type-helper font-mono text-secondary">check</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="play" />
+          <code class="type-helper font-mono text-secondary">play</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="pause" />
+          <code class="type-helper font-mono text-secondary">pause</code>
         </div>
       </div>
       <p class="mt-1 type-helper text-secondary">
-        Stroke icons inherit color from the parent via
-        ``currentColor``. Sizes: ``sm`` (w-3.5), ``md`` (w-4, default),
-        ``lg`` (w-5).
+        Icons inherit color from the parent via ``currentColor`` (most are
+        filled outlines; ``play`` is stroked). Sizes: ``sm`` (w-3.5), ``md``
+        (w-4, default), ``lg`` (w-5).
       </p>
-      <div class="mt-0.5 type-helper text-secondary font-mono">Icon24.jinja :: ICONS_24 in templates.py</div>
+      <div class="mt-0.5 type-helper text-secondary font-mono">Icon16.jinja :: ICONS_16 in templates.py</div>
     </section>
 
     <section id="icons-12" class="scroll-mt-8 mb-6">
       <h2 class="type-heading text-primary mb-1">Icons -- 12x12 chrome glyphs (Icon12)</h2>
-      <div class="dark bg-surface-primary border border-default rounded-lg p-4 flex items-center gap-4 text-secondary mt-4">
-        <div class="flex flex-col items-center gap-1 w-16">
+      <div class="dark bg-surface-primary border border-default rounded-lg p-4 flex items-start gap-4 text-secondary mt-4">
+        <div class="flex flex-col items-start gap-1 w-16">
           <Icon12 name="minimize" />
           <code class="type-helper font-mono text-tertiary">minimize</code>
         </div>
-        <div class="flex flex-col items-center gap-1 w-16">
+        <div class="flex flex-col items-start gap-1 w-16">
           <Icon12 name="maximize" />
           <code class="type-helper font-mono text-tertiary">maximize</code>
         </div>
-        <div class="flex flex-col items-center gap-1 w-16">
+        <div class="flex flex-col items-start gap-1 w-16">
           <Icon12 name="close" />
           <code class="type-helper font-mono text-tertiary">close</code>
         </div>
@@ -688,35 +715,12 @@
         </p>
       </div>
 
-    {# Workspace accent picker #}
-    <section id="workspace-accent" class="scroll-mt-8 mb-12">
-      <h2 class="type-heading text-primary mb-1">Workspace accent</h2>
-      <p class="type-helper text-secondary mb-4">
-        Per-workspace identity color: a user-picked <code>#rrggbb</code> hex
-        (10-swatch palette + custom hex in workspace settings, stored as an
-        mngr <code>color</code> label). Pick a color; everything below that
-        uses <code>--workspace-accent</code> updates live.
-      </p>
-      <div>
-        <div class="flex items-center gap-4">
-          <div class="accent-swatch w-12 h-12 rounded-md border border-default shrink-0"></div>
-          <div class="flex-1">
-            <label for="styleguide-accent-color" class="block type-helper text-secondary mb-1">
-              accent hex
-            </label>
-            <input id="styleguide-accent-color" type="color" value="#0b292b">
-          </div>
-          <code id="styleguide-accent-value" class="type-helper text-primary"></code>
-        </div>
-      </div>
-    </section>
-
     {# ColorSwatch primitive: the circular radio buttons the workspace
        color pickers (settings + create form) compose. aria-checked drives
        the blue selection ring via app.css; the create page additionally
        narrows the rim to 1px via its own picker-scoped override. #}
     <section id="color-swatches" class="scroll-mt-8 mb-12">
-      <div class="type-section text-secondary mb-2">Color swatches</div>
+      <h2 class="type-heading text-primary mb-2">Color swatches</h2>
       <div class="flex items-center gap-2" role="radiogroup" aria-label="Color swatch demo, settings size">
         <ColorSwatch hex="#0b292b" name="confusion" selected size="md" />
         <ColorSwatch hex="#9fbbd3" name="peace" size="md" />
@@ -734,35 +738,45 @@
        workspace color); the .titlebar-surface scope derives the black/white
        foreground from it in pure CSS (lch relative color), so the same
        TitlebarButton glyphs + page title read correctly on a dark workspace
-       color and a light one alike -- exactly as chrome.js paints them. #}
+       color and a light one alike -- exactly as chrome.js paints them. The
+       three sections are sized 1 / 2 / 1 (nav | title | requests + window
+       controls) so the page title sits in the bar's exact center regardless
+       of how wide each side is -- matching Chrome.jinja. #}
     <section id="titlebar-buttons" class="scroll-mt-8 mb-6">
-      <div class="type-section text-secondary mb-2">Titlebar buttons (self-theming)</div>
+      <h2 class="type-heading text-primary mb-2">Titlebar buttons (self-theming)</h2>
       <div class="flex flex-col gap-2">
         {% for _bg in ['#0b292b', '#cecd0c'] %}
         <div class="titlebar-surface rounded-lg overflow-hidden border border-default h-[38px] flex items-center select-none px-1"
              style="--titlebar-bg: {{ _bg }}; background-color: var(--titlebar-bg);">
-          <div class="flex items-center gap-0.5">
-            <TitlebarButton title="Projects"><Icon24 name="menu" /></TitlebarButton>
-            <TitlebarButton title="Home"><Icon24 name="home" /></TitlebarButton>
-            <TitlebarButton title="Back"><Icon24 name="back" /></TitlebarButton>
-            <TitlebarButton title="Forward"><Icon24 name="forward" /></TitlebarButton>
+          <div class="flex-1 flex items-center gap-0.5 min-w-0">
+            <TitlebarButton title="Projects"><Icon16 name="menu" /></TitlebarButton>
+            <TitlebarButton title="Home"><Icon16 name="home" /></TitlebarButton>
+            <TitlebarButton title="Back"><Icon16 name="chevron-left" /></TitlebarButton>
+            <TitlebarButton title="Forward"><Icon16 name="chevron-right" /></TitlebarButton>
           </div>
-          <div class="flex-1 flex items-center justify-center px-2 min-w-0">
+          <div class="flex-[2] flex items-center justify-center px-2 min-w-0">
             <span class="text-primary type-label whitespace-nowrap overflow-hidden text-ellipsis">my-workspace</span>
           </div>
-          <TitlebarButton title="Requests" extra="relative"><Icon24 name="messages" /></TitlebarButton>
+          <div class="flex-1 flex items-center justify-end min-w-0">
+            <TitlebarButton title="Requests" extra="gap-[3px]"><Icon16 name="inbox" /></TitlebarButton>
+            <div class="flex">
+              <TitlebarButton variant="control" title="Minimize"><Icon12 name="minimize" /></TitlebarButton>
+              <TitlebarButton variant="control" title="Maximize"><Icon12 name="maximize" /></TitlebarButton>
+              <TitlebarButton variant="control" tone="danger" title="Close"><Icon12 name="close" /></TitlebarButton>
+            </div>
+          </div>
         </div>
         {% endfor %}
       </div>
-      <div class="mt-1 type-helper text-secondary font-mono">TitlebarButton.jinja + .titlebar-surface (app.css) -- contrast derived from --titlebar-bg via lch</div>
+      <div class="mt-1 type-helper text-secondary font-mono">TitlebarButton.jinja + .titlebar-surface (app.css) -- 1/2/1 flex sections center the title; contrast derived from --titlebar-bg via lch</div>
     </section>
 
-    {# Notification badge. One component (Badge.jinja), two shapes: the bare
-       dot (no count) and the count pill (a number, capped at 99+). The dot is
-       what the titlebar requests button shows today; the count pill is not yet
-       wired into the app but lives here so the catalog documents it. #}
+    {# Notification badge. One component (Badge.jinja), two shapes: the count
+       pill (a number, capped at 99+) and the bare dot (no count). The titlebar
+       requests button shows the count inline beside the messages icon; the dot
+       is the no-number variant. #}
     <section id="notification-badge" class="scroll-mt-8 mb-6">
-      <div class="type-section text-secondary mb-2">Notification badge</div>
+      <h2 class="type-heading text-primary mb-2">Notification badge</h2>
       <div class="flex items-center gap-3">
         <Badge :count="4" />
         <Badge :count="12" />
@@ -771,24 +785,24 @@
       </div>
       <p class="mt-2 type-helper text-secondary">
         Count pill (``min-w-[16px]`` keeps a single digit circular; caps at
-        99+) and the bare dot. The titlebar requests button pins the dot to the
-        messages icon's top-right corner:
+        99+) and the bare dot. In the titlebar the count sits inline beside the
+        messages icon (the gap collapses when there are no requests):
       </p>
       <div class="mt-2 titlebar-surface rounded-lg overflow-hidden border border-default"
            style="--titlebar-bg: #18181b; background-color: var(--titlebar-bg);">
         <div class="h-[38px] flex items-center justify-end px-1">
-          <TitlebarButton title="Requests" extra="relative">
-            <Icon24 name="messages" />
-            <Badge class="absolute top-0.5 right-0.5" />
+          <TitlebarButton title="Requests" extra="gap-[3px]">
+            <Icon16 name="inbox" />
+            <Badge :count="4" />
           </TitlebarButton>
         </div>
       </div>
-      <div class="mt-1 type-helper text-secondary font-mono">templates/Badge.jinja (titlebar dot: Chrome.jinja :: #requests-badge)</div>
+      <div class="mt-1 type-helper text-secondary font-mono">templates/Badge.jinja (titlebar count: Chrome.jinja :: #requests-badge)</div>
     </section>
 
     {# Window controls (only rendered on non-mac in real chrome) #}
     <section id="window-controls" class="scroll-mt-8 mb-6">
-      <div class="type-section text-secondary mb-2">Window controls</div>
+      <h2 class="type-heading text-primary mb-2">Window controls</h2>
       <div class="titlebar-surface rounded-lg overflow-hidden border border-default"
            style="--titlebar-bg: #18181b; background-color: var(--titlebar-bg);">
         <div class="h-[38px] flex items-center justify-end">
@@ -810,24 +824,31 @@
        dev_styleguide.js) so this catalog can't drift from the live menu.
        The empty container below is filled in on load. #}
     <section id="sidebar-items" class="scroll-mt-8 mb-6">
-      <div class="type-section text-secondary mb-2">Sidebar items</div>
+      <h2 class="type-heading text-primary mb-2">Sidebar items</h2>
       <div id="styleguide-sidebar-rows"
            class="dark w-[280px] flex flex-col gap-0.5 p-1 rounded-lg border border-subtle bg-surface-primary overflow-hidden"></div>
       <div class="mt-1 type-helper text-secondary font-mono">window.mindsSidebarRow.buildRow (sidebar_workspace_row.js) -- the one row builder shared by static/sidebar.js + static/chrome.js; SidebarBottom.jinja supplies the "New workspace" / "Manage account(s)" rows below the workspace list.</div>
     </section>
 
-    {# Accent spine #}
+    {# Accent spine. The left stripe is the only surface in the catalog that
+       renders the per-workspace accent (a user-picked #rrggbb stored as an
+       mngr color label); pick a hex and the stripe updates live. #}
     <section id="accent-spine" class="scroll-mt-8 mb-6">
-      <div class="type-section text-secondary mb-2">Accent spine</div>
+      <h2 class="type-heading text-primary mb-2">Accent spine</h2>
       <div class="accent-spine relative flex items-center gap-3 bg-surface-primary border border-default rounded-lg px-4 py-3 overflow-hidden">
         <div class="type-body text-primary">Card with workspace accent stripe on the left edge.</div>
       </div>
-      <div class="mt-1 type-helper text-secondary font-mono">templates/pages/Landing.jinja, templates/pages/Destroying.jinja :: .accent-spine from app.css</div>
+      <div class="mt-2 flex items-center gap-3">
+        <label for="styleguide-accent-color" class="type-helper text-secondary">accent hex</label>
+        <input id="styleguide-accent-color" type="color" value="#0b292b">
+        <code id="styleguide-accent-value" class="type-helper text-primary"></code>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">templates/pages/Landing.jinja, templates/pages/Destroying.jinja :: .accent-spine reads --workspace-accent from app.css</div>
     </section>
 
     {# Focus ring -- the accent ring shared by TextInput, Select, Textarea via INPUT_BASE #}
     <section id="form-controls" class="scroll-mt-8 mb-6">
-      <div class="type-section text-secondary mb-2">Form controls (TextInput / Select / Textarea)</div>
+      <h2 class="type-heading text-primary mb-2">Form controls (TextInput / Select / Textarea)</h2>
       <div class="flex flex-col gap-3">
         <TextInput name="styleguide-accent-input" placeholder="TextInput -- click to focus" />
         <div class="flex items-center gap-2">
@@ -846,7 +867,7 @@
 
     {# Spinner #}
     <section id="spinner" class="scroll-mt-8 mb-6">
-      <div class="type-section text-secondary mb-2">Spinner</div>
+      <h2 class="type-heading text-primary mb-2">Spinner</h2>
       <div class="flex items-center gap-6">
         <div class="flex items-center gap-3">
           <Spinner size="sm" />
@@ -864,7 +885,7 @@
 
     {# Buttons #}
     <section id="buttons" class="scroll-mt-8 mb-6">
-      <div class="type-section text-secondary mb-2">Buttons -- variants</div>
+      <h2 class="type-heading text-primary mb-2">Buttons -- variants</h2>
       <div class="flex flex-wrap items-center gap-2">
         <Button variant="primary">Primary</Button>
         <Button variant="secondary">Secondary</Button>
@@ -877,12 +898,12 @@
 
     {# Button sizes #}
     <section id="button-sizes" class="scroll-mt-8 mb-6">
-      <div class="type-section text-secondary mb-2">Buttons -- sizes</div>
+      <h2 class="type-heading text-primary mb-2">Buttons -- sizes</h2>
       <div class="flex flex-col gap-3">
         <div class="flex flex-wrap items-center gap-2">
           <Button variant="primary" size="md">Default (md)</Button>
           <Button variant="primary" size="lg">Large (lg, prominent CTA)</Button>
-          <Button variant="ghost" size="icon" title="Settings" aria-label="Settings"><Icon24 name="settings" /></Button>
+          <Button variant="ghost" size="icon" title="Settings" aria-label="Settings"><Icon16 name="settings" /></Button>
         </div>
         <Button variant="primary" size="lg" block>Block (w-full, used for auth CTAs)</Button>
       </div>
@@ -893,7 +914,7 @@
        picks up the ``text-accent hover:underline`` recipe with an
        optional ``weight="medium"`` for prominent auth-flow affordances. #}
     <section id="links" class="scroll-mt-8 mb-6">
-      <div class="type-section text-secondary mb-2">Links</div>
+      <h2 class="type-heading text-primary mb-2">Links</h2>
       <div class="flex flex-wrap items-center gap-4">
         <Link href="#">Back to projects</Link>
         <Link href="#" weight="medium">Sign in</Link>
@@ -914,7 +935,7 @@
        over this pattern when the affordance is a real navigation --
        keyboard focus and accessibility are cleaner on a plain anchor. #}
     <section id="button-links" class="scroll-mt-8 mb-6">
-      <div class="type-section text-secondary mb-2">Buttons -- link style (via extra=)</div>
+      <h2 class="type-heading text-primary mb-2">Buttons -- link style (via extra=)</h2>
       <div class="flex flex-wrap items-center gap-4">
         <Button variant="ghost"
                 extra="!p-0 !bg-transparent !type-helper !text-accent hover:!bg-transparent hover:underline">
@@ -933,7 +954,7 @@
 
     {# Notices #}
     <section id="notices" class="scroll-mt-8 mb-6">
-      <div class="type-section text-secondary mb-2">Notices</div>
+      <h2 class="type-heading text-primary mb-2">Notices</h2>
       <div>
         <Notice variant="info">Heads up: informational message.</Notice>
         <Notice variant="warn">Careful: something may need attention.</Notice>
@@ -945,7 +966,7 @@
 
     {# Cards #}
     <section id="cards" class="scroll-mt-8 mb-6">
-      <div class="type-section text-secondary mb-2">Cards</div>
+      <h2 class="type-heading text-primary mb-2">Cards</h2>
       <div class="flex flex-col gap-2">
         <Card>
           <span class="type-body text-primary">Default block card -- caller arranges children.</span>
@@ -970,7 +991,7 @@
 
     {# Page container #}
     <section id="page-container" class="scroll-mt-8 mb-6">
-      <div class="type-section text-secondary mb-2">Page container</div>
+      <h2 class="type-heading text-primary mb-2">Page container</h2>
       <div class="bg-fill-subtle border border-default rounded-lg">
         <PageContainer>
           <div class="bg-surface-primary border border-default rounded-md p-3 type-body text-primary">
@@ -983,7 +1004,7 @@
 
     {# Opt (onboarding option card) #}
     <section id="opt" class="scroll-mt-8 mb-6">
-      <div class="type-section text-secondary mb-2">Opt (onboarding option)</div>
+      <h2 class="type-heading text-primary mb-2">Opt (onboarding option)</h2>
       <div class="flex flex-col gap-2">
         <Opt val="example-a" title="Example option" desc="Non-editable selectable card." />
         <Opt val="example-b" title="Selected" desc="Marker for the chosen option." selected />
@@ -994,7 +1015,7 @@
 
     {# OAuth icons #}
     <section id="oauth-icons" class="scroll-mt-8 mb-6">
-      <div class="type-section text-secondary mb-2">OAuth icons</div>
+      <h2 class="type-heading text-primary mb-2">OAuth icons</h2>
       <div class="flex items-center gap-6">
         <span class="inline-flex items-center gap-2 type-body text-primary">
           <auth.OauthIcon provider="google" /> Google
@@ -1008,7 +1029,7 @@
 
     {# Status badges #}
     <section id="status-badges" class="scroll-mt-8 mb-6">
-      <div class="type-section text-secondary mb-2">Status badges</div>
+      <h2 class="type-heading text-primary mb-2">Status badges</h2>
       <div class="flex flex-wrap items-center gap-3">
         <StatusBadge>Neutral</StatusBadge>
         <StatusBadge variant="success">Done</StatusBadge>
@@ -1028,7 +1049,7 @@
 
     {# Section header #}
     <section id="section-header" class="scroll-mt-8 mb-6">
-      <div class="type-section text-secondary mb-2">Section header</div>
+      <h2 class="type-heading text-primary mb-2">Section header</h2>
       <div>
         <SectionHeader>Plain</SectionHeader>
         <p class="type-body text-primary mb-2">Content under the plain header.</p>
@@ -1040,7 +1061,7 @@
 
     {# Dialog close button #}
     <section id="dialog-close" class="scroll-mt-8 mb-6">
-      <div class="type-section text-secondary mb-2">Dialog close button</div>
+      <h2 class="type-heading text-primary mb-2">Dialog close button</h2>
       <div class="relative h-16">
         <DialogCloseButton onclick="void(0)" />
         <p class="type-body text-secondary">Top-right X used by overlay dialogs.</p>
@@ -1051,7 +1072,7 @@
     {# Modal -- styleguide only shows the *inside* of the modal because
        the real wrapper occupies the whole viewport. #}
     <section id="modal" class="scroll-mt-8 mb-6">
-      <div class="type-section text-secondary mb-2">Modal (inner card preview)</div>
+      <h2 class="type-heading text-primary mb-2">Modal (inner card preview)</h2>
       <div class="bg-fill-subtle border border-default rounded-lg p-6 flex items-center justify-center">
         <div class="bg-surface-primary rounded-lg shadow-overlay border border-default max-w-sm w-full p-6">
           <h2 class="type-heading text-primary mb-3">Confirm action?</h2>

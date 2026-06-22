@@ -2,7 +2,7 @@
 {#
   Styled <select> with a custom dropdown chevron. The native <select> arrow
   can't be themed, so we hide it (``appearance-none``) and overlay a
-  ``chevron-down`` Icon24 on the right; it inherits ``text-secondary`` via
+  ``chevron-down`` Icon16 on the right; it inherits ``text-secondary`` via
   currentColor (so it flips with the theme) and is ``pointer-events-none`` so
   clicks fall through to the select. Children should be a sequence of
   <option> elements; the caller owns per-option selected/disabled state.
@@ -26,6 +26,6 @@
 <div class="relative {{ width }}">
   <select {{ attrs.render(name=name, classes=_cls) }}>{{ content }}</select>
   <span class="pointer-events-none absolute inset-y-0 right-2 flex items-center text-secondary">
-    <Icon24 name="chevron-down" />
+    <Icon16 name="chevron-down" />
   </span>
 </div>

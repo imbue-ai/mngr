@@ -61,8 +61,8 @@ def test_render_landing_page_has_open_in_new_window_button_before_settings() -> 
     # to the main process in Electron (or opens a new tab in a browser).
     html = render_landing_page(accessible_agent_ids=(_AGENT_A,))
     assert "window.landingOpenInNewWindow(this)" in html
-    # The diagonal shaft of the open-in-new arrow (Figma node 560-5109).
-    assert '<path d="M18 6L6 18"/>' in html
+    # The open-in-new arrow glyph (Icon16 ``arrow-up-right``, Figma node 857-5137).
+    assert '<path d="M12.9331 10.3336' in html
     # It sits before the settings button within the row.
     assert html.index("window.landingOpenInNewWindow") < html.index(f"/workspace/{_AGENT_A}/settings")
 
@@ -386,6 +386,60 @@ def test_render_chrome_page_contains_titlebar() -> None:
     assert "home-btn" in html
     assert "back-btn" in html
     assert "content-frame" in html
+
+
+def test_render_chrome_page_titlebar_centers_title_with_1_2_1_sections() -> None:
+    # The titlebar is three flex sections sized 1 / 2 / 1 (left controls |
+    # title | right controls) so the workspace title sits in the window's exact
+    # horizontal center regardless of how wide each side's controls are. The
+    # title's section grows at flex-[2] and centers its content; it is flanked
+    # by exactly two flex-1 sections (left + right). The center must NOT be a
+    # lone flex-1 -- that centered the title within the *leftover* space, so it
+    # drifted off-center whenever the two sides differed in width.
+    html = render_chrome_page()
+    titlebar = html[html.index('id="minds-titlebar"') : html.index('id="sidebar-backdrop"')]
+    assert "flex-[2] flex items-center justify-center" in titlebar
+    assert "flex-[2]" in titlebar[: titlebar.index('id="page-title"')]
+    assert titlebar.count("flex-1") == 2
+
+
+def test_render_chrome_page_titlebar_reserves_mac_traffic_lights_with_spacer() -> None:
+    # On macOS the traffic-light strip is reserved with a fixed shrink-0 spacer
+    # div *inside* the left flex-1 section -- NOT a left padding. With
+    # box-sizing: border-box a left padding clamps the section's flex base size
+    # up to the padding, making the equal-width left section wider than the
+    # right and shoving the centered title ~36px off-center; a spacer instead
+    # lives inside the section (which min-w-0 lets shrink to its flex share), so
+    # both sides stay equal width and the title stays truly centered. Non-mac
+    # has no such reservation (it draws its own controls on the right instead).
+    html_mac = render_chrome_page(is_mac=True)
+    html_other = render_chrome_page(is_mac=False)
+    # The padding approach is the bug being fixed: it must not come back.
+    assert "pl-[72px]" not in html_mac
+    assert "pl-[72px]" not in html_other
+    # The spacer sits at the very start of the left section, ahead of the menu
+    # button (#sidebar-toggle), only on macOS.
+    left_section_mac = html_mac[: html_mac.index('id="sidebar-toggle"')]
+    assert 'class="w-[72px] shrink-0" aria-hidden="true"' in left_section_mac
+    assert "w-[72px]" not in html_other
+
+
+def test_render_chrome_page_requests_badge_is_inline_count() -> None:
+    # The requests badge is the Badge count pill sat inline beside the messages
+    # icon (gap-[3px] row), not a dot overlapping the icon's corner: it carries
+    # the type-badge pill role and no absolute positioning (chrome.js fills the
+    # count text + toggles the native `hidden` attribute).
+    html = render_chrome_page()
+    assert 'id="requests-badge"' in html
+    assert "type-badge" in html
+    assert "gap-[3px]" in html
+    # No corner overlay: the badge no longer pins itself to the top-right.
+    assert "top-0.5 right-0.5" not in html
+    # Hidden at rest via the native `hidden` ATTRIBUTE, not a `hidden` class: the
+    # pill bakes in `inline-flex`, which beats the `.hidden` utility, so a class
+    # would leave a stray "0" showing. Match the bare attribute on the pill.
+    assert 'id="requests-badge" hidden>' in html
+    assert 'id="requests-badge" class="hidden"' not in html
 
 
 def test_render_chrome_page_drops_title_swatch_and_seam_border() -> None:
@@ -1382,64 +1436,83 @@ def test_oauth_button_github_uses_github_label_and_glyph() -> None:
     assert "M12 0C5.37 0 0 5.37" in html
 
 
-def test_card_page_default_padding_and_max_width() -> None:
-    html = CATALOG.render("CardPage", title="x", _content="<p>body</p>")
-    # Card surface: bg/border/rounded/shadow + p-8 + max-w-[420px] + w-full.
-    assert "bg-surface-primary" in html
-    assert "rounded-lg" in html
-    assert "shadow-raised" in html
+def test_page_narrow_container_default_padding_and_max_width() -> None:
+    html = CATALOG.render("PageNarrowContainer", title="x", _content="<p>body</p>")
+    # Width/padding only: p-8 + max-w-[420px] + w-full, no surface chrome.
     assert "p-8" in html
     assert "max-w-[420px]" in html
+    assert "w-full" in html
     assert "<p>body</p>" in html
-    # The body is flex-centered around the card.
+    # No border/rounding/shadow -- this is a plain width container, not a card.
+    assert "rounded-lg" not in html
+    assert "shadow-raised" not in html
+    assert "border border-default" not in html
+    # The body is flex-centered around the column.
     assert "flex items-center justify-center min-h-screen" in html
 
 
-def test_card_page_form_padding_uses_p6() -> None:
-    html = CATALOG.render("CardPage", title="x", padding="form", max_width="max-w-[520px]", _content="x")
+def test_page_narrow_container_form_padding_uses_p6() -> None:
+    html = CATALOG.render("PageNarrowContainer", title="x", padding="form", max_width="max-w-[520px]", _content="x")
     assert "p-6" in html
     assert "p-8" not in html
     assert "max-w-[520px]" in html
 
 
-def test_icon24_renders_with_stroke_shell_and_default_size() -> None:
-    # ``home`` is one of the icons in the ICONS_24 catalog global.
-    html = CATALOG.render("Icon24", name="home")
-    # Stroke-based shell attrs applied uniformly.
-    assert 'viewBox="0 0 24 24"' in html
-    assert 'fill="none"' in html
-    assert 'stroke="currentColor"' in html
-    assert 'stroke-width="2"' in html
+def test_icon16_renders_with_fill_shell_and_default_size() -> None:
+    # ``home`` is one of the icons in the ICONS_16 catalog global.
+    html = CATALOG.render("Icon16", name="home")
+    # The 16x16 fill shell: the SVG defaults to fill="currentColor" so each
+    # glyph takes the parent's text color (Figma's hardcoded black is dropped).
+    assert 'viewBox="0 0 16 16"' in html
+    assert 'fill="currentColor"' in html
     assert 'aria-hidden="true"' in html
+    # The fill icons carry no stroke shell (that was the old lucide style).
+    assert 'stroke-width="2"' not in html
     # Default size = md = w-4 h-4.
     assert "w-4 h-4" in html
-    # Path data from the catalog flows through unescaped.
-    assert '<path d="M3 12L12 3l9 9"/>' in html
+    # Path data flows through unescaped as a bare fill outline (no per-path
+    # fill -- it inherits currentColor from the shell, never Figma's black).
+    assert '<path d="M9.40039 9.01301' in html
+    assert "black" not in html
 
 
-def test_icon24_size_axis() -> None:
+def test_icon16_size_axis() -> None:
     for size, css_class in (("sm", "w-3.5 h-3.5"), ("md", "w-4 h-4"), ("lg", "w-5 h-5")):
-        html = CATALOG.render("Icon24", name="home", size=size)
+        html = CATALOG.render("Icon16", name="home", size=size)
         assert css_class in html
 
 
-def test_icon24_renders_arrow_up_right() -> None:
-    # The diagonal open-in-new arrow (Figma node 560-5109) backs the
-    # "open in new window" affordance on workspace rows (landing page + sidebar).
-    html = CATALOG.render("Icon24", name="arrow-up-right")
-    assert 'viewBox="0 0 24 24"' in html
-    assert '<path d="M18 16.5V6H7.5"/>' in html
-    assert '<path d="M18 6L6 18"/>' in html
+def test_icon16_renders_arrow_up_right() -> None:
+    # The diagonal open-in-new arrow backs the "open in new window"
+    # affordance on workspace rows (landing page).
+    html = CATALOG.render("Icon16", name="arrow-up-right")
+    assert 'viewBox="0 0 16 16"' in html
+    assert '<path d="M12.9331 10.3336' in html
 
 
-def test_icon24_renders_menu() -> None:
-    # The lucide ``menu`` glyph (three horizontal lines) is the titlebar
-    # button that opens the floating workspace menu.
-    html = CATALOG.render("Icon24", name="menu")
-    assert 'viewBox="0 0 24 24"' in html
-    assert '<line x1="4" y1="6" x2="20" y2="6"/>' in html
-    assert '<line x1="4" y1="12" x2="20" y2="12"/>' in html
-    assert '<line x1="4" y1="18" x2="20" y2="18"/>' in html
+def test_icon16_renders_menu() -> None:
+    # The ``menu`` glyph (three horizontal bars) is the titlebar button that
+    # opens the floating workspace menu.
+    html = CATALOG.render("Icon16", name="menu")
+    assert 'viewBox="0 0 16 16"' in html
+    assert '<path d="M13.3337 11.4004' in html
+
+
+def test_icon16_play_is_the_lone_stroked_glyph() -> None:
+    # Every other glyph is a filled outline, but ``play`` is a stroked
+    # triangle, so its path overrides the shell's fill with its own
+    # currentColor stroke (still no hardcoded black).
+    html = CATALOG.render("Icon16", name="play")
+    assert 'viewBox="0 0 16 16"' in html
+    assert 'fill="none" stroke="currentColor" stroke-width="1.2"' in html
+    assert "black" not in html
+
+
+def test_icon16_settings_is_offset_into_the_16_grid() -> None:
+    # ``settings`` is authored on a 15-unit grid, so it's nudged into the
+    # 16-unit frame with a translate group.
+    html = CATALOG.render("Icon16", name="settings")
+    assert '<g transform="translate(0.5 0.5)">' in html
 
 
 def test_icon12_renders_with_w3_h3_size_and_12_viewbox() -> None:
@@ -1544,7 +1617,7 @@ def test_select_renders_with_option_children_and_focus_ring() -> None:
     # Inherits the shared INPUT_BASE accent focus ring (drawn outside the field).
     assert "focus:outline-accent" in html
     assert "focus:outline-2" in html
-    # The chevron is overlaid via a themeable Icon24 (native arrow hidden).
+    # The chevron is overlaid via a themeable Icon16 (native arrow hidden).
     assert "appearance-none" in html
     # Default width sizes the wrapper; the inner <select> fills it (w-full).
     assert 'class="relative w-full"' in html
@@ -1617,8 +1690,9 @@ def test_dialog_close_button_renders_x_svg_and_onclick() -> None:
     html = CATALOG.render("DialogCloseButton", onclick="closePermissionDialog()")
     assert 'aria-label="Close"' in html
     assert 'onclick="closePermissionDialog()"' in html
-    # The X-glyph path data fragment that identifies the close SVG.
-    assert "M4.22 4.22a.75.75 0 0 1 1.06 0L10 8.94" in html
+    # Renders the shared Icon16 ``close`` glyph (16px); its path fragment.
+    assert "w-4 h-4" in html
+    assert '<path d="M11.5762 3.57617' in html
 
 
 def test_dialog_close_button_id_optional() -> None:

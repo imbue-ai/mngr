@@ -26,7 +26,7 @@ root of `templates/`. Auth-flow components live under `templates/auth/`.
 |---|---|
 | `Base` | Universal HTML scaffold (html/head/body, compiled Tailwind v4 sheet `app.min.css`). Every page wraps in this. |
 | `PageContainer` | Centered `max-w-[720px]` body wrapper. Default for in-app settings-style pages (Landing, Accounts, WorkspaceSettings, Sharing, Destroying). |
-| `CardPage` | Centered-card layout for auth flow + form pages. `padding="default"` (`p-10`, auth) or `"form"` (`p-6`, Create); `max_width` is a Tailwind utility. |
+| `PageNarrowContainer` | Centered, narrow page layout for auth flow + form pages. Width/padding only -- no surface chrome. `padding="default"` (`p-8`, auth) or `"form"` (`p-6`, Create); `max_width` is a Tailwind utility. |
 | `Card` | Card surface with `layout`/`padding`/`interactive`/`tag`/`href` props. Pulls `.minds-card` from `app.css` for the shared shell. |
 | `Modal` | Overlay dialog with backdrop. Used for confirmation dialogs (Welcome's skip-account prompt, WorkspaceSettings' destroy modal). |
 | `PermissionsHeader` / `PermissionsForm` / `PermissionsError` / `PermissionsManualCredentials` | Composable building blocks for the latchkey permission-request detail fragments (`pages.LatchkeyPredefinedPermission`, `pages.LatchkeyFileSharingPermission`). The surrounding modal chrome lives in the inbox shell (`pages.Inbox`), not in a separate dialog primitive. |
@@ -57,16 +57,16 @@ root of `templates/`. Auth-flow components live under `templates/auth/`.
 |---|---|
 | `Notice` | Info / warn / success / error banner. Use HTML attribute passthrough (`id=`, `class="hidden"`) for JS-toggled messages. |
 | `StatusBadge` | Compact pill. `variant="neutral"` / `success` / `error` / `warn` / `info`. |
-| `Badge` | Notification badge on the `important` hue. No `count` -> an 8px dot (the titlebar requests indicator); `count` set -> a count pill (`type-badge` text, caps at 99+). Carries no position; the caller places it (`class="absolute ..."`) and toggles `class="hidden"`. |
+| `Badge` | Notification badge on the `important` hue. `count` set -> a count pill (`type-badge` text, caps at 99+); no `count` -> an 8px dot. The titlebar requests button shows the count inline beside the icon (icon + badge in a `gap-[3px]` row; chrome.js sets the text + toggles `class="hidden"`). Carries no position; the caller places it. |
 | `Spinner` | CSS-only animated circle. `size="sm"` / `"md"` / `"lg"` ; `tone="default"` / `"accent"` (blue, for primary-action spinners). |
 
 ### Icons
 
 | Component | Role |
 |---|---|
-| `Icon24` | 24x24 lucide-style stroke icon. `name=` picks from `ICONS_24` dict in `templates.py`. Sizes `sm` / `md` / `lg`. Inherits color via `currentColor`. |
+| `Icon16` | 16x16 icon from the shared Figma set (node 857-5091), rendered in a `viewBox="0 0 16 16"` shell defaulting to `fill="currentColor"`. Most glyphs are filled outlines; `play` is the lone stroked one (carries its own `stroke="currentColor"`). `name=` picks from `ICONS_16` dict in `templates.py`. Sizes `sm` / `md` (default = `w-4`) / `lg`. Inherits color via `currentColor`. |
 | `Icon12` | 12x12 title-bar chrome glyph (minimize / maximize / close). Single canonical `w-3 h-3` size; used only inside TitlebarButton `variant="control"`. |
-| `auth.OauthIcon` | Brand glyph (Google / GitHub). Stays separate from `Icon24` -- multi-color brand fills, no stroke shell. |
+| `auth.OauthIcon` | Brand glyph (Google / GitHub). Stays separate from `Icon16` -- multi-color brand fills, not the single-color icon set. |
 
 ### CSS classes for JS-rendered surfaces
 
@@ -88,7 +88,7 @@ in sync:
 
 | Source | Contents |
 |---|---|
-| `templates.py` | `BTN_BASE` / `BTN_SIZES` / `BTN_VARIANTS` (button shell), `INPUT_BASE` (form-control shell), `ICONS_24` / `ICONS_12` (SVG path data). Exposed as JinjaX Catalog globals. |
+| `templates.py` | `BTN_BASE` / `BTN_SIZES` / `BTN_VARIANTS` (button shell), `INPUT_BASE` (form-control shell), `ICONS_16` / `ICONS_12` (SVG path data). Exposed as JinjaX Catalog globals. |
 | `static/app.css` | The `@theme` design tokens (colors, radius, type ramp, elevation) plus hand-written recipes: `.minds-card`, `.spinner` + `.spinner-accent`, `.code-pill`, `.accent-spine`, `.accent-swatch`, `.color-swatch` / `.color-hex-pill` (workspace color picker rim + selection-ring / hex-input pill), `.titlebar-surface` / `.titlebar-btn-danger`, and the runtime `--workspace-accent` / `--titlebar-bg` (set via inline style on the document root by chrome.js). |
 | `templates/pages/DevStyleguide.jinja` | The live visual catalog. Mount at `/_dev/styleguide` in a running app. Tells you what exists and what each variant looks like. |
 

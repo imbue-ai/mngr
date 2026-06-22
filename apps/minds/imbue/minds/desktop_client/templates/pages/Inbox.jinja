@@ -21,7 +21,6 @@
       padding: 10px 12px;
       cursor: pointer;
       border-left: 3px solid transparent;
-      transition: background 100ms;
     }
     .inbox-card:hover { background: rgba(0, 0, 0, 0.04); }
     .inbox-card.is-selected {
@@ -607,11 +606,8 @@
                 id="inbox-close-btn"
                 onclick="closeInbox()"
                 style="-webkit-app-region: no-drag;"
-                class="justify-self-end inline-flex items-center justify-center w-6 h-6 rounded-md text-tertiary hover:text-primary hover:bg-fill-hover transition-colors cursor-pointer">
-          <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" class="w-4 h-4">
-            <path fill-rule="evenodd" clip-rule="evenodd"
-                  d="M4.22 4.22a.75.75 0 0 1 1.06 0L10 8.94l4.72-4.72a.75.75 0 1 1 1.06 1.06L11.06 10l4.72 4.72a.75.75 0 1 1-1.06 1.06L10 11.06l-4.72 4.72a.75.75 0 0 1-1.06-1.06L8.94 10 4.22 5.28a.75.75 0 0 1 0-1.06Z" />
-          </svg>
+                class="justify-self-end inline-flex items-center justify-center w-6 h-6 rounded-md text-tertiary hover:text-primary hover:bg-fill-hover cursor-pointer">
+          <Icon16 name="close" />
         </button>
       </div>
       <div id="inbox-body" class="flex flex-1 min-h-0 {% if is_empty %}is-empty{% endif %}">
