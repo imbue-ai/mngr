@@ -440,10 +440,13 @@ html {
   box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.25);
 }
 .color-swatch[aria-checked="true"] {
-  box-shadow:
-    inset 0 0 0 2px rgba(0, 0, 0, 0.25),
-    0 0 0 2px #fff,
-    0 0 0 4px var(--c-accent); /* accent selection ring */
+  box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.25);
+  /* Accent selection ring floated off the swatch by a real, transparent gap:
+     outline-offset leaves the gap unpainted so the page background shows
+     through it in every mode -- never a hardcoded white rim (which read as a
+     stray white border in dark mode). */
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
 }
 
 /*
@@ -455,10 +458,9 @@ html {
   box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
 }
 #create-color-picker .color-swatch[aria-checked="true"] {
-  box-shadow:
-    inset 0 0 0 1px rgba(0, 0, 0, 0.25),
-    0 0 0 2px #fff,
-    0 0 0 4px var(--c-accent);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
 }
 
 /*

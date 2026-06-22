@@ -94,6 +94,8 @@ Reorganized the dev styleguide page (`/_dev/styleguide`) into two labeled groups
 
 - The color-swatch demo now shows the same three swatches per row (selected / default / disabled) at both the `md` and `sm` sizes, with a little more vertical space between the two rows -- so the size comparison is apples-to-apples.
 
+- Fixed the selected color swatch's selection ring: the gap between the swatch and the accent ring is now a real transparent gap (via `outline` + `outline-offset`) instead of a hardcoded white rim, so it shows the background in every mode rather than flashing a stray white border in dark mode. Applies to both the settings (`md`) and create-form (`sm`) pickers.
+
 Aligned the `Button` primitive with the Figma button component (node 342-4059). The default (md) size now uses the Figma padding -- `px-4 py-2` (16px / 8px) instead of `px-3 py-2` -- and the variant recipes were reworked:
 
 - **Secondary** has no fill at rest: it's a `border-strong` outline with `text-primary`, and only tints (`bg-fill-hover` on hover, `bg-fill-active` on press) on interaction.
