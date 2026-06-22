@@ -30,9 +30,9 @@ from pydantic import Field
 from pydantic import PrivateAttr
 from sentry_sdk import HttpTransport
 from sentry_sdk import get_current_scope
-from sentry_sdk.attachments import Attachment
 from sentry_sdk.consts import EndpointType
 from sentry_sdk.envelope import Envelope
+from sentry_sdk.integrations.flask import FlaskIntegration
 from sentry_sdk.integrations.stdlib import StdlibIntegration
 from sentry_sdk.types import Event
 from sentry_sdk.types import Hint
@@ -66,11 +66,6 @@ SENTRY_DSN_PRODUCTION = 'https://d8658891db0c1246864df82eefd74b6d@o4504335315501
 SENTRY_DSN_STAGING = 'https://221f676a7e3c99733e85dc5c8dd6d6e2@o4504335315501056.ingest.us.sentry.io/4511609241862145'
 SENTRY_DSN_DEV = 'https://0a66e5894c00f701e3c1b7c2daae4650@o4504335315501056.ingest.us.sentry.io/4511609244811264'
 
-
-def truncate_string(s: str, max_length: int) -> str:
-    if len(s) <= max_length:
-        return s
-    return s[: max_length - 3] + "..."
 
 class SentryEventRejected(Exception):
     pass
@@ -406,18 +401,6 @@ def get_traceback_with_vars(exception: BaseException | None = None) -> str:
         return f"got exception while formatting traceback with `traceback_with_variables`: {traceback.format_exception(e)}"
 
 
-def _default_sentry_add_extra_info_hook(event: Event, hint: Hint) -> tuple[Event, Hint, tuple[Callable, ...]]:
-    """Add traceback with variables to the event as an attachment."""
-    # TODO: We just use sentry attachments here; we could also upload to S3, but figure this hook is itself a fallback, so leaving it for now?
-    expected_attachments = []
-    tb_with_vars = truncate_string(get_traceback_with_vars(), MAX_SENTRY_ATTACHMENT_SIZE)
-    hint["attachments"].append(Attachment(tb_with_vars.encode(), filename="traceback_with_variables.txt"))
-    expected_attachments.append("traceback_with_variables.txt")
-    # record the names of the expected attachments just in case there's any weirdness about attachments not showing up
-    event.setdefault("extra", {})["expected_attachments"] = str(expected_attachments)
-    return event, hint, ()
-
-
 # We define BeforeSendType here to be one or more callables that match the signature of sentry's before_send hook.
 # The event will be passed through each one in our wrapping code.
 BaseBeforeSendType = Callable[[Event, Hint], Event | None]
@@ -504,7 +487,9 @@ def setup_sentry(
         default_integrations=True,
         # this doesn't affect the default integrations, but prevents any other ones from being added automatically
         auto_enabling_integrations=False,
-        integrations=[],
+        integrations=[
+            FlaskIntegration(),
+        ],
         disabled_integrations=[
             StdlibIntegration()
         ],
@@ -531,7 +516,7 @@ def setup_sentry(
     min_sentry_level: int = SentryLoguruLoggingLevels.LOW_PRIORITY.value
     handler = SentryEventHandler(
         level=min_sentry_level,
-        add_extra_info_hook=add_extra_info_hook or _default_sentry_add_extra_info_hook,
+        add_extra_info_hook=add_extra_info_hook,
     )
     register_sentry_event_handler(handler)
     logger.add(
