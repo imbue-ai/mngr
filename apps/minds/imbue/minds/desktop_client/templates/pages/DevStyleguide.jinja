@@ -711,16 +711,14 @@
       <div class="flex items-center gap-2" role="radiogroup" aria-label="Color swatch demo, settings size">
         <ColorSwatch hex="#0b292b" name="confusion" selected size="md" />
         <ColorSwatch hex="#9fbbd3" name="peace" size="md" />
-        <ColorSwatch hex="#cecd0c" name="energy" size="md" />
-        <ColorSwatch hex="#fcefd4" name="clarity" size="md" />
-        <ColorSwatch hex="#492222" name="courage" size="md" disabled />
+        <ColorSwatch hex="#cecd0c" name="energy" size="md" disabled />
       </div>
-      <div class="flex items-center gap-2 mt-2" role="radiogroup" aria-label="Color swatch demo, create-form size">
+      <div class="flex items-center gap-2 mt-4" role="radiogroup" aria-label="Color swatch demo, create-form size">
         <ColorSwatch hex="#0b292b" name="confusion" selected size="sm" />
         <ColorSwatch hex="#9fbbd3" name="peace" size="sm" />
-        <ColorSwatch hex="#cecd0c" name="energy" size="sm" />
+        <ColorSwatch hex="#cecd0c" name="energy" size="sm" disabled />
       </div>
-      <div class="mt-1 type-helper text-secondary font-mono">ColorSwatch.jinja (size="md" settings / "sm" create; selected ring via aria-checked, last md swatch disabled) + app.css :: .color-swatch</div>
+      <div class="mt-1 type-helper text-secondary font-mono">ColorSwatch.jinja (size="md" settings / "sm" create; same three per row: first selected via aria-checked, third disabled) + app.css :: .color-swatch</div>
     </section>
 
     {# Titlebar buttons (self-theming). Each bar sets only --titlebar-bg (a

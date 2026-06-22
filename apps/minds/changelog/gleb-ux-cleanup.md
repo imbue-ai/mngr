@@ -92,6 +92,8 @@ Reorganized the dev styleguide page (`/_dev/styleguide`) into two labeled groups
 
 - Each section is a scroll anchor carrying a `scroll-mt` offset, so a TOC jump lands the heading below the viewport top rather than flush against it. `dev_styleguide.js` adds an `IntersectionObserver` scrollspy that marks the active section's link via `aria-current="page"` (styled in `app.css`).
 
+- The color-swatch demo now shows the same three swatches per row (selected / default / disabled) at both the `md` and `sm` sizes, with a little more vertical space between the two rows -- so the size comparison is apples-to-apples.
+
 Aligned the `Button` primitive with the Figma button component (node 342-4059). The default (md) size now uses the Figma padding -- `px-4 py-2` (16px / 8px) instead of `px-3 py-2` -- and the variant recipes were reworked:
 
 - **Secondary** has no fill at rest: it's a `border-strong` outline with `text-primary`, and only tints (`bg-fill-hover` on hover, `bg-fill-active` on press) on interaction.
