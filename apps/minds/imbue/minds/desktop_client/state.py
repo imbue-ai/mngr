@@ -28,6 +28,7 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
@@ -111,6 +112,9 @@ class DesktopClientState(MutableModel):
     )
     system_interface_health_tracker: SystemInterfaceHealthTracker | None = Field(
         default=None, frozen=True, description="System-interface health tracker"
+    )
+    discovery_health_watchdog: DiscoveryHealthWatchdog | None = Field(
+        default=None, frozen=True, description="App-global discovery-pipeline health watchdog"
     )
     mngr_binary: str = Field(default="mngr", frozen=True, description="Path/name of the mngr binary to shell out to")
     mngr_host_dir: Path = Field(

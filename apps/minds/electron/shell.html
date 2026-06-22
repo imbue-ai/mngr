@@ -216,6 +216,10 @@
         errorView.style.display = 'flex';
         if (data.message) document.getElementById('error-message').textContent = data.message;
         if (data.details) document.getElementById('error-details').textContent = data.details;
+        // Optional per-takeover label for the primary action (e.g. "Restart
+        // Minds" for the discovery-pipeline takeover). Defaults to the static
+        // "Retry" label for the generic backend-crash case.
+        if (data.actionLabel) document.getElementById('retry-btn').textContent = data.actionLabel;
       });
     }
   </script>
