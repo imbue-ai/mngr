@@ -33,6 +33,8 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.bootstrap import env_name_from_root_name
+from imbue.minds.bootstrap import is_minds_root_name_set_to_active_env
 from imbue.minds.bootstrap import minds_data_dir_for
 from imbue.minds.bootstrap import reconcile_imbue_cloud_providers_from_sessions
 from imbue.minds.bootstrap import resolve_minds_root_name
@@ -76,6 +78,7 @@ from imbue.minds.primitives import OutputFormat
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.output import emit_event
+from imbue.minds.utils.sentry.core import SentryDeployEnvironment
 from imbue.minds.utils.sentry.core import setup_sentry
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -173,18 +176,18 @@ def run(
 
     # Initialize Sentry for the minds backend process. ``setup_logging`` already ran
     # in the CLI group callback, so the loguru sinks Sentry layers on top of exist.
-    # Uploading log files + traceback-with-locals attachments to the shared S3
-    # buckets ships potentially-sensitive data off the user's machine, so it is
-    # opt-in via MINDS_SENTRY_S3_UPLOADS (default off).
-    # TODO: thread through the real environment, release id, git sha, and per-env DSN
-    # selection instead of these placeholders.
-    is_sentry_s3_upload_enabled = os.environ.get("MINDS_SENTRY_S3_UPLOADS", "").strip().lower() in ("1", "true", "yes")
+    # The activated minds env (from `minds env activate`) selects the Sentry DSN and
+    # the S3 attachment bucket: production and staging each get their own, while every
+    # other env (dev-*, ci-*, or no activated env) reports to the dev project with no
+    # S3 uploads. We treat "not activated" as dev so an un-activated `minds run` never
+    # accidentally reports to the production project.
+    # TODO: thread through the real release id + git sha instead of these placeholders.
+    activated_env_name = env_name_from_root_name(root_name) if is_minds_root_name_set_to_active_env() else None
     setup_sentry(
-        environment="development",
+        environment=SentryDeployEnvironment.from_minds_env_name(activated_env_name),
         release_id="0.0.0-dev",
         git_commit_sha="unknown",
         log_folder=paths.log_dir,
-        is_s3_upload_enabled=is_sentry_s3_upload_enabled,
     )
     client_config_path = config_file
     client_env_config = load_client_config(client_config_path)

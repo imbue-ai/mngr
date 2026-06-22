@@ -76,6 +76,41 @@ SENTRY_DSN_STAGING = 'https://221f676a7e3c99733e85dc5c8dd6d6e2@o4504335315501056
 SENTRY_DSN_DEV = 'https://0a66e5894c00f701e3c1b7c2daae4650@o4504335315501056.ingest.us.sentry.io/4511609244811264'
 
 
+class SentryDeployEnvironment(StrEnum):
+    """Which Sentry project (and S3 bucket) a minds process reports to.
+
+    Derived from the activated minds env (set by ``minds env activate``):
+    ``production`` and ``staging`` each report to their own Sentry DSN and S3
+    bucket; every other env (``dev-*``, ``ci-*``, or no activated env) reports
+    to the shared dev Sentry project and uploads nothing to S3.
+    """
+
+    PRODUCTION = "production"
+    STAGING = "staging"
+    DEVELOPMENT = "development"
+
+    @classmethod
+    def from_minds_env_name(cls, env_name: str | None) -> "SentryDeployEnvironment":
+        """Map an activated minds env name to its Sentry environment.
+
+        Only the exact names ``production`` and ``staging`` get their own
+        targets; everything else (``dev-*``, ``ci-*``, or ``None`` when no env
+        is activated) falls back to ``DEVELOPMENT``.
+        """
+        if env_name == cls.PRODUCTION.value:
+            return cls.PRODUCTION
+        if env_name == cls.STAGING.value:
+            return cls.STAGING
+        return cls.DEVELOPMENT
+
+
+_SENTRY_DSN_BY_ENVIRONMENT: Mapping["SentryDeployEnvironment", str] = {
+    SentryDeployEnvironment.PRODUCTION: SENTRY_DSN_PRODUCTION,
+    SentryDeployEnvironment.STAGING: SENTRY_DSN_STAGING,
+    SentryDeployEnvironment.DEVELOPMENT: SENTRY_DSN_DEV,
+}
+
+
 class SentryEventRejected(Exception):
     pass
 
@@ -457,26 +492,24 @@ def _fixup_release_id(release_id: str) -> str:
 
 
 def setup_sentry(
-    environment: str,
+    environment: SentryDeployEnvironment,
     release_id: str,
     git_commit_sha: str,
     log_folder: Path,
     global_user_context: Mapping[str, str] | None = None,
-    is_s3_upload_enabled: bool = False,
 ) -> None:
     """Sets up the main Sentry instance for this process.
 
     This should be done *after* setting up normal loguru loggers, to ensure that sentry handling happens after normal logging.
     In case the sentry stuff hangs or something odd, we want to make sure to at least get regular log output.
 
-    Args:
-        ...
-        before_send: If provided, this function (or list of functions) will be called in order to handle and mutate the event before sending to Sentry.
+    The ``environment`` selects both the Sentry DSN and the S3 attachment bucket:
+    ``production`` and ``staging`` each report to their own project + bucket, while
+    ``development`` reports to the shared dev project and uploads nothing to S3.
     """
     assert "SENTRY_DSN" not in os.environ, ("Please `unset SENTRY_DSN` in your environment.")
 
-    # TODO: replace this with the right DSN based on environment.
-    sentry_dsn = SENTRY_DSN_DEV
+    sentry_dsn = _SENTRY_DSN_BY_ENVIRONMENT[environment]
 
     # NOTE: the rate limiter object's lifetime is maintained by being captured in the
     #       closure of the before_send function
@@ -488,7 +521,7 @@ def setup_sentry(
 
     sentry_sdk.init(
         sample_rate=1.0,
-        environment=environment,
+        environment=environment.value,
         traces_sample_rate=1.0,
         # required for `logger.error` calls to include stacktraces
         attach_stacktrace=True,
@@ -519,13 +552,18 @@ def setup_sentry(
     )
     logger.info("Sentry initialized")
 
-    if is_s3_upload_enabled:
-        # Off by default (see the caller's env var gate): uploading log files and
-        # the traceback-with-locals attachment to the shared S3 buckets ships
-        # potentially-sensitive data off the user's machine, so it must be opted
-        # into explicitly.
-        setup_s3_uploads(is_production=environment == "production")
-        logger.info("Sentry S3 attachment uploads enabled (environment={})", environment)
+    # The S3 attachment bucket follows the environment: production and staging
+    # each upload log files + the traceback-with-locals attachment to their own
+    # bucket; development uploads nothing (those attachments can carry
+    # potentially-sensitive data, so dev machines never ship them off-box).
+    if environment is SentryDeployEnvironment.PRODUCTION:
+        setup_s3_uploads(is_production=True)
+        logger.info("Sentry S3 attachment uploads enabled (production bucket)")
+    elif environment is SentryDeployEnvironment.STAGING:
+        setup_s3_uploads(is_production=False)
+        logger.info("Sentry S3 attachment uploads enabled (staging bucket)")
+    else:
+        logger.info("Sentry S3 attachment uploads disabled (environment={})", environment.value)
 
     if global_user_context is not None:
         sentry_sdk.set_user(dict(global_user_context))
