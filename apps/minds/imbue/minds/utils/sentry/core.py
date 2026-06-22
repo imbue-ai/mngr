@@ -467,13 +467,11 @@ def _fixup_release_id(release_id: str) -> str:
 
 
 def setup_sentry(
-    dsn: str,
+    environment: str,
     release_id: str,
+    git_commit_sha: str,
+    log_folder: Path,
     global_user_context: Mapping[str, str] | None = None,
-    integrations: tuple[Any, ...] = (),
-    before_send: BeforeSendType | None = None,
-    add_extra_info_hook: Callable[[Event, Hint], tuple[Event, Hint, tuple[Callable, ...]]] | None = None,
-    environment: str | None = None,
 ) -> None:
     """Sets up the main Sentry instance for this process.
 
@@ -484,9 +482,10 @@ def setup_sentry(
         ...
         before_send: If provided, this function (or list of functions) will be called in order to handle and mutate the event before sending to Sentry.
     """
-    assert "SENTRY_DSN" not in os.environ, (
-        "Please `unset SENTRY_DSN` in your environment. Set the DSN via the server settings FRONTEND_SENTRY_DSN and BACKEND_SENTRY_DSN instead."
-    )
+    assert "SENTRY_DSN" not in os.environ, ("Please `unset SENTRY_DSN` in your environment.")
+
+    # TODO: replace this with the right DSN based on environment.
+    sentry_dsn = SENTRY_DSN_DEV
 
     before_send_unrolled = []
 
@@ -526,7 +525,7 @@ def setup_sentry(
         disabled_integrations=[
             StdlibIntegration()
         ],
-        dsn=dsn,
+        dsn=sentry_dsn,
         send_default_pii=False,
         # sentry has a max payload size of 1MB, so we can't make this infinite
         max_value_length=10_000,
@@ -567,6 +566,20 @@ def setup_sentry(
         diagnose=False,
         format=SENTRY_LOG_FORMAT,
     )
+    scope = get_current_scope()
+    scope.set_context(
+        _SENTRY_SCULPTOR_CONTEXT_KEY,
+        # need to cast to `dict` to make PyCharm happy
+        cast(
+            dict,
+            SentryMindsConfigDict(
+                log_folder_path=log_folder,
+            ),
+        ),
+    )
+    scope.set_tag("git_sha", git_commit_sha)
+    logger.info("Sentry initialized with DSN: {}", sentry_dsn)
+    logger.info("Sentry initialized with log folder: {}", log_folder)
 
 
 _SENTRY_EVENT_HANDLER: SentryEventHandler | None = None
@@ -745,35 +758,3 @@ def add_extra_info_hook(event: Event, hint: Hint) -> tuple[Event, Hint, tuple[Ca
 
     event["extra"]["platform"] = _get_platform_info()
     return event, hint, tuple(callbacks)
-
-
-def setup_sentry_with_context(
-	sentry_dsn: str,
-    release_id: str,
-    git_commit_sha: str,
-    log_folder: Path,
-    environment: str | None = None,
-    global_user_context: Mapping[str, str] | None = None,
-) -> None:
-    setup_sentry(
-        dsn=sentry_dsn,
-        release_id=release_id,
-        global_user_context=global_user_context,
-        add_extra_info_hook=add_extra_info_hook,
-        environment=environment,
-    )
-    # Store the log file path in Sentry's global context
-    scope = get_current_scope()
-    scope.set_context(
-        _SENTRY_SCULPTOR_CONTEXT_KEY,
-        # need to cast to `dict` to make PyCharm happy
-        cast(
-            dict,
-            SentryMindsConfigDict(
-                log_folder_path=log_folder,
-            ),
-        ),
-    )
-    scope.set_tag("git_sha", git_commit_sha)
-    logger.info("Sentry initialized with DSN: {}", sentry_dsn)
-    logger.info("Sentry initialized with log folder: {}", log_folder)
