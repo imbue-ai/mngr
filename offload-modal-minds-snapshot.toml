@@ -31,6 +31,18 @@ sandbox_project_root = "/code/mngr"
 
 [provider]
 type = "modal"
+# Resource request per sandbox. offload's Modal default is only 128 MiB,
+# which is fine for the trivial container-state checks but nowhere near
+# enough to RESUME the workspace: a resumed sandbox runs dockerd, starts
+# the FCT workspace container, AND its nested docker-state (docker-in-
+# docker) daemon. Without this the resume tests OOM and pytest is killed
+# before it writes junit, which surfaces only as offload "failed to
+# download junit.xml ... path does not exist". Match what
+# scripts/snapshot_minds_e2e_state.py used to PRODUCE the image (cpu=4,
+# memory=8GiB) so the resumed state has the same headroom it was built
+# with.
+cpu_cores = 4.0
+memory_gb = 8
 # vm_runtime must match what scripts/snapshot_minds_e2e_state.py used
 # when *producing* the image -- the resumed sandbox's Docker-in-sandbox
 # layer (/var/lib/docker) was written under a VM-runtime sandbox and
