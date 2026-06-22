@@ -989,9 +989,15 @@
         <StatusBadge variant="error">Failed</StatusBadge>
         <StatusBadge variant="warn">Warning</StatusBadge>
         <StatusBadge variant="info">Info</StatusBadge>
-        <StatusBadge variant="warn" size="xs">Tiny</StatusBadge>
       </div>
-      <div class="mt-1 type-helper text-secondary font-mono">StatusBadge.jinja</div>
+      <div class="flex flex-wrap items-center gap-3 mt-2">
+        <StatusBadge size="xs">Neutral</StatusBadge>
+        <StatusBadge variant="success" size="xs">Done</StatusBadge>
+        <StatusBadge variant="error" size="xs">Failed</StatusBadge>
+        <StatusBadge variant="warn" size="xs">Warning</StatusBadge>
+        <StatusBadge variant="info" size="xs">Info</StatusBadge>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">StatusBadge.jinja (sm slot badges / xs inline tags)</div>
     </section>
 
     {# Section header #}

@@ -1274,7 +1274,8 @@ def test_elevation_uses_shadow_roles_not_raw_steps() -> None:
 def test_notice_renders_each_variant() -> None:
     variants_to_class = {
         "info": "bg-info/8",
-        "warn": "bg-warning/8",
+        # warn uses the yellow caution surface, not a tint of the brown warning hue.
+        "warn": "--c-warning-surface",
         "success": "bg-success/8",
         "error": "bg-important/8",
     }
@@ -1641,12 +1642,14 @@ def test_modal_card_extra_appends_to_inner_card_classes() -> None:
 
 
 def test_status_badge_renders_each_variant_class_set() -> None:
+    # Done / Failed / Info are solid status fills; neutral a muted fill; warn
+    # the yellow caution surface (foreground stays the warning hue).
     variants_to_class = {
         "neutral": "bg-fill-subtle",
-        "success": "bg-success/15",
-        "error": "bg-important/15",
-        "warn": "bg-warning/15",
-        "info": "bg-info/15",
+        "success": "bg-success text-white",
+        "error": "bg-important text-white",
+        "warn": "--c-warning-surface",
+        "info": "bg-info text-white",
     }
     for variant, css_class in variants_to_class.items():
         html = CATALOG.render("StatusBadge", variant=variant, _content="x")

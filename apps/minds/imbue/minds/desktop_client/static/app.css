@@ -253,6 +253,10 @@
   --c-success: #0c8106;
   --c-warning: #b45300;
   --c-info: #166fc7;
+  /* Warning surfaces (badge / notice backgrounds) use a yellow caution fill
+     rather than a low-opacity tint of the brown-orange --c-warning, which
+     reads muddy; the warning foreground stays --c-warning. */
+  --c-warning-surface: hsl(49 100% 50% / 0.2);
   /* Accent / interactive (links, selected states, focus rings, progress).
      A WCAG-AA blue; #0069d9 clears 4.5:1 as link text on the white surface.
      That value reads too dark on the pure-black dark surface, so .dark lifts

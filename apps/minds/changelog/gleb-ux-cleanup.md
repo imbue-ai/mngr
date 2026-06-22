@@ -139,3 +139,13 @@ The titlebar workspace title now uses the `type-label` role (14px / semibold) in
 Titlebar buttons now show an accent keyboard-focus outline (`focus-visible:outline-2 outline-accent`, no offset) instead of falling back to the browser's default focus ring, which auto-contrasted to a stray white ring on the dark / colored titlebar.
 
 Reworked the `Select` dropdown to match Figma (node 345-4060): the native OS arrow is hidden (`appearance-none`) and replaced with a themeable `chevron-down` `Icon24` overlaid on the right (inherits `text-secondary`, `pointer-events-none` so clicks fall through), inset from the right edge with room reserved via `pr-8`. Added a `chevron-down` glyph to the `Icon24` set. The width prop now sizes the wrapper that anchors the chevron; the `<select>` fills it.
+
+Restyled the status badges (`StatusBadge`):
+
+- **Neutral** keeps its muted fill but now uses secondary text.
+
+- **Done / Failed / Info** (success / error / info) use the full status color as a solid background with white text, instead of a low-opacity tint with colored text.
+
+- **Warning** uses a dedicated yellow caution surface (`--c-warning-surface`, `hsl(49 100% 50% / 0.2)`) with the warning foreground -- a solid yellow with white text would be unreadable, and a tint of the brown-orange warning hue reads muddy. The warning `Notice` uses the same yellow surface.
+
+- The styleguide now shows a full second row of `xs` badges (every variant) instead of a single "Tiny" badge tacked onto the end.

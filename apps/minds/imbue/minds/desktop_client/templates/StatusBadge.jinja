@@ -10,12 +10,15 @@
   ``gap-2`` when the badge contains its own spinner). ``title`` adds a
   native browser tooltip on hover.
 #}
+{# Done / Failed / Info read as solid status fills with white text; neutral is
+   a muted fill with secondary text; warn is the yellow caution surface with
+   the (brown-orange) warning foreground, since white on yellow is unreadable. #}
 {% set _variants = {
-  "neutral": "bg-fill-subtle text-primary",
-  "success": "bg-success/15 text-success",
-  "error":   "bg-important/15 text-important",
-  "warn":    "bg-warning/15 text-warning",
-  "info":    "bg-info/15 text-info",
+  "neutral": "bg-fill-subtle text-secondary",
+  "success": "bg-success text-white",
+  "error":   "bg-important text-white",
+  "warn":    "bg-[var(--c-warning-surface)] text-warning",
+  "info":    "bg-info text-white",
 } %}
 {# Badge type role from size: sm slot badges read as labels (14/semibold),
    xs inline tags as helper (12/regular). #}
