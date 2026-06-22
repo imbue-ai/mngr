@@ -69,7 +69,7 @@ _BTN_SIZES: Final[Mapping[str, str]] = {
 # the no-fill variants (secondary / ghost) tint with the fill tokens instead.
 _BTN_VARIANTS: Final[Mapping[str, str]] = {
     "primary": "bg-surface-inverse text-inverse-primary border border-transparent hover:opacity-80",
-    "secondary": "bg-transparent text-primary border border-strong hover:bg-fill-hover active:bg-fill-active",
+    "secondary": "bg-transparent text-primary border border-default hover:bg-fill-hover active:bg-fill-active",
     "danger": "bg-important text-white border border-transparent hover:opacity-90 active:opacity-75",
     "success": "bg-success text-white border border-transparent hover:opacity-90 active:opacity-75",
     "ghost": "bg-transparent text-primary border border-transparent hover:bg-fill-hover active:bg-fill-active",

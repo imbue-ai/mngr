@@ -808,7 +808,7 @@ def test_button_renders_each_variant_class_set() -> None:
     # secondary its border (it has no resting fill), ghost its transparent base.
     variants_to_class = {
         "primary": "bg-surface-inverse",
-        "secondary": "border-strong",
+        "secondary": "border-default",
         "danger": "bg-important",
         "success": "bg-success",
         "ghost": "bg-transparent",
