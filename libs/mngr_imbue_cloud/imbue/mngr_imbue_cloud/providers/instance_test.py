@@ -518,3 +518,18 @@ def test_ensure_host_key_pinned_is_a_noop_when_key_is_none(temp_mngr_ctx: MngrCo
     host_id = HostId.generate()
     known_hosts_path = provider._ensure_host_key_pinned(host_id, "203.0.113.9", 2222, None)
     assert known_hosts_path.read_text() == ""
+
+
+def test_ensure_host_key_pinned_pins_outer_key_when_only_container_entry_exists(temp_mngr_ctx: MngrContext) -> None:
+    """The outer (:22, bare-host pattern) key must still be pinned when a container
+    ([host]:2222) entry is already present -- the bare host is a substring of the
+    bracketed container line, so a substring check would wrongly skip it."""
+    provider = ImbueCloudProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"), mngr_ctx=temp_mngr_ctx
+    )
+    host_id = HostId.generate()
+    provider._ensure_host_key_pinned(host_id, "203.0.113.10", 2222, "ssh-ed25519 AAAAcontainerkey")
+    known_hosts_path = provider._ensure_host_key_pinned(host_id, "203.0.113.10", 22, "ssh-ed25519 AAAAouterkey")
+    contents = known_hosts_path.read_text()
+    assert "AAAAcontainerkey" in contents
+    assert "AAAAouterkey" in contents

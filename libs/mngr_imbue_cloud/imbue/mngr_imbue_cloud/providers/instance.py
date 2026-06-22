@@ -1532,7 +1532,15 @@ class ImbueCloudProvider(BaseProviderInstance):
             known_hosts_path.touch()
         if public_key:
             host_pattern = format_as_known_hosts_address(hostname, port)
-            if host_pattern not in known_hosts_path.read_text():
+            # Match a known_hosts *line* whose leading field is exactly this
+            # host:port (mirrors add_host_to_known_hosts / clear_host_from_known_hosts).
+            # A bare-hostname pattern (default port) is a substring of the bracketed
+            # ``[host]:port`` form, so a plain ``in`` substring test would wrongly
+            # treat the outer (:22) key as already present when only a container
+            # ([host]:2222) entry exists, silently skipping the pin.
+            entry_prefix = f"{host_pattern} "
+            already_present = any(line.startswith(entry_prefix) for line in known_hosts_path.read_text().splitlines())
+            if not already_present:
                 add_host_to_known_hosts(known_hosts_path, hostname, port, public_key)
         return known_hosts_path
 
