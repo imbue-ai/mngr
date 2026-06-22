@@ -10,39 +10,47 @@ guarantees the opposite -- every spawned process is killed on group
 exit -- so it is structurally the wrong tool here. Same justification as
 ``apps/minds/imbue/minds/desktop_client/latchkey/_spawn.py``.
 
-Status is fully derived from disk + the live resolver; there is no
-state.json. For each in-flight destroy ``<paths.data_dir>/destroying/<agent_id>/``
-contains three files: ``pid`` (single-line text), ``host_id`` (the host the
-destroy is tearing down) and ``output.log`` (combined stdout+stderr from the
-bash wrapper). :py:class:`DestroyingStatus` is computed from ``pid`` liveness +
-whether the workspace's *host* is still up -- the caller answers that via
-``is_host_still_active`` (the workspace agent still in
-``MngrCliBackendResolver.list_active_workspace_ids()`` OR its host not yet in a
-terminal ``DESTROYED`` state). Keying on the host, not just the workspace
-agent, is deliberate: a minds host also runs a ``system-services`` agent, so a
-destroy that removed only the workspace agent must read as FAILED, not DONE.
+A minds destroy is a whole-*host* teardown: the host also runs a
+``system-services`` agent, so the wrapper fans out over every agent on the
+host (see :func:`_build_destroy_command`) -- destroying only the workspace
+agent would leave the host (and its cloud instance) alive.
 
-  - dir present + pid alive                       -> RUNNING
-  - dir present + pid dead + host gone            -> DONE   (caller deletes the dir)
-  - dir present + pid dead + host still up        -> FAILED (kept for inspection)
+Status is derived from disk; there is no state.json. For each in-flight
+destroy ``<paths.data_dir>/destroying/<agent_id>/`` holds:
 
-The ~1-second window between the destroy subprocess exiting and the
-``mngr observe`` discovery tail picking up the host's ``DESTROYED`` state
-can briefly flip status to FAILED for a successful destroy. The detail
-page poll picks up the corrected status on the next tick. Acceptable
-jitter; documented in ``specs/detached-destroy-flow/spec.md``.
+  - ``pid`` (single-line int): the detached bash wrapper's PID.
+  - ``process_start`` (single-line float): the wrapper's psutil
+    ``create_time()``, so a recycled PID is not mistaken for a live wrapper.
+  - ``output.log``: combined stdout+stderr from the wrapper.
+  - ``result`` (single-line int): the wrapper's exit code, written
+    atomically the instant ``mngr destroy`` finishes. Its presence is the
+    authoritative completion signal.
+
+:py:class:`DestroyingStatus` is computed as:
+
+  - ``result`` present, exit code 0        -> DONE   (caller finalizes the record)
+  - ``result`` present, exit code non-zero -> FAILED (kept for inspection)
+  - ``result`` absent, pid alive           -> RUNNING
+  - ``result`` absent, pid dead            -> FAILED (wrapper died mid-destroy)
+
+Reading the wrapper's own recorded exit code -- rather than inferring the
+host's state from the lagging ``mngr observe`` discovery cache -- keeps the
+status correct the instant the wrapper exits and across a minds restart:
+no spurious FAILED while discovery catches up, and a genuinely failed
+destroy is never mistaken for DONE (which would orphan a still-billing host).
 """
 
 import os
+import shlex
 import shutil
 import subprocess
-from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
 from enum import auto
 from pathlib import Path
 from typing import Final
 
+import psutil
 from loguru import logger
 from pydantic import Field
 
@@ -56,14 +64,21 @@ from imbue.mngr.primitives import HostId
 _DESTROYING_DIR_NAME: Final[str] = "destroying"
 _PID_FILE_NAME: Final[str] = "pid"
 _LOG_FILE_NAME: Final[str] = "output.log"
-_HOST_ID_FILE_NAME: Final[str] = "host_id"
+_RESULT_FILE_NAME: Final[str] = "result"
+_RESULT_TMP_SUFFIX: Final[str] = ".partial"
+_PROCESS_START_FILE_NAME: Final[str] = "process_start"
+
+# Two different processes cannot occupy one PID within a second of each
+# other (the slot stays held until the first is reaped), so a create_time
+# gap this large means the PID was recycled.
+_CREATE_TIME_TOLERANCE_SECONDS: Final[float] = 1.0
 
 
 class DestroyingStatus(UpperCaseStrEnum):
     """Status of a detached destroy subprocess.
 
-    Values are derived from disk + resolver state -- callers don't write
-    them anywhere; :py:func:`read_destroying` computes them per request.
+    Values are derived from disk state -- callers don't write them
+    anywhere; :py:func:`read_destroying` computes them per request.
     """
 
     RUNNING = auto()
@@ -75,20 +90,17 @@ class DestroyingRecord(FrozenModel):
     """Snapshot of a detached destroy's state.
 
     All fields are derived from disk inspection of
-    ``<paths.data_dir>/destroying/<agent_id>/`` plus the caller's
-    ``is_host_still_active`` answer; there is no on-disk state.json.
+    ``<paths.data_dir>/destroying/<agent_id>/``; there is no on-disk
+    state.json.
     """
 
     agent_id: AgentId = Field(description="Agent that is being / was being destroyed")
     pid: int = Field(description="PID of the detached bash wrapper that runs `mngr destroy`")
     started_at: datetime = Field(description="Wall-clock time the destroy was started (directory mtime)")
     pid_alive: bool = Field(description="Whether the wrapper PID is still live")
-    is_host_still_active: bool = Field(
-        description=(
-            "Whether the workspace's host is still up: the workspace agent is still in "
-            "list_active_workspace_ids(), or its host has not yet reached DESTROYED. A destroy "
-            "is only DONE once this is False (the whole host, not just the agent, is gone)."
-        )
+    exit_code: int | None = Field(
+        default=None,
+        description="Exit code the wrapper recorded on completion, or None while it is still running",
     )
     status: DestroyingStatus = Field(description="Derived status; see DestroyingStatus docstring")
     log_path: Path = Field(description="Absolute path to output.log for the detail page tail")
@@ -106,66 +118,88 @@ def _log_file(paths: WorkspacePaths, agent_id: AgentId) -> Path:
     return _destroying_dir(paths, agent_id) / _LOG_FILE_NAME
 
 
-def _host_id_file(paths: WorkspacePaths, agent_id: AgentId) -> Path:
-    return _destroying_dir(paths, agent_id) / _HOST_ID_FILE_NAME
+def _result_file(paths: WorkspacePaths, agent_id: AgentId) -> Path:
+    return _destroying_dir(paths, agent_id) / _RESULT_FILE_NAME
 
 
-def read_host_id(agent_id: AgentId, paths: WorkspacePaths) -> HostId | None:
-    """Return the host id recorded for this agent's destroy, or None if absent/unreadable.
+def _process_start_file(paths: WorkspacePaths, agent_id: AgentId) -> Path:
+    return _destroying_dir(paths, agent_id) / _PROCESS_START_FILE_NAME
 
-    Written by :func:`start_destroy` so a later status read can ask the
-    resolver whether that *host* (not just the workspace agent) is actually
-    gone before declaring the destroy DONE.
-    """
-    path = _host_id_file(paths, agent_id)
-    if not path.is_file():
-        return None
+
+def _process_create_time(pid: int) -> float | None:
+    """Return the process creation time for ``pid``, or None if it is already gone."""
     try:
-        value = path.read_text().strip()
-    except OSError as e:
-        logger.warning("Could not read host_id file {} for destroying agent {}: {}", path, agent_id, e)
+        return psutil.Process(pid).create_time()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
         return None
-    return HostId(value) if value else None
 
 
-def _is_pid_alive(pid: int) -> bool:
-    """Best-effort check whether ``pid`` is still running.
+def _is_pid_alive(pid: int, expected_create_time: float | None = None) -> bool:
+    """Whether ``pid`` still names the destroy wrapper we spawned.
 
-    Three cases to handle:
+    ``expected_create_time`` (the wrapper's ``create_time()`` recorded at
+    spawn) guards against PID reuse: if the OS recycled the PID onto an
+    unrelated process while minds was closed, the live process's
+    create_time will not match and we report the wrapper as gone rather
+    than mistaking the stranger for a still-running destroy.
 
-    - Pid was never our child (we're a fresh minds backend after the
-      original Popen-parent died). ``os.kill(pid, 0)`` is the right
-      check: ``ProcessLookupError`` => dead, ok => alive.
-    - Pid IS our child and is still running. Same -- ``os.kill(pid, 0)``
-      succeeds, and we want to report alive.
-    - Pid IS our child and exited but hasn't been reaped (zombie).
-      ``os.kill(pid, 0)`` succeeds because the pid still occupies the
-      process table, but the destroy is done. We need
-      ``os.waitpid(pid, WNOHANG)`` to reap it; once reaped, the next
-      ``os.kill(pid, 0)`` will correctly raise ``ProcessLookupError``.
-
-    PermissionError is reported as alive (kept-alive default for the
-    not-our-pid edge case where someone else's pid happens to match).
+    Reaps our own finished child first so it stops occupying the table;
+    ``ECHILD`` ("not our child") fires after a minds restart re-parents
+    the wrapper to init, which is fine.
     """
     try:
-        # Reap if we're the parent and the child has finished. ECHILD
-        # ("not our child") fires on the post-restart case; that's fine,
-        # the os.kill below handles the actual liveness check there.
         os.waitpid(pid, os.WNOHANG)
     except ChildProcessError:
         pass
     except OSError as e:
-        logger.trace("waitpid({}) raised {}; falling through to kill(0)", pid, e)
+        logger.trace("waitpid({}) raised {}; falling through to psutil check", pid, e)
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+        proc = psutil.Process(pid)
+        create_time = proc.create_time()
+    except psutil.NoSuchProcess:
         return False
-    except PermissionError:
+    except psutil.AccessDenied:
         return True
-    return True
+    if expected_create_time is not None and abs(create_time - expected_create_time) > _CREATE_TIME_TOLERANCE_SECONDS:
+        return False
+    try:
+        return proc.status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
+    except psutil.AccessDenied:
+        return True
 
 
-def _build_destroy_command(host_id: HostId, mngr_binary: str = MNGR_BINARY) -> list[str]:
+def _read_result(paths: WorkspacePaths, agent_id: AgentId) -> int | None:
+    """Read the wrapper's recorded exit code, or None if it has not finished."""
+    try:
+        text = _result_file(paths, agent_id).read_text().strip()
+    except (FileNotFoundError, OSError):
+        return None
+    if not text:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        logger.warning("Unparseable result file for destroying agent {}: {!r}", agent_id, text)
+        return None
+
+
+def _read_process_start(paths: WorkspacePaths, agent_id: AgentId) -> float | None:
+    """Read the wrapper's recorded create_time, or None if not recorded."""
+    try:
+        text = _process_start_file(paths, agent_id).read_text().strip()
+    except (FileNotFoundError, OSError):
+        return None
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _build_destroy_command(host_id: HostId, result_path: Path, mngr_binary: str = MNGR_BINARY) -> list[str]:
     """Build the bash command run by the detached subprocess.
 
     Always fans out to *every* agent on the host (the workspace agent plus the
@@ -175,18 +209,38 @@ def _build_destroy_command(host_id: HostId, mngr_binary: str = MNGR_BINARY) -> l
     so there is deliberately no single-agent path here: a minds workspace
     teardown is a *host* teardown.
 
+    The wrapper records ``mngr destroy``'s exit code to ``result_path``
+    atomically (write-then-rename) once it finishes; this is the authoritative
+    completion signal :func:`read_destroying` derives status from. ``set -o
+    pipefail`` ensures a failed ``mngr list`` surfaces as a non-zero result
+    rather than being masked by the trailing ``mngr destroy`` exiting 0 on
+    empty input.
+
     Lease release is not chained explicitly because ``mngr destroy`` handles
     it: when the last agent on a host is destroyed, ``mngr destroy`` calls
     ``provider.destroy_host`` which (for ``imbue_cloud``) wipes the on-VPS data
     and releases the lease back to the pool, and (for the VPS providers)
-    terminates the instance. The destroyed-host grace period
-    (``destroyed_host_persisted_seconds``) then only retains historical state.
-    The same chain runs again if ``mngr delete`` is called later by GC; it's
-    idempotent on an already-released lease.
+    terminates the instance.
     """
     # ``mngr list ... --ids`` writes one id per line; ``mngr destroy -f -`` reads
     # ids from stdin. The pipe handles host-mates fanout in one shot.
-    shell_command = f"{mngr_binary} list --include 'host.id == \"{host_id}\"' --ids | {mngr_binary} destroy -f -"
+    destroy = f"{mngr_binary} list --include 'host.id == \"{host_id}\"' --ids | {mngr_binary} destroy -f -"
+    final = shlex.quote(str(result_path))
+    partial = shlex.quote(str(result_path) + _RESULT_TMP_SUFFIX)
+    shell_command = (
+        "set -o pipefail\n"
+        + destroy
+        + "\n"
+        + "rc=$?\n"
+        + "printf '%s\\n' \"$rc\" > "
+        + partial
+        + " && mv "
+        + partial
+        + " "
+        + final
+        + "\n"
+        + "exit $rc\n"
+    )
     return ["bash", "-c", shell_command]
 
 
@@ -207,8 +261,9 @@ def start_destroy(
 
     The subprocess is detached (``start_new_session=True``), so it survives a
     minds-backend exit. stdout+stderr go to a single ``output.log`` file; the
-    wrapper's PID is written to ``pid`` and the host id to ``host_id`` (so a
-    later status read can confirm the *host* is gone, not just the agent).
+    wrapper's PID is written to ``pid`` and its create_time to ``process_start``
+    (so a later status read can reject a recycled PID), and the wrapper itself
+    records its exit code to ``result`` on completion.
 
     Idempotent: if a destroy is already running for this agent (``pid`` exists
     and is alive), we return the existing record without spawning a second
@@ -219,9 +274,7 @@ def start_destroy(
     doesn't include the venv bin dir). Tests override this with ``"mngr"``
     so a PATH-prepended fake mngr binary can be picked up.
     """
-    # ``is_host_still_active=True`` is conservative: we only reuse a RUNNING
-    # record (pid alive), and pid-alive derives RUNNING regardless of this flag.
-    existing = read_destroying(agent_id, paths, is_host_still_active=True)
+    existing = read_destroying(agent_id, paths)
     if existing is not None and existing.status == DestroyingStatus.RUNNING:
         logger.info("Destroy for {} already running (pid={}); reusing", agent_id, existing.pid)
         return existing
@@ -230,15 +283,18 @@ def start_destroy(
     dir_path.mkdir(parents=True, exist_ok=True)
     log_path = _log_file(paths, agent_id)
     pid_path = _pid_file(paths, agent_id)
+    result_path = _result_file(paths, agent_id)
+    process_start_path = _process_start_file(paths, agent_id)
 
-    # Record the host id up front so status reads can ask the resolver whether
-    # the host (not just the workspace agent) actually went away.
-    _host_id_file(paths, agent_id).write_text(f"{host_id}\n")
-
-    # Truncate the log file so a Retry doesn't show the previous run's output.
+    # Clear the prior run's artifacts so a Retry starts clean: a stale
+    # ``result`` would read as an immediate terminal status, a stale
+    # ``process_start`` would point at the previous wrapper, and the log
+    # would show the old attempt's output.
     log_path.write_bytes(b"")
+    result_path.unlink(missing_ok=True)
+    process_start_path.unlink(missing_ok=True)
 
-    command = _build_destroy_command(host_id, mngr_binary=mngr_binary)
+    command = _build_destroy_command(host_id, result_path, mngr_binary=mngr_binary)
     log_handle = log_path.open("ab")
     try:
         process_env = dict(os.environ) if env is None else dict(env)
@@ -258,6 +314,9 @@ def start_destroy(
         log_handle.close()
 
     pid_path.write_text(f"{process.pid}\n")
+    create_time = _process_create_time(process.pid)
+    if create_time is not None:
+        process_start_path.write_text(f"{create_time!r}\n")
     started_at = datetime.now(timezone.utc)
     logger.info(
         "Started detached destroy for agent {} (pid={}, host_id={}, log={})",
@@ -271,7 +330,7 @@ def start_destroy(
         pid=process.pid,
         started_at=started_at,
         pid_alive=True,
-        is_host_still_active=True,
+        exit_code=None,
         status=DestroyingStatus.RUNNING,
         log_path=log_path,
     )
@@ -280,22 +339,18 @@ def start_destroy(
 def read_destroying(
     agent_id: AgentId,
     paths: WorkspacePaths,
-    is_host_still_active: bool,
 ) -> DestroyingRecord | None:
     """Read the on-disk record for a single agent's destroy, or None if no dir.
 
-    ``is_host_still_active`` is supplied by the caller (which owns the resolver)
-    rather than fetched here, so this module stays free of the resolver's
-    threading + locking shape. It must be True when *either* the workspace
-    agent is still in ``list_active_workspace_ids()`` *or* the workspace's host
-    has not yet reached DESTROYED -- so a destroy that tore down only the
-    workspace agent while system-services kept the host alive reads as FAILED,
-    not DONE. The status table:
+    Status is derived from the wrapper's recorded ``result`` (exit code)
+    first, falling back to pid liveness only while no result has been
+    recorded yet:
 
-      - dir absent                                              -> None
-      - dir present, pid alive                                  -> RUNNING
-      - dir present, pid dead, is_host_still_active=False       -> DONE
-      - dir present, pid dead, is_host_still_active=True        -> FAILED
+      - dir absent                            -> None
+      - result present, exit code 0           -> DONE
+      - result present, exit code non-zero    -> FAILED
+      - result absent, pid alive              -> RUNNING
+      - result absent, pid dead               -> FAILED
 
     Returns ``None`` for the absent case; otherwise a populated record.
     """
@@ -308,35 +363,31 @@ def read_destroying(
     except (ValueError, OSError) as e:
         logger.warning("Could not parse pid file {} for destroying agent {}: {}", pid_path, agent_id, e)
         return None
-    pid_alive = _is_pid_alive(pid)
-    if pid_alive:
+    exit_code = _read_result(paths, agent_id)
+    pid_alive = _is_pid_alive(pid, _read_process_start(paths, agent_id))
+    if exit_code is not None:
+        status = DestroyingStatus.DONE if exit_code == 0 else DestroyingStatus.FAILED
+    elif pid_alive:
         status = DestroyingStatus.RUNNING
-    elif is_host_still_active:
-        status = DestroyingStatus.FAILED
     else:
-        status = DestroyingStatus.DONE
+        status = DestroyingStatus.FAILED
     started_at = datetime.fromtimestamp(dir_path.stat().st_mtime, tz=timezone.utc)
     return DestroyingRecord(
         agent_id=agent_id,
         pid=pid,
         started_at=started_at,
         pid_alive=pid_alive,
-        is_host_still_active=is_host_still_active,
+        exit_code=exit_code,
         status=status,
         log_path=_log_file(paths, agent_id),
     )
 
 
-def list_destroying(
-    paths: WorkspacePaths,
-    is_host_still_active: Callable[[AgentId], bool],
-) -> dict[AgentId, DestroyingRecord]:
+def list_destroying(paths: WorkspacePaths) -> dict[AgentId, DestroyingRecord]:
     """Walk ``<paths.data_dir>/destroying/`` and return a record per agent_id.
 
-    Used by the landing-page renderer. ``is_host_still_active`` answers, per
-    agent, whether that workspace's host is still up (see
-    :func:`read_destroying`); the caller closes it over the current discovery
-    snapshot so the same view is shared across every record's status derivation.
+    Used by the landing-page renderer. Status no longer depends on the
+    resolver snapshot -- each record's status comes from disk alone.
     """
     root = paths.data_dir / _DESTROYING_DIR_NAME
     if not root.is_dir():
@@ -350,7 +401,7 @@ def list_destroying(
         except ValueError:
             logger.warning("Skipping destroying entry with non-AgentId name: {}", entry.name)
             continue
-        record = read_destroying(agent_id, paths, is_host_still_active=is_host_still_active(agent_id))
+        record = read_destroying(agent_id, paths)
         if record is not None:
             records[agent_id] = record
     return records

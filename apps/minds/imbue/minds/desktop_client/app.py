@@ -69,7 +69,6 @@ from imbue.minds.desktop_client.destroying import DestroyingStatus
 from imbue.minds.desktop_client.destroying import delete_destroying
 from imbue.minds.desktop_client.destroying import list_destroying
 from imbue.minds.desktop_client.destroying import read_destroying
-from imbue.minds.desktop_client.destroying import read_host_id
 from imbue.minds.desktop_client.destroying import read_log_chunk
 from imbue.minds.desktop_client.destroying import start_destroy
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
@@ -498,17 +497,18 @@ def _handle_landing_page(
     all_agent_ids = backend_resolver.list_active_workspace_ids()
     paths: WorkspacePaths | None = request.app.state.api_v1_paths
     landing_session_store: MultiAccountSessionStore | None = request.app.state.session_store
-    destroying_status_by_agent_id = _resolve_destroying_for_landing(paths, backend_resolver, landing_session_store)
+    destroying_status_by_agent_id = _resolve_destroying_for_landing(paths, landing_session_store)
+    display_agent_ids = _landing_agent_ids_to_display(all_agent_ids, destroying_status_by_agent_id)
 
-    if all_agent_ids:
+    if display_agent_ids:
         telegram_orchestrator: TelegramSetupOrchestrator | None = request.app.state.telegram_orchestrator
         telegram_status: dict[str, bool] | None = None
         if telegram_orchestrator is not None:
-            telegram_status = {str(aid): telegram_orchestrator.agent_has_telegram(aid) for aid in all_agent_ids}
+            telegram_status = {str(aid): telegram_orchestrator.agent_has_telegram(aid) for aid in display_agent_ids}
         agent_names: dict[str, str] = {}
         agent_accents: dict[str, str] = {}
         agent_providers: dict[str, str] = {}
-        for aid in all_agent_ids:
+        for aid in display_agent_ids:
             info = backend_resolver.get_agent_display_info(aid)
             ws_name = backend_resolver.get_workspace_name(aid)
             if ws_name:
@@ -524,7 +524,7 @@ def _handle_landing_page(
             aid: state.value for aid, state in compute_mind_liveness_by_agent_id(backend_resolver).items()
         }
         html = render_landing_page(
-            accessible_agent_ids=all_agent_ids,
+            accessible_agent_ids=display_agent_ids,
             mngr_forward_origin=_get_mngr_forward_origin(request),
             telegram_status_by_agent_id=telegram_status,
             agent_names=agent_names,
@@ -1615,18 +1615,17 @@ async def _handle_creation_logs_sse(
 
 def _resolve_destroying_for_landing(
     paths: WorkspacePaths | None,
-    backend_resolver: BackendResolverInterface,
     session_store: MultiAccountSessionStore | None,
 ) -> dict[str, str]:
     """Walk ``<paths.data_dir>/destroying/``, finalize DONE records, return marker map.
 
     Returns ``{agent_id_str: "running" | "failed"}`` for any in-flight or
-    failed destroy. A destroy is DONE only once the whole *host* is gone (not
-    just the workspace agent -- see :func:`_host_still_active`); on DONE we
-    disassociate the workspace from its account and delete the record, so the
-    row vanishes on the next refresh. A FAILED destroy stays associated and
-    visible so the user can retry rather than being left with an invisible,
-    still-running host.
+    failed destroy. DONE vs FAILED comes purely from the destroy's recorded
+    exit code (see :func:`destroying.read_destroying`), never from the lagging
+    discovery cache. On DONE we disassociate the workspace from its account and
+    delete the record (see :func:`_finalize_destroyed_workspace`); a FAILED
+    destroy stays associated and visible so the user can retry rather than
+    being left with an invisible, still-running host.
 
     Returns an empty dict (and does no work) when ``paths`` is None --
     that path is exercised by tests that build a minimal app without
@@ -1634,14 +1633,38 @@ def _resolve_destroying_for_landing(
     """
     if paths is None:
         return {}
-    records = list_destroying(paths, lambda aid: _host_still_active(backend_resolver, paths, aid))
+    records = list_destroying(paths)
     marker: dict[str, str] = {}
     for agent_id, record in records.items():
         if record.status == DestroyingStatus.DONE:
             _finalize_destroyed_workspace(agent_id, paths, session_store)
-            continue
-        marker[str(agent_id)] = "running" if record.status == DestroyingStatus.RUNNING else "failed"
+        elif record.status == DestroyingStatus.RUNNING:
+            marker[str(agent_id)] = "running"
+        else:
+            marker[str(agent_id)] = "failed"
     return marker
+
+
+def _landing_agent_ids_to_display(
+    all_agent_ids: tuple[AgentId, ...],
+    destroying_status_by_agent_id: dict[str, str],
+) -> tuple[AgentId, ...]:
+    """Discovered agents, plus any agent that still has a destroy record.
+
+    A failed destroy must stay visible even after the resolver drops the
+    agent (or before discovery has populated on a fresh open), so a host
+    whose teardown failed can never become an invisible, still-billing
+    orphan. Discovered agents keep their order; destroy-only agents are
+    appended in a stable order.
+    """
+    discovered = frozenset(all_agent_ids)
+    extra: list[AgentId] = []
+    for aid in destroying_status_by_agent_id:
+        agent_id = AgentId(aid)
+        if agent_id not in discovered:
+            extra.append(agent_id)
+    extra.sort(key=str)
+    return (*all_agent_ids, *extra)
 
 
 def _finalize_destroyed_workspace(
@@ -1651,49 +1674,16 @@ def _finalize_destroyed_workspace(
 ) -> None:
     """Disassociate a fully-destroyed workspace from its account, then delete its record.
 
-    Runs only once the host is confirmed gone (DONE). Disassociating here --
-    rather than synchronously when the user clicks destroy -- means a failed or
-    partial teardown keeps the workspace visible instead of hiding a host that
-    is still running.
+    Runs only once the destroy is confirmed successful (DONE, from the recorded
+    exit code). Disassociating here -- rather than synchronously when the user
+    clicks destroy -- means a failed or partial teardown keeps the workspace
+    visible instead of hiding a host that is still running.
     """
     if session_store is not None:
         account = session_store.get_account_for_workspace(str(agent_id))
         if account is not None:
             session_store.disassociate_workspace(str(account.user_id), str(agent_id))
     delete_destroying(agent_id, paths)
-
-
-def _host_still_active(
-    backend_resolver: BackendResolverInterface,
-    paths: WorkspacePaths | None,
-    agent_id: AgentId,
-) -> bool:
-    """Whether the workspace's host is still up (not just the workspace agent).
-
-    True if the workspace agent is still in ``list_active_workspace_ids()`` OR
-    its recorded host has not yet reached ``DESTROYED``. A detached destroy is
-    only DONE once this is False -- otherwise a destroy that tore down only the
-    workspace agent while ``system-services`` kept the host alive would falsely
-    read as DONE. See ``destroying.read_destroying``.
-    """
-    if agent_id in backend_resolver.list_active_workspace_ids():
-        return True
-    if paths is None:
-        return False
-    host_id = read_host_id(agent_id, paths)
-    if host_id is None:
-        return False
-    state = backend_resolver.get_host_state(host_id)
-    return state is not None and state is not HostState.DESTROYED
-
-
-def _is_host_still_active(request: Request, agent_id: AgentId) -> bool:
-    """Request-scoped wrapper around :func:`_host_still_active`."""
-    return _host_still_active(
-        request.app.state.backend_resolver,
-        request.app.state.api_v1_paths,
-        agent_id,
-    )
 
 
 async def _handle_destroy_agent_api(
@@ -1732,7 +1722,7 @@ async def _handle_destroy_agent_api(
     backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
 
     # Idempotent: short-circuit if a destroy is already running.
-    existing = read_destroying(parsed_id, paths, is_host_still_active=_is_host_still_active(request, parsed_id))
+    existing = read_destroying(parsed_id, paths)
     if existing is not None and existing.status == DestroyingStatus.RUNNING:
         return Response(
             status_code=200,
@@ -1774,7 +1764,7 @@ def _handle_destroying_status_api(
     if paths is None:
         return Response(status_code=404, content='{"error": "No record"}', media_type="application/json")
     parsed_id = AgentId(agent_id)
-    record = read_destroying(parsed_id, paths, is_host_still_active=_is_host_still_active(request, parsed_id))
+    record = read_destroying(parsed_id, paths)
     if record is None:
         return Response(status_code=404, content='{"error": "No record"}', media_type="application/json")
     return Response(
@@ -1783,7 +1773,7 @@ def _handle_destroying_status_api(
                 "agent_id": agent_id,
                 "pid": record.pid,
                 "pid_alive": record.pid_alive,
-                "is_host_still_active": record.is_host_still_active,
+                "exit_code": record.exit_code,
                 "status": str(record.status).lower(),
             }
         ),
@@ -1853,9 +1843,7 @@ def _handle_destroying_page(
     if paths is None:
         return Response(status_code=404, content="No record")
     parsed_id = AgentId(agent_id)
-    record = read_destroying(
-        parsed_id, paths, is_host_still_active=_host_still_active(backend_resolver, paths, parsed_id)
-    )
+    record = read_destroying(parsed_id, paths)
     if record is None:
         return Response(status_code=404, content="No record")
     workspace_name = backend_resolver.get_workspace_name(parsed_id)
@@ -2251,7 +2239,7 @@ async def _handle_chrome_events(
             session_store: MultiAccountSessionStore | None = request.app.state.session_store
             paths: WorkspacePaths | None = request.app.state.api_v1_paths
             last_workspace_data = _build_workspace_list(backend_resolver, session_store)
-            last_destroying_ids = _destroying_agent_ids(paths, backend_resolver)
+            last_destroying_ids = _destroying_agent_ids(paths)
             has_accounts = bool(session_store and session_store.list_accounts())
             yield "data: {}\n\n".format(
                 json.dumps(
@@ -2370,7 +2358,7 @@ async def _handle_chrome_events(
                 # change makes ``current_data`` differ and pushes a ``workspaces``
                 # update below -- no separate liveness channel needed.
                 current_data = _build_workspace_list(backend_resolver, session_store)
-                current_destroying_ids = _destroying_agent_ids(paths, backend_resolver)
+                current_destroying_ids = _destroying_agent_ids(paths)
                 if current_data != last_workspace_data or current_destroying_ids != last_destroying_ids:
                     last_workspace_data = current_data
                     last_destroying_ids = current_destroying_ids
@@ -2502,7 +2490,7 @@ def _build_providers_state_payload(backend_resolver: BackendResolverInterface) -
     }
 
 
-def _destroying_agent_ids(paths: WorkspacePaths | None, backend_resolver: BackendResolverInterface) -> list[str]:
+def _destroying_agent_ids(paths: WorkspacePaths | None) -> list[str]:
     """Return the agent ids currently in any in-flight / failed destroy state.
 
     Pure read of the on-disk ``destroying/`` dir; never deletes records (the
@@ -2514,7 +2502,7 @@ def _destroying_agent_ids(paths: WorkspacePaths | None, backend_resolver: Backen
     """
     if paths is None:
         return []
-    records = list_destroying(paths, lambda aid: _host_still_active(backend_resolver, paths, aid))
+    records = list_destroying(paths)
     return [str(agent_id) for agent_id, record in records.items() if record.status != DestroyingStatus.DONE]
 
 

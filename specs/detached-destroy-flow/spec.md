@@ -14,9 +14,7 @@ Today, "destroy project" hangs the project-settings page until the underlying `m
 ### POST `/api/destroy-agent/<agent_id>`
 
 - Authenticated; otherwise `403`.
-- **Synchronously**, before spawning anything:
-  - Disassociates the workspace from the session store (existing behavior).
-  - Looks up the agent's `host.id` via a fast `mngr list --include 'id == "<id>"' --format json` call, so the spawned subprocess can do host-mates fanout without a second `mngr list`. If the lookup fails (agent not found, mngr error), the subprocess will fall back to single-agent destroy.
+- **Resolves the workspace's `host.id` from the in-memory backend resolver** (which always knows it for a workspace the user can see). A minds workspace teardown is a *host* teardown, and there is no safe single-agent fallback, so if the host id can't be resolved the endpoint **refuses with `409`** rather than risk a partial destroy. Disassociation does **not** happen here — it is deferred to DONE-time finalization (see "Landing-page marker"), so a failed teardown keeps the workspace visible and owned.
 - **Spawns a detached subprocess** that performs the destroy. Returns immediately:
   - `202 Accepted`
   - body: `{"agent_id": "<id>", "status": "running", "redirect_url": "/"}`
@@ -24,34 +22,38 @@ Today, "destroy project" hangs the project-settings page until the underlying `m
 
 ### Detached destroy subprocess
 
-- **Command**: a single `bash -c '<chained mngr commands>'` invocation. No new Python subcommand; minds backend formats the shell string from the host_id it just looked up:
-  - With host_id: `mngr list --include 'host.id == "<host_id>"' --ids | mngr destroy -f -` (host-mates fanout — every agent on the same Docker host goes down together, matching today's semantics).
-  - Without host_id (lookup failed): `mngr destroy <agent_id> -f` (single-agent fallback).
+- **Command**: a single `bash -c '<chained mngr commands>'` invocation. No new Python subcommand; minds backend formats the shell string from the resolved host_id:
+  - `mngr list --include 'host.id == "<host_id>"' --ids | mngr destroy -f -` — fans out over **every** agent on the host. A minds host also runs a `system-services` agent, so destroying only the workspace agent would leave the host (and its cloud instance) alive; there is deliberately **no single-agent path**.
+  - The wrapper runs under `set -o pipefail` and, once the destroy returns, records its exit code to `<destroying_dir>/<agent_id>/result` via an atomic write-then-rename. `pipefail` ensures a failed `mngr list` in the fanout pipe is recorded as a non-zero result rather than being masked by the trailing `mngr destroy` exiting 0 on empty input. This recorded exit code is the **authoritative completion signal** — status is derived from it, not from when the discovery cache happens to catch up.
 - **No imbue_cloud lease release.** Lease release belongs in `mngr_imbue_cloud.instance.delete_host`, which mngr's GC calls after the destroyed-host grace period. Eagerly calling `mngr imbue_cloud hosts release` here was duplicating that responsibility in two places; we drop the eager call so `delete_host` is the single source of truth for lease lifecycle.
 - **Detached spawn**: `subprocess.Popen([...], start_new_session=True, stdin=DEVNULL, stdout=log_file, stderr=log_file, ...)`. Inherits the parent's `MNGR_HOST_DIR` / `MNGR_PREFIX` so the subprocess hits the right minds host dir. The Popen handle is intentionally allowed to go out of scope — same pattern as `spawn_detached_latchkey_gateway`.
 - **Output log** at `<paths.data_dir>/destroying/<agent_id>/output.log` (combined stdout+stderr, written via Popen redirection — no Python wrapper writes to it).
-- **Pid file** at `<paths.data_dir>/destroying/<agent_id>/pid` (single-line text). Written by the minds backend immediately after `Popen(...)` returns and **before** the API response. The file's existence + the pid's liveness are the only state we track on disk. No `state.json`.
-- The subprocess terminates when the chained mngr commands exit; output log + pid file persist for inspection.
+- **Pid file** at `<paths.data_dir>/destroying/<agent_id>/pid` (single-line int). Written by the minds backend immediately after `Popen(...)` returns and **before** the API response.
+- **Process-start file** at `<paths.data_dir>/destroying/<agent_id>/process_start` (single-line float, the wrapper's psutil `create_time()`). Written right after the pid file. It lets the liveness check reject a recycled PID: if the OS reused the wrapper's PID for an unrelated process while minds was closed, the live process's `create_time` won't match and the wrapper is reported as gone.
+- **Result file** at `<paths.data_dir>/destroying/<agent_id>/result` (single-line int exit code), written by the wrapper itself on completion. Its presence is the authoritative completion signal. No `state.json`.
+- The subprocess terminates when the chained mngr commands exit; output log + pid + result files persist for inspection.
 
 ### Status derivation (no state file)
 
-For a given `agent_id`, status is computed from three signals:
+For a given `agent_id`, status is derived from the wrapper's recorded `result` first, falling back to PID liveness only while no result has been recorded yet:
 
-| Directory present? | `pid` alive? | Agent in `list_known_workspace_ids()`? | Status |
+| Directory present? | `result` recorded? | `pid` alive (reuse-safe)? | Status |
 |---|---|---|---|
 | no | — | — | not in flight |
-| yes | yes | — | **running** |
-| yes | no | yes | **failed** (the destroy ran but the agent is still there) |
-| yes | no | no | **done** (auto-deleted on next render) |
+| yes | exit code 0 | — | **done** |
+| yes | exit code ≠ 0 | — | **failed** (the destroy genuinely failed) |
+| yes | not yet | yes | **running** |
+| yes | not yet | no | **failed** (wrapper died before recording an outcome) |
 
-There is one ~1-second race window: if the subprocess just exited cleanly but the destroy event hasn't propagated through `mngr observe` → plugin → minds resolver yet, the agent will still appear in `list_known_workspace_ids()` and status will momentarily read "failed". The detail page poll picks up the correct status on the next tick (the discovery tail polls at 1 Hz; see `_discovery_stream_tail_events_file` in `libs/mngr/imbue/mngr/api/discovery_events.py:716`). Acceptable jitter.
+Crucially, the resolver / `list_active_workspace_ids()` no longer participates in `done` vs `failed`: that comes solely from the destroy's own exit code. This removes the previous ~1-second jitter window (a clean exit no longer reads "failed" while discovery catches up) and the symmetric closed-app failure modes (a genuinely-failed destroy can no longer be mistaken for "done" during the pre-discovery window after a restart, and a recycled PID can no longer pin a finished destroy at "running" forever).
 
 ### Landing-page marker
 
-- Server reads `<paths.data_dir>/destroying/` on each `/` render; for each subdirectory, computes status per the table above using the resolver's current `list_known_workspace_ids()`.
+- Server reads `<paths.data_dir>/destroying/` on each `/` render; for each subdirectory, computes status per the table above.
+- **The displayed rows are the union of discovered workspace agents and every agent with a live destroy record.** A destroy record is rendered even when `list_active_workspace_ids()` does *not* list its agent. This is the load-bearing guarantee against a silent orphan: a destroy that **failed** leaves a host alive and still billing, and if discovery has since dropped that agent (or hasn't populated yet on a fresh open), keying the page off discovery alone would render nothing — the failed host would be invisible. So a destroy-only agent (one with a record but not in the resolver) still gets its own row carrying the marker. This holds even when `list_active_workspace_ids()` is empty: instead of the "Discovering…" / create-form empty state, the page shows the destroy rows.
 - For **running**: render an inline "Destroying…" marker (small spinner + text) on that workspace's row. The marker is wrapped in an `<a href="/destroying/<agent_id>">` so it doubles as a shortcut to the detail page. The row's main click target (currently `window.location='<plugin>/goto/<id>/'`) is **disabled** while destroying.
 - For **failed**: render a "Destroy failed" badge (red), also linking to `/destroying/<agent_id>`. The agent row still shows because the agent wasn't actually destroyed.
-- For **done**: the renderer **deletes** `<paths.data_dir>/destroying/<agent_id>/` and renders nothing for that row. By construction, the destroyed agent is already absent from `list_known_workspace_ids()`, so the row vanishes naturally.
+- For **done** (exit code 0): the renderer **finalizes** the destroy — it disassociates the workspace from its account and deletes `<paths.data_dir>/destroying/<agent_id>/`, rendering nothing. Disassociating here (rather than synchronously when the user clicks destroy) means a failed or partial teardown keeps the workspace visible and owned so the user can retry. The resolver is never consulted to decide `done` vs `failed` — only the recorded exit code is.
 
 ### Settings-page destroy button
 
@@ -77,7 +79,7 @@ There is one ~1-second race window: if the subprocess just exited cleanly but th
 
 ### GET `/api/destroying/<agent_id>/status`
 
-- Returns `{"agent_id", "pid", "pid_alive", "agent_in_resolver", "status"}` where `status` is computed via the table above.
+- Returns `{"agent_id", "pid", "pid_alive", "exit_code", "status"}` where `status` is computed via the table above and `exit_code` is the wrapper's recorded exit code (`null` until it finishes).
 - 404 if no record exists.
 - Used by the detail page's polling loop.
 
@@ -94,7 +96,7 @@ There is one ~1-second race window: if the subprocess just exited cleanly but th
 
 ### Adoption on minds restart
 
-- When minds backend starts, it does NOT actively reconcile in-flight destroying records — the polling endpoints already return live state from disk + `kill -0`. The user sees "Destroying…" on the landing page if the subprocess from the previous session is still running, and "Failed" (with the log) if it died in between (pid not alive AND agent still in resolver).
+- When minds backend starts, it does NOT actively reconcile in-flight destroying records — the polling endpoints already return live state from disk. Because status is read from the wrapper's recorded `result`, the verdict survives the restart intact: a destroy that finished while minds was closed reads "done" (exit 0) or "failed" (exit ≠ 0); one still in flight reads "running"; one whose wrapper died without recording an outcome reads "failed" (surfaced with its log for inspection rather than silently dropped). The recycled-PID guard (`process_start`) prevents a finished destroy from being pinned at "running" by an unrelated process that inherited its PID.
 
 ## Out of Scope
 
@@ -106,10 +108,10 @@ There is one ~1-second race window: if the subprocess just exited cleanly but th
 
 1. New module `apps/minds/imbue/minds/desktop_client/destroying.py`:
    - `DestroyingStatus` enum: `RUNNING` / `DONE` / `FAILED`.
-   - `DestroyingRecord` model: `agent_id`, `pid`, `started_at`, `pid_alive`, `agent_in_resolver`, `status`, `log_path`, `dir`.
-   - `start_destroy(agent_id, paths, host_id, env)` → builds the bash command, opens `output.log`, calls `Popen(...)` detached, writes the `pid` file, returns the new record.
-   - `read_destroying(agent_id, paths, agent_in_resolver)` → reads `pid`, computes status, returns the record (or None if no dir).
-   - `list_destroying(paths, agent_ids_in_resolver)` → iterates `<paths.data_dir>/destroying/` and yields records.
+   - `DestroyingRecord` model: `agent_id`, `pid`, `started_at`, `pid_alive`, `exit_code`, `status`, `log_path`.
+   - `start_destroy(agent_id, paths, host_id, env)` → builds the bash command (which records its exit code to `result` on completion), opens `output.log`, calls `Popen(...)` detached, writes the `pid` and `process_start` files, returns the new record.
+   - `read_destroying(agent_id, paths)` → reads `pid` + `result` + `process_start`, computes status from the recorded exit code first (PID liveness only as the not-yet-recorded fallback), returns the record (or None if no dir).
+   - `list_destroying(paths)` → iterates `<paths.data_dir>/destroying/` and yields records.
    - `delete_destroying(agent_id, paths)` → removes the directory (idempotent).
    - `read_log_chunk(agent_id, paths, offset)` → seek + read tail.
 
@@ -144,5 +146,5 @@ There is one ~1-second race window: if the subprocess just exited cleanly but th
    - On confirm, after `fetch('/api/destroy-agent/<id>', POST)` resolves with 2xx, immediately `window.location.href = '/'`. Drop the `pollDestroyStatus()` and `destroy-spinner` element entirely (server-rendered marker on `/` replaces it).
 
 8. Tests:
-   - `destroying_test.py`: round-trip `start_destroy` against a fake destroy command (a tiny bash script that prints to stdout, exits 0 or 1), assert `pid` file is written, `output.log` captures both streams, status reads correctly off pid + agent-presence.
+   - `destroying_test.py`: round-trip `start_destroy` against a fake destroy command (a tiny bash script that prints to stdout, exits 0 or 1), assert `pid` file is written, `output.log` captures both streams, the `result` file records the exit code, status reads correctly off the recorded exit code (a recorded result overrides a still-live pid; a pid that dies before recording reads `failed`), and the recycled-PID guard rejects a mismatched `create_time`.
    - `app_test.py` patches: assert `/api/destroying/<id>/status` and `/log` shapes; assert the landing page renders the marker when a destroying dir exists.
