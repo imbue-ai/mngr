@@ -1,3 +1,5 @@
 Begin porting the Sentry error-reporting setup into the minds backend. `minds run` now calls `setup_sentry()` during startup (after logging is configured) so the Python backend reports errors and attaches logs to Sentry. The environment, release id, and git sha are placeholders for now and will be wired up to real values in a follow-up.
 
 Enable the Sentry Flask integration so reported errors from web backend endpoints carry request context (transaction name, URL, method, query string, headers).
+
+Add opt-in uploading of log files and traceback-with-locals attachments to S3 for Sentry error reports, gated behind the `MINDS_SENTRY_S3_UPLOADS` env var (default off, since it ships potentially-sensitive data off the user's machine). The log-collection logic now matches the minds log layout: a flat logs directory (`~/.minds/logs`) containing the live Python backend JSONL log, its timestamp-suffixed rotated siblings, and the Electron log, all gzip-compressed on upload. Sentry's `log_folder` is now the minds logs directory (exposed as `WorkspacePaths.log_dir`) rather than the data directory.

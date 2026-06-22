@@ -169,16 +169,22 @@ def run(
     root_name = resolve_minds_root_name()
     data_directory = minds_data_dir_for(root_name)
     minds_config = MindsConfig(data_dir=data_directory)
+    paths = WorkspacePaths(data_dir=data_directory)
 
     # Initialize Sentry for the minds backend process. ``setup_logging`` already ran
     # in the CLI group callback, so the loguru sinks Sentry layers on top of exist.
+    # Uploading log files + traceback-with-locals attachments to the shared S3
+    # buckets ships potentially-sensitive data off the user's machine, so it is
+    # opt-in via MINDS_SENTRY_S3_UPLOADS (default off).
     # TODO: thread through the real environment, release id, git sha, and per-env DSN
     # selection instead of these placeholders.
+    is_sentry_s3_upload_enabled = os.environ.get("MINDS_SENTRY_S3_UPLOADS", "").strip().lower() in ("1", "true", "yes")
     setup_sentry(
         environment="development",
         release_id="0.0.0-dev",
         git_commit_sha="unknown",
-        log_folder=data_directory,
+        log_folder=paths.log_dir,
+        is_s3_upload_enabled=is_sentry_s3_upload_enabled,
     )
     client_config_path = config_file
     client_env_config = load_client_config(client_config_path)
@@ -197,7 +203,6 @@ def run(
     # so the reconcile happens here once we've loaded the client config.
     reconcile_imbue_cloud_providers_from_sessions(connector_url_str, root_name=root_name)
 
-    paths = WorkspacePaths(data_dir=data_directory)
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
     is_electron = os.getenv("MINDS_ELECTRON") == "1"
     notification_dispatcher = NotificationDispatcher(is_electron=is_electron)

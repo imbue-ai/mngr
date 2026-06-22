@@ -48,11 +48,20 @@ from imbue.minds.utils.sentry.loguru_handler import log_error_inside_sentry
 from imbue.minds.utils.sentry.s3_uploader import EXTRAS_UPLOADED_FILES_KEY
 from imbue.minds.utils.sentry.s3_uploader import get_s3_upload_key
 from imbue.minds.utils.sentry.s3_uploader import get_s3_upload_url
+from imbue.minds.utils.sentry.s3_uploader import setup_s3_uploads
 from imbue.minds.utils.sentry.s3_uploader import upload_to_s3
 from imbue.minds.utils.sentry.s3_uploader import upload_to_s3_with_key
 from imbue.minds.utils.sentry.s3_uploader import wait_for_s3_uploads
 
-LOG_EXTENSION = "jsonl"
+# Minds writes all of its logs flat into a single logs directory (``~/.minds/logs``):
+#   * ``minds-events.jsonl``       -- the live Python backend log (the loguru JSONL sink)
+#   * ``minds-events.jsonl.<ts>``  -- rotated Python backend logs (timestamp-suffixed by make_jsonl_file_sink)
+#   * ``minds.log``                -- the Electron main-process log
+# None of these are gzip-compressed on disk, so every file is compressed on upload.
+_LIVE_LOG_GLOB = "*.jsonl"
+_ROTATED_LOG_GLOB = "*.jsonl.*"
+_ELECTRON_LOG_GLOB = "*.log"
+# suffix appended to the (gzip-compressed) S3 upload keys for log files
 COMPRESSED_LOG_EXTENSION = "gz"
 
 
@@ -453,6 +462,7 @@ def setup_sentry(
     git_commit_sha: str,
     log_folder: Path,
     global_user_context: Mapping[str, str] | None = None,
+    is_s3_upload_enabled: bool = False,
 ) -> None:
     """Sets up the main Sentry instance for this process.
 
@@ -509,6 +519,14 @@ def setup_sentry(
     )
     logger.info("Sentry initialized")
 
+    if is_s3_upload_enabled:
+        # Off by default (see the caller's env var gate): uploading log files and
+        # the traceback-with-locals attachment to the shared S3 buckets ships
+        # potentially-sensitive data off the user's machine, so it must be opted
+        # into explicitly.
+        setup_s3_uploads(is_production=environment == "production")
+        logger.info("Sentry S3 attachment uploads enabled (environment={})", environment)
+
     if global_user_context is not None:
         sentry_sdk.set_user(dict(global_user_context))
 
@@ -536,7 +554,7 @@ def setup_sentry(
     )
     scope = get_current_scope()
     scope.set_context(
-        _SENTRY_SCULPTOR_CONTEXT_KEY,
+        _SENTRY_MINDS_CONTEXT_KEY,
         # need to cast to `dict` to make PyCharm happy
         cast(
             dict,
@@ -570,7 +588,7 @@ MAX_SENTRY_ATTACHMENT_SIZE = 10 * 1024 * 1024
 # Maciek could not find the documentation for that behavior
 MAX_SENTRY_LIST_SIZE = 10
 
-_SENTRY_SCULPTOR_CONTEXT_KEY = "_config"
+_SENTRY_MINDS_CONTEXT_KEY = "_config"
 
 
 class SentryMindsConfigDict(TypedDict):
@@ -579,14 +597,14 @@ class SentryMindsConfigDict(TypedDict):
 
 def _get_config_from_scope() -> SentryMindsConfigDict | None:
     scope = get_current_scope()._contexts.get(
-        _SENTRY_SCULPTOR_CONTEXT_KEY, SentryMindsConfigDict(log_folder_path=None)
+        _SENTRY_MINDS_CONTEXT_KEY, SentryMindsConfigDict(log_folder_path=None)
     )
-    # we only put SentrySculptorConfigDict in _contexts, but regrettably as a third-party library we can't tell pyre that
+    # we only put SentryMindsConfigDict in _contexts, but regrettably as a third-party library we can't tell pyre that
     return cast(SentryMindsConfigDict, scope)
 
 
 def _get_log_folder_from_scope() -> Path | None:
-    # TODO: _get_sculptor_config_from_scope() can be None. do we want to return None in that case, or error?
+    # TODO: _get_config_from_scope() can be None. do we want to return None in that case, or error?
     log_folder_path = _get_config_from_scope().get("log_folder_path")  # pyre-fixme[16]
     if log_folder_path and log_folder_path.exists():
         logger.debug("Using Sentry context log_folder_path: {}", str(log_folder_path))
@@ -624,7 +642,10 @@ class ErrorAttachmentsS3Uploader(MutableModel):
             # https://github.com/madler/zlib/blob/5a82f71ed1dfc0bec044d9702463dbdf84ea3b71/deflate.c#L117
             contents = gzip.compress(contents, compresslevel=3)
         uri = upload_to_s3_with_key(key, contents)
-        if uri is not None:
+        # Only cache immutable (rotated) files, whose contents never change, so a
+        # later error report can reuse the same key instead of re-uploading them.
+        # The live log is mutable and must be re-uploaded on every report.
+        if uri is not None and immutable:
             with self._lock:
                 # we assume that uri and key are in sync
                 self._immutable_logs_keys[file_path] = key
@@ -636,27 +657,26 @@ class ErrorAttachmentsS3Uploader(MutableModel):
 
         Returns external urls grouped by their logical names and the callbacks that need to be invoked which will
         actually perform the uploads to make those urls available.
+
+        ``logs_folder`` is the minds logs directory (``~/.minds/logs``), whose layout is flat:
+        a live ``*.jsonl`` Python backend log, timestamp-suffixed ``*.jsonl.<ts>`` rotated logs, and
+        the Electron ``*.log``. All are gzip-compressed on upload.
         """
         uploads: dict[tuple[str, str], Callable | None] = {}
 
         if exception is not None:
-            # NOTE: the following comment is copied without understanding
             # this traceback is from the logger call site!
             key = get_s3_upload_key("logsite_traceback_with_vars", ".txt")
             uploads[("", key)] = partial(self._upload_traceback_cb, key=key, exception=exception)
 
         if logs_folder:
-            # upload all live log files
-            for log_file in _n_newest_files(
-                (logs_folder / "server").glob(f"*.{LOG_EXTENSION}"), n=MAX_SENTRY_LIST_SIZE
-            ):
-                key = get_s3_upload_key(log_file.stem, f".{LOG_EXTENSION}.{COMPRESSED_LOG_EXTENSION}")
+            # The live Python backend log (mutable -- re-upload on every report).
+            for log_file in _n_newest_files(logs_folder.glob(_LIVE_LOG_GLOB), n=MAX_SENTRY_LIST_SIZE):
+                key = get_s3_upload_key(log_file.name, f".{COMPRESSED_LOG_EXTENSION}")
                 uploads[("live_logs", key)] = partial(self._upload_file_cb, key=key, file_path=log_file, compress=True)
 
-            # upload each of the compressed log files
-            for log_file in _n_newest_files(
-                (logs_folder / "server").glob(f"*.{COMPRESSED_LOG_EXTENSION}"), n=MAX_SENTRY_LIST_SIZE
-            ):
+            # Rotated Python backend logs (immutable -- upload once and reuse the cached key).
+            for log_file in _n_newest_files(logs_folder.glob(_ROTATED_LOG_GLOB), n=MAX_SENTRY_LIST_SIZE):
                 with self._lock:
                     existing_key = self._immutable_logs_keys.get(log_file)
 
@@ -664,13 +684,14 @@ class ErrorAttachmentsS3Uploader(MutableModel):
                     logger.trace("Not uploading {} because it already exists under {}", log_file, existing_key)
                     uploads[("rotated_logs", existing_key)] = None
                 else:
-                    key = get_s3_upload_key(log_file.stem, f".{COMPRESSED_LOG_EXTENSION}")
+                    key = get_s3_upload_key(log_file.name, f".{COMPRESSED_LOG_EXTENSION}")
                     uploads[("rotated_logs", key)] = partial(
-                        self._upload_file_cb, key=key, file_path=log_file, immutable=True
+                        self._upload_file_cb, key=key, file_path=log_file, compress=True, immutable=True
                     )
 
-            for log_file in _n_newest_files((logs_folder / "electron").glob("*.log"), n=MAX_SENTRY_LIST_SIZE):
-                key = get_s3_upload_key(log_file.stem, f".log.{COMPRESSED_LOG_EXTENSION}")
+            # The Electron main-process log.
+            for log_file in _n_newest_files(logs_folder.glob(_ELECTRON_LOG_GLOB), n=MAX_SENTRY_LIST_SIZE):
+                key = get_s3_upload_key(log_file.name, f".{COMPRESSED_LOG_EXTENSION}")
                 uploads[("electron_logs", key)] = partial(
                     self._upload_file_cb,
                     key=key,

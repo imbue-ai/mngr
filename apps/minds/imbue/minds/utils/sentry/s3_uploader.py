@@ -56,7 +56,7 @@ class _S3Uploader(FrozenModel):
                 Key=key,
                 Body=contents,
             )
-            logger.debug("Done uploading to s3://{}/{}", self.bucket, key)  # XXX remove before merge
+            logger.debug("Done uploading to s3://{}/{}", self.bucket, key)
         except Exception as e:
             logger.info("Failed to upload {} to S3: {}", key, e)
             # if re-raised, who would even catch this exception?
