@@ -17,19 +17,9 @@
 # 0.9.5 -> 0.9.6 in this PR is what enables this config to exist.
 
 [offload]
-# Run the whole minds_snapshot_resume suite in a SINGLE sandbox
-# (max_parallel = 1). Two reasons:
-#  1. The tests share one resumed workspace via the session-scoped
-#     `running_workspace` fixture, so one sandbox resumes the workspace
-#     ONCE and all tests reuse it -- faster than fanning out, where each
-#     sandbox would pay a full docker-start + agent-restart resume.
-#  2. It collapses N per-sandbox junit downloads into one. offload's
-#     junit retrieval from vm_runtime sandboxes is unreliable: a 5-way
-#     fan-out reproducibly failed every download ("path does not exist:
-#     /tmp/sb-*.xml") and hung the run, while a single sandbox (and the
-#     earlier one-test suite) downloads cleanly. Keep this at 1 unless
-#     offload's vm_runtime download path becomes reliable for fan-out.
-max_parallel = 1
+# Tiny test suite to start. max_parallel scales up as more
+# @pytest.mark.minds_snapshot_resume tests get added.
+max_parallel = 10
 test_timeout_secs = 900
 stream_output = true
 sandbox_project_root = "/code/mngr"
