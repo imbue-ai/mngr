@@ -2720,10 +2720,14 @@ log "=== Shutdown script completed ==="
         # Resources from cached host record (no remote call)
         resource = self.get_host_resources(host)
 
-        # Lock status from SSH-collected data
+        # Lock status from SSH-collected data. The lock file persists after release
+        # (its inode must stay stable across local and remote holders), so its mtime
+        # alone does not indicate "held"; use the real flock held-probe.
         lock_mtime = raw.get("lock_mtime")
-        is_locked = lock_mtime is not None
-        locked_time = datetime.fromtimestamp(lock_mtime, tz=timezone.utc) if lock_mtime is not None else None
+        is_locked = bool(raw.get("is_lock_held"))
+        locked_time = (
+            datetime.fromtimestamp(lock_mtime, tz=timezone.utc) if is_locked and lock_mtime is not None else None
+        )
 
         # Certified data from SSH-collected data (parsed from data.json)
         certified_data: CertifiedHostData | None = None

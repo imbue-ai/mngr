@@ -57,7 +57,10 @@ echo "UPTIME=$(cat /proc/uptime 2>/dev/null | awk '{{print $1}}')"
 # Boot time
 echo "BTIME=$(grep '^btime ' /proc/stat 2>/dev/null | awk '{{print $2}}')"
 
-# Lock file mtime
+# Host lock: held-state (a real flock, probed non-blockingly) and mtime (for
+# display). The lock file persists after release, so existence != held; guard on
+# existence so the probe never creates it.
+echo "LOCK_HELD=$([ -e '{host_dir}/host_lock' ] && ! flock -n '{host_dir}/host_lock' -c true 2>/dev/null && echo true || echo false)"
 echo "LOCK_MTIME=$(stat -c %Y '{host_dir}/host_lock' 2>/dev/null)"
 
 # SSH activity mtime
@@ -121,6 +124,8 @@ def _build_stopped_listing_collection_script(prefix: str) -> str:
     container (uptime, btime, ps output, tmux info, active marker).
     """
     return f"""
+# A stopped container has no running process, so the lock cannot be held.
+echo "LOCK_HELD=false"
 echo "LOCK_MTIME=$(stat -c %Y "$HOST_DIR/host_lock" 2>/dev/null)"
 echo "SSH_ACTIVITY_MTIME=$(stat -c %Y "$HOST_DIR/activity/ssh" 2>/dev/null)"
 echo '{SEP_DATA_JSON_START}'
@@ -302,6 +307,8 @@ def parse_listing_collection_output(stdout: str) -> dict[str, Any]:
             result["uptime_seconds"] = parse_optional_float(line[len("UPTIME=") :])
         elif line.startswith("BTIME=") and "btime" not in result:
             result["btime"] = parse_optional_int(line[len("BTIME=") :])
+        elif line.startswith("LOCK_HELD=") and "is_lock_held" not in result:
+            result["is_lock_held"] = line[len("LOCK_HELD=") :].strip() == "true"
         elif line.startswith("LOCK_MTIME=") and "lock_mtime" not in result:
             result["lock_mtime"] = parse_optional_int(line[len("LOCK_MTIME=") :])
         elif line.startswith("SSH_ACTIVITY_MTIME=") and "ssh_activity_mtime" not in result:
