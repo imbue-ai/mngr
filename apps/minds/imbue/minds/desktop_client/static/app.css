@@ -176,6 +176,11 @@
  *   type-body        14 / regular    default body text
  *   type-helper      12 / regular    captions, hints, metadata
  *   type-section     12 / semibold   ALL-CAPS section eyebrow
+ *
+ * type-badge (10 / bold, 12 line-height) is a specialized component role -- not
+ * a content-text role -- for the notification count pill (Badge.jinja). It is
+ * the one deliberate sub-ramp size: the pill must stay compact, so it sits below
+ * the 12px content floor.
  */
 @utility type-heading-lg {
   font-size: var(--text-2xl);
@@ -208,6 +213,11 @@
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
+}
+@utility type-badge {
+  font-size: 10px;
+  line-height: 12px;
+  font-weight: 700;
 }
 
 /*

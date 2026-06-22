@@ -745,19 +745,33 @@
       <div class="mt-1 type-helper text-secondary font-mono">TitlebarButton.jinja + .titlebar-surface (app.css) -- contrast derived from --titlebar-bg via lch</div>
     </section>
 
-    {# Notification badge #}
+    {# Notification badge. One component (Badge.jinja), two shapes: the bare
+       dot (no count) and the count pill (a number, capped at 99+). The dot is
+       what the titlebar requests button shows today; the count pill is not yet
+       wired into the app but lives here so the catalog documents it. #}
     <section id="notification-badge" class="scroll-mt-8 mb-6">
       <div class="type-section text-secondary mb-2">Notification badge</div>
-      <div class="titlebar-surface rounded-lg overflow-hidden border border-default"
+      <div class="flex items-center gap-3">
+        <Badge :count="4" />
+        <Badge :count="12" />
+        <Badge :count="150" />
+        <Badge />
+      </div>
+      <p class="mt-2 type-helper text-secondary">
+        Count pill (``min-w-[16px]`` keeps a single digit circular; caps at
+        99+) and the bare dot. The titlebar requests button pins the dot to the
+        messages icon's top-right corner:
+      </p>
+      <div class="mt-2 titlebar-surface rounded-lg overflow-hidden border border-default"
            style="--titlebar-bg: #18181b; background-color: var(--titlebar-bg);">
         <div class="h-[38px] flex items-center justify-end px-1">
           <TitlebarButton title="Requests" extra="relative">
             <Icon24 name="messages" />
-            <span class="absolute top-0.5 right-0.5 w-2 h-2 rounded-full bg-important"></span>
+            <Badge class="absolute top-0.5 right-0.5" />
           </TitlebarButton>
         </div>
       </div>
-      <div class="mt-1 type-helper text-secondary font-mono">templates/pages/Chrome.jinja :: #requests-badge</div>
+      <div class="mt-1 type-helper text-secondary font-mono">templates/Badge.jinja (titlebar dot: Chrome.jinja :: #requests-badge)</div>
     </section>
 
     {# Window controls (only rendered on non-mac in real chrome) #}

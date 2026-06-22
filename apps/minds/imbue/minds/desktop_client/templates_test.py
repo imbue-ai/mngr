@@ -1671,3 +1671,36 @@ def test_status_badge_title_renders_when_present() -> None:
 def test_status_badge_title_omitted_when_empty() -> None:
     html = CATALOG.render("StatusBadge", _content="x")
     assert "title=" not in html
+
+
+def test_badge_dot_when_count_omitted() -> None:
+    # No count -> the bare 8px important dot: no number, no pill width / type role.
+    html = CATALOG.render("Badge")
+    assert "w-2 h-2 rounded-full bg-important" in html
+    assert "min-w-" not in html
+    assert "type-badge" not in html
+
+
+def test_badge_count_renders_number_in_pill() -> None:
+    html = CATALOG.render("Badge", count=4)
+    assert ">4<" in html
+    # The count pill: min-width keeps a single digit circular; bold 10px role.
+    assert "min-w-[16px]" in html
+    assert "type-badge" in html
+    assert "bg-important" in html
+
+
+def test_badge_count_caps_at_99_plus() -> None:
+    # Counts above 99 collapse to "99+" so the pill stays compact.
+    html = CATALOG.render("Badge", count=150)
+    assert ">99+<" in html
+    assert "150" not in html
+
+
+def test_badge_class_and_id_pass_through() -> None:
+    # The titlebar requests badge relies on id + the chrome.js-toggled `hidden`
+    # class flowing through onto the badge's root span.
+    html = CATALOG.render("Badge", **{"id": "requests-badge", "class": "hidden absolute top-0.5 right-0.5"})
+    assert 'id="requests-badge"' in html
+    assert "hidden" in html
+    assert "absolute" in html
