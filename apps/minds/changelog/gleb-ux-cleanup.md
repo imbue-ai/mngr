@@ -133,3 +133,5 @@ Tuned the radius scale and a couple of tokens:
 - `success` `#25931f` -> `#0fa108` and `info` `#2582d0` -> `#1773cf` (warning and important unchanged).
 
 - The `Notice` tints are lighter and more defined: the fill drops from 12% to 8% opacity and the border rises from 30% to 50% (`bg-<hue>/8` + `border-<hue>/50`).
+
+Refined the titlebar buttons (`TitlebarButton`): the foreground is now always `text-primary` (full contrast, re-based per-workspace by `.titlebar-surface`) instead of resting at `text-secondary` and brightening on hover, and the `nav` variant is a square icon button sized by padding (`p-2` around the 24px icon -> 32x32) rather than a fixed `w-8 h-7`. The `control` variant (min / max / close) keeps its OS-matching `w-9 h-[38px]` geometry but also picks up the always-`text-primary` foreground.

@@ -899,13 +899,13 @@ def test_color_swatch_unselected_and_small_and_disabled() -> None:
 
 def test_titlebar_button_default_is_nav_variant() -> None:
     html = CATALOG.render("TitlebarButton", _content="<svg/>")
-    # nav variant => w-8 h-7 rounded-md, default tone => plain foreground
-    # tokens (text-secondary + hover:text-primary + hover:bg-fill-hover),
-    # re-based per-workspace by the .titlebar-surface scope in app.css.
-    assert "w-8" in html
-    assert "h-7" in html
+    # nav variant => square padded icon button (p-2 rounded-md, no fixed w/h);
+    # default tone => always text-primary + hover:bg-fill-hover, re-based
+    # per-workspace by the .titlebar-surface scope in app.css.
+    assert "p-2" in html
     assert "rounded-md" in html
-    assert "text-secondary" in html
+    assert "text-primary" in html
+    assert "text-secondary" not in html
     assert "hover:bg-fill-hover" in html
     # The danger tone modifier should NOT be present on the default tone.
     assert "titlebar-btn-danger" not in html
@@ -925,8 +925,8 @@ def test_titlebar_button_danger_tone_applies_red_hover() -> None:
     html = CATALOG.render("TitlebarButton", variant="control", tone="danger", _content="<svg/>")
     # ``.titlebar-btn-danger`` (in app.css) supplies the red hover.
     assert "titlebar-btn-danger" in html
-    # The shared foreground tokens still apply (base colors + geometry).
-    assert "text-secondary" in html
+    # The shared foreground token still applies (always text-primary).
+    assert "text-primary" in html
 
 
 # -- Workspace palette + WCAG contrast picker ----------------------------
