@@ -38,6 +38,8 @@ from imbue.minds.bootstrap import is_minds_root_name_set_to_active_env
 from imbue.minds.bootstrap import minds_data_dir_for
 from imbue.minds.bootstrap import reconcile_imbue_cloud_providers_from_sessions
 from imbue.minds.bootstrap import resolve_minds_root_name
+from imbue.minds.build_info import resolve_git_sha
+from imbue.minds.build_info import resolve_release_id
 from imbue.minds.config.data_types import DEFAULT_DESKTOP_CLIENT_HOST
 from imbue.minds.config.data_types import DEFAULT_DESKTOP_CLIENT_PORT
 from imbue.minds.config.data_types import MNGR_BINARY
@@ -184,13 +186,15 @@ def run(
     # S3 attachment uploads are additionally opt-in via MINDS_SENTRY_S3_UPLOADS
     # (default off, even in production/staging) since they can carry
     # potentially-sensitive data; development never uploads regardless.
-    # TODO: thread through the real release id + git sha instead of these placeholders.
+    # The release id (desktop app version) and git sha come from the Electron
+    # launcher via env vars, falling back to the in-repo package.json / "unknown"
+    # for bare source runs (see imbue.minds.build_info).
     activated_env_name = env_name_from_root_name(root_name) if is_minds_root_name_set_to_active_env() else None
     is_sentry_s3_upload_enabled = os.environ.get("MINDS_SENTRY_S3_UPLOADS", "").strip().lower() in ("1", "true", "yes")
     setup_sentry(
         environment=SentryDeployEnvironment.from_minds_env_name(activated_env_name),
-        release_id="0.0.0-dev",
-        git_commit_sha="unknown",
+        release_id=resolve_release_id(),
+        git_commit_sha=resolve_git_sha(),
         log_folder=paths.log_dir,
         is_s3_upload_enabled=is_sentry_s3_upload_enabled,
     )

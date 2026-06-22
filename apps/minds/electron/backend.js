@@ -1,4 +1,4 @@
-const { spawn } = require('child_process');
+const { spawn, execSync } = require('child_process');
 const net = require('net');
 const fs = require('fs');
 const path = require('path');
@@ -20,6 +20,38 @@ for (const stream of [process.stdout, process.stderr]) {
 }
 
 let backendProcess = null;
+
+/**
+ * Resolve the release id + git SHA handed to the Python backend (which forwards
+ * them to Sentry as the release + git_sha tag).
+ *
+ * - releaseId always comes from package.json (the desktop app version).
+ * - gitSha: dev runs resolve it live from the monorepo's git checkout (this is
+ *   `just minds-start` -> `pnpm start` -> `electron .`); packaged builds read
+ *   the SHA baked into build-info.json by build.js (build-info.json is only
+ *   written at build time, so reading it in dev would surface a stale value).
+ * Both fall back to "unknown" when unavailable (e.g. a tarball with no .git, or
+ *   a packaged build whose build-info.json is missing).
+ */
+function getBuildMetadata() {
+  const releaseId = require('../package.json').version || 'unknown';
+  let gitSha = 'unknown';
+  if (paths.isDev()) {
+    try {
+      gitSha = execSync('git rev-parse HEAD', { cwd: paths.getMonorepoRoot() }).toString().trim() || 'unknown';
+    } catch (err) {
+      console.warn(`[build-metadata] Could not resolve git SHA from checkout: ${err.message}`);
+    }
+  } else {
+    try {
+      const info = JSON.parse(fs.readFileSync(path.join(__dirname, 'build-info.json'), 'utf8'));
+      gitSha = info.gitSha || 'unknown';
+    } catch (err) {
+      console.warn(`[build-metadata] Could not read build-info.json: ${err.message}`);
+    }
+  }
+  return { releaseId, gitSha };
+}
 
 /**
  * Find an available port by briefly binding to port 0.
@@ -160,6 +192,9 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       const mindsRootName = paths.getMindsRootName();
       const mngrHostDir = paths.getMngrHostDir();
       const mngrPrefix = paths.getMngrPrefix();
+      // Forwarded to the Python backend so Sentry tags reports with the desktop
+      // app version (release) and the git SHA the build was cut from.
+      const { releaseId, gitSha } = getBuildMetadata();
       // When build.js embedded a client.toml + root_name pair (production
       // / staging / beta packaged builds), pass --config-file explicitly
       // so the backend doesn't have to fall back to MINDS_CLIENT_CONFIG_PATH.
@@ -191,6 +226,8 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MNGR_PREFIX: mngrPrefix,
           MINDS_LATCHKEY_BINARY: paths.getLatchkeyPath(),
           MINDS_LATCHKEY_DIRECTORY: paths.getLatchkeyDirectory(),
+          MINDS_RELEASE_ID: releaseId,
+          MINDS_GIT_SHA: gitSha,
         };
       } else {
         // Packaged mode: use bundled uv with standalone pyproject
@@ -254,6 +291,8 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           // it. Without this, uv falls back to <project>/.venv which is
           // inside the signed .app bundle (read-only on macOS).
           VIRTUAL_ENV: paths.getVenvDir(),
+          MINDS_RELEASE_ID: releaseId,
+          MINDS_GIT_SHA: gitSha,
         };
       }
 

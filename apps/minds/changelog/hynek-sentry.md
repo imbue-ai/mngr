@@ -8,4 +8,6 @@ Select the Sentry DSN and S3 bucket from the activated minds env (`minds env act
 
 S3 attachment uploads remain opt-in via the `MINDS_SENTRY_S3_UPLOADS` env var (default off, even in production and staging), since the uploaded logs and traceback-with-locals attachments can carry potentially-sensitive data. When enabled, the bucket follows the environment; development never uploads regardless of the flag.
 
+Report the desktop app version (from `package.json`) as the Sentry release and the git SHA the build was cut from as the `git_sha` tag. The Electron launcher passes both to the Python backend via `MINDS_RELEASE_ID`/`MINDS_GIT_SHA` (resolving the SHA live from the checkout in dev and from the build-time `build-info.json` in packaged builds); bare source runs fall back to reading `package.json` and report an `unknown` SHA.
+
 Bump the bundled latchkey CLI to 2.17.2.
