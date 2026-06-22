@@ -471,8 +471,13 @@
   function updateRequestsBadge(count) {
     var badge = document.getElementById('requests-badge');
     if (!badge) return;
-    if (count > 0) badge.classList.remove('hidden');
-    else badge.classList.add('hidden');
+    if (count > 0) {
+      // The badge is the Badge.jinja count pill; mirror its 99+ cap here.
+      badge.textContent = count > 99 ? '99+' : String(count);
+      badge.classList.remove('hidden');
+    } else {
+      badge.classList.add('hidden');
+    }
   }
 
   function handleChromeEvent(data) {

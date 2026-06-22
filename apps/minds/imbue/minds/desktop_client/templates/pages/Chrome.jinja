@@ -56,9 +56,9 @@
     <div class="flex-1 flex items-center justify-center px-2 min-w-0">
       <span id="page-title" class="text-primary type-label whitespace-nowrap overflow-hidden text-ellipsis">Minds</span>
     </div>
-    <TitlebarButton id="requests-toggle" title="Requests" extra="relative">
+    <TitlebarButton id="requests-toggle" title="Requests" extra="gap-[3px]">
       <Icon24 name="messages" />
-      <Badge id="requests-badge" class="hidden absolute top-0.5 right-0.5" />
+      <Badge :count="0" id="requests-badge" class="hidden" />
     </TitlebarButton>
     <div class="flex {% if is_mac %}hidden{% endif %}">
       <TitlebarButton variant="control" id="min-btn" title="Minimize"><Icon12 name="minimize" /></TitlebarButton>
