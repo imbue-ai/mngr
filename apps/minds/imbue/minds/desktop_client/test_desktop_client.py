@@ -27,6 +27,7 @@ from imbue.minds.desktop_client.app import _is_discovery_fresh
 from imbue.minds.desktop_client.app import _provider_error_for_workspace
 from imbue.minds.desktop_client.app import _resolve_destroying_for_landing
 from imbue.minds.desktop_client.app import _run_restart_sequence
+from imbue.minds.desktop_client.app import _should_emit_system_interface_status
 from imbue.minds.desktop_client.app import _ssh_command_for_agent
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -2070,13 +2071,41 @@ def test_provider_error_for_workspace_is_none_when_provider_unknown() -> None:
 
 
 def test_is_discovery_fresh_distinguishes_recent_from_stale_and_missing() -> None:
-    """Freshness gates the destructive tier: only a recent snapshot confirms reachability."""
+    """Freshness gates the recovery redirect: only a recent snapshot is trustworthy."""
     now = datetime.now(timezone.utc)
     assert _is_discovery_fresh(now) is True
-    # A snapshot well past the freshness window (the post-outage stall) is stale.
+    # A snapshot well past the freshness window (a stalled pipeline) is stale.
     assert _is_discovery_fresh(now - timedelta(minutes=5)) is False
-    # No snapshot at all (e.g. before initial discovery) cannot confirm reachability.
+    # No snapshot at all (e.g. before initial discovery) cannot be trusted.
     assert _is_discovery_fresh(None) is False
+
+
+def test_should_emit_system_interface_status_gates_stuck_on_discovery_freshness() -> None:
+    """The recovery redirect (driven by a STUCK status push) waits for fresh discovery.
+
+    STUCK is the only status the chrome redirects on, so it is suppressed while
+    discovery is stale -- keeping the user on the auto-refreshing loader -- and
+    emitted once a fresh snapshot lands. Other statuses never gate the redirect.
+    """
+    resolver = MngrCliBackendResolver()
+    # Cold start, no snapshot yet: a STUCK agent must not be redirected.
+    assert _should_emit_system_interface_status(resolver, AgentHealth.STUCK) is False
+    # Non-STUCK statuses do not drive the redirect, so they are never gated.
+    assert _should_emit_system_interface_status(resolver, AgentHealth.RESTARTING) is True
+    assert _should_emit_system_interface_status(resolver, AgentHealth.RESTART_FAILED) is True
+    assert _should_emit_system_interface_status(resolver, AgentHealth.HEALTHY) is True
+    # A fresh snapshot promotes STUCK to a redirect.
+    resolver.update_providers(
+        providers=(), error_by_provider_name={}, last_full_snapshot_at=datetime.now(timezone.utc)
+    )
+    assert _should_emit_system_interface_status(resolver, AgentHealth.STUCK) is True
+    # A snapshot past the freshness window (a stalled pipeline) suppresses it again.
+    resolver.update_providers(
+        providers=(),
+        error_by_provider_name={},
+        last_full_snapshot_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+    )
+    assert _should_emit_system_interface_status(resolver, AgentHealth.STUCK) is False
 
 
 def test_recovery_page_requires_authentication(tmp_path: Path) -> None:

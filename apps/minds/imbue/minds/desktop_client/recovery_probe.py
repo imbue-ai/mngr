@@ -157,17 +157,6 @@ class DispatchTier(str, Enum):
     PROVIDER_UNAVAILABLE, which is a transient outage worth retrying.
     """
 
-    REACHABILITY_UNCONFIRMED = "reachability_unconfirmed"
-    """The resolver's Layer-A view is too stale to positively establish provider
-    reachability, so we will not yet offer the destructive host restart. This is
-    the post-outage window: discovery may still show a stale ``RUNNING`` host
-    with no provider error surfaced yet. Rather than trust that stale state and
-    hand the user a destructive restart that may not help, the page shows a
-    non-destructive Retry and keeps converging; once discovery catches up it
-    reclassifies into the real tier (PROVIDER_UNAVAILABLE, HOST_UNRESPONSIVE, an
-    auto-dispatch tier, or full recovery). Does not assert the provider is down.
-    """
-
 
 class ProviderProbeError(FrozenModel):
     """A provider-level error for this workspace's provider, sourced from discovery.
@@ -324,7 +313,7 @@ def _coerce_optional_int(value: object) -> int | None:
     return None
 
 
-# -- Layer-A host/provider state (resolver-sourced) ------------------------
+# -- Host/provider state (resolver-sourced) --------------------------------
 
 
 _RUNNING_STATE: Final[str] = "RUNNING"
@@ -336,17 +325,17 @@ _PROVIDER_UNAVAILABLE_EXCEPTION: Final[str] = "ProviderUnavailableError"
 #
 # In-container checks are wrapped in ``mngr exec <id> '<check>' --no-start
 # --quiet`` so the operator does not need a shell inside the container, and
-# their ``output`` is exactly what that command prints. The two Layer-A probes
-# (host state, system-services agent) and the resolver probe are read from
-# minds' own passive-discovery memory rather than re-sampled, so they carry a
-# short ``(... from the discovery snapshot)`` pseudo-command label and have no
+# their ``output`` is exactly what that command prints. The host-state,
+# system-services-agent, and resolver probes are read from minds' own
+# passive-discovery memory rather than re-sampled, so they carry a short
+# ``(... from the discovery snapshot)`` pseudo-command label and have no
 # runnable reproduction.
 
-# Pseudo-command labels for the resolver-sourced Layer-A probes (no runnable
+# Pseudo-command labels for the resolver-sourced probes (no runnable
 # reproduction -- the datum is read from the passive discovery snapshot).
 _HOST_STATE_PSEUDO_COMMAND: Final[str] = "(host state from the discovery snapshot)"
 _SERVICES_AGENT_PSEUDO_COMMAND: Final[str] = "(system-services agent from the discovery snapshot)"
-# Output shown for the Layer-A probes when discovery has not surfaced the datum.
+# Output shown for the resolver-sourced probes when discovery has not surfaced the datum.
 _NO_HOST_STATE: Final[str] = "(no host state in the discovery snapshot)"
 _NO_SERVICES_AGENT: Final[str] = "(no system-services agent id known -- discovery has not surfaced one)"
 
@@ -570,9 +559,8 @@ def _build_plugin_resolver_probe(plugin_resolver_services: dict[str, str]) -> Pr
 def _classify_dispatch_tier(
     probes: tuple[Probe, ...],
     provider_error: ProviderProbeError | None,
-    reachability_confirmed: bool,
 ) -> DispatchTier:
-    """Derive the dispatch tier from probe answers and the Layer-A signals.
+    """Derive the dispatch tier from probe answers and the provider error.
 
     Ordered by precedence:
 
@@ -592,11 +580,9 @@ def _classify_dispatch_tier(
       user's agents.
     * HOST_UNRESPONSIVE when the container claims running but we can't exec into
       it (or on any other ambiguous host state): a host restart bounces a live
-      container, so it requires explicit user consent -- BUT only when
-      ``reachability_confirmed`` is true. When the resolver's Layer-A view is
-      stale (the post-outage window), the RUNNING claim may pre-date an outage,
-      so we fall to REACHABILITY_UNCONFIRMED (Retry, never a destructive restart)
-      and let the reactive page converge once discovery catches up.
+      container, so it requires explicit user consent. The recovery page is only
+      reached once discovery is fresh (the redirect is gated on freshness), so
+      the RUNNING claim is trustworthy here.
     """
     if provider_error is not None:
         if provider_error.exception_type == _PROVIDER_UNAVAILABLE_EXCEPTION:
@@ -611,8 +597,6 @@ def _classify_dispatch_tier(
     can_run = answers.get(_QUESTION_CAN_RUN_COMMANDS_INSIDE)
     if container_running == ProbeAnswer.YES and can_run == ProbeAnswer.YES:
         return DispatchTier.INTERFACE_UNRESPONSIVE
-    if not reachability_confirmed:
-        return DispatchTier.REACHABILITY_UNCONFIRMED
     return DispatchTier.HOST_UNRESPONSIVE
 
 
@@ -621,7 +605,6 @@ def build_host_health_response(
     services_agent_id: AgentId | None,
     in_container_stdout: str | None,
     plugin_resolver_services: dict[str, str],
-    reachability_confirmed: bool,
     mngr_exec_command: str = "",
     mngr_binary: str = "mngr",
     provider_error: ProviderProbeError | None = None,
@@ -630,9 +613,9 @@ def build_host_health_response(
     """Assemble the host-health response (probes + dispatch tier) from raw inputs.
 
     Pure function so the integration is straightforward to unit-test: feed in
-    the resolver-sourced Layer-A state (``host_state``, ``services_agent_id``,
-    ``provider_error``, ``reachability_confirmed``) plus the in-container exec
-    stdout and plugin snapshot, and assert on the probe answers and derived tier.
+    the resolver-sourced host/provider state (``host_state``,
+    ``services_agent_id``, ``provider_error``) plus the in-container exec stdout
+    and plugin snapshot, and assert on the probe answers and derived tier.
 
     ``host_state`` is the workspace host's lifecycle state read from the passive
     discovery resolver (``get_host_state``), e.g. ``"RUNNING"`` / ``"STOPPED"``;
@@ -644,11 +627,6 @@ def build_host_health_response(
     PROVIDER_UNAVAILABLE / WORKSPACE_UNREACHABLE tiers and its message is carried
     on the response as ``unreachable_reason``. ``provider_label`` is the friendly
     provider name for that page's title.
-
-    ``reachability_confirmed`` is whether the resolver's Layer-A view is fresh
-    enough (no provider error + recent discovery snapshot) to positively
-    establish provider reachability. When false, the would-be destructive
-    HOST_UNRESPONSIVE classification falls to REACHABILITY_UNCONFIRMED instead.
     """
     in_container = _parse_in_container_probe(in_container_stdout)
     exec_cmd = mngr_exec_command or "(mngr exec <system-services-agent>)"
@@ -661,7 +639,7 @@ def build_host_health_response(
         _build_curl_probe(in_container, mngr_binary, services_agent_id),
         _build_plugin_resolver_probe(plugin_resolver_services),
     )
-    dispatch_tier = _classify_dispatch_tier(probes, provider_error, reachability_confirmed)
+    dispatch_tier = _classify_dispatch_tier(probes, provider_error)
     is_provider_tier = dispatch_tier in (DispatchTier.PROVIDER_UNAVAILABLE, DispatchTier.WORKSPACE_UNREACHABLE)
     return HostHealthResponse(
         probes=probes,

@@ -134,3 +134,56 @@ This is cheap *because of the collapse*: with host-health now a resolver read (n
 ### Changelog
 
 - `apps/minds` changelog entry for the recovery host-health refactor (remove the synchronous `mngr list`; read Layer-A state from the resolver). No `libs/mngr*` change is required by this follow-up — the typed `ProviderUnavailableError` and the discovery `error_by_provider_name` plumbing already landed.
+
+## Revision: gate the recovery redirect on fresh discovery (option A)
+
+> Branch `gabriel/recovery-redundancy`. This section revises the **"reachability-unconfirmed + reactive recovery page"** approach above. That approach shipped a transient `REACHABILITY_UNCONFIRMED` dispatch tier plus a client-side convergence loop so a stale-discovery load would render Retry and then update itself once discovery caught up. This revision removes all of that machinery in favor of a single upstream gate.
+
+### Motivation
+
+`REACHABILITY_UNCONFIRMED` is, functionally, a *loading* state: it exists only for the brief window where discovery has not yet confirmed reachability, and it collapses into a real tier within one poll cycle. Expressing it as a peer of the actionable recovery tiers (`HOST_UNRESPONSIVE`, `PROVIDER_UNAVAILABLE`, ...) — with its own page, its own `reachability_confirmed` boolean threaded through the classifier, and its own client convergence loop — is more structure than the state deserves. Worse, it conflates two different concerns:
+
+- a **transient** "discovery hasn't caught up yet" (cold start, or the ≤one-cycle post-outage window), and
+- a **persistent** "the discovery pipeline itself is broken" — which is app-global infrastructure health, not a per-workspace recovery condition, and belongs in its own surface with its own monitoring/auto-restart (see the **discovery-watchdog follow-up**, branch `gabriel/discovery-watchdog`).
+
+A cleaner cut: don't send the user to the recovery page at all until discovery is fresh. Then the recovery page can *assume* fresh discovery, and the whole `reachability_confirmed` / `REACHABILITY_UNCONFIRMED` / convergence apparatus disappears.
+
+### Key facts that make this clean
+
+- **The redirect is fully app-controlled.** The `mngr_forward` plugin only ever serves a dumb, auto-refreshing "Loading workspace" 503 loader (1s meta-refresh) and emits a `system_interface_backend_failure` envelope; it never navigates to recovery. The redirect is driven entirely by minds: the background probe loop marks the agent `STUCK` on the `SystemInterfaceHealthTracker`, the chrome-events SSE pushes a `system_interface_status` event, and `chrome.js` (`maybeRedirectToRecovery`) navigates the content view to `/agents/<id>/recovery` (guarded by a client-side redirect lock). Nothing about discovery freshness is consulted today.
+- **A provider outage keeps discovery fresh.** The discovery poll emits a full snapshot every ~10s even when a provider is down — per-provider failures fold into `error_by_provider_name` (`ErrorBehavior.CONTINUE`). So a provider outage shows up as *fresh snapshot + typed error* → `PROVIDER_UNAVAILABLE`, never as stale discovery. Gating the redirect on freshness therefore does **not** stall the common outage case: discovery is fresh-with-error and the redirect fires promptly into a confident `PROVIDER_UNAVAILABLE`.
+- **Stale discovery means the pipeline is broken (or cold-starting), not that a provider is down.** A snapshot is withheld only when the producer/consumer pipeline stalls (`mngr observe` or the `mngr forward` consumer wedged/dead) or `list_agents` itself raises structurally. So the only times the redirect gate actually defers are **cold start** (no first snapshot yet, ~10s) and **persistently broken discovery**.
+
+### Design
+
+- **Gate the `STUCK` redirect signal on discovery freshness, server-side.** In the chrome-events SSE (`_handle_chrome_events`), suppress emitting `system_interface_status` with status `stuck` for an agent while discovery is stale (`_is_discovery_fresh` is false) — at all three emission points (the connect-time snapshot, the per-transition drain, and the 15s re-assert backstop). While stale, the chrome receives no `stuck` event and stays on the plugin's auto-refreshing loader. Once a fresh snapshot lands (or the next re-assert tick after one does), the `stuck` event is emitted and the chrome redirects. No `chrome.js` change is required — the existing "redirect on `stuck`" logic is unchanged; it simply isn't told `stuck` until discovery is fresh.
+- **Remove `reachability_confirmed` and `REACHABILITY_UNCONFIRMED`.** `_classify_dispatch_tier` returns `HOST_UNRESPONSIVE` unconditionally for the "host claims RUNNING but unreachable" case; `build_host_health_response` / the classifier no longer take a `reachability_confirmed` argument. The in-container exec gate keeps only its meaningful checks — fire the exec when `provider_error is None and host_state == RUNNING` — dropping the freshness conjunct (the page is only reached fresh).
+- **Remove the client convergence loop.** Delete `scheduleConvergence` / `isAwaitingFreshDiscovery` / the `CONVERGE_*` constants / `renderReachabilityUnconfirmed`. `provider_unavailable` keeps auto-returning the user via the existing `scheduleHealthyPoll` 302-watch (the health tracker flips HEALTHY → the page 302s to `return_to`); it no longer needs to re-classify, because it was reached with fresh discovery.
+
+### Accepted failure mode (deliberately punted)
+
+If the discovery pipeline is **persistently broken**, the redirect is gated forever and the user is left on the auto-refreshing "Loading workspace" loader indefinitely. This is accepted **for this branch** to keep the logic here simple; it is the exact failure mode the **discovery-watchdog follow-up** (branch `gabriel/discovery-watchdog`) exists to fix (detect a stalled pipeline via snapshot-age, auto-restart the pipeline, and surface a distinct app-global "lost track of your workspaces" state). We add no max-wait fallback here.
+
+### Safety note (residual, accepted)
+
+The destructive-restart safety gate that `REACHABILITY_UNCONFIRMED` provided now lives upstream as the redirect gate: in the normal flow you only reach the recovery page with fresh discovery, so a destructive `HOST_UNRESPONSIVE` is only offered on confirmed-fresh state. The residual case is reaching the recovery page and *then* having discovery go stale (the pipeline breaks while you sit on the page), or a direct nav — where the probe would classify `HOST_UNRESPONSIVE` on possibly-stale state and offer the restart. This reverts to the pre-this-follow-up behavior, which is low-risk: a destructive `--stop-host` physically cannot run against an unreachable host (its SSH fails), so the only residual danger is "host reachable + mind actually fine," the same descoped residual noted at the top of this document. Acceptable; flagged.
+
+### Constant / naming cleanup (folded in)
+
+- Rename `_RESTART_COMMAND_TIMEOUT_SECONDS` → `_MNGR_COMMAND_TIMEOUT_SECONDS`: it is the default for `_run_mngr` generally (5 of 6 call sites — including `mngr label`, a non-restart command), not a restart-specific value. The comment keeps the "sized for the slowest legitimate case, a host stop/start" rationale.
+- Derive the freshness threshold from the discovery poll cadence instead of a bare `30.0`: promote `_DISCOVERY_STREAM_POLL_INTERVAL_SECONDS` in `libs/mngr/imbue/mngr/api/discovery_events.py` to a public `DISCOVERY_STREAM_POLL_INTERVAL_SECONDS` and set `_DISCOVERY_FRESHNESS_THRESHOLD_SECONDS = 3 * DISCOVERY_STREAM_POLL_INTERVAL_SECONDS` (3 missed snapshots), so the threshold can't silently drift from the cadence it depends on.
+- Drop the internal "Layer A / Layer B" jargon from comments/docstrings in `app.py` and `recovery_probe.py` in favor of the plain meaning ("provider reachability and host lifecycle" / "the in-container exec probe").
+
+### Acceptance criteria (revision)
+
+- A workspace whose system interface is down does **not** redirect to the recovery page while discovery is stale; it stays on the auto-refreshing "Loading workspace" loader. Once a fresh discovery snapshot lands (and the agent is still stuck), the chrome redirects to the recovery page.
+- With imbue_cloud unreachable (discovery fresh-with-error), the redirect fires promptly and the recovery page classifies `PROVIDER_UNAVAILABLE` (no stale-window Retry state in the normal flow).
+- The host-health endpoint no longer takes or computes `reachability_confirmed`, and there is no `REACHABILITY_UNCONFIRMED` tier; `HOST_UNRESPONSIVE` is returned for the host-claims-RUNNING-but-unreachable case.
+- The recovery-page client has no convergence loop; `provider_unavailable` still auto-returns the user once the workspace recovers, via the 302 healthy-watch.
+- With a persistently broken discovery pipeline, the user remains on the loader (no redirect) — the accepted, follow-up-handled failure mode.
+- Existing tiers (`HOST_OFFLINE`, `INTERFACE_UNRESPONSIVE`, `WORKSPACE_MISCONFIGURED`, `HOST_UNRESPONSIVE`, `PROVIDER_UNAVAILABLE`, `WORKSPACE_UNREACHABLE`) still classify correctly.
+
+### Changelog (revision)
+
+- `apps/minds` changelog entry: gate the recovery redirect on fresh discovery; remove the `REACHABILITY_UNCONFIRMED` tier, the `reachability_confirmed` plumbing, and the recovery-page convergence loop; rename the mngr-command timeout constant; derive the discovery-freshness threshold from the poll cadence.
+- `dev` changelog entry for the promoted `DISCOVERY_STREAM_POLL_INTERVAL_SECONDS` constant if the `libs/mngr` change warrants it (it is a rename/visibility change in `libs/mngr`, so a `libs/mngr` entry, not `dev`).

@@ -29,22 +29,20 @@ def _response(
     services_agent_id: AgentId | None = _SERVICES_AGENT_ID,
     in_container_stdout: str | None = None,
     plugin_resolver_services: dict[str, str] | None = None,
-    reachability_confirmed: bool = True,
     provider_error: ProviderProbeError | None = None,
     provider_label: str = "",
     mngr_exec_command: str = "",
 ) -> HostHealthResponse:
-    """Call ``build_host_health_response`` with resolver-sourced Layer-A defaults.
+    """Call ``build_host_health_response`` with resolver-sourced defaults.
 
-    Defaults to a healthy, reachability-confirmed RUNNING host so each test only
-    has to vary the inputs it exercises.
+    Defaults to a healthy RUNNING host so each test only has to vary the inputs
+    it exercises.
     """
     return build_host_health_response(
         host_state=host_state,
         services_agent_id=services_agent_id,
         in_container_stdout=in_container_stdout,
         plugin_resolver_services=plugin_resolver_services or {},
-        reachability_confirmed=reachability_confirmed,
         provider_error=provider_error,
         provider_label=provider_label,
         mngr_exec_command=mngr_exec_command,
@@ -218,21 +216,14 @@ def test_dispatch_tier_host_offline_when_container_is_offline() -> None:
 
 
 def test_dispatch_tier_host_unresponsive_when_container_running_but_exec_dead() -> None:
-    """SSH-dead path: host claims RUNNING but exec failed, with reachability confirmed -> consent."""
-    response = _response(host_state="RUNNING", in_container_stdout=None, reachability_confirmed=True)
-    assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
+    """SSH-dead path: host claims RUNNING but exec failed -> consent-gated host restart.
 
-
-def test_dispatch_tier_reachability_unconfirmed_gates_destructive_tier_when_stale() -> None:
-    """Post-outage window: a stale RUNNING host with unconfirmed reachability must NOT offer a restart.
-
-    This is the safety property that replaces the old synchronous-list timeout
-    signal: the would-be destructive HOST_UNRESPONSIVE tier is withheld in favor
-    of the non-destructive REACHABILITY_UNCONFIRMED outcome (Retry), so a brief
-    connectivity drop never hands the user a destructive button on stale state.
+    The recovery page is only reached once discovery is fresh (the redirect is
+    gated on freshness upstream), so the RUNNING claim is trustworthy here and
+    HOST_UNRESPONSIVE is returned unconditionally.
     """
-    response = _response(host_state="RUNNING", in_container_stdout=None, reachability_confirmed=False)
-    assert response.dispatch_tier == DispatchTier.REACHABILITY_UNCONFIRMED
+    response = _response(host_state="RUNNING", in_container_stdout=None)
+    assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
 
 
 def test_dispatch_tier_misconfigured_beats_other_signals() -> None:
@@ -246,7 +237,7 @@ def test_dispatch_tier_misconfigured_beats_other_signals() -> None:
 
 
 def test_dispatch_tier_host_unresponsive_for_ambiguous_host_state() -> None:
-    response = _response(host_state="STARTING", in_container_stdout=None, reachability_confirmed=True)
+    response = _response(host_state="STARTING", in_container_stdout=None)
     assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
 
 
@@ -257,7 +248,6 @@ def test_dispatch_tier_provider_unavailable_beats_host_state() -> None:
     """An unreachable provider classifies as PROVIDER_UNAVAILABLE regardless of host state."""
     response = _response(
         host_state="RUNNING",
-        reachability_confirmed=False,
         provider_error=ProviderProbeError(exception_type="ProviderUnavailableError", message="unreachable"),
         provider_label="Imbue Cloud",
     )
@@ -338,8 +328,8 @@ def test_python_probe_commands_are_well_formed_and_runnable() -> None:
 # --- command / output alignment -------------------------------------------
 #
 # Each probe's output is exactly what its command (run where minds ran it) would
-# print. The two Layer-A probes are read from the passive discovery snapshot, so
-# they carry a pseudo-command label and their output is the raw resolver datum;
+# print. The host-state and system-services-agent probes are read from the passive
+# discovery snapshot, so they carry a pseudo-command label and their output is the raw resolver datum;
 # the in-container probes carry a runnable ``mngr exec`` reproduction.
 
 

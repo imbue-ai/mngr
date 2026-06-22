@@ -821,47 +821,6 @@ _RECOVERY_SCRIPT: Final[str] = """\
           }, REFRESH_INTERVAL_MS);
         }
 
-        // Background convergence loop for the "awaiting fresh discovery" states
-        // (provider_unavailable and reachability_unconfirmed). Each tick does two
-        // things, backing off geometrically so a long outage doesn't hammer
-        // anything: (1) watch pollUrl for the server to start 302ing -- which
-        // happens once the workspace recovers on its own and the background probe
-        // loop flips the tracker HEALTHY -- and follow it back to the workspace;
-        // (2) otherwise re-fetch the (now cheap, resolver-backed) host-health
-        // probe and re-classify, so the affordance updates on its own as
-        // discovery catches up: Retry -> Restart workspace, Retry ->
-        // provider-unavailable, or Retry -> auto-dispatch. A single inflight
-        // guard keeps a manual Retry or a re-render from stacking a second loop.
-        var convergeTimer = null;
-        var CONVERGE_START_MS = 1500;
-        var CONVERGE_MAX_MS = 30000;
-        function isAwaitingFreshDiscovery(tier) {
-          return tier === 'provider_unavailable' || tier === 'reachability_unconfirmed';
-        }
-        function scheduleConvergence(delayMs) {
-          if (convergeTimer !== null) clearTimeout(convergeTimer);
-          convergeTimer = setTimeout(function () {
-            convergeTimer = null;
-            var nextDelay = Math.min(delayMs * 1.5, CONVERGE_MAX_MS);
-            fetch(pollUrl(), { credentials: 'same-origin', redirect: 'manual' }).then(function (resp) {
-              if (resp.type === 'opaqueredirect' || (resp.status >= 300 && resp.status < 400)) {
-                window.location.assign(pollUrl());
-                return;
-              }
-              // Not recovered on its own: re-classify from the latest resolver
-              // state. fromConvergence=true so the render does not arm a second
-              // loop; we re-arm here only while still awaiting fresh discovery.
-              fetchHealth().then(function (data) {
-                applyHealth(data, true, true);
-                if (isAwaitingFreshDiscovery(data && data.dispatch_tier)) scheduleConvergence(nextDelay);
-              }, function () {
-                scheduleConvergence(nextDelay);
-              });
-            }, function () {
-              scheduleConvergence(nextDelay);
-            });
-          }, delayMs);
-        }
 
         function renderLoading() {
           titleEl.textContent = 'Loading workspace';
@@ -918,9 +877,9 @@ _RECOVERY_SCRIPT: Final[str] = """\
         }
         // The provider backend (Imbue Cloud, or the local docker daemon) is
         // unreachable. A restart routes through that same backend, so it can't
-        // help -- offer only a Retry. The background convergence loop (armed by
-        // applyHealth) auto-returns the moment the provider comes back, or
-        // reclassifies if discovery surfaces a different tier.
+        // help -- offer only a Retry. The background healthy-poll (armed by
+        // applyHealth) auto-returns the user to the workspace the moment it
+        // recovers and the tracker flips HEALTHY.
         function renderProviderUnavailable(data) {
           var label = (data && data.provider_label) || 'the workspace backend';
           titleEl.textContent = "Can't connect to " + label;
@@ -929,22 +888,6 @@ _RECOVERY_SCRIPT: Final[str] = """\
             + ' may be temporarily unavailable. This page will reconnect automatically '
             + 'once it can reach your workspace again.';
           show(spinnerEl, false);
-          show(errorEl, false);
-          show(hostBtn, false);
-          show(retryBtn, true);
-        }
-        // The resolver's host/provider view is too stale to confirm reachability
-        // (the post-outage window: discovery may still show a stale RUNNING host
-        // with no provider error surfaced yet). We will not offer a destructive
-        // restart on unconfirmed state, so show a neutral "checking" state with a
-        // Retry; the background convergence loop reclassifies into the real tier
-        // -- or returns the user to the workspace -- once discovery catches up.
-        function renderReachabilityUnconfirmed() {
-          titleEl.textContent = 'Checking workspace connection';
-          messageEl.textContent =
-            'Confirming whether your workspace can be reached. This usually takes a few seconds; '
-            + 'if it needs a restart, that option will appear here automatically.';
-          show(spinnerEl, true);
           show(errorEl, false);
           show(hostBtn, false);
           show(retryBtn, true);
@@ -985,12 +928,11 @@ _RECOVERY_SCRIPT: Final[str] = """\
         }
 
         // Render (and, when ``autoDispatch``, dispatch a restart for) the tier in
-        // a host-health payload. ``fromConvergence`` is true only when called
-        // from the background convergence loop: the awaiting-discovery renders
-        // then skip arming a fresh convergence loop (the loop re-arms itself), so
-        // a manual entry arms exactly one loop and a re-render never resets its
-        // backoff.
-        function applyHealth(data, autoDispatch, fromConvergence) {
+        // a host-health payload. The recovery page is only reached once discovery
+        // is fresh (the redirect is gated on freshness), so the classification is
+        // trustworthy and there is no transient awaiting-discovery state to
+        // converge through.
+        function applyHealth(data, autoDispatch) {
           latestHealth = data || null;
           renderDebugMenu(latestHealth);
           var tier = data && data.dispatch_tier;
@@ -1006,19 +948,14 @@ _RECOVERY_SCRIPT: Final[str] = """\
             renderMisconfigured();
             return;
           }
-          // Provider-level and awaiting-fresh-discovery outcomes short-circuit
-          // before any restart dispatch on EVERY entry path: no restart can or
-          // should fire while the backend is unreachable, rejecting us, or its
-          // state is unconfirmed. All render-only; the awaiting-discovery ones
-          // arm the background convergence loop so the tier updates on its own.
+          // Provider-level outcomes short-circuit before any restart dispatch on
+          // EVERY entry path: no restart can or should fire while the backend is
+          // unreachable or rejecting us. Render-only; provider_unavailable arms
+          // the background healthy-poll so it auto-returns once the workspace
+          // recovers.
           if (tier === 'provider_unavailable') {
             renderProviderUnavailable(data);
-            if (!fromConvergence) scheduleConvergence(CONVERGE_START_MS);
-            return;
-          }
-          if (tier === 'reachability_unconfirmed') {
-            renderReachabilityUnconfirmed();
-            if (!fromConvergence) scheduleConvergence(CONVERGE_START_MS);
+            scheduleHealthyPoll();
             return;
           }
           if (tier === 'workspace_unreachable') {
@@ -1055,7 +992,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
         function runProbe(autoDispatch) {
           renderLoading();
           fetchHealth().then(function (data) {
-            applyHealth(data, autoDispatch, false);
+            applyHealth(data, autoDispatch);
           }, function () {
             renderUnresponsive();
           });
@@ -1066,13 +1003,9 @@ _RECOVERY_SCRIPT: Final[str] = """\
         });
         if (retryBtn) {
           retryBtn.addEventListener('click', function () {
-            // Re-check reachability immediately. Clear any in-flight convergence
-            // loop so the manual probe doesn't race or stack with it; runProbe
-            // re-arms the loop if we're still awaiting fresh discovery.
-            // autoDispatch stays true, but the provider/unreachable/unconfirmed
-            // tiers are render-only, so this never dispatches a restart -- it
-            // just refreshes the probe and re-renders the state.
-            if (convergeTimer !== null) { clearTimeout(convergeTimer); convergeTimer = null; }
+            // Re-check reachability immediately. autoDispatch stays true, but the
+            // provider/unreachable tiers are render-only, so this never dispatches
+            // a restart -- it just refreshes the probe and re-renders the state.
             runProbe(true);
           });
         }
