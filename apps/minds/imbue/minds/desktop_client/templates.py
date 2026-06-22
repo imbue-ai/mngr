@@ -244,7 +244,7 @@ _FALLBACK_HOST_NAME: Final[str] = "assistant"
 # Pin to an annotated FCT tag so a shipped binary clones the exact FCT
 # snapshot it was verified against. Bump to a newer tag only after
 # re-verifying launch-to-msg CI against (this binary, the new tag).
-FALLBACK_BRANCH: Final[str] = "minds-v0.3.1"
+FALLBACK_BRANCH: Final[str] = "minds-v0.3.2"
 
 # Env var (set by ``just minds-start`` and the e2e workspace runner) that opts a
 # launch into the operator's local-worktree create-form defaults. Gating on an
@@ -547,11 +547,14 @@ _RECOVERY_STYLE: Final[str] = """\
       }
       .row { flex-shrink: 0; }
 
-      /* Primary action. The restart button is the page's focal point: full
-         width, prominent, directly under the message. Most users only ever
-         need this -- the troubleshooting disclosures below are for the rare
-         deep-debugging case. */
-      #recovery-host-btn {
+      /* Primary action. The restart and retry buttons are the page's focal
+         point: full width, prominent, directly under the message. They are
+         mutually exclusive (only one shows at a time, per the rendered tier)
+         and share this styling. Most users only ever need this -- the
+         troubleshooting disclosures below are for the rare deep-debugging
+         case. */
+      #recovery-host-btn,
+      #recovery-retry-btn {
         margin-top: 20px;
         flex-shrink: 0;
         width: 100%;
@@ -564,7 +567,8 @@ _RECOVERY_STYLE: Final[str] = """\
         font-weight: 600;
         cursor: pointer;
       }
-      #recovery-host-btn:hover { background: #3f3f46; }
+      #recovery-host-btn:hover,
+      #recovery-retry-btn:hover { background: #3f3f46; }
       #recovery-host-btn.secondary { background: #6b7280; }
       #recovery-host-btn.secondary:hover { background: #4b5563; }
 
@@ -710,6 +714,10 @@ _RECOVERY_SCRIPT: Final[str] = """\
         var spinnerEl = document.getElementById('loading-spinner');
         var errorEl = document.getElementById('recovery-error');  // null unless restart_failed
         var hostBtn = document.getElementById('recovery-host-btn');
+        // Shown (in place of the restart button) on the provider-unavailable and
+        // workspace-unreachable states, where a restart cannot help; re-runs the
+        // host-health probe so the user can re-check reachability on demand.
+        var retryBtn = document.getElementById('recovery-retry-btn');
         var debugDetailsEl = document.getElementById('recovery-debug-details');
         var debugContentEl = document.getElementById('recovery-debug-content');
         var copyBtn = document.getElementById('copy-diagnostics-btn');
@@ -813,12 +821,39 @@ _RECOVERY_SCRIPT: Final[str] = """\
           }, REFRESH_INTERVAL_MS);
         }
 
+        // Background convergence poll for the provider-unavailable state. Like
+        // scheduleHealthyPoll it watches pollUrl for the server to start 302ing
+        // (which happens once the provider is reachable again and the background
+        // probe loop flips the tracker HEALTHY), but it backs off geometrically
+        // rather than polling every second -- a provider outage can last a while
+        // and there is no point hammering the connector. A single inflight guard
+        // keeps a manual Retry from stacking a second poll chain.
+        var providerPollTimer = null;
+        var PROVIDER_POLL_START_MS = 2000;
+        var PROVIDER_POLL_MAX_MS = 30000;
+        function scheduleProviderPoll(delayMs) {
+          if (providerPollTimer !== null) clearTimeout(providerPollTimer);
+          providerPollTimer = setTimeout(function () {
+            providerPollTimer = null;
+            fetch(pollUrl(), { credentials: 'same-origin', redirect: 'manual' }).then(function (resp) {
+              if (resp.type === 'opaqueredirect' || (resp.status >= 300 && resp.status < 400)) {
+                window.location.assign(pollUrl());
+                return;
+              }
+              scheduleProviderPoll(Math.min(delayMs * 1.5, PROVIDER_POLL_MAX_MS));
+            }, function () {
+              scheduleProviderPoll(Math.min(delayMs * 1.5, PROVIDER_POLL_MAX_MS));
+            });
+          }, delayMs);
+        }
+
         function renderLoading() {
           titleEl.textContent = 'Loading workspace';
           messageEl.textContent = '';
           show(spinnerEl, true);
           show(errorEl, false);
           show(hostBtn, false);
+          show(retryBtn, false);
           // A stale diagnostic from the previous tick would be misleading
           // while we're in flight to a fresh check; hide it and drop the
           // cached payload so renderDebugMenu starts blank next time.
@@ -865,6 +900,38 @@ _RECOVERY_SCRIPT: Final[str] = """\
           hostBtn.classList.remove('secondary');
           show(hostBtn, true);
         }
+        // The provider backend (Imbue Cloud, or the local docker daemon) is
+        // unreachable. A restart routes through that same backend, so it can't
+        // help -- offer only a Retry, and keep a backed-off background poll
+        // running so we auto-return the moment the provider comes back.
+        function renderProviderUnavailable(data) {
+          var label = (data && data.provider_label) || 'the workspace backend';
+          titleEl.textContent = "Can't connect to " + label;
+          messageEl.textContent =
+            'Check your internet connection and try again. ' + label
+            + ' may be temporarily unavailable. This page will reconnect automatically '
+            + 'once it can reach your workspace again.';
+          show(spinnerEl, false);
+          show(errorEl, false);
+          show(hostBtn, false);
+          show(retryBtn, true);
+          scheduleProviderPoll(PROVIDER_POLL_START_MS);
+        }
+        // The provider answered but rejected us (expired login, no account
+        // configured, ...). A restart cannot fix an auth/config problem, so
+        // surface the reason and offer only a Retry.
+        function renderWorkspaceUnreachable(data) {
+          var reason = (data && data.unreachable_reason) || '';
+          titleEl.textContent = "Can't reach your workspace";
+          messageEl.textContent = reason
+            ? reason
+            : 'Your workspace could not be reached. This usually means your account or '
+              + 'login needs attention; a restart will not help.';
+          show(spinnerEl, false);
+          show(errorEl, false);
+          show(hostBtn, false);
+          show(retryBtn, true);
+        }
 
         function postRestart(path) {
           renderLoading();
@@ -906,6 +973,18 @@ _RECOVERY_SCRIPT: Final[str] = """\
               renderMisconfigured();
               return;
             }
+            // Provider-level outcomes short-circuit before any restart dispatch
+            // on EVERY entry path (including restart_failed): when the backend is
+            // unreachable or rejecting us, no restart can help, so we never want
+            // to offer or auto-dispatch one. Both render-only.
+            if (tier === 'provider_unavailable') {
+              renderProviderUnavailable(data);
+              return;
+            }
+            if (tier === 'workspace_unreachable') {
+              renderWorkspaceUnreachable(data);
+              return;
+            }
             if (!autoDispatch) {
               // restart_failed entry: render unresponsive so the failure
               // reason and the diagnostics list both stay visible.
@@ -934,6 +1013,15 @@ _RECOVERY_SCRIPT: Final[str] = """\
         hostBtn.addEventListener('click', function () {
           postRestart('/restart-host');
         });
+        if (retryBtn) {
+          retryBtn.addEventListener('click', function () {
+            // Re-check reachability immediately. autoDispatch stays true, but the
+            // provider/unreachable tiers are render-only, so this never dispatches
+            // a restart -- it just refreshes the probe and re-renders the state.
+            if (providerPollTimer !== null) { clearTimeout(providerPollTimer); providerPollTimer = null; }
+            runProbe(true);
+          });
+        }
         if (copyBtn) {
           copyBtn.addEventListener('click', copyDiagnostics);
         }
@@ -1031,6 +1119,7 @@ def render_recovery_page(
     # whenever neither disclosure is currently visible.
     card_extra = (
         '      <button id="recovery-host-btn" class="hidden">Restart workspace</button>\n'
+        '      <button id="recovery-retry-btn" class="hidden">Retry</button>\n'
         '      <div class="recovery-troubleshooting">\n'
         '        <p class="recovery-troubleshooting-label">Troubleshooting</p>\n'
         + error_block

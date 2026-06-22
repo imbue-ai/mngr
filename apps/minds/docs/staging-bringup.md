@@ -111,12 +111,13 @@ become Vault entries in step 4.
   `https://minds-staging--rsc-staging-api.modal.run/auth/callback/github`.
   Capture the client id and secret.
 
-- [ ] **OVH credentials** for staging. Generate the AK/AS/CK trio at
-  <https://api.us.ovhcloud.com/createApp> for the `ovh-us` endpoint
-  with the scopes the pool flows need (see `host-pool-setup.md`).
-  These can be skipped on the first deploy (the entry is optional --
-  deploy logs a warning and proceeds), but pool host creation and
-  `minds env destroy` cleanup both require it.
+- [ ] **Bare-metal box supplier credentials** for staging (currently
+  OVH; also used to tear down legacy OVH VPS hosts). Generate the
+  AK/AS/CK trio at <https://api.us.ovhcloud.com/createApp> for the
+  `ovh-us` endpoint with the scopes the pool flows need (see
+  `host-pool-setup.md`). These can be skipped on the first deploy (the
+  entry is optional -- deploy logs a warning and proceeds), but pool
+  host creation and `minds env destroy` cleanup both require it.
 
 - [ ] **Anthropic API key** for the staging LiteLLM proxy backend. Either
   mint a dedicated key under a staging-tagged Anthropic account or
@@ -241,10 +242,11 @@ never pushed to Modal):
   needs it).
 
 - [ ] **`secrets/minds/staging/ovh`** -- `OVH_APPLICATION_KEY`,
-  `OVH_APPLICATION_SECRET`, `OVH_CONSUMER_KEY`. Skippable on first
-  deploy (deploy warns and continues), but required before
-  `mngr imbue_cloud admin pool create` or `minds env destroy` can
-  succeed.
+  `OVH_APPLICATION_SECRET`, `OVH_CONSUMER_KEY` (the bare-metal box
+  supplier credentials, currently OVH; also used to tear down legacy
+  OVH VPS hosts). Skippable on first deploy (deploy warns and
+  continues), but required before `mngr imbue_cloud admin pool create`
+  or `minds env destroy` can succeed.
 
 After every push:
 
@@ -296,8 +298,8 @@ This is the safety-gated command from `environments.md`. What it does:
 
 Watch the deploy logs. On the first run, expect:
 
-- `WARNING: Vault read for ovh failed ...` if you skipped the OVH
-  entry. Safe to ignore.
+- `WARNING: Vault read for ovh failed ...` if you skipped the
+  bare-metal box supplier credentials entry. Safe to ignore.
 - Per-app deploy lines ending with
   `https://minds-staging--rsc-staging-api.modal.run` and
   `https://minds-staging--llm-staging-proxy.modal.run`. The deploy
@@ -321,32 +323,36 @@ Only needed if you want the staging desktop client to use IMBUE_CLOUD
 launch mode. DOCKER mode (`--template main --template docker`) works
 without any pool hosts.
 
-With staging activated, bake via the canonical justfile recipe:
+Pool hosts are baked as bare-metal **slices** (baking new OVH classic VPS
+pool hosts is deprecated and no longer supported). You first need a
+bare-metal box that is registered + prepped (`status=ready`) via the
+`mngr imbue_cloud admin server` commands -- see
+[host-pool-setup.md](./host-pool-setup.md) step 5. With staging activated,
+bake onto a `ready` box via the canonical justfile recipe:
 
 ```bash
-just bake-pool-host '{"repo_branch_or_tag": "v0.3.0"}' US-WEST-OR
+just bake-slice-prod US-WEST-OR v0.3.0 1 --server-id <bare-metal-server-id>
 ```
 
-`just bake-pool-host <attributes-json> <region> [workspace_dir] [count] [extra flags]`
-wraps `minds pool create`, which derives the management SSH key and the OVH
-AK/AS/CK from the tier's Vault entries, auto-tags the VPS `minds_env=staging`
-(so `minds env destroy` can tear it down), and -- for staging/production --
-reads the host_pool DSN from `secrets/minds/staging/neon`. You do NOT export
-any of those by hand. See [host-pool-setup.md](./host-pool-setup.md) step 5
-for the full breakdown.
+`just bake-slice-prod <region> <tag> [count] [extra flags]` wraps
+`minds pool create --backend slice`, which derives the pool SSH key from
+the tier's Vault entry and -- for staging/production -- reads the host_pool
+DSN from `secrets/minds/staging/neon`. You do NOT export any of those by
+hand. See [host-pool-setup.md](./host-pool-setup.md) step 5 for the full
+breakdown.
 
-`--region` is required by OVH (use any OVH datacenter code that's valid
-for the VPS plan; `US-WEST-OR` and `US-EAST-VA` are the routine picks).
-The baked version comes from the `workspace_dir` checkout (default
-`~/project/forever-claude-template`), NOT from `--attributes` -- check that
-workspace out at the tag/branch you want baked first (e.g. `v0.3.0`).
+`region` is the lease-region **label** stamped on each row (what the
+connector region-matches at lease time, e.g. `US-WEST-OR` / `US-EAST-VA`) --
+not the box's raw datacenter code. The baked version comes from the bake
+source (`<tag>` here, e.g. `v0.3.0`), NOT from `--attributes`.
 
-Common first-bake failure: ``OVH API POST /order/cart/.../checkout
-returned error: You do not have preferred payment method``. The OVH
-account needs a default payment method configured before any VPS order
-can go through. Set one in the OVH manager UI (Billing -> Payment
-methods -> add -> mark as default) and re-run. The bake script cleans
-up the half-provisioned VPS on this failure, so it's safe to retry.
+The bare-metal box itself is ordered ahead of time via `mngr imbue_cloud
+admin server order` (using the supplier credentials). A common box-order
+failure with the current OVH supplier is ``OVH API POST
+/order/cart/.../checkout returned error: You do not have preferred payment
+method`` -- the supplier account needs a default payment method (OVH manager
+UI: Billing -> Payment methods -> add -> mark as default) before any box
+order can go through.
 
 - [ ] `just list-pool-hosts` shows the row.
 

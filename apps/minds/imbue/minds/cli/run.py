@@ -6,7 +6,7 @@ forwarding logic lives in the ``mngr_forward`` plugin now; this command:
 1. Spawns ``mngr forward --service system_interface --preauth-cookie ...`` as
    a subprocess via ``EnvelopeStreamConsumer`` (which feeds the surviving
    ``MngrCliBackendResolver`` from the plugin's envelope stream).
-2. Builds the slimmed minds-side bare-origin FastAPI app and runs it on
+2. Builds the slimmed minds-side bare-origin Flask app and runs it on
    ``--port`` (default 8420).
 3. Emits a ``mngr_forward_started`` JSONL event on stdout carrying the
    preauth cookie value, so the Electron shell can pre-set
@@ -24,12 +24,10 @@ import secrets
 import threading
 import webbrowser
 from pathlib import Path
-from types import FrameType
 from typing import Final
 
 import click
-import uvicorn
-from fastapi import FastAPI
+from flask import Flask
 from loguru import logger
 from pydantic import Field
 
@@ -48,7 +46,6 @@ from imbue.minds.desktop_client.api_key_store import generate_api_key
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.app import start_system_interface_health_probe_loop
 from imbue.minds.desktop_client.auth import FileAuthStore
-from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.forward_cli import ForwardSubprocessConfig
 from imbue.minds.desktop_client.forward_cli import start_mngr_forward
@@ -68,7 +65,10 @@ from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissi
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import load_response_events
+from imbue.minds.desktop_client.server import desktop_client_runtime
+from imbue.minds.desktop_client.server import serve_desktop_client
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.system_interface_health import should_enroll_suspect_for_backend_failure
 from imbue.minds.primitives import OneTimeCode
@@ -89,7 +89,7 @@ from imbue.mngr_latchkey.store import LatchkeyStoreError
 
 # How long `minds run` waits for the spawned `mngr forward` plugin to report
 # its bound port via a `listening` envelope before treating startup as failed.
-# The plugin emits this from its FastAPI lifespan startup, so on a warm
+# The plugin emits this from its own server's startup, so on a warm
 # install the wait only needs to cover the subprocess's own interpreter
 # start and imports. On a cold install (vanilla Mac, no `~/.minds/.venv`),
 # uv has to download the python toolchain + install the venv + load
@@ -220,7 +220,7 @@ def run(
     gateway_client = LatchkeyGatewayClient.from_latchkey(latchkey)
 
     # Build the supervisor once and keep the handle: the startup restart runs on
-    # the background thread below, and the same instance is stashed on app.state
+    # the background thread below, and the same instance is held in the app state
     # so the provider-change request handlers can ``bounce()`` it mid-session
     # (mirroring the SIGHUP minds already sends its own ``mngr forward`` observe).
     latchkey_forward_supervisor = LatchkeyForwardSupervisor(
@@ -252,11 +252,12 @@ def run(
     # orphan tree running across restarts.
     start_grandparent_death_watcher(root_concurrency_group)
 
-    # Run ``mngr message`` (and, over time, other ``mngr`` CLI calls) in children
-    # forked from a pre-warmed forkserver instead of spawning a fresh subprocess
-    # each time, so UI actions like Approve/Deny don't pay the multi-second
-    # interpreter+import startup cost. ``prewarm`` is non-blocking: it pays the
-    # one-time import cost on a background thread, off the request path.
+    # Run ``mngr message`` (and, over time, other ``mngr`` CLI calls) in a
+    # pre-warmed, single-use ``mngr`` process instead of spawning (and importing)
+    # a fresh interpreter each time, so UI actions like Approve/Deny don't pay the
+    # multi-second interpreter+import startup cost. ``prewarm`` is non-blocking:
+    # it spawns the first warm process (which pays the import cost) on a
+    # background thread, off the request path.
     mngr_caller = get_default_mngr_caller()
     mngr_caller.prewarm(root_concurrency_group)
     mngr_message_sender = MngrMessageSender(mngr_caller=mngr_caller, concurrency_group=root_concurrency_group)
@@ -427,8 +428,8 @@ def run(
         root_concurrency_group=root_concurrency_group,
     )
 
-    # Wire the permission-requests streaming consumer once the FastAPI
-    # app is built so the on_request callback can mutate ``app.state``
+    # Wire the permission-requests streaming consumer once the Flask
+    # app is built so the on_request callback can mutate the app state
     # directly. The consumer thread runs for the lifetime of
     # ``root_concurrency_group``.
     permission_requests_consumer = PermissionRequestsConsumer(
@@ -436,12 +437,12 @@ def run(
         on_request=_StreamedPermissionRequestHandler(app=app, backend_resolver=backend_resolver, latchkey=latchkey),
     )
     permission_requests_consumer.start(root_concurrency_group)
-    # Stash on app.state so the lifespan shutdown can stop() the consumer
+    # Stash on the app state so the shutdown teardown can stop() the consumer
     # before draining the root concurrency group; without this the
     # consumer thread stays blocked on its follow-stream read=None socket
     # for the full CG shutdown timeout and the group surfaces a "1 strand
     # did not finish in time" warning on every clean exit.
-    app.state.permission_requests_consumer = permission_requests_consumer
+    get_state(app).permission_requests_consumer = permission_requests_consumer
 
     if not no_browser:
         # Open the URL that carries the one-time code rather than the bare
@@ -455,83 +456,29 @@ def run(
         thread = threading.Thread(target=_sleep_then_open, args=(minds_login_url,), daemon=True)
         thread.start()
 
-    server = _PreShutdownAwareServer(config=uvicorn.Config(app, host=host, port=port, timeout_graceful_shutdown=1))
-    server.pre_shutdown_app = app
-    server.pre_shutdown_resolver = backend_resolver
-    try:
-        server.run()
-    finally:
-        consumer.terminate()
-
-
-class _PreShutdownAwareServer(uvicorn.Server):
-    """A uvicorn Server that flips ``app.state.shutdown_event`` on SIGINT/SIGTERM.
-
-    Without this hook, uvicorn's shutdown order is:
-
-    1. Signal handler sets ``should_exit = True``.
-    2. Main loop notices, calls ``shutdown()``.
-    3. ``shutdown()`` waits ``timeout_graceful_shutdown`` seconds for
-       in-flight connections (SSE streams that the browser is holding
-       open are still in-flight).
-    4. On timeout, cancels every in-flight task with ``CancelledError``
-       -- which surfaces as a noisy starlette/anyio traceback in the
-       log on every clean shutdown.
-    5. THEN calls ``lifespan.shutdown()`` (i.e. our ``_managed_lifespan``
-       finally block).
-
-    Setting ``shutdown_event`` from the lifespan finally is too late --
-    the cancel has already happened. ``handle_exit`` is the earliest
-    hook we have: it fires from the signal handler itself, BEFORE
-    uvicorn starts waiting for connections, so our SSE handlers see
-    the flag set on their next iteration and return their generators
-    cleanly. Once they're done, ``shutdown()``'s wait completes
-    without timing out, no tasks need to be cancelled, no traceback.
-
-    The ``backend_resolver.notify_change()`` poke wakes the chrome SSE
-    out of its 30-second ``change_event.wait()`` immediately, so the
-    SSE handlers don't have to wait out the full poll interval before
-    noticing ``shutdown_event``.
-
-    ``pre_shutdown_app`` and ``pre_shutdown_resolver`` are set by the
-    caller via direct attribute assignment immediately after
-    construction. We can't override ``__init__`` (the project ratchet
-    forbids it on non-exception classes), and the parent's __init__
-    takes only ``config``, so the cleanest way to thread these in is
-    explicit post-construction assignment. ``None`` defaults keep the
-    type checker happy and let the handler no-op gracefully if a future
-    caller forgets to wire them up.
-    """
-
-    pre_shutdown_app: FastAPI | None = None
-    pre_shutdown_resolver: BackendResolverInterface | None = None
-
-    def handle_exit(self, sig: int, frame: FrameType | None) -> None:
-        # Fire BEFORE super(): super().handle_exit sets should_exit,
-        # which begins uvicorn's shutdown sequence. We want shutdown_event
-        # set first so SSE handlers exit before uvicorn starts waiting
-        # on still-in-flight connections.
-        if self.pre_shutdown_app is not None:
-            self.pre_shutdown_app.state.shutdown_event.set()
-        if isinstance(self.pre_shutdown_resolver, MngrCliBackendResolver):
-            self.pre_shutdown_resolver.notify_change()
-        super().handle_exit(sig, frame)
+    # ``desktop_client_runtime`` owns the shared HTTP client + geo-detection
+    # startup and the ordered shutdown teardown (close client, terminate
+    # consumers, stop the mngr caller, drain the root concurrency group).
+    # ``serve_desktop_client`` runs the graceful cheroot server until
+    # SIGINT/SIGTERM, flipping ``shutdown_event`` + waking the SSE handlers
+    # before the server drains so streams end cleanly with no tracebacks.
+    with desktop_client_runtime(get_state(app), is_externally_managed_client=False):
+        serve_desktop_client(app, get_state(app), host=host, port=port)
 
 
 class _StreamedPermissionRequestHandler(FrozenModel):
     """Callable that appends a streamed permission request to the app inbox.
 
-    The handler runs on the permission-requests consumer thread (not
-    the FastAPI event loop), so it only does thread-safe work:
-    appending to the immutable :class:`RequestInbox` produces a new
-    instance per mutation and Python attribute assignment is atomic for
-    our purposes here. Same trick the legacy JSONL
-    ``_handle_request_event_callback`` already uses.
+    The handler runs on the permission-requests consumer thread (not a
+    request thread), so it only does thread-safe work: appending to the
+    immutable :class:`RequestInbox` produces a new instance per mutation
+    and Python attribute assignment is atomic for our purposes here. Same
+    trick the legacy JSONL ``_handle_request_event_callback`` already uses.
     """
 
-    app: FastAPI = Field(
+    app: Flask = Field(
         frozen=True,
-        description="Desktop-client FastAPI instance whose ``state.request_inbox`` is mutated on receipt.",
+        description="Desktop-client Flask instance whose state ``request_inbox`` is mutated on receipt.",
     )
     backend_resolver: MngrCliBackendResolver = Field(
         frozen=True,
@@ -545,12 +492,12 @@ class _StreamedPermissionRequestHandler(FrozenModel):
         ),
     )
 
-    # ``FastAPI``, ``MngrCliBackendResolver`` and ``Latchkey`` are not
+    # ``Flask``, ``MngrCliBackendResolver`` and ``Latchkey`` are not
     # pydantic natives; tolerate them with ``arbitrary_types_allowed``.
     model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
 
     def __call__(self, event: RequestEvent) -> None:
-        current: RequestInbox | None = self.app.state.request_inbox
+        current: RequestInbox | None = get_state(self.app).request_inbox
         if current is None:
             return
         # The gateway re-emits every still-pending request on each
@@ -567,7 +514,7 @@ class _StreamedPermissionRequestHandler(FrozenModel):
         # eventual approval actually takes effect. Best-effort: failures
         # are logged and the request is still surfaced.
         self._maybe_recover_host_permissions(event)
-        self.app.state.request_inbox = current.add_request(event)
+        get_state(self.app).request_inbox = current.add_request(event)
         if isinstance(event, LatchkeyPredefinedPermissionRequestEvent):
             logger.info(
                 "Streamed latchkey permission request for agent {} (scope={}, request_id={})",

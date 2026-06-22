@@ -1,0 +1,1 @@
+Updated the shared provider release harness's offline-host_dir capability docstring to note that GCP now also supports the offline ``host_dir`` mirror (alongside AWS S3 and Azure Blob), so Trip 1's opt-in offline-host_dir step runs against GCP too.

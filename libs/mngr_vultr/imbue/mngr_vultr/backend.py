@@ -2,7 +2,6 @@ from collections.abc import Sequence
 from typing import Any
 from typing import Final
 
-from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import SecretStr
@@ -10,13 +9,14 @@ from pydantic import SecretStr
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
-from imbue.mngr_vps_docker.instance import VpsDockerProvider
-from imbue.mngr_vps_docker.instance import parse_vps_build_args
+from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
+from imbue.mngr_vps.build_args import parse_vps_build_args
+from imbue.mngr_vps.instance import VpsProvider
 from imbue.mngr_vultr import hookimpl
 from imbue.mngr_vultr.client import VultrVpsClient
 from imbue.mngr_vultr.config import VultrProviderConfig
@@ -24,11 +24,11 @@ from imbue.mngr_vultr.config import VultrProviderConfig
 VULTR_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("vultr")
 
 
-class VultrProvider(VpsDockerProvider):
+class VultrProvider(VpsProvider):
     """Vultr-specific provider that implements VPS listing via the Vultr API.
 
     All cross-VPS discovery machinery (parallel SSH reads, caching,
-    per-name lookups) is inherited from ``VpsDockerProvider``; this
+    per-name lookups) is inherited from ``VpsProvider``; this
     subclass only contributes the provider-specific tag-based listing.
     """
 
@@ -48,9 +48,6 @@ class VultrProvider(VpsDockerProvider):
         """
         return self.vultr_client.list_instances()
 
-    def _credentials_configured(self) -> bool:
-        return bool(self.vultr_client.api_key.get_secret_value())
-
     def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
         """Parse Vultr-prefixed build args (--vultr-region, --vultr-plan, --git-depth)."""
         return parse_vps_build_args(
@@ -66,11 +63,9 @@ class VultrProvider(VpsDockerProvider):
 
         Vultr uses raw IPv4 addresses as SSH targets, not DNS names. The
         return values are strings to satisfy the base-class contract,
-        which accepts either IPs or hostnames.
+        which accepts either IPs or hostnames. The API key is guaranteed present
+        (the backend raises ProviderNotAuthorizedError at construction otherwise).
         """
-        if not self._credentials_configured():
-            logger.warning("Vultr API key not configured, skipping VPS discovery")
-            return []
         provider_tag = f"mngr-provider={self.name}"
         instances = self._list_instances_cached()
         vps_ips: list[str] = []
@@ -123,13 +118,19 @@ class VultrProviderBackend(ProviderBackendInterface):
         if not isinstance(config, VultrProviderConfig):
             raise MngrError(f"Expected VultrProviderConfig, got {type(config).__name__}")
 
+        # An enabled-but-unauthenticated provider is an error, not a silent
+        # zero-result listing: surface it consistently with the other cloud
+        # providers so it is reported (and contributes a non-zero exit) rather
+        # than vanishing. ProviderNotAuthorizedError is a ProviderUnavailableError,
+        # so read paths still treat it as unavailable.
         try:
             api_key = config.get_api_key()
-        except ValueError:
-            # No API key configured -- create with empty key.
-            # The provider will be discoverable but discovery operations will
-            # return empty results and log a warning when the API is called.
-            api_key = ""
+        except ValueError as e:
+            raise ProviderNotAuthorizedError(
+                name,
+                reason="Vultr API key not configured",
+                short_remediation="set the Vultr API key (VULTR_API_KEY or providers.<name>.api_key)",
+            ) from e
         vultr_client = VultrVpsClient(api_key=SecretStr(api_key), os_id=config.default_os_id)
 
         return VultrProvider(

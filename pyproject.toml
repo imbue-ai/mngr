@@ -17,10 +17,11 @@ dependencies = [
 # only ever forward -- pushing it back would re-exclude a deliberately-pinned
 # fresh dep and break resolution. This only buys a detection delay;
 # it can't catch a compromise that stays undetected past the window.
-exclude-newer = "2026-06-03T00:00:00Z"
+exclude-newer = "2026-06-04T00:00:00Z"
 
 [tool.uv.sources]
 imbue-common = { workspace = true }
+overlay = { workspace = true }
 
 [tool.uv.workspace]
 members = ["libs/*", "apps/*"]
@@ -41,6 +42,8 @@ dev = [
     "tomlkit>=0.12.0",
     "imbue-common[dev]",
     "shellcheck-py>=0.10.0",
+    # In-memory AWS service mocks for unit tests (S3 state-bucket round-trips).
+    "moto[s3]>=5.0",
 ]
 
 # Shared pytest settings (markers, filterwarnings, coverage report config)
@@ -69,6 +72,7 @@ addopts = [
   "--cov=imbue.mngr",
   "--cov=imbue.imbue_common",
   "--cov=imbue.resource_guards",
+  "--cov=imbue.overlay",
   "--cov=imbue.mngr_claude",
   "--cov=imbue.mngr_claude_subagent_proxy",
   "--cov=imbue.mngr_opencode",
@@ -102,7 +106,7 @@ addopts = [
   "--cov=imbue.modal_proxy",
   "--cov=imbue.mngr_wait",
   "--cov=imbue.mngr_robinhood",
-  "--cov=imbue.mngr_vps_docker",
+  "--cov=imbue.mngr_vps",
   "--cov=imbue.mngr_vultr",
   "--cov=imbue.mngr_aws",
   "--cov=imbue.mngr_ovh",

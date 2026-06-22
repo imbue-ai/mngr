@@ -38,27 +38,3 @@ class ForwardPluginConfig(PluginConfig):
         default=False,
         description="Whether to open the login URL automatically (sets --open-browser by default).",
     )
-
-    def merge_with(self, override: "PluginConfig") -> "ForwardPluginConfig":
-        merged_enabled = override.enabled if override.enabled is not None else self.enabled
-        if not isinstance(override, ForwardPluginConfig):
-            return self.__class__(
-                enabled=merged_enabled,
-                port=self.port,
-                agent_include=self.agent_include,
-                agent_exclude=self.agent_exclude,
-                event_include=self.event_include,
-                event_exclude=self.event_exclude,
-                auto_open_browser=self.auto_open_browser,
-            )
-        return self.__class__(
-            enabled=merged_enabled,
-            port=override.port if override.port is not None else self.port,
-            agent_include=override.agent_include if override.agent_include is not None else self.agent_include,
-            agent_exclude=override.agent_exclude if override.agent_exclude is not None else self.agent_exclude,
-            event_include=override.event_include if override.event_include is not None else self.event_include,
-            event_exclude=override.event_exclude if override.event_exclude is not None else self.event_exclude,
-            auto_open_browser=(
-                override.auto_open_browser if override.auto_open_browser is not None else self.auto_open_browser
-            ),
-        )

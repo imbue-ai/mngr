@@ -21,6 +21,16 @@ from imbue.mngr_imbue_cloud.primitives import R2BucketAccess
 from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
 
 
+class SliceTeardownTarget(FrozenModel):
+    """A slice pool host to tear down: its lima resources and the box that hosts them."""
+
+    pool_host_row_id: str = Field(description="The pool_hosts row id (deleted after the VM is torn down)")
+    lima_instance_name: str = Field(description="The slice's lima instance name on the box")
+    lima_disk_name: str | None = Field(default=None, description="The slice's lima data-disk name, if recorded")
+    box_public_address: str = Field(description="SSH-reachable address of the bare-metal box hosting the slice")
+    lima_service_user: str = Field(description="The box's non-root lima user that owns the VMs")
+
+
 class PaidListEntry(FrozenModel):
     """One row of a connector paid-list table (a domain or an email).
 

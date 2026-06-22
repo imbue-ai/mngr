@@ -21,9 +21,11 @@ and own the environment / cleanup story themselves.
 
 import os
 import re
+import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -84,6 +86,16 @@ _ELECTRON_MAIN_JS: Final[Path] = _REPO_ROOT / "apps" / "minds" / "electron" / "m
 # "stuck in <phase>" error before a wrapping suite-level timeout fires.
 _CDP_READY_TIMEOUT_SECONDS: Final[int] = 120
 _BACKEND_READY_TIMEOUT_SECONDS: Final[int] = 120
+# ``connect_over_cdp`` occasionally hangs in its CDP handshake under
+# Electron-in-CI even after ``/json/version`` is up (GPU/sandbox/dbus quirks):
+# the WebSocket connects but target negotiation stalls, and it stays wedged for
+# that Electron instance (retrying the connect against the same process does not
+# recover it). So we bound a single connect attempt and instead relaunch Electron
+# from scratch -- a fresh process gets a fresh CDP endpoint. Only the launch +
+# connect is retried; once a page is obtained the create flow runs once so real
+# failures still surface.
+_CDP_CONNECT_TIMEOUT_MS: Final[float] = 60_000.0
+_ELECTRON_LAUNCH_ATTEMPTS: Final[int] = 3
 _CREATE_FORM_TIMEOUT_SECONDS: Final[int] = 600
 _SYSTEM_INTERFACE_TIMEOUT_SECONDS: Final[int] = 180
 _CREATE_OUTCOME_POLL_INTERVAL_MS: Final[int] = 500
@@ -443,6 +455,45 @@ def _stream_electron_output(process: subprocess.Popen[bytes]) -> None:
 _ELECTRON_SIGTERM_GRACE_SECONDS: Final[int] = 30
 
 
+def _signal_process_group(process_group_id: int, sig: int) -> None:
+    """Send ``sig`` to a whole process group, ignoring an already-dead group."""
+    try:
+        os.killpg(process_group_id, sig)
+    except ProcessLookupError:
+        pass
+
+
+def _terminate_electron_process_tree(process: subprocess.Popen[bytes]) -> None:
+    """SIGTERM (then SIGKILL) the Electron process group, so no child survives.
+
+    Electron is launched as a session leader (``start_new_session=True``), so
+    its renderer/GPU/utility children and the backend it spawns share its
+    process group. Signalling the group -- rather than just ``process.pid`` --
+    guarantees the whole tree dies; a leftover child would otherwise keep the
+    profile's single-instance lock held and wedge the next relaunch.
+    """
+    if process.poll() is not None:
+        return
+    try:
+        process_group_id = os.getpgid(process.pid)
+    except ProcessLookupError:
+        return
+
+    _signal_process_group(process_group_id, signal.SIGTERM)
+    try:
+        process.wait(timeout=_ELECTRON_SIGTERM_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "Electron did not exit on SIGTERM within {}s; sending SIGKILL",
+            _ELECTRON_SIGTERM_GRACE_SECONDS,
+        )
+        _signal_process_group(process_group_id, signal.SIGKILL)
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            logger.warning("Electron process group did not exit within 5s of SIGKILL")
+
+
 @contextmanager
 def _launched_electron(
     workspace_git_url: Path,
@@ -463,13 +514,23 @@ def _launched_electron(
     repo root, which is what the snapshot script wants.
 
     SIGTERM with a ``_ELECTRON_SIGTERM_GRACE_SECONDS`` grace, then
-    SIGKILL. The Electron main process owns the backend subprocess and
-    the renderer; clean termination cascades. The grace window is
+    SIGKILL -- delivered to the whole process group (Electron is launched
+    as a session leader via ``start_new_session=True``), not just the main
+    PID. The Electron main process owns the backend subprocess and the
+    renderer/GPU children; signalling the group ensures they all die
+    instead of being orphaned. That matters for the retry path: a SIGKILL
+    that left renderer/GPU children alive would keep them holding the
+    profile's single-instance lock, so the next relaunch would bind its
+    debug port, fail ``requestSingleInstanceLock()``, and quit immediately
+    (the CDP port then refusing every connection). The grace window is
     intentionally generous (30s) because the minds backend that Electron
-    spawns has its own asyncio teardown path that needs ~5-10 seconds to
-    drain mngr_forward streams cleanly -- shorter grace periods
-    routinely escalate to SIGKILL and leave the workspace in a
-    half-shutdown state.
+    spawns needs a few seconds to drain mngr_forward streams cleanly --
+    shorter grace periods routinely escalate to SIGKILL and leave the
+    workspace in a half-shutdown state.
+
+    Each launch also gets its own throwaway ``--user-data-dir`` so that,
+    even if a prior attempt's teardown was imperfect, this instance never
+    collides with a stale single-instance lock from the default profile.
 
     Note: tearing down Electron does NOT destroy the workspace's mngr
     agent / Docker container. Those persist as separate host-level
@@ -480,44 +541,43 @@ def _launched_electron(
             f"Electron binary missing at {_ELECTRON_BINARY}. Run `cd apps/minds && pnpm install` first."
         )
 
-    cmd = [
-        str(_ELECTRON_BINARY),
-        str(_ELECTRON_MAIN_JS),
-        f"--remote-debugging-port={debug_port}",
-        # GitHub Actions runners ship Electron's chrome-sandbox binary
-        # without the setuid bit, so the renderer aborts on launch with
-        # `FATAL:setuid_sandbox_host.cc -- The SUID sandbox helper
-        # binary was found, but is not configured correctly`. Disabling
-        # the sandbox sidesteps the chown/chmod dance and matches the
-        # well-trodden CI pattern (Playwright's own electron docs ship
-        # `--no-sandbox` for the same reason). Acceptable here because
-        # the binary we drive is a dev-mode Electron launched against
-        # our own backend, not a downloaded one.
-        "--no-sandbox",
-    ]
-    logger.info("Launching Electron: {}", " ".join(cmd))
-    process = subprocess.Popen(
-        cmd,
-        cwd=str(host_config_dir or _REPO_ROOT),
-        env=_build_electron_env(workspace_git_url, workspace_name),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    _stream_electron_output(process)
-    try:
-        yield process
-    finally:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=_ELECTRON_SIGTERM_GRACE_SECONDS)
-            except subprocess.TimeoutExpired:
-                logger.warning(
-                    "Electron did not exit on SIGTERM within {}s; sending SIGKILL",
-                    _ELECTRON_SIGTERM_GRACE_SECONDS,
-                )
-                process.kill()
-                process.wait(timeout=5)
+    with tempfile.TemporaryDirectory(prefix="minds-electron-userdata-") as user_data_dir:
+        cmd = [
+            str(_ELECTRON_BINARY),
+            str(_ELECTRON_MAIN_JS),
+            f"--remote-debugging-port={debug_port}",
+            # A fresh, throwaway profile per launch. Electron's single-instance
+            # lock is keyed on the user-data-dir; isolating it guarantees a
+            # relaunch (after a prior attempt was SIGKILLed) cannot fail
+            # ``requestSingleInstanceLock()`` against a lock a surviving child
+            # of the previous attempt might still hold.
+            f"--user-data-dir={user_data_dir}",
+            # GitHub Actions runners ship Electron's chrome-sandbox binary
+            # without the setuid bit, so the renderer aborts on launch with
+            # `FATAL:setuid_sandbox_host.cc -- The SUID sandbox helper
+            # binary was found, but is not configured correctly`. Disabling
+            # the sandbox sidesteps the chown/chmod dance and matches the
+            # well-trodden CI pattern (Playwright's own electron docs ship
+            # `--no-sandbox` for the same reason). Acceptable here because
+            # the binary we drive is a dev-mode Electron launched against
+            # our own backend, not a downloaded one.
+            "--no-sandbox",
+        ]
+        logger.info("Launching Electron: {}", " ".join(cmd))
+        process = subprocess.Popen(
+            cmd,
+            cwd=str(host_config_dir or _REPO_ROOT),
+            env=_build_electron_env(workspace_git_url, workspace_name),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            # Own session/process group so teardown can signal the whole tree.
+            start_new_session=True,
+        )
+        _stream_electron_output(process)
+        try:
+            yield process
+        finally:
+            _terminate_electron_process_tree(process)
 
 
 def _wait_for_cdp(debug_port: int, timeout_seconds: int) -> None:
@@ -539,6 +599,16 @@ def _wait_for_cdp(debug_port: int, timeout_seconds: int) -> None:
             last_error = repr(exc)
         threading.Event().wait(timeout=0.5)
     raise TimeoutError(f"CDP at port {debug_port} did not respond within {timeout_seconds}s (last: {last_error})")
+
+
+class _ElectronConnectError(RuntimeError):
+    """Raised when launching Electron or attaching Playwright to its CDP endpoint fails.
+
+    Signals a wedged Electron launch (the connect-and-attach phase), which the
+    caller recovers by relaunching a fresh Electron process -- as opposed to a
+    failure while driving the create flow, which is a real test failure and must
+    propagate.
+    """
 
 
 def _pick_content_page(browser: Browser, timeout_seconds: int) -> Page:
@@ -725,18 +795,168 @@ def _wait_for_workspace_ready_or_failure(page: Page, timeout_seconds: int) -> No
     )
 
 
+def _drive_create_flow(
+    page: Page,
+    fct_path: Path,
+    workspace_name: str,
+    launch_mode: str = "DOCKER",
+    account_label: str | None = None,
+    region: str | None = None,
+) -> None:
+    """Drive the create form + onboarding to a ready workspace on an attached page.
+
+    Runs exactly once per successful Electron attach; any failure here is a real
+    test failure (not a wedged-launch flake) and propagates to fail the test.
+
+    ``launch_mode`` selects the compute provider in the create form (DOCKER,
+    LIMA, AWS, ...). ``account_label`` optionally selects an AI-provider account
+    (by visible option text) before submitting. ``region`` selects the machine
+    region for region-aware modes (aws/vultr/imbue_cloud); it is required by the
+    form for those modes and ignored (the row is hidden) for others.
+    """
+    backend_origin = _backend_origin_from_page(page)
+    logger.info("Backend origin: {}", backend_origin)
+
+    logger.info("Navigating to /create")
+    page.goto(f"{backend_origin}/create", wait_until="domcontentloaded")
+    page.wait_for_selector("#create-form", state="attached", timeout=10_000)
+
+    # The repo field lives inside the collapsed "Configure..."
+    # panel's nested "Show advanced settings" section; open both
+    # so the field is visible (and to mirror what a user setting
+    # a non-default repo would do). ``#host_name`` is top-level.
+    page.click("#configure-toggle")
+    page.wait_for_selector("#toggle-advanced:visible", timeout=5_000)
+    page.click("#toggle-advanced")
+    page.wait_for_selector("#git_url:visible", timeout=5_000)
+
+    _ensure_field_value(page, "#host_name", workspace_name)
+    _ensure_field_value(page, "#git_url", str(fct_path))
+    # Optionally select an AI-provider account (by visible label) before
+    # picking the compute mode -- some modes/tiers require a real account.
+    if account_label is not None:
+        page.select_option("#account_id", label=account_label)
+    # Select the requested compute provider. With no account selected the
+    # form defaults to LIMA; CI's local-Docker test pins DOCKER. The select
+    # lives in the (now-open) "Configure..." panel.
+    page.select_option("#launch_mode", launch_mode)
+    # Region-aware modes (aws/vultr/imbue_cloud) reveal a region select
+    # that must carry a value; the JS shows the row on the launch_mode
+    # change event, so wait for it before selecting.
+    if region is not None:
+        page.wait_for_selector("#region:visible", timeout=5_000)
+        page.select_option("#region", region)
+
+    logger.info("Submitting create form")
+    page.click("#create-submit")
+
+    # Submitting starts creation in the background and lands on
+    # the onboarding question flow. Walk the three questions
+    # accepting their pre-selected defaults; finishing the last
+    # one enters the workspace (directly if creation already
+    # finished, otherwise via the loading screen, which redirects
+    # once creation completes).
+    page.wait_for_selector("#onboarding", state="attached", timeout=10_000)
+    # Walk the three onboarding questions, accepting each
+    # pre-selected default. q1/q2 advance to the next question
+    # screen; confirm each advance (retrying the click) to absorb
+    # the creating.js handler-attach race. The final (q3) Next runs
+    # finishQuestions(), which shows the loading screen or redirects
+    # straight to the workspace -- the workspace-ready-or-failure wait
+    # below covers that transition (and the failure case), and by q3
+    # creating.js has long since loaded.
+    _advance_onboarding_screen(page, "q1")
+    _advance_onboarding_screen(page, "q2")
+    q3_next_button = '[data-screen="q3"] .js-next'
+    page.wait_for_selector(q3_next_button, state="visible", timeout=10_000)
+    page.click(q3_next_button)
+
+    # Race the workspace-ready redirect against the create flow's
+    # failure view, so a `mngr create` failure (e.g. an unregistered
+    # docker runtime) fails this run fast with the surfaced error
+    # rather than blocking the whole navigation budget.
+    _wait_for_workspace_ready_or_failure(page, _CREATE_FORM_TIMEOUT_SECONDS)
+    logger.info("Workspace ready at {}", page.url)
+
+    page.wait_for_selector(
+        _DOCKVIEW_WORKSPACE_SELECTOR,
+        state="visible",
+        timeout=_SYSTEM_INTERFACE_TIMEOUT_SECONDS * 1000,
+    )
+    logger.info("system_interface dockview rendered; workspace creation complete")
+
+
+def _attempt_create_workspace_via_electron(
+    fct_path: Path,
+    workspace_name: str,
+    debug_port: int,
+    host_config_dir: Path | None,
+    launch_mode: str = "DOCKER",
+    account_label: str | None = None,
+    region: str | None = None,
+) -> None:
+    """One Electron launch + CDP attach + create-flow drive.
+
+    Raises :class:`_ElectronConnectError` if the launch/CDP-attach phase fails
+    (a wedged Electron the caller should recover by relaunching). Errors from the
+    create flow itself propagate unchanged so real test failures are not retried.
+    """
+    with _launched_electron(fct_path, workspace_name, debug_port, host_config_dir):
+        with sync_playwright() as playwright:
+            try:
+                _wait_for_cdp(debug_port, _CDP_READY_TIMEOUT_SECONDS)
+                browser = playwright.chromium.connect_over_cdp(
+                    f"http://127.0.0.1:{debug_port}", timeout=_CDP_CONNECT_TIMEOUT_MS
+                )
+            except (PlaywrightError, TimeoutError) as exc:
+                raise _ElectronConnectError(f"Electron CDP attach failed on port {debug_port}: {exc}") from exc
+            # Always disconnect the browser once it is open, regardless of which
+            # phase fails: picking the content page is still part of the attach
+            # phase (a wedged-launch flake -> ``_ElectronConnectError``), while a
+            # create-flow failure is a real test failure that must propagate.
+            try:
+                try:
+                    page = _pick_content_page(browser, _BACKEND_READY_TIMEOUT_SECONDS)
+                except (PlaywrightError, TimeoutError) as exc:
+                    raise _ElectronConnectError(f"Electron CDP attach failed on port {debug_port}: {exc}") from exc
+                _drive_create_flow(
+                    page,
+                    fct_path,
+                    workspace_name,
+                    launch_mode=launch_mode,
+                    account_label=account_label,
+                    region=region,
+                )
+            finally:
+                browser.close()
+
+
 def create_workspace_via_electron(
     fct_path: Path,
     workspace_name: str,
     debug_port: int,
     host_config_dir: Path | None = None,
+    launch_mode: str = "DOCKER",
+    account_label: str | None = None,
+    region: str | None = None,
 ) -> None:
-    """Drive Electron to create a local Docker workspace from ``fct_path``.
+    """Drive Electron to create a workspace from ``fct_path``.
+
+    ``launch_mode`` selects the compute provider in the create form (DOCKER,
+    LIMA, AWS, ...). ``account_label`` optionally selects an AI-provider account
+    (by visible option text) before submitting. ``region`` selects the machine
+    region for region-aware modes (aws/vultr/imbue_cloud); it is required by the
+    form for those modes and ignored (the row is hidden) for others.
 
     Returns once the workspace's ``system_interface`` dockview UI has
     rendered through the desktop client proxy. Does NOT clean up the
     resulting mngr agent or its Docker container -- the caller decides
     whether to destroy or to capture the state.
+
+    Retries the Electron launch + CDP attach (with a fresh process + debug port)
+    up to ``_ELECTRON_LAUNCH_ATTEMPTS`` times to absorb a wedged Electron CDP
+    handshake (a known Electron-in-CI flake); the create flow itself runs once,
+    so a genuine creation failure fails the test immediately.
 
     Caller contract:
     - ``fct_path`` must be a populated FCT working tree (use
@@ -748,75 +968,30 @@ def create_workspace_via_electron(
     - ``host_config_dir`` is the cwd for the Electron process (see
       :func:`_launched_electron`); leave unset outside pytest.
     """
-    with _launched_electron(fct_path, workspace_name, debug_port, host_config_dir):
-        _wait_for_cdp(debug_port, _CDP_READY_TIMEOUT_SECONDS)
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{debug_port}")
-            try:
-                page = _pick_content_page(browser, _BACKEND_READY_TIMEOUT_SECONDS)
-                backend_origin = _backend_origin_from_page(page)
-                logger.info("Backend origin: {}", backend_origin)
-
-                logger.info("Navigating to /create")
-                page.goto(f"{backend_origin}/create", wait_until="domcontentloaded")
-                page.wait_for_selector("#create-form", state="attached", timeout=10_000)
-
-                # The repo field lives inside the collapsed "Configure..."
-                # panel's nested "Show advanced settings" section; open both
-                # so the field is visible (and to mirror what a user setting
-                # a non-default repo would do). ``#host_name`` is top-level.
-                page.click("#configure-toggle")
-                page.wait_for_selector("#toggle-advanced:visible", timeout=5_000)
-                page.click("#toggle-advanced")
-                page.wait_for_selector("#git_url:visible", timeout=5_000)
-
-                _ensure_field_value(page, "#host_name", workspace_name)
-                _ensure_field_value(page, "#git_url", str(fct_path))
-                # Explicitly select the DOCKER compute provider: with no
-                # account selected the form now defaults to LIMA (a local VM
-                # that isn't available on the CI runner), so this test --
-                # which is specifically about local Docker -- must pin DOCKER
-                # rather than relying on the default. The select lives in the
-                # (now-open) "Configure..." panel. AI provider stays at its
-                # no-account default of SUBSCRIPTION.
-                page.select_option("#launch_mode", "DOCKER")
-
-                logger.info("Submitting create form")
-                page.click("#create-submit")
-
-                # Submitting starts creation in the background and lands on
-                # the onboarding question flow. Walk the three questions
-                # accepting their pre-selected defaults; finishing the last
-                # one enters the workspace (directly if creation already
-                # finished, otherwise via the loading screen, which redirects
-                # once creation completes).
-                page.wait_for_selector("#onboarding", state="attached", timeout=10_000)
-                # Walk the three onboarding questions, accepting each
-                # pre-selected default. q1/q2 advance to the next question
-                # screen; confirm each advance (retrying the click) to absorb
-                # the creating.js handler-attach race. The final (q3) Next runs
-                # finishQuestions(), which shows the loading screen or redirects
-                # straight to the workspace -- the workspace-ready-or-failure wait
-                # below covers that transition (and the failure case), and by q3
-                # creating.js has long since loaded.
-                _advance_onboarding_screen(page, "q1")
-                _advance_onboarding_screen(page, "q2")
-                q3_next_button = '[data-screen="q3"] .js-next'
-                page.wait_for_selector(q3_next_button, state="visible", timeout=10_000)
-                page.click(q3_next_button)
-
-                # Race the workspace-ready redirect against the create flow's
-                # failure view, so a `mngr create` failure (e.g. an unregistered
-                # docker runtime) fails this run fast with the surfaced error
-                # rather than blocking the whole navigation budget.
-                _wait_for_workspace_ready_or_failure(page, _CREATE_FORM_TIMEOUT_SECONDS)
-                logger.info("Workspace ready at {}", page.url)
-
-                page.wait_for_selector(
-                    _DOCKVIEW_WORKSPACE_SELECTOR,
-                    state="visible",
-                    timeout=_SYSTEM_INTERFACE_TIMEOUT_SECONDS * 1000,
-                )
-                logger.info("system_interface dockview rendered; workspace creation complete")
-            finally:
-                browser.close()
+    last_error: _ElectronConnectError | None = None
+    for attempt in range(1, _ELECTRON_LAUNCH_ATTEMPTS + 1):
+        # Reuse the caller-provided port on the first try; allocate a fresh one
+        # for each relaunch so a leftover socket from a wedged process can't clash.
+        attempt_port = debug_port if attempt == 1 else find_free_port()
+        try:
+            _attempt_create_workspace_via_electron(
+                fct_path,
+                workspace_name,
+                attempt_port,
+                host_config_dir,
+                launch_mode=launch_mode,
+                account_label=account_label,
+                region=region,
+            )
+            return
+        except _ElectronConnectError as exc:
+            last_error = exc
+            logger.warning(
+                "Electron launch/CDP attempt {}/{} failed; relaunching: {}",
+                attempt,
+                _ELECTRON_LAUNCH_ATTEMPTS,
+                exc,
+            )
+    raise PlaywrightTimeoutError(
+        f"Electron CDP attach failed after {_ELECTRON_LAUNCH_ATTEMPTS} relaunch attempts (last error: {last_error})"
+    )

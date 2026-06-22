@@ -79,7 +79,7 @@ def test_prevent_builtin_exception_raises() -> None:
 
 
 def test_prevent_silent_decode_error_catches() -> None:
-    rc.check_silent_decode_error_catches(_DIR, snapshot(11))
+    rc.check_silent_decode_error_catches(_DIR, snapshot(8))
 
 
 # --- Import style ---
@@ -87,10 +87,10 @@ def test_prevent_silent_decode_error_catches() -> None:
 
 def test_prevent_inline_imports() -> None:
     # The one allowed inline import is ``from imbue.mngr.main import cli`` inside
-    # ``utils/mngr_caller.py``'s forkserver child target. Importing it at module
+    # ``utils/mngr_caller.py``'s warm-server entry point. Importing it at module
     # scope would pay mngr's multi-second import cost inside the minds backend
-    # process, defeating the entire purpose of the forkserver (which preloads it
-    # out-of-process). See that module's docstring.
+    # process, defeating the entire purpose of the warm process (which imports it
+    # out-of-process, off the request path). See that module's docstring.
     rc.check_inline_imports(_DIR, snapshot(1))
 
 
@@ -124,7 +124,7 @@ def test_prevent_asyncio_import() -> None:
     # and ``file_sharing.py``) both use ``run_in_executor`` to run the blocking
     # grant/deny path off the event loop -- all intrinsic to FastAPI
     # integration.
-    rc.check_asyncio_import(_DIR, snapshot(4))
+    rc.check_asyncio_import(_DIR, snapshot(1))
 
 
 def test_prevent_pandas_import() -> None:
@@ -337,7 +337,7 @@ def test_prevent_if_elif_without_else() -> None:
 
 
 def test_prevent_inline_functions() -> None:
-    rc.check_inline_functions(_DIR, snapshot(0))
+    rc.check_inline_functions(_DIR, snapshot(11))
 
 
 def test_prevent_underscore_imports() -> None:

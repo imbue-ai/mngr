@@ -17,7 +17,7 @@ from imbue.mngr_ovh.bootstrap import bootstrap_root_authorized_keys_via_user
 from imbue.mngr_ovh.bootstrap import pin_host_key_via_tofu
 from imbue.mngr_ovh.bootstrap import verify_root_ssh
 from imbue.mngr_ovh.bootstrap import wait_for_ssh_after_rebuild
-from imbue.mngr_vps_docker.errors import VpsProvisioningError
+from imbue.mngr_vps.errors import VpsProvisioningError
 
 
 def _make_private_key(tmp_path: Path) -> Path:
@@ -108,7 +108,7 @@ def _write_rsa_private_key(tmp_path: Path, key_name: str = "id_rsa") -> Path:
     """Write an RSA private key in the TraditionalOpenSSL PEM format.
 
     Matches what ``ssh_utils.generate_ssh_keypair`` produces for the base
-    ``VpsDockerProvider``, so the regression test for Bug 4 reflects the
+    ``VpsProvider``, so the regression test for Bug 4 reflects the
     real on-disk format the OVH provider receives.
     """
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -135,7 +135,7 @@ def test_load_private_key_accepts_rsa(tmp_path: Path) -> None:
     Pre-fix, ``pin_host_key_via_tofu`` hardcoded
     ``paramiko.Ed25519Key.from_private_key_file``, which raised
     ``SSHException("encountered RSA key, expected OPENSSH key")`` against
-    the RSA keys the base ``VpsDockerProvider`` actually produces.
+    the RSA keys the base ``VpsProvider`` actually produces.
     """
     key_path = _write_rsa_private_key(tmp_path)
     loaded = _load_private_key(key_path)

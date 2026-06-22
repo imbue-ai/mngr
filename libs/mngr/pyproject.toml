@@ -1,6 +1,6 @@
 [project]
 name = "imbue-mngr"
-version = "0.2.16"
+version = "0.2.17"
 description = "Library for managing AI coding agents across different hosts"
 requires-python = ">=3.12"
 license = "MIT"
@@ -18,6 +18,7 @@ classifiers = [
 ]
 dependencies = [
     "imbue-common==0.1.20",
+    "overlay==0.1.0",
     "resource-guards==0.1.8",
     "cel-python>=0.5.0",
     "click>=8.0",
@@ -79,6 +80,7 @@ exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py", "**/util
 [tool.uv.sources]
 imbue-common = { workspace = true }
 concurrency-group = { workspace = true }
+overlay = { workspace = true }
 resource-guards = { workspace = true }
 # skitwright is used by e2e tests (not a runtime dependency); resolved via workspace
 # mngr_modal is used by e2e conftest (shared truncate_modal_name); resolved via workspace
@@ -141,7 +143,7 @@ omit = [
   # thresholds; excluding them from the combined report keeps the
   # combined 80% gate focused on the "main" set of packages and
   # prevents their lower coverage from dragging the combined mean down.
-  "*/mngr_vps_docker/*",
+  "*/mngr_vps/*",
   "*/mngr_vultr/*",
 ]
 

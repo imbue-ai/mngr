@@ -1,8 +1,7 @@
-from typing import Any
-
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.mngr.config.agent_alias_registry import normalize_agent_type_name
 from imbue.mngr.config.agent_class_registry import get_agent_class
@@ -10,13 +9,21 @@ from imbue.mngr.config.agent_class_registry import is_agent_class_registered
 from imbue.mngr.config.agent_plugin_registry import get_agent_type_owner
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
+from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.primitives import AgentTypeName
 
-# Fields on AgentTypeConfig that are routing metadata (not runtime config values).
-# These are skipped when applying custom overrides to a parent config.
-_METADATA_FIELDS: frozenset[str] = frozenset({"parent_type", "plugin"})
+
+def _without_routing_metadata(config: AgentTypeConfig) -> AgentTypeConfig:
+    """Return a copy of ``config`` with the inheritance-routing metadata
+    (``parent_type`` / ``plugin``) cleared, so a parent/child merge never carries it into
+    the merged runtime config. These two fields are routing metadata, not runtime config."""
+    return config.model_copy_update(
+        to_update(config.field_ref().parent_type, None),
+        to_update(config.field_ref().plugin, None),
+    )
+
 
 # =============================================================================
 # Agent Config Registry
@@ -95,31 +102,26 @@ def _apply_custom_overrides_to_parent_config(
     parent_config: AgentTypeConfig,
     custom_config: AgentTypeConfig,
 ) -> AgentTypeConfig:
-    """Apply custom type overrides onto a parent config instance.
+    """Apply a custom agent type's overrides onto its parent type's config.
 
-    Handles the case where parent_config may be a subclass of AgentTypeConfig
-    (e.g., ClaudeAgentConfig) by constructing a new instance of the parent's
-    concrete class with the base fields overridden. Iterates over all fields
-    that were explicitly set in the custom config (including subclass-specific
-    fields like auto_dismiss_dialogs).
-
-    All fields use assign-by-default. Tuple/list/dict fields no longer
-    auto-concatenate across parent inheritance; use the ``field__extend``
-    operator in TOML to opt into additive behavior.
+    The ``parent_type`` inheritance arm of the config merge (see ``config/README.md``):
+    delegates to ``overlay_merge.merge_models_via_overlay`` with ``parent_config`` as the
+    base, so the result reparses into ``type(parent_config)`` -- the class-switching crux,
+    where a base-class ``custom_config`` folded onto a ``ClaudeAgentConfig`` parent yields
+    a ``ClaudeAgentConfig`` with the parent's subclass-only fields. Both layers have their
+    inheritance-routing metadata (``parent_type`` / ``plugin``) cleared first
+    (``_without_routing_metadata``) so it never flows into the merged runtime config, and
+    ``serialize_as_any`` keeps subclass-only fields. Assign-by-default, except
+    ``SettingsPatchField`` fields accumulate across the boundary; cross-scope
+    ``settings_overrides`` narrowing here is intentionally not surfaced (deferred with the
+    broader narrowing-philosophy decision).
     """
-    explicitly_set_fields = custom_config.model_fields_set
-    if not explicitly_set_fields - _METADATA_FIELDS:
-        return parent_config
-
-    custom_values = custom_config.model_dump()
-    updates: list[tuple[str, Any]] = [
-        (field_name, custom_values[field_name])
-        for field_name in explicitly_set_fields
-        if field_name not in _METADATA_FIELDS
-    ]
-    if not updates:
-        return parent_config
-    return parent_config.model_copy_update(*updates)
+    merged, _narrowings = merge_models_via_overlay(
+        _without_routing_metadata(parent_config),
+        _without_routing_metadata(custom_config),
+        serialize_as_any=True,
+    )
+    return merged
 
 
 def _check_agent_type_not_disabled(

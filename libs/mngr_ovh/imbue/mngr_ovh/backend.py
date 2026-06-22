@@ -15,6 +15,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import HostId
@@ -50,19 +51,19 @@ from imbue.mngr_ovh.pending_orders import write_pending_order_marker
 from imbue.mngr_ovh.recycle import abort_recycle
 from imbue.mngr_ovh.recycle import finalize_recycle
 from imbue.mngr_ovh.recycle import try_recycle_cancelled_vps
-from imbue.mngr_vps_docker.host_setup import apply_host_setup_on_outer
-from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
-from imbue.mngr_vps_docker.instance import VpsDockerProvider
-from imbue.mngr_vps_docker.instance import parse_vps_build_args
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
+from imbue.mngr_vps.build_args import parse_vps_build_args
+from imbue.mngr_vps.host_setup import apply_host_setup_on_outer
+from imbue.mngr_vps.instance import VpsProvider
+from imbue.mngr_vps.primitives import VpsInstanceId
 
 OVH_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("ovh")
 
 _OVH_REBUILD_TASK_TIMEOUT_SECONDS: Final[float] = 1800.0
 
 
-class OvhProvider(VpsDockerProvider):
-    """OVH classic-VPS provider built on top of ``VpsDockerProvider``.
+class OvhProvider(VpsProvider):
+    """OVH classic-VPS provider built on top of ``VpsProvider``.
 
     Implements the provider-specific VPS listing via OVH IAM v2 tags and
     overrides ``_provision_vps`` with OVH's order + rebuild + TOFU flow,
@@ -117,22 +118,16 @@ class OvhProvider(VpsDockerProvider):
         """
         if self._vps_iam_cache is not None:
             return list(self._vps_iam_cache)
-        if self.ovh_client.is_unconfigured:
-            # No credentials anywhere (config, OVH_* env, ~/.ovh.conf): don't
-            # bother making a doomed API call. Silently return empty so that
-            # `mngr list` / `mngr usage` / etc. don't dump a WARNING into
-            # stdout for users who haven't set up OVH. A real failure with
-            # real credentials still surfaces through the except branch below.
-            self._vps_iam_cache = []
-            return []
+        # No is_unconfigured guard here: the backend raises ProviderNotAuthorizedError
+        # at construction when OVH has no resolvable credentials, so a constructed
+        # provider always has credentials to attempt the listing with.
         # Deliberately do NOT catch IAM-listing errors here. Swallowing to an
         # empty list would make a transient OVH outage / expired credentials
         # look like "this provider has zero hosts" -- which the discovery layer
         # cannot distinguish from a real empty result, and which defeats mngr's
         # "mark hosts UNKNOWN when a provider's discovery fails" safeguard. We
         # let it propagate so `mngr list --on-error continue` records the
-        # failure instead of silently dropping live hosts. (The genuinely-
-        # unconfigured case is the is_unconfigured early-return above.)
+        # failure instead of silently dropping live hosts.
         resources = list_vps_resources_for_provider(self.ovh_client, provider_name=str(self.name))
         hostnames = [r.name for r in resources if r.name]
         self._vps_iam_cache = hostnames
@@ -145,7 +140,7 @@ class OvhProvider(VpsDockerProvider):
     def _provider_state_dir(self) -> Path:
         """``<profile_dir>/providers/<backend>/<instance_name>/`` -- mngr's per-instance state dir.
 
-        Mirrors :meth:`VpsDockerProvider._key_dir` minus the ``keys/``
+        Mirrors :meth:`VpsProvider._key_dir` minus the ``keys/``
         leaf -- this is the dir under which all per-instance state lives
         (SSH keys, pending-order markers, ...).
         """
@@ -475,7 +470,7 @@ class OvhProvider(VpsDockerProvider):
                     # ``_provision_vps`` so a typo / reserved key has
                     # already failed before we got here. Just merge.
                     # ``MNGR_VPS_EXTRA_TAGS`` mirrors the contract
-                    # ``mngr_vps_docker.build_vps_tags`` honors for
+                    # ``mngr_vps.build_vps_tags`` honors for
                     # Vultr-style callers (e.g. the imbue_cloud pool
                     # bake setting ``minds_env=<name>``).
                     all_tags: dict[str, str] = {
@@ -515,7 +510,7 @@ class OvhProvider(VpsDockerProvider):
                 # not for root. TOFU + bootstrap happen as that user;
                 # the bootstrap sudo-copies the key to /root/.ssh so the
                 # rest of the provider (which operates as root via the
-                # base VpsDockerProvider) works without per-call sudos.
+                # base VpsProvider) works without per-call sudos.
                 vps_private_key_path, _ = self._get_vps_ssh_keypair()
                 bootstrap_user = self.ovh_config.bootstrap_ssh_user
                 pin_host_key_via_tofu(
@@ -546,12 +541,12 @@ class OvhProvider(VpsDockerProvider):
                 # the single shared source of truth (``apply_host_setup_on_outer``):
                 # pinned Docker, optional gVisor runsc (gated by
                 # ``install_gvisor_runtime``), sshd tuning, the base packages
-                # mngr_vps_docker needs (rsync/inotify-tools/jq), plus the
+                # mngr_vps needs (rsync/inotify-tools/jq), plus the
                 # OVH-specific qemu purge that disables the hypervisor's
                 # filesystem-freezing automated backups. Runs as the final
                 # outer-bootstrap step (on both the fresh-order and recycle
                 # paths -- the recycle rebuild reinstalls the qemu agent) before
-                # the base VpsDockerProvider takes over. Any failure raises and
+                # the base VpsProvider takes over. Any failure raises and
                 # aborts provisioning, so no half-set-up host is handed back.
                 with self._make_outer_for_vps_ip(service_name) as outer:
                     apply_host_setup_on_outer(
@@ -641,6 +636,17 @@ class OvhProviderBackend(ProviderBackendInterface):
         if not isinstance(config, OvhProviderConfig):
             raise MngrError(f"Expected OvhProviderConfig, got {type(config).__name__}")
         ovh_client = build_ovh_client(config)
+        # An enabled-but-unauthenticated provider is an error, not a silent
+        # zero-result listing: if no credentials are resolvable anywhere (config,
+        # OVH_* env, ~/.ovh.conf), surface it consistently with the other cloud
+        # providers. ProviderNotAuthorizedError is a ProviderUnavailableError, so
+        # read paths still treat it as unavailable rather than empty.
+        if ovh_client.is_unconfigured:
+            raise ProviderNotAuthorizedError(
+                name,
+                reason="OVH credentials not configured",
+                short_remediation="set OVH_* env vars, configure ~/.ovh.conf, or set credentials in [providers.<name>]",
+            )
         return OvhProvider(
             name=name,
             host_dir=config.host_dir,

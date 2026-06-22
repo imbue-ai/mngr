@@ -1,5 +1,3 @@
-import multiprocessing.forkserver
-import multiprocessing.resource_tracker
 from collections.abc import Iterator
 
 import pytest
@@ -7,25 +5,23 @@ import pytest
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.mngr_caller import _coerce_exit_code
+from imbue.mngr.utils.polling import wait_for
 
 
-@pytest.fixture(autouse=True)
-def _stop_forkserver_after_test() -> Iterator[None]:
-    """Tear down the multiprocessing forkserver + resource_tracker after each test.
+@pytest.fixture()
+def mngr_caller() -> Iterator[MngrCaller]:
+    """A standalone caller whose warm processes are torn down after the test.
 
-    A real :meth:`MngrCaller.call` starts a process-lifetime forkserver (and
-    multiprocessing starts a resource_tracker alongside it). In production these
-    are reaped at interpreter exit / on parent death, but the per-session leak
-    checker runs earlier and would flag them, so tests that start a real
-    forkserver must stop it explicitly. Both ``_stop`` calls are safe no-ops
-    when nothing was started.
+    A real :meth:`MngrCaller.call` leaves an idle warm process waiting on a
+    socket for the next call. ``stop`` terminates it (and tears down the owned
+    concurrency group + socket directory) so the per-session leak checker does
+    not flag the lingering subprocess.
     """
-    yield
-    # ``_stop`` is the real reset mechanism (multiprocessing itself calls it at
-    # exit); it resets internal state so a later call restarts cleanly. It is
-    # absent from typeshed, hence the ignores.
-    multiprocessing.forkserver._forkserver._stop()  # ty: ignore[unresolved-attribute]
-    multiprocessing.resource_tracker._resource_tracker._stop()  # ty: ignore[unresolved-attribute]
+    caller = MngrCaller()
+    try:
+        yield caller
+    finally:
+        caller.stop()
 
 
 def test_coerce_exit_code_none_is_success() -> None:
@@ -49,25 +45,25 @@ def test_call_result_defaults() -> None:
     assert result.is_timed_out is False
 
 
-# These two tests start a real multiprocessing forkserver and preload
-# ``imbue.mngr.main`` before forking a child to run the CLI. Under CI load that
-# cold start routinely exceeds the 10s global pytest-timeout (the call's own
+# These tests spawn a real warm ``mngr`` process (a fresh interpreter that
+# imports ``imbue.mngr.main``) and run the CLI in it over a socket. Under CI load
+# that cold start routinely exceeds the 10s global pytest-timeout (the call's own
 # timeout is 120s), so give them a generous per-test timeout and mark them flaky
 # so offload retries a contended cold start rather than failing the run.
 @pytest.mark.flaky
 @pytest.mark.timeout(60)
-def test_call_runs_mngr_version_in_forkserver_child() -> None:
-    """End-to-end: a real ``mngr --version`` runs in a forkserver child.
+def test_call_runs_mngr_version_in_warm_process(mngr_caller: MngrCaller) -> None:
+    """End-to-end: a real ``mngr --version`` runs in a warm process.
 
-    This exercises the whole mechanism: starting the forkserver, preloading
-    ``imbue.mngr.main``, forking a child, running the CLI, and capturing
-    stdout/exit-code. ``--version`` is used because it does no provider
-    discovery, so the call is fast and deterministic.
+    This exercises the whole mechanism: spawning a warm process connected by an
+    anonymous socketpair, handing it the argv over the socket, running the CLI,
+    and capturing stdout/exit-code. ``--version`` is used because it does no
+    provider discovery, so the call is fast and deterministic.
 
-    Marked flaky: forkserver cold-start occasionally exceeds the 10s pytest
+    Marked flaky: warm-process cold-start occasionally exceeds the 10s pytest
     timeout under CI load.
     """
-    result = MngrCaller().call(["--version"], timeout=120.0)
+    result = mngr_caller.call(["--version"], timeout=120.0)
     assert result.returncode == 0
     assert result.is_timed_out is False
     assert "mngr" in result.stdout
@@ -75,8 +71,53 @@ def test_call_runs_mngr_version_in_forkserver_child() -> None:
 
 @pytest.mark.flaky
 @pytest.mark.timeout(60)
-def test_call_reports_nonzero_exit_for_unknown_command() -> None:
-    # Marked flaky: forkserver cold-start occasionally exceeds the 10s pytest
+def test_call_reports_nonzero_exit_for_unknown_command(mngr_caller: MngrCaller) -> None:
+    # Marked flaky: warm-process cold-start occasionally exceeds the 10s pytest
     # timeout under CI load.
-    result = MngrCaller().call(["definitely-not-a-real-subcommand"], timeout=120.0)
+    result = mngr_caller.call(["definitely-not-a-real-subcommand"], timeout=120.0)
     assert result.returncode != 0
+
+
+@pytest.mark.flaky
+@pytest.mark.timeout(60)
+def test_second_call_reuses_pre_spawned_warm_process(mngr_caller: MngrCaller) -> None:
+    """After one call, a replacement warm process is already waiting for the next.
+
+    The first call pays the cold-start cost; the second should be served by the
+    warm process spawned when the first was claimed. We assert correctness of
+    both results (timing is not asserted, to avoid flakiness).
+    """
+    first_result = mngr_caller.call(["--version"], timeout=120.0)
+    assert first_result.returncode == 0
+    second_result = mngr_caller.call(["--version"], timeout=120.0)
+    assert second_result.returncode == 0
+    assert "mngr" in second_result.stdout
+
+
+@pytest.mark.flaky
+@pytest.mark.timeout(60)
+def test_call_times_out_and_reports_timed_out(mngr_caller: MngrCaller) -> None:
+    """A zero timeout surfaces as a timed-out result with a sentinel returncode."""
+    result = mngr_caller.call(["--version"], timeout=0.0)
+    assert result.is_timed_out is True
+    assert result.returncode != 0
+
+
+@pytest.mark.flaky
+@pytest.mark.timeout(60)
+def test_warm_process_exits_when_parent_disconnects(mngr_caller: MngrCaller) -> None:
+    """An idle warm process must not hang around once its parent socket is closed.
+
+    Closing the parent end without sending a request simulates the minds backend
+    going away (e.g. a hard kill). The warm process should observe EOF on its
+    socket and exit on its own, leaving no orphan.
+    """
+    warm_process = mngr_caller._spawn_warm_process()
+    warm_process.connection.close()
+    wait_for(
+        warm_process.running_process.is_finished,
+        timeout=30.0,
+        poll_interval=0.05,
+        error_message="warm mngr process did not exit after its parent disconnected",
+    )
+    assert warm_process.running_process.is_finished()

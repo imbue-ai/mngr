@@ -1,9 +1,10 @@
 import pytest
 
+from imbue.mngr.primitives import HostId
+from imbue.mngr_imbue_cloud.errors import SliceCapacityError
 from imbue.mngr_imbue_cloud.slices.lima_slice_client import LimaSliceVpsClient
-from imbue.mngr_imbue_cloud.slices.lima_slice_client import parse_listening_ports
 from imbue.mngr_lima.errors import LimaCommandError
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsInstanceId
 
 # Note: provision_slice_vm / destroy_instance / get_instance_status drive limactl
 # over SSH against a real box and are exercised by the live slice smoke test, not
@@ -127,12 +128,57 @@ def test_destroy_disk_raises_on_genuine_delete_failure() -> None:
         client.destroy_disk("mngr-slice-abc-data")
 
 
-def test_parse_listening_ports_extracts_ipv4_ipv6_and_wildcard() -> None:
-    ss_output = (
-        "LISTEN 0      128          0.0.0.0:22         0.0.0.0:*\n"
-        "LISTEN 0      128             [::]:22            [::]:*\n"
-        "LISTEN 0      128       127.0.0.1:5432       0.0.0.0:*\n"
-        "LISTEN 0      128                *:22001              *:*\n"
-        "garbage line with too few fields\n"
+def test_provision_slice_vm_reserves_under_lock_then_starts_and_returns_box_chosen_ports() -> None:
+    host_id = HostId.generate()
+    # The reserve runs as one base64'd bash command (it holds the box lock); it prints
+    # the ports it chose. The long boot is a separate, unlocked `limactl start`.
+    client = _recording_client(
+        {
+            "base64 -d | bash": (0, "MNGR_SLICE_RESERVED 22001 22002\n", ""),
+            "limactl --log-level=info start": (0, "", ""),
+        }
     )
-    assert parse_listening_ports(ss_output) == {22, 5432, 22001}
+    result = client.provision_slice_vm(
+        host_id=host_id,
+        env_name="dev-josh",
+        vcpus=2,
+        memory_mib=8192,
+        disk_gib=40,
+        host_dir="/mngr",
+        root_authorized_public_key="ssh-ed25519 AAAA",
+        host_private_key_pem="PEM",
+        host_public_key_openssh="ssh-ed25519 BBBB",
+        boot_disk_gib=32,
+        slot_count=6,
+        port_range_start=22000,
+        port_range_end=32000,
+    )
+    # The ports come from the box reservation, and the instance/disk names are env-stamped.
+    assert result.vm_ssh_host_port == 22001
+    assert result.container_ssh_host_port == 22002
+    assert result.instance_name == f"mngr-slice-dev-josh-{host_id.get_uuid().hex}"
+    assert result.disk_name == f"mngr-slice-dev-josh-{host_id.get_uuid().hex}-data"
+    # The reserve happened before the boot, and the boot was a separate command.
+    reserve_idx = next(i for i, cmd in enumerate(client.recorded_commands) if "base64 -d | bash" in cmd)
+    start_idx = next(i for i, cmd in enumerate(client.recorded_commands) if "limactl --log-level=info start" in cmd)
+    assert reserve_idx < start_idx
+
+
+def test_provision_slice_vm_raises_slice_capacity_error_when_box_is_full() -> None:
+    client = _recording_client({"base64 -d | bash": (4, "", "MNGR_SLICE_BOX_FULL 6/6")})
+    with pytest.raises(SliceCapacityError):
+        client.provision_slice_vm(
+            host_id=HostId.generate(),
+            env_name="dev-josh",
+            vcpus=2,
+            memory_mib=8192,
+            disk_gib=40,
+            host_dir="/mngr",
+            root_authorized_public_key="ssh-ed25519 AAAA",
+            host_private_key_pem="PEM",
+            host_public_key_openssh="ssh-ed25519 BBBB",
+            boot_disk_gib=32,
+            slot_count=6,
+            port_range_start=22000,
+            port_range_end=32000,
+        )

@@ -7,9 +7,9 @@
 
 ```text
 mngr [create|c] [<ADDRESS>] [<AGENT_TYPE>] [-t <TEMPLATE>] [--new-host] [-w WINDOW_NAME=COMMAND]
-    [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--transfer <MODE>]
+    [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--adopt <SESSION>] [--transfer <MODE>]
     [--[no-]rsync] [--rsync-args <ARGS>] [--branch [BASE][:NEW]] [--[no-]ensure-clean]
-    [--snapshot <ID>] [-b <BUILD_ARG>] [-s <START_ARG>] [--post-host-create-command <COMMAND>]
+    [--snapshot <ID>] [-b <BUILD_ARG>] [-s <START_ARG>] [--post-host-create-command <COMMAND>] [--post-host-create-outer-command <COMMAND>]
     [--env <KEY=VALUE>] [--env-file <FILE>] [--pass-env <KEY>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
     [--idle-timeout <SECONDS>] [--idle-mode <MODE>] [--start-on-boot|--no-start-on-boot] [--reuse|--no-reuse]
     [--message <TEXT>] [--message-file <FILE>] [--edit-message]
@@ -99,13 +99,13 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 | `--connect`, `--no-connect` | boolean | Connect to the agent after creation [default: connect] | `True` |
 | `--foreground` | boolean | Run a headless agent in the foreground, streaming output and auto-destroying when done. Required for headless agent types | `False` |
 | `--auto-start`, `--no-auto-start` | boolean | Automatically start offline hosts (source and target) before proceeding | `True` |
-| `--adopt-session` | text | Adopt an existing Claude Code session into this agent. Accepts a session ID or a path to a .jsonl file. A session ID is searched in the current and user-scope Claude config dirs, every live local mngr agent, and preserved sessions from destroyed agents. Repeatable: every named session is made available in the new agent, but only the last one is resumed on startup (Claude can only resume one session at a time). | None |
 
 ## Source Data (what to include in the new agent)
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--from`, `--source` | text | Source data for the agent [AGENT[@HOST[.PROVIDER]][:PATH] &#x7C; @HOST:PATH &#x7C; :PATH &#x7C; GIT_URL]. A bare name refers to an agent; use :PATH for a directory. GIT_URL (e.g. https://github.com/owner/repo or git@gitlab.com:owner/repo.git) is cloned to ~/.mngr/clones/<name>-<id>/ using local git auth. Defaults to git root if omitted | None |
+| `--adopt`, `--adopt-session` | text | Adopt an existing session into this newly created agent so it resumes that conversation. Accepts a session id or a path to the session file; a session id is searched across the relevant user/config store, every live local mngr agent, and preserved sessions from destroyed agents. Repeatable: every named session is copied in, and the last is resumed on startup (unless combined with --from, in which case the source agent's session is resumed). | None |
 | `--rsync`, `--no-rsync` | boolean | Use rsync for file transfer [default: yes if rsync-args are present or if git is disabled] | None |
 | `--rsync-args` | text | Additional arguments to pass to rsync | None |
 
@@ -157,6 +157,7 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 | `-b`, `--build-arg` | text | Build argument as key=value or --key=value (e.g., -b gpu=h100 -b cpu=2) [repeatable] | None |
 | `-s`, `--start-arg` | text | Argument for start [repeatable] | None |
 | `--post-host-create-command` | text | Shell command to run inside the new host after it is created, before any agent work_dir setup. Runs synchronously; non-zero exit aborts the create. [repeatable] | None |
+| `--post-host-create-outer-command` | text | Shell command to run once on the host's outer machine (the underlying VM/daemon host) after the host is created. Runs synchronously; non-zero exit aborts the create. Skipped (with a warning) when the provider has no outer host. [repeatable] | None |
 
 ## Host Lifecycle
 
@@ -213,8 +214,8 @@ Provider: aws
                                 per region (see mngr_aws README 'Multiple regions').
     --aws-instance-type=TYPE    EC2 instance type (default: t3.small)
     --aws-ami=AMI-ID            Override the per-host AMI for this create only
-                                (default: provider config's default_ami_id /
-                                default_ami_by_region for the chosen region)
+                                (default: provider config's default_ami_id, or the
+                                pinned per-region default for the chosen region)
     --aws-spot                  Run on EC2 spot capacity (presence-only flag).
                                 AWS may reclaim with ~2 min notice; the host is
                                 terminated, not stopped, on reclaim. Opt-in only.

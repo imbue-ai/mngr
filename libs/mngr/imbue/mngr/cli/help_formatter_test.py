@@ -368,7 +368,7 @@ def test_mngr_config_pager_merge_override_wins(mngr_test_prefix: str) -> None:
     base = MngrConfig(prefix=mngr_test_prefix, pager="less")
     override = MngrConfig(prefix=mngr_test_prefix, pager="more")
 
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.pager == "more"
 
 
@@ -377,7 +377,7 @@ def test_mngr_config_pager_merge_keeps_base_when_override_none(mngr_test_prefix:
     base = MngrConfig(prefix=mngr_test_prefix, pager="less")
     override = MngrConfig(prefix=mngr_test_prefix)
 
-    merged = base.merge_with(override)
+    merged, _ = base.merge_with(override)
     assert merged.pager == "less"
 
 

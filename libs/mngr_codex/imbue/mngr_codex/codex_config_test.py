@@ -31,6 +31,7 @@ from imbue.mngr_codex.codex_config import is_project_trusted
 from imbue.mngr_codex.codex_config import merge_project_trust
 from imbue.mngr_codex.codex_config import parse_codex_cli_version
 from imbue.mngr_codex.codex_config import read_codex_config
+from imbue.mngr_codex.codex_config import rewrite_rollout_record_cwd
 from imbue.mngr_codex.codex_config import serialize_codex_config
 from imbue.mngr_codex.codex_config import serialize_codex_hooks
 
@@ -346,3 +347,35 @@ def test_read_codex_config_raises_on_malformed_toml(local_provider: LocalProvide
     config_path.write_text("this is = = not valid toml [[[")
     with pytest.raises(UserInputError):
         read_codex_config(host, config_path)
+
+
+# =============================================================================
+# Rollout cwd rebind (session adoption)
+# =============================================================================
+
+_SESSION_ID = "019ae614-d626-70f1-a87d-31e6966231f5"
+_OLD_CWD = "/private/tmp/old/workdir"
+_NEW_CWD = "/private/tmp/new/workdir"
+
+
+def test_rewrite_rollout_record_cwd_rebinds_session_meta_and_turn_context() -> None:
+    session_meta = {"type": "session_meta", "payload": {"id": _SESSION_ID, "cwd": _OLD_CWD}}
+    turn_context = {"type": "turn_context", "payload": {"cwd": _OLD_CWD, "model": "gpt-5.5"}}
+    rewritten_meta = rewrite_rollout_record_cwd(session_meta, _NEW_CWD)
+    rewritten_turn = rewrite_rollout_record_cwd(turn_context, _NEW_CWD)
+    assert rewritten_meta["payload"]["cwd"] == _NEW_CWD
+    assert rewritten_turn["payload"]["cwd"] == _NEW_CWD
+    # The session id (and other payload fields) survive the rewrite.
+    assert rewritten_meta["payload"]["id"] == _SESSION_ID
+    assert rewritten_turn["payload"]["model"] == "gpt-5.5"
+    # The input record is not mutated in place (a fresh dict is returned).
+    assert session_meta["payload"]["cwd"] == _OLD_CWD
+
+
+def test_rewrite_rollout_record_cwd_leaves_non_cwd_records_untouched() -> None:
+    # A record type without a cwd is returned unchanged.
+    response_item = {"type": "response_item", "payload": {"type": "message", "role": "user"}}
+    assert rewrite_rollout_record_cwd(response_item, _NEW_CWD) == response_item
+    # A cwd-bearing type whose payload happens to lack a cwd is also untouched.
+    no_cwd = {"type": "turn_context", "payload": {"model": "gpt-5.5"}}
+    assert rewrite_rollout_record_cwd(no_cwd, _NEW_CWD) == no_cwd

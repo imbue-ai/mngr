@@ -1,16 +1,40 @@
 """Tests for OVH provider backend registration + F1 source-position invariant."""
 
 import inspect
+import os
 import re
 from pathlib import Path
 
+import ovh.config
+import pytest
+
+from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import ProviderNotAuthorizedError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.primitives import ProviderBackendName
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_ovh import backend as backend_module
 from imbue.mngr_ovh.backend import OVH_BACKEND_NAME
 from imbue.mngr_ovh.backend import OvhProvider
 from imbue.mngr_ovh.backend import OvhProviderBackend
 from imbue.mngr_ovh.backend import register_provider_backend
 from imbue.mngr_ovh.config import OvhProviderConfig
+
+# python-ovh resolves credentials from these fixed files (no env override exists for
+# the path). If any are present on the host, an "unconfigured" config could still pick
+# up real credentials, so the unconfigured-provider test below skips in that case.
+_OVH_CONFIG_FILE_PATHS: tuple[str, ...] = tuple(ovh.config.CONFIG_PATH)
+
+_OVH_CREDENTIAL_ENV_VARS: tuple[str, ...] = (
+    "OVH_ENDPOINT",
+    "OVH_APPLICATION_KEY",
+    "OVH_APPLICATION_SECRET",
+    "OVH_APP_KEY",
+    "OVH_APP_SECRET",
+    "OVH_CONSUMER_KEY",
+    "OVH_CLIENT_ID",
+    "OVH_CLIENT_SECRET",
+)
 
 
 def test_backend_name() -> None:
@@ -49,10 +73,32 @@ def test_register_provider_backend_returns_tuple() -> None:
     assert result[1] is OvhProviderConfig
 
 
+def test_build_provider_instance_raises_not_authorized_when_unconfigured(
+    temp_mngr_ctx: MngrContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An enabled-but-unconfigured OVH provider surfaces as ProviderNotAuthorizedError, not a silent empty listing."""
+    # Skip if the host has a real OVH config file: python-ovh would then resolve real
+    # credentials and the provider would (correctly) construct rather than raise.
+    if any(os.path.exists(path) for path in _OVH_CONFIG_FILE_PATHS):
+        pytest.skip("an OVH config file exists on this host, so credentials are resolvable")
+    for env_var in _OVH_CREDENTIAL_ENV_VARS:
+        monkeypatch.delenv(env_var, raising=False)
+    name = ProviderInstanceName("ovh-no-creds")
+    config = OvhProviderConfig(backend=OVH_BACKEND_NAME)
+
+    with pytest.raises(ProviderNotAuthorizedError) as exc_info:
+        OvhProviderBackend.build_provider_instance(name, config, temp_mngr_ctx)
+
+    # A ProviderUnavailableError subclass so read paths keep the provider visible
+    # (reported as unavailable) rather than dropping it from the listing.
+    assert isinstance(exc_info.value, ProviderUnavailableError)
+    assert exc_info.value.provider_name == name
+
+
 # -- F1 invariant -------------------------------------------------------------
 #
 # Constructing a full ``OvhProvider`` for a behaviour-level test is
-# expensive (it inherits from ``VpsDockerProvider`` which inherits from
+# expensive (it inherits from ``VpsProvider`` which inherits from
 # ``BaseProviderInstance`` and pulls in ``MngrContext`` etc.). The
 # parsing-failure path itself is already exhaustively covered by
 # ``iam_tags_test.py::test_parse_extra_tags_env_*``. What F1 added is a

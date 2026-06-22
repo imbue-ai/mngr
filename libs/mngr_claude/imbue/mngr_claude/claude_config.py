@@ -1,5 +1,6 @@
 import copy
 import fcntl
+import functools
 import json
 import os
 import re
@@ -122,12 +123,10 @@ def resolve_shared_claude_config_dir() -> Path:
     unset, so ``use_env_config_dir=True`` effectively means "don't touch the
     config dir at all -- inherit whatever the parent shell would have used."
     The fallback path is shared (not per-agent), which is the whole point of
-    the flag.
+    the flag. Shared mode inherits the same ambient resolution as
+    ``get_claude_config_dir``.
     """
-    env_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-    if env_dir:
-        return Path(env_dir)
-    return Path.home() / ".claude"
+    return get_claude_config_dir()
 
 
 def find_user_claude_config() -> Path:
@@ -323,19 +322,34 @@ def remove_claude_trust_for_path(config_path: Path, path: Path) -> bool:
     return True
 
 
-def is_effort_callout_dismissed(config_path: Path) -> bool:
-    """Check whether the effort callout has been dismissed in the given config file.
-
-    Returns True if effortCalloutDismissed is true in the config file.
-    """
+def _get_boolean_flag(config_path: Path, key: str) -> bool:
+    """Return whether the given boolean flag is set to true in the config file."""
     config = read_claude_config(config_path)
-    return bool(config.get("effortCalloutDismissed", False))
+    return bool(config.get(key, False))
+
+
+def _set_boolean_flag(config_path: Path, key: str) -> bool:
+    """Set the given boolean flag to true in the config file. No-op if already set.
+
+    Acquires the config lock, reads, and atomically writes the updated config.
+    Returns True if it wrote (the flag was newly set), False if it was already set.
+    """
+    with _claude_config_lock(config_path):
+        config = read_claude_config(config_path)
+        if config.get(key, False):
+            return False
+        config[key] = True
+        _write_claude_config_atomic(config_path, config)
+    return True
+
+
+def is_effort_callout_dismissed(config_path: Path) -> bool:
+    """Check whether the effort callout has been dismissed in the given config file."""
+    return _get_boolean_flag(config_path, "effortCalloutDismissed")
 
 
 def check_effort_callout_dismissed(config_path: Path) -> None:
     """Check that the effort callout has been dismissed in the given config file.
-
-    Reads the config file and verifies that effortCalloutDismissed is true.
 
     Raises ClaudeEffortCalloutNotDismissedError if the effort callout has not
     been dismissed.
@@ -345,24 +359,14 @@ def check_effort_callout_dismissed(config_path: Path) -> None:
 
 
 def dismiss_effort_callout(config_path: Path) -> None:
-    """Set effortCalloutDismissed=true in the given config file.
-
-    Acquires the config lock and sets the field. No-op if already set.
-    """
-    with _claude_config_lock(config_path):
-        config = read_claude_config(config_path)
-        if config.get("effortCalloutDismissed", False):
-            return
-        config["effortCalloutDismissed"] = True
-        _write_claude_config_atomic(config_path, config)
-
-    logger.trace("Dismissed effort callout in Claude config")
+    """Set effortCalloutDismissed=true in the given config file. No-op if already set."""
+    if _set_boolean_flag(config_path, "effortCalloutDismissed"):
+        logger.trace("Dismissed effort callout in Claude config")
 
 
 def is_onboarding_completed(config_path: Path) -> bool:
     """Check whether onboarding has been completed in the given config file."""
-    config = read_claude_config(config_path)
-    return bool(config.get("hasCompletedOnboarding", False))
+    return _get_boolean_flag(config_path, "hasCompletedOnboarding")
 
 
 def check_onboarding_completed(config_path: Path) -> None:
@@ -373,20 +377,13 @@ def check_onboarding_completed(config_path: Path) -> None:
 
 def complete_onboarding(config_path: Path) -> None:
     """Set hasCompletedOnboarding=true in the given config file. No-op if already set."""
-    with _claude_config_lock(config_path):
-        config = read_claude_config(config_path)
-        if config.get("hasCompletedOnboarding", False):
-            return
-        config["hasCompletedOnboarding"] = True
-        _write_claude_config_atomic(config_path, config)
-
-    logger.trace("Marked onboarding as completed in Claude config")
+    if _set_boolean_flag(config_path, "hasCompletedOnboarding"):
+        logger.trace("Marked onboarding as completed in Claude config")
 
 
 def is_bypass_permissions_accepted(config_path: Path) -> bool:
     """Check whether the bypass permissions prompt has been accepted in the given config file."""
-    config = read_claude_config(config_path)
-    return bool(config.get("bypassPermissionsModeAccepted", False))
+    return _get_boolean_flag(config_path, "bypassPermissionsModeAccepted")
 
 
 def check_bypass_permissions_accepted(config_path: Path) -> None:
@@ -397,26 +394,14 @@ def check_bypass_permissions_accepted(config_path: Path) -> None:
 
 def accept_bypass_permissions(config_path: Path) -> None:
     """Set bypassPermissionsModeAccepted=true in the given config file. No-op if already set."""
-    with _claude_config_lock(config_path):
-        config = read_claude_config(config_path)
-        if config.get("bypassPermissionsModeAccepted", False):
-            return
-        config["bypassPermissionsModeAccepted"] = True
-        _write_claude_config_atomic(config_path, config)
-
-    logger.trace("Accepted bypass permissions in Claude config")
+    if _set_boolean_flag(config_path, "bypassPermissionsModeAccepted"):
+        logger.trace("Accepted bypass permissions in Claude config")
 
 
 def acknowledge_cost_threshold(config_path: Path) -> None:
     """Set hasAcknowledgedCostThreshold=true in the given config file. No-op if already set."""
-    with _claude_config_lock(config_path):
-        config = read_claude_config(config_path)
-        if config.get("hasAcknowledgedCostThreshold", False):
-            return
-        config["hasAcknowledgedCostThreshold"] = True
-        _write_claude_config_atomic(config_path, config)
-
-    logger.trace("Acknowledged cost threshold in Claude config")
+    if _set_boolean_flag(config_path, "hasAcknowledgedCostThreshold"):
+        logger.trace("Acknowledged cost threshold in Claude config")
 
 
 def check_claude_dialogs_dismissed(config_path: Path, source_path: Path) -> None:
@@ -497,10 +482,81 @@ def encode_claude_project_dir_name(path: Path) -> str:
     anthropics/claude-code#19972. If this encoder diverges from Claude
     Code's, ``on_after_provisioning`` writes the adopted JSONL to a
     project subdir Claude Code never reads on resume, the find guard in
-    ``assemble_command`` returns no match, and ``--adopt-session``
+    ``assemble_command`` returns no match, and ``--adopt``
     silently spawns a fresh session via the ``||`` fallback.
     """
     return _NON_DASH_ALNUM_ASCII.sub("-", str(path))
+
+
+# =============================================================================
+# Per-agent Claude artifact directory ($MNGR_AGENT_STATE_DIR/plugin/claude/)
+# =============================================================================
+
+# Single source of truth for the per-agent ``plugin/claude/`` layout (relative to
+# $MNGR_AGENT_STATE_DIR). It holds the isolated config dir (``anthropic/``), the
+# response-stream buffers, and the managed settings file, and is preserved as part
+# of the agent's ``plugin/`` subtree on clone. Routing every accessor through
+# ``get_agent_claude_plugin_dir`` keeps those call sites from drifting.
+_AGENT_CLAUDE_PLUGIN_SUBPATH: Final[tuple[str, ...]] = ("plugin", "claude")
+
+# Filename of the file holding all of mngr's Claude hooks, loaded via
+# ``claude --settings``. Now used only in ``use_env_config_dir`` mode: there is no
+# per-agent config dir to bake hooks into, so mngr loads them from this file
+# instead. (In normal mode the hooks live in the per-agent config-dir
+# ``settings.json`` -- the "user" layer Claude reads -- and this file is unused.)
+# It lives in the agent's private state dir rather than the project's
+# ``.claude/settings.local.json``, which every claude session in that directory
+# reads (including plain non-mngr ones) -- so mngr's hooks take effect only inside
+# the agent and never run in a plain ``claude`` session. mngr owns the file
+# outright and rewrites it fresh each provision.
+MANAGED_SETTINGS_FILENAME: Final[str] = "mngr_managed_settings.json"
+MANAGED_SETTINGS_RELATIVE_PATH: Final[tuple[str, ...]] = (*_AGENT_CLAUDE_PLUGIN_SUBPATH, MANAGED_SETTINGS_FILENAME)
+
+
+def get_agent_claude_plugin_dir(agent_state_dir: Path) -> Path:
+    """Return the per-agent directory holding mngr's Claude artifacts.
+
+    ``agent_state_dir`` is the agent's state directory (on-disk $MNGR_AGENT_STATE_DIR).
+    The directory holds the per-agent config dir (``anthropic/``), the response-stream
+    buffers, and the managed settings file. See ``_AGENT_CLAUDE_PLUGIN_SUBPATH``.
+    """
+    return agent_state_dir.joinpath(*_AGENT_CLAUDE_PLUGIN_SUBPATH)
+
+
+# Subdirectory of the per-agent ``plugin/claude/`` dir that is the agent's isolated
+# Claude config dir (the per-agent replacement for ``~/.claude/``). It holds the
+# config-dir ``settings.json`` (the "user" layer Claude reads from
+# $CLAUDE_CONFIG_DIR) and the session ``projects/`` subtree.
+_AGENT_CLAUDE_CONFIG_SUBDIR: Final[str] = "anthropic"
+
+
+def get_agent_claude_config_dir(agent_state_dir: Path) -> Path:
+    """Return the agent's isolated Claude config dir (per-agent replacement for ~/.claude/).
+
+    This is the directory Claude reads as ``$CLAUDE_CONFIG_DIR`` in normal mode;
+    its ``settings.json`` is the "user" settings layer mngr builds. Single source
+    of truth shared by ``ClaudeAgent.get_claude_config_dir`` and the
+    subagent-proxy plugin so the path never drifts between them.
+    """
+    return get_agent_claude_plugin_dir(agent_state_dir) / _AGENT_CLAUDE_CONFIG_SUBDIR
+
+
+def get_managed_settings_path(agent_state_dir: Path) -> Path:
+    """Return the agent's mngr-managed Claude settings file. See ``MANAGED_SETTINGS_FILENAME``."""
+    return get_agent_claude_plugin_dir(agent_state_dir) / MANAGED_SETTINGS_FILENAME
+
+
+def get_agent_hook_settings_path(agent_state_dir: Path, *, use_env_config_dir: bool) -> Path:
+    """Return the settings file mngr's Claude hooks live in for this agent.
+
+    In ``use_env_config_dir`` mode the managed ``--settings`` file (no per-agent config dir
+    exists); otherwise the per-agent config-dir ``settings.json`` (the "user" layer Claude
+    reads, built by ``_build_settings_json``). Single source of truth shared by mngr_claude
+    and the subagent-proxy plugin so the branch never drifts between them.
+    """
+    if use_env_config_dir:
+        return get_managed_settings_path(agent_state_dir)
+    return get_agent_claude_config_dir(agent_state_dir) / "settings.json"
 
 
 # =============================================================================
@@ -785,17 +841,17 @@ def hook_already_exists(existing_hooks: list[dict[str, Any]], new_hook: dict[str
     return False
 
 
-def merge_hooks_config(existing_settings: dict[str, Any], hooks_config: dict[str, Any]) -> dict[str, Any] | None:
+def merge_hooks_config(existing_settings: dict[str, Any], hooks_config: dict[str, Any]) -> dict[str, Any]:
     """Merge new hooks into existing settings, skipping duplicates.
 
-    Returns the merged settings dict if any hooks were added, or None if all
-    hooks already existed. Does not mutate the input dict.
+    Returns a new settings dict with any not-yet-present hooks appended -- equal by value
+    to ``existing_settings`` when every hook already existed. Does not mutate the input; a
+    caller that must avoid a redundant write compares the result against its input.
     """
     merged = copy.deepcopy(existing_settings)
     if "hooks" not in merged:
         merged["hooks"] = {}
 
-    any_added = False
     for event_name, event_hooks in hooks_config["hooks"].items():
         if event_name not in merged["hooks"]:
             merged["hooks"][event_name] = []
@@ -803,6 +859,14 @@ def merge_hooks_config(existing_settings: dict[str, Any], hooks_config: dict[str
         for new_hook in event_hooks:
             if not hook_already_exists(merged["hooks"][event_name], new_hook):
                 merged["hooks"][event_name].append(new_hook)
-                any_added = True
 
-    return merged if any_added else None
+    return merged
+
+
+def fold_hook_configs(base: dict[str, Any], hook_configs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Fold a sequence of hook configs onto a base settings dict via ``merge_hooks_config``.
+
+    Each config is merged in order, skipping duplicate hooks. Returns the resulting
+    settings dict (equal by value to ``base`` if every hook already existed).
+    """
+    return functools.reduce(merge_hooks_config, hook_configs, base)

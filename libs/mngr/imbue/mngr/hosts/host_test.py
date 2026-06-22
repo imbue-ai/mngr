@@ -2,6 +2,8 @@
 
 import io
 import json
+import subprocess
+import threading
 from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
@@ -10,6 +12,7 @@ from typing import Any
 from typing import IO
 from typing import cast
 
+import pluggy
 import pytest
 from paramiko import ChannelException
 from paramiko import SSHException
@@ -17,10 +20,13 @@ from pyinfra.api.command import StringCommand
 from pyinfra.api.host import Host as PyinfraHost
 from pyinfra.connectors.util import CommandOutput
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import EnvVar
+from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import TmuxConfig
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.errors import AgentError
 from imbue.mngr.errors import AgentStartError
@@ -33,8 +39,11 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.host import ONBOARDING_TEXT
 from imbue.mngr.hosts.host import ONBOARDING_TEXT_TMUX_USER
+from imbue.mngr.hosts.host import _LOCK_ACQUIRED_MARKER
+from imbue.mngr.hosts.host import _LOCK_TIMED_OUT_MARKER
 from imbue.mngr.hosts.host import _TMUX_SET_TITLES_STRING
 from imbue.mngr.hosts.host import _TMUX_STATUS_LEFT_LENGTH
+from imbue.mngr.hosts.host import _build_remote_lock_command
 from imbue.mngr.hosts.host import _build_start_agent_shell_command
 from imbue.mngr.hosts.host import _format_env_file
 from imbue.mngr.hosts.host import _is_transient_ssh_error
@@ -60,6 +69,7 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import TmuxHeight
 from imbue.mngr.primitives import TmuxWidth
 from imbue.mngr.primitives import TmuxWindowSize
@@ -67,6 +77,7 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.testing import get_cleanup_failures
 from imbue.mngr.utils.testing import get_short_random_string
+from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr.utils.testing import make_test_agent_details
 
 
@@ -681,6 +692,7 @@ def _build_command_with_defaults(
     additional_commands: list[NamedCommand] | None = None,
     unset_vars: list[str] | None = None,
     onboarding_text: str | None = None,
+    primary_window_name: str = "agent",
     tmux_options: AgentTmuxOptions | None = None,
 ) -> str:
     """Call _build_start_agent_shell_command with standard test defaults."""
@@ -693,6 +705,7 @@ def _build_command_with_defaults(
         tmux_config_path=Path("/tmp/tmux.conf"),
         unset_vars=unset_vars if unset_vars is not None else [],
         host_dir=host_dir,
+        primary_window_name=primary_window_name,
         tmux_options=tmux_options if tmux_options is not None else AgentTmuxOptions(),
         onboarding_text=onboarding_text,
     )
@@ -723,6 +736,40 @@ def test_build_start_agent_shell_command_produces_single_command(
     # Should contain the process monitor
     assert "nohup" in result
     assert "pane_pid" in result
+
+
+def test_build_start_agent_shell_command_names_primary_window_and_targets_it_by_name(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """new-session must name the primary window (-n) and all targets must use that name,
+    not the literal :0, so mngr works regardless of the user's tmux base-index.
+    """
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    result = _build_command_with_defaults(agent, temp_host_dir, primary_window_name="agent")
+
+    session = f"mngr-{agent.name}"
+    assert "new-session -d" in result
+    assert " -n agent" in result
+    # Targets address the window by name, never the literal :0 index.
+    assert f"={session}:agent" in result
+    assert f"={session}:0" not in result
+
+
+def test_build_start_agent_shell_command_uses_custom_primary_window_name(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """A custom tmux.primary_window_name flows into both -n and the window targets."""
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    result = _build_command_with_defaults(agent, temp_host_dir, primary_window_name="primary")
+
+    session = f"mngr-{agent.name}"
+    assert " -n primary" in result
+    assert f"={session}:primary" in result
+    assert f"={session}:agent" not in result
 
 
 def test_build_start_agent_shell_command_uses_default_dimensions_when_unset(
@@ -756,12 +803,12 @@ def test_build_start_agent_shell_command_sets_manual_window_size_on_agent_window
     temp_host_dir: Path,
     temp_work_dir: Path,
 ) -> None:
-    """A manual window-size emits a set-option targeting the agent window (:0)."""
+    """A manual window-size emits a set-option targeting the agent's named primary window."""
     agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
     options = AgentTmuxOptions(window_size=TmuxWindowSize.MANUAL)
     result = _build_command_with_defaults(agent, temp_host_dir, tmux_options=options)
 
-    assert f"set-option -t =mngr-{agent.name}:0 window-size manual" in result
+    assert f"set-option -t =mngr-{agent.name}:agent window-size manual" in result
 
 
 def test_build_start_agent_shell_command_includes_unset_vars(
@@ -853,6 +900,7 @@ def test_build_start_agent_shell_command_send_keys_uses_end_of_options_separator
         tmux_config_path=Path("/tmp/tmux.conf"),
         unset_vars=[],
         host_dir=temp_host_dir,
+        primary_window_name="agent",
         tmux_options=AgentTmuxOptions(),
     )
 
@@ -2566,6 +2614,76 @@ def test_host_lock_cooperatively_acquires_and_releases(
     assert host.is_lock_held() is False
 
 
+def test_build_remote_lock_command_blocking_holds_flock_until_stdin_closes() -> None:
+    """The blocking remote lock command must be valid shell, flock the path, and signal acquisition."""
+    cmd = _build_remote_lock_command(Path("/mngr/host_lock"), timeout_seconds=None)
+    assert subprocess.run(["sh", "-n", "-c", cmd], capture_output=True).returncode == 0
+    assert "flock 9" in cmd
+    assert "/mngr/host_lock" in cmd
+    assert _LOCK_ACQUIRED_MARKER in cmd
+    # It must wait on stdin (so closing the channel releases the lock).
+    assert "read" in cmd
+
+
+def test_build_remote_lock_command_with_timeout_uses_flock_wait() -> None:
+    """A bounded remote lock command must use ``flock -w`` and emit the timeout marker."""
+    cmd = _build_remote_lock_command(Path("/mngr/host_lock"), timeout_seconds=12.0)
+    assert subprocess.run(["sh", "-n", "-c", cmd], capture_output=True).returncode == 0
+    assert "flock -w 12 9" in cmd
+    assert _LOCK_ACQUIRED_MARKER in cmd
+    assert _LOCK_TIMED_OUT_MARKER in cmd
+
+
+def test_host_lock_cooperatively_acquires_and_releases_blocking(
+    local_host: Host,
+) -> None:
+    """lock_cooperatively with an indefinite timeout should acquire and release the lock."""
+    host = local_host
+    with host.lock_cooperatively(timeout_seconds=None):
+        assert host.is_lock_held() is True
+    # The lock file persists (stable inode) but is no longer held.
+    assert (host.host_dir / "host_lock").exists()
+    assert host.is_lock_held() is False
+
+
+def test_host_lock_cooperatively_is_mutually_exclusive(
+    local_host: Host,
+) -> None:
+    """A second lock_cooperatively must block until the first releases (real flock)."""
+    host = local_host
+    first_acquired = threading.Event()
+    allow_first_release = threading.Event()
+    second_acquired = threading.Event()
+
+    def hold_first() -> None:
+        with host.lock_cooperatively(timeout_seconds=None):
+            first_acquired.set()
+            # Hold the lock until the test signals release.
+            allow_first_release.wait(timeout=30.0)
+
+    def acquire_second() -> None:
+        # Only attempt once the first holder is established.
+        first_acquired.wait(timeout=30.0)
+        with host.lock_cooperatively(timeout_seconds=None):
+            second_acquired.set()
+
+    first_thread = threading.Thread(target=hold_first)
+    second_thread = threading.Thread(target=acquire_second)
+    first_thread.start()
+    second_thread.start()
+    try:
+        assert first_acquired.wait(timeout=30.0)
+        # The second acquisition must not succeed while the first holds the lock.
+        assert not second_acquired.wait(timeout=1.0)
+        # Releasing the first lets the second proceed.
+        allow_first_release.set()
+        assert second_acquired.wait(timeout=30.0)
+    finally:
+        allow_first_release.set()
+        first_thread.join(timeout=30.0)
+        second_thread.join(timeout=30.0)
+
+
 def test_host_get_reported_lock_time_returns_none_when_no_lock(
     local_host: Host,
 ) -> None:
@@ -3098,6 +3216,54 @@ def test_host_create_host_tmux_config_does_not_source_user_config(
     assert "source-file" not in content
 
 
+def _make_local_host_with_tmux_config(
+    tmux_config: TmuxConfig,
+    temp_host_dir: Path,
+    temp_profile_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+    active_concurrency_group: ConcurrencyGroup,
+    mngr_test_prefix: str,
+) -> Host:
+    """Build a local Host whose MngrConfig carries the given tmux config."""
+    config = MngrConfig(
+        default_host_dir=temp_host_dir,
+        prefix=mngr_test_prefix,
+        is_error_reporting_enabled=False,
+        tmux=tmux_config,
+    )
+    ctx = make_mngr_ctx(config, plugin_manager, temp_profile_dir, concurrency_group=active_concurrency_group)
+    provider = LocalProviderInstance(name=ProviderInstanceName("local"), host_dir=temp_host_dir, mngr_ctx=ctx)
+    return provider.create_host(HostName(LOCAL_HOST_NAME))
+
+
+def test_host_create_host_tmux_config_sources_additional_config_when_configured(
+    temp_host_dir: Path,
+    temp_profile_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+    active_concurrency_group: ConcurrencyGroup,
+    mngr_test_prefix: str,
+) -> None:
+    """A configured tmux.additional_config_path is sourced (guarded by test -f) into the session config."""
+    additional_config_path = "~/.mngr/tmux.user.conf"
+    host = _make_local_host_with_tmux_config(
+        TmuxConfig(additional_config_path=Path(additional_config_path)),
+        temp_host_dir,
+        temp_profile_dir,
+        plugin_manager,
+        active_concurrency_group,
+        mngr_test_prefix,
+    )
+    content = host._create_host_tmux_config().read_text()
+
+    assert f"if-shell 'test -f {additional_config_path}' 'source-file {additional_config_path}'" in content
+    # Only the configured additional_config_path is sourced; mngr never sources ~/.tmux.conf
+    # (tmux loads that itself at server start).
+    assert content.count("source-file") == 1
+    assert "~/.tmux.conf" not in content
+    # The path is interpolated unquoted so a leading ~ is expanded by the host shell/tmux.
+    assert f"'{additional_config_path}'" not in content
+
+
 # =========================================================================
 # Tests for Host._build_env_shell_command
 # =========================================================================
@@ -3154,6 +3320,37 @@ def test_host_collect_agent_env_vars_includes_mngr_variables(
     # alongside MNGR_GIT_BASE_BRANCH and must hold the same value.
     assert "CODE_GUARDIAN_STOP_HOOK__BASE_BRANCH" in env
     assert env["CODE_GUARDIAN_STOP_HOOK__BASE_BRANCH"] == env["MNGR_GIT_BASE_BRANCH"]
+    # The primary tmux window name is exported (default "agent") so in-session
+    # helpers like the ttyd attach script can target the window by name, not :0.
+    assert env["MNGR_PRIMARY_WINDOW_NAME"] == "agent"
+
+
+def test_host_collect_agent_env_vars_uses_configured_primary_window_name(
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+    temp_profile_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+    active_concurrency_group: ConcurrencyGroup,
+    mngr_test_prefix: str,
+) -> None:
+    """A custom tmux.primary_window_name flows into MNGR_PRIMARY_WINDOW_NAME."""
+    host = _make_local_host_with_tmux_config(
+        TmuxConfig(primary_window_name="primary"),
+        temp_host_dir,
+        temp_profile_dir,
+        plugin_manager,
+        active_concurrency_group,
+        mngr_test_prefix,
+    )
+    options = CreateAgentOptions(
+        name=AgentName("env-window-agent"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+    )
+    agent = host.create_agent_state(temp_work_dir, options)
+
+    env = host._collect_agent_env_vars(agent, options)
+    assert env["MNGR_PRIMARY_WINDOW_NAME"] == "primary"
 
 
 def test_host_collect_agent_env_vars_with_env_file(

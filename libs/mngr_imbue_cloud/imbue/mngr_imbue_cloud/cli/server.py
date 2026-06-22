@@ -72,15 +72,17 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_disk_gib
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_memory_mib
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_vcpus
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slot_count
+from imbue.mngr_imbue_cloud.slices.bare_metal import count_slice_resource_names
 from imbue.mngr_imbue_cloud.slices.bare_metal import find_server_capacity_by_id
-from imbue.mngr_imbue_cloud.slices.bare_metal import partition_port_range
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_disk_name
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import build_slice_pool_host_insert_values
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import delete_pool_host_row
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_server_by_id
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_server_capacities
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_slice_disk_names_for_server
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_slice_instance_names_for_server
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_unleased_slice_teardown_targets
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import insert_bare_metal_server
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import insert_slice_pool_host
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import update_server
@@ -101,7 +103,7 @@ from imbue.mngr_imbue_cloud.slices.pricing import compute_slice_pricing_rows
 from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_X86_64
 from imbue.mngr_ovh.client import build_ovh_client
 from imbue.mngr_ovh.config import OvhProviderConfig
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsInstanceId
 
 
 def _format_capacity_table(capacities: list[BareMetalServerCapacity]) -> str:
@@ -418,6 +420,7 @@ def _build_slice_create_args(
     server: BareMetalServer,
     sizing: dict[str, int],
     region: str,
+    env_name: str | None,
     pool_public_key: str,
     private_key_path: Path,
     ssh_user: str,
@@ -428,9 +431,10 @@ def _build_slice_create_args(
 
     The carve knobs (vcpus / memory / disk) are computed per box so the leased
     host's actual size matches its advertised attributes; the box address + lima
-    user + pool key + this bake's disjoint port window are passed the same way.
-    Concurrent bakes get disjoint ``slice_port_range_*`` windows so their in-VM
-    port probes cannot pick the same box ports.
+    user + pool key + the owning env + the box's slot count + the full box port
+    range are passed the same way. The on-box reservation lock makes concurrent
+    bakes (this env's and other envs') pick distinct ports from the shared range, so
+    every bake is handed the full range rather than a disjoint window.
     """
     prefix = f"providers.{_SLICE_PROVIDER_INSTANCE}"
     overrides = {
@@ -445,29 +449,39 @@ def _build_slice_create_args(
         "slice_vcpus": str(sizing["vcpus"]),
         "slice_memory_mib": str(sizing["memory_mib"]),
         "slice_disk_gib": str(sizing["disk_gib"]),
+        # The box's total slot count: the on-box reservation refuses to carve once
+        # the box already holds this many slices (the cross-env over-allocation guard).
+        "slice_slot_count": str(server.slot_count),
         "slice_port_range_start": str(port_range_start),
         "slice_port_range_end": str(port_range_end),
     }
+    # The owning env (stamped into the slice's lima names) is omitted entirely when
+    # absent, so the provider falls back to legacy un-stamped names.
+    if env_name is not None:
+        overrides["slice_env_name"] = env_name
     args: list[str] = []
     for key, value in overrides.items():
         args.extend(["-S", f"{prefix}.{key}={value}"])
     return args
 
 
-def _rollback_slice_vm(*, server: BareMetalServer, ssh_user: str, private_key_path: Path, host_id: str) -> None:
+def _rollback_slice_vm(
+    *, server: BareMetalServer, ssh_user: str, private_key_path: Path, host_id: str, env_name: str | None
+) -> None:
     """Best-effort: destroy a carved slice VM whose later bake/bookkeeping failed, so it does not leak.
 
     Drives ``limactl delete`` / ``disk delete`` over SSH on the box (via the same
     SSH-backed client the carve uses) for the deterministic instance/disk names
-    derived from ``host_id``. Swallows + logs any failure -- the caller is already
-    on a failure path -- so it never masks the original error.
+    derived from ``host_id`` and the owning ``env_name``. Swallows + logs any
+    failure -- the caller is already on a failure path -- so it never masks the
+    original error.
     """
     client = LimaSliceVpsClient(
         box_address=str(server.public_address),
         box_ssh_user=ssh_user,
         private_key_path=str(private_key_path),
     )
-    instance_id = VpsInstanceId(slice_lima_instance_name(HostId(host_id)))
+    instance_id = VpsInstanceId(slice_lima_instance_name(HostId(host_id), env_name))
     try:
         client.destroy_instance(instance_id)
     except (MngrError, OSError) as exc:
@@ -522,6 +536,7 @@ def _bake_one_slice(
     sizing: dict[str, int],
     lease_attributes: dict[str, Any],
     region: str,
+    env_name: str | None,
     workspace_dir: Path,
     pool_public_key: str,
     private_key_path: Path,
@@ -556,6 +571,7 @@ def _bake_one_slice(
                 server=server,
                 sizing=sizing,
                 region=region,
+                env_name=env_name,
                 pool_public_key=pool_public_key,
                 private_key_path=private_key_path,
                 ssh_user=ssh_user,
@@ -614,8 +630,8 @@ def _bake_one_slice(
                 attributes_json=attributes_json,
                 region=region,
                 bare_metal_server_id=str(server.id),
-                lima_instance_name=slice_lima_instance_name(host_id_obj),
-                lima_disk_name=slice_lima_disk_name(host_id_obj),
+                lima_instance_name=slice_lima_instance_name(host_id_obj, env_name),
+                lima_disk_name=slice_lima_disk_name(host_id_obj, env_name),
             )
             conn = psycopg2.connect(database_url)
             try:
@@ -624,7 +640,11 @@ def _bake_one_slice(
                 conn.close()
         except (PoolBakeError, BareMetalProvisioningError, MngrError, psycopg2.Error, OSError):
             _rollback_slice_vm(
-                server=server, ssh_user=ssh_user, private_key_path=private_key_path, host_id=baked.host_id
+                server=server,
+                ssh_user=ssh_user,
+                private_key_path=private_key_path,
+                host_id=baked.host_id,
+                env_name=env_name,
             )
             raise
         logger.info(
@@ -656,6 +676,7 @@ def _bake_into_outcomes(
     sizing: dict[str, int],
     lease_attributes: dict[str, Any],
     region: str,
+    env_name: str | None,
     workspace_dir: Path,
     pool_public_key: str,
     private_key_path: Path,
@@ -680,6 +701,7 @@ def _bake_into_outcomes(
             sizing=sizing,
             lease_attributes=lease_attributes,
             region=region,
+            env_name=env_name,
             workspace_dir=workspace_dir,
             pool_public_key=pool_public_key,
             private_key_path=private_key_path,
@@ -734,19 +756,29 @@ def _kill_bake_worker_processes(grace_seconds: float = 5.0) -> None:
             pass
 
 
-def _reap_orphan_slice_resources(*, server: BareMetalServer, private_key_path: Path, database_url: str) -> None:
-    """Delete slice VMs AND data disks on the box that have no pool_hosts row (orphans from failed bakes).
+def _reap_orphan_slice_resources(
+    *, server: BareMetalServer, private_key_path: Path, database_url: str, env_name: str | None
+) -> None:
+    """Delete THIS env's slice VMs AND data disks on the box that have no pool_hosts row.
 
-    Reconciles the box's lima instances and disks against the DB: any ``mngr-slice-``
-    resource with no row (any status) is an orphan -- a ``mngr create`` killed by its own
-    timeout after carving but before the row insert (the provider's rollback never ran),
-    or a disk left behind when a rollback ``limactl delete`` could not unlock it (so the
-    VM is gone but its disk leaked, permanently holding the box slot). Disks are reconciled
-    independently of instances so a disk that outlived its VM is still reaped. Best-effort:
-    logs and continues on any error so it never fails the bake. Assumes no other bake
-    invocation is concurrently mid-carve against this box (an in-flight resource not yet
-    inserted would otherwise look orphaned).
+    Reconciles the box's lima instances and disks against the DB, scoped to slices
+    stamped for ``env_name``: any such resource with no row (any status) is an orphan
+    -- a ``mngr create`` killed by its own timeout after carving but before the row
+    insert (the provider's rollback never ran), or a disk left behind when a rollback
+    ``limactl delete`` could not unlock it (so the VM is gone but its disk leaked,
+    permanently holding the box slot). Other envs' slices and legacy un-stamped slices
+    are never touched, so envs can safely share a box. Disks are reconciled
+    independently of instances so a disk that outlived its VM is still reaped.
+    Best-effort: logs and continues on any error so it never fails the bake. Assumes no
+    other bake invocation OF THIS ENV is concurrently mid-carve against the box (an
+    in-flight resource not yet inserted would otherwise look orphaned).
+
+    A bake with no owning env (``env_name`` is None) produces only legacy un-stamped
+    names, which must be left untouched, so reaping is skipped entirely.
     """
+    if env_name is None:
+        logger.info("Orphan reap skipped on {}: no owning env to scope to", server.public_address)
+        return
     ssh_user = server.lima_service_user or "limahost"
     client = LimaSliceVpsClient(
         box_address=str(server.public_address),
@@ -766,7 +798,7 @@ def _reap_orphan_slice_resources(*, server: BareMetalServer, private_key_path: P
             tracked_instance_names = fetch_slice_instance_names_for_server(conn, server.id)
         finally:
             conn.close()
-        instance_orphans = compute_orphan_slice_instance_names(box_instance_names, tracked_instance_names)
+        instance_orphans = compute_orphan_slice_instance_names(box_instance_names, tracked_instance_names, env_name)
         if not instance_orphans:
             logger.info("Orphan reap: no untracked slice VMs on {}", server.public_address)
         else:
@@ -797,7 +829,7 @@ def _reap_orphan_slice_resources(*, server: BareMetalServer, private_key_path: P
         tracked_disk_names = fetch_slice_disk_names_for_server(conn, server.id)
     finally:
         conn.close()
-    disk_orphans = compute_orphan_slice_disk_names(box_disk_names, tracked_disk_names)
+    disk_orphans = compute_orphan_slice_disk_names(box_disk_names, tracked_disk_names, env_name)
     if not disk_orphans:
         logger.info("Orphan reap: no untracked slice disks on {}", server.public_address)
         return
@@ -814,12 +846,83 @@ def _reap_orphan_slice_resources(*, server: BareMetalServer, private_key_path: P
             logger.warning("Orphan reap: failed to delete disk {} on {}: {}", disk_name, server.public_address, exc)
 
 
+def destroy_slice_vm(*, server: BareMetalServer, lima_instance_name: str) -> None:
+    """Destroy one slice's lima VM (and its data disk) on its box, freeing the box slot.
+
+    The teardown counterpart of the carve: SSHes the bare-metal box with the pool
+    management key (POOL_SSH_PRIVATE_KEY) and runs ``limactl delete`` for the named
+    instance -- the same client + key path the orphan reaper uses, but targeted at a
+    single known instance so ``admin pool destroy`` can fully tear down a slice
+    before dropping its ``pool_hosts`` row (instead of stranding the VM on the box).
+    """
+    if not server.public_address:
+        raise BareMetalProvisioningError(
+            f"server {server.id} has no public_address; cannot reach the box to destroy {lima_instance_name}"
+        )
+    ssh_user = server.lima_service_user or "limahost"
+    with _pool_private_key_path() as private_key_path:
+        client = LimaSliceVpsClient(
+            box_address=str(server.public_address),
+            box_ssh_user=ssh_user,
+            private_key_path=str(private_key_path),
+        )
+        client.destroy_instance(VpsInstanceId(lima_instance_name))
+
+
+def tear_down_unleased_slices(database_url: str) -> dict[str, Any]:
+    """Tear down every unleased slice VM recorded in ``database_url`` and drop its row.
+
+    The teardown an env destroy runs (before its per-env DB is deleted) so the env's
+    baked-but-unleased pool slices don't leak their VMs on the shared boxes. Leased
+    slices are excluded: they are torn down via their agent's release path. Each VM
+    teardown is idempotent (an already-absent VM counts as success); the row is
+    dropped only after its VM is gone. Must-succeed: raises
+    ``BareMetalProvisioningError`` listing every slice whose box could not be
+    reached, so the caller can stop the destroy rather than silently leak.
+    """
+    conn = psycopg2.connect(database_url)
+    try:
+        targets = fetch_unleased_slice_teardown_targets(conn)
+    finally:
+        conn.close()
+    if not targets:
+        return {"torn_down": 0, "failed": 0}
+    torn_down_count = 0
+    failures: list[str] = []
+    with _pool_private_key_path() as private_key_path:
+        for target in targets:
+            client = LimaSliceVpsClient(
+                box_address=target.box_public_address,
+                box_ssh_user=target.lima_service_user,
+                private_key_path=str(private_key_path),
+            )
+            try:
+                client.destroy_instance(VpsInstanceId(target.lima_instance_name))
+            except (MngrError, OSError) as exc:
+                logger.warning("Failed to tear down slice {}: {}", target.lima_instance_name, exc)
+                failures.append(f"{target.lima_instance_name} on {target.box_public_address}: {exc}")
+                continue
+            conn = psycopg2.connect(database_url)
+            try:
+                delete_pool_host_row(conn, target.pool_host_row_id)
+            finally:
+                conn.close()
+            torn_down_count += 1
+            logger.info("Tore down unleased slice {} on {}", target.lima_instance_name, target.box_public_address)
+    if failures:
+        raise BareMetalProvisioningError(
+            f"failed to tear down {len(failures)} slice(s); their VMs may still be running: {'; '.join(failures)}"
+        )
+    return {"torn_down": torn_down_count, "failed": 0}
+
+
 def allocate_slices(
     *,
     count: int,
     server_id: str,
     lease_attributes: dict[str, Any],
     region: str,
+    env_name: str | None,
     workspace_dir: Path,
     mngr_source: str | None,
     database_url: str,
@@ -841,7 +944,12 @@ def allocate_slices(
     size stamped on top, and records ``region`` (the lease-region label, not the
     box's raw datacenter code) so the connector's region-filtered lease matches.
 
-    After the bakes finish, reconciles the box's slice VMs against the DB and reaps
+    ``env_name`` (the activated minds env) is stamped into every slice's lima names
+    so envs can share a box: free-slot capacity is read from the box's REAL
+    occupancy (all envs + legacy), each carve reserves its slot + ports under a box
+    lock, and the post-bake reap only ever touches this env's own stamped slices.
+
+    After the bakes finish, reconciles this env's slice VMs against the DB and reaps
     any orphan (a VM with no pool_hosts row -- e.g. a create killed by its own
     timeout after carving but before the insert). ``database_url`` is already
     resolved by the caller. ``is_dry_run`` only reports placement.
@@ -856,7 +964,7 @@ def allocate_slices(
     finally:
         conn.close()
     # One explicitly-chosen server per batch (homogeneous sizing): the operator names the box via
-    # ``--server-id``; we never auto-select. Require it to be ready and to hold the whole batch.
+    # ``--server-id``; we never auto-select. Require it to be ready.
     chosen = find_server_capacity_by_id(capacities, BareMetalServerDbId(server_id))
     server = chosen.server
     if str(server.status) != SERVER_STATUS_READY:
@@ -864,54 +972,64 @@ def allocate_slices(
             f"server {server.id} is '{server.status}', not '{SERVER_STATUS_READY}'; "
             "finish `admin server await-delivery` + `setup` before baking slices on it"
         )
-    if chosen.free_slots < count:
-        raise click.UsageError(
-            f"server {server.id} has only {chosen.free_slots} free slot(s); cannot bake {count} "
-            "(allocate on one server per invocation -- run again, or choose another --server-id)"
-        )
-    sizing = compute_server_slice_sizing(server)
-
-    if is_dry_run:
-        emit_json(
-            {
-                "dry_run": True,
-                "server_id": str(server.id),
-                "public_address": server.public_address,
-                "region": region,
-                "count": count,
-                "free_slots": chosen.free_slots,
-                "per_slice_sizing": sizing,
-                "attributes": {**lease_attributes, **slice_advertised_attributes(sizing)},
-            }
-        )
-        return
-
-    # Resolve the mngr source tree (default to this checkout). The workspace dir
-    # is already resolved + validated by the caller's bake-source context.
-    repo_root = Path(__file__).resolve().parents[5]
-    resolved_mngr_source = Path(mngr_source) if mngr_source else repo_root
     if not server.public_address:
         raise click.UsageError(f"server {server.id} has no public_address; cannot bake")
+    sizing = compute_server_slice_sizing(server)
 
-    # Vendor this branch's mngr into the FCT workspace once (the baked container
-    # builds its mngr from vendor/mngr); the parallel bakes then share it.
-    sync_mngr_into_template(resolved_mngr_source, workspace_dir)
-
+    ssh_user = server.lima_service_user or "limahost"
     with _pool_private_key_path() as private_key_path:
+        # Free slots come from the box's REAL occupancy (every env's slices plus any
+        # legacy un-stamped ones), NOT this env's DB row count -- so independent envs
+        # sharing the box cannot collectively over-subscribe it. This is a fast
+        # pre-check; the authoritative guard is the per-slice on-box reservation lock.
+        occupancy_client = LimaSliceVpsClient(
+            box_address=str(server.public_address),
+            box_ssh_user=ssh_user,
+            private_key_path=str(private_key_path),
+        )
+        box_used_slots = count_slice_resource_names(occupancy_client.list_disk_names())
+        free_slots = max(0, server.slot_count - box_used_slots)
+        if free_slots < count:
+            raise click.UsageError(
+                f"server {server.id} has only {free_slots} of {server.slot_count} slot(s) free "
+                f"({box_used_slots} in use on the box across all envs); cannot bake {count}"
+            )
+
+        if is_dry_run:
+            emit_json(
+                {
+                    "dry_run": True,
+                    "server_id": str(server.id),
+                    "public_address": server.public_address,
+                    "region": region,
+                    "env_name": env_name,
+                    "count": count,
+                    "free_slots": free_slots,
+                    "box_used_slots": box_used_slots,
+                    "per_slice_sizing": sizing,
+                    "attributes": {**lease_attributes, **slice_advertised_attributes(sizing)},
+                }
+            )
+            return
+
+        # Resolve the mngr source tree (default to this checkout). The workspace dir
+        # is already resolved + validated by the caller's bake-source context. Vendor
+        # this branch's mngr into the FCT workspace once (the baked container builds
+        # its mngr from vendor/mngr); the parallel bakes then share it.
+        repo_root = Path(__file__).resolve().parents[5]
+        resolved_mngr_source = Path(mngr_source) if mngr_source else repo_root
+        sync_mngr_into_template(resolved_mngr_source, workspace_dir)
+
         pool_public_key = _derive_public_key(private_key_path)
         # Spawn one thread per slice but cap how many bake at once with a semaphore
         # (``max_concurrency``): each thread blocks on it before its ``mngr create``,
         # so the box is never contended by more than K simultaneous carves+builds
-        # (which would push each create past its timeout). Each bake gets a DISJOINT
-        # port sub-range -- partitioned across the FULL ``count`` (not K), since a
-        # finished slice's VM keeps its ports, so windows must never be reused.
+        # (which would push each create past its timeout). Every bake is handed the
+        # FULL box port range: the on-box reservation lock makes concurrent carves
+        # (this env's and other envs') pick distinct free ports from it.
         outcomes: list[dict[str, Any]] = []
         outcomes_lock = threading.Lock()
         bake_semaphore = threading.Semaphore(max_concurrency)
-        port_windows = [
-            partition_port_range(DEFAULT_SLICE_PORT_RANGE_START, DEFAULT_SLICE_PORT_RANGE_END, count, idx)
-            for idx in range(count)
-        ]
         threads = [
             ObservableThread(
                 target=_bake_into_outcomes,
@@ -920,12 +1038,13 @@ def allocate_slices(
                     sizing=sizing,
                     lease_attributes=lease_attributes,
                     region=region,
+                    env_name=env_name,
                     workspace_dir=workspace_dir,
                     pool_public_key=pool_public_key,
                     private_key_path=private_key_path,
                     database_url=database_url,
-                    port_range_start=port_windows[idx][0],
-                    port_range_end=port_windows[idx][1],
+                    port_range_start=DEFAULT_SLICE_PORT_RANGE_START,
+                    port_range_end=DEFAULT_SLICE_PORT_RANGE_END,
                     is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
                     semaphore=bake_semaphore,
                     total=count,
@@ -969,7 +1088,9 @@ def allocate_slices(
             # join -- an individual-create timeout (already a 'failed' outcome by now)
             # is cleaned here; the except above handles a top-level kill. Restore the
             # signal handlers last so the reap itself isn't interrupted.
-            _reap_orphan_slice_resources(server=server, private_key_path=private_key_path, database_url=database_url)
+            _reap_orphan_slice_resources(
+                server=server, private_key_path=private_key_path, database_url=database_url, env_name=env_name
+            )
             if is_main_thread:
                 signal.signal(signal.SIGTERM, previous_sigterm)
                 signal.signal(signal.SIGINT, previous_sigint)

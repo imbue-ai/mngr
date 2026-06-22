@@ -15,10 +15,12 @@ import pytest
 from pydantic import ValidationError
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.agents.update_policy import AgentUpdatePolicy
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.errors import AgentInstallationError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
@@ -26,6 +28,7 @@ from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
@@ -104,11 +107,17 @@ def _stub_host(
     )
 
 
-def _make_options() -> CreateAgentOptions:
+def _make_options(
+    *,
+    adopt_session: tuple[str, ...] = (),
+    source_agent_state_location: HostLocation | None = None,
+) -> CreateAgentOptions:
     return CreateAgentOptions(
         name=AgentName("test"),
         agent_type=AgentTypeName("pi-coding"),
         environment=AgentEnvironmentOptions(),
+        adopt_session=adopt_session,
+        source_agent_state_location=source_agent_state_location,
     )
 
 
@@ -153,7 +162,7 @@ def test_pi_coding_agent_config_merge_with_override() -> None:
     base = PiCodingAgentConfig()
     override = PiCodingAgentConfig(cli_args=("--verbose",))
 
-    merged = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
 
     assert isinstance(merged, PiCodingAgentConfig)
     assert merged.cli_args == ("--verbose",)
@@ -511,6 +520,43 @@ def test_modify_env_vars_reflects_disabled_transcripts(pi_agent: PiCodingAgent, 
     assert env_vars["MNGR_PI_EMIT_RAW_TRANSCRIPT"] == "0"
 
 
+def test_get_install_command_installs_latest_by_default(pi_agent: PiCodingAgent) -> None:
+    assert pi_agent.get_install_command() == "npm install -g @earendil-works/pi-coding-agent"
+
+
+def test_get_install_command_pins_version(make_pi_agent: Callable[..., PiCodingAgent]) -> None:
+    agent = make_pi_agent(agent_config=PiCodingAgentConfig(version="1.2.3"))
+    assert agent.get_install_command() == "npm install -g @earendil-works/pi-coding-agent@1.2.3"
+
+
+def test_modify_env_vars_skips_version_check_when_policy_never(
+    make_pi_agent: Callable[..., PiCodingAgent], tmp_path: Path
+) -> None:
+    agent = make_pi_agent(agent_config=PiCodingAgentConfig(update_policy=AgentUpdatePolicy.NEVER))
+    env_vars: dict[str, str] = {}
+    agent.modify_env_vars(_fake_host(tmp_path), env_vars)
+    assert env_vars["PI_SKIP_VERSION_CHECK"] == "1"
+
+
+def test_modify_env_vars_skips_version_check_by_default_on_attended_local(
+    pi_agent: PiCodingAgent, tmp_path: Path
+) -> None:
+    """The default policy disables pi's startup version check, even on an attended local host."""
+    env_vars: dict[str, str] = {}
+    pi_agent.modify_env_vars(_fake_host(tmp_path, is_local=True), env_vars)
+    assert env_vars["PI_SKIP_VERSION_CHECK"] == "1"
+
+
+def test_modify_env_vars_leaves_version_check_when_policy_auto(
+    make_pi_agent: Callable[..., PiCodingAgent], tmp_path: Path
+) -> None:
+    """Explicit AUTO opts back into pi's startup version check (no PI_SKIP_VERSION_CHECK)."""
+    agent = make_pi_agent(agent_config=PiCodingAgentConfig(update_policy=AgentUpdatePolicy.AUTO))
+    env_vars: dict[str, str] = {}
+    agent.modify_env_vars(_fake_host(tmp_path, is_local=True), env_vars)
+    assert "PI_SKIP_VERSION_CHECK" not in env_vars
+
+
 # =============================================================================
 # assemble_command
 # =============================================================================
@@ -550,6 +596,21 @@ def test_assemble_command_preserves_cli_and_agent_args(pi_agent: PiCodingAgent, 
 
     assert "--thinking high" in command
     assert "--model claude" in command
+
+
+def test_assemble_command_adds_approve_when_auto_dismiss_dialogs(pi_agent: PiCodingAgent, tmp_path: Path) -> None:
+    # auto_dismiss_dialogs launches pi with --approve so it auto-trusts the project
+    # folder (pi's native unattended path), and the trust dialog never blocks.
+    object.__setattr__(pi_agent, "agent_config", PiCodingAgentConfig(auto_dismiss_dialogs=True))
+    command = str(pi_agent.assemble_command(_fake_host(tmp_path), (), None))
+    assert "--approve" in command
+
+
+def test_assemble_command_omits_approve_by_default(pi_agent: PiCodingAgent, tmp_path: Path) -> None:
+    # Default config does not auto-dismiss, so --approve is not added: pi decides
+    # trust itself (the dialog, or a previously seeded trust decision).
+    command = str(pi_agent.assemble_command(_fake_host(tmp_path), (), None))
+    assert "--approve" not in command
 
 
 # =============================================================================
@@ -716,6 +777,118 @@ def test_seed_per_agent_workspace_trust_writes_per_agent_file(pi_agent: PiCoding
     data = _read_pi_trust(trust_path.read_text(), trust_path)
     assert len(data) == 1
     assert all(value is True for value in data.values())
+
+
+# =============================================================================
+# Session adoption (--adopt and --from clone)
+# =============================================================================
+
+
+def _write_pi_session(sessions_dir: Path, subdir: str, session_id: str, cwd: str = "/old/cwd") -> Path:
+    """Write a minimal pi session JSONL under ``sessions_dir/subdir`` and return its path.
+
+    The first record is a ``session`` record carrying ``cwd`` (the field adoption
+    rebinds); a second message record stands in for conversation content.
+    """
+    session_subdir = sessions_dir / subdir
+    session_subdir.mkdir(parents=True, exist_ok=True)
+    session_file = session_subdir / f"20240101_000000_{session_id}.jsonl"
+    session_file.write_text(
+        json.dumps({"type": "session", "cwd": cwd, "id": session_id}) + "\n" + json.dumps({"type": "message"}) + "\n"
+    )
+    return session_file
+
+
+def _read_resume_pointer(agent: PiCodingAgent) -> str:
+    return (agent._get_agent_dir() / _SESSION_FILE_NAME).read_text()
+
+
+@pytest.mark.rsync
+def test_adopt_session_multiple_resumes_last(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """``--adopt A B`` copies both sessions in and resumes the last (B)."""
+    agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
+    source_a = _write_pi_session(tmp_path / "src-a", "encoded-a", "sessA")
+    source_b = _write_pi_session(tmp_path / "src-b", "encoded-b", "sessB")
+    options = _make_options(adopt_session=(str(source_a), str(source_b)))
+
+    agent.adopt_session(agent.host, options, agent.mngr_ctx)
+
+    sessions_dir = agent.get_pi_config_dir() / "sessions"
+    # Both sessions are available in the new agent's store (additive copy).
+    assert (sessions_dir / "encoded-a" / source_a.name).exists()
+    assert (sessions_dir / "encoded-b" / source_b.name).exists()
+    # Only the last (B) is resumed.
+    assert _read_resume_pointer(agent) == str(sessions_dir / "encoded-b" / source_b.name)
+
+
+@pytest.mark.rsync
+def test_adopt_session_rebinds_cwd(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """An adopted session's embedded cwd is rebound to the new agent's work_dir."""
+    agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
+    source = _write_pi_session(tmp_path / "src", "encoded", "sess1", cwd="/no/longer/exists")
+    options = _make_options(adopt_session=(str(source),))
+
+    agent.adopt_session(agent.host, options, agent.mngr_ctx)
+
+    adopted = agent.get_pi_config_dir() / "sessions" / "encoded" / source.name
+    first_record = json.loads(adopted.read_text().splitlines()[0])
+    assert first_record["cwd"] == agent._get_host_canonical_work_dir(agent.host)
+
+
+@pytest.mark.rsync
+def test_adopt_from_clone_with_explicit_resumes_clone(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """``--adopt A --from X`` copies both, and the clone (X) is the one resumed."""
+    agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
+    source_a = _write_pi_session(tmp_path / "src-a", "encoded-a", "sessA")
+
+    # The --from source's native pi session store, at the preserved relpath.
+    source_state_dir = tmp_path / "source-agent-state"
+    source_sessions = source_state_dir / "plugin" / "pi_coding" / "sessions"
+    clone_session = _write_pi_session(source_sessions, "encoded-clone", "sessClone")
+    source_location = HostLocation(host=agent.host, path=source_state_dir)
+    options = _make_options(adopt_session=(str(source_a),), source_agent_state_location=source_location)
+
+    agent.adopt_session(agent.host, options, agent.mngr_ctx)
+
+    # The explicit session is still copied in (available, not resumed).
+    assert (agent.get_pi_config_dir() / "sessions" / "encoded-a" / source_a.name).exists()
+    # The clone's session is the one resumed.
+    resumed = agent._get_agent_dir() / "plugin" / "pi_coding" / "sessions" / "encoded-clone" / clone_session.name
+    assert _read_resume_pointer(agent) == str(resumed)
+
+
+def test_adopt_from_clone_no_store_warns(
+    local_provider: LocalProviderInstance, tmp_path: Path, log_warnings: list[str]
+) -> None:
+    """A ``--from`` clone whose source has no pi session store warns and resumes nothing."""
+    agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
+    # Source state dir exists but has no plugin/pi_coding/sessions store.
+    source_state_dir = tmp_path / "source-agent-state"
+    source_state_dir.mkdir()
+    source_location = HostLocation(host=agent.host, path=source_state_dir)
+    options = _make_options(source_agent_state_location=source_location)
+
+    agent.adopt_session(agent.host, options, agent.mngr_ctx)
+
+    assert any("no pi session store" in message for message in log_warnings)
+    assert not (agent._get_agent_dir() / _SESSION_FILE_NAME).exists()
+
+
+def test_adopt_from_clone_empty_store_warns(
+    local_provider: LocalProviderInstance, tmp_path: Path, log_warnings: list[str]
+) -> None:
+    """A ``--from`` clone whose source store has no session JSONL warns and resumes nothing."""
+    agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig())
+    source_state_dir = tmp_path / "source-agent-state"
+    # The store dir exists but holds no .jsonl session.
+    (source_state_dir / "plugin" / "pi_coding" / "sessions").mkdir(parents=True)
+    source_location = HostLocation(host=agent.host, path=source_state_dir)
+    options = _make_options(source_agent_state_location=source_location)
+
+    agent.adopt_session(agent.host, options, agent.mngr_ctx)
+
+    assert any("no session JSONL" in message for message in log_warnings)
+    assert not (agent._get_agent_dir() / _SESSION_FILE_NAME).exists()
 
 
 # =============================================================================

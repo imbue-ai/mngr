@@ -4,10 +4,10 @@ import fcntl
 import importlib.resources
 import io
 import json
+import math
 import os
 import shlex
 import tempfile
-import time
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
@@ -53,6 +53,7 @@ from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import CommandTimeoutError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostDataSchemaError
+from imbue.mngr.errors import HostError
 from imbue.mngr.errors import InvalidActivityTypeError
 from imbue.mngr.errors import LockNotHeldError
 from imbue.mngr.errors import MngrError
@@ -210,6 +211,96 @@ def _get_ssh_transport(pyinfra_host: Any) -> Transport | None:
     return None
 
 
+# The single host lock file. It is held via a real flock(2) -- directly on local
+# hosts, and over a long-lived SSH exec channel on remote hosts -- so a holder
+# running locally inside the host (e.g. a VM/container boot hook) and a holder
+# running remotely over SSH (e.g. the minds desktop client) mutually exclude.
+# It is never deleted so its inode stays stable across local and remote holders;
+# the idle-shutdown watcher and ``is_lock_held`` detect it via a flock probe, not
+# via file existence.
+_HOST_LOCK_FILENAME: Final[str] = "host_lock"
+
+# Default timeout for callers that want a bounded wait (e.g. gc). ``create`` and
+# ``start`` pass ``None`` to block indefinitely until the lock is acquired.
+_DEFAULT_HOST_LOCK_TIMEOUT_SECONDS: Final[float] = 300.0
+
+# Env var that retains a failed host (and keeps its lock held) for debugging.
+_RETAIN_LOCK_FOR_DEBUG_ENV_VAR: Final[str] = "MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE"
+
+# Markers printed by the remote lock holder so the local side can track progress.
+_LOCK_ACQUIRED_MARKER: Final[str] = "__MNGR_LOCK_ACQUIRED__"
+_LOCK_TIMED_OUT_MARKER: Final[str] = "__MNGR_LOCK_TIMED_OUT__"
+_LOCK_WAITING_MARKER: Final[str] = "__MNGR_LOCK_WAITING__"
+
+# Confirmation printed by the detached debug lock holder once it has been forked.
+_LOCK_HOLDER_LAUNCHED_MARKER: Final[str] = "__MNGR_LOCK_HOLDER_LAUNCHED__"
+
+
+def _is_retain_lock_for_debug_enabled() -> bool:
+    """Whether the debug flag that keeps a failed host (and its lock) alive is set."""
+    return os.environ.get(_RETAIN_LOCK_FOR_DEBUG_ENV_VAR) == "1"
+
+
+@pure
+def _build_remote_lock_command(lock_file_path: Path, timeout_seconds: float | None) -> str:
+    """Build the remote shell command that holds a flock(2) until stdin closes.
+
+    Opens the lock fd, tries a non-blocking acquire first (printing a "waiting"
+    marker if it must block), waits for the lock (bounded by ``timeout_seconds``
+    when given), prints the acquired marker, then reads stdin until EOF. Closing
+    the controlling channel sends EOF, so the shell exits, the fd closes, and the
+    lock releases. A bounded-wait timeout prints the timeout marker and exits 1;
+    any other failure (e.g. ``flock`` missing) exits without printing a marker so
+    the local side surfaces it as an unexpected error rather than a timeout.
+    """
+    quoted_path = shlex.quote(str(lock_file_path))
+    quoted_dir = shlex.quote(str(lock_file_path.parent))
+    acquired = shlex.quote(_LOCK_ACQUIRED_MARKER)
+    timed_out = shlex.quote(_LOCK_TIMED_OUT_MARKER)
+    waiting = shlex.quote(_LOCK_WAITING_MARKER)
+    hold = f"printf '%s\\n' {acquired} && while IFS= read -r _; do :; done"
+    if timeout_seconds is None:
+        # Block indefinitely. ``flock -n`` first so we only emit the waiting marker
+        # under genuine contention; ``flock 9`` then blocks until released.
+        blocking_acquire = "flock 9"
+    else:
+        # flock -w expects whole seconds; round up so a sub-second budget still
+        # waits at least one second.
+        wait_seconds = max(1, math.ceil(timeout_seconds))
+        blocking_acquire = f"flock -w {wait_seconds} 9"
+    return (
+        f"mkdir -p {quoted_dir} && exec 9>{quoted_path} && "
+        f"if flock -n 9; then {hold}; "
+        f"else printf '%s\\n' {waiting} && "
+        f"if {blocking_acquire}; then {hold}; "
+        f'else rc=$?; [ "$rc" = 1 ] && printf \'%s\\n\' {timed_out}; exit "$rc"; fi; fi'
+    )
+
+
+def _wait_for_remote_lock_acquired(channel: Any) -> None:
+    """Block until the remote lock holder reports it has acquired the lock.
+
+    Raises LockNotHeldError if a bounded wait timed out. Raises HostError if the
+    channel closes before any result marker (e.g. ``flock`` missing on the host),
+    which should never happen and must not be mistaken for a timeout.
+    """
+    acquired_bytes = _LOCK_ACQUIRED_MARKER.encode()
+    timed_out_bytes = _LOCK_TIMED_OUT_MARKER.encode()
+    waiting_bytes = _LOCK_WAITING_MARKER.encode()
+    buffer = b""
+    is_waiting_logged = False
+    while acquired_bytes not in buffer:
+        if timed_out_bytes in buffer:
+            raise LockNotHeldError("Timed out waiting to acquire the host lock")
+        if waiting_bytes in buffer and not is_waiting_logged:
+            logger.info("Waiting to acquire host lock (another operation is using this host)...")
+            is_waiting_logged = True
+        chunk = channel.recv(4096)
+        if not chunk:
+            raise HostError("Remote host lock command exited before acquiring the lock (is flock installed?)")
+        buffer += chunk
+
+
 def install_packaged_script_on_host(
     host: OnlineHostInterface,
     *,
@@ -257,6 +348,26 @@ def read_json_dict_via_host(host: OnlineHostInterface, path: Path) -> dict[str, 
         logger.warning("Could not parse {} as JSON ({}); treating as empty.", path, e)
         return {}
     return loaded if isinstance(loaded, dict) else {}
+
+
+def write_json_dict_via_host(
+    host: OnlineHostInterface, path: Path, data: dict[str, Any], *, make_parent: bool = False
+) -> None:
+    """Write-side counterpart to ``read_json_dict_via_host``.
+
+    Serializes ``data`` as pretty-printed JSON (two-space indent, trailing
+    newline) and writes it to ``path`` via the host (works for local or
+    remote hosts). When ``make_parent`` is True, creates the parent directory
+    first so the write does not depend on something else having created it.
+
+    Lives here rather than in ``file_utils`` because it needs
+    ``OnlineHostInterface``, which would create a circular import via
+    ``config.data_types``.
+    """
+    text = json.dumps(data, indent=2) + "\n"
+    if make_parent:
+        host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(path.parent))}", timeout_seconds=5.0)
+    host.write_text_file(path, text)
 
 
 def _git_command_stdout(host: OnlineHostInterface, command: str, cwd: Path) -> str | None:
@@ -680,60 +791,58 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     # =========================================================================
 
     @contextmanager
-    def lock_cooperatively(self, timeout_seconds: float = 300.0) -> Iterator[None]:
-        """Context manager for acquiring and releasing the host lock.
+    def lock_cooperatively(self, timeout_seconds: float | None = _DEFAULT_HOST_LOCK_TIMEOUT_SECONDS) -> Iterator[None]:
+        """Hold the host's exclusive, cross-actor lock for the duration of the block.
 
-        For local hosts, uses flock for process-level locking.
-        For remote hosts, writes/removes a lock file to prevent the idle shutdown script
-        from triggering during operations. On error, the lock file is removed by default
-        so the host can idle-shutdown; set MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1
-        to retain it for debugging.
+        Holds a real ``flock(2)`` on the ``host_lock`` file -- directly on local
+        hosts, and over a long-lived SSH exec channel on remote hosts -- so that
+        a holder running *locally* inside the host and a holder running *remotely*
+        over SSH mutually exclude. Because the in-host idle-shutdown watcher tests
+        the same flock, holding the lock also suppresses idle shutdown while we
+        operate on the host. The lock auto-releases when the block exits (even on
+        error): on remote hosts the SSH channel closes, the remote shell exits,
+        the fd closes, and the lock releases.
+
+        ``timeout_seconds=None`` blocks indefinitely until the lock is acquired
+        (used by ``create`` and ``start``); a finite value raises
+        ``LockNotHeldError`` if the lock cannot be acquired in time.
+
+        On error, if ``MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1``,
+        a detached on-host process re-holds the lock so the failed (remote) host
+        stays up for debugging instead of idle-shutting-down.
         """
-        lock_file_path = self.host_dir / "host_lock"
-
-        if not self.is_local:
-            # Write a lock file so the shutdown script does not trigger while we are operating on the host
-            self.write_text_file(lock_file_path, str(time.time()))
-            try:
+        lock_file_path = self.host_dir / _HOST_LOCK_FILENAME
+        if self.is_local:
+            with self._hold_local_host_lock(lock_file_path, timeout_seconds):
                 yield
-            except BaseException:
-                # On error, remove the lock file so the host can idle-shutdown normally,
-                # unless the user wants to retain it for debugging
-                is_retain_lock = os.environ.get("MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE") == "1"
-                if is_retain_lock:
-                    logger.debug(
-                        "Retaining host lock file for debugging (MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1)"
-                    )
-                else:
-                    logger.debug(
-                        "Removing host lock file on error to allow idle shutdown (set MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1 to prevent this and debug)"
-                    )
-                    try:
-                        self.execute_idempotent_command(f"rm -f '{lock_file_path}'")
-                    except (MngrError, OSError) as lock_removal_error:
-                        logger.warning(
-                            "Failed to remove host lock file during error cleanup: {}",
-                            lock_removal_error,
-                        )
-                raise
-            else:
-                self.execute_idempotent_command(f"rm -f '{lock_file_path}'")
-            return
+        else:
+            with self._hold_remote_host_lock(lock_file_path, timeout_seconds):
+                yield
 
+    @contextmanager
+    def _hold_local_host_lock(self, lock_file_path: Path, timeout_seconds: float | None) -> Iterator[None]:
+        """Hold a real flock(2) on the local filesystem for the duration of the block."""
         lock_file_path.parent.mkdir(parents=True, exist_ok=True)
-
         lock_file = open(str(lock_file_path), "w")
         try:
             with log_span("acquiring host lock at {}", lock_file_path):
-                try:
-                    wait_for(
-                        lambda: _try_acquire_flock(lock_file),
-                        timeout=timeout_seconds,
-                        poll_interval=0.1,
-                        error_message=f"Failed to acquire lock within {timeout_seconds}s",
-                    )
-                except TimeoutError as e:
-                    raise LockNotHeldError(str(e)) from e
+                if _try_acquire_flock(lock_file):
+                    pass
+                elif timeout_seconds is None:
+                    # Contended: log once, then block indefinitely.
+                    logger.info("Waiting to acquire host lock (another operation is using this host)...")
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                else:
+                    logger.info("Waiting to acquire host lock (another operation is using this host)...")
+                    try:
+                        wait_for(
+                            lambda: _try_acquire_flock(lock_file),
+                            timeout=timeout_seconds,
+                            poll_interval=0.1,
+                            error_message=f"Failed to acquire lock within {timeout_seconds}s",
+                        )
+                    except TimeoutError as e:
+                        raise LockNotHeldError(str(e)) from e
             yield
         finally:
             try:
@@ -742,19 +851,97 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 lock_file.close()
             logger.trace("Released host lock")
 
+    @contextmanager
+    def _hold_remote_host_lock(self, lock_file_path: Path, timeout_seconds: float | None) -> Iterator[None]:
+        """Hold a real flock(2) on the host over SSH for the duration of the block.
+
+        A long-lived exec channel opens the lock fd, waits for the lock, and then
+        waits for stdin EOF. Closing the channel on exit sends that EOF, so the
+        remote shell exits, the fd closes, and the lock releases.
+        """
+        # Establish the SSH connection before grabbing the transport: it is opened
+        # lazily, and the lock can be the first thing to touch it (so the transport
+        # would otherwise be None). Mirrors every other transport user.
+        self._ensure_connected()
+        transport = self._get_paramiko_transport()
+        channel = transport.open_session()
+        is_lock_acquired = False
+        try:
+            with log_span("acquiring host lock at {} (over SSH)", lock_file_path):
+                channel.exec_command(_build_remote_lock_command(lock_file_path, timeout_seconds))
+                _wait_for_remote_lock_acquired(channel)
+            is_lock_acquired = True
+            yield
+        except BaseException:
+            # If an operation that held the lock fails, optionally keep the host
+            # alive for debugging: launch a detached holder that re-grabs the flock
+            # after our channel releases it (it blocks on flock until we release).
+            if is_lock_acquired and _is_retain_lock_for_debug_enabled():
+                logger.debug(
+                    "Launching detached host-lock holder for debugging "
+                    "(MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1)"
+                )
+                self._launch_detached_lock_holder(lock_file_path)
+            raise
+        finally:
+            try:
+                channel.shutdown_write()
+            except (OSError, EOFError) as shutdown_error:
+                # Best-effort EOF to release the remote flock; the channel.close()
+                # below tears it down regardless. Log so a wedged teardown is visible.
+                logger.debug("Failed to send EOF when releasing remote host lock: {}", shutdown_error)
+            channel.close()
+            logger.trace("Released host lock (over SSH)")
+
+    def _launch_detached_lock_holder(self, lock_file_path: Path) -> None:
+        """Launch a detached on-host process that holds the host-lock flock indefinitely.
+
+        Used only when the debug retain flag is set: it keeps a failed remote host
+        from idle-shutting-down by holding the same flock our channel is about to
+        release. It blocks on flock until our channel releases, then holds forever
+        (bounded only by the host's hard max-age timeout or a manual destroy).
+        """
+        quoted_path = shlex.quote(str(lock_file_path))
+        quoted_dir = shlex.quote(str(lock_file_path.parent))
+        launched_marker = shlex.quote(_LOCK_HOLDER_LAUNCHED_MARKER)
+        # setsid detaches into a new session so the holder survives the channel
+        # close; redirecting all stdio lets the parent shell exit immediately.
+        command = (
+            f"mkdir -p {quoted_dir} && "
+            f"setsid sh -c 'exec 9>{quoted_path}; flock 9; exec sleep infinity' "
+            f"</dev/null >/dev/null 2>&1 & "
+            f"printf '%s\\n' {launched_marker}"
+        )
+        self._ensure_connected()
+        transport = self._get_paramiko_transport()
+        channel = transport.open_session()
+        try:
+            channel.exec_command(command)
+            # Wait for the launch confirmation so the holder forks before we release.
+            marker_bytes = _LOCK_HOLDER_LAUNCHED_MARKER.encode()
+            buffer = b""
+            while marker_bytes not in buffer:
+                chunk = channel.recv(4096)
+                if not chunk:
+                    logger.warning("Detached host-lock holder did not confirm launch")
+                    break
+                buffer += chunk
+        finally:
+            channel.close()
+
     def get_reported_lock_time(self) -> datetime | None:
-        """Get the mtime of the lock file."""
-        lock_path = self.host_dir / "host_lock"
+        """Get the mtime of the lock file (set by the truncating open at acquire)."""
+        lock_path = self.host_dir / _HOST_LOCK_FILENAME
         return self._get_file_mtime(lock_path)
 
     def is_lock_held(self) -> bool:
-        """Check whether the host lock is currently held.
+        """Check whether the host lock is currently held via a non-blocking flock probe.
 
-        For local hosts, attempts a non-blocking flock to test if the lock is held by another
-        process (the lock file persists after release, so file existence alone is insufficient).
-        For remote hosts, checks whether the lock file exists (it is deleted on release).
+        The lock file persists after release (its inode must stay stable across
+        local and remote holders), so file existence alone is insufficient: a
+        non-blocking flock probe is the only way to tell whether it is held.
         """
-        lock_path = self.host_dir / "host_lock"
+        lock_path = self.host_dir / _HOST_LOCK_FILENAME
 
         if self.is_local:
             if not lock_path.exists():
@@ -767,7 +954,19 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             except (BlockingIOError, OSError):
                 return True
         else:
-            return self.get_reported_lock_time() is not None
+            return self._is_remote_lock_held(lock_path)
+
+    def _is_remote_lock_held(self, lock_path: Path) -> bool:
+        """Probe whether the remote host lock is held via a single non-blocking flock test."""
+        quoted_path = shlex.quote(str(lock_path))
+        # Guard on existence so the probe never creates the lock file when absent.
+        command = (
+            f"if [ ! -e {quoted_path} ]; then echo NOT_HELD; "
+            f"elif flock -n {quoted_path} -c true 2>/dev/null; then echo NOT_HELD; "
+            f"else echo HELD; fi"
+        )
+        result = self.execute_idempotent_command(command)
+        return result.success and "HELD" in result.stdout and "NOT_HELD" not in result.stdout
 
     # =========================================================================
     # Certified Data
@@ -2260,6 +2459,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         env_vars["MNGR_AGENT_STATE_DIR"] = str(agent_state_dir)
         env_vars["MNGR_AGENT_WORK_DIR"] = str(agent.work_dir)
         env_vars["LLM_USER_PATH"] = str(agent_state_dir / "llm_data")
+        # The agent's primary tmux window name, exported so in-session helpers
+        # (e.g. the ttyd attach script) can target the window by name rather than
+        # the literal :0 index, keeping them independent of the user's base-index.
+        env_vars["MNGR_PRIMARY_WINDOW_NAME"] = self.mngr_ctx.config.tmux.primary_window_name
 
         # 2. Add programmatic defaults
         base_branch = (options.git.base_branch if options.git else None) or ""
@@ -2522,8 +2725,8 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             data_path = agent_state_dir / "data.json"
 
             # Rename the tmux session first (idempotent -- no-ops if session doesn't exist with old name)
-            old_session_name = f"{self.mngr_ctx.config.prefix}{old_name}"
-            new_session_name = f"{self.mngr_ctx.config.prefix}{new_name}"
+            old_session_name = self.mngr_ctx.config.agent_session_name(old_name)
+            new_session_name = self.mngr_ctx.config.agent_session_name(new_name)
             old_session_target = TmuxSessionTarget(session_name=old_session_name).as_shell_arg()
             result = self.execute_idempotent_command(
                 f"tmux has-session -t {old_session_target} 2>/dev/null && "
@@ -2690,6 +2893,26 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             "",
         ]
 
+        # Source the user's extra mngr-specific tmux config if one is configured.
+        # Unlike this auto-generated file, that path is never overwritten by mngr,
+        # so it is a stable place for users to add their own session config. (This
+        # is distinct from ~/.tmux.conf, which tmux loads itself at server start;
+        # mngr does not re-source that, to avoid re-running non-idempotent user
+        # config on every agent creation.) The path is interpolated unquoted so a
+        # leading ~ is expanded by the host's shell and tmux; additional_config_path
+        # is expected to be an absolute or ~-relative path without shell-special
+        # characters.
+        additional_config_path = self.mngr_ctx.config.tmux.additional_config_path
+        if additional_config_path is not None:
+            additional_config_str = str(additional_config_path)
+            lines.extend(
+                [
+                    "# Source the user's extra mngr tmux config if it exists",
+                    f"if-shell 'test -f {additional_config_str}' 'source-file {additional_config_str}'",
+                    "",
+                ]
+            )
+
         if self.is_local:
             # Local hosts: detach and exec into mngr destroy/stop directly
             lines.extend(
@@ -2777,7 +3000,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     else:
                         onboarding_text = ONBOARDING_TEXT
 
-                session_name = f"{self.mngr_ctx.config.prefix}{agent.name}"
+                session_name = agent.session_name
                 with log_span("Starting agent {} in tmux session {}", agent.name, session_name):
                     # Build and execute a single combined shell command for this agent
                     combined_command = _build_start_agent_shell_command(
@@ -2789,6 +3012,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                         tmux_config_path=tmux_config_path,
                         unset_vars=self.mngr_ctx.config.unset_vars,
                         host_dir=self.host_dir,
+                        primary_window_name=self.mngr_ctx.config.tmux.primary_window_name,
                         tmux_options=self.get_agent_tmux_options(agent),
                         onboarding_text=onboarding_text,
                     )
@@ -3064,7 +3288,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                         continue
 
                     current_agents.append(agent)
-                    session_name = f"{self.mngr_ctx.config.prefix}{agent.name}"
+                    session_name = self.mngr_ctx.config.agent_session_name(agent.name)
                     all_pids.extend(self._collect_session_pids(session_name, failures, agent.name))
                     # Also pick up orphans (e.g. children of an OOM-killed claude) that
                     # reparented to PID 1 and so are invisible to the pane-descendant walk.
@@ -3105,7 +3329,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 # "can't find session") is benign; a session that exists but cannot be killed
                 # is a real LOCAL_STATE_REMAINS failure.
                 for agent in current_agents:
-                    session_name = f"{self.mngr_ctx.config.prefix}{agent.name}"
+                    session_name = self.mngr_ctx.config.agent_session_name(agent.name)
                     _result, failure = self._run_classified_cleanup_command(
                         f"tmux kill-session -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()}",
                         failure_category=CleanupFailureCategory.LOCAL_STATE_REMAINS,
@@ -3298,6 +3522,7 @@ def _build_start_agent_shell_command(
     tmux_config_path: Path,
     unset_vars: Sequence[str],
     host_dir: Path,
+    primary_window_name: str,
     tmux_options: AgentTmuxOptions,
     onboarding_text: str | None = None,
 ) -> str:
@@ -3333,6 +3558,10 @@ def _build_start_agent_shell_command(
     # Code's Ink framework to render at 1 column wide, breaking marker-based
     # message sending. Passing -x/-y appears to use a different tmux code
     # path that sets the PTY dimensions correctly at creation time.
+    # Name the primary window (-n) and target it by name everywhere below, so
+    # mngr's targeting is independent of the user's tmux `base-index` setting
+    # (a `set -g base-index 1` in ~/.tmux.conf would otherwise create the agent
+    # window at index 1 while mngr hardcoded `:0`).
     # Width/height come from the agent's tmux options (falling back to the
     # historical 200x50). Unless window-size is "manual", the window will still be
     # resized to match the client's terminal when attached.
@@ -3341,6 +3570,7 @@ def _build_start_agent_shell_command(
     steps.append(
         "tmux new-session -d"
         f" -s {shlex.quote(session_name)}"
+        f" -n {shlex.quote(primary_window_name)}"
         f" -x {tmux_width} -y {tmux_height}"
         f" -c {shlex.quote(str(agent.work_dir))}"
         f" {shlex.quote(env_shell_cmd)}"
@@ -3352,11 +3582,11 @@ def _build_start_agent_shell_command(
     # not the whole && chain.
     steps.append(f"(tmux source-file {shlex.quote(str(tmux_config_path))} || true)")
 
-    quoted_exact_agent_window = TmuxWindowTarget(session_name=session_name, window=0).as_shell_arg()
+    quoted_exact_agent_window = TmuxWindowTarget(session_name=session_name, window=primary_window_name).as_shell_arg()
 
     # Apply the requested resize policy (e.g. "manual" pins the window to the
     # dimensions above so attaching clients never resize it). window-size is a
-    # window option, so it is set on the agent's window (:0). When unset, tmux's
+    # window option, so it is set on the agent's primary window. When unset, tmux's
     # own default ("latest") is left in place -- today's behavior.
     if tmux_options.window_size is not None:
         steps.append(
@@ -3423,8 +3653,8 @@ def _build_start_agent_shell_command(
         steps.append(f"tmux select-window -t {quoted_exact_agent_window}")
 
     # Send the agent command as literal keys, then Enter to execute.
-    # Target window :0 explicitly so this works even after additional windows
-    # have been created (which changes the active window).
+    # Target the agent's primary window by name explicitly so this works even
+    # after additional windows have been created (which changes the active window).
     steps.append(f"tmux send-keys -t {quoted_exact_agent_window} -l -- {shlex.quote(command)}")
     steps.append(f"tmux send-keys -t {quoted_exact_agent_window} Enter")
 
@@ -3442,7 +3672,7 @@ def _build_start_agent_shell_command(
     )
     steps.append(activity_printf_cmd)
 
-    # Build the process activity monitor script (runs in the background, inspects window :0 where the agent is assumed to be running)
+    # Build the process activity monitor script (runs in the background, inspects the agent's primary window where the agent is assumed to be running)
     # Wait up to 10 seconds for the PANE_PID to appear (tmux can take a moment to start)
     max_wait_seconds = 10
     tmux_list_panes_cmd = f"tmux list-panes -t {quoted_exact_agent_window} -F '#{{pane_pid}}' 2>/dev/null | head -n 1"

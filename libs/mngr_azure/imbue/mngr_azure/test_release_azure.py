@@ -34,12 +34,19 @@ import os
 import subprocess
 import time
 from collections.abc import Iterator
+from collections.abc import Mapping
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 from azure.identity import DefaultAzureCredential
 from azure.mgmt.compute import ComputeManagementClient
 
+from imbue.mngr.providers.provider_release_testing import run_provider_release_trip1
+from imbue.mngr.providers.provider_release_testing import run_provider_release_trip2
+from imbue.mngr.providers.provider_release_testing import run_provider_release_trip3
+from imbue.mngr.providers.provider_release_testing import run_provider_release_trip4
+from imbue.mngr_azure.client import AZURE_PYTEST_LAUNCHED_TAG
 from imbue.mngr_azure.client import AzureVpsClient
 from imbue.mngr_azure.config import DEFAULT_IMAGE_OFFER
 from imbue.mngr_azure.config import DEFAULT_IMAGE_PUBLISHER
@@ -52,6 +59,9 @@ from imbue.mngr_azure.testing import AZURE_TEST_NAME_PREFIX
 from imbue.mngr_azure.testing import AZURE_TEST_VM_SIZE
 from imbue.mngr_azure.testing import azure_credentials_available
 from imbue.mngr_azure.testing import get_default_subscription_id
+from imbue.mngr_vps.primitives import IsolationMode
+from imbue.mngr_vps.testing import VpsCloudReleaseProfile
+from imbue.mngr_vps.testing import find_handle_by_launched_label
 
 pytestmark = [
     pytest.mark.release,
@@ -88,7 +98,13 @@ def _fail_if_opted_in_without_credentials() -> None:
         )
 
 
-def _write_release_settings(settings_dir: Path, subscription_id: str) -> None:
+def _write_release_settings(
+    settings_dir: Path,
+    subscription_id: str,
+    *,
+    isolation: str | None = None,
+    include_subscription_id: bool = True,
+) -> None:
     """Write the release-test ``settings.toml`` into ``settings_dir``.
 
     Shared by the prepare fixture and the per-test settings fixture so both the
@@ -96,12 +112,23 @@ def _write_release_settings(settings_dir: Path, subscription_id: str) -> None:
     opted-in config. ``is_allowed_in_pytest = true`` is required because the
     subprocesses inherit ``PYTEST_CURRENT_TEST`` and mngr refuses to load any
     config that does not opt in.
+
+    ``isolation`` selects the placement shape: ``None`` leaves the default
+    (Docker container); ``"NONE"`` writes ``isolation = "NONE"`` so the bare
+    (no-container) realizer runs the agent directly on the Azure VM's OS.
+
+    ``include_subscription_id`` defaults to True; Trip 4's missing-credential case sets it False so
+    no subscription resolves (the env override also clears the ``AZURE_*`` subscription vars), which
+    is what makes ``build_provider_instance`` raise Azure's curated unavailable error.
     """
+    isolation_line = f'isolation = "{isolation}"\n' if isolation is not None else ""
+    subscription_line = f'subscription_id = "{subscription_id}"\n' if include_subscription_id else ""
     (settings_dir / "settings.toml").write_text(
         "is_allowed_in_pytest = true\n"
         "\n[providers.azure]\n"
         'backend = "azure"\n'
-        f'subscription_id = "{subscription_id}"\n'
+        f"{isolation_line}"
+        f"{subscription_line}"
         f'default_region = "{AZURE_DEFAULT_REGION}"\n'
         f'default_vm_size = "{AZURE_TEST_VM_SIZE}"\n'
         f'resource_group = "{AZURE_DEFAULT_RESOURCE_GROUP}"\n'
@@ -235,91 +262,9 @@ def _run_mngr(
 
 
 # =============================================================================
-# Provider lifecycle (full create / exec / stop / start / destroy)
+# Provider create with a project Dockerfile built on the VM (unique coverage:
+# the remote build-on-VM path, not exercised by the shared trips).
 # =============================================================================
-
-
-@pytest.mark.rsync
-def test_provider_lifecycle_create_exec_and_destroy(
-    azure_test_settings_dir: Path,
-    temp_git_repo: Path,
-) -> None:
-    agent_name = f"{AZURE_TEST_NAME_PREFIX}{int(time.time()) % 100000}"
-
-    result = _run_mngr(
-        azure_test_settings_dir,
-        temp_git_repo,
-        "create",
-        agent_name,
-        "--type",
-        "command",
-        "--provider",
-        "azure",
-        "--no-connect",
-        "--",
-        "sleep",
-        "99999",
-    )
-    assert result.returncode == 0, f"Create failed: {result.stderr}\n--- stdout ---\n{result.stdout}"
-    assert "successfully" in result.stdout.lower(), f"unexpected create output: {result.stdout}"
-
-    try:
-        result = _run_mngr(azure_test_settings_dir, temp_git_repo, "exec", agent_name, "echo hello-from-azure")
-        assert result.returncode == 0, f"Exec failed: {result.stderr}"
-        assert "hello-from-azure" in result.stdout
-
-        result = _run_mngr(azure_test_settings_dir, temp_git_repo, "exec", agent_name, "test -d /mngr && echo exists")
-        assert result.returncode == 0, f"host_dir check failed: {result.stderr}"
-        assert "exists" in result.stdout
-
-        result = _run_mngr(azure_test_settings_dir, temp_git_repo, "list")
-        assert result.returncode == 0, f"List failed: {result.stderr}"
-        assert agent_name in result.stdout
-        assert "azure" in result.stdout
-    finally:
-        _run_mngr(azure_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=180)
-
-
-@pytest.mark.rsync
-def test_provider_lifecycle_create_stop_start_destroy(
-    azure_test_settings_dir: Path,
-    temp_git_repo: Path,
-) -> None:
-    agent_name = f"{AZURE_TEST_NAME_PREFIX}ss-{int(time.time()) % 100000}"
-
-    result = _run_mngr(
-        azure_test_settings_dir,
-        temp_git_repo,
-        "create",
-        agent_name,
-        "--type",
-        "command",
-        "--provider",
-        "azure",
-        "--no-connect",
-        "--",
-        "sleep",
-        "99999",
-    )
-    assert result.returncode == 0, f"Create failed: {result.stderr}\n--- stdout ---\n{result.stdout}"
-    assert "successfully" in result.stdout.lower(), f"unexpected create output: {result.stdout}"
-
-    try:
-        result = _run_mngr(azure_test_settings_dir, temp_git_repo, "stop", agent_name)
-        assert result.returncode == 0, f"Stop failed: {result.stderr}"
-
-        result = _run_mngr(azure_test_settings_dir, temp_git_repo, "list")
-        assert result.returncode == 0
-        assert agent_name in result.stdout
-
-        result = _run_mngr(azure_test_settings_dir, temp_git_repo, "start", agent_name, "--no-connect")
-        assert result.returncode == 0, f"Start failed: {result.stderr}"
-
-        result = _run_mngr(azure_test_settings_dir, temp_git_repo, "exec", agent_name, "echo alive-after-restart")
-        assert result.returncode == 0, f"Post-restart exec failed: {result.stderr}"
-        assert "alive-after-restart" in result.stdout
-    finally:
-        _run_mngr(azure_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=180)
 
 
 @pytest.mark.rsync
@@ -331,7 +276,7 @@ def test_provider_create_builds_dockerfile_on_vm(
 
     The other lifecycle tests create from the default base image; this one exercises
     the remote-build path the ``-t azure`` template relies on (the same shared
-    ``mngr_vps_docker`` flow ``gcp`` uses): ``mngr create`` uploads the build context,
+    ``mngr_vps`` flow ``gcp`` uses): ``mngr create`` uploads the build context,
     runs ``docker build`` on the VM, and starts the agent container FROM the built
     image. We confirm that by baking a marker into the image with a ``RUN`` and reading
     it back via ``exec`` -- if create silently fell back to the base image, the marker
@@ -394,6 +339,134 @@ def test_provider_create_builds_dockerfile_on_vm(
         )
     finally:
         _run_mngr(azure_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=180)
+
+
+# =============================================================================
+# Trip 1 -- the shared provider release lifecycle (create -> stop/start ->
+# sketchy kill -> gc), parametrized over isolation mode. See
+# `imbue.mngr.providers.provider_release_testing` and
+# `specs/provider-release-tests.md`.
+# =============================================================================
+
+
+class _AzureReleaseProfile(VpsCloudReleaseProfile):
+    """Azure plumbing for the shared provider release trip."""
+
+    provider_name = "azure"
+    name_prefix = AZURE_TEST_NAME_PREFIX
+
+    # Trip 4: Azure is the one provider that curates its missing-credential help text -- it points
+    # at the subscription / `az login` setup steps instead of the generic "start Docker" guidance.
+    has_curated_unavailable_help = True
+    credential_setup_command = "az login"
+    # Azure captures host_dir to the Blob state bucket at `mngr stop`, so a stopped host's host_dir
+    # is readable offline (Trip 1's opt-in offline-host_dir step).
+    supports_offline_host_dir = True
+
+    def __init__(self, client: AzureVpsClient, isolation: IsolationMode, subscription_id: str) -> None:
+        super().__init__(client, isolation)
+        self._azure_client = client
+        self._subscription_id = subscription_id
+
+    def unavailable_reason(self) -> str | None:
+        if not (azure_credentials_available() and AZURE_RELEASE_TESTS_OPT_IN):
+            return "Azure credentials or MNGR_AZURE_RELEASE_TESTS=1 not set"
+        return None
+
+    def write_settings(self, settings_dir: Path) -> None:
+        _write_release_settings(
+            settings_dir,
+            self._subscription_id,
+            isolation="NONE" if self._isolation is IsolationMode.NONE else None,
+        )
+
+    def write_credentials_unresolvable_settings(self, settings_dir: Path) -> None:
+        # Omit ``subscription_id`` so nothing pins one in settings; paired with the env override
+        # clearing ``AZURE_SUBSCRIPTION_ID`` and pointing ``AZURE_CONFIG_DIR`` at an empty dir,
+        # ``get_subscription_id`` raises and Azure surfaces its curated unavailable error.
+        _write_release_settings(settings_dir, self._subscription_id, include_subscription_id=False)
+
+    def create_extra_args(self) -> Sequence[str]:
+        return ()
+
+    def make_credentials_unresolvable_env(self) -> Mapping[str, str | None]:
+        # Clear the env subscription and point the az-CLI config at an empty dir so no subscription
+        # resolves from any source (settings omits it via the settings hook above).
+        return {
+            "AZURE_SUBSCRIPTION_ID": None,
+            "MNGR_AZURE_SUBSCRIPTION_ID": None,
+            "AZURE_CONFIG_DIR": "/nonexistent/azure/config",
+        }
+
+    def find_launched_host_handle(self, host_name: str) -> str | None:
+        return find_handle_by_launched_label(self._azure_client.list_instances(), AZURE_PYTEST_LAUNCHED_TAG)
+
+
+@pytest.mark.rsync
+@pytest.mark.parametrize("isolation", [IsolationMode.CONTAINER, IsolationMode.NONE])
+def test_provider_release_trip1(
+    isolation: IsolationMode,
+    tmp_path: Path,
+    temp_git_repo: Path,
+    azure_release_client: AzureVpsClient,
+    azure_release_subscription_id: str,
+    _azure_release_test_network_prepared: None,
+) -> None:
+    run_provider_release_trip1(
+        _AzureReleaseProfile(azure_release_client, isolation, azure_release_subscription_id),
+        tmp_path,
+        temp_git_repo,
+    )
+
+
+@pytest.mark.rsync
+@pytest.mark.parametrize("isolation", [IsolationMode.CONTAINER, IsolationMode.NONE])
+def test_provider_release_trip2(
+    isolation: IsolationMode,
+    tmp_path: Path,
+    temp_git_repo: Path,
+    azure_release_client: AzureVpsClient,
+    azure_release_subscription_id: str,
+    _azure_release_test_network_prepared: None,
+) -> None:
+    run_provider_release_trip2(
+        _AzureReleaseProfile(azure_release_client, isolation, azure_release_subscription_id),
+        tmp_path,
+        temp_git_repo,
+    )
+
+
+@pytest.mark.rsync
+@pytest.mark.parametrize("isolation", [IsolationMode.CONTAINER, IsolationMode.NONE])
+def test_provider_release_trip3(
+    isolation: IsolationMode,
+    tmp_path: Path,
+    temp_git_repo: Path,
+    azure_release_client: AzureVpsClient,
+    azure_release_subscription_id: str,
+    _azure_release_test_network_prepared: None,
+) -> None:
+    run_provider_release_trip3(
+        _AzureReleaseProfile(azure_release_client, isolation, azure_release_subscription_id),
+        tmp_path,
+        temp_git_repo,
+    )
+
+
+def test_provider_release_trip4(
+    tmp_path: Path,
+    temp_git_repo: Path,
+    azure_release_client: AzureVpsClient,
+    azure_release_subscription_id: str,
+) -> None:
+    # No-boot CLI error-classification trip: not parametrized over isolation (the error paths are
+    # isolation-agnostic) and no ``rsync`` mark (it never provisions a host). No network-prepare
+    # dependency either -- nothing is created.
+    run_provider_release_trip4(
+        _AzureReleaseProfile(azure_release_client, IsolationMode.CONTAINER, azure_release_subscription_id),
+        tmp_path,
+        temp_git_repo,
+    )
 
 
 # =============================================================================

@@ -523,7 +523,7 @@ _IMBUE_CLOUD_BACKEND_NAME: Final[str] = "imbue_cloud"
 # block so the imbue_cloud slow (rebuild) path runs the agent container under
 # gVisor with the runsc hardening args. These mirror the forever-claude-template
 # ``[providers.ovh]`` bake settings; ``ImbueCloudProviderConfig`` (which extends
-# ``VpsDockerProviderConfig``) forwards them onto the delegated vps_docker
+# ``VpsProviderConfig``) forwards them onto the delegated vps_docker
 # provider, and ``install_gvisor_runtime`` also drives the slow path's SSH
 # host-setup so a leased host that lacks runsc has it installed before the
 # container is rebuilt under it.

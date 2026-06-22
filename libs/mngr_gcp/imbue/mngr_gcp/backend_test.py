@@ -1,5 +1,6 @@
 """Tests for GCP provider backend registration."""
 
+import json
 from datetime import datetime
 from datetime import timezone
 
@@ -10,25 +11,35 @@ from google.cloud import compute_v1
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_gcp.backend import AGENT_METADATA_PREFIX
 from imbue.mngr_gcp.backend import GCP_BACKEND_NAME
 from imbue.mngr_gcp.backend import GcpProvider
 from imbue.mngr_gcp.backend import GcpProviderBackend
+from imbue.mngr_gcp.backend import HOST_STATE_METADATA_KEY
 from imbue.mngr_gcp.backend import ParsedGcpBuildOptions
+from imbue.mngr_gcp.backend import _GceMetadataHostStateStore
 from imbue.mngr_gcp.client import GcpVpsClient
+from imbue.mngr_gcp.client import HOST_ID_METADATA_KEY
 from imbue.mngr_gcp.client import HOST_NAME_METADATA_KEY
+from imbue.mngr_gcp.client import ISOLATION_METADATA_KEY
 from imbue.mngr_gcp.config import GcpProviderConfig
 from imbue.mngr_gcp.errors import GcpCredentialsError
 from imbue.mngr_gcp.testing import FakeInstancesClient
 from imbue.mngr_gcp.testing import _StubbedGcpVpsClient
-from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
+from imbue.mngr_vps.bare_realizer import BareRealizer
+from imbue.mngr_vps.host_store import VpsHostConfig
+from imbue.mngr_vps.host_store import VpsHostRecord
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.testing import seed_stopped_host_record
 
 
 class _StubAdcConfig(GcpProviderConfig):
@@ -303,12 +314,15 @@ def test_parse_build_args_rejects_dropped_vps_prefix(temp_mngr_ctx: MngrContext)
 
 
 # =============================================================================
-# Offline labels+metadata paths (stop/start lifecycle): instance lookup,
-# agent-data mirror, discovery, offline-host reconstruction.
+# Offline discovery + the GCE-metadata-backed state store (stop/start lifecycle):
+# instance lookup, agent/host-record mirror, discovery, offline reconstruction.
 #
 # These build a GcpProvider over a _StubbedGcpVpsClient whose FakeInstancesClient
 # returns hand-built compute_v1.Instance objects; the provider normalizes them
 # through the real list_instances path (labels -> "tags", metadata -> "metadata").
+# The full host record lives in the ``mngr-host-state`` metadata value and one
+# full agent JSON per agent under ``mngr-agent-<id>`` -- the GCP analog of the
+# AWS/Azure object-storage state bucket, behind the same HostStateStore interface.
 # =============================================================================
 
 
@@ -316,8 +330,8 @@ def _build_stubbed_provider(mngr_ctx: MngrContext) -> tuple[GcpProvider, FakeIns
     """Build a GcpProvider whose GCE client is a _StubbedGcpVpsClient over a FakeInstancesClient.
 
     Returns the provider and the fake so a test can seed ``list_result`` (the
-    label/metadata-based lookups read it) and assert on recorded
-    ``set_metadata`` calls. The GCP analog of AWS's ``_build_stubbed_provider``.
+    label/metadata-based lookups read it) and assert on recorded ``set_metadata``
+    calls. The GCP analog of AWS's ``_build_stubbed_provider``.
     """
     config = GcpProviderConfig(backend=GCP_BACKEND_NAME, project_id="test-project", auto_shutdown_seconds=3600)
     instances = FakeInstancesClient()
@@ -345,66 +359,68 @@ def _instance(
     name: str,
     status: str,
     *,
+    host_id: HostId | None = None,
     labels: dict[str, str] | None = None,
     metadata: dict[str, str] | None = None,
     nat_ip: str = "",
 ) -> compute_v1.Instance:
     """A compute_v1.Instance carrying GCE labels + metadata, as the GCE API returns it.
 
-    GCP stores host-id/created-at as labels (surfaced in the normalized dict's
-    "tags") but the host name and per-agent records as metadata (surfaced in
-    "metadata"); this mirrors that split so ``list_instances`` normalizes it the
-    way production does.
+    GCP stores only ``mngr-provider`` as a label; the host id, host name, full
+    host record, and per-agent records all live in metadata (surfaced in the
+    normalized dict's "metadata"). ``host_id`` seeds the ``mngr-host-id`` metadata
+    value the way production does, so this mirrors the real ``list_instances``
+    normalization.
     """
     access_configs = [compute_v1.AccessConfig(nat_i_p=nat_ip)] if nat_ip else []
+    full_metadata = dict(metadata or {})
+    if host_id is not None:
+        full_metadata[HOST_ID_METADATA_KEY] = str(host_id)
     return compute_v1.Instance(
         name=name,
         status=status,
         labels=labels or {},
-        metadata=compute_v1.Metadata(items=[compute_v1.Items(key=k, value=v) for k, v in (metadata or {}).items()]),
+        metadata=compute_v1.Metadata(items=[compute_v1.Items(key=k, value=v) for k, v in full_metadata.items()]),
         network_interfaces=[compute_v1.NetworkInterface(access_configs=access_configs)],
     )
 
 
-def _seed_stopped_host_record(provider: GcpProvider, host_id: HostId) -> None:
-    """Cache a record with ``vps_ip=None`` so the base on-volume path short-circuits.
+def _agent_metadata_json(agent_id: AgentId, **fields: object) -> str:
+    """Render a full agent record JSON, as the metadata store stores it under ``mngr-agent-<id>``."""
+    return json.dumps({"id": str(agent_id), **fields})
 
-    The agent-data hooks call ``super()`` first (the authoritative on-volume
-    store) and only additionally write GCE metadata. For a *stopped* host the
-    base raises ``HostNotFoundError`` (no reachable ``vps_ip``); seeding such a
-    record makes the base short-circuit immediately without any SSH or discovery
-    sweep, so these metadata-path tests exercise the stopped-host fallback
-    without standing up a fake VPS. The GCP analog of AWS's helper.
-    """
-    certified = CertifiedHostData(
-        host_id=str(host_id),
-        host_name="myhost",
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
-        stop_reason=HostState.STOPPED.value,
+
+def _host_state_metadata_json(host_id: HostId, host_name: str, *, vps_ip: str | None = None) -> str:
+    """Render a full ``VpsHostRecord`` JSON, as the metadata store stores it under ``mngr-host-state``."""
+    record = VpsHostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=str(host_id),
+            host_name=host_name,
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            stop_reason=HostState.STOPPED.value,
+        ),
+        vps_ip=vps_ip,
     )
-    provider._host_record_cache[host_id] = VpsDockerHostRecord(certified_host_data=certified)
+    return record.model_dump_json()
 
 
-def _host_id_label(host_id: HostId) -> str:
-    """The GCE label value form of a host id (lowercased to the GCE charset)."""
-    return str(host_id).lower()
-
-
-def test_find_instance_for_host_matches_by_host_id_label(temp_mngr_ctx: MngrContext) -> None:
-    """``_find_instance_for_host`` resolves a (stopped) instance by its mngr-host-id label, no SSH."""
+def test_find_instance_for_host_matches_by_host_id_metadata(temp_mngr_ctx: MngrContext) -> None:
+    """``_find_instance_for_host`` resolves a (stopped) instance by its mngr-host-id metadata, no SSH."""
     provider, instances = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     instances.list_result = [
         _instance(
             "i-match",
             "TERMINATED",
-            labels={"mngr-host-id": _host_id_label(host_id), "mngr-provider": "gcp-test"},
+            host_id=host_id,
+            labels={"mngr-provider": "gcp-test"},
         ),
         _instance(
             "i-other",
             "RUNNING",
-            labels={"mngr-host-id": _host_id_label(HostId.generate()), "mngr-provider": "gcp-test"},
+            host_id=HostId.generate(),
+            labels={"mngr-provider": "gcp-test"},
             nat_ip="10.0.0.9",
         ),
     ]
@@ -413,32 +429,54 @@ def test_find_instance_for_host_matches_by_host_id_label(temp_mngr_ctx: MngrCont
     assert found["id"] == "i-match"
 
 
-def test_find_instance_for_host_returns_none_when_no_label_match(temp_mngr_ctx: MngrContext) -> None:
-    """A host with no matching instance label resolves to None (after a cache-refresh retry).
+def test_realizer_for_vps_ip_reads_bare_marker_from_gce_metadata(temp_mngr_ctx: MngrContext) -> None:
+    """A GCE bare host (metadata ``mngr-isolation=none``) is probed with the BARE realizer.
+
+    GCP stores the placement marker in metadata (not the normalized tag list), so the
+    GcpProvider overrides ``_isolation_marker_for_instance`` to read it from there.
+    Discovery then picks the bare realizer (port 22, no container probe) even though
+    the provider config defaults to CONTAINER -- the fix for connecting to a bare host.
+    """
+    provider, instances = _build_stubbed_provider(temp_mngr_ctx)
+    instances.list_result = [
+        _instance(
+            "i-bare",
+            "RUNNING",
+            host_id=HostId.generate(),
+            labels={"mngr-provider": "gcp-test"},
+            metadata={ISOLATION_METADATA_KEY: "none"},
+            nat_ip="10.0.0.42",
+        ),
+    ]
+    realizer = provider._realizer_for_vps_ip("10.0.0.42")
+    assert isinstance(realizer, BareRealizer)
+    assert realizer.agent_endpoint("10.0.0.42").port == 22
+
+
+def test_find_instance_for_host_returns_none_when_no_metadata_match(temp_mngr_ctx: MngrContext) -> None:
+    """A host with no matching instance metadata resolves to None (after a cache-refresh retry).
 
     On a cache miss ``_find_instance_for_host`` drops the cache and re-lists once,
     so a just-created instance absent from a stale cache is still found. With a
     persistent miss the fake returns the same (non-matching) list both times.
     """
     provider, instances = _build_stubbed_provider(temp_mngr_ctx)
-    instances.list_result = [
-        _instance("i-other", "RUNNING", labels={"mngr-host-id": _host_id_label(HostId.generate())}, nat_ip="10.0.0.9")
-    ]
+    instances.list_result = [_instance("i-other", "RUNNING", host_id=HostId.generate(), nat_ip="10.0.0.9")]
     assert provider._find_instance_for_host(HostId.generate()) is None
 
 
-def test_find_instance_for_host_refuses_duplicate_host_id_label(temp_mngr_ctx: MngrContext) -> None:
-    """Two instances sharing a mngr-host-id label are refused, not silently disambiguated.
+def test_find_instance_for_host_refuses_duplicate_host_id_metadata(temp_mngr_ctx: MngrContext) -> None:
+    """Two instances sharing a mngr-host-id are refused, not silently disambiguated.
 
-    The label is account-writable, so a duplicate could otherwise steer
+    The metadata is account-writable, so a duplicate could otherwise steer
     ``mngr start`` (and the agent-metadata writes keyed off this lookup) onto the
     wrong instance. The lookup must raise rather than pick the first match.
     """
     provider, instances = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     instances.list_result = [
-        _instance("i-real", "TERMINATED", labels={"mngr-host-id": _host_id_label(host_id)}),
-        _instance("i-evil", "RUNNING", labels={"mngr-host-id": _host_id_label(host_id)}, nat_ip="10.0.0.9"),
+        _instance("i-real", "TERMINATED", host_id=host_id),
+        _instance("i-evil", "RUNNING", host_id=host_id, nat_ip="10.0.0.9"),
     ]
     with pytest.raises(MngrError, match="ambiguous"):
         provider._find_instance_for_host(host_id)
@@ -466,20 +504,31 @@ def test_rebind_known_hosts_pre_connect_uses_local_keypairs(temp_mngr_ctx: MngrC
     assert new_ip in container_known_hosts and expected_container_key in container_known_hosts
 
 
-def test_persist_agent_data_mirrors_fields_into_metadata(temp_mngr_ctx: MngrContext) -> None:
-    """persist_agent_data finds the instance by host label and upserts per-field agent metadata.
+def test_state_store_is_gce_metadata_backed(temp_mngr_ctx: MngrContext) -> None:
+    """GCP has no object-storage bucket; its ``_state_store`` is the GCE-metadata store.
+
+    This is the GCP arm of the uniform ``HostStateStore`` interface the AWS/Azure
+    object-storage buckets also implement -- the offline read/write paths on the
+    shared base dispatch through it identically.
+    """
+    provider, _instances = _build_stubbed_provider(temp_mngr_ctx)
+    assert isinstance(provider._state_store, _GceMetadataHostStateStore)
+
+
+def test_persist_agent_data_writes_full_agent_json_to_metadata(temp_mngr_ctx: MngrContext) -> None:
+    """persist_agent_data finds the instance by host label and writes the full agent JSON under one key.
 
     Exercises the stopped-host path (the on-volume base write is unavailable, so
     only the GCE metadata is written); the seeded ``vps_ip=None`` record makes
-    ``super().persist_agent_data`` short-circuit with ``HostNotFoundError``. A
-    single ``set_instance_metadata`` round-trip carries the upserts (name/type,
-    plus labels as compact JSON).
+    ``super().persist_agent_data`` short-circuit with ``HostNotFoundError``. One
+    ``set_instance_metadata`` round-trip writes the full agent record JSON under
+    ``mngr-agent-<id>`` -- uniform with the bucket's per-agent object.
     """
     provider, instances = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     agent_id = AgentId.generate()
-    _seed_stopped_host_record(provider, host_id)
-    listed = _instance("i-1", "TERMINATED", labels={"mngr-host-id": _host_id_label(host_id)})
+    seed_stopped_host_record(provider, host_id)
+    listed = _instance("i-1", "TERMINATED", host_id=host_id)
     instances.list_result = [listed]
     # set_metadata reads the live instance first (whole-object read-modify-write).
     instances.get_result = listed
@@ -489,42 +538,100 @@ def test_persist_agent_data_mirrors_fields_into_metadata(temp_mngr_ctx: MngrCont
     )
     assert len(instances.set_metadata_calls) == 1
     written = {item.key: item.value for item in instances.set_metadata_calls[0].items}
-    assert written[f"{AGENT_METADATA_PREFIX}{agent_id}-name"] == "a1"
-    assert written[f"{AGENT_METADATA_PREFIX}{agent_id}-type"] == "command"
-    assert written[f"{AGENT_METADATA_PREFIX}{agent_id}-labels"] == '{"env":"prod"}'
+    stored = json.loads(written[f"{AGENT_METADATA_PREFIX}{agent_id}"])
+    assert stored == {"id": str(agent_id), "name": "a1", "type": "command", "labels": {"env": "prod"}}
 
 
-def test_persist_agent_data_carries_deletes_in_single_call(temp_mngr_ctx: MngrContext) -> None:
-    """An explicit labels={} removal deletes the stale -labels key in the same setMetadata write.
-
-    Unlike AWS's two tag calls (CreateTags + DeleteTags), one GCE setMetadata
-    round-trip carries both the upserts and the stale deletes.
-    """
+def test_remove_persisted_agent_data_deletes_the_agent_key(temp_mngr_ctx: MngrContext) -> None:
+    """Removing an agent drops its single ``mngr-agent-<id>`` metadata key (idempotent)."""
     provider, instances = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     agent_id = AgentId.generate()
-    _seed_stopped_host_record(provider, host_id)
+    seed_stopped_host_record(provider, host_id)
     listed = _instance(
         "i-1",
         "TERMINATED",
-        labels={"mngr-host-id": _host_id_label(host_id)},
-        metadata={f"{AGENT_METADATA_PREFIX}{agent_id}-labels": '{"env":"prod"}'},
+        host_id=host_id,
+        metadata={f"{AGENT_METADATA_PREFIX}{agent_id}": _agent_metadata_json(agent_id, name="a1")},
     )
     instances.list_result = [listed]
     instances.get_result = listed
-    provider.persist_agent_data(
-        host_id,
-        {"id": str(agent_id), "name": "a1", "type": "command", "labels": {}},
-    )
+    provider.remove_persisted_agent_data(host_id, agent_id)
     assert len(instances.set_metadata_calls) == 1
     written = {item.key: item.value for item in instances.set_metadata_calls[0].items}
-    # The stale labels key is removed; name/type are upserted.
-    assert f"{AGENT_METADATA_PREFIX}{agent_id}-labels" not in written
-    assert written[f"{AGENT_METADATA_PREFIX}{agent_id}-name"] == "a1"
+    assert f"{AGENT_METADATA_PREFIX}{agent_id}" not in written
+
+
+def test_persist_host_record_externally_writes_full_record_to_metadata(temp_mngr_ctx: MngrContext) -> None:
+    """The full host record is mirrored to the ``mngr-host-state`` metadata value (bucket parity)."""
+    provider, instances = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    listed = _instance("i-1", "TERMINATED", host_id=host_id)
+    instances.list_result = [listed]
+    instances.get_result = listed
+    record = VpsHostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=str(host_id),
+            host_name="myhost",
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            stop_reason=HostState.STOPPED.value,
+        ),
+        vps_ip="203.0.113.7",
+    )
+    provider._persist_host_record_externally(record)
+    assert len(instances.set_metadata_calls) == 1
+    written = {item.key: item.value for item in instances.set_metadata_calls[0].items}
+    round_tripped = VpsHostRecord.model_validate_json(written[HOST_STATE_METADATA_KEY])
+    assert round_tripped.certified_host_data.host_name == "myhost"
+    assert round_tripped.vps_ip == "203.0.113.7"
+
+
+def test_remirror_host_name_restamps_identity_metadata(temp_mngr_ctx: MngrContext) -> None:
+    """A rename re-stamps ``mngr-host-name`` (read by offline discovery) to ``mngr-<newname>``."""
+    provider, instances = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    listed = _instance(
+        "i-1",
+        "TERMINATED",
+        host_id=host_id,
+        metadata={HOST_NAME_METADATA_KEY: "mngr-oldname"},
+    )
+    instances.get_result = listed
+    record = VpsHostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=str(host_id),
+            host_name="newname",
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            stop_reason=HostState.STOPPED.value,
+        ),
+        config=VpsHostConfig(vps_instance_id=VpsInstanceId("i-1"), region="us-west1-a", plan="e2-medium"),
+    )
+    provider._remirror_host_name(record, HostName("newname"))
+    assert len(instances.set_metadata_calls) == 1
+    written = {item.key: item.value for item in instances.set_metadata_calls[0].items}
+    assert written[HOST_NAME_METADATA_KEY] == "mngr-newname"
+
+
+def test_remirror_host_name_no_op_without_config(temp_mngr_ctx: MngrContext) -> None:
+    """No config means no instance id to address, so the re-stamp is a no-op (no API call)."""
+    provider, instances = _build_stubbed_provider(temp_mngr_ctx)
+    record = VpsHostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=str(HostId.generate()),
+            host_name="newname",
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            stop_reason=HostState.STOPPED.value,
+        ),
+    )
+    provider._remirror_host_name(record, HostName("newname"))
+    assert instances.set_metadata_calls == []
 
 
 def test_list_persisted_agent_data_for_host_reads_metadata(temp_mngr_ctx: MngrContext) -> None:
-    """list_persisted_agent_data_for_host reassembles an agent from its metadata (stopped host)."""
+    """list_persisted_agent_data_for_host reads the full agent JSON from metadata (stopped host)."""
     provider, instances = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     agent_id = AgentId.generate()
@@ -532,11 +639,11 @@ def test_list_persisted_agent_data_for_host_reads_metadata(temp_mngr_ctx: MngrCo
         _instance(
             "i-1",
             "TERMINATED",
-            labels={"mngr-host-id": _host_id_label(host_id)},
+            host_id=host_id,
             metadata={
-                f"{AGENT_METADATA_PREFIX}{agent_id}-name": "a1",
-                f"{AGENT_METADATA_PREFIX}{agent_id}-type": "command",
-                f"{AGENT_METADATA_PREFIX}{agent_id}-labels": '{"env":"prod"}',
+                f"{AGENT_METADATA_PREFIX}{agent_id}": _agent_metadata_json(
+                    agent_id, name="a1", type="command", labels={"env": "prod"}
+                )
             },
         )
     ]
@@ -549,7 +656,7 @@ def test_list_persisted_agent_data_for_host_reads_metadata(temp_mngr_ctx: MngrCo
 
 
 def test_discover_hosts_and_agents_surfaces_terminated_host_from_metadata(temp_mngr_ctx: MngrContext) -> None:
-    """A TERMINATED instance (no external IP) is reconstructed from labels+metadata as a STOPPED host."""
+    """A TERMINATED instance (no external IP) is surfaced as a STOPPED host with its agents from metadata."""
     provider, instances = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     agent_id = AgentId.generate()
@@ -557,11 +664,11 @@ def test_discover_hosts_and_agents_surfaces_terminated_host_from_metadata(temp_m
         _instance(
             "i-1",
             "TERMINATED",
-            labels={"mngr-host-id": _host_id_label(host_id), "mngr-provider": "gcp-test"},
+            host_id=host_id,
+            labels={"mngr-provider": "gcp-test"},
             metadata={
                 HOST_NAME_METADATA_KEY: "mngr-myhost",
-                f"{AGENT_METADATA_PREFIX}{agent_id}-name": "a1",
-                f"{AGENT_METADATA_PREFIX}{agent_id}-type": "command",
+                f"{AGENT_METADATA_PREFIX}{agent_id}": _agent_metadata_json(agent_id, name="a1", type="command"),
             },
         )
     ]
@@ -579,7 +686,7 @@ def test_discover_hosts_and_agents_surfaces_terminated_host_from_metadata(temp_m
 
 
 def test_discover_hosts_and_agents_surfaces_stopping_host_during_transition(temp_mngr_ctx: MngrContext) -> None:
-    """A still-STOPPING instance (OS down) is reconstructed from metadata so it doesn't vanish mid-stop.
+    """A still-STOPPING instance (OS down) is surfaced from metadata so it doesn't vanish mid-stop.
 
     ``_HOST_DOWN_STATES`` includes STOPPING so a host stays discoverable across
     the stop transition before it reaches the terminal TERMINATED, keeping
@@ -592,10 +699,11 @@ def test_discover_hosts_and_agents_surfaces_stopping_host_during_transition(temp
         _instance(
             "i-1",
             "STOPPING",
-            labels={"mngr-host-id": _host_id_label(host_id), "mngr-provider": "gcp-test"},
+            host_id=host_id,
+            labels={"mngr-provider": "gcp-test"},
             metadata={
                 HOST_NAME_METADATA_KEY: "mngr-myhost",
-                f"{AGENT_METADATA_PREFIX}{agent_id}-name": "a1",
+                f"{AGENT_METADATA_PREFIX}{agent_id}": _agent_metadata_json(agent_id, name="a1"),
             },
         )
     ]
@@ -607,10 +715,10 @@ def test_discover_hosts_and_agents_surfaces_stopping_host_during_transition(temp
     assert [a.agent_id for a in result[hosts[host_id]]] == [agent_id]
 
 
-def test_discover_hosts_and_agents_skips_instance_with_absent_host_id_label(temp_mngr_ctx: MngrContext) -> None:
-    """An instance with no mngr-host-id label is skipped; a well-formed stopped host still surfaces.
+def test_discover_hosts_and_agents_skips_instance_with_absent_host_id_metadata(temp_mngr_ctx: MngrContext) -> None:
+    """An instance with no mngr-host-id metadata is skipped; a well-formed stopped host still surfaces.
 
-    A missing host-id label yields no DiscoveredHost for that instance; the
+    A missing host-id yields no DiscoveredHost for that instance; the
     offline-discovery loop must skip it and still surface the well-formed stopped
     host, rather than letting one bad instance take down the whole sweep.
     """
@@ -621,7 +729,8 @@ def test_discover_hosts_and_agents_skips_instance_with_absent_host_id_label(temp
         _instance(
             "i-good",
             "TERMINATED",
-            labels={"mngr-host-id": _host_id_label(good_host_id), "mngr-provider": "gcp-test"},
+            host_id=good_host_id,
+            labels={"mngr-provider": "gcp-test"},
             metadata={HOST_NAME_METADATA_KEY: "mngr-goodhost"},
         ),
     ]
@@ -632,11 +741,12 @@ def test_discover_hosts_and_agents_skips_instance_with_absent_host_id_label(temp
     assert len(host_ids) == 1
 
 
-def test_to_offline_host_reconstructs_stopped_host_from_metadata(temp_mngr_ctx: MngrContext) -> None:
-    """to_offline_host rebuilds a STOPPED offline host from labels+metadata when SSH can't reach it.
+def test_to_offline_host_reconstructs_full_record_from_metadata(temp_mngr_ctx: MngrContext) -> None:
+    """to_offline_host rebuilds the full STOPPED host record from ``mngr-host-state`` when SSH can't reach it.
 
-    The name comes from the ``mngr-host-name`` metadata and created_at from the
-    ``mngr-created-at`` label (GCE's restricted ``%Y-%m-%dt%H-%M-%S`` form).
+    Unlike the previous lossy label reconstruction, the full ``VpsHostRecord``
+    (name, IP, ...) is read back from the metadata state record -- parity with the
+    AWS/Azure bucket's ``host_state.json``.
     """
     provider, instances = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
@@ -644,8 +754,8 @@ def test_to_offline_host_reconstructs_stopped_host_from_metadata(temp_mngr_ctx: 
         _instance(
             "i-1",
             "TERMINATED",
-            labels={"mngr-host-id": _host_id_label(host_id), "mngr-created-at": "2026-01-01t00-00-00"},
-            metadata={HOST_NAME_METADATA_KEY: "mngr-myhost"},
+            host_id=host_id,
+            metadata={HOST_STATE_METADATA_KEY: _host_state_metadata_json(host_id, "myhost", vps_ip="203.0.113.7")},
         )
     ]
     offline = provider.to_offline_host(host_id)
@@ -656,109 +766,14 @@ def test_to_offline_host_reconstructs_stopped_host_from_metadata(temp_mngr_ctx: 
     assert (created_at.year, created_at.month, created_at.day) == (2026, 1, 1)
 
 
-def test_to_offline_host_falls_back_to_now_on_malformed_created_at(
-    temp_mngr_ctx: MngrContext, log_warnings: list[str]
-) -> None:
-    """A malformed mngr-created-at label is surfaced (warning) and falls back to now(), not swallowed."""
+def test_to_offline_host_raises_when_no_host_state_metadata(temp_mngr_ctx: MngrContext) -> None:
+    """With the instance present but no ``mngr-host-state`` record, the offline read raises HostNotFound.
+
+    This matches the AWS/Azure bucket: a host the store has never recorded cannot
+    be reconstructed, rather than fabricating a lossy stand-in.
+    """
     provider, instances = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
-    before = datetime.now(timezone.utc)
-    instances.list_result = [
-        _instance(
-            "i-1",
-            "TERMINATED",
-            labels={"mngr-host-id": _host_id_label(host_id), "mngr-created-at": "not-a-timestamp"},
-            metadata={HOST_NAME_METADATA_KEY: "mngr-myhost"},
-        )
-    ]
-    offline = provider.to_offline_host(host_id)
-    assert offline.id == host_id
-    assert offline.get_state() == HostState.STOPPED
-    # Fell back to now() rather than crashing on the unparseable label.
-    assert offline.get_certified_data().created_at >= before
-    assert any("Malformed mngr-created-at" in w for w in log_warnings), log_warnings
-
-
-# =============================================================================
-# Agent-metadata helpers (the per-field upsert/delete logic, unit-level)
-# =============================================================================
-
-
-def _normalized_instance(metadata: dict[str, str]) -> dict:
-    """A normalized instance dict carrying a ``metadata`` dict, for helper unit tests."""
-    return {"id": "i-1", "tags": [], "metadata": metadata}
-
-
-def test_agent_metadata_items_builds_one_entry_per_field(temp_mngr_ctx: MngrContext) -> None:
-    """name/type/labels each map to their own mngr-agent-<id>-<field> metadata entry."""
-    provider, _instances = _build_stubbed_provider(temp_mngr_ctx)
-    updates, delete_keys = provider._agent_metadata_items(
-        "agent-1",
-        {"id": "agent-1", "name": "a1", "type": "command", "labels": {"env": "prod"}},
-        _normalized_instance({}),
-    )
-    assert updates == {
-        "mngr-agent-agent-1-name": "a1",
-        "mngr-agent-agent-1-type": "command",
-        "mngr-agent-agent-1-labels": '{"env":"prod"}',
-    }
-    assert delete_keys == []
-
-
-def test_agent_metadata_items_omits_empty_labels(temp_mngr_ctx: MngrContext) -> None:
-    """An agent with absent or empty labels gets no -labels entry."""
-    provider, _instances = _build_stubbed_provider(temp_mngr_ctx)
-    instance = _normalized_instance({})
-    for agent_data in (
-        {"id": "agent-1", "name": "a1", "type": "command"},
-        {"id": "agent-1", "name": "a1", "type": "command", "labels": {}},
-    ):
-        updates, _ = provider._agent_metadata_items("agent-1", agent_data, instance)
-        assert "mngr-agent-agent-1-labels" not in updates
-
-
-def test_agent_metadata_items_deletes_stale_labels_on_explicit_removal(temp_mngr_ctx: MngrContext) -> None:
-    """When an update carries empty labels (an explicit removal), the stale -labels key is deleted."""
-    provider, _instances = _build_stubbed_provider(temp_mngr_ctx)
-    instance = _normalized_instance(
-        {
-            "mngr-agent-agent-1-name": "a1",
-            "mngr-agent-agent-1-type": "command",
-            "mngr-agent-agent-1-labels": '{"env":"prod"}',
-        }
-    )
-    updates, delete_keys = provider._agent_metadata_items(
-        "agent-1", {"id": "agent-1", "name": "a1", "type": "command", "labels": {}}, instance
-    )
-    assert "mngr-agent-agent-1-labels" not in updates
-    assert delete_keys == ["mngr-agent-agent-1-labels"]
-
-
-def test_agent_metadata_items_preserves_absent_fields_on_partial_update(temp_mngr_ctx: MngrContext) -> None:
-    """A partial persist (e.g. only id+type) must NOT delete the agent's existing name/labels.
-
-    persist_agent_data is an upsert sometimes called with a partial record.
-    Treating an absent field as a removal would clobber the name offline
-    resolve-by-name (`mngr start <agent>` on a stopped host) depends on.
-    """
-    provider, _instances = _build_stubbed_provider(temp_mngr_ctx)
-    instance = _normalized_instance(
-        {
-            "mngr-agent-agent-1-name": "a1",
-            "mngr-agent-agent-1-type": "command",
-            "mngr-agent-agent-1-labels": '{"env":"prod"}',
-        }
-    )
-    updates, delete_keys = provider._agent_metadata_items("agent-1", {"id": "agent-1", "type": "claude"}, instance)
-    assert updates == {"mngr-agent-agent-1-type": "claude"}
-    # name and labels are absent from this update, so their keys are left untouched.
-    assert delete_keys == []
-
-
-def test_persisted_agent_dicts_reassembles_id_with_dashes(temp_mngr_ctx: MngrContext) -> None:
-    """An agent id containing dashes still reassembles: the field is split off the *final* dash."""
-    provider, _instances = _build_stubbed_provider(temp_mngr_ctx)
-    agents = provider._persisted_agent_dicts_from_instance(
-        _normalized_instance({"mngr-agent-ab-cd-ef-name": "a1", "mngr-agent-ab-cd-ef-type": "command"})
-    )
-    assert agents == [{"id": "ab-cd-ef", "name": "a1", "type": "command"}]
+    instances.list_result = [_instance("i-1", "TERMINATED", host_id=host_id)]
+    with pytest.raises(HostNotFoundError):
+        provider.to_offline_host(host_id)
