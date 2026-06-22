@@ -1213,7 +1213,7 @@ class FakePoolBackend:
     """In-memory pool database replacement for testing host pool + paid-list endpoints."""
 
     pool_rows: list[FakePoolRow]
-    append_key_calls: list[tuple[str, int, str, str, str]]
+    append_key_calls: list[tuple[str, int, str, str, str, str]]
     ovh_ops: FakeOvhOps
     # Paid-list stores: value -> {"is_paid", "created_at", "updated_at"}.
     paid_domains: dict[str, dict[str, Any]]

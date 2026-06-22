@@ -1,3 +1,5 @@
+from typing import cast
+
 import pytest
 
 from imbue.mngr_imbue_cloud.errors import BareMetalConfigError
@@ -9,6 +11,7 @@ from imbue.mngr_imbue_cloud.slices.ordering import extract_order_id
 from imbue.mngr_imbue_cloud.slices.ordering import select_eco_option_codes
 from imbue.mngr_imbue_cloud.slices.ordering import start_os_reinstall
 from imbue.mngr_imbue_cloud.slices.ordering import summarize_checkout_prices
+from imbue.mngr_ovh.client import OvhVpsClient
 
 
 def _eco_options() -> list[dict]:
@@ -254,7 +257,9 @@ class _FakeReinstallClient:
 
 def test_start_os_reinstall_injects_a_known_host_key_and_returns_its_public_half() -> None:
     client = _FakeReinstallClient()
-    result = start_os_reinstall(client, service_name="ns1.example", ssh_public_key="ssh-ed25519 AAAAclient")
+    result = start_os_reinstall(
+        cast(OvhVpsClient, client), service_name="ns1.example", ssh_public_key="ssh-ed25519 AAAAclient"
+    )
     assert result.task_id == 4242
     # The reinstall request injects our login key AND a post-install script (the
     # private host-key delivery channel), and we get back the host PUBLIC key to pin.
