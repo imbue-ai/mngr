@@ -118,7 +118,7 @@ Lifted the accent color in dark mode to a brighter blue (`#0069d9` -> `#4d9bff`)
 
 Decluttered the dev styleguide previews: dropped the redundant "Light" / "Dark" labels from the dual-mode token previews (the white/black cards are self-evident), removed the decorative card frame (border / background / padding) from the single-mode previews (Type ramp, Spacing, Corner radius) so the samples sit directly on the page, and dropped the borders from the corner-radius demo shapes (each is now just its filled shape).
 
-Gave the primary button a pressed state: it now dims to 60% opacity on `:active` -- a clear step below the 80% hover, so a held press reads distinctly rather than blending into the hover state.
+Gave the primary button a pressed state: it dims to 70% opacity on `:active` (a step below the 80% hover) -- toned down from an earlier 60% once the press scale (below) was added to carry the feedback.
 
 Gave the styleguide's floating light/dark toggle an opaque surface background (`.styleguide-toggle` in app.css) so it stays legible while floating over page content; the hover/active fills are composited over that surface as a background-image gradient rather than replacing it (a translucent fill background-color would let content show through).
 
@@ -149,3 +149,5 @@ Restyled the status badges (`StatusBadge`):
 - **Warning** uses a dedicated yellow caution surface (`--c-warning-surface`, `hsl(49 100% 50% / 0.2)`) with the warning foreground -- a solid yellow with white text would be unreadable, and a tint of the brown-orange warning hue reads muddy. The warning `Notice` uses the same yellow surface.
 
 - The styleguide now shows a full second row of `xs` badges (every variant) instead of a single "Tiny" badge tacked onto the end.
+
+All buttons now scale to 98% on `:active` (a subtle press-in), animated via `transition` (which also smooths the hover/press color + opacity changes). The primary button's active dim was eased from 60% to 70% opacity to match -- the scale now carries most of the press feedback.
