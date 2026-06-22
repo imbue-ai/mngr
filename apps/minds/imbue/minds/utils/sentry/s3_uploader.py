@@ -9,7 +9,6 @@ import boto3
 from botocore import UNSIGNED
 from botocore.config import Config
 from loguru import logger
-
 from pydantic import PrivateAttr
 
 EXTRAS_UPLOADED_FILES_KEY = "uploaded_files"
@@ -37,7 +36,7 @@ class _S3Uploader(FrozenModel):
     def model_post_init(self, context) -> None:
         # NOTE: we use an unsigned client to avoid the need to provide AWS credentials.
         self._s3_client = boto3.client("s3", region_name=self.region, config=Config(signature_version=UNSIGNED))
-        self._thread_pool = ThreadPoolExecutor(max_workers=None, thread_name_prefix=f"s3_upload")
+        self._thread_pool = ThreadPoolExecutor(max_workers=None, thread_name_prefix="s3_upload")
         # Unfortunately, there's no safe access to the queue size of the thread pool so calculating that number precisely
         # using a semaphore. Each queued up uploads acquires a single value and returns it only after its thread is done
         # interacting with S3. The value of the semaphore at any given time is the number of available work slots, and

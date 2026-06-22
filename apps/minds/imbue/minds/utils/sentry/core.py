@@ -3,7 +3,6 @@ import gzip
 import os
 import re
 import sys
-from collections.abc import Callable
 import threading
 import time
 import traceback
@@ -25,7 +24,6 @@ from typing import TypedDict
 from typing import assert_never
 from typing import cast
 
-import psutil
 import sentry_sdk
 import sentry_sdk.utils
 import traceback_with_variables
@@ -44,19 +42,17 @@ from traceback_with_variables import Format
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.utils.sentry.loguru_handler import SENTRY_LOG_FORMAT
+from imbue.minds.utils.sentry.loguru_handler import SentryBreadcrumbHandler
+from imbue.minds.utils.sentry.loguru_handler import SentryEventHandler
+from imbue.minds.utils.sentry.loguru_handler import SentryLoguruLoggingLevels
+from imbue.minds.utils.sentry.loguru_handler import log_error_inside_sentry
 from imbue.minds.utils.sentry.s3_uploader import EXTRAS_UPLOADED_FILES_KEY
 from imbue.minds.utils.sentry.s3_uploader import get_s3_upload_key
 from imbue.minds.utils.sentry.s3_uploader import get_s3_upload_url
 from imbue.minds.utils.sentry.s3_uploader import upload_to_s3
 from imbue.minds.utils.sentry.s3_uploader import upload_to_s3_with_key
 from imbue.minds.utils.sentry.s3_uploader import wait_for_s3_uploads
-from imbue.minds.utils.sentry.loguru_handler import SENTRY_LOG_FORMAT
-from imbue.minds.utils.sentry.loguru_handler import SentryBreadcrumbHandler
-from imbue.minds.utils.sentry.loguru_handler import SentryEventHandler
-from imbue.minds.utils.sentry.loguru_handler import SentryLoguruLoggingLevels
-from imbue.minds.utils.sentry.loguru_handler import log_error_inside_sentry
-from imbue.concurrency_group.thread_utils import ObservableThread
-
 
 LOG_EXTENSION = "jsonl"
 COMPRESSED_LOG_EXTENSION = "gz"
