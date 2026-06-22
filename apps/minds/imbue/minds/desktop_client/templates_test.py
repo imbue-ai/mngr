@@ -638,6 +638,7 @@ def test_render_recovery_page_script_branches_on_dispatch_tier() -> None:
         "'interface_unresponsive'",
         "'host_unresponsive'",
         "'provider_unavailable'",
+        "'reachability_unconfirmed'",
         "'workspace_unreachable'",
     ):
         assert tier in html, f"recovery page JS missing branch for {tier}"
@@ -645,6 +646,7 @@ def test_render_recovery_page_script_branches_on_dispatch_tier() -> None:
     assert "renderMisconfigured" in html
     assert "renderUnresponsive" in html
     assert "renderProviderUnavailable" in html
+    assert "renderReachabilityUnconfirmed" in html
     assert "renderWorkspaceUnreachable" in html
     assert "Workspace misconfigured" in html
     assert "Try restart anyway" in html
@@ -652,8 +654,8 @@ def test_render_recovery_page_script_branches_on_dispatch_tier() -> None:
 
 def test_render_recovery_page_provider_unavailable_offers_retry_not_restart() -> None:
     """The provider-unavailable state must surface a Retry affordance and a backed-off
-    background poll, and must NOT auto-dispatch or offer a host restart (a restart routes
-    through the unreachable backend, so it cannot help).
+    background convergence loop, and must NOT auto-dispatch or offer a host restart (a
+    restart routes through the unreachable backend, so it cannot help).
     """
     html = render_recovery_page(
         agent_id=_AGENT_A,
@@ -662,15 +664,56 @@ def test_render_recovery_page_provider_unavailable_offers_retry_not_restart() ->
         initial_error="",
     )
     assert 'id="recovery-retry-btn"' in html
-    # The provider branch renders the page and starts the backed-off poll; it
+    # The provider render shows the Retry and the "Can't connect to" copy; it
     # must not fall through to a restart dispatch.
     provider_start = html.find("function renderProviderUnavailable")
     assert provider_start >= 0
     provider_end = html.find("function ", provider_start + 1)
     provider_block = html[provider_start:provider_end]
-    assert "scheduleProviderPoll" in provider_block
     assert "Can't connect to" in provider_block
+    assert "show(retryBtn, true)" in provider_block
     assert "postRestart" not in provider_block
+    # The provider_unavailable tier arms the backed-off convergence loop (which
+    # also re-classifies as discovery catches up); its branch returns before any
+    # restart dispatch.
+    assert "scheduleConvergence" in html
+    apply_start = html.find("function applyHealth(")
+    apply_block = html[apply_start : html.find("function ", apply_start + 1)]
+    assert apply_block.find("'provider_unavailable'") < apply_block.find("postRestart")
+
+
+def test_render_recovery_page_reachability_unconfirmed_offers_retry_and_converges() -> None:
+    """The post-outage reachability_unconfirmed tier renders a neutral Retry (no destructive
+    restart) and arms the convergence loop so the page reclassifies on its own once discovery
+    catches up -- the "make sure it updates properly" requirement.
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="stuck",
+        initial_error="",
+    )
+    # The render is neutral (does not assert the provider is down) and offers only Retry.
+    unconfirmed_start = html.find("function renderReachabilityUnconfirmed")
+    assert unconfirmed_start >= 0
+    unconfirmed_block = html[unconfirmed_start : html.find("function ", unconfirmed_start + 1)]
+    assert "Checking workspace connection" in unconfirmed_block
+    assert "show(retryBtn, true)" in unconfirmed_block
+    assert "Can't connect to" not in unconfirmed_block
+    assert "postRestart" not in unconfirmed_block
+    # In applyHealth, the reachability_unconfirmed branch arms the convergence
+    # loop and returns before any restart dispatch.
+    apply_start = html.find("function applyHealth(")
+    apply_block = html[apply_start : html.find("function ", apply_start + 1)]
+    assert apply_block.find("'reachability_unconfirmed'") < apply_block.find("postRestart")
+    # The convergence loop re-runs the classification (re-fetches host-health),
+    # not just the 302 recovery-watch, so a stale Retry transitions on its own.
+    # Bound the block by the next top-level (8-space-indented) function so the
+    # nested anonymous setTimeout/fetch callbacks don't truncate it.
+    converge_start = html.find("function scheduleConvergence(")
+    converge_block = html[converge_start : html.find("\n        function ", converge_start + 1)]
+    assert "fetchHealth" in converge_block
+    assert "applyHealth" in converge_block
 
 
 def test_render_recovery_page_loading_hides_diagnostic_dropdown() -> None:
@@ -718,11 +761,11 @@ def test_render_recovery_page_honors_misconfigured_before_autodispatch_short_cir
 
     A workspace whose services.toml lacks [services.system_interface] lands in
     restart_failed once its undeclared interface fails to come back up, so the
-    page runs runProbe(false). If the no-auto-dispatch short-circuit
-    (``if (!autoDispatch) renderUnresponsive()``) ran before the
-    workspace_misconfigured check, that workspace would render a misleading
-    "unresponsive" page even though no restart can recover it. Assert the
-    misconfigured branch precedes the short-circuit inside runProbe so the
+    page runs runProbe(false), which renders via applyHealth. If the
+    no-auto-dispatch short-circuit (``if (!autoDispatch) renderUnresponsive()``)
+    ran before the workspace_misconfigured check, that workspace would render a
+    misleading "unresponsive" page even though no restart can recover it. Assert
+    the misconfigured branch precedes the short-circuit inside applyHealth so the
     restart_failed path still reaches renderMisconfigured().
     """
     html = render_recovery_page(
@@ -731,7 +774,7 @@ def test_render_recovery_page_honors_misconfigured_before_autodispatch_short_cir
         initial_status="restart_failed",
         initial_error="boom",
     )
-    probe_body = html[html.index("function runProbe(") :]
+    probe_body = html[html.index("function applyHealth(") :]
     misconfigured_pos = probe_body.index("'workspace_misconfigured'")
     short_circuit_pos = probe_body.index("if (!autoDispatch)")
     assert misconfigured_pos < short_circuit_pos, (

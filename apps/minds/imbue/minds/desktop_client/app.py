@@ -9,6 +9,7 @@ from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
+from datetime import timezone
 from enum import auto
 from pathlib import Path
 from typing import Any
@@ -83,8 +84,6 @@ from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
 from imbue.minds.desktop_client.recovery_probe import ProviderProbeError
 from imbue.minds.desktop_client.recovery_probe import build_host_health_response
 from imbue.minds.desktop_client.recovery_probe import build_probe_argv
-from imbue.minds.desktop_client.recovery_probe import extract_provider_error
-from imbue.minds.desktop_client.recovery_probe import provider_unavailable_error
 from imbue.minds.desktop_client.region_preference import AWS_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import GeoLocationCache
 from imbue.minds.desktop_client.region_preference import IMBUE_CLOUD_PROVIDER_KEY
@@ -164,11 +163,13 @@ from imbue.minds.primitives import UserDataPreference
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.telegram.setup import TelegramSetupStatus
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
+from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import InvalidName
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
@@ -2526,13 +2527,23 @@ _WORKSPACE_PROBE_TIMEOUT_SECONDS: Final[float] = 2.0
 # Generous: a host stop/start bounces a container and can legitimately take
 # tens of seconds, so this is a "definitely wedged" ceiling, not an estimate.
 _RESTART_COMMAND_TIMEOUT_SECONDS: Final[float] = 120.0
-# Hard timeout for the recovery host-health probe's ``mngr list``. Far shorter
-# than the restart ceiling: this is a *diagnostic* that gates the recovery UI,
-# so a healthy-but-slow network has ample room while a dead network resolves to
-# "can't reach the provider" in tens of seconds instead of stranding the user on
-# the "Loading workspace" loader for the full restart timeout. A timeout here is
-# itself classified as provider-unavailable (see _run_host_health_probe).
+# Hard timeout for the recovery host-health probe's in-container ``mngr exec``.
+# Far shorter than the restart ceiling: this is a *diagnostic* that gates the
+# recovery UI. The exec touches the provider (``get_host`` -> the connector's
+# ~30s httpx) before reaching the container, so it must carry its own 30s-class
+# cap rather than inheriting the 120s restart default -- otherwise a wedged
+# host could gate the recovery UI for the full restart timeout. The probe is
+# only fired when Layer A is already healthy (provider reachable + host
+# RUNNING), so it never stacks a doomed round-trip during an outage.
 _HOST_HEALTH_PROBE_TIMEOUT_SECONDS: Final[float] = 30.0
+# How recent the last full discovery snapshot must be for the resolver's
+# Layer-A view to positively establish provider reachability. Discovery polls
+# every ~10s; a healthy poll emits a snapshot each cycle, so a snapshot older
+# than this means discovery has stalled (the post-outage window) and the host
+# state it last reported can no longer be trusted to offer a destructive
+# restart. Comfortably above the normal inter-snapshot interval to avoid
+# false "stale" during a single slow-but-healthy poll.
+_DISCOVERY_FRESHNESS_THRESHOLD_SECONDS: Final[float] = 30.0
 # How long we wait for the system interface to answer again after a restart,
 # split by tier. A surgical (in-place) restart leaves the container running, so
 # the interface should answer again quickly. A host restart cold-boots the
@@ -2556,48 +2567,6 @@ def _build_mngr_stop_argv(mngr_binary: str, agent_id: AgentId, is_host_restart: 
 def _build_mngr_start_argv(mngr_binary: str, agent_id: AgentId) -> list[str]:
     """Build the argv for ``mngr start`` on ``agent_id`` (also starts the host if it is stopped)."""
     return [mngr_binary, "start", str(agent_id), "--quiet"]
-
-
-def _build_mngr_host_state_argv(
-    mngr_binary: str,
-    agent_id: AgentId,
-    services_agent_id: AgentId | None,
-    provider_name: str | None,
-) -> list[str]:
-    """Build the argv for the layer-2 probe: list agents to read each host's lifecycle state.
-
-    The recovery page keys its restart tier off the workspace host's state:
-    a RUNNING host can be recovered with the surgical system-interface
-    restart, while a stopped host needs a full host restart. ``mngr list``
-    is a pure read -- it never starts a stopped container.
-
-    Scopes the listing to just this workspace's chat agent + system-services
-    agent via a CEL ``id == ...`` include, for a smaller payload. When the
-    workspace's provider is known it also passes ``--provider`` so discovery
-    only queries that provider: ``--provider`` is a discovery fan-out control
-    (unlike the post-discovery CEL ``--include``), so an unrelated provider
-    being unreachable does not make this listing exit nonzero and blank out
-    this workspace's own host state. ``--on-error continue`` keeps a per-host
-    failure within the scoped provider from hard-failing the listing.
-    """
-    if services_agent_id is None:
-        include = f'id == "{agent_id}"'
-    else:
-        include = f'id == "{agent_id}" || id == "{services_agent_id}"'
-    argv = [
-        mngr_binary,
-        "list",
-        "--format",
-        "json",
-        "--quiet",
-        "--include",
-        include,
-        "--on-error",
-        "continue",
-    ]
-    if provider_name is not None:
-        argv += ["--provider", provider_name]
-    return argv
 
 
 def _sanitize_recovery_return_to(raw: str) -> str:
@@ -2698,7 +2667,12 @@ def _handle_recovery_page(
     return make_html_response(content=html_body)
 
 
-def _run_mngr(concurrency_group: ConcurrencyGroup, argv: list[str], env: dict[str, str]) -> str:
+def _run_mngr(
+    concurrency_group: ConcurrencyGroup,
+    argv: list[str],
+    env: dict[str, str],
+    timeout_seconds: float = _RESTART_COMMAND_TIMEOUT_SECONDS,
+) -> str:
     """Run an ``mngr`` subprocess to completion and return its stdout on a clean exit.
 
     Raises ``MngrCommandError`` for every non-clean outcome, like the rest of
@@ -2710,8 +2684,12 @@ def _run_mngr(concurrency_group: ConcurrencyGroup, argv: list[str], env: dict[st
     ``except MngrCommandError`` callers are unaffected), a nonzero exit as a bare
     ``MngrCommandError`` (discarding stdout, unlike ``_run_mngr_capturing``), and
     a launch failure as a bare ``MngrCommandError``.
+
+    ``timeout_seconds`` defaults to the generous restart ceiling; the recovery
+    host-health exec probe overrides it with a much shorter cap since it must
+    not gate the recovery UI for tens of seconds.
     """
-    stdout, returncode, stderr = _run_mngr_capturing(concurrency_group, argv, env)
+    stdout, returncode, stderr = _run_mngr_capturing(concurrency_group, argv, env, timeout_seconds=timeout_seconds)
     if returncode != 0:
         raise MngrCommandError(f"exited {returncode}: {stderr.strip()}")
     return stdout
@@ -3219,15 +3197,53 @@ def _handle_host_health_probe_api(
     )
 
 
+def _provider_error_for_workspace(
+    provider_errors: Mapping[ProviderInstanceName, DiscoveryError], provider_name: str | None
+) -> ProviderProbeError | None:
+    """Map this workspace's provider error (if any) from the discovery snapshot.
+
+    ``get_provider_errors()`` keys per-provider discovery errors by provider
+    name, so attribution to *this* workspace's provider is exact -- a docker
+    mind's recovery is never blamed on a simultaneous imbue_cloud outage. Returns
+    None in the brief pre-discovery window where the provider is unknown
+    (``provider_name is None``) rather than guess. The ``ProviderUnavailableError``
+    type name is preserved so classification can tell a connector outage (retry)
+    apart from an auth/config failure (show reason).
+    """
+    if provider_name is None:
+        return None
+    for name, error in provider_errors.items():
+        if str(name) == provider_name:
+            return ProviderProbeError(exception_type=error.type_name, message=error.message)
+    return None
+
+
+def _is_discovery_fresh(last_full_snapshot_at: datetime | None) -> bool:
+    """Whether the most recent full discovery snapshot is recent enough to trust.
+
+    A snapshot older than ``_DISCOVERY_FRESHNESS_THRESHOLD_SECONDS`` (or no
+    snapshot at all) means discovery has stalled -- the resolver's host state may
+    pre-date an outage -- so reachability cannot be positively established.
+    """
+    if last_full_snapshot_at is None:
+        return False
+    age_seconds = (datetime.now(timezone.utc) - last_full_snapshot_at).total_seconds()
+    return age_seconds <= _DISCOVERY_FRESHNESS_THRESHOLD_SECONDS
+
+
 def _run_host_health_probe(
     agent_id: AgentId,
     concurrency_group: ConcurrencyGroup,
 ) -> HostHealthResponse:
-    """Run the batched ``mngr exec`` probe + ``mngr list`` lookup, return the response.
+    """Compose the host-health response from the passive resolver + an in-container probe.
 
-    Composes the response from three independent inputs: ``mngr list`` for
-    host state / services-agent state, the batched in-container
-    ``mngr exec`` probe, and the plugin's resolver-snapshot mirror.
+    Layer A (provider reachability + host lifecycle) is read from the
+    ``backend_resolver`` -- the single passive-discovery sampler shared with the
+    rest of minds -- not re-sampled with a synchronous ``mngr list``. Layer B
+    (why the inner interface isn't answering) comes from the batched in-container
+    ``mngr exec`` probe, which is fired only when Layer A is healthy (provider
+    reachable + host RUNNING) so an outage never pays a doomed provider
+    round-trip. The plugin's resolver-snapshot mirror supplies the last probe.
     """
     env = dict(os.environ)
     env["MNGR_HOST_DIR"] = str(get_state().mngr_host_dir)
@@ -3236,74 +3252,41 @@ def _run_host_health_probe(
     services_agent_id = backend_resolver.get_system_services_agent_id(agent_id)
     display_info = backend_resolver.get_agent_display_info(agent_id)
     provider_name = display_info.provider_name if display_info is not None else None
-    list_argv = _build_mngr_host_state_argv(mngr_binary, agent_id, services_agent_id, provider_name)
-    list_command = shlex.join(list_argv)
     # Friendly provider name for the "Can't connect to ..." page title; reuse the
     # workspace-listing label map (docker -> "Docker", imbue_cloud_* -> "Imbue
     # Cloud", ...), falling back to a generic label for an unknown/None provider.
     provider_label = friendly_provider_label(provider_name) or "the workspace backend"
-    list_error: str | None = None
-    list_stdout = ""
-    list_timed_out = False
-    provider_error: ProviderProbeError | None = None
-    try:
-        # Capture stdout even on a nonzero exit: with ``--on-error continue`` the
-        # listing still emits its JSON body (including the ``errors[]`` array that
-        # carries the provider-reachability signal) and then exits 1 when a
-        # provider failed. The listing is scoped to this workspace's own provider
-        # (see _build_mngr_host_state_argv), so a nonzero exit reflects a problem
-        # with *this* provider/host. Record the reason for the host-state rows,
-        # but keep the body so ``extract_provider_error`` can classify it.
-        list_stdout, returncode, list_stderr = _run_mngr_capturing(
-            concurrency_group, list_argv, env, timeout_seconds=_HOST_HEALTH_PROBE_TIMEOUT_SECONDS
-        )
-        if returncode != 0:
-            list_error = f"exited {returncode}: {list_stderr.strip()}"
-            logger.warning("`mngr list` for host-health probe of {} did not exit cleanly: {}", agent_id, list_error)
-    except MngrCommandTimeoutError as exc:
-        # The listing never completed within the probe window. There is no body to
-        # parse and -- crucially -- no positive evidence the host is reachable but
-        # wedged, so we must not offer a destructive restart. Classify the provider
-        # as unreachable (retry, not restart): the same tier a connector-raised
-        # ProviderUnavailableError lands in. Without this, an unreachable provider
-        # produces UNKNOWN host state and falls through to HOST_UNRESPONSIVE, which
-        # is exactly what handed users a destructive button during a full outage.
-        list_error = str(exc)
-        list_timed_out = True
-        provider_error = provider_unavailable_error(
-            f"Could not reach {provider_label}: the workspace listing timed out after "
-            f"{int(_HOST_HEALTH_PROBE_TIMEOUT_SECONDS)}s."
-        )
-        logger.warning(
-            "`mngr list` for host-health probe of {} timed out; classifying provider as unreachable: {}",
-            agent_id,
-            list_error,
-        )
-    except MngrCommandError as exc:
-        # Failed to launch the process at all (no body); continue with an empty
-        # listing and surface the reason on the host-state rows.
-        list_error = str(exc)
-        logger.warning("`mngr list` for host-health probe of {} did not run: {}", agent_id, list_error)
-    list_json: str | None = list_stdout or None
-    if provider_error is None:
-        provider_error = extract_provider_error(list_json, provider_name)
-    # The in-container probe stays quiet at warning level: its argv embeds a
-    # long base64 inner script that adds nothing to diagnostics, and the
-    # dispatch_tier INFO line already records the outcome. Trust the stdout only
-    # on a clean exit -- any non-clean outcome (a failed ``mngr exec`` such as
-    # ``--no-start`` against a stopped host, a timeout, or a launch / group
-    # failure) raises and leaves ``in_container_stdout`` None, which parses to a
-    # "no" on the can-we-run-commands probe, and is recorded only at debug.
+
+    # -- Layer A: read host/provider state from the passive discovery resolver --
+    host_state_enum = (
+        backend_resolver.get_host_state(HostId(display_info.host_id)) if display_info is not None else None
+    )
+    host_state = host_state_enum.value if host_state_enum is not None else ""
+    provider_error = _provider_error_for_workspace(backend_resolver.get_provider_errors(), provider_name)
+    _, last_full_snapshot_at = backend_resolver.get_freshness_timestamps()
+    # Reachability is positively established only when discovery currently reports
+    # no error for this provider AND its last snapshot is fresh. In the
+    # post-outage window (stale snapshot, error not surfaced yet) this is False,
+    # so the destructive HOST_UNRESPONSIVE tier is withheld in favor of Retry.
+    reachability_confirmed = provider_error is None and _is_discovery_fresh(last_full_snapshot_at)
+
+    # -- Layer B: in-container exec probe, only when Layer A is healthy --
+    # The exec SSHes to the container via ``get_host`` (the connector's ~30s
+    # httpx), so it carries an explicit 30s-class cap (never the 120s restart
+    # default) and is skipped entirely unless the provider is reachable and the
+    # host is RUNNING -- so an outage never stacks a doomed round-trip here, and
+    # a stopped host is classified offline without an exec attempt. A non-clean
+    # outcome leaves ``in_container_stdout`` None (parses to "no" on the
+    # can-we-run-commands probe) and is recorded only at debug.
     in_container_stdout: str | None = None
-    # Skip the in-container exec probe when the listing timed out: the exec SSHes
-    # to the container over the same network that just failed to even enumerate
-    # the provider, so it would only add another doomed round-trip -- and the tier
-    # is already PROVIDER_UNAVAILABLE regardless of what it answers. A provider
-    # error *with* a body is different (the connector can be down while the host's
-    # own SSH path is fine), so we still probe in that case.
-    if services_agent_id is not None and not list_timed_out:
+    if services_agent_id is not None and reachability_confirmed and host_state_enum == HostState.RUNNING:
         try:
-            in_container_stdout = _run_mngr(concurrency_group, build_probe_argv(mngr_binary, services_agent_id), env)
+            in_container_stdout = _run_mngr(
+                concurrency_group,
+                build_probe_argv(mngr_binary, services_agent_id),
+                env,
+                timeout_seconds=_HOST_HEALTH_PROBE_TIMEOUT_SECONDS,
+            )
         except MngrCommandError as exc:
             logger.debug("in-container probe for host-health of {} did not exit cleanly: {}", agent_id, exc)
     consumer: EnvelopeStreamConsumer | None = get_state().envelope_stream_consumer
@@ -3315,13 +3298,11 @@ def _run_host_health_probe(
     else:
         exec_command = "(mngr exec <system-services-agent>) -- no services agent id known"
     return build_host_health_response(
-        list_json=list_json,
-        agent_id=agent_id,
+        host_state=host_state,
         services_agent_id=services_agent_id,
         in_container_stdout=in_container_stdout,
         plugin_resolver_services=plugin_resolver_services,
-        mngr_list_command=list_command,
-        mngr_list_error=list_error,
+        reachability_confirmed=reachability_confirmed,
         mngr_exec_command=exec_command,
         mngr_binary=mngr_binary,
         provider_error=provider_error,

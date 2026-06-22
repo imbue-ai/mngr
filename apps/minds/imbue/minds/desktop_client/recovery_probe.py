@@ -1,9 +1,11 @@
 """Recovery diagnostics probe.
 
-Powers the workspace-recovery page's diagnostics list. The endpoint runs
-a batched in-container probe via ``mngr exec`` and reads ``mngr list``
-state, then returns a flat list of named probes -- each capturing the
-question asked, the command (or pseudo-command label) that produced the
+Powers the workspace-recovery page's diagnostics list. The endpoint reads
+the outer host/provider state from the passive discovery resolver (a single
+sampler shared with the rest of minds -- no synchronous ``mngr list``) and
+runs a batched in-container probe via ``mngr exec`` only when that outer
+state is healthy, then returns a flat list of named probes -- each capturing
+the question asked, the command (or pseudo-command label) that produced the
 data, the raw output captured, and a derived yes/no/unknown answer.
 
 The recovery-page client renders each probe row as a question with a
@@ -155,17 +157,30 @@ class DispatchTier(str, Enum):
     PROVIDER_UNAVAILABLE, which is a transient outage worth retrying.
     """
 
+    REACHABILITY_UNCONFIRMED = "reachability_unconfirmed"
+    """The resolver's Layer-A view is too stale to positively establish provider
+    reachability, so we will not yet offer the destructive host restart. This is
+    the post-outage window: discovery may still show a stale ``RUNNING`` host
+    with no provider error surfaced yet. Rather than trust that stale state and
+    hand the user a destructive restart that may not help, the page shows a
+    non-destructive Retry and keeps converging; once discovery catches up it
+    reclassifies into the real tier (PROVIDER_UNAVAILABLE, HOST_UNRESPONSIVE, an
+    auto-dispatch tier, or full recovery). Does not assert the provider is down.
+    """
+
 
 class ProviderProbeError(FrozenModel):
-    """A provider-level error pulled from ``mngr list``'s ``errors[]`` array.
+    """A provider-level error for this workspace's provider, sourced from discovery.
 
     Carries just the fields the recovery classification needs: the exception
     type (to tell a connector outage apart from an auth/config failure) and the
-    human-readable message (rendered on the unreachable page).
+    human-readable message (rendered on the unreachable page). Built from the
+    resolver's ``get_provider_errors()`` (the passive discovery snapshot's
+    per-provider ``error_by_provider_name``).
     """
 
     exception_type: str = Field(
-        description="Exception class name from `mngr list` errors[] (e.g. ProviderUnavailableError)."
+        description="Exception class name from the discovery error (e.g. ProviderUnavailableError)."
     )
     message: str = Field(description="Human-readable error message to surface to the user.")
 
@@ -309,131 +324,31 @@ def _coerce_optional_int(value: object) -> int | None:
     return None
 
 
-# -- mngr-list extraction --------------------------------------------------
+# -- Layer-A host/provider state (resolver-sourced) ------------------------
 
 
 _RUNNING_STATE: Final[str] = "RUNNING"
 _OFFLINE_HOST_STATES: Final[frozenset[str]] = frozenset({"STOPPED", "STOPPING", "CRASHED", "FAILED"})
-
-
-def _extract_agent_row(list_json: str | None, agent_id: AgentId) -> dict | None:
-    """Pull the row for ``agent_id`` from ``mngr list --format json`` output."""
-    if list_json is None:
-        return None
-    try:
-        agents = json.loads(list_json).get("agents", [])
-    except (json.JSONDecodeError, AttributeError) as exc:
-        logger.warning("Could not parse `mngr list` output while extracting agent row: {}", exc)
-        return None
-    for agent in agents:
-        if isinstance(agent, dict) and agent.get("id") == str(agent_id):
-            return agent
-    return None
-
-
-def _extract_host_state(agent_row: dict | None) -> str:
-    """Read ``host.state`` from a row of ``mngr list --format json``."""
-    if agent_row is None:
-        return ""
-    host = agent_row.get("host")
-    if not isinstance(host, dict):
-        return ""
-    state = host.get("state")
-    if not isinstance(state, str):
-        return ""
-    return state
-
-
 _PROVIDER_UNAVAILABLE_EXCEPTION: Final[str] = "ProviderUnavailableError"
-
-
-def provider_unavailable_error(message: str) -> ProviderProbeError:
-    """Build a synthetic provider error that classifies as PROVIDER_UNAVAILABLE.
-
-    Used when the host-state listing could not *complete* (e.g. the host-health
-    ``mngr list`` timed out), so there is no ``errors[]`` body to parse. An
-    inability to even enumerate the provider is evidence it is unreachable, so we
-    route it through the same retry-don't-restart tier as a connector-raised
-    ``ProviderUnavailableError`` rather than letting it fall through to the
-    destructive ``HOST_UNRESPONSIVE`` bucket.
-    """
-    return ProviderProbeError(exception_type=_PROVIDER_UNAVAILABLE_EXCEPTION, message=message)
-
-
-def extract_provider_error(list_json: str | None, provider_name: str | None) -> ProviderProbeError | None:
-    """Pull this workspace's provider-level error from ``mngr list``'s ``errors[]``, if any.
-
-    ``mngr list --on-error continue`` emits ``{"agents": [...], "errors": [...]}``
-    even when a provider fails (and exits non-zero), so the recovery probe reads
-    the body regardless of exit code. Each error dict carries ``exception_type``,
-    ``message`` and -- for provider-level errors -- ``provider_name``.
-
-    Only errors attributed to *this* workspace's provider count. When the probe's
-    listing is scoped via ``--provider`` (the normal case) that is automatic, but
-    in the brief pre-discovery window where the workspace's provider is unknown
-    (``provider_name is None``) we return None rather than blame an unrelated
-    provider's error on this workspace.
-
-    A ``ProviderUnavailableError`` is preferred over any other matching error so
-    a genuine connector outage classifies as PROVIDER_UNAVAILABLE (retry, no
-    restart) rather than being shadowed by an incidental auth/config error.
-    """
-    if list_json is None or provider_name is None:
-        return None
-    try:
-        errors = json.loads(list_json).get("errors", [])
-    except (json.JSONDecodeError, AttributeError) as exc:
-        logger.warning("Could not parse `mngr list` output while extracting provider error: {}", exc)
-        return None
-    if not isinstance(errors, list):
-        return None
-    fallback: ProviderProbeError | None = None
-    for entry in errors:
-        if not isinstance(entry, dict) or entry.get("provider_name") != provider_name:
-            continue
-        exception_type = str(entry.get("exception_type") or "")
-        message = str(entry.get("message") or "")
-        if exception_type == _PROVIDER_UNAVAILABLE_EXCEPTION:
-            return ProviderProbeError(exception_type=exception_type, message=message)
-        if fallback is None:
-            fallback = ProviderProbeError(exception_type=exception_type, message=message)
-    return fallback
-
-
-def _extract_services_agent_state(list_json: str | None, services_agent_id: AgentId | None) -> str:
-    """Return the lifecycle state of the system-services agent from ``mngr list`` output."""
-    if services_agent_id is None:
-        return ""
-    row = _extract_agent_row(list_json, services_agent_id)
-    if row is None:
-        return ""
-    state = row.get("state")
-    if not isinstance(state, str):
-        return ""
-    return state
 
 
 # -- Per-probe builders ----------------------------------------------------
 #
-# Every probe's ``command`` is a complete, copy-pasteable command whose stdout
-# equals the probe's ``output`` when run in the same place minds ran it (the
-# mngr host for the ``mngr list`` / ``mngr exec`` probes). Host-state probes
-# pipe ``mngr list`` through ``jq`` to print exactly the extracted field;
-# in-container checks are wrapped in ``mngr exec <id> '<check>' --no-start
-# --quiet`` so the operator does not need a shell inside the container. The
-# only exception is the resolver probe, whose datum lives in minds' own memory
-# and has no runnable reproduction.
+# In-container checks are wrapped in ``mngr exec <id> '<check>' --no-start
+# --quiet`` so the operator does not need a shell inside the container, and
+# their ``output`` is exactly what that command prints. The two Layer-A probes
+# (host state, system-services agent) and the resolver probe are read from
+# minds' own passive-discovery memory rather than re-sampled, so they carry a
+# short ``(... from the discovery snapshot)`` pseudo-command label and have no
+# runnable reproduction.
 
-# Display strings shared between a probe's rendered ``output`` and the fallback
-# its reproduction command prints, so the two stay byte-identical.
-_NO_HOST_ROW: Final[str] = "no host row"
-_NO_AGENT_ROW: Final[str] = "no agent row"
-
-
-def _mngr_list_jq_command(mngr_list_command: str, jq_filter: str) -> str:
-    """``mngr list ... | jq -r '<filter>'`` -- the list call plus its derivation."""
-    base = mngr_list_command or "mngr list --format json"
-    return f"{base} | jq -r {shlex.quote(jq_filter)}"
+# Pseudo-command labels for the resolver-sourced Layer-A probes (no runnable
+# reproduction -- the datum is read from the passive discovery snapshot).
+_HOST_STATE_PSEUDO_COMMAND: Final[str] = "(host state from the discovery snapshot)"
+_SERVICES_AGENT_PSEUDO_COMMAND: Final[str] = "(system-services agent from the discovery snapshot)"
+# Output shown for the Layer-A probes when discovery has not surfaced the datum.
+_NO_HOST_STATE: Final[str] = "(no host state in the discovery snapshot)"
+_NO_SERVICES_AGENT: Final[str] = "(no system-services agent id known -- discovery has not surfaced one)"
 
 
 def _mngr_exec_command(mngr_binary: str, services_agent_id: AgentId | None, inner_command: str) -> str:
@@ -449,10 +364,8 @@ def _mngr_exec_command(mngr_binary: str, services_agent_id: AgentId | None, inne
     return shlex.join([mngr_binary, "exec", str(services_agent_id), inner_command, "--no-start", "--quiet"])
 
 
-def _build_container_running_probe(
-    host_state: str, agent_id: AgentId, mngr_list_command: str, mngr_list_error: str | None
-) -> Probe:
-    """Probe 1: host.state from ``mngr list``, extracted with jq."""
+def _build_container_running_probe(host_state: str) -> Probe:
+    """Probe 1: the workspace host's lifecycle state, read from the discovery snapshot."""
     upper = host_state.upper()
     if upper == _RUNNING_STATE:
         answer = ProbeAnswer.YES
@@ -460,56 +373,36 @@ def _build_container_running_probe(
         answer = ProbeAnswer.NO
     else:
         answer = ProbeAnswer.UNKNOWN
-    if host_state:
-        output = host_state
-    elif mngr_list_error is not None:
-        # No row for this host AND the listing did not exit cleanly: surface why
-        # rather than a bare "no host row" (the answer stays UNKNOWN either way).
-        output = f"mngr list failed: {mngr_list_error}"
-    else:
-        output = _NO_HOST_ROW
-    jq_filter = f'([.agents[] | select(.id == "{agent_id}")][0].host.state) // "{_NO_HOST_ROW}"'
+    output = host_state if host_state else _NO_HOST_STATE
     return Probe(
         question=_QUESTION_CONTAINER_RUNNING,
-        command=_mngr_list_jq_command(mngr_list_command, jq_filter),
+        command=_HOST_STATE_PSEUDO_COMMAND,
         output=output,
         answer=answer,
     )
 
 
-def _build_services_agent_registered_probe(
-    list_json: str | None,
-    services_agent_id: AgentId | None,
-    mngr_list_command: str,
-    mngr_list_error: str | None,
-) -> Probe:
-    """Probe 2: lifecycle state of the system-services agent, extracted with jq."""
+def _build_services_agent_registered_probe(services_agent_id: AgentId | None) -> Probe:
+    """Probe 2: is the system-services agent present in the discovery snapshot?
+
+    Presence is read from the resolver (``get_system_services_agent_id``): a
+    resolved id -- whether from the live snapshot or the persisted last-good
+    topology -- answers YES; an unresolved one answers UNKNOWN (discovery has not
+    surfaced this workspace's system-services agent yet). This probe is purely
+    diagnostic; the dispatch tier never branches on it.
+    """
     if services_agent_id is None:
-        # No id to filter on -> no runnable command (like the resolver probe).
         return Probe(
             question=_QUESTION_SERVICES_AGENT_REGISTERED,
-            command="(no system-services agent id known -- discovery has not surfaced one)",
-            output="(no system-services agent id known -- discovery has not surfaced one)",
+            command=_SERVICES_AGENT_PSEUDO_COMMAND,
+            output=_NO_SERVICES_AGENT,
             answer=ProbeAnswer.UNKNOWN,
         )
-    services_state = _extract_services_agent_state(list_json, services_agent_id)
-    jq_filter = f'([.agents[] | select(.id == "{services_agent_id}")][0].state) // "{_NO_AGENT_ROW}"'
-    if services_state:
-        answer = ProbeAnswer.YES
-        output = services_state
-    elif mngr_list_error is not None:
-        # No row AND the listing did not exit cleanly: we cannot tell whether the
-        # agent is registered, so answer UNKNOWN and surface why instead of NO.
-        answer = ProbeAnswer.UNKNOWN
-        output = f"mngr list failed: {mngr_list_error}"
-    else:
-        answer = ProbeAnswer.NO
-        output = _NO_AGENT_ROW
     return Probe(
         question=_QUESTION_SERVICES_AGENT_REGISTERED,
-        command=_mngr_list_jq_command(mngr_list_command, jq_filter),
-        output=output,
-        answer=answer,
+        command=_SERVICES_AGENT_PSEUDO_COMMAND,
+        output=str(services_agent_id),
+        answer=ProbeAnswer.YES,
     )
 
 
@@ -674,8 +567,12 @@ def _build_plugin_resolver_probe(plugin_resolver_services: dict[str, str]) -> Pr
 # -- Top-level builder + dispatch tier -------------------------------------
 
 
-def _classify_dispatch_tier(probes: tuple[Probe, ...], provider_error: ProviderProbeError | None) -> DispatchTier:
-    """Derive the dispatch tier from probe answers and the provider-error signal.
+def _classify_dispatch_tier(
+    probes: tuple[Probe, ...],
+    provider_error: ProviderProbeError | None,
+    reachability_confirmed: bool,
+) -> DispatchTier:
+    """Derive the dispatch tier from probe answers and the Layer-A signals.
 
     Ordered by precedence:
 
@@ -690,13 +587,16 @@ def _classify_dispatch_tier(probes: tuple[Probe, ...], provider_error: ProviderP
       bury that behind any transport / container check.
     * HOST_OFFLINE when the container is offline: nothing live to interrupt, so
       a host restart can run unattended.
-    * HOST_UNRESPONSIVE when the container claims running but we can't exec into
-      it: a host restart bounces a live container so it requires explicit user
-      consent.
     * INTERFACE_UNRESPONSIVE when both container and exec are healthy: the
       system-services agent can be restarted in place without touching the
       user's agents.
-    * HOST_UNRESPONSIVE on anything else (ambiguous host states).
+    * HOST_UNRESPONSIVE when the container claims running but we can't exec into
+      it (or on any other ambiguous host state): a host restart bounces a live
+      container, so it requires explicit user consent -- BUT only when
+      ``reachability_confirmed`` is true. When the resolver's Layer-A view is
+      stale (the post-outage window), the RUNNING claim may pre-date an outage,
+      so we fall to REACHABILITY_UNCONFIRMED (Retry, never a destructive restart)
+      and let the reactive page converge once discovery catches up.
     """
     if provider_error is not None:
         if provider_error.exception_type == _PROVIDER_UNAVAILABLE_EXCEPTION:
@@ -711,17 +611,17 @@ def _classify_dispatch_tier(probes: tuple[Probe, ...], provider_error: ProviderP
     can_run = answers.get(_QUESTION_CAN_RUN_COMMANDS_INSIDE)
     if container_running == ProbeAnswer.YES and can_run == ProbeAnswer.YES:
         return DispatchTier.INTERFACE_UNRESPONSIVE
+    if not reachability_confirmed:
+        return DispatchTier.REACHABILITY_UNCONFIRMED
     return DispatchTier.HOST_UNRESPONSIVE
 
 
 def build_host_health_response(
-    list_json: str | None,
-    agent_id: AgentId,
+    host_state: str,
     services_agent_id: AgentId | None,
     in_container_stdout: str | None,
     plugin_resolver_services: dict[str, str],
-    mngr_list_command: str = "",
-    mngr_list_error: str | None = None,
+    reachability_confirmed: bool,
     mngr_exec_command: str = "",
     mngr_binary: str = "mngr",
     provider_error: ProviderProbeError | None = None,
@@ -729,37 +629,39 @@ def build_host_health_response(
 ) -> HostHealthResponse:
     """Assemble the host-health response (probes + dispatch tier) from raw inputs.
 
-    Pure function so the integration is straightforward to unit-test:
-    feed in raw ``mngr list`` / in-container stdout / plugin snapshot,
-    assert on the probe answers and the derived tier.
+    Pure function so the integration is straightforward to unit-test: feed in
+    the resolver-sourced Layer-A state (``host_state``, ``services_agent_id``,
+    ``provider_error``, ``reachability_confirmed``) plus the in-container exec
+    stdout and plugin snapshot, and assert on the probe answers and derived tier.
 
-    ``mngr_binary`` is used to render the ``mngr exec`` reproduction commands
-    for the in-container probes; ``mngr_list_command`` is the real list argv
-    those probes pipe through ``jq`` to print exactly their extracted field.
-    ``mngr_list_error`` is the reason ``mngr list`` did not exit cleanly (or
-    None); the host-state probes surface it in place of a bare "no row" when the
-    listing failed to produce this workspace's row, so the user can see *why*.
+    ``host_state`` is the workspace host's lifecycle state read from the passive
+    discovery resolver (``get_host_state``), e.g. ``"RUNNING"`` / ``"STOPPED"``;
+    ``""`` when discovery has not surfaced the host. ``mngr_binary`` is used to
+    render the ``mngr exec`` reproduction commands for the in-container probes.
 
-    ``provider_error`` is this workspace's provider-level error parsed from
-    ``mngr list``'s ``errors[]`` (see ``extract_provider_error``); when present
-    it drives the PROVIDER_UNAVAILABLE / WORKSPACE_UNREACHABLE tiers and its
-    message is carried on the response as ``unreachable_reason``.
-    ``provider_label`` is the friendly provider name for that page's title.
+    ``provider_error`` is this workspace's provider-level error read from the
+    resolver's ``get_provider_errors()``; when present it drives the
+    PROVIDER_UNAVAILABLE / WORKSPACE_UNREACHABLE tiers and its message is carried
+    on the response as ``unreachable_reason``. ``provider_label`` is the friendly
+    provider name for that page's title.
+
+    ``reachability_confirmed`` is whether the resolver's Layer-A view is fresh
+    enough (no provider error + recent discovery snapshot) to positively
+    establish provider reachability. When false, the would-be destructive
+    HOST_UNRESPONSIVE classification falls to REACHABILITY_UNCONFIRMED instead.
     """
     in_container = _parse_in_container_probe(in_container_stdout)
-    agent_row = _extract_agent_row(list_json, agent_id)
-    host_state = _extract_host_state(agent_row)
     exec_cmd = mngr_exec_command or "(mngr exec <system-services-agent>)"
     probes: tuple[Probe, ...] = (
-        _build_container_running_probe(host_state, agent_id, mngr_list_command, mngr_list_error),
-        _build_services_agent_registered_probe(list_json, services_agent_id, mngr_list_command, mngr_list_error),
+        _build_container_running_probe(host_state),
+        _build_services_agent_registered_probe(services_agent_id),
         _build_can_run_commands_probe(in_container, exec_cmd),
         _build_services_toml_probe(in_container, mngr_binary, services_agent_id),
         _build_port_listening_probe(in_container, mngr_binary, services_agent_id),
         _build_curl_probe(in_container, mngr_binary, services_agent_id),
         _build_plugin_resolver_probe(plugin_resolver_services),
     )
-    dispatch_tier = _classify_dispatch_tier(probes, provider_error)
+    dispatch_tier = _classify_dispatch_tier(probes, provider_error, reachability_confirmed)
     is_provider_tier = dispatch_tier in (DispatchTier.PROVIDER_UNAVAILABLE, DispatchTier.WORKSPACE_UNREACHABLE)
     return HostHealthResponse(
         probes=probes,

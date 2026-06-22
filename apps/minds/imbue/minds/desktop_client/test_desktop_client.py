@@ -3,6 +3,7 @@ import os
 import queue
 import subprocess
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
 
@@ -17,12 +18,13 @@ from imbue.minds.desktop_client import recovery_probe as _recovery_probe
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
-from imbue.minds.desktop_client.app import _build_mngr_host_state_argv
 from imbue.minds.desktop_client.app import _build_mngr_start_argv
 from imbue.minds.desktop_client.app import _build_mngr_stop_argv
 from imbue.minds.desktop_client.app import _build_requests_payload
 from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import _destroying_agent_ids
+from imbue.minds.desktop_client.app import _is_discovery_fresh
+from imbue.minds.desktop_client.app import _provider_error_for_workspace
 from imbue.minds.desktop_client.app import _resolve_destroying_for_landing
 from imbue.minds.desktop_client.app import _run_restart_sequence
 from imbue.minds.desktop_client.app import _ssh_command_for_agent
@@ -2023,103 +2025,58 @@ def test_build_mngr_start_argv_targets_the_agent() -> None:
     assert argv[:3] == ["/usr/local/bin/mngr", "start", str(aid)]
 
 
-def test_build_mngr_host_state_argv_scopes_to_workspace_and_continues_on_error() -> None:
-    """The host-state probe filters to just this workspace's agents and
-    tolerates per-host failures so a broken sibling host doesn't blank
-    out the diagnostic."""
-    agent = AgentId.generate()
-    services = AgentId.generate()
-    argv = _build_mngr_host_state_argv("/usr/local/bin/mngr", agent, services, None)
-    assert argv[:5] == ["/usr/local/bin/mngr", "list", "--format", "json", "--quiet"]
-    # CEL include matches both the chat agent and the system-services agent.
-    assert "--include" in argv
-    include_value = argv[argv.index("--include") + 1]
-    assert f'id == "{agent}"' in include_value
-    assert f'id == "{services}"' in include_value
-    # --on-error continue is required so one broken host does not abort the
-    # listing for the rest.
-    assert argv[argv.index("--on-error") + 1] == "continue"
-    # No provider known -> discovery is not scoped to a provider.
-    assert "--provider" not in argv
+def test_provider_error_for_workspace_keys_on_this_workspaces_provider() -> None:
+    """The provider error is attributed by exact provider name, mapping type + message.
 
-
-def test_build_mngr_host_state_argv_omits_services_id_when_unresolved() -> None:
-    """When the services-agent id is unknown, the filter degenerates to just
-    the chat agent's id -- the listing is still scoped, just with one term."""
-    agent = AgentId.generate()
-    argv = _build_mngr_host_state_argv("/usr/local/bin/mngr", agent, None, None)
-    include_value = argv[argv.index("--include") + 1]
-    assert include_value == f'id == "{agent}"'
-
-
-def test_build_mngr_host_state_argv_scopes_discovery_to_provider_when_known() -> None:
-    """When the workspace's provider is known, the probe passes ``--provider`` so
-    discovery only queries that provider.
-
-    ``--provider`` is a discovery fan-out control (unlike the post-discovery CEL
-    ``--include``), so an unrelated provider being unreachable can no longer make
-    this listing exit nonzero and blank out the workspace's own host state.
+    This is the per-provider keying that keeps a docker mind's recovery from
+    being misclassified as provider-unavailable during a simultaneous imbue_cloud
+    outage: only an error whose provider name matches this workspace's is used.
     """
-    agent = AgentId.generate()
-    services = AgentId.generate()
-    argv = _build_mngr_host_state_argv("/usr/local/bin/mngr", agent, services, "docker")
-    assert argv[argv.index("--provider") + 1] == "docker"
-
-
-def _classify_host_health_compat(list_json: str | None, agent_id: AgentId) -> dict[str, bool]:
-    """Legacy-shape wrapper around the probe-list response.
-
-    Projects the new "container running?" probe + dispatch_tier classification
-    back onto the prior ``{"reachable": ..., "host_offline": ...}`` contract
-    so the existing host-state classification cases stay covered.
-    """
-    response = _recovery_probe.build_host_health_response(
-        list_json=list_json,
-        agent_id=agent_id,
-        services_agent_id=None,
-        in_container_stdout=None,
-        plugin_resolver_services={},
+    errors = {
+        ProviderInstanceName("imbue_cloud_acme"): DiscoveryError(
+            type_name="ProviderUnavailableError",
+            message="could not reach Imbue Cloud",
+            provider_name=ProviderInstanceName("imbue_cloud_acme"),
+        ),
+    }
+    matched = _provider_error_for_workspace(errors, "imbue_cloud_acme")
+    assert matched == _recovery_probe.ProviderProbeError(
+        exception_type="ProviderUnavailableError", message="could not reach Imbue Cloud"
     )
-    for probe in response.probes:
-        if "container running" in probe.question:
-            return {
-                "reachable": probe.answer == _recovery_probe.ProbeAnswer.YES,
-                "host_offline": probe.answer == _recovery_probe.ProbeAnswer.NO,
-            }
-    return {"reachable": False, "host_offline": False}
 
 
-def test_classify_host_health_running_host_is_reachable() -> None:
-    """A RUNNING host classifies as reachable -- the surgical restart applies."""
-    aid = AgentId.generate()
-    list_json = json.dumps({"agents": [{"id": str(aid), "host": {"state": "RUNNING"}}]})
-    assert _classify_host_health_compat(list_json, aid) == {"reachable": True, "host_offline": False}
+def test_provider_error_for_workspace_ignores_other_providers() -> None:
+    """An error for a different provider is never blamed on this workspace."""
+    errors = {
+        ProviderInstanceName("imbue_cloud_acme"): DiscoveryError(
+            type_name="ProviderUnavailableError",
+            message="down",
+            provider_name=ProviderInstanceName("imbue_cloud_acme"),
+        ),
+    }
+    assert _provider_error_for_workspace(errors, "docker") is None
 
 
-def test_classify_host_health_stopped_host_is_offline() -> None:
-    """A STOPPED (or crashed) host classifies as offline -- safe to auto host-restart."""
-    aid = AgentId.generate()
-    for state in ("STOPPED", "CRASHED", "FAILED", "STOPPING"):
-        list_json = json.dumps({"agents": [{"id": str(aid), "host": {"state": state}}]})
-        assert _classify_host_health_compat(list_json, aid) == {"reachable": False, "host_offline": True}, state
+def test_provider_error_for_workspace_is_none_when_provider_unknown() -> None:
+    """Pre-discovery (provider unknown), we cannot attribute any error to this workspace."""
+    errors = {
+        ProviderInstanceName("imbue_cloud_acme"): DiscoveryError(
+            type_name="ProviderUnavailableError",
+            message="down",
+            provider_name=ProviderInstanceName("imbue_cloud_acme"),
+        ),
+    }
+    assert _provider_error_for_workspace(errors, None) is None
 
 
-def test_classify_host_health_ambiguous_state_is_neither() -> None:
-    """An ambiguous host state (or a missing agent / bad output) is neither.
-
-    The recovery page then falls back to a confirmed manual restart rather
-    than auto-dispatching a potentially destructive host restart.
-    """
-    aid = AgentId.generate()
-    # An ambiguous lifecycle state (host may still be running agents).
-    starting = json.dumps({"agents": [{"id": str(aid), "host": {"state": "STARTING"}}]})
-    assert _classify_host_health_compat(starting, aid) == {"reachable": False, "host_offline": False}
-    # The probed agent is absent from the listing.
-    other = json.dumps({"agents": [{"id": "agent-other", "host": {"state": "STOPPED"}}]})
-    assert _classify_host_health_compat(other, aid) == {"reachable": False, "host_offline": False}
-    # mngr produced no usable output at all.
-    assert _classify_host_health_compat(None, aid) == {"reachable": False, "host_offline": False}
-    assert _classify_host_health_compat("not json", aid) == {"reachable": False, "host_offline": False}
+def test_is_discovery_fresh_distinguishes_recent_from_stale_and_missing() -> None:
+    """Freshness gates the destructive tier: only a recent snapshot confirms reachability."""
+    now = datetime.now(timezone.utc)
+    assert _is_discovery_fresh(now) is True
+    # A snapshot well past the freshness window (the post-outage stall) is stale.
+    assert _is_discovery_fresh(now - timedelta(minutes=5)) is False
+    # No snapshot at all (e.g. before initial discovery) cannot confirm reachability.
+    assert _is_discovery_fresh(None) is False
 
 
 def test_recovery_page_requires_authentication(tmp_path: Path) -> None:
