@@ -118,7 +118,7 @@ Lifted the accent color in dark mode to a brighter blue (`#0069d9` -> `#4d9bff`)
 
 Decluttered the dev styleguide previews: dropped the redundant "Light" / "Dark" labels from the dual-mode token previews (the white/black cards are self-evident), removed the decorative card frame (border / background / padding) from the single-mode previews (Type ramp, Spacing, Corner radius) so the samples sit directly on the page, and dropped the borders from the corner-radius demo shapes (each is now just its filled shape).
 
-Gave the primary button a pressed state: it now dims to 70% opacity on `:active` (its hover is 80%), so a press reads distinctly from a hover.
+Gave the primary button a pressed state: it now dims to 60% opacity on `:active` -- a clear step below the 80% hover, so a held press reads distinctly rather than blending into the hover state.
 
 Gave the styleguide's floating light/dark toggle an opaque surface background (`.styleguide-toggle` in app.css) so it stays legible while floating over page content; the hover/active fills are composited over that surface as a background-image gradient rather than replacing it (a translucent fill background-color would let content show through).
 
