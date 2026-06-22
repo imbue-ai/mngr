@@ -1747,6 +1747,69 @@ def test_list_agents_abort_mode_propagates_top_level_mngr_error(
 
 
 # =============================================================================
+# An unreachable *default* (auto-enumerated, unconfigured) provider is skipped by
+# an enumerate-all listing rather than aborting it -- e.g. the Docker daemon is
+# down, or a cloud backend has no credentials. The user never configured the
+# provider, so its unavailability is incidental. A provider the user *did*
+# configure still fails loudly in ABORT mode.
+# =============================================================================
+
+
+@pytest.mark.parametrize("is_streaming", [False, True])
+def test_list_agents_skips_unavailable_default_provider_in_abort_mode(
+    temp_mngr_ctx: MngrContext,
+    is_streaming: bool,
+) -> None:
+    """An auto-enumerated backend that is unreachable is skipped, even in ABORT mode.
+
+    The backend is registered (so discovery enumerates a default instance for it)
+    but NOT added to ``config.providers``, so it is exactly the incidental,
+    unconfigured case: an installed-but-unreachable backend must not abort the
+    whole listing. Covers both the batch and streaming discovery paths.
+    """
+    _backend_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME] = _UnavailableDiscoveryProviderBackend
+    _provider_config_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME] = ProviderInstanceConfig
+    try:
+        result = list_agents(
+            mngr_ctx=temp_mngr_ctx,
+            is_streaming=is_streaming,
+            error_behavior=ErrorBehavior.ABORT,
+        )
+    finally:
+        del _backend_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME]
+        del _provider_config_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME]
+
+    # Skipped silently: the unreachable default provider contributes no error and
+    # does not abort the command (list_agents returned normally).
+    provider_errors = [e for e in result.errors if isinstance(e, ProviderErrorInfo)]
+    assert provider_errors == [], provider_errors
+
+
+def test_list_agents_abort_mode_propagates_configured_unavailable_provider(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A provider the user *explicitly configured* still fails loudly in ABORT mode.
+
+    Unlike an auto-enumerated default instance, an unreachable provider that the
+    user added to ``config.providers`` is a real error they opted into, so an
+    enumerate-all listing must surface it rather than silently skip it.
+    """
+    _backend_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME] = _UnavailableDiscoveryProviderBackend
+    _provider_config_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME] = ProviderInstanceConfig
+    try:
+        configured_ctx = _make_unavailable_alongside_local_ctx(temp_mngr_ctx)
+        with pytest.raises(MngrError, match="offline"):
+            list_agents(
+                mngr_ctx=configured_ctx,
+                is_streaming=False,
+                error_behavior=ErrorBehavior.ABORT,
+            )
+    finally:
+        del _backend_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME]
+        del _provider_config_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME]
+
+
+# =============================================================================
 # Lines 235-237: OSError when writing full discovery snapshot
 # =============================================================================
 

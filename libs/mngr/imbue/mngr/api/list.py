@@ -34,6 +34,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderDiscoveryError
 from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.errors import ProviderInstanceNotFoundError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import HostDetails
@@ -383,6 +384,31 @@ def _get_provider_config_for_snapshot(
     return ProviderInstanceConfig(backend=ProviderBackendName(str(name)))
 
 
+def _should_skip_unavailable_default_provider(
+    provider_name: ProviderInstanceName,
+    error: BaseException,
+    mngr_ctx: MngrContext,
+) -> bool:
+    """Whether an enumerate-all listing should silently skip this provider error.
+
+    A *default* (auto-enumerated) provider instance for an installed backend that
+    is simply unreachable -- e.g. the Docker daemon is not running, or a cloud
+    backend has no credentials configured -- must not abort the whole listing. The
+    user never configured this provider, so its unavailability is incidental, not
+    an error they asked us to surface fatally. This honors the
+    ``ProviderUnavailableError`` contract ("a single offline backend does not block
+    the entire operation") and the docker/cloud backend docstrings, which state
+    that read paths skip an unreachable provider; it also matches
+    ``get_all_provider_instances`` (the loader ``mngr gc`` uses), which already
+    skips ``ProviderUnavailableError``.
+
+    An *explicitly configured* provider (present in ``config.providers``) still
+    honors ``error_behavior``: the user opted into it, so an enumerate-all listing
+    should fail loudly (or record the error) rather than hide it.
+    """
+    return isinstance(error, ProviderUnavailableError) and provider_name not in mngr_ctx.config.providers
+
+
 def _construct_and_discover_for_provider(
     provider_name: ProviderInstanceName,
     mngr_ctx: MngrContext,
@@ -413,6 +439,9 @@ def _construct_and_discover_for_provider(
         logger.debug("Skipping provider {} (empty -- nothing to list): {}", provider_name, e)
         return
     except Exception as e:
+        if _should_skip_unavailable_default_provider(provider_name, e, mngr_ctx):
+            logger.debug("Skipping default provider {} (unavailable -- not configured): {}", provider_name, e)
+            return
         if params.error_behavior == ErrorBehavior.ABORT:
             # Wrap so downstream handlers (e.g. discovery_events'
             # _write_unfiltered_full_snapshot_logged, which only knows how to
@@ -639,6 +668,11 @@ def _construct_discover_and_emit_for_provider(
         # provider is always safe to skip in listing.
         logger.debug("Skipping provider {} (empty -- nothing to list): {}", provider_name, e)
     except Exception as e:
+        if _should_skip_unavailable_default_provider(provider_name, e, mngr_ctx):
+            # See _construct_and_discover_for_provider's matching arm: an
+            # unconfigured, unreachable backend must not abort an enumerate-all listing.
+            logger.debug("Skipping default provider {} (unavailable -- not configured): {}", provider_name, e)
+            return
         if params.error_behavior == ErrorBehavior.ABORT:
             if isinstance(e, MngrError):
                 raise
