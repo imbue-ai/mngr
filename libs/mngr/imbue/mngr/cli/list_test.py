@@ -12,12 +12,20 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
+from imbue.mngr.api.list import ErrorInfo
 from imbue.mngr.api.list import ListResult
+from imbue.mngr.api.list import ProviderErrorInfo
+from imbue.mngr.cli.exit_codes import EXIT_CODE_ERROR
+from imbue.mngr.cli.exit_codes import EXIT_CODE_PROVIDER_INACCESSIBLE
+from imbue.mngr.cli.exit_codes import EXIT_CODE_SUCCESS
 from imbue.mngr.cli.list import _StreamingHumanRenderer
 from imbue.mngr.cli.list import _StreamingTemplateEmitter
 from imbue.mngr.cli.list import _compute_column_widths
 from imbue.mngr.cli.list import _emit_human_output
 from imbue.mngr.cli.list import _emit_template_output
+from imbue.mngr.cli.list import _exit_code_for_list_errors
+from imbue.mngr.cli.list import _format_list_error_line
+from imbue.mngr.cli.list import _format_provider_error_line
 from imbue.mngr.cli.list import _format_streaming_agent_row
 from imbue.mngr.cli.list import _format_streaming_header_row
 from imbue.mngr.cli.list import _format_value_as_string
@@ -26,10 +34,13 @@ from imbue.mngr.cli.list import _get_header_label
 from imbue.mngr.cli.list import _is_streaming_eligible
 from imbue.mngr.cli.list import _parse_slice_spec
 from imbue.mngr.cli.list import _render_format_template
+from imbue.mngr.cli.list import _render_list_errors_block
 from imbue.mngr.cli.list import _should_use_streaming_mode
 from imbue.mngr.cli.list import _sort_agents_by_cel
 from imbue.mngr.cli.list import _truncate_to_width
 from imbue.mngr.cli.list import list_command
+from imbue.mngr.colors import ERROR_COLOR
+from imbue.mngr.colors import RESET_COLOR
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.primitives import AgentLifecycleState
@@ -1746,3 +1757,87 @@ def test_list_schema_rejects_agent_selection_options(
     )
     assert result.exit_code != 0
     assert "--schema lists fields and cannot be combined with" in result.output
+
+
+# =============================================================================
+# Provider error rendering + exit-code selection
+# =============================================================================
+
+
+def _provider_error(
+    provider: str, *, is_inaccessible: bool, short_reason: str | None, remediation: str | None
+) -> ProviderErrorInfo:
+    """Build a ProviderErrorInfo for rendering / exit-code tests."""
+    return ProviderErrorInfo(
+        exception_type="ProviderNotAuthorizedError" if is_inaccessible else "RuntimeError",
+        message=f"{provider} failed",
+        is_provider_inaccessible=is_inaccessible,
+        provider_name=ProviderInstanceName(provider),
+        short_reason=short_reason,
+        short_remediation=remediation,
+    )
+
+
+def test_format_provider_error_line_includes_reason_remediation_and_disable_hint() -> None:
+    """The concise line shows provider, reason, remediation, and the disable hint."""
+    error = _provider_error(
+        "aws", is_inaccessible=True, short_reason="AWS credentials not configured", remediation="run `aws configure`"
+    )
+    line = _format_provider_error_line(error)
+    assert line == (
+        "aws: AWS credentials not configured — run `aws configure` "
+        "(disable: mngr config set --scope user providers.aws.is_enabled false)"
+    )
+
+
+def test_format_provider_error_line_collapses_multiline_reason_to_first_line() -> None:
+    """A multi-line message stays a single glanceable line."""
+    error = _provider_error("azure", is_inaccessible=True, short_reason="first line\nsecond line", remediation=None)
+    line = _format_provider_error_line(error)
+    assert line.startswith("azure: first line ")
+    assert "\n" not in line
+
+
+def test_format_list_error_line_falls_back_to_message_for_non_provider_errors() -> None:
+    """A plain ErrorInfo (not provider-scoped) renders its message verbatim."""
+    error = ErrorInfo(exception_type="RuntimeError", message="something broke")
+    assert _format_list_error_line(error) == "something broke"
+
+
+def test_render_list_errors_block_is_plain_when_color_disabled() -> None:
+    """Without color the block is the Errors: heading plus one indented line per error, no ANSI codes."""
+    errors = [_provider_error("aws", is_inaccessible=True, short_reason="creds", remediation="run x")]
+    block = _render_list_errors_block(errors, is_color_enabled=False)
+    assert block.startswith("Errors:\n  aws: creds")
+    assert ERROR_COLOR not in block
+    assert RESET_COLOR not in block
+
+
+def test_render_list_errors_block_is_red_when_color_enabled() -> None:
+    """With color enabled the whole block is wrapped in the bold-red error color, matching MngrError.show."""
+    errors = [_provider_error("aws", is_inaccessible=True, short_reason="creds", remediation="run x")]
+    block = _render_list_errors_block(errors, is_color_enabled=True)
+    assert block.startswith(ERROR_COLOR)
+    assert block.endswith(RESET_COLOR)
+    assert "Errors:" in block
+
+
+def test_exit_code_for_list_errors_success_when_empty() -> None:
+    assert _exit_code_for_list_errors([]) == EXIT_CODE_SUCCESS
+
+
+def test_exit_code_for_list_errors_inaccessible_when_all_inaccessible() -> None:
+    errors = [
+        _provider_error("aws", is_inaccessible=True, short_reason="creds", remediation=None),
+        _provider_error("gcp", is_inaccessible=True, short_reason="creds", remediation=None),
+    ]
+    assert _exit_code_for_list_errors(errors) == EXIT_CODE_PROVIDER_INACCESSIBLE
+
+
+def test_exit_code_for_list_errors_generic_when_any_non_inaccessible() -> None:
+    """A mix of an auth failure and a generic failure exits with the generic error code."""
+    errors = [
+        _provider_error("aws", is_inaccessible=True, short_reason="creds", remediation=None),
+        _provider_error("docker", is_inaccessible=False, short_reason=None, remediation=None),
+    ]
+    assert _exit_code_for_list_errors(errors) == EXIT_CODE_ERROR

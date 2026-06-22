@@ -39,10 +39,11 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.host import ONBOARDING_TEXT
 from imbue.mngr.hosts.host import ONBOARDING_TEXT_TMUX_USER
-from imbue.mngr.hosts.host import _START_LOCK_ACQUIRED_MARKER
+from imbue.mngr.hosts.host import _LOCK_ACQUIRED_MARKER
+from imbue.mngr.hosts.host import _LOCK_TIMED_OUT_MARKER
 from imbue.mngr.hosts.host import _TMUX_SET_TITLES_STRING
 from imbue.mngr.hosts.host import _TMUX_STATUS_LEFT_LENGTH
-from imbue.mngr.hosts.host import _build_remote_start_lock_command
+from imbue.mngr.hosts.host import _build_remote_lock_command
 from imbue.mngr.hosts.host import _build_start_agent_shell_command
 from imbue.mngr.hosts.host import _format_env_file
 from imbue.mngr.hosts.host import _is_transient_ssh_error
@@ -2613,40 +2614,49 @@ def test_host_lock_cooperatively_acquires_and_releases(
     assert host.is_lock_held() is False
 
 
-def test_build_remote_start_lock_command_holds_flock_until_stdin_closes() -> None:
-    """The remote lock command must be valid shell, flock the lock path, and signal acquisition."""
-    cmd = _build_remote_start_lock_command(Path("/mngr/host_start_lock"))
+def test_build_remote_lock_command_blocking_holds_flock_until_stdin_closes() -> None:
+    """The blocking remote lock command must be valid shell, flock the path, and signal acquisition."""
+    cmd = _build_remote_lock_command(Path("/mngr/host_lock"), timeout_seconds=None)
     assert subprocess.run(["sh", "-n", "-c", cmd], capture_output=True).returncode == 0
     assert "flock 9" in cmd
-    assert "/mngr/host_start_lock" in cmd
-    assert _START_LOCK_ACQUIRED_MARKER in cmd
+    assert "/mngr/host_lock" in cmd
+    assert _LOCK_ACQUIRED_MARKER in cmd
     # It must wait on stdin (so closing the channel releases the lock).
     assert "read" in cmd
 
 
-def test_host_lock_for_starting_acquires_and_releases(
+def test_build_remote_lock_command_with_timeout_uses_flock_wait() -> None:
+    """A bounded remote lock command must use ``flock -w`` and emit the timeout marker."""
+    cmd = _build_remote_lock_command(Path("/mngr/host_lock"), timeout_seconds=12.0)
+    assert subprocess.run(["sh", "-n", "-c", cmd], capture_output=True).returncode == 0
+    assert "flock -w 12 9" in cmd
+    assert _LOCK_ACQUIRED_MARKER in cmd
+    assert _LOCK_TIMED_OUT_MARKER in cmd
+
+
+def test_host_lock_cooperatively_acquires_and_releases_blocking(
     local_host: Host,
 ) -> None:
-    """lock_for_starting should acquire the dedicated start lock and create its file."""
+    """lock_cooperatively with an indefinite timeout should acquire and release the lock."""
     host = local_host
-    start_lock_path = host.host_dir / "host_start_lock"
-    with host.lock_for_starting():
-        assert start_lock_path.exists()
-    # It uses a dedicated file, not the idle-suppression host_lock.
-    assert not (host.host_dir / "host_lock").exists()
+    with host.lock_cooperatively(timeout_seconds=None):
+        assert host.is_lock_held() is True
+    # The lock file persists (stable inode) but is no longer held.
+    assert (host.host_dir / "host_lock").exists()
+    assert host.is_lock_held() is False
 
 
-def test_host_lock_for_starting_is_mutually_exclusive(
+def test_host_lock_cooperatively_is_mutually_exclusive(
     local_host: Host,
 ) -> None:
-    """A second lock_for_starting must block until the first releases (real flock)."""
+    """A second lock_cooperatively must block until the first releases (real flock)."""
     host = local_host
     first_acquired = threading.Event()
     allow_first_release = threading.Event()
     second_acquired = threading.Event()
 
     def hold_first() -> None:
-        with host.lock_for_starting():
+        with host.lock_cooperatively(timeout_seconds=None):
             first_acquired.set()
             # Hold the lock until the test signals release.
             allow_first_release.wait(timeout=30.0)
@@ -2654,7 +2664,7 @@ def test_host_lock_for_starting_is_mutually_exclusive(
     def acquire_second() -> None:
         # Only attempt once the first holder is established.
         first_acquired.wait(timeout=30.0)
-        with host.lock_for_starting():
+        with host.lock_cooperatively(timeout_seconds=None):
             second_acquired.set()
 
     first_thread = threading.Thread(target=hold_first)

@@ -1958,8 +1958,13 @@ class VpsProvider(BaseProviderInstance):
         resource = self.get_host_resources(host)
 
         lock_mtime = raw.get("lock_mtime")
-        is_locked = lock_mtime is not None
-        locked_time = datetime.fromtimestamp(lock_mtime, tz=timezone.utc) if lock_mtime is not None else None
+        # The lock file persists after release (its inode must stay stable across
+        # local and remote holders), so its mtime alone does not indicate "held".
+        # Use the real flock held-probe collected by the listing script.
+        is_locked = bool(raw.get("is_lock_held"))
+        locked_time = (
+            datetime.fromtimestamp(lock_mtime, tz=timezone.utc) if is_locked and lock_mtime is not None else None
+        )
 
         certified_data: CertifiedHostData | None = None
         certified_data_dict = raw.get("certified_data")

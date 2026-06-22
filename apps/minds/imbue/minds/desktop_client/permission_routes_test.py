@@ -1,6 +1,6 @@
 """Integration tests for the permission routes wired into ``app.py``.
 
-Drives the FastAPI app via ``TestClient`` against a real catalog and a
+Drives the Flask app via the test client against a real catalog and a
 fake ``LatchkeyPermissionGrantHandler`` so the routes are exercised
 end-to-end without spawning any subprocesses.
 """
@@ -9,10 +9,9 @@ import uuid
 from collections.abc import Sequence
 from pathlib import Path
 
-from fastapi import FastAPI
-from fastapi import Request
-from fastapi.responses import Response
-from fastapi.testclient import TestClient
+from flask import Request
+from flask import Response
+from flask.testing import FlaskClient
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -44,6 +43,8 @@ from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import create_latchkey_predefined_permission_request_event
 from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
+from imbue.minds.desktop_client.responses import make_response
+from imbue.minds.desktop_client.state import get_state
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -72,8 +73,8 @@ def _make_other_request_event(agent_id: str) -> RequestEvent:
 class _RecordingHandler(LatchkeyPermissionGrantHandler):
     """Subclass of ``LatchkeyPermissionGrantHandler`` that records calls instead of running them.
 
-    Inheriting from the real handler keeps the ``app.state`` typing happy
-    without polluting production code with a Protocol.
+    Inheriting from the real handler keeps the ``request_event_handlers``
+    typing happy without polluting production code with a Protocol.
     """
 
     grant_outcome: GrantOutcome = Field(default=GrantOutcome.GRANTED)
@@ -149,11 +150,9 @@ class _RecordingHandler(LatchkeyPermissionGrantHandler):
         return self.deny_message, response_event
 
 
-def _get_app_request_inbox(client: TestClient) -> RequestInbox:
-    """Pull the live request inbox out of the FastAPI app behind a TestClient."""
-    app = client.app
-    assert isinstance(app, FastAPI)
-    inbox = app.state.request_inbox
+def _get_app_request_inbox(client: FlaskClient) -> RequestInbox:
+    """Pull the live request inbox out of the Flask app behind a test client."""
+    inbox = get_state(client.application).request_inbox
     assert isinstance(inbox, RequestInbox)
     return inbox
 
@@ -239,7 +238,7 @@ def _build_authenticated_client(
     inbox: RequestInbox,
     agent_id: AgentId | None = None,
     host_id: HostId | None = None,
-) -> TestClient:
+) -> FlaskClient:
     auth_dir = tmp_path / "auth"
     auth_store = FileAuthStore(data_directory=auth_dir)
     backend_resolver: BackendResolverInterface
@@ -261,9 +260,9 @@ def _build_authenticated_client(
         request_inbox=inbox,
         request_event_handlers=(handler,),
     )
-    client = TestClient(app, base_url="http://localhost")
+    client = app.test_client()
     cookie_value = create_session_cookie(signing_key=auth_store.get_signing_key())
-    client.cookies.set(SESSION_COOKIE_NAME, cookie_value, path="/")
+    client.set_cookie(SESSION_COOKIE_NAME, cookie_value)
     return client
 
 
@@ -533,7 +532,7 @@ def test_post_permission_grant_calls_handler_and_resolves_inbox(tmp_path: Path) 
     )
 
     assert response.status_code == 200
-    assert response.json() == {"outcome": "GRANTED", "message": "granted"}
+    assert response.get_json() == {"outcome": "GRANTED", "message": "granted"}
     assert len(handler.grant_calls) == 1
     call = handler.grant_calls[0]
     assert call["scope"] == "slack-api"
@@ -589,7 +588,7 @@ def test_post_permission_grant_with_failed_signin_keeps_request_pending(tmp_path
     )
 
     assert response.status_code == 200
-    payload = response.json()
+    payload = response.get_json()
     # FAILED is a distinct outcome from DENIED: the approval failed but the
     # request is not resolved, so the agent's message carries the reason.
     assert payload["outcome"] == "FAILED"
@@ -623,7 +622,7 @@ def test_post_permission_grant_with_manual_credentials_keeps_request_pending(tmp
     )
 
     assert response.status_code == 200
-    payload = response.json()
+    payload = response.get_json()
     assert payload["outcome"] == "NEEDS_MANUAL_CREDENTIALS"
     assert payload["set_credentials_example"] == expected_example
     # The request must remain pending so the user can click Approve again
@@ -646,7 +645,7 @@ def test_post_permission_deny_calls_handler_and_resolves_inbox(tmp_path: Path) -
     response = client.post(f"/requests/{request.event_id}/deny")
 
     assert response.status_code == 200
-    assert response.json() == {"outcome": "DENIED"}
+    assert response.get_json() == {"outcome": "DENIED"}
     assert len(handler.deny_calls) == 1
     final_inbox = _get_app_request_inbox(client)
     assert final_inbox.get_pending_count() == 0
@@ -875,7 +874,7 @@ def test_unauthenticated_grant_post_returns_403(tmp_path: Path) -> None:
     handler = _make_recording_handler(tmp_path)
     client = _build_authenticated_client(tmp_path, handler, inbox)
     # Drop the cookie to simulate an unauthenticated request.
-    client.cookies.clear()
+    client.delete_cookie(SESSION_COOKIE_NAME)
 
     response = client.post(
         f"/requests/{request.event_id}/grant",
@@ -917,13 +916,13 @@ class _StubOtherHandler(RequestEventHandler):
     ) -> str:
         return "ok"
 
-    async def apply_grant_request(self, request: Request, req_event: RequestEvent) -> Response:
+    def apply_grant_request(self, request: Request, req_event: RequestEvent) -> Response:
         self.grant_event_ids.append(str(req_event.event_id))
-        return Response(content="granted", status_code=200)
+        return make_response(content="granted", status_code=200)
 
-    async def apply_deny_request(self, request: Request, req_event: RequestEvent) -> Response:
+    def apply_deny_request(self, request: Request, req_event: RequestEvent) -> Response:
         self.deny_event_ids.append(str(req_event.event_id))
-        return Response(content="denied", status_code=200)
+        return make_response(content="denied", status_code=200)
 
 
 def _build_authenticated_client_with_handlers(
@@ -932,7 +931,7 @@ def _build_authenticated_client_with_handlers(
     inbox: RequestInbox,
     known_agent_ids: tuple[AgentId, ...] = (),
     host_id: HostId | None = None,
-) -> TestClient:
+) -> FlaskClient:
     auth_dir = tmp_path / "auth"
     auth_store = FileAuthStore(data_directory=auth_dir)
     backend_resolver: BackendResolverInterface
@@ -953,9 +952,9 @@ def _build_authenticated_client_with_handlers(
         request_inbox=inbox,
         request_event_handlers=handlers,
     )
-    client = TestClient(app, base_url="http://localhost")
+    client = app.test_client()
     cookie_value = create_session_cookie(signing_key=auth_store.get_signing_key())
-    client.cookies.set(SESSION_COOKIE_NAME, cookie_value, path="/")
+    client.set_cookie(SESSION_COOKIE_NAME, cookie_value)
     return client
 
 

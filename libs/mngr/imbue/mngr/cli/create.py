@@ -1008,8 +1008,8 @@ def _create_agent(
                 with _editor_cleanup_scope(setup.editor_session):
                     if setup.editor_session is not None:
                         # Hold the host lock while waiting for the editor to prevent
-                        # idle shutdown during long editing sessions
-                        with host.lock_cooperatively():
+                        # idle shutdown during long editing sessions (block indefinitely)
+                        with host.lock_cooperatively(timeout_seconds=None):
                             _handle_editor_message(
                                 editor_session=setup.editor_session,
                                 agent=agent,
@@ -1084,7 +1084,7 @@ def _create_agent(
         # rather than leaking it.
         if setup.editor_session is not None:
             with destroy_new_host_on_create_failure(create_result.host, new_host_provider):
-                with create_result.host.lock_cooperatively():
+                with create_result.host.lock_cooperatively(timeout_seconds=None):
                     _handle_editor_message(
                         editor_session=setup.editor_session,
                         agent=create_result.agent,

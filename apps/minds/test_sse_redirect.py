@@ -16,9 +16,9 @@ import threading
 from pathlib import Path
 
 import pytest
-import uvicorn
 from loguru import logger
 from playwright.sync_api import sync_playwright
+from werkzeug.serving import make_server
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
@@ -80,9 +80,8 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
         agent_creator=creator,
     )
 
-    config = uvicorn.Config(app, host=host, port=port, log_level="warning")
-    server = uvicorn.Server(config)
-    thread = threading.Thread(target=server.run, daemon=True)
+    server = make_server(host, port, app, threaded=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
     for _ in range(50):
@@ -152,5 +151,5 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
             finally:
                 browser.close()
     finally:
-        server.should_exit = True
+        server.shutdown()
         thread.join(timeout=5)

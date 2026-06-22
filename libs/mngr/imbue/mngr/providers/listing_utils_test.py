@@ -64,6 +64,7 @@ def test_parse_listing_collection_output_basic() -> None:
         [
             "UPTIME=12345.67",
             "BTIME=1700000000",
+            "LOCK_HELD=true",
             "LOCK_MTIME=",
             "SSH_ACTIVITY_MTIME=1700000100",
             "---MNGR_DATA_JSON_START---",
@@ -78,6 +79,7 @@ def test_parse_listing_collection_output_basic() -> None:
     result = parse_listing_collection_output(output)
     assert result["uptime_seconds"] == 12345.67
     assert result["btime"] == 1700000000
+    assert result["is_lock_held"] is True
     assert result["lock_mtime"] is None
     assert result["ssh_activity_mtime"] == 1700000100
     assert result["certified_data"]["host_id"] == "host-abc"

@@ -1,4 +1,4 @@
-"""TestClient coverage for the mind host Start/Stop endpoints, the quit-prompt
+"""Flask test-client coverage for the mind host Start/Stop endpoints, the quit-prompt
 running-minds lookup, the bulk stop-hosts endpoint, and the landing-page controls.
 
 Mind liveness is derived from the discovery snapshot's host state (folded into the
@@ -12,7 +12,7 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 
-from starlette.testclient import TestClient
+from flask.testing import FlaskClient
 
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -45,18 +45,18 @@ def _capable_workspace_agent(agent_id: AgentId, host: HostId = _HOST_A) -> Disco
     )
 
 
-def _make_client(tmp_path: Path, resolver: MngrCliBackendResolver) -> tuple[TestClient, FileAuthStore]:
+def _make_client(tmp_path: Path, resolver: MngrCliBackendResolver) -> tuple[FlaskClient, FileAuthStore]:
     auth_store = FileAuthStore(data_directory=tmp_path / "auth")
     app = create_desktop_client(
         auth_store=auth_store,
         backend_resolver=resolver,
         http_client=None,
     )
-    return TestClient(app, base_url="http://localhost"), auth_store
+    return app.test_client(), auth_store
 
 
-def _authenticate(client: TestClient, auth_store: FileAuthStore) -> None:
-    client.cookies.set(SESSION_COOKIE_NAME, create_session_cookie(signing_key=auth_store.get_signing_key()), path="/")
+def _authenticate(client: FlaskClient, auth_store: FileAuthStore) -> None:
+    client.set_cookie(SESSION_COOKIE_NAME, create_session_cookie(signing_key=auth_store.get_signing_key()))
 
 
 def _docker_provider() -> DiscoveredProvider:
@@ -154,7 +154,7 @@ def test_running_minds_empty_when_no_capable_minds(tmp_path: Path) -> None:
     _authenticate(client, auth_store)
     response = client.get("/api/minds/running")
     assert response.status_code == 200
-    assert response.json() == {"running": []}
+    assert response.get_json() == {"running": []}
 
 
 def test_stop_state_container_requires_authentication(tmp_path: Path) -> None:
@@ -169,7 +169,7 @@ def test_stop_state_container_noop_without_concurrency_group(tmp_path: Path) -> 
     _authenticate(client, auth_store)
     response = client.post("/api/minds/stop-state-container")
     assert response.status_code == 200
-    assert response.json() == {"stopped": False}
+    assert response.get_json() == {"stopped": False}
 
 
 def test_running_minds_reads_discovery_without_subprocess(tmp_path: Path) -> None:
@@ -188,7 +188,7 @@ def test_running_minds_reads_discovery_without_subprocess(tmp_path: Path) -> Non
     response = client.get("/api/minds/running")
 
     assert response.status_code == 200
-    running = response.json()["running"]
+    running = response.get_json()["running"]
     # Only the RUNNING mind is listed; the STOPPED one is excluded.
     assert [entry["id"] for entry in running] == [str(running_agent)]
 
@@ -204,7 +204,7 @@ def test_running_minds_reflects_optimistic_override(tmp_path: Path) -> None:
     response = client.get("/api/minds/running")
 
     assert response.status_code == 200
-    assert response.json() == {"running": []}
+    assert response.get_json() == {"running": []}
 
 
 # -- landing page integration --
