@@ -255,10 +255,10 @@
  */
 
 :root {
-  /* Status / feedback (Figma). Single hue per semantic, mode-independent --
-     they read on both light and dark surfaces; tints for notice/badge
-     backgrounds are derived with an opacity modifier (e.g. bg-success/10).
-     Add a .dark override later only if a hue needs a contrast tweak. */
+  /* Status / feedback (Figma). One hue per semantic. These light values read on
+     the white surface; .dark lifts each to a brighter value (below), because the
+     deep light hues go muddy / low-contrast on the pure-black surface. Notice /
+     badge tints derive from the active hue via the --c-*-surface tokens. */
   --c-important: #d90c00;
   --c-success: #0c8106;
   --c-warning: #b45300;
@@ -286,9 +286,16 @@
      the accent to a brighter blue in dark mode so links, focus rings, selection
      tints, and progress stay clear (clears WCAG AA as link text on black). */
   --c-accent: #4d9bff;
-  /* The dark status hues are deep enough that an 8% tint over pure black reads
-     as solid black -- the notice / badge shape disappears. Lift the surface
-     opacity so green / red / blue backings stay legible on the dark surface
+  /* Status hues run brighter in dark mode: the deep light values go muddy and
+     low-contrast on the pure-black surface -- both as foreground text and as the
+     derived notice tints -- so each lifts to a brighter value here. */
+  --c-important: #fb1f13;
+  --c-success: #12be09;
+  --c-warning: #ff851a;
+  --c-info: #4396ea;
+  /* Notice / badge surfaces stay a tint of the (now brighter) hue, but lifted
+     from 8% to 22%: an 8% tint over pure black is invisible regardless of hue,
+     so the higher opacity keeps the green / red / blue backing shape legible
      (warning keeps its bright yellow fill, already visible on both). */
   --c-important-surface: rgb(from var(--c-important) r g b / 0.22);
   --c-success-surface: rgb(from var(--c-success) r g b / 0.22);

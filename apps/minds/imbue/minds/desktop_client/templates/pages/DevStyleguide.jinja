@@ -394,19 +394,20 @@
       <div class="mt-2 type-helper text-secondary font-mono">app.css :: --color-surface-* (bg-surface-*) + --color-fill-* (bg-fill-*)</div>
     </section>
 
-    {# Status / feedback tokens. One solid hue per semantic (Figma),
-       mode-independent; notice / badge backgrounds use a per-mode surface
-       token (--c-*-surface) -- a faint tint in light, a higher-opacity tint
-       in dark so the shape stays visible on black. data-token marks each
-       --color-* for the drift guard. #}
+    {# Status / feedback tokens. One hue per semantic (Figma); .dark lifts each
+       to a brighter value (the deep light hues go muddy on the pure-black
+       surface). Notice / badge backgrounds use a per-mode surface token
+       (--c-*-surface) -- a faint tint in light, a higher-opacity tint in dark
+       so the shape stays visible on black. data-token marks each --color-* for
+       the drift guard. #}
     <section id="status" class="scroll-mt-8 mb-12">
       <h2 class="type-heading text-primary mb-1">Status / feedback tokens</h2>
       <p class="type-helper text-secondary mb-4">
-        One solid hue per semantic (<code>important</code> / <code>success</code>
-        / <code>warning</code> / <code>info</code>). The hue is the same in both
-        modes; notice / badge backgrounds use a per-mode surface token
-        (<code>--c-success-surface</code>), faint in light and lifted in dark so
-        the shape stays visible on black.
+        One hue per semantic (<code>important</code> / <code>success</code>
+        / <code>warning</code> / <code>info</code>). Dark mode lifts each hue to a
+        brighter value (the deep light hues go muddy on black); notice / badge
+        backgrounds use a per-mode surface token (<code>--c-success-surface</code>),
+        faint in light and lifted in dark so the shape stays visible.
       </p>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
 
