@@ -42,15 +42,16 @@ PROBE_SENTINEL: Final[str] = "===PROBE-READY==="
 
 # Hard ceiling for a single batched ``mngr exec``, so a wedged container can't
 # gate the recovery UI. Only two of the inner checks spawn subprocesses
-# (``tmux ls`` at 1s and ``curl`` at 2s, summing to 3s worst case); the TOML
-# parse and the ``/proc/net/tcp`` LISTEN scan run in-process. 5s leaves margin.
+# (``supervisorctl status`` at 1s and ``curl`` at 2s, summing to 3s worst case);
+# the supervisord.conf parse and the ``/proc/net/tcp`` LISTEN scan run
+# in-process. 5s leaves margin.
 PROBE_TIMEOUT_SECONDS: Final[float] = 5.0
 
 
 # Inner Python script executed on the agent's host, loaded from a sibling
-# .txt resource so the in-container script's patterns (tomllib import,
-# subprocess calls, broad Exception catches, ...) don't trip minds-side
-# ratchets that only inspect ``.py`` files. The script is then base64-encoded
+# .txt resource so the in-container script's patterns (subprocess calls,
+# broad Exception catches, ...) don't trip minds-side ratchets that only
+# inspect ``.py`` files. The script is then base64-encoded
 # in ``build_probe_shell_command`` so the outer ``mngr exec`` argv stays a
 # single shell-safe token without quoting headaches.
 _PROBE_SCRIPT_PATH: Final[Path] = Path(__file__).parent / "recovery_probe_script.txt"
@@ -138,9 +139,6 @@ class DispatchTier(str, Enum):
     in the way we expect, so we ask the user before bouncing it.
     """
 
-    WORKSPACE_MISCONFIGURED = "workspace_misconfigured"
-    """services.toml lacks [services.system_interface] -- a restart won't help."""
-
     PROVIDER_UNAVAILABLE = "provider_unavailable"
     """The provider backend itself is unreachable (imbue_cloud connector down /
     network down, or local docker daemon stopped). A host or interface restart
@@ -213,7 +211,7 @@ class HostHealthResponse(FrozenModel):
 _QUESTION_CONTAINER_RUNNING: Final[str] = "Is the workspace's container running?"
 _QUESTION_SERVICES_AGENT_REGISTERED: Final[str] = "Is the system-services agent registered?"
 _QUESTION_CAN_RUN_COMMANDS_INSIDE: Final[str] = "Can we run a command inside the container?"
-_QUESTION_SERVICES_TOML_DECLARES: Final[str] = "Does services.toml declare [services.system_interface]?"
+_QUESTION_SYSTEM_INTERFACE_RUNNING: Final[str] = "Is the system_interface service running under supervisord?"
 _QUESTION_PORT_LISTENING: Final[str] = "Is anything listening on the system-interface inner port?"
 _QUESTION_CURL_OK: Final[str] = "Does the inner web server answer GET / inside the container?"
 _QUESTION_PLUGIN_RESOLVER: Final[str] = "Has the system interface registered with the plugin resolver?"
@@ -233,11 +231,8 @@ class _InContainerProbe(FrozenModel):
 
     sentinel_seen: bool = Field(default=False)
     raw_stdout: str = Field(default="")
-    tmux_ls: str | None = Field(default=None)
-    tmux_error: str | None = Field(default=None)
-    services_toml_declares_system_interface: bool | None = Field(default=None)
-    services_toml_path: str = Field(default="/code/services.toml")
-    services_toml_error: str | None = Field(default=None)
+    system_interface_status: str | None = Field(default=None)
+    supervisorctl_error: str | None = Field(default=None)
     inner_port: int | None = Field(default=None)
     port_listener: str | None = Field(default=None)
     port_listener_error: str | None = Field(default=None)
@@ -278,13 +273,8 @@ def _parse_in_container_probe(stdout: str | None) -> _InContainerProbe:
     return _InContainerProbe(
         sentinel_seen=True,
         raw_stdout=stdout,
-        tmux_ls=_coerce_optional_str(payload.get("tmux_ls")),
-        tmux_error=_coerce_optional_str(payload.get("tmux_error")),
-        services_toml_declares_system_interface=_coerce_optional_bool(
-            payload.get("services_toml_declares_system_interface")
-        ),
-        services_toml_path=str(payload.get("services_toml_path") or "/code/services.toml"),
-        services_toml_error=_coerce_optional_str(payload.get("services_toml_error")),
+        system_interface_status=_coerce_optional_str(payload.get("system_interface_status")),
+        supervisorctl_error=_coerce_optional_str(payload.get("supervisorctl_error")),
         inner_port=_coerce_optional_int(payload.get("inner_port")),
         port_listener=_coerce_optional_str(payload.get("port_listener")),
         port_listener_error=_coerce_optional_str(payload.get("port_listener_error")),
@@ -297,12 +287,6 @@ def _coerce_optional_str(value: object) -> str | None:
     if value is None:
         return None
     return str(value)
-
-
-def _coerce_optional_bool(value: object) -> bool | None:
-    if isinstance(value, bool):
-        return value
-    return None
 
 
 def _coerce_optional_int(value: object) -> int | None:
@@ -412,41 +396,63 @@ def _build_can_run_commands_probe(in_container: _InContainerProbe, mngr_exec_com
     )
 
 
-def _services_toml_inner_command(services_toml_path: str) -> str:
-    """In-container check that prints ``declared`` or ``MISSING``.
+def _supervisorctl_status_inner_command() -> str:
+    """In-container ``supervisorctl status`` for the system_interface service.
 
-    Mirrors the inline probe script's ``isinstance(si, dict)`` test. The body
-    uses only double quotes so it survives the single-quoted ``-c`` wrapper,
-    which in turn survives ``shlex.join`` quoting for ``mngr exec``.
+    Pointed at the repo-root config (``-c /code/supervisord.conf``) so it finds
+    the unix socket declared there; the default config search path does not
+    include that file. Prints supervisord's own status line, e.g.
+    ``system_interface   RUNNING   pid 42, uptime 0:10:00``.
     """
-    body = (
-        "import tomllib; "
-        f'd = tomllib.load(open("{services_toml_path}", "rb")); '
-        'print("declared" if isinstance(d.get("services", {}).get("system_interface"), dict) else "MISSING")'
-    )
-    return f"python3 -c '{body}'"
+    return "supervisorctl -c /code/supervisord.conf status system_interface"
 
 
-def _build_services_toml_probe(
+def _build_system_interface_probe(
     in_container: _InContainerProbe,
     mngr_binary: str,
     services_agent_id: AgentId | None,
 ) -> Probe:
-    """Probe 4: does services.toml declare [services.system_interface]?"""
-    command = _mngr_exec_command(
-        mngr_binary, services_agent_id, _services_toml_inner_command(in_container.services_toml_path)
-    )
+    """Probe 4: is the system_interface service RUNNING under supervisord?
+
+    Purely diagnostic -- the dispatch tier never branches on it. A
+    not-RUNNING service while the container is up and exec works still
+    classifies as INTERFACE_UNRESPONSIVE (a surgical restart bounces
+    supervisord with it), so this probe is the detail behind that tier, not
+    a tier of its own.
+    """
+    command = _mngr_exec_command(mngr_binary, services_agent_id, _supervisorctl_status_inner_command())
     if not in_container.sentinel_seen:
-        output, answer = "(in-container probe did not run)", ProbeAnswer.UNKNOWN
-    elif in_container.services_toml_error is not None:
-        output, answer = f"error: {in_container.services_toml_error}", ProbeAnswer.UNKNOWN
-    elif in_container.services_toml_declares_system_interface is True:
-        output, answer = "declared", ProbeAnswer.YES
-    elif in_container.services_toml_declares_system_interface is False:
-        output, answer = "MISSING", ProbeAnswer.NO
+        return Probe(
+            question=_QUESTION_SYSTEM_INTERFACE_RUNNING,
+            command=command,
+            output="(in-container probe did not run)",
+            answer=ProbeAnswer.UNKNOWN,
+        )
+    if in_container.supervisorctl_error is not None:
+        return Probe(
+            question=_QUESTION_SYSTEM_INTERFACE_RUNNING,
+            command=command,
+            output=f"error: {in_container.supervisorctl_error}",
+            answer=ProbeAnswer.UNKNOWN,
+        )
+    status = in_container.system_interface_status
+    if not status:
+        return Probe(
+            question=_QUESTION_SYSTEM_INTERFACE_RUNNING,
+            command=command,
+            output="(no supervisorctl status returned)",
+            answer=ProbeAnswer.UNKNOWN,
+        )
+    state = parse_supervisorctl_status_state(status)
+    if state == _SUPERVISOR_RUNNING_STATE:
+        answer = ProbeAnswer.YES
+    elif state is not None:
+        answer = ProbeAnswer.NO
     else:
-        output, answer = "(no declaration data returned)", ProbeAnswer.UNKNOWN
-    return Probe(question=_QUESTION_SERVICES_TOML_DECLARES, command=command, output=output, answer=answer)
+        # No recognized state word -- a connection error, ``no such process``,
+        # or otherwise unparseable output. We can't claim it's down.
+        answer = ProbeAnswer.UNKNOWN
+    return Probe(question=_QUESTION_SYSTEM_INTERFACE_RUNNING, command=command, output=status, answer=answer)
 
 
 def _no_listener_output(port: int) -> str:
@@ -490,7 +496,7 @@ def _build_port_listening_probe(
     if not in_container.sentinel_seen:
         output, answer = "(in-container probe did not run)", ProbeAnswer.UNKNOWN
     elif port is None:
-        output, answer = "(could not parse inner port from services.toml command)", ProbeAnswer.UNKNOWN
+        output, answer = "(could not parse inner port from supervisord.conf)", ProbeAnswer.UNKNOWN
     elif in_container.port_listener_error is not None:
         output, answer = f"error: {in_container.port_listener_error}", ProbeAnswer.UNKNOWN
     elif (in_container.port_listener or "").strip():
@@ -523,7 +529,7 @@ def _build_curl_probe(
     if not in_container.sentinel_seen:
         output, answer = "(in-container probe did not run)", ProbeAnswer.UNKNOWN
     elif port is None:
-        output, answer = "(could not parse inner port from services.toml command)", ProbeAnswer.UNKNOWN
+        output, answer = "(could not parse inner port from supervisord.conf)", ProbeAnswer.UNKNOWN
     elif in_container.curl_error is not None:
         output, answer = f"error: {in_container.curl_error}", ProbeAnswer.NO
     elif in_container.curl_status == "200":
@@ -570,9 +576,6 @@ def _classify_dispatch_tier(
       the host-state probes cannot be trusted, so the provider-error signal wins
       outright. A ProviderUnavailableError is a transient outage (retry);
       anything else from the provider is an auth/config problem (show reason).
-    * WORKSPACE_MISCONFIGURED beats the remaining tiers: a missing
-      [services.system_interface] block means no restart will help, so don't
-      bury that behind any transport / container check.
     * HOST_OFFLINE when the container is offline: nothing live to interrupt, so
       a host restart can run unattended.
     * INTERFACE_UNRESPONSIVE when both container and exec are healthy: the
@@ -589,8 +592,6 @@ def _classify_dispatch_tier(
             return DispatchTier.PROVIDER_UNAVAILABLE
         return DispatchTier.WORKSPACE_UNREACHABLE
     answers = {probe.question: probe.answer for probe in probes}
-    if answers.get(_QUESTION_SERVICES_TOML_DECLARES) == ProbeAnswer.NO:
-        return DispatchTier.WORKSPACE_MISCONFIGURED
     container_running = answers.get(_QUESTION_CONTAINER_RUNNING)
     if container_running == ProbeAnswer.NO:
         return DispatchTier.HOST_OFFLINE
@@ -634,7 +635,7 @@ def build_host_health_response(
         _build_container_running_probe(host_state),
         _build_services_agent_registered_probe(services_agent_id),
         _build_can_run_commands_probe(in_container, exec_cmd),
-        _build_services_toml_probe(in_container, mngr_binary, services_agent_id),
+        _build_system_interface_probe(in_container, mngr_binary, services_agent_id),
         _build_port_listening_probe(in_container, mngr_binary, services_agent_id),
         _build_curl_probe(in_container, mngr_binary, services_agent_id),
         _build_plugin_resolver_probe(plugin_resolver_services),
@@ -647,6 +648,31 @@ def build_host_health_response(
         unreachable_reason=(provider_error.message if provider_error is not None else ""),
         provider_label=(provider_label if is_provider_tier else ""),
     )
+
+
+# supervisord process states (see supervisor.states.ProcessStates). RUNNING is
+# the only "up" state; the rest are real-but-not-running. Any second token that
+# is NOT one of these (a connection error, ``no such process``, ...) means we
+# could not read a status and the answer is UNKNOWN rather than NO.
+_SUPERVISOR_RUNNING_STATE: Final[str] = "RUNNING"
+_SUPERVISOR_PROCESS_STATES: Final[frozenset[str]] = frozenset(
+    {"STOPPED", "STARTING", "RUNNING", "BACKOFF", "STOPPING", "EXITED", "FATAL", "UNKNOWN"}
+)
+
+
+def parse_supervisorctl_status_state(output: str) -> str | None:
+    """Extract the supervisor process-state word from a ``supervisorctl status <name>`` line.
+
+    supervisorctl prints ``<name>   <STATE>   <detail...>``; this returns the
+    second whitespace-delimited field when it is a recognized supervisor state
+    (e.g. ``RUNNING``, ``STOPPED``, ``FATAL``), else None -- which is how a
+    connection error, a ``no such process`` line, or otherwise unparseable
+    output is told apart from a genuine not-running state.
+    """
+    fields = output.split()
+    if len(fields) >= 2 and fields[1] in _SUPERVISOR_PROCESS_STATES:
+        return fields[1]
+    return None
 
 
 # Regex used in tests that need to assert on the embedded inner-port parse.
