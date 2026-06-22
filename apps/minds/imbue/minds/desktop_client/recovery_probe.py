@@ -603,6 +603,10 @@ def _build_port_listening_probe(
 ) -> Probe:
     """Probe 5: scan /proc/net/tcp{,6} for a LISTEN socket on the inner port."""
     port = in_container.inner_port
+    # The ``else 0`` is a placeholder for an unparseable inner port: the command
+    # string is built unconditionally for display, but when port is None the
+    # ``elif port is None`` branch below forces an UNKNOWN answer, so the
+    # cosmetic ``:0`` command is never treated as a meaningful probe result.
     inner = _port_listening_inner_command(port if port is not None else 0)
     command = _mngr_exec_command(mngr_binary, services_agent_id, inner)
     if not in_container.sentinel_seen:
@@ -636,6 +640,10 @@ def _build_curl_probe(
 ) -> Probe:
     """Probe 6: does the inner web server answer GET / inside the container?"""
     port = in_container.inner_port
+    # See _build_port_listening_probe: the ``else 0`` is a display-only
+    # placeholder for an unparseable inner port; the ``elif port is None``
+    # branch below forces UNKNOWN, so the cosmetic ``:0`` command is never a
+    # meaningful probe result.
     inner = _curl_inner_command(port if port is not None else 0)
     command = _mngr_exec_command(mngr_binary, services_agent_id, inner)
     if not in_container.sentinel_seen:

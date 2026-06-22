@@ -79,7 +79,18 @@ class MindsConfig(MutableModel):
         with self._lock:
             data = self._read_raw()
             value = data.get("default_account_id")
-            return str(value) if value is not None else None
+            # As with auto_open_requests_panel: an absent key means "no default
+            # set"; a present-but-wrong-typed value is config corruption we
+            # surface rather than silently str()-coerce (e.g. a hand-edit of
+            # default_account_id = 123 should not become the account "123").
+            if value is None:
+                return None
+            if not isinstance(value, str):
+                raise MindsConfigError(
+                    f"default_account_id in {self._config_path} must be a string, "
+                    f"got {type(value).__name__}: {value!r}"
+                )
+            return value
 
     def set_default_account_id(self, user_id: str | None) -> None:
         """Set or clear the default account for new workspaces."""
@@ -133,9 +144,19 @@ class MindsConfig(MutableModel):
         with self._lock:
             data = self._read_raw()
             value = data.get("auto_open_requests_panel")
-            if isinstance(value, bool):
-                return value
-            return True
+            # An absent key is the common case (no preference set yet): use the
+            # default. But a present-but-wrong-typed value (e.g. a hand-edit of
+            # auto_open_requests_panel = "yes") is config corruption -- raise
+            # rather than silently coerce it to the default, mirroring the
+            # no-silent-fallback contract _read_raw documents above.
+            if value is None:
+                return True
+            if not isinstance(value, bool):
+                raise MindsConfigError(
+                    f"auto_open_requests_panel in {self._config_path} must be a boolean, "
+                    f"got {type(value).__name__}: {value!r}"
+                )
+            return value
 
     def set_auto_open_requests_panel(self, enabled: bool) -> None:
         """Set whether the inbox should auto-open on new pending requests.

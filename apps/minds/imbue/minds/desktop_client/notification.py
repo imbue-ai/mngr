@@ -116,7 +116,11 @@ def _build_toast_widgets(
     Returns (frame, content) where frame is the outermost container and
     content holds the text labels (used for click binding).
     """
-    urgency_color = _URGENCY_COLOR_BY_LEVEL.get(urgency, "#eab308")
+    # Direct subscript (not .get with a default): the map is exhaustive over
+    # NotificationUrgency, so a missing key means the enum grew without the map
+    # being extended -- surface that loudly via KeyError rather than silently
+    # rendering a new level with a stale fallback color.
+    urgency_color = _URGENCY_COLOR_BY_LEVEL[urgency]
 
     frame = tk.Frame(root, bg="#1e293b", padx=12, pady=8)
     frame.pack(fill=tk.BOTH, expand=True)
@@ -205,6 +209,10 @@ def _run_tkinter_toast(
 
         root.mainloop()
     except (tk.TclError, OSError, RuntimeError) as e:
+        # Toasts are best-effort and run on a daemon thread, so a display
+        # failure should warn-and-continue rather than crash the thread. The
+        # broad types are required, not lazy: tkinter raises RuntimeError for
+        # off-main-thread Tcl access and OSError for display/connection issues.
         logger.warning("Failed to show tkinter notification: {}", e)
 
 
@@ -234,6 +242,10 @@ def _run_macos_notification_subprocess(script: str) -> None:
                 is_checked_after=False,
             )
     except (OSError, ExceptionGroup) as e:
+        # Native notifications are best-effort and run on a daemon thread, so a
+        # failure should warn-and-continue rather than crash. The broad types
+        # are required: OSError covers osascript launch failures, and
+        # ConcurrencyGroup surfaces process failures wrapped in an ExceptionGroup.
         logger.warning("Failed to show macOS notification: {}", e)
 
 

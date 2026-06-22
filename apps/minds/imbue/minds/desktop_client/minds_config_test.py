@@ -90,6 +90,28 @@ def test_corrupt_toml_raises(tmp_path: Path) -> None:
         config.get_auto_open_requests_panel()
 
 
+def test_default_account_id_wrong_type_raises(tmp_path: Path) -> None:
+    """A present-but-non-string default_account_id raises rather than silently
+    str()-coercing it (e.g. a hand-edited number must not become the account
+    of that name).
+    """
+    config = _make_config(tmp_path)
+    (tmp_path / "config.toml").write_text("default_account_id = 123\n")
+    with pytest.raises(MindsConfigError):
+        config.get_default_account_id()
+
+
+def test_auto_open_requests_panel_wrong_type_raises(tmp_path: Path) -> None:
+    """A present-but-non-boolean auto_open_requests_panel value raises rather
+    than silently coercing to the default. A hand-edited config with a string
+    or number for this key is corruption we should surface, not paper over.
+    """
+    config = _make_config(tmp_path)
+    (tmp_path / "config.toml").write_text('auto_open_requests_panel = "yes"\n')
+    with pytest.raises(MindsConfigError):
+        config.get_auto_open_requests_panel()
+
+
 def test_multiple_settings_coexist(tmp_path: Path) -> None:
     """Setting one value does not clobber other values."""
     config = _make_config(tmp_path)
