@@ -210,7 +210,7 @@ def _system_interface_status_payload(
     return payload
 
 
-def _should_emit_system_interface_status(backend_resolver: "BackendResolverInterface", status: AgentHealth) -> bool:
+def _should_emit_system_interface_status(backend_resolver: BackendResolverInterface, status: AgentHealth) -> bool:
     """Whether to push a ``system_interface_status`` event for an agent in ``status``.
 
     A STUCK status is what drives the chrome to redirect the content view to the
