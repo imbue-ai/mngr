@@ -241,10 +241,10 @@ class DiscoveryHealthWatchdog(MutableModel):
                 self._rungs_attempted = 0
                 self._last_rung_at = None
             else:
+                action, fire_from_ladder = self._advance_ladder_locked(now)
                 if self._health == DiscoveryHealth.HEALTHY:
                     self._health = DiscoveryHealth.RECONNECTING
                     fire = DiscoveryHealth.RECONNECTING
-                action, fire_from_ladder = self._advance_ladder_locked(now)
                 if fire_from_ladder is not None:
                     fire = fire_from_ladder
         # Perform the chosen remediation and fire callbacks outside the lock.
