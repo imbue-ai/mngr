@@ -136,11 +136,12 @@ def build_create_admin_args(
 
     For the ``ovh_vps`` backend, auto-injects ``--tag minds_env=<env_name>`` (so
     ``minds env destroy`` can enumerate the VPSes the env owns) and forwards
-    ``--management-public-key-file``. For the ``slice`` backend it emits neither --
-    slices are not OVH-IAM-tagged and authorize the pool key from
-    POOL_SSH_PRIVATE_KEY at carve time. Every other user-supplied flag forwards
-    verbatim. Split out from the click command so tests can exercise the wiring
-    without faking a subprocess.
+    ``--management-public-key-file``. For the ``slice`` backend it instead forwards
+    ``--slice-env-name <env_name>`` (stamped into each slice's lima names, so a
+    shared box can attribute the slice to this env) -- slices are not OVH-IAM-tagged
+    and authorize the pool key from POOL_SSH_PRIVATE_KEY at carve time. Every other
+    user-supplied flag forwards verbatim. Split out from the click command so tests
+    can exercise the wiring without faking a subprocess.
 
     The bake source is exactly one of ``--from-tag`` (production, clones a tag)
     or ``--workspace-dir`` (dev, a working tree); the admin CLI derives the
@@ -187,6 +188,10 @@ def build_create_admin_args(
         args.extend(["--mngr-source", mngr_source])
     if backend == _BACKEND_OVH_VPS and not is_recycle_enabled:
         args.append("--no-recycle")
+    if backend == _BACKEND_SLICE:
+        # Stamp the owning env into each slice's lima names so multiple dev envs can
+        # share one bare-metal box (occupancy read from the box; reap scoped to this env).
+        args.extend(["--slice-env-name", env_name])
     if backend == _BACKEND_SLICE and server_id is not None:
         args.extend(["--server-id", server_id])
     if backend == _BACKEND_SLICE and is_dry_run:
@@ -196,6 +201,41 @@ def build_create_admin_args(
     if is_deferred_install_wait_skipped:
         args.append("--skip-deferred-install-wait")
     return args
+
+
+def build_teardown_slices_admin_args(*, database_url: str | None) -> list[str]:
+    """Compose the ``mngr imbue_cloud admin pool teardown-slices`` argv.
+
+    Forwards ``--database-url`` only when non-None (dev auto-resolves it from the
+    activated env's secrets.toml; staging/production pass the Vault-resolved DSN).
+    """
+    args = ["teardown-slices"]
+    if database_url is not None:
+        args.extend(["--database-url", database_url])
+    return args
+
+
+def tear_down_env_pool_slices(env_name: str) -> None:
+    """Tear down the env's unleased pool slices on their boxes before the env's DB is deleted.
+
+    Resolves the pool SSH key (Vault) + host_pool DSN exactly like ``pool create``,
+    then shells to ``mngr imbue_cloud admin pool teardown-slices``. Leased slices are
+    left to their agent's release path. A missing pool SSH key is a bad state, not a
+    "nothing to clean up" signal -- it raises (failing the destroy) so we never
+    silently leak the env's slice VMs; a genuine teardown failure (an unreachable
+    box) likewise raises rather than leaking.
+    """
+    try:
+        pool_private_key = read_pool_private_key_from_vault(env_name)
+    except VaultReadError as exc:
+        raise click.ClickException(
+            f"Could not read the pool SSH private key from Vault for env '{env_name}': {exc}"
+        ) from exc
+    database_url = resolve_host_pool_dsn(env_name, None)
+    args = build_teardown_slices_admin_args(database_url=database_url)
+    _raise_on_failure(
+        "teardown-slices", _run_admin_command(args, extra_env={_POOL_PRIVATE_KEY_ENV_VAR: pool_private_key})
+    )
 
 
 def build_list_admin_args(*, database_url: str | None) -> list[str]:
@@ -640,13 +680,13 @@ def pool() -> None:
 @click.option(
     "--backend",
     type=click.Choice([_BACKEND_OVH_VPS, _BACKEND_SLICE]),
-    default=_BACKEND_OVH_VPS,
+    default=_BACKEND_SLICE,
     show_default=True,
     help=(
-        "Which machine backs each pool host. ``ovh_vps`` orders an OVH classic VPS on demand; "
-        "``slice`` carves a lima VM on a pre-registered + prepped bare-metal box (see "
-        "`mngr imbue_cloud admin server`). Both bake the same FCT pool host and insert the same "
-        "kind of leasable row."
+        "Which machine backs each pool host. ``slice`` (the default) carves a lima VM on a "
+        "pre-registered + prepped bare-metal box (see `mngr imbue_cloud admin server`). ``ovh_vps`` "
+        "is DEPRECATED: baking new OVH classic VPS pool hosts is no longer supported. Existing OVH "
+        "VPS pool hosts can still be listed and destroyed."
     ),
 )
 @click.option(
@@ -786,16 +826,26 @@ def pool_create(
     max_concurrency: int | None,
     is_deferred_install_wait_skipped: bool,
 ) -> None:
-    """Create pool hosts for the activated minds env (OVH VPS or bare-metal slice).
+    """Create bare-metal slice pool hosts for the activated minds env.
 
     Resolves the activated tier's secrets from Vault so the operator never exports
-    them by hand: for ``ovh_vps`` the OVH AK/AS/CK plus the management public key
-    derived from ``<vault_path_prefix>/pool-ssh``; for ``slice`` the
+    them by hand: for ``slice`` (the default and only supported backend) the
     POOL_SSH_PRIVATE_KEY (used to SSH the bare-metal box and carve the lima VM). The
     activated env dictates the tier, keeping "I'm on dev, I bake against the dev
     account using the dev keypair" the unambiguous default and making the
     keypair-mismatch class of bake failures unreachable for the standard path.
+
+    ``--backend ovh_vps`` is DEPRECATED and rejected up front: baking new OVH classic
+    VPS pool hosts is no longer supported (existing ones stay listable/destroyable).
     """
+    # Baking new OVH VPS pool hosts is deprecated -- Imbue Cloud serves agents on
+    # bare-metal slices now. Reject fast, before any activated-env / Vault / OVH
+    # credential resolution. Existing OVH VPS pool hosts stay listable/destroyable.
+    if backend == _BACKEND_OVH_VPS:
+        raise click.UsageError(
+            "Baking new OVH VPS pool hosts is deprecated -- use --backend slice (bare-metal slices). "
+            "Existing OVH VPS pool hosts can still be listed and destroyed."
+        )
     env_name = require_activated_env_name()
     if backend == _BACKEND_OVH_VPS and is_dry_run:
         raise click.UsageError("--dry-run is only supported for --backend slice")

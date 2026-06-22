@@ -451,18 +451,25 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
 
     @abstractmethod
     @contextmanager
-    def lock_cooperatively(self, timeout_seconds: float = 30.0) -> Iterator[None]:
-        """Context manager for acquiring and releasing the host lock."""
+    def lock_cooperatively(self, timeout_seconds: float | None = 300.0) -> Iterator[None]:
+        """Hold the host's exclusive, cross-actor lock for the duration of the block.
+
+        Holds a real flock(2) (directly on local hosts, over SSH on remote hosts)
+        that coordinates local (in-host) and remote (over-SSH) holders and
+        suppresses idle shutdown while held. ``timeout_seconds=None`` blocks
+        indefinitely; a finite value raises LockNotHeldError if it cannot be
+        acquired in time.
+        """
         ...
 
     @abstractmethod
     def get_reported_lock_time(self) -> datetime | None:
-        """Return the last modification time of the host lock file, or None if not locked."""
+        """Return the last modification time of the host lock file, or None if absent."""
         ...
 
     @abstractmethod
     def is_lock_held(self) -> bool:
-        """Check whether the host lock is currently held."""
+        """Check whether the host lock is currently held (via a non-blocking flock probe)."""
         ...
 
     # =========================================================================
@@ -1114,6 +1121,13 @@ class HostProvisioningOptions(FrozenModel):
         "synchronously, after the host is ready but before any agent work_dir "
         "is touched. Each command runs in order; a non-zero exit aborts the create.",
     )
+    post_host_create_outer_commands: tuple[CommandString, ...] = Field(
+        default=(),
+        description="Shell commands to run once on the host's outer machine (the "
+        "underlying VM/daemon host), synchronously, after the host is ready. Run "
+        "in order; a non-zero exit aborts the create. Skipped (with a warning) "
+        "when the provider exposes no outer host.",
+    )
 
 
 # Mapping from raw-string config/CLI field names to HostProvisioningOptions
@@ -1122,6 +1136,7 @@ class HostProvisioningOptions(FrozenModel):
 # sync.
 HOST_PROVISIONING_FIELD_MAP: tuple[tuple[str, str, Any], ...] = (
     ("post_host_create_command", "post_host_create_commands", CommandString),
+    ("post_host_create_outer_command", "post_host_create_outer_commands", CommandString),
 )
 
 

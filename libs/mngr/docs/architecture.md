@@ -20,7 +20,7 @@ Agents fully contain their own state on their host.
 
 This means no database, no state corruption, and multiple `mngr` instances can manage the same agents.
 
-Some interactions are gated via cooperative locking [future] (using `flock` on known lock files) to avoid race conditions. See [locking spec](../future_specs/locking.md) for details.
+Some interactions are gated via a cooperative host lock to avoid race conditions. State-changing operations (e.g. `create`, `start`, `gc`) hold a real `flock(2)` on the host's `host_lock` file -- directly on local hosts, and over a long-lived SSH exec channel on remote hosts -- so that a holder running locally inside the host and a holder running remotely over SSH mutually exclude. The in-host idle-shutdown watcher tests that same lock (a non-blocking `flock` probe), so holding it also suppresses idle shutdown. See [locking spec](../future_specs/locking.md) for the broader (partly future) design.
 
 ## Conventions
 

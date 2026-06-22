@@ -2067,12 +2067,19 @@ async function promptMindShutdown() {
   return { proceed: true, stop: true, running };
 }
 
-function fetchInitialChromeState(timeoutMs = 4000) {
+function fetchInitialChromeState(timeoutMs = 10000) {
   // Drives one round-trip to /_chrome/events (SSE) to learn both auth status
   // and the current workspace list. Returns:
   //   { authenticated: true, workspaces: [...] }  on authenticated success
   //   { authenticated: false }                     when the backend says auth_required
   //   null                                          on timeout / network error
+  //
+  // The timeout must comfortably exceed the connect-time snapshot's slowest
+  // blocking step: the backend computes ``has_accounts`` (a cold ``mngr
+  // imbue_cloud auth list`` subprocess, ~5s on first call) before emitting the
+  // first ``workspaces`` event. A timeout shorter than that returned ``null``,
+  // which the startup path treats as unauthenticated and routes to /welcome --
+  // bouncing an already-signed-in user to the onboarding page.
   return new Promise((resolve) => {
     if (!backendBaseUrl) {
       resolve(null);
@@ -3087,7 +3094,7 @@ async function runQuitSequence() {
 
 // Route POSIX SIGTERM / SIGINT through the quit sequence so they trigger the
 // same `backend.shutdown()` chain that window-close uses (SIGTERMing the python
-// backend and waiting for uvicorn's graceful exit). Without these handlers
+// backend and waiting for its graceful exit). Without these handlers
 // Node's default for these signals is to exit immediately, which orphans the
 // python backend and the `mngr forward` / `observe` subprocesses. The `just
 // minds-stop` recipe sends SIGTERM here; we mark it headless so it shuts down

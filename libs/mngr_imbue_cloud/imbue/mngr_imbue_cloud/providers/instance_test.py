@@ -8,12 +8,14 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import cast
 
+import httpx
 import pytest
 from pydantic import Field
 from pydantic import SecretStr
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CommandResult
@@ -29,7 +31,9 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.data_types import LeasedHostInfo
 from imbue.mngr_imbue_cloud.errors import FastPathUnavailableError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 from imbue.mngr_imbue_cloud.hosts.host import ImbueCloudHost
+from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import LeaseDbId
 from imbue.mngr_imbue_cloud.providers.instance import ImbueCloudProvider
 from imbue.mngr_imbue_cloud.providers.instance import _resolve_fast_path_attributes
@@ -426,3 +430,65 @@ def test_start_host_rebootstraps_container_ssh(tmp_path: Path, temp_mngr_ctx: Mn
     assert not any("authorized_keys" in command for command in commands)
     # The returned host is the rebuilt host object (start_host completed).
     assert result is built
+
+
+# =============================================================================
+# _list_leased_hosts_cached -- discovery-time error narrowing. A transport-level
+# failure reaching the connector (flaky wifi / connector down) must surface as
+# ProviderUnavailableError so recovery UIs can tell "the provider is unreachable,
+# don't bother restarting" apart from auth/account problems, which keep their own
+# types and fall through to the generic "can't reach your workspace" handling.
+# =============================================================================
+
+
+class _ListHostsClient:
+    """Stub connector client whose ``list_hosts`` raises a preset exception."""
+
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    def list_hosts(self, access_token: SecretStr) -> list[LeasedHostInfo]:
+        raise self._error
+
+
+class _DiscoveryProvider(ImbueCloudProvider):
+    """Provider stub with the account/token resolution short-circuited.
+
+    Isolates ``_list_leased_hosts_cached`` so a test can drive only the
+    connector call's failure mode without standing up sessions on disk.
+    """
+
+    def _require_account(self, override: str | None = None) -> ImbueCloudAccount:
+        return ImbueCloudAccount("user@example.com")
+
+    def _get_access_token(self, account: ImbueCloudAccount) -> SecretStr:
+        return SecretStr("token")
+
+
+def _make_discovery_provider(list_hosts_error: Exception) -> _DiscoveryProvider:
+    return _DiscoveryProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"),
+        client=_ListHostsClient(list_hosts_error),
+        _leased_hosts_cache=None,
+    )
+
+
+def test_list_leased_hosts_maps_transport_failure_to_provider_unavailable() -> None:
+    """A connection-level httpx failure becomes ProviderUnavailableError (the retry-not-restart signal)."""
+    provider = _make_discovery_provider(httpx.ConnectError("Connection refused"))
+
+    with pytest.raises(ProviderUnavailableError) as exc_info:
+        provider._list_leased_hosts_cached()
+
+    # The provider name is attributed (so mngr's errors[] carries it) and the
+    # curated help text does NOT tell a cloud user to start Docker.
+    assert exc_info.value.provider_name == ProviderInstanceName("imbue-cloud-test")
+    assert "docker" not in (exc_info.value.user_help_text or "").lower()
+
+
+def test_list_leased_hosts_preserves_auth_error() -> None:
+    """An auth failure keeps its own type -- it is NOT laundered into ProviderUnavailableError."""
+    provider = _make_discovery_provider(ImbueCloudAuthError("Unauthenticated (401)"))
+
+    with pytest.raises(ImbueCloudAuthError):
+        provider._list_leased_hosts_cached()

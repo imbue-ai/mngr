@@ -20,7 +20,7 @@ from datetime import timezone
 from pathlib import Path
 
 import pytest
-from starlette.testclient import TestClient
+from flask.testing import FlaskClient
 
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.desktop_client.app import _build_providers_state_payload
@@ -48,7 +48,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 _ROOT_NAME = "minds-dev-tname"
 
 
-def _make_test_client(tmp_path: Path) -> tuple[TestClient, FileAuthStore]:
+def _make_test_client(tmp_path: Path) -> tuple[FlaskClient, FileAuthStore]:
     """Build a desktop client backed by a real MngrCliBackendResolver + on-disk authn."""
     auth_dir = tmp_path / "auth"
     auth_store = FileAuthStore(data_directory=auth_dir)
@@ -58,13 +58,12 @@ def _make_test_client(tmp_path: Path) -> tuple[TestClient, FileAuthStore]:
         backend_resolver=resolver,
         http_client=None,
     )
-    client = TestClient(app, base_url="http://localhost")
-    return client, auth_store
+    return app.test_client(), auth_store
 
 
-def _authenticate(client: TestClient, auth_store: FileAuthStore) -> None:
+def _authenticate(client: FlaskClient, auth_store: FileAuthStore) -> None:
     cookie_value = create_session_cookie(signing_key=auth_store.get_signing_key())
-    client.cookies.set(SESSION_COOKIE_NAME, cookie_value, path="/")
+    client.set_cookie(SESSION_COOKIE_NAME, cookie_value)
 
 
 # -- _handle_provider_toggle -----------------------------------------------
@@ -91,7 +90,7 @@ def test_provider_toggle_returns_400_on_non_json_body(monkeypatch: pytest.Monkey
 
     response = client.post(
         "/api/providers/modal/toggle",
-        content=b"not json",
+        data=b"not json",
         headers={"Content-Type": "application/json"},
     )
 
@@ -165,7 +164,7 @@ def test_provider_toggle_writes_settings_and_returns_changed_true(
     response = client.post("/api/providers/modal/toggle", json={"is_enabled": False})
 
     assert response.status_code == 200
-    payload = response.json()
+    payload = response.get_json()
     assert payload == {"provider_name": "modal", "is_enabled": False, "changed": True}
     parsed = tomllib.loads(settings_path.read_text())
     assert parsed["providers"]["modal"] == {"is_enabled": False}
@@ -180,12 +179,12 @@ def test_provider_toggle_is_idempotent(monkeypatch: pytest.MonkeyPatch, tmp_path
 
     first = client.post("/api/providers/modal/toggle", json={"is_enabled": False})
     assert first.status_code == 200
-    assert first.json()["changed"] is True
+    assert first.get_json()["changed"] is True
     mtime_after_first = settings_path.stat().st_mtime_ns
 
     second = client.post("/api/providers/modal/toggle", json={"is_enabled": False})
     assert second.status_code == 200
-    assert second.json()["changed"] is False
+    assert second.get_json()["changed"] is False
     # File untouched
     assert settings_path.stat().st_mtime_ns == mtime_after_first
 

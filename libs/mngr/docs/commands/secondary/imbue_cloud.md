@@ -654,7 +654,7 @@ mngr imbue_cloud admin pool create [OPTIONS]
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--count` | integer | Number of pool hosts to create | None |
-| `--backend` | choice (`ovh_vps` &#x7C; `slice`) | Which machine backs each pool host. ``ovh_vps`` orders an OVH classic VPS on demand; ``slice`` carves a lima VM on one of our registered bare-metal boxes (run `admin server register` + `prep` first). Both bake the same FCT pool host and insert the same kind of leasable row -- only the machine-provisioning step differs. | `ovh_vps` |
+| `--backend` | choice (`ovh_vps` &#x7C; `slice`) | Which machine backs each pool host. ``slice`` (the default) carves a lima VM on one of our registered bare-metal boxes (run `admin server register` + `prep` first). ``ovh_vps`` is DEPRECATED: baking new OVH classic VPS pool hosts is no longer supported -- only ``slice`` bakes are allowed. Existing OVH VPS pool hosts can still be listed and destroyed. | `slice` |
 | `--region` | text | Lease/region code stamped on every new row (e.g. ``US-EAST-VA``, ``US-WEST-OR``) -- this is what the connector's region-filtered lease matches. For ``ovh_vps`` it is also the OVH datacenter the VPS is ordered in. For ``slice`` it is the lease-region label only (NOT the box's raw datacenter code). | None |
 | `--tag` | text | [ovh_vps only] Repeatable ``KEY=VALUE`` tag attached to every freshly-provisioned VPS via the OVH IAM v2 tag system. Forwarded to the inner ``mngr create`` as ``MNGR_VPS_EXTRA_TAGS=k1=v1,k2=v2``. Example: ``--tag minds_env=alice --tag pool-owner=bob``. | None |
 | `--from-tag` | text | [production bake] Clone --repo-url at exactly this tag into a fresh temp dir and bake from it. Stamps repo_url=canonical(--repo-url) and repo_branch_or_tag=<tag>; the content provably equals the tag. Mutually exclusive with --workspace-dir; errors if <tag> is not a real tag. | None |
@@ -667,6 +667,7 @@ mngr imbue_cloud admin pool create [OPTIONS]
 | `--mngr-source` | path | Path to the mngr monorepo root. If provided, rsyncs into the template's vendor/mngr/ before creating hosts. | None |
 | `--no-recycle` | boolean | [ovh_vps only] Force a fresh OVH VPS order instead of reclaiming a cancelled VPS. By default the OVH provider recycles a cancelled (still-billable) VPS when one is available; pass this to test the fresh-provision path. Sets MNGR__PROVIDERS__OVH__ENABLE_RECYCLE_CANCELLED=false on the inner `mngr create`. | `True` |
 | `--server-id` | text | [slice only, required] The bare_metal_servers row id to bake the slices onto (from `admin server list`). Slice baking targets an explicitly-chosen, ready box -- it never auto-selects one. | None |
+| `--slice-env-name` | text | [slice only] Owning environment name stamped into each slice's lima instance + disk names (mngr-slice-<env>-<host-hex>). Lets multiple dev envs share one bare-metal box: occupancy is read from the box, and the post-bake reap only ever touches this env's own slices. Usually forwarded by `minds pool create` from the activated env; omit only for legacy un-stamped baking. | None |
 | `--dry-run` | boolean | [slice only] Report placement + per-slice sizing; do not bake. | `False` |
 | `--max-concurrency` | integer | [slice only] Max slices baked at once; the rest queue and start as slots free. Bounds box CPU/IO/network contention so each `mngr create` stays under its timeout. | `4` |
 | `--skip-deferred-install-wait` | boolean | [dev only] Don't wait for the FCT deferred-install (heavy apt + Playwright/Chromium) to finish before stopping the baked services agent. Saves a few minutes per bake, but the baked container's deferred-install may be left incomplete (stopping mid-apt can corrupt dpkg). Safe for dev/throwaway bakes; NEVER use for production pool hosts. | `False` |
@@ -702,6 +703,21 @@ mngr imbue_cloud admin pool destroy [OPTIONS] POOL_HOST_ID
 | `--database-url` | text | Neon PostgreSQL direct connection string for the pool DB. Defaults to MINDS_HOST_POOL_DSN env var, or the activated minds env's secrets.toml NEON_HOST_POOL_DSN field (so `minds env activate <dev-env>` is enough). Pass this explicitly when operating outside an activated env. | None |
 | `--force` | boolean | Drop the row even if status != 'released' | `False` |
 | `--skip-vps-cancel` | boolean | Only drop the DB row; do NOT tear down the underlying machine (cancel the OVH VPS for an ovh_vps row, or destroy the lima VM for a slice row). Use exclusively when the machine is already gone -- otherwise the default path tears it down so no billing/slot orphan is left behind. | `False` |
+
+## mngr imbue_cloud admin pool teardown-slices
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin pool teardown-slices [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--database-url` | text | Neon PostgreSQL direct connection string for the pool DB. Defaults to MINDS_HOST_POOL_DSN env var, or the activated minds env's secrets.toml NEON_HOST_POOL_DSN field. Pass explicitly when operating outside an activated env. | None |
 
 ## mngr imbue_cloud admin paid
 

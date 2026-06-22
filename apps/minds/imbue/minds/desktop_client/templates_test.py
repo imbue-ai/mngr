@@ -690,13 +690,45 @@ def test_render_recovery_page_script_branches_on_dispatch_tier() -> None:
         initial_error="",
     )
     assert "dispatch_tier" in html
-    for tier in ("'workspace_misconfigured'", "'host_offline'", "'interface_unresponsive'", "'host_unresponsive'"):
+    for tier in (
+        "'workspace_misconfigured'",
+        "'host_offline'",
+        "'interface_unresponsive'",
+        "'host_unresponsive'",
+        "'provider_unavailable'",
+        "'workspace_unreachable'",
+    ):
         assert tier in html, f"recovery page JS missing branch for {tier}"
     # The shared landing places for each branch.
     assert "renderMisconfigured" in html
     assert "renderUnresponsive" in html
+    assert "renderProviderUnavailable" in html
+    assert "renderWorkspaceUnreachable" in html
     assert "Workspace misconfigured" in html
     assert "Try restart anyway" in html
+
+
+def test_render_recovery_page_provider_unavailable_offers_retry_not_restart() -> None:
+    """The provider-unavailable state must surface a Retry affordance and a backed-off
+    background poll, and must NOT auto-dispatch or offer a host restart (a restart routes
+    through the unreachable backend, so it cannot help).
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="stuck",
+        initial_error="",
+    )
+    assert 'id="recovery-retry-btn"' in html
+    # The provider branch renders the page and starts the backed-off poll; it
+    # must not fall through to a restart dispatch.
+    provider_start = html.find("function renderProviderUnavailable")
+    assert provider_start >= 0
+    provider_end = html.find("function ", provider_start + 1)
+    provider_block = html[provider_start:provider_end]
+    assert "scheduleProviderPoll" in provider_block
+    assert "Can't connect to" in provider_block
+    assert "postRestart" not in provider_block
 
 
 def test_render_recovery_page_loading_hides_diagnostic_dropdown() -> None:

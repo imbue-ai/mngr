@@ -140,7 +140,7 @@ Do NOT use a key from `~/.mngr/profiles/...` -- that belongs to non-minds mngr a
 
 ### Vault (for pool / slice bakes)
 
-Pool/slice bakes (`minds pool create`, `just bake-pool-host-{dev,prod}`, `just bake-slice-{dev,prod}`) read secrets from Vault (the tier's `POOL_SSH_PRIVATE_KEY`, the host-pool DSN, etc.). Two things to know:
+Slice bakes (`minds pool create`, `just bake-slice-{dev,prod}`) read secrets from Vault (the tier's `POOL_SSH_PRIVATE_KEY`, the host-pool DSN, etc.). (Baking new OVH classic VPS pool hosts is deprecated and no longer supported.) Two things to know:
 
 - **Login is interactive.** Run `vault login -method=oidc` once per session (browser OIDC); the token lands at `~/.vault-token`.
 - **`VAULT_ADDR` / `VAULT_NAMESPACE` are usually NOT set in a non-interactive shell.** The minds wrappers (`minds pool ...` and the `bake-*` recipes) apply the imbue HCP defaults automatically via `apps/minds/imbue/minds/envs/vault_reader.py`, so they "just work" with only the token -- **prefer them**. If you run a **raw** `vault` or `mngr imbue_cloud admin ...` command, a bare `vault` defaults to `https://127.0.0.1:8200` and fails with "connection refused" -- that is a missing address, **NOT** "logged out" (don't ask the operator to re-login, and don't ask them for `VAULT_ADDR`). Export the defaults first:

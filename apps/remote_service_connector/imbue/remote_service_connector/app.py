@@ -2173,6 +2173,131 @@ def clean_up_slice_on_box(
     _run_ssh_commands_on_box(box_address, 22, lima_service_user, management_key_pem, commands)
 
 
+# Slice lima resources are named ``mngr-slice-<env>-<host-hex>`` (the data disk
+# adds a ``-data`` suffix). The host hex is a hyphen-free uuid, so the env stamp is
+# everything between the prefix and the trailing ``-<host-hex>``. Mirrors
+# ``mngr_imbue_cloud.slices.bare_metal`` (the connector has no dependency on it).
+_SLICE_LIMA_PREFIX = "mngr-slice-"
+_SLICE_LIMA_DISK_SUFFIX = "-data"
+_STAMPED_SLICE_CORE_RE = re.compile(r"^(?P<env>.+)-(?P<host>[0-9a-f]{32})$")
+# Non-login SSH may not source the lima user's profile, so set PATH explicitly
+# (limactl is extracted to /usr/local/bin by box prep).
+_BOX_LIMACTL_PATH_PREFIX = "PATH=/usr/local/bin:$HOME/.local/bin:$PATH"
+
+
+def slice_name_env_owner(name: str) -> str | None:
+    """The env a slice instance/disk name is stamped for, or None if legacy/foreign/not-a-slice."""
+    if not name.startswith(_SLICE_LIMA_PREFIX):
+        return None
+    core = name[len(_SLICE_LIMA_PREFIX) :]
+    if core.endswith(_SLICE_LIMA_DISK_SUFFIX):
+        core = core[: -len(_SLICE_LIMA_DISK_SUFFIX)]
+    match = _STAMPED_SLICE_CORE_RE.match(core)
+    return match.group("env") if match else None
+
+
+def _list_box_lima_names(host: str, user: str, management_key_pem: str, json_subcommand: str) -> set[str]:
+    """SSH the box and return the ``name`` of every lima instance or disk (per ``json_subcommand``).
+
+    ``json_subcommand`` is ``list --json`` (instances) or ``disk list --json`` (disks);
+    both emit one JSON object per line. Raises ``PoolHostCleanupError`` on a non-zero exit
+    so the caller skips this box rather than mistaking an SSH failure for "no VMs".
+    """
+    names: set[str] = set()
+    command = f"{_BOX_LIMACTL_PATH_PREFIX} limactl {json_subcommand}"
+    with _management_ssh_client(host, 22, user, management_key_pem, timeout_seconds=30) as client:
+        _stdin, stdout, stderr = client.exec_command(command)
+        exit_status = stdout.channel.recv_exit_status()
+        output = stdout.read().decode()
+        if exit_status != 0:
+            raise PoolHostCleanupError(
+                f"`limactl {json_subcommand}` on {host} failed (exit {exit_status}): {stderr.read().decode()}"
+            )
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            logger.warning("Skipping unparseable lima JSON line on %s: %r", host, stripped)
+            continue
+        name = parsed.get("name")
+        if name:
+            names.add(name)
+    return names
+
+
+def reconcile_slice_boxes(conn: Any, env_name: str) -> int:
+    """Audit each box's lima slices against the DB, scoped to ``env_name``'s stamped slices.
+
+    Returns the number of divergences found (and logged). Alert-only by design: for
+    every bare-metal box it logs, at error level,
+
+    * a slice stamped for ``env_name`` present on the box with no pool_hosts row, and
+    * a pool_hosts row whose VM is absent from the box.
+
+    It deliberately does NOT auto-delete. A row-less stamped slice is most often a
+    bake mid-flight (the carve creates the instance ~10-30 min before it inserts the
+    row), and this cron runs on a fixed hourly schedule independent of bakes -- so
+    auto-reaping here would race a live bake and destroy its slice. Actual reaping is
+    left to the bake-time reaper (which runs in the bake's own ``finally``, where the
+    in-flight set is known). If a box's lima resources cannot be listed, this raises:
+    a box we could not inspect was NOT reconciled, and that failure must surface
+    rather than be mistaken for a clean audit. Other envs' slices and legacy
+    un-stamped slices are never inspected, so this is safe on a shared box.
+    """
+    if not env_name:
+        logger.info("Slice reconcile skipped: connector has no MINDS_ENV_NAME to scope to")
+        return 0
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, public_address, lima_service_user FROM bare_metal_servers")
+        servers = cur.fetchall()
+    # Read the pool key only once we know there are boxes to inspect: a deployment
+    # with no slice infrastructure (no boxes, no POOL_SSH_PRIVATE_KEY) must not fail
+    # here just because the cron also covers the OVH pool-host cleanup.
+    if not servers:
+        return 0
+    management_key_pem = os.environ["POOL_SSH_PRIVATE_KEY"]
+    divergence_count = 0
+    for server_id, public_address, lima_service_user in servers:
+        if not public_address:
+            continue
+        user = lima_service_user or "root"
+        # If we cannot list a box's lima resources we did NOT reconcile it; let the
+        # failure propagate rather than silently skipping (which would look like a
+        # clean audit and could mask vanished/leaked VMs).
+        box_instances = _list_box_lima_names(public_address, user, management_key_pem, "list --json")
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT lima_instance_name FROM pool_hosts WHERE backend_kind = %s AND bare_metal_server_id = %s",
+                (BACKEND_KIND_SLICE, str(server_id)),
+            )
+            tracked_instances = {row[0] for row in cur.fetchall() if row[0]}
+
+        # This env's stamped slices on the box with no DB row (often a bake mid-flight).
+        untracked = {
+            name for name in box_instances if slice_name_env_owner(name) == env_name and name not in tracked_instances
+        }
+        for instance_name in sorted(untracked):
+            divergence_count += 1
+            logger.error(
+                "Slice reconcile divergence on %s: stamped slice %s has no pool_hosts row "
+                "(in-flight bake, or an orphan for the bake-time reaper)",
+                public_address,
+                instance_name,
+            )
+        # A DB row whose VM is gone is the other divergence direction.
+        for missing_instance in sorted(tracked_instances - box_instances):
+            divergence_count += 1
+            logger.error(
+                "Slice reconcile divergence on %s: pool_hosts row for %s has no VM on the box (needs manual rebake/cleanup)",
+                public_address,
+                missing_instance,
+            )
+    return divergence_count
+
+
 def run_pool_host_cleanup_sweep(conn: Any, ovh_ops: OvhOps, region_code: str) -> tuple[int, int]:
     """Clean up every ``removing`` pool host: strip tags, cancel, delete the row.
 
@@ -4106,7 +4231,22 @@ def cleanup_removing_pool_hosts() -> dict[str, int]:
         success_count, failure_count = run_pool_host_cleanup_sweep(
             conn, _get_ovh_ops(), ovh_region_code_for_endpoint(_get_ovh_endpoint())
         )
+        # Audit this env's slices on every box against the DB (alert-only: it never
+        # auto-deletes, to avoid racing an in-flight bake). Scoped to MINDS_ENV_NAME so
+        # it is safe on a box shared by multiple dev envs. A reconcile failure (DB,
+        # SSH, or a missing POOL_SSH_PRIVATE_KEY while boxes exist) is a real failure:
+        # let it propagate and fail the cron run rather than silently swallowing it.
+        divergence_count = reconcile_slice_boxes(conn, _current_minds_env_name())
     finally:
         conn.close()
-    logger.info("Pool host cleanup sweep done: cleaned=%d failed=%d", success_count, failure_count)
-    return {"cleaned": success_count, "failed": failure_count}
+    logger.info(
+        "Pool host cleanup sweep done: cleaned=%d failed=%d slice_divergences=%d",
+        success_count,
+        failure_count,
+        divergence_count,
+    )
+    return {
+        "cleaned": success_count,
+        "failed": failure_count,
+        "slice_divergences": divergence_count,
+    }

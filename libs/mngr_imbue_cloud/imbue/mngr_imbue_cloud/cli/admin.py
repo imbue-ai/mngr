@@ -1,12 +1,14 @@
 """`mngr imbue_cloud admin pool ...` -- operator-only pool provisioning.
 
-``pool create`` bakes pre-provisioned pool hosts on a chosen ``--backend``: an OVH
-classic VPS ordered on demand (``ovh_vps``, the default) or a lima-VM "slice" carved
-on one of our registered bare-metal boxes (``slice``; the shared implementation is
-``cli.server.allocate_slices``). Both bake the same FCT pool host and write the same
-kind of leasable row to the connector's Neon ``pool_hosts`` table -- only the
-machine-provisioning step differs (order-a-VPS vs. carve-a-VM). The OVH path also
-installs + configures ufw and a management SSH key on the VPS + container.
+``pool create`` bakes pre-provisioned pool hosts on a chosen ``--backend``: a lima-VM
+"slice" carved on one of our registered bare-metal boxes (``slice``, the default; the
+shared implementation is ``cli.server.allocate_slices``), or -- DEPRECATED -- an OVH
+classic VPS ordered on demand (``ovh_vps``; baking new OVH VPS pool hosts is no longer
+supported, though existing ones stay listable/destroyable). Both bake the same FCT
+pool host and write the same kind of leasable row to the connector's Neon
+``pool_hosts`` table -- only the machine-provisioning step differs (carve-a-VM vs.
+order-a-VPS). The OVH path also installs + configures ufw and a management SSH key on
+the VPS + container.
 
 Provider-generic by design: extra VPS-side tags (e.g. ``minds_env=<name>``
 threaded through by the ``minds pool`` env-aware wrapper) come from
@@ -56,6 +58,7 @@ from imbue.mngr_imbue_cloud.cli._common import resolve_pool_database_url
 from imbue.mngr_imbue_cloud.cli.server import DEFAULT_SLICE_BAKE_CONCURRENCY
 from imbue.mngr_imbue_cloud.cli.server import allocate_slices
 from imbue.mngr_imbue_cloud.cli.server import destroy_slice_vm
+from imbue.mngr_imbue_cloud.cli.server import tear_down_unleased_slices
 from imbue.mngr_imbue_cloud.errors import RepoIdentityError
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_server_by_id
@@ -392,13 +395,13 @@ def _create_single_pool_host(
 @click.option(
     "--backend",
     type=click.Choice(["ovh_vps", "slice"]),
-    default="ovh_vps",
+    default="slice",
     show_default=True,
     help=(
-        "Which machine backs each pool host. ``ovh_vps`` orders an OVH classic VPS on demand; "
-        "``slice`` carves a lima VM on one of our registered bare-metal boxes (run `admin server "
-        "register` + `prep` first). Both bake the same FCT pool host and insert the same kind of "
-        "leasable row -- only the machine-provisioning step differs."
+        "Which machine backs each pool host. ``slice`` (the default) carves a lima VM on one of our "
+        "registered bare-metal boxes (run `admin server register` + `prep` first). ``ovh_vps`` is "
+        "DEPRECATED: baking new OVH classic VPS pool hosts is no longer supported -- only ``slice`` "
+        "bakes are allowed. Existing OVH VPS pool hosts can still be listed and destroyed."
     ),
 )
 @click.option(
@@ -517,6 +520,17 @@ def _create_single_pool_host(
     ),
 )
 @click.option(
+    "--slice-env-name",
+    "slice_env_name",
+    default=None,
+    help=(
+        "[slice only] Owning environment name stamped into each slice's lima instance + disk names "
+        "(mngr-slice-<env>-<host-hex>). Lets multiple dev envs share one bare-metal box: occupancy is read "
+        "from the box, and the post-bake reap only ever touches this env's own slices. Usually forwarded by "
+        "`minds pool create` from the activated env; omit only for legacy un-stamped baking."
+    ),
+)
+@click.option(
     "--dry-run",
     "is_dry_run",
     is_flag=True,
@@ -561,17 +575,31 @@ def pool_create(
     mngr_source: str | None,
     is_recycle_enabled: bool,
     server_id: str | None,
+    slice_env_name: str | None,
     is_dry_run: bool,
     max_concurrency: int,
     is_deferred_install_wait_skipped: bool,
 ) -> None:
-    """Create pre-provisioned pool hosts on the chosen backend (OVH VPS or bare-metal slice).
+    """Create pre-provisioned bare-metal slice pool hosts (``--backend slice``, the default).
+
+    ``--backend ovh_vps`` is DEPRECATED and rejected: baking new OVH classic VPS pool
+    hosts is no longer supported (existing ones stay listable/destroyable).
 
     The bake source -- exactly one of ``--from-tag`` (production, clones a tag) or
     ``--workspace-dir`` (dev, a working tree) -- determines the content baked and
     the canonical ``repo_url`` / ``repo_branch_or_tag`` stamped into each row, so
     the advertised identity always describes what is actually baked.
     """
+    # Baking new OVH VPS pool hosts is deprecated: Imbue Cloud serves agents from
+    # bare-metal slices now. Existing OVH VPS pool hosts stay listable/destroyable,
+    # but no new ones may be baked. Reject before any (clone-heavy) work.
+    if backend == "ovh_vps":
+        fail_with_json(
+            "Baking new OVH VPS pool hosts is deprecated -- use --backend slice (bare-metal slices). "
+            "Existing OVH VPS pool hosts can still be listed and destroyed.",
+            error_class="UsageError",
+        )
+
     resolved_database_url = resolve_pool_database_url(database_url)
     parsed_attributes = _parse_optional_attributes_json(attributes_json)
 
@@ -629,6 +657,7 @@ def pool_create(
                     server_id=server_id,
                     lease_attributes=attributes,
                     region=region,
+                    env_name=slice_env_name,
                     workspace_dir=bake_source.workspace_dir,
                     mngr_source=mngr_source,
                     database_url=resolved_database_url,
@@ -967,3 +996,30 @@ def pool_destroy(pool_host_id: str, database_url: str | None, force: bool, skip_
             "slice_vm_destroyed": teardown == PoolHostUnderlyingTeardown.SLICE_VM,
         }
     )
+
+
+@pool.command(name="teardown-slices")
+@click.option(
+    "--database-url",
+    required=False,
+    default=None,
+    type=str,
+    help=(
+        "Neon PostgreSQL direct connection string for the pool DB. Defaults to "
+        "MINDS_HOST_POOL_DSN env var, or the activated minds env's secrets.toml "
+        "NEON_HOST_POOL_DSN field. Pass explicitly when operating outside an activated env."
+    ),
+)
+def pool_teardown_slices(database_url: str | None) -> None:
+    """Tear down every unleased slice VM in the pool DB and drop its row.
+
+    Used by ``minds env destroy`` (before the per-env DB is deleted) so the env's
+    baked-but-unleased pool slices don't leak their VMs on the shared bare-metal
+    boxes. Leased slices are excluded -- they are torn down via their agent's release
+    path. Needs POOL_SSH_PRIVATE_KEY in the environment to SSH the boxes (the minds
+    wrapper injects it from Vault). Idempotent per VM; fails (non-zero) if any box
+    could not be reached, so the caller can stop rather than silently leak.
+    """
+    resolved_database_url = resolve_pool_database_url(database_url)
+    result = tear_down_unleased_slices(resolved_database_url)
+    emit_json(result)

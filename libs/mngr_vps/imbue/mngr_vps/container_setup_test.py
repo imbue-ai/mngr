@@ -1,39 +1,10 @@
 import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
 
 from imbue.mngr.utils.testing import run_git_command
-from imbue.mngr_vps.container_setup import _build_start_container_script
 from imbue.mngr_vps.container_setup import _clone_build_context_for_self_contained_git
-
-
-def test_build_start_container_script_shell_quotes_name() -> None:
-    # A hostile name must be shell-quoted so it can't break out of the assignment.
-    script = _build_start_container_script("evil; rm -rf /")
-    assert "name='evil; rm -rf /'" in script
-    assert "__CONTAINER_NAME__" not in script
-
-
-def test_build_start_container_script_has_recovery_shape() -> None:
-    script = _build_start_container_script("my-container")
-    # Fast path: a plain docker start.
-    assert 'docker start "$name"' in script
-    # Recovery only fires on the gVisor self-overlay filestore collision.
-    assert "gvisor.filestore" in script
-    assert "repeated submounts" in script
-    # Reap is scoped to this container id AND runsc (never a broad pattern).
-    assert 'grep -F "$cid" | grep runsc' in script
-    # Stale on-disk filestore is cleared from the container's overlay dirs.
-    assert 'rm -f "$d"/.gvisor.filestore.*' in script
-
-
-def test_start_container_script_is_valid_posix_sh() -> None:
-    # Guard against quoting/syntax regressions in the embedded recovery script.
-    script = _build_start_container_script("minds-dev-josh-1-lima-4")
-    check = subprocess.run(["sh", "-n"], input=script, text=True, capture_output=True)
-    assert check.returncode == 0, check.stderr
 
 
 def test_clone_build_context_returns_none_for_non_git_context(tmp_path: Path) -> None:

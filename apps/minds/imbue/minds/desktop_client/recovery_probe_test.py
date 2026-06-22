@@ -8,14 +8,23 @@ from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
 from imbue.minds.desktop_client.recovery_probe import PROBE_SENTINEL
 from imbue.minds.desktop_client.recovery_probe import Probe
 from imbue.minds.desktop_client.recovery_probe import ProbeAnswer
+from imbue.minds.desktop_client.recovery_probe import ProviderProbeError
 from imbue.minds.desktop_client.recovery_probe import build_host_health_response
 from imbue.minds.desktop_client.recovery_probe import build_probe_argv
+from imbue.minds.desktop_client.recovery_probe import extract_provider_error
 from imbue.minds.desktop_client.recovery_probe import parse_inner_port_from_command
 from imbue.minds.desktop_client.recovery_probe import parse_listening_sockets
+from imbue.minds.desktop_client.recovery_probe import provider_unavailable_error
 from imbue.mngr.primitives import AgentId
 
 _AGENT_ID: AgentId = AgentId("agent-" + "0" * 31 + "1")
 _SERVICES_AGENT_ID: AgentId = AgentId("agent-" + "0" * 31 + "2")
+_PROVIDER_NAME: str = "imbue_cloud_acme"
+
+
+def _list_json_with_errors(errors: list[dict[str, object]], host_state: str = "RUNNING") -> str:
+    """`mngr list` JSON whose agents[] may be empty but whose errors[] carries provider failures."""
+    return json.dumps({"agents": [{"id": str(_AGENT_ID), "host": {"state": host_state}}], "errors": errors})
 
 
 def _probe_stdout(payload: dict[str, object]) -> str:
@@ -364,6 +373,113 @@ def test_dispatch_tier_host_unresponsive_for_ambiguous_host_state() -> None:
         plugin_resolver_services={},
     )
     assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
+
+
+# --- provider reachability extraction + tiers ----------------------------
+
+
+def test_extract_provider_error_returns_unavailable_for_this_provider() -> None:
+    list_json = _list_json_with_errors(
+        [
+            {
+                "exception_type": "ProviderUnavailableError",
+                "message": "Provider 'imbue_cloud_acme' is not available: could not reach Imbue Cloud",
+                "provider_name": _PROVIDER_NAME,
+            }
+        ]
+    )
+    error = extract_provider_error(list_json, _PROVIDER_NAME)
+    assert error == ProviderProbeError(
+        exception_type="ProviderUnavailableError",
+        message="Provider 'imbue_cloud_acme' is not available: could not reach Imbue Cloud",
+    )
+
+
+def test_extract_provider_error_ignores_other_providers() -> None:
+    """An error attributed to a different provider must not be blamed on this workspace."""
+    list_json = _list_json_with_errors(
+        [{"exception_type": "ProviderUnavailableError", "message": "docker down", "provider_name": "docker"}]
+    )
+    assert extract_provider_error(list_json, _PROVIDER_NAME) is None
+
+
+def test_extract_provider_error_returns_none_when_provider_unknown() -> None:
+    """Pre-discovery (provider unknown), we cannot attribute any error to this workspace."""
+    list_json = _list_json_with_errors(
+        [{"exception_type": "ProviderUnavailableError", "message": "down", "provider_name": _PROVIDER_NAME}]
+    )
+    assert extract_provider_error(list_json, None) is None
+
+
+def test_extract_provider_error_prefers_unavailable_over_other_error() -> None:
+    """A genuine connector outage must win over an incidental auth error so it classifies as retryable."""
+    list_json = _list_json_with_errors(
+        [
+            {"exception_type": "ImbueCloudAuthError", "message": "401", "provider_name": _PROVIDER_NAME},
+            {"exception_type": "ProviderUnavailableError", "message": "unreachable", "provider_name": _PROVIDER_NAME},
+        ]
+    )
+    error = extract_provider_error(list_json, _PROVIDER_NAME)
+    assert error is not None
+    assert error.exception_type == "ProviderUnavailableError"
+
+
+def test_dispatch_tier_provider_unavailable_beats_host_state() -> None:
+    """Even with a host row present, an unreachable provider classifies as PROVIDER_UNAVAILABLE."""
+    response = build_host_health_response(
+        list_json=_list_json_with_errors(
+            [{"exception_type": "ProviderUnavailableError", "message": "unreachable", "provider_name": _PROVIDER_NAME}]
+        ),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=None,
+        plugin_resolver_services={},
+        provider_error=ProviderProbeError(exception_type="ProviderUnavailableError", message="unreachable"),
+        provider_label="Imbue Cloud",
+    )
+    assert response.dispatch_tier == DispatchTier.PROVIDER_UNAVAILABLE
+    assert response.unreachable_reason == "unreachable"
+    assert response.provider_label == "Imbue Cloud"
+
+
+def test_dispatch_tier_provider_unavailable_from_timed_out_listing() -> None:
+    """A host-health listing that times out (no body, no row) classifies as PROVIDER_UNAVAILABLE.
+
+    This is the regression for the full-network-outage case: when `mngr list`
+    never completes there is no errors[] body to parse and no host row, so the
+    probe synthesizes a provider-unavailable error (see ``provider_unavailable_error``
+    / ``_run_host_health_probe``). Without it, ``list_json=None`` yields an UNKNOWN
+    container state that falls through to the destructive HOST_UNRESPONSIVE tier.
+    """
+    response = build_host_health_response(
+        list_json=None,
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=None,
+        plugin_resolver_services={},
+        mngr_list_error="timed out after 30s",
+        provider_error=provider_unavailable_error(
+            "Could not reach Imbue Cloud: the workspace listing timed out after 30s."
+        ),
+        provider_label="Imbue Cloud",
+    )
+    assert response.dispatch_tier == DispatchTier.PROVIDER_UNAVAILABLE
+    assert response.provider_label == "Imbue Cloud"
+
+
+def test_dispatch_tier_workspace_unreachable_for_non_connectivity_provider_error() -> None:
+    """A non-ProviderUnavailable provider error (auth/config) is the generic, non-retryable bucket."""
+    response = build_host_health_response(
+        list_json=_list_json(host_state="RUNNING"),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=None,
+        plugin_resolver_services={},
+        provider_error=ProviderProbeError(exception_type="ImbueCloudAuthError", message="Your login expired."),
+        provider_label="Imbue Cloud",
+    )
+    assert response.dispatch_tier == DispatchTier.WORKSPACE_UNREACHABLE
+    assert response.unreachable_reason == "Your login expired."
 
 
 # --- shape sanity --------------------------------------------------------

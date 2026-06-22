@@ -26,6 +26,7 @@ dependencies = [
     "concurrency-group>=0.1.0",
     "resource-guards>=0.1.0",
     "modal-proxy>=0.1.0",
+    "overlay>=0.1.0",
 ]
 
 # Supply-chain hardening: rolling 14-day cooldown. Refuses any wheel /
@@ -52,3 +53,4 @@ imbue-common = { path = "../../../../libs/imbue_common", editable = true }
 concurrency-group = { path = "../../../../libs/concurrency_group", editable = true }
 resource-guards = { path = "../../../../libs/resource_guards", editable = true }
 modal-proxy = { path = "../../../../libs/modal_proxy", editable = true }
+overlay = { path = "../../../../libs/overlay", editable = true }
