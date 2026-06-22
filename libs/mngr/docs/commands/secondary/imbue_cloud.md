@@ -719,6 +719,21 @@ mngr imbue_cloud admin pool teardown-slices [OPTIONS]
 | ---- | ---- | ----------- | ------- |
 | `--database-url` | text | Neon PostgreSQL direct connection string for the pool DB. Defaults to MINDS_HOST_POOL_DSN env var, or the activated minds env's secrets.toml NEON_HOST_POOL_DSN field. Pass explicitly when operating outside an activated env. | None |
 
+## mngr imbue_cloud admin pool backfill-host-keys
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin pool backfill-host-keys [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--database-url` | text | Neon PostgreSQL direct connection string for the pool DB. Defaults to MINDS_HOST_POOL_DSN env var, or the activated minds env's secrets.toml NEON_HOST_POOL_DSN field. Pass explicitly when operating outside an activated env. | None |
+
 ## mngr imbue_cloud admin paid
 
 **Usage:**
