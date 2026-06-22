@@ -106,4 +106,14 @@ Aligned the `Button` primitive with the Figma button component (node 342-4059). 
 
 - **Primary** (solid inverse surface) and **success** (solid green) keep their fills and now dim via opacity on hover/press to match. Every variant carries a 1px border (visible only on secondary, transparent elsewhere) so all variants render at the same height. Disabled opacity moved from 30% to 40% to match Figma.
 
-- Button corner radius stays on the design-system scale (`rounded-md`, 4px); Figma specifies 6px, which is off our 2/4/8/16 radius scale, so it was not introduced.
+- All button sizes now use `rounded-md`, which is 6px (see the radius-scale change below) -- so buttons match Figma's 6px corner.
+
+Redefined the `rounded-md` radius step from 4px to 6px (scale: 2 / 6 / 8 / 16). md is the default control radius, so buttons, form inputs, badges, and color swatches all round at 6px now, matching Figma.
+
+Gave buttons a focus ring drawn **outside** the button via `outline` + `outline-offset` (keyboard focus only, `focus-visible`), so it no longer overwrites the variant border; the offset gap is transparent in every mode.
+
+Aligned form inputs (TextInput / Select / Textarea) with Figma's text field (node 345-4059): 12px padding (`p-3`), a tertiary-colored placeholder, a subtle `fill-subtle` tint on hover, and a focus ring drawn outside the field (`outline-offset`) that keeps the `border-strong` border instead of recoloring it (replacing the previous border-recolor + inner ring).
+
+Lifted the accent color in dark mode to a brighter blue (`#0069d9` -> `#4d9bff`). On the pure-black dark surface the original accent read too dark: low-opacity tints (`accent/15`, `/40`) nearly vanished and link text was hard to read. The brighter dark-mode value keeps links, focus rings, selection tints, and progress legible (and clears WCAG AA as link text on black). Light mode is unchanged.
+
+Decluttered the dev styleguide previews: dropped the redundant "Light" / "Dark" labels from the dual-mode token previews (the white/black cards are self-evident), removed the decorative card frame (border / background / padding) from the single-mode previews (Type ramp, Spacing, Corner radius) so the samples sit directly on the page, and dropped the borders from the corner-radius demo shapes (each is now just its filled shape).

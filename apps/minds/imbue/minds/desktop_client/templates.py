@@ -52,14 +52,20 @@ TEMPLATE_DIR: Final[Path] = Path(__file__).resolve().parent / "templates"
 # default in-flow button; ``lg`` is the prominent block CTA used on the
 # auth flow; ``icon`` is a square padding for icon-only buttons (e.g. the
 # restart / settings icons in the Landing project row).
+# The focus ring is an outline OUTSIDE the button (outline-offset) so it never
+# overwrites the variant border; the offset gap is transparent (shows the
+# background) in every mode. focus-visible keeps it to keyboard focus.
 _BTN_BASE: Final[str] = (
     "inline-flex items-center justify-center gap-1.5 leading-tight "
     "transition-colors disabled:opacity-40 disabled:cursor-not-allowed "
-    "cursor-pointer no-underline whitespace-nowrap"
+    "cursor-pointer no-underline whitespace-nowrap "
+    "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
 )
+# All sizes share the md control radius (rounded-md = 6px); they differ only in
+# padding and (for icon) shape.
 _BTN_SIZES: Final[Mapping[str, str]] = {
     "md": "px-4 py-2 rounded-md type-label",
-    "lg": "px-4 py-3 rounded-lg type-label",
+    "lg": "px-4 py-3 rounded-md type-label",
     "icon": "p-1.5 rounded-md type-label",
 }
 # Variant recipes (Figma "Button" component, node 342-4059). Every variant
@@ -77,12 +83,16 @@ _BTN_VARIANTS: Final[Mapping[str, str]] = {
 
 # Shared Tailwind class string for the three form-control components
 # (TextInput.jinja, Select.jinja, Textarea.jinja). Exposed as a Catalog
-# global so the accent focus ring, border, padding and text size live in
-# exactly one place. Width and border-radius vary per-component so they
-# are NOT included here -- each component sets its own.
+# global so the focus ring, border, padding and text size live in exactly one
+# place. Width and border-radius vary per-component so they are NOT included
+# here -- each component sets its own. Matches Figma's text field (node
+# 345-4059): 12px padding, border-strong, tertiary placeholder, a subtle
+# fill-tint on hover, and a focus ring drawn OUTSIDE the field (outline-offset)
+# so it keeps the border rather than recoloring it.
 _INPUT_BASE: Final[str] = (
-    "px-3 py-2 type-body border border-strong bg-surface-primary text-primary "
-    "outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/40"
+    "p-3 type-body border border-strong bg-surface-primary text-primary "
+    "placeholder:text-tertiary transition hover:bg-fill-subtle "
+    "focus:outline-2 focus:outline-offset-2 focus:outline-accent"
 )
 
 # Inner SVG path data for the lucide-style 24x24 stroke icons. The

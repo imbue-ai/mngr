@@ -136,16 +136,16 @@
  */
 
 /*
- * Corner-radius scale -- four steps (px), held by a ratchet alongside the
- * built-in rounded-full / rounded-none. Round-down snap from the old values:
- * sm 4->2, md 6->4, lg stays 8, and the old 12px (cards / modals / xl) folds
- * down into lg, leaving xl as the reserved 16px top step. The one exception is
- * the chrome content frame, which keeps a structural rounded-[12px] to match
- * Electron's CONTENT_CORNER_RADIUS and the OS window's outer rounding.
+ * Corner-radius scale -- four steps (px: sm 2 / md 6 / lg 8 / xl 16), held by a
+ * ratchet alongside the built-in rounded-full / rounded-none. md is the
+ * default control radius (buttons, inputs, badges, swatches) and matches
+ * Figma's 6px. The one exception is the chrome content frame, which keeps a
+ * structural rounded-[12px] to match Electron's CONTENT_CORNER_RADIUS and the
+ * OS window's outer rounding.
  */
 @theme {
   --radius-sm: 2px;
-  --radius-md: 4px;
+  --radius-md: 6px;
   --radius-lg: 8px;
   --radius-xl: 16px;
 }
@@ -254,11 +254,18 @@
   --c-warning: #d49a2c;
   --c-info: #527ea3;
   /* Accent / interactive (links, selected states, focus rings, progress).
-     One mode-independent blue -- the system accent. Chosen to clear WCAG AA
-     (4.5:1) as link text on both the white and pure-black surfaces (5.2:1 /
-     4.0:1). Lighter rings / tints derive from it via an opacity modifier
-     (e.g. ring-accent/40, bg-accent/15). */
+     A WCAG-AA blue; #0069d9 clears 4.5:1 as link text on the white surface.
+     That value reads too dark on the pure-black dark surface, so .dark lifts
+     it to a brighter blue (below). Lighter rings / tints derive via an opacity
+     modifier (e.g. ring-accent/40, bg-accent/15). */
   --c-accent: #0069d9;
+}
+.dark {
+  /* The light-mode accent reads too dark on the pure-black surface: low-opacity
+     tints (accent/15, /40) nearly vanish and link text loses legibility. Lift
+     the accent to a brighter blue in dark mode so links, focus rings, selection
+     tints, and progress stay clear (clears WCAG AA as link text on black). */
+  --c-accent: #4d9bff;
 }
 
 /*

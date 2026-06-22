@@ -839,7 +839,8 @@ def test_button_default_size_uses_md_geometry() -> None:
 def test_button_size_lg_uses_block_cta_geometry() -> None:
     html = CATALOG.render("Button", variant="primary", size="lg", block=True, _content="Sign in")
     assert "py-3" in html
-    assert "rounded-lg" in html
+    # All button sizes share the md control radius (6px).
+    assert "rounded-md" in html
     assert "type-label" in html
     assert "w-full" in html
 
@@ -1538,9 +1539,9 @@ def test_select_renders_with_option_children_and_focus_ring() -> None:
     assert "<select" in html
     assert 'name="launch_mode"' in html
     assert '<option value="LIMA">lima</option>' in html
-    # Inherits the shared INPUT_BASE accent focus ring.
-    assert "focus:border-accent" in html
-    assert "focus:ring-2" in html
+    # Inherits the shared INPUT_BASE accent focus ring (drawn outside the field).
+    assert "focus:outline-accent" in html
+    assert "focus:outline-2" in html
     # Default width is w-full.
     assert "w-full" in html
 
@@ -1590,7 +1591,7 @@ def test_textarea_renders_value_in_content_with_shared_shell() -> None:
     assert 'rows="6"' in html
     assert "line1\nline2" in html
     assert "font-mono" in html
-    assert "focus:border-accent" in html
+    assert "focus:outline-accent" in html
 
 
 def test_section_header_plain_has_no_divider_classes() -> None:

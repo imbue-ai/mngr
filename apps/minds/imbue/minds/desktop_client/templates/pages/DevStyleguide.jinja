@@ -127,7 +127,7 @@
         reuse Tailwind's steps -- 24 / 18 / 14 / 12 px. Compose with a colour
         token, e.g. <code>type-label text-primary</code>.
       </p>
-      <div class="bg-surface-primary border border-default rounded-lg p-4 flex flex-col gap-4">
+      <div class="flex flex-col gap-4">
         <div>
           <p class="type-heading-lg text-primary">Large heading</p>
           <p class="type-helper text-tertiary font-mono mt-0.5">type-heading-lg -- 24 / bold</p>
@@ -176,7 +176,6 @@
         {# Light (scoped via `.light` so it stays light even when the whole
            app is toggled to dark) #}
         <div>
-          <div class="type-section text-secondary mb-2">Light</div>
           <div class="light rounded-lg border border-default bg-surface-primary p-4 flex flex-col gap-4">
             <div class="flex flex-col gap-2">
               <div data-token="--color-primary" class="flex items-baseline justify-between gap-3">
@@ -211,7 +210,6 @@
 
         {# Dark (scoped via `.dark` on the card) #}
         <div>
-          <div class="type-section text-secondary mb-2">Dark</div>
           <div class="dark rounded-lg border border-default bg-surface-primary p-4 flex flex-col gap-4">
             <div class="flex flex-col gap-2">
               <div class="flex items-baseline justify-between gap-3">
@@ -264,7 +262,6 @@
 
         {# Light #}
         <div>
-          <div class="type-section text-secondary mb-2">Light</div>
           <div class="light rounded-lg border border-default bg-surface-primary p-4 grid grid-cols-3 gap-3">
             <div data-token="--color-subtle" class="flex flex-col items-center gap-2">
               <div class="w-full h-12 rounded-md border border-subtle"></div>
@@ -283,7 +280,6 @@
 
         {# Dark (scoped via `.dark`) #}
         <div>
-          <div class="type-section text-secondary mb-2">Dark</div>
           <div class="dark rounded-lg border border-default bg-surface-primary p-4 grid grid-cols-3 gap-3">
             <div class="flex flex-col items-center gap-2">
               <div class="w-full h-12 rounded-md border border-subtle"></div>
@@ -322,7 +318,6 @@
 
         {# Light #}
         <div>
-          <div class="type-section text-secondary mb-2">Light</div>
           <div class="light bg-surface-primary border border-default rounded-lg p-4">
             <div class="type-section text-tertiary mb-1.5">Surfaces</div>
             <div class="grid grid-cols-3 gap-3 mb-4">
@@ -359,7 +354,6 @@
 
         {# Dark (scoped via `.dark`) #}
         <div>
-          <div class="type-section text-secondary mb-2">Dark</div>
           <div class="dark bg-surface-primary border border-default rounded-lg p-4">
             <div class="type-section text-tertiary mb-1.5">Surfaces</div>
             <div class="grid grid-cols-3 gap-3 mb-4">
@@ -414,7 +408,6 @@
 
         {# Light #}
         <div>
-          <div class="type-section text-secondary mb-2">Light</div>
           <div class="light bg-surface-primary border border-default rounded-lg p-4">
             <div class="grid grid-cols-4 gap-2 mb-4">
               <div data-token="--color-important" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-important"></div><code class="type-helper font-mono text-secondary">important</code></div>
@@ -431,7 +424,6 @@
 
         {# Dark #}
         <div>
-          <div class="type-section text-secondary mb-2">Dark</div>
           <div class="dark bg-surface-primary border border-default rounded-lg p-4">
             <div class="grid grid-cols-4 gap-2 mb-4">
               <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-important"></div><code class="type-helper font-mono text-secondary">important</code></div>
@@ -457,9 +449,10 @@
     <section id="accent" class="scroll-mt-8 mb-12">
       <h2 class="type-heading text-primary mb-1">Accent / interactive token</h2>
       <p class="type-helper text-secondary mb-4">
-        One <code>accent</code> hue (a WCAG-AA blue), same in both modes, behind
-        links, selected states, focus rings and progress. Solid for
-        selection / progress (<code>bg-accent</code>, <code>border-accent</code>);
+        One <code>accent</code> hue (a WCAG-AA blue), lifted to a brighter blue
+        in dark mode so links and low-opacity tints stay legible on the black
+        surface. Behind links, selected states, focus rings and progress. Solid
+        for selection / progress (<code>bg-accent</code>, <code>border-accent</code>);
         lighter rings and tints derive via an opacity modifier (e.g.
         <code>ring-accent/40</code>, <code>bg-accent/15</code>).
       </p>
@@ -467,7 +460,6 @@
 
         {# Light #}
         <div>
-          <div class="type-section text-secondary mb-2">Light</div>
           <div class="light bg-surface-primary border border-default rounded-lg p-4 flex flex-col gap-3">
             <div class="grid grid-cols-4 gap-2">
               <div data-token="--color-accent" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-accent"></div><code class="type-helper font-mono text-secondary">accent</code></div>
@@ -482,7 +474,6 @@
 
         {# Dark #}
         <div>
-          <div class="type-section text-secondary mb-2">Dark</div>
           <div class="dark bg-surface-primary border border-default rounded-lg p-4 flex flex-col gap-3">
             <div class="grid grid-cols-4 gap-2">
               <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-accent"></div><code class="type-helper font-mono text-secondary">accent</code></div>
@@ -509,33 +500,33 @@
     <section id="radius" class="scroll-mt-8 mb-12">
       <h2 class="type-heading text-primary mb-1">Corner radius</h2>
       <p class="type-helper text-secondary mb-4">
-        Four steps (2 / 4 / 8 / 16 px) plus <code>rounded-full</code>; each
+        Four steps (2 / 6 / 8 / 16 px) plus <code>rounded-full</code>; each
         plays one role. <code>rounded-xl</code> (16px) is reserved for the
         largest surfaces.
       </p>
-      <div class="bg-surface-primary border border-default rounded-lg p-4 grid grid-cols-2 sm:grid-cols-5 gap-4">
+      <div class="grid grid-cols-2 sm:grid-cols-5 gap-4">
         <div class="flex flex-col items-center text-center">
-          <div class="w-16 h-16 bg-fill-active border border-strong rounded-sm"></div>
+          <div class="w-16 h-16 bg-fill-active rounded-sm"></div>
           <code class="type-helper font-mono text-secondary mt-1">rounded-sm (2px)</code>
           <span class="type-helper text-secondary">subtle accents, tiny badges</span>
         </div>
         <div class="flex flex-col items-center text-center">
-          <div class="w-16 h-16 bg-fill-active border border-strong rounded-md"></div>
-          <code class="type-helper font-mono text-secondary mt-1">rounded-md (4px)</code>
+          <div class="w-16 h-16 bg-fill-active rounded-md"></div>
+          <code class="type-helper font-mono text-secondary mt-1">rounded-md (6px)</code>
           <span class="type-helper text-secondary">buttons, badges, swatches</span>
         </div>
         <div class="flex flex-col items-center text-center">
-          <div class="w-16 h-16 bg-fill-active border border-strong rounded-lg"></div>
+          <div class="w-16 h-16 bg-fill-active rounded-lg"></div>
           <code class="type-helper font-mono text-secondary mt-1">rounded-lg (8px)</code>
           <span class="type-helper text-secondary">inputs, cards, modals, panels, log boxes</span>
         </div>
         <div class="flex flex-col items-center text-center">
-          <div class="w-16 h-16 bg-fill-active border border-strong rounded-xl"></div>
+          <div class="w-16 h-16 bg-fill-active rounded-xl"></div>
           <code class="type-helper font-mono text-secondary mt-1">rounded-xl (16px)</code>
           <span class="type-helper text-secondary">reserved -- largest surfaces</span>
         </div>
         <div class="flex flex-col items-center text-center">
-          <div class="w-16 h-16 bg-fill-active border border-strong rounded-full"></div>
+          <div class="w-16 h-16 bg-fill-active rounded-full"></div>
           <code class="type-helper font-mono text-secondary mt-1">rounded-full</code>
           <span class="type-helper text-secondary">pills, dots, spinner outline</span>
         </div>
@@ -556,7 +547,7 @@
         <code>0.5 / 1 / 1.5 / 2 / 3 / 4 / 6 / 8 / 12 / 16</code>
         (= 2 / 4 / 6 / 8 / 12 / 16 / 24 / 32 / 48 / 64 px).
       </p>
-      <div class="bg-surface-primary border border-default rounded-lg p-4 flex flex-col gap-2">
+      <div class="flex flex-col gap-2">
         {% for _m in [0.5, 1, 1.5, 2, 3, 4, 6, 8, 12, 16] %}
         <div class="flex items-center gap-3">
           <code class="type-helper font-mono text-secondary w-12 shrink-0">p-{{ _m }}</code>
@@ -817,7 +808,7 @@
         </div>
         <Textarea name="styleguide-textarea" rows="3" extra="font-mono" :value="'shared focus ring\\nshared border\\nshared px-3 py-2'" />
       </div>
-      <div class="mt-1 type-helper text-secondary font-mono">TextInput.jinja / Select.jinja / Textarea.jinja :: INPUT_BASE (focus:border-accent focus:ring-2 focus:ring-accent/40)</div>
+      <div class="mt-1 type-helper text-secondary font-mono">TextInput.jinja / Select.jinja / Textarea.jinja :: INPUT_BASE (p-3, border-strong, placeholder-tertiary; focus ring drawn outside via outline-offset, keeping the border)</div>
     </section>
 
 
