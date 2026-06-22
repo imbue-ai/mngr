@@ -202,6 +202,8 @@ def test_pool_host_insert_writes_service_name_into_vps_instance_id() -> None:
         container_ssh_port=_CONTAINER_SSH_PORT,
         attributes_json="{}",
         region="US-EAST-VA",
+        outer_host_public_key="ssh-ed25519 AAAAouter",
+        container_host_public_key="ssh-ed25519 AAAAcontainer",
     )
     column_to_value = _insert_column_to_value(values)
     assert column_to_value["vps_instance_id"] == "vps-deadbeef.vps.ovh.us"
@@ -210,6 +212,9 @@ def test_pool_host_insert_writes_service_name_into_vps_instance_id() -> None:
     # Sanity: host_id still lands in its own column.
     assert column_to_value["host_id"] == "host-bbbb"
     assert column_to_value["vps_address"] == "vps-deadbeef.vps.ovh.us"
+    # The baked host keys land in their own columns for strict pinning at lease time.
+    assert column_to_value["outer_host_public_key"] == "ssh-ed25519 AAAAouter"
+    assert column_to_value["container_host_public_key"] == "ssh-ed25519 AAAAcontainer"
 
 
 def test_pool_create_backend_defaults_to_slice() -> None:

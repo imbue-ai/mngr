@@ -1304,6 +1304,8 @@ class FakePoolBackend:
         host_id_str: str = "host-xyz",
         host_name: str | None = None,
         region: str | None = None,
+        outer_host_public_key: str | None = _FAKE_OUTER_HOST_PUBLIC_KEY,
+        container_host_public_key: str | None = _FAKE_CONTAINER_HOST_PUBLIC_KEY,
     ) -> FakePoolRow:
         """Add an available host to the in-memory pool."""
         row = _make_pool_row(
@@ -1317,6 +1319,8 @@ class FakePoolBackend:
             version=version,
             host_name=host_name,
             region=region,
+            outer_host_public_key=outer_host_public_key,
+            container_host_public_key=container_host_public_key,
         )
         self.pool_rows.append(row)
         return row
