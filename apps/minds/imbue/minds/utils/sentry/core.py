@@ -15,19 +15,17 @@ from functools import cache
 from functools import partial
 from pathlib import Path
 from typing import Any
-from typing import Callable
-from typing import Collection
 from typing import Iterable
 from typing import Mapping
 from typing import MutableMapping
 from typing import TypedDict
-from typing import assert_never
 from typing import cast
 
 import sentry_sdk
 import sentry_sdk.utils
 import traceback_with_variables
 from loguru import logger
+from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 from sentry_sdk import HttpTransport
@@ -79,6 +77,8 @@ class SentryEventRejected(Exception):
 
 
 class ExceptionKey(FrozenModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     exception_type: type[BaseException] | None
     exception_args: tuple[Hashable, ...]
 
@@ -157,6 +157,8 @@ class _SentryEventRateLimiter(MutableModel):
 
     Each allowed exception is assumed to be sent.
     """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     # these exception will never be rate limited
     pass_thru_exception_types: Collection[type[BaseException]] = Field(default_factory=set)
@@ -483,25 +485,12 @@ def setup_sentry(
     # TODO: replace this with the right DSN based on environment.
     sentry_dsn = SENTRY_DSN_DEV
 
-    before_send_unrolled = []
-
-    if isinstance(before_send, list):
-        before_send_unrolled = list(before_send)
-    elif callable(before_send):
-        before_send_unrolled = [before_send]
-    elif before_send is None:
-        pass
-    else:
-        assert_never(before_send)
-
     # NOTE: the rate limiter object's lifetime is maintained by being captured in the
     #       closure of the before_send function
     rate_limiter = _SentryEventRateLimiter()
-    before_send_unrolled.append(rate_limiter.before_send)
-
     before_send = functools.partial(
         _before_send_wrapper,
-        before_send_list=before_send_unrolled,
+        before_send_list=[rate_limiter.before_send],
     )
 
     sentry_sdk.init(
@@ -515,9 +504,7 @@ def setup_sentry(
         default_integrations=True,
         # this doesn't affect the default integrations, but prevents any other ones from being added automatically
         auto_enabling_integrations=False,
-        integrations=[
-            *integrations,
-        ],
+        integrations=[],
         disabled_integrations=[
             StdlibIntegration()
         ],

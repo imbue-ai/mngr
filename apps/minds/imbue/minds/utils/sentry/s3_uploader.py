@@ -4,12 +4,15 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from datetime import timezone
+from typing import Any
 
 import boto3
 from botocore import UNSIGNED
 from botocore.config import Config
 from loguru import logger
 from pydantic import PrivateAttr
+
+from imbue.imbue_common.frozen_model import FrozenModel
 
 EXTRAS_UPLOADED_FILES_KEY = "uploaded_files"
 
@@ -27,7 +30,7 @@ class _S3Uploader(FrozenModel):
     region: str
     maximum_concurrency: int = MAXIMUM_QUEUED_S3_UPLOADS
 
-    _s3_client: Client = PrivateAttr()  # type: ignore[valid-type]
+    _s3_client: Any = PrivateAttr()
 
     # protects access to the thread collections
     _thread_pool: ThreadPoolExecutor = PrivateAttr()

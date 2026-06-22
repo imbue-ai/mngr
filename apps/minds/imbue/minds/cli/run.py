@@ -76,6 +76,7 @@ from imbue.minds.primitives import OutputFormat
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.output import emit_event
+from imbue.minds.utils.sentry.core import setup_sentry
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
@@ -168,6 +169,17 @@ def run(
     root_name = resolve_minds_root_name()
     data_directory = minds_data_dir_for(root_name)
     minds_config = MindsConfig(data_dir=data_directory)
+
+    # Initialize Sentry for the minds backend process. ``setup_logging`` already ran
+    # in the CLI group callback, so the loguru sinks Sentry layers on top of exist.
+    # TODO: thread through the real environment, release id, git sha, and per-env DSN
+    # selection instead of these placeholders.
+    setup_sentry(
+        environment="development",
+        release_id="0.0.0-dev",
+        git_commit_sha="unknown",
+        log_folder=data_directory,
+    )
     client_config_path = config_file
     client_env_config = load_client_config(client_config_path)
     connector_url_str = str(client_env_config.connector_url).rstrip("/")

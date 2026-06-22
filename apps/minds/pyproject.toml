@@ -35,6 +35,7 @@ dependencies = [
     "werkzeug>=3.0",
     "wsgidav>=4.3",
     "sentry-sdk>=2.59.0",
+    "traceback-with-variables>=2.0",
 ]
 license = {text = "FCL-1.0-MIT"}
 license-files = [
