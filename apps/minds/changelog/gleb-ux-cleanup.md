@@ -122,7 +122,7 @@ Gave the primary button a pressed state: it now dims to 60% opacity on `:active`
 
 Gave the styleguide's floating light/dark toggle an opaque surface background (`.styleguide-toggle` in app.css) so it stays legible while floating over page content; the hover/active fills are composited over that surface as a background-image gradient rather than replacing it (a translucent fill background-color would let content show through).
 
-Updated the status / feedback semantic hues to the Figma values (applied in both modes, as before): `success` `#5c8a3c` -> `#25931f`, `warning` `#d49a2c` -> `#e18c14`, `info` `#527ea3` -> `#2582d0`; `important` is unchanged (`#f50d00`). All the derived notice / badge tints (e.g. `bg-success/12`, `border-info/30`, `text-warning`) pick up the new hues automatically.
+Updated the status / feedback semantic hues (mode-independent): `success` `#5c8a3c` -> `#0c8106`, `warning` `#d49a2c` -> `#b45300`, `info` `#527ea3` -> `#166fc7`, `important` (error / failed) `#f50d00` -> `#d90c00`. All the derived notice / badge tints and status text pick up the new hues automatically.
 
 Further decluttered the styleguide previews: dropped the background from the Elevation section (the two shadow cards now sit on the page, where the drop shadows still read), and removed the card frame (border / background / padding) from the single-mode component examples (buttons, form controls, spinner, notices, links, icons, badges, opt, oauth, section header, dialog close, the workspace-accent picker). The frame is kept only where it carries meaning: the dual-mode token cards, the colored self-theming titlebar surfaces, the dark sidebar / chrome-glyph islands, the accent-spine card, and the page-container / modal backdrop illustrations.
 
@@ -130,8 +130,6 @@ Tuned the radius scale and a couple of tokens:
 
 - `rounded-sm` moved from 2px to 4px (scale is now 4 / 6 / 8 / 16).
 
-- `success` `#25931f` -> `#0fa108` and `info` `#2582d0` -> `#1773cf` (warning and important unchanged).
-
-- The `Notice` tints are lighter and more defined: the fill drops from 12% to 8% opacity and the border rises from 30% to 50% (`bg-<hue>/8` + `border-<hue>/50`).
+- `Notice` banners are now borderless tinted boxes: an 8%-opacity hue fill (`bg-<hue>/8`) with the hue as text, no border (down from a 12% fill + bordered box).
 
 Refined the titlebar buttons (`TitlebarButton`): the foreground is now always `text-primary` (full contrast, re-based per-workspace by `.titlebar-surface`) instead of resting at `text-secondary` and brightening on hover, and the `nav` variant is a square icon button sized by padding (`p-2` around the 24px icon -> 32x32) rather than a fixed `w-8 h-7`. The `control` variant (min / max / close) keeps its OS-matching `w-9 h-[38px]` geometry but also picks up the always-`text-primary` foreground.
