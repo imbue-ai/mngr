@@ -1960,7 +1960,11 @@ def _pin_expected_host_key(client: paramiko.SSHClient, host: str, port: int, exp
     known_hosts_name = host if port == 22 else f"[{host}]:{port}"
     entry = HostKeyEntry.from_line(f"{known_hosts_name} {expected_host_public_key.strip()}")
     if entry is None or entry.key is None:
-        raise PoolHostCleanupError(
+        # An SSHException (not PoolHostCleanupError) so this is handled uniformly by
+        # every caller: the teardown sweep and reconcile already treat it as an SSH
+        # failure, and the lease path's `except (paramiko.SSHException, OSError)`
+        # maps it to a 502 (SSH key injection failed) rather than a misleading 500.
+        raise paramiko.SSHException(
             f"could not parse expected host key for {known_hosts_name}: {expected_host_public_key!r}"
         )
     client.get_host_keys().add(known_hosts_name, entry.key.get_name(), entry.key)
