@@ -42,24 +42,24 @@ from sentry_sdk.types import Event
 from sentry_sdk.types import Hint
 from traceback_with_variables import Format
 
-from imbue_core.common import truncate_string
-from imbue_core.pydantic_serialization import FrozenModel
-from imbue_core.pydantic_serialization import MutableModel
-from imbue_core.s3_uploader import EXTRAS_UPLOADED_FILES_KEY
-from imbue_core.s3_uploader import get_s3_upload_key
-from imbue_core.s3_uploader import get_s3_upload_url
-from imbue_core.s3_uploader import upload_to_s3
-from imbue_core.s3_uploader import upload_to_s3_with_key
-from imbue_core.s3_uploader import wait_for_s3_uploads
-from imbue_core.sentry_loguru_handler import SENTRY_LOG_FORMAT
-from imbue_core.sentry_loguru_handler import SentryBreadcrumbHandler
-from imbue_core.sentry_loguru_handler import SentryEventHandler
-from imbue_core.sentry_loguru_handler import SentryLoguruLoggingLevels
-from imbue_core.sentry_loguru_handler import log_error_inside_sentry
-from imbue_core.thread_utils import ObservableThread
-from sculptor.utils.build import BuildMetadata
-from sculptor.utils.logs import COMPRESSED_LOG_EXTENSION
-from sculptor.utils.logs import LOG_EXTENSION
+from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.utils.sentry.s3_uploader import EXTRAS_UPLOADED_FILES_KEY
+from imbue.minds.utils.sentry.s3_uploader import get_s3_upload_key
+from imbue.minds.utils.sentry.s3_uploader import get_s3_upload_url
+from imbue.minds.utils.sentry.s3_uploader import upload_to_s3
+from imbue.minds.utils.sentry.s3_uploader import upload_to_s3_with_key
+from imbue.minds.utils.sentry.s3_uploader import wait_for_s3_uploads
+from imbue.minds.utils.sentry.loguru_handler import SENTRY_LOG_FORMAT
+from imbue.minds.utils.sentry.loguru_handler import SentryBreadcrumbHandler
+from imbue.minds.utils.sentry.loguru_handler import SentryEventHandler
+from imbue.minds.utils.sentry.loguru_handler import SentryLoguruLoggingLevels
+from imbue.minds.utils.sentry.loguru_handler import log_error_inside_sentry
+from imbue.concurrency_group.thread_utils import ObservableThread
+
+
+LOG_EXTENSION = "jsonl"
+COMPRESSED_LOG_EXTENSION = "gz"
 
 
 # sentry's size limits are annoyingly hard to evaluate before sending the event. we'll just try to be conservative.
@@ -67,6 +67,11 @@ from sculptor.utils.logs import LOG_EXTENSION
 # https://develop.sentry.dev/sdk/data-model/envelopes/#size-limits
 MAX_SENTRY_ATTACHMENT_SIZE = 10 * 1024 * 1024
 
+
+def truncate_string(s: str, max_length: int) -> str:
+    if len(s) <= max_length:
+        return s
+    return s[: max_length - 3] + "..."
 
 class SentryEventRejected(Exception):
     pass
@@ -748,11 +753,13 @@ class ErrorAttachmentsS3Uploader(MutableModel):
 _ATTACHMENTS_UPLOADER = ErrorAttachmentsS3Uploader()
 
 
-def _add_extra_info_hook(event: Event, hint: Hint) -> tuple[Event, Hint, tuple[Callable, ...]]:
-    # Add live debugging state as a tag for easy filtering in Sentry UI
-    if "tags" not in event:
-        event["tags"] = {}
+def add_extra_info_hook(event: Event, hint: Hint) -> tuple[Event, Hint, tuple[Callable, ...]]:
+    """The add_extra_info_hook gets called in the SentryEventHandler. This seems a little too early in the process for
+    sending things to s3.
 
+    Sentry may still decide to discard the issue and in that scenario, executing all the uploads now would just
+    blackhole them.
+    """
     exception = sys.exception()
     if exception is None:
         try:
@@ -766,27 +773,38 @@ def _add_extra_info_hook(event: Event, hint: Hint) -> tuple[Event, Hint, tuple[C
         database_path=_get_sculptor_db_from_scope(),
     )
 
+    if s3_uri_groups:
+        for group_name, s3_uris in s3_uri_groups.items():
+            # NOTE: EXTRAS_UPLOADED_FILES_KEY is not safe to write to, as it may get stomped by other code paths
+            extra_name = f"{EXTRAS_UPLOADED_FILES_KEY}_{group_name}"
+            # NOTE: It is possible that there are pre-existing contents of this list that
+            #       will bump the list size over the MAX_SENTRY_LIST_SIZE. Ignoring this edge
+            #       as no one is expected to actually write to these at the moment of committing this.
+            # TODO: perhaps move these to event["uploaded_files"][extra_name] so that
+            # the type checker knows that the outcome has to be a list?
+            event["extra"][extra_name] = event["extra"].get(extra_name, []) + s3_uris  # pyre-fixme[58]
+
+    event["extra"]["disk_usage_percent"] = _get_disk_percentage_full()
     event["extra"]["platform"] = _get_platform_info()
+    event["extra"]["container_environment"] = _get_likely_container_environment()
     return event, hint, tuple(callbacks)
 
 
 def setup_sentry_with_context(
-    build_metadata: BuildMetadata,
+	sentry_dsn: str,
+    release_id: str,
+    git_commit_sha: str,
     log_folder: Path,
     db_path: Path | None,
     environment: str | None = None,
     global_user_context: Mapping[str, str] | None = None,
 ) -> None:
-    # make sure all of our threads explode if we run into an irrecoverable exception
-    ObservableThread.set_irrecoverable_exception_handler(is_irrecoverable_exception)
-
     setup_sentry(
-        dsn=build_metadata.sentry_dsn,
-        release_id=build_metadata.version,
+        dsn=sentry_dsn,
+        release_id=release_id,
         global_user_context=global_user_context,
         add_extra_info_hook=add_extra_info_hook,
         environment=environment,
-        before_send=mirror_exception_to_posthog,
     )
     # Store the log file path in Sentry's global context
     scope = get_current_scope()
@@ -801,6 +819,6 @@ def setup_sentry_with_context(
             ),
         ),
     )
-    scope.set_tag("git_sha", build_metadata.git_commit_sha)
-    logger.info("Sentry initialized with DSN: {}", build_metadata.sentry_dsn)
+    scope.set_tag("git_sha", git_commit_sha)
+    logger.info("Sentry initialized with DSN: {}", sentry_dsn)
     logger.info("Sentry initialized with log folder: {}", log_folder)
