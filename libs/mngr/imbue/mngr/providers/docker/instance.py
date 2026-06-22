@@ -43,6 +43,8 @@ from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.hosts.outer_host import create_local_pyinfra_host
 from imbue.mngr.hosts.outer_host import create_ssh_pyinfra_host_using_user_config
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
+from imbue.mngr.interfaces.cleanup_failures import collect_cleanup_failures
 from imbue.mngr.interfaces.cleanup_failures import collecting_cleanup_failures
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CleanupFailure
@@ -792,30 +794,44 @@ kill -TERM 1
         """The deterministic tag for the image built for a host in create_host."""
         return f"mngr-build-{host_id}"
 
-    def _remove_build_image(self, host_id: HostId) -> None:
+    def _remove_build_image(self, host_id: HostId, force: bool = False) -> None:
         """Remove the per-host build image created in create_host.
 
         No-op when the image is absent -- the host used a pulled `--image`
-        (no such tag), or the tag was already removed (destroy_host runs
-        before delete_host). When the image IS present, any removal failure
-        propagates so it is visible rather than silently leaking the image.
-        Snapshot images are independent `docker commit` images that retain
-        the underlying layers, so removing this tag does not break snapshot
-        restore.
+        (no such tag), or the tag was already removed. Snapshot images are
+        independent `docker commit` images that retain the underlying layers,
+        so removing this tag does not break snapshot restore.
 
-        `force=True` removes the tag, not the image. `mngr-build-<host_id>`
-        is the image's only tag, so an unforced remove tries to delete the
-        underlying image -- which Docker refuses while a (leftover) stopped
-        container still references it ("must be forced - container is using
-        its referenced image"). Forcing drops just the tag (all mngr needs);
-        the image lingers as a dangling layer, reclaimed once that container
-        is gone.
+        `mngr-build-<host_id>` is the image's only tag, so an unforced remove
+        deletes the underlying image; Docker refuses that with a 409 conflict
+        while a leftover container still references it. `force=True` drops just
+        the tag, leaving a dangling layer reclaimed once that container is gone.
         """
         tag = self._build_image_tag(host_id)
         if not self._docker_client.images.list(name=tag):
             logger.trace("No build image to remove for host {}", host_id)
             return
-        self._docker_client.images.remove(tag, force=True)
+        self._docker_client.images.remove(tag, force=force)
+
+    @staticmethod
+    def _is_image_in_use_conflict(error: docker.errors.APIError) -> bool:
+        """True when a build-image removal hit Docker's "image in use" conflict (409).
+
+        Removing the build image's only tag deletes the underlying image, which
+        Docker refuses with 409 while a leftover container still references it.
+        """
+        return error.status_code == 409
+
+    def _record_build_image_leak(self, failures: list[CleanupFailure], host_id: HostId, error: Exception) -> None:
+        """Record a build-image removal failure as a leftover-resource leak."""
+        logger.warning("Failed to remove build image for host {}: {}", host_id, error)
+        failures.append(
+            CleanupFailure(
+                category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                message=f"failed to remove build image for host {host_id}: {error}",
+                host_id=host_id,
+            )
+        )
 
     def _build_image(self, build_args: Sequence[str], tag: str) -> str:
         """Build a Docker image using the configured builder (docker or depot)."""
@@ -1516,21 +1532,15 @@ kill -TERM 1
                         )
                     )
 
-            # Untag the per-host build image so built images don't pile up. Safe
-            # now that the container is gone; snapshots keep their own layers.
+            # Remove the per-host build image so built images don't pile up. The
+            # container is gone, so the unforced removal deletes the image;
+            # snapshots keep their own layers.
             try:
                 self._remove_build_image(host_id)
             except docker.errors.NotFound:
                 pass
             except docker.errors.DockerException as e:
-                logger.warning("Failed to remove build image for host {}: {}", host_id, e)
-                failures.append(
-                    CleanupFailure(
-                        category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
-                        message=f"failed to remove build image for host {host_id}: {e}",
-                        host_id=host_id,
-                    )
-                )
+                self._record_build_image_leak(failures, host_id, e)
 
             # Mark the host record DESTROYED. A failure here leaves the record inconsistent.
             try:
@@ -1552,9 +1562,11 @@ kill -TERM 1
     def delete_host(self, host: HostInterface) -> None:
         """Permanently delete all records associated with a (destroyed) host.
 
-        Removes snapshot images, the host volume directory, the build image
-        tag, and the host record. Called by gc_machines once a destroyed host
-        has aged past ``destroyed_host_persisted_seconds``.
+        Removes snapshot images, the host volume directory, the build image,
+        and the host record. Called by gc_machines once a destroyed host has
+        aged past ``destroyed_host_persisted_seconds``. If a leaked container
+        still references the build image, it is destroyed too, so no trace of
+        the host remains.
 
         Best-effort: every step is attempted, and a real failure (a resource
         that exists but could not be removed) is recorded and raised as a
@@ -1590,21 +1602,30 @@ kill -TERM 1
                 except (FileNotFoundError, OSError, MngrError) as e:
                     logger.trace("No host volume to clean up for {}: {}", host_id, e)
 
-            # Defensive untag in case destroy_host did not run (idempotent). A
-            # removal failure is recorded as a leak rather than aborting the GC
-            # sweep with a raw DockerException. _remove_build_image no-ops if
-            # the image is already gone.
+            # Remove the build image, ensuring no trace of the host remains. A
+            # leaked container still referencing the image makes the unforced
+            # removal fail with a 409 conflict; destroy_host then removes that
+            # container so the forced re-removal drops the now-dangling tag.
+            # Residual failures are recorded as leaks rather than aborting the
+            # GC sweep with a raw DockerException.
             try:
                 self._remove_build_image(host_id)
+            except docker.errors.NotFound:
+                pass
+            except docker.errors.APIError as e:
+                if self._is_image_in_use_conflict(e):
+                    try:
+                        self.destroy_host(host)
+                    except CleanupFailedGroup as group:
+                        collect_cleanup_failures(failures, group)
+                    try:
+                        self._remove_build_image(host_id, force=True)
+                    except docker.errors.DockerException as retry_error:
+                        self._record_build_image_leak(failures, host_id, retry_error)
+                else:
+                    self._record_build_image_leak(failures, host_id, e)
             except docker.errors.DockerException as e:
-                logger.warning("Failed to remove build image for host {}: {}", host_id, e)
-                failures.append(
-                    CleanupFailure(
-                        category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
-                        message=f"failed to remove build image for host {host_id}: {e}",
-                        host_id=host_id,
-                    )
-                )
+                self._record_build_image_leak(failures, host_id, e)
 
             self._host_store.delete_host_record(host_id)
             self._container_cache_by_id.pop(host_id, None)

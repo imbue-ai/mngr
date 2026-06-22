@@ -8,6 +8,7 @@ import docker
 import docker.errors
 import docker.models.containers
 import pytest
+import requests
 
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.errors import ProcessTimeoutError
@@ -854,55 +855,170 @@ class _BuildRemovalDockerClient:
         self.images = images
 
 
-def test_remove_build_image_forces_removal(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
-    """The per-host build image is removed with force=True.
+def test_remove_build_image_unforced_by_default(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """_remove_build_image deletes the image unforced by default; force passes through.
 
-    A (now-stopped) container created from the image still references it, so an
-    unforced delete fails with Docker's "must be forced" conflict.
+    An unforced removal deletes the underlying image (full cleanup) once no
+    container references it; force=True is reserved for the fallback that drops
+    only the tag.
     """
     provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
     fake_images = _BuildRemovalImages(present=True)
     provider.__dict__["_docker_client"] = _BuildRemovalDockerClient(fake_images)
 
     provider._remove_build_image(HostId(HOST_ID_A))
+    provider._remove_build_image(HostId(HOST_ID_A), force=True)
 
     expected_tag = DockerProviderInstance._build_image_tag(HostId(HOST_ID_A))
-    assert fake_images.remove_calls == [{"tag": expected_tag, "force": True}]
+    assert fake_images.remove_calls == [
+        {"tag": expected_tag, "force": False},
+        {"tag": expected_tag, "force": True},
+    ]
 
 
-@pytest.mark.allow_warnings(match=r"Failed to remove build image for host")
-def test_delete_host_records_build_image_failure_as_cleanup_failure(
-    temp_mngr_ctx: MngrContext, tmp_path: Path
-) -> None:
-    """A build-image removal failure in delete_host is recorded and raised as a
-    CleanupFailedGroup -- not a raw DockerException that aborts the GC sweep.
-
-    GC calls delete_host on aged-out destroyed hosts; an orphaned container can
-    still reference the build image, so its removal can raise a 409 conflict.
-    delete_host must surface that as a CleanupFailedGroup (which GC aggregates
-    and continues past) while still deleting the host record so the host does
-    not reappear on the next sweep.
-    """
-    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
-    conflict = docker.errors.APIError("conflict: (must be forced) - container is using its referenced image")
-    provider.__dict__["_docker_client"] = _BuildRemovalDockerClient(
-        _BuildRemovalImages(present=True, remove_error=conflict)
+def _image_in_use_conflict() -> docker.errors.APIError:
+    """The 409 Docker raises when a build image's last tag is removed while a container holds it."""
+    response = requests.Response()
+    response.status_code = 409
+    return docker.errors.APIError(
+        "409 Client Error: Conflict (must be forced) - container is using its referenced image",
+        response=response,
     )
 
+
+class _LeakedContainer:
+    """A container in `_LeakedContainerDaemon`, referencing one host's build image."""
+
+    def __init__(self, daemon: "_LeakedContainerDaemon", host_id: HostId, remove_error: Exception | None) -> None:
+        self._daemon = daemon
+        self.id = f"container-{host_id}"
+        self.host_id = host_id
+        self.status = "exited"
+        self._remove_error = remove_error
+
+    def reload(self) -> None:
+        if self not in self._daemon.containers_present:
+            raise docker.errors.NotFound(f"container {self.id} gone")
+
+    def stop(self, timeout: int | None = None) -> None:
+        pass
+
+    def remove(self, force: bool = False) -> None:
+        if self._remove_error is not None:
+            raise self._remove_error
+        if self in self._daemon.containers_present:
+            self._daemon.containers_present.remove(self)
+
+
+class _LeakedContainerContainers:
+    def __init__(self, daemon: "_LeakedContainerDaemon") -> None:
+        self._daemon = daemon
+
+    def list(self, all: bool = False, filters: dict | None = None) -> list[_LeakedContainer]:
+        wanted_host_id: str | None = None
+        for label in (filters or {}).get("label", []):
+            if label.startswith(f"{LABEL_HOST_ID}="):
+                wanted_host_id = label.split("=", 1)[1]
+        return [c for c in self._daemon.containers_present if wanted_host_id in (None, str(c.host_id))]
+
+
+class _LeakedContainerImages:
+    def __init__(self, daemon: "_LeakedContainerDaemon") -> None:
+        self._daemon = daemon
+
+    def list(self, name: str | None = None) -> list[object]:
+        return [object()] if name in self._daemon.image_tags else []
+
+    def remove(self, tag: str, force: bool = False) -> None:
+        if tag not in self._daemon.image_tags:
+            raise docker.errors.NotFound(f"image {tag} not found")
+        referenced = any(
+            DockerProviderInstance._build_image_tag(c.host_id) == tag for c in self._daemon.containers_present
+        )
+        if referenced and not force:
+            raise _image_in_use_conflict()
+        self._daemon.image_tags.discard(tag)
+
+
+class _LeakedContainerDaemon:
+    """Stateful fake Docker client modeling the leaked-container/build-image conflict.
+
+    The build image ``mngr-build-<host_id>`` is "in use" -- its unforced removal
+    raises Docker's 409 conflict -- while a container for that host_id exists.
+    force=True drops the tag regardless, and removing the container clears the
+    conflict, mirroring real Docker semantics.
+    """
+
+    def __init__(self) -> None:
+        self.image_tags: set[str] = set()
+        self.containers_present: list[_LeakedContainer] = []
+        self.images = _LeakedContainerImages(self)
+        self.containers = _LeakedContainerContainers(self)
+
+    def add_host_with_leaked_container(self, host_id: HostId, remove_error: Exception | None = None) -> None:
+        self.image_tags.add(DockerProviderInstance._build_image_tag(host_id))
+        self.containers_present.append(_LeakedContainer(self, host_id, remove_error))
+
+
+def _write_destroyed_host_record(provider: DockerProviderInstance, host_id: str) -> OfflineHost:
     record = HostRecord(
         certified_host_data=CertifiedHostData(
-            host_id=HOST_ID_A,
+            host_id=host_id,
             host_name="h",
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
         )
     )
     provider._host_store.write_host_record(record)
-    host = provider._create_host_from_host_record(record)
+    return provider._create_host_from_host_record(record)
+
+
+def test_delete_host_destroys_leaked_container_then_removes_build_image(
+    temp_mngr_ctx: MngrContext, tmp_path: Path
+) -> None:
+    """delete_host clears a leaked container so no trace of the host remains.
+
+    A container left over from an earlier failed destroy still references the
+    build image, so the unforced removal hits a 409 conflict. delete_host must
+    destroy that container and then drop the build image -- leaving no
+    container, no image, and no host record -- rather than force-untagging the
+    image and leaking the container.
+    """
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    daemon = _LeakedContainerDaemon()
+    daemon.add_host_with_leaked_container(HostId(HOST_ID_A))
+    provider.__dict__["_docker_client"] = daemon
+    host = _write_destroyed_host_record(provider, HOST_ID_A)
+
+    provider.delete_host(host)
+
+    assert daemon.containers_present == []
+    assert daemon.image_tags == set()
+    assert provider._host_store.read_host_record(HostId(HOST_ID_A), use_cache=False) is None
+
+
+@pytest.mark.allow_warnings(match=r"Failed to remove (build image|container) for host")
+def test_delete_host_records_leak_when_container_removal_stays_stuck(
+    temp_mngr_ctx: MngrContext, tmp_path: Path
+) -> None:
+    """A container that cannot be removed is surfaced as a leak, not a crash.
+
+    When destroy_host still cannot remove the conflicting container, delete_host
+    force-drops the build-image tag and records the leftover resource as a
+    CleanupFailedGroup (which GC aggregates and continues past) while still
+    deleting the host record so the host does not reappear next sweep.
+    """
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    daemon = _LeakedContainerDaemon()
+    daemon.add_host_with_leaked_container(HostId(HOST_ID_A), remove_error=docker.errors.APIError("stuck"))
+    provider.__dict__["_docker_client"] = daemon
+    host = _write_destroyed_host_record(provider, HOST_ID_A)
 
     with pytest.raises(CleanupFailedGroup) as exc_info:
         provider.delete_host(host)
 
     assert any(f.category == CleanupFailureCategory.HOST_RESOURCE_REMAINS for f in exc_info.value.failures)
-    # The host record is still deleted, so the host does not reappear next sweep.
+    # The build-image tag is force-dropped even though the container is stuck...
+    assert daemon.image_tags == set()
+    # ...and the host record is still deleted, so the host does not reappear next sweep.
     assert provider._host_store.read_host_record(HostId(HOST_ID_A), use_cache=False) is None
