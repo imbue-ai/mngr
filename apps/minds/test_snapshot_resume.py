@@ -22,10 +22,10 @@ import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Final
-from typing import NamedTuple
 
 import pytest
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.recovery_probe import PROBE_SENTINEL
 from imbue.minds.desktop_client.recovery_probe import build_probe_shell_command
 
@@ -64,7 +64,7 @@ _ALIVE_AGENT_STATES: Final[frozenset[str]] = frozenset(
 _SERVED_HTTP_STATUS_CODES: Final[frozenset[str]] = frozenset({"200", "301", "302", "307", "401"})
 
 
-class _ResumedWorkspace(NamedTuple):
+class _ResumedWorkspace(FrozenModel):
     """The workspace container + its system-services agent id, post-resume."""
 
     container_name: str
