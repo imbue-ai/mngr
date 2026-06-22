@@ -5,9 +5,8 @@ from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr.api.agent_state import CombinedState
 from imbue.mngr.errors import UserInputError
-from imbue.mngr.primitives import AgentLifecycleState
-from imbue.mngr.primitives import HostState
 from imbue.mngr_wait.primitives import SHARED_STATE_RUNNING
 from imbue.mngr_wait.primitives import SHARED_STATE_STOPPED
 from imbue.mngr_wait.primitives import TERMINAL_AGENT_STATES
@@ -20,15 +19,6 @@ class WaitTarget(FrozenModel):
 
     identifier: str = Field(description="The original identifier string (ID or name)")
     target_type: WaitTargetType = Field(description="Whether this is an agent or host target")
-
-
-class CombinedState(FrozenModel):
-    """Current state of the target at a point in time."""
-
-    host_state: HostState | None = Field(default=None, description="Current host state (None if host is unreachable)")
-    agent_state: AgentLifecycleState | None = Field(
-        default=None, description="Current agent lifecycle state (None if not an agent target or unreachable)"
-    )
 
 
 class StateChange(FrozenModel):

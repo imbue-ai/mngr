@@ -28,6 +28,7 @@ from imbue.mngr.cli.rename import rename
 from imbue.mngr.cli.rsync import rsync_command
 from imbue.mngr.cli.snapshot import snapshot
 from imbue.mngr.cli.start import start
+from imbue.mngr.cli.state import state
 from imbue.mngr.cli.stop import stop
 from imbue.mngr.cli.transcript import transcript
 from imbue.mngr.config.data_types import CreateCliOptions
@@ -255,6 +256,7 @@ _HELP_TEST_CASES: list[tuple[click.Command, list[str], str]] = [
     (cli, ["git", "pull", "--help"], "git_pull"),
     (rename, ["--help"], "rename"),
     (start, ["--help"], "start"),
+    (state, ["--help"], "state"),
     (stop, ["--help"], "stop"),
     (cli, ["snapshot", "create", "--help"], "snapshot_create"),
     (cli, ["snapshot", "list", "--help"], "snapshot_list"),
@@ -295,6 +297,7 @@ _NONEXISTENT_AGENT_CASES: list[tuple[click.Command, list[str], str]] = [
     (rename, ["nonexistent-agent-99812", "new-name"], "rename"),
     (snapshot, ["create", "nonexistent-agent-xyz"], "snapshot_create"),
     (snapshot, ["list", "nonexistent-agent-xyz"], "snapshot_list"),
+    (state, ["nonexistent-agent-51234"], "state"),
     (start, ["nonexistent-agent-98732"], "start"),
     (start, ["nonexistent-agent-98733", "--restart"], "start_restart"),
     (stop, ["nonexistent-agent-45721"], "stop"),

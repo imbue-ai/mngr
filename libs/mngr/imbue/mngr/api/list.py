@@ -188,6 +188,34 @@ class _ListAgentsParams(FrozenModel):
     )
 
 
+def build_field_generators(
+    mngr_ctx: MngrContext,
+) -> tuple[
+    dict[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]],
+    dict[str, dict[str, Callable[[DiscoveredAgent, HostDetails], Any]]],
+]:
+    """Collect the (online, offline) plugin field generators registered via the hooks.
+
+    Returned as ``(field_generators, offline_field_generators)``, keyed by plugin
+    name. Shared by ``list_agents`` and the single-target detail fetchers in
+    ``api.agent_state`` so plugin fields appear identically regardless of which
+    path built the ``AgentDetails``.
+    """
+    field_generators: dict[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] = {}
+    for hook_result in mngr_ctx.pm.hook.agent_field_generators():
+        if hook_result is not None:
+            plugin_name, generators = hook_result
+            field_generators[plugin_name] = generators
+
+    offline_field_generators: dict[str, dict[str, Callable[[DiscoveredAgent, HostDetails], Any]]] = {}
+    for offline_hook_result in mngr_ctx.pm.hook.offline_agent_field_generators():
+        if offline_hook_result is not None:
+            offline_plugin_name, offline_generators = offline_hook_result
+            offline_field_generators[offline_plugin_name] = offline_generators
+
+    return field_generators, offline_field_generators
+
+
 @log_call
 def list_agents(
     mngr_ctx: MngrContext,
@@ -224,17 +252,7 @@ def list_agents(
     try:
         results_lock = Lock()
 
-        field_generators: dict[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] = {}
-        for hook_result in mngr_ctx.pm.hook.agent_field_generators():
-            if hook_result is not None:
-                plugin_name, generators = hook_result
-                field_generators[plugin_name] = generators
-
-        offline_field_generators: dict[str, dict[str, Callable[[DiscoveredAgent, HostDetails], Any]]] = {}
-        for offline_hook_result in mngr_ctx.pm.hook.offline_agent_field_generators():
-            if offline_hook_result is not None:
-                offline_plugin_name, offline_generators = offline_hook_result
-                offline_field_generators[offline_plugin_name] = offline_generators
+        field_generators, offline_field_generators = build_field_generators(mngr_ctx)
 
         params = _ListAgentsParams(
             compiled_include_filters=compiled_include_filters,

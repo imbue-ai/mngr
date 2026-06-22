@@ -49,6 +49,7 @@ from imbue.mngr.cli.rename import rename
 from imbue.mngr.cli.rsync import rsync_command
 from imbue.mngr.cli.snapshot import snapshot
 from imbue.mngr.cli.start import start
+from imbue.mngr.cli.state import state
 from imbue.mngr.cli.stop import stop
 from imbue.mngr.cli.transcript import transcript
 from imbue.mngr.config.loader import block_disabled_plugins
@@ -352,6 +353,7 @@ BUILTIN_COMMANDS: list[click.Command] = [
     git_command,
     rename,
     start,
+    state,
     stop,
     limit,
     snapshot,

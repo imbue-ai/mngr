@@ -9,7 +9,7 @@ from imbue.mngr.cli.field_catalog import _CEL_SYNTHESIZED_KEYS
 from imbue.mngr.cli.field_catalog import build_list_field_catalog
 from imbue.mngr.cli.field_catalog import catalog_rows_as_dicts
 from imbue.mngr.cli.field_catalog import render_catalog_help_markdown
-from imbue.mngr.cli.list import _FIELD_ALIASES
+from imbue.mngr.cli.field_render import FIELD_ALIASES
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.primitives import AgentId
@@ -116,22 +116,22 @@ def test_synthesized_rows_exist_and_computed_fields_are_cel_only() -> None:
 
 
 def test_catalog_covers_every_field_alias() -> None:
-    """Each alias in ``_FIELD_ALIASES`` is documented as a catalog row.
+    """Each alias in ``FIELD_ALIASES`` is documented as a catalog row.
 
     Pins the alias rows to the real alias table so a new alias cannot be added
     without surfacing it in the field catalog / help.
     """
-    assert set(_FIELD_ALIASES) <= _catalog_keys()
+    assert set(FIELD_ALIASES) <= _catalog_keys()
 
 
 def test_no_orphan_computed_or_alias_rows() -> None:
     """Every row in the "Computed and alias fields" section is backed by reality.
 
     Each such row must be either a synthesized CEL key (``_CEL_SYNTHESIZED_KEYS``) or a
-    real alias (``_FIELD_ALIASES``). This is the reverse of the two pins above and
+    real alias (``FIELD_ALIASES``). This is the reverse of the two pins above and
     catches a row left behind in the catalog after its source is removed.
     """
-    backed = set(_CEL_SYNTHESIZED_KEYS) | set(_FIELD_ALIASES)
+    backed = set(_CEL_SYNTHESIZED_KEYS) | set(FIELD_ALIASES)
     computed_rows = [row for row in build_list_field_catalog() if row.section == FieldSection.COMPUTED]
     orphans = [row.key for row in computed_rows if row.key not in backed]
     assert not orphans, f"catalog has computed/alias rows not backed by the computation or alias table: {orphans}"
