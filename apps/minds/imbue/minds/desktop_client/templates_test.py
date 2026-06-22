@@ -899,10 +899,10 @@ def test_color_swatch_unselected_and_small_and_disabled() -> None:
 
 def test_titlebar_button_default_is_nav_variant() -> None:
     html = CATALOG.render("TitlebarButton", _content="<svg/>")
-    # nav variant => square padded icon button (p-2 rounded-md, no fixed w/h);
+    # nav variant => square padded icon button (p-1.5 rounded-md, no fixed w/h);
     # default tone => always text-primary + hover:bg-fill-hover, re-based
     # per-workspace by the .titlebar-surface scope in app.css.
-    assert "p-2" in html
+    assert "p-1.5" in html
     assert "rounded-md" in html
     assert "text-primary" in html
     assert "text-secondary" not in html
