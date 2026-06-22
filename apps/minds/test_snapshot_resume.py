@@ -56,6 +56,13 @@ _ALIVE_AGENT_STATES: Final[frozenset[str]] = frozenset(
     {"RUNNING", "WAITING", "REPLACED", "RUNNING_UNKNOWN_AGENT_TYPE"}
 )
 
+# HTTP status codes that mean system_interface is serving (as opposed to a
+# connection refusal, which curl reports as ``000``): a 2xx, a redirect, or a
+# 401 auth challenge. The shell poll loops in ``_wait_for_system_interface_up``
+# mirror this set in a ``case`` statement (they run inside ``docker exec`` and
+# cannot reference this constant).
+_SERVED_HTTP_STATUS_CODES: Final[frozenset[str]] = frozenset({"200", "301", "302", "307", "401"})
+
 
 class _ResumedWorkspace(NamedTuple):
     """The workspace container + its system-services agent id, post-resume."""
@@ -304,7 +311,7 @@ def test_resumed_workspace_serves_system_interface(running_workspace: _ResumedWo
         f"curl -s -o /dev/null -w '%{{http_code}}' http://localhost:{_SYSTEM_INTERFACE_PORT}/",
         timeout=30,
     )
-    assert result.stdout.strip() in {"200", "301", "302", "307", "401"}, (
+    assert result.stdout.strip() in _SERVED_HTTP_STATUS_CODES, (
         f"system_interface returned {result.stdout.strip()!r} after resume (expected a served response)."
     )
 
@@ -387,7 +394,7 @@ def test_minds_recovery_restores_dead_system_interface() -> None:
     )
     # minds' real recovery probe should now see system_interface unhealthy.
     broken_probe = _run_minds_in_container_probe(container_name)
-    assert broken_probe.get("curl_status") not in {"200", "301", "302", "307", "401"}, (
+    assert broken_probe.get("curl_status") not in _SERVED_HTTP_STATUS_CODES, (
         f"Expected system_interface unhealthy after stopping system-services; probe={broken_probe!r}"
     )
 
@@ -404,6 +411,6 @@ def test_minds_recovery_restores_dead_system_interface() -> None:
         "system_interface did not recover after minds' surgical restart of system-services."
     )
     recovered_probe = _run_minds_in_container_probe(container_name)
-    assert recovered_probe.get("curl_status") in {"200", "301", "302", "307", "401"}, (
+    assert recovered_probe.get("curl_status") in _SERVED_HTTP_STATUS_CODES, (
         f"minds recovery probe still reports system_interface unhealthy after restart; probe={recovered_probe!r}"
     )
