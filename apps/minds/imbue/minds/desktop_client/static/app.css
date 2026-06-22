@@ -250,9 +250,9 @@
      backgrounds are derived with an opacity modifier (e.g. bg-success/10).
      Add a .dark override later only if a hue needs a contrast tweak. */
   --c-important: #f50d00;
-  --c-success: #5c8a3c;
-  --c-warning: #d49a2c;
-  --c-info: #527ea3;
+  --c-success: #25931f;
+  --c-warning: #e18c14;
+  --c-info: #2582d0;
   /* Accent / interactive (links, selected states, focus rings, progress).
      A WCAG-AA blue; #0069d9 clears 4.5:1 as link text on the white surface.
      That value reads too dark on the pure-black dark surface, so .dark lifts

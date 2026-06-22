@@ -121,3 +121,5 @@ Decluttered the dev styleguide previews: dropped the redundant "Light" / "Dark" 
 Gave the primary button a pressed state: it now dims to 70% opacity on `:active` (its hover is 80%), so a press reads distinctly from a hover.
 
 Gave the styleguide's floating light/dark toggle an opaque surface background (`.styleguide-toggle` in app.css) so it stays legible while floating over page content; the hover/active fills are composited over that surface as a background-image gradient rather than replacing it (a translucent fill background-color would let content show through).
+
+Updated the status / feedback semantic hues to the Figma values (applied in both modes, as before): `success` `#5c8a3c` -> `#25931f`, `warning` `#d49a2c` -> `#e18c14`, `info` `#527ea3` -> `#2582d0`; `important` is unchanged (`#f50d00`). All the derived notice / badge tints (e.g. `bg-success/12`, `border-info/30`, `text-warning`) pick up the new hues automatically.
