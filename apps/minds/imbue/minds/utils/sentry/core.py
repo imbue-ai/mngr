@@ -51,7 +51,6 @@ from imbue_core.s3_uploader import get_s3_upload_url
 from imbue_core.s3_uploader import upload_to_s3
 from imbue_core.s3_uploader import upload_to_s3_with_key
 from imbue_core.s3_uploader import wait_for_s3_uploads
-from imbue_core.sculptor.telemetry import mirror_exception_to_posthog
 from imbue_core.sentry_loguru_handler import SENTRY_LOG_FORMAT
 from imbue_core.sentry_loguru_handler import SentryBreadcrumbHandler
 from imbue_core.sentry_loguru_handler import SentryEventHandler
@@ -61,11 +60,6 @@ from imbue_core.thread_utils import ObservableThread
 from sculptor.utils.build import BuildMetadata
 from sculptor.utils.logs import COMPRESSED_LOG_EXTENSION
 from sculptor.utils.logs import LOG_EXTENSION
-
-try:
-    import brotli  # type: ignore
-except ImportError:
-    brotli = None
 
 
 # sentry's size limits are annoyingly hard to evaluate before sending the event. we'll just try to be conservative.
