@@ -137,6 +137,9 @@ _ICONS_24: Final[Mapping[str, str]] = {
     # frame) scaled to this 24px viewBox (span 6-18); the shaft runs
     # corner-to-corner while the arrowhead legs stop short (7/8 of the span).
     "arrow-up-right": '<path d="M18 16.5V6H7.5"/><path d="M18 6L6 18"/>',
+    # lucide ``chevron-down``: the dropdown affordance overlaid on Select
+    # (native <select> arrows can't be themed, so appearance-none + this).
+    "chevron-down": '<path d="m6 9 6 6 6-6"/>',
 }
 
 # 12x12 chrome glyph path data (minimize / maximize / close). Title-bar

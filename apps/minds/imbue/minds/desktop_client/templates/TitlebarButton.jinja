@@ -3,7 +3,8 @@
   Title-bar window-control button. Distinct from the general-purpose
   Button primitive only in geometry (window-control sizing); its colors
   are plain design tokens (always ``text-primary`` + ``hover:bg-fill-hover``
-  + ``active:bg-fill-active``).
+  + ``active:bg-fill-active``). Keyboard focus shows an accent outline (no
+  offset, so no white gap appears over the colored / neutral titlebar).
 
   Those tokens are re-based per-workspace by the ``.titlebar-surface`` scope
   in app.css, which derives a black/white contrast from ``--titlebar-bg`` in
@@ -39,6 +40,6 @@
   "default": "",
   "danger": "titlebar-btn-danger",
 } -%}
-{%- set _btn_base = "inline-flex items-center justify-center cursor-pointer transition-colors text-primary hover:bg-fill-hover active:bg-fill-active" -%}
+{%- set _btn_base = "inline-flex items-center justify-center cursor-pointer transition-colors text-primary hover:bg-fill-hover active:bg-fill-active focus-visible:outline-2 focus-visible:outline-accent" -%}
 {%- set _cls = _btn_base ~ " " ~ _variants[variant] ~ " " ~ _tones[tone] ~ " " ~ extra -%}
 <button {{ attrs.render(type="button", classes=_cls) }}>{{ content }}</button>

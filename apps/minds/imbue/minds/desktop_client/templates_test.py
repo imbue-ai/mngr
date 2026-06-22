@@ -1542,15 +1542,16 @@ def test_select_renders_with_option_children_and_focus_ring() -> None:
     # Inherits the shared INPUT_BASE accent focus ring (drawn outside the field).
     assert "focus:outline-accent" in html
     assert "focus:outline-2" in html
-    # Default width is w-full.
-    assert "w-full" in html
+    # The chevron is overlaid via a themeable Icon24 (native arrow hidden).
+    assert "appearance-none" in html
+    # Default width sizes the wrapper; the inner <select> fills it (w-full).
+    assert 'class="relative w-full"' in html
 
 
 def test_select_honors_width_prop() -> None:
     html = CATALOG.render("Select", name="x", width="w-48", _content="")
-    assert "w-48" in html
-    # Default w-full should be replaced, not added alongside.
-    assert " w-full " not in html
+    # The width prop sizes the wrapper; the inner <select> fills it (w-full).
+    assert 'class="relative w-48"' in html
 
 
 def test_link_regular_uses_accent_underline_recipe() -> None:
