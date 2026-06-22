@@ -584,70 +584,29 @@ MAX_SENTRY_ATTACHMENT_SIZE = 10 * 1024 * 1024
 # Maciek could not find the documentation for that behavior
 MAX_SENTRY_LIST_SIZE = 10
 
-_SENTRY_SCULPTOR_CONTEXT_KEY = "sculptor_config"
+_SENTRY_SCULPTOR_CONTEXT_KEY = "_config"
 
 
-class SentrySculptorConfigDict(TypedDict):
+class SentryMindsConfigDict(TypedDict):
     log_folder_path: Path | None
-    db_path: Path | None
 
 
-def _get_sculptor_config_from_scope() -> SentrySculptorConfigDict | None:
+def _get_config_from_scope() -> SentryMindsConfigDict | None:
     scope = get_current_scope()._contexts.get(
-        _SENTRY_SCULPTOR_CONTEXT_KEY, SentrySculptorConfigDict(db_path=None, log_folder_path=None)
+        _SENTRY_SCULPTOR_CONTEXT_KEY, SentryMindsConfigDict(log_folder_path=None)
     )
     # we only put SentrySculptorConfigDict in _contexts, but regrettably as a third-party library we can't tell pyre that
-    return cast(SentrySculptorConfigDict, scope)
+    return cast(SentryMindsConfigDict, scope)
 
 
-def _get_sculptor_log_folder_from_scope() -> Path | None:
+def _get_log_folder_from_scope() -> Path | None:
     # TODO: _get_sculptor_config_from_scope() can be None. do we want to return None in that case, or error?
-    log_folder_path = _get_sculptor_config_from_scope().get("log_folder_path")  # pyre-fixme[16]
+    log_folder_path = _get_config_from_scope().get("log_folder_path")  # pyre-fixme[16]
     if log_folder_path and log_folder_path.exists():
         logger.debug("Using Sentry context log_folder_path: {}", str(log_folder_path))
         return log_folder_path
     logger.info("No log file path found")
     return None
-
-
-def _get_sculptor_db_from_scope() -> Path | None:
-    # TODO: _get_sculptor_config_from_scope() can be None. do we want to return None in that case, or error?
-    db_path = _get_sculptor_config_from_scope().get("db_path")  # pyre-fixme[16]
-    if db_path and db_path.exists():
-        return db_path
-    return None
-
-
-def _get_disk_percentage_full() -> float | None:
-    db_path = _get_sculptor_db_from_scope()
-    if not db_path:
-        return None
-    return psutil.disk_usage(str(db_path)).percent
-
-
-_CONTAINER_ENVIRONMENT_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("OrbStack", (".*orbstack.*",)),
-    ("Colima", (".*colima.*",)),
-    (
-        "Rancher Desktop",
-        (".*rancher-desktop.*", "^rd( +|$)"),
-    ),
-    ("Docker Desktop", (".*docker-desktop.*", ".*com.docker.backend.*", ".*com.docker.hyperkit.*")),
-    ("Podman Desktop", (".*podman.*",)),
-)
-
-
-@cache
-def _get_likely_container_environment() -> str | None:
-    for process in psutil.process_iter(["name", "cmdline"]):
-        for container_environment_name, patterns in _CONTAINER_ENVIRONMENT_PATTERNS:
-            for pattern in patterns:
-                if re.match(pattern, process.info["name"] or "") or any(
-                    re.match(pattern, cmd) for cmd in (process.info["cmdline"] or [])
-                ):
-                    return container_environment_name
-    return None
-
 
 @cache
 def _get_platform_info() -> str:
@@ -685,7 +644,7 @@ class ErrorAttachmentsS3Uploader(MutableModel):
                 self._immutable_logs_keys[file_path] = key
 
     def collect_external_attachments(
-        self, *, exception: BaseException | None, logs_folder: Path | None, database_path: Path | None
+        self, *, exception: BaseException | None, logs_folder: Path | None
     ) -> tuple[Mapping[str, Collection[str]], tuple[Callable, ...]]:
         """Prepares external uploads that will be attached to the error report.
 
@@ -733,10 +692,6 @@ class ErrorAttachmentsS3Uploader(MutableModel):
                     compress=True,
                 )
 
-        if database_path and database_path.exists():
-            key = get_s3_upload_key("sculptor_db", ".db")
-            uploads[("", key)] = partial(self._upload_file_cb, key=key, file_path=database_path)
-
         grouped_uris = defaultdict(list)
         for group, key in uploads.keys():
             grouped_uris[group].append(get_s3_upload_url(key))
@@ -769,8 +724,7 @@ def add_extra_info_hook(event: Event, hint: Hint) -> tuple[Event, Hint, tuple[Ca
 
     s3_uri_groups, callbacks = _ATTACHMENTS_UPLOADER.collect_external_attachments(
         exception=exception,
-        logs_folder=_get_sculptor_log_folder_from_scope(),
-        database_path=_get_sculptor_db_from_scope(),
+        logs_folder=_get_log_folder_from_scope()
     )
 
     if s3_uri_groups:
@@ -784,9 +738,7 @@ def add_extra_info_hook(event: Event, hint: Hint) -> tuple[Event, Hint, tuple[Ca
             # the type checker knows that the outcome has to be a list?
             event["extra"][extra_name] = event["extra"].get(extra_name, []) + s3_uris  # pyre-fixme[58]
 
-    event["extra"]["disk_usage_percent"] = _get_disk_percentage_full()
     event["extra"]["platform"] = _get_platform_info()
-    event["extra"]["container_environment"] = _get_likely_container_environment()
     return event, hint, tuple(callbacks)
 
 
@@ -795,7 +747,6 @@ def setup_sentry_with_context(
     release_id: str,
     git_commit_sha: str,
     log_folder: Path,
-    db_path: Path | None,
     environment: str | None = None,
     global_user_context: Mapping[str, str] | None = None,
 ) -> None:
@@ -813,9 +764,8 @@ def setup_sentry_with_context(
         # need to cast to `dict` to make PyCharm happy
         cast(
             dict,
-            SentrySculptorConfigDict(
+            SentryMindsConfigDict(
                 log_folder_path=log_folder,
-                db_path=db_path,
             ),
         ),
     )
