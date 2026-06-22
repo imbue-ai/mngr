@@ -65,6 +65,16 @@ class MalformedMngrOutputError(MindError, ValueError):
     ...
 
 
+class InvalidJsonBodyError(MindError, ValueError):
+    """Raised when a request body is missing or not valid JSON.
+
+    Subclasses ``ValueError`` so the desktop client's request handlers can keep
+    catching ``(json.JSONDecodeError, ValueError)`` around body parsing.
+    """
+
+    ...
+
+
 class MindsConfigError(MindError):
     """Raised when minds config cannot be parsed or validated."""
 
