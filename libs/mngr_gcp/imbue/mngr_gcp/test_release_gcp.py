@@ -212,7 +212,7 @@ class _GcpReleaseProfile(VpsCloudReleaseProfile):
     name_prefix = GCP_TEST_NAME_PREFIX
 
     # Trip 4: GCP curates the missing-credential help text toward the ADC login command (the
-    # spec's divergence was fixed in this PR -- see `_gcp_unavailable_error` in mngr_gcp/backend.py).
+    # spec's divergence was fixed in this PR -- see `_gcp_not_authorized_error` in mngr_gcp/backend.py).
     has_curated_unavailable_help = True
     credential_setup_command = "gcloud auth application-default login"
     # GCP captures host_dir to the GCS state bucket at `mngr stop`, so a stopped host's host_dir is

@@ -41,7 +41,11 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    rc.check_bare_print(_DIR, snapshot(33), excluded_patterns=("_kqueue_tty_test_script.py",))
+    # 34 includes the blessed `write_stderr_line` helper in cli/output_helpers.py -- the
+    # stderr sibling of `write_human_line`, used for the `mngr list` end-of-output error
+    # block so piped stdout stays clean. Call sites route through it rather than writing
+    # to sys.stderr directly.
+    rc.check_bare_print(_DIR, snapshot(34), excluded_patterns=("_kqueue_tty_test_script.py",))
 
 
 # --- Exception handling ---

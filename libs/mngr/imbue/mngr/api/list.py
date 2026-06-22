@@ -33,7 +33,9 @@ from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderDiscoveryError
 from imbue.mngr.errors import ProviderEmptyError
+from imbue.mngr.errors import ProviderError
 from imbue.mngr.errors import ProviderInstanceNotFoundError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import HostDetails
@@ -112,17 +114,35 @@ class ErrorInfo(FrozenModel):
 
     exception_type: str = Field(description="The type name of the exception (e.g., 'RuntimeError')")
     message: str = Field(description="The error message")
+    # True when the underlying exception is a ProviderUnavailableError (which now
+    # includes ProviderNotAuthorizedError). Lets the CLI pick the granular
+    # provider-inaccessible exit code without re-parsing the message or type name.
+    is_provider_inaccessible: bool = Field(
+        default=False,
+        description="Whether this error means a provider was unreachable or unauthenticated",
+    )
+    # Verbose, multi-line remediation guidance (from MngrError.user_help_text), if any.
+    help_text: str | None = Field(default=None, description="Verbose remediation guidance for the user")
 
     @classmethod
     def build(cls, exception: BaseException) -> "ErrorInfo":
         """Build an ErrorInfo from an exception."""
-        return cls(exception_type=type(exception).__name__, message=str(exception))
+        return cls(
+            exception_type=type(exception).__name__,
+            message=str(exception),
+            is_provider_inaccessible=isinstance(exception, ProviderUnavailableError),
+            help_text=exception.user_help_text if isinstance(exception, MngrError) else None,
+        )
 
 
 class ProviderErrorInfo(ErrorInfo):
     """Error information with provider context."""
 
     provider_name: ProviderInstanceName = Field(description="Name of the provider where the error occurred")
+    # Concise reason/remediation lifted from ProviderUnavailableError so callers can
+    # render a consistent one-line summary; None for non-provider-unavailable failures.
+    short_reason: str | None = Field(default=None, description="Concise reason the provider is unavailable")
+    short_remediation: str | None = Field(default=None, description="Concise next step the user can take")
 
     @classmethod
     def build_for_provider(cls, exception: BaseException, provider_name: ProviderInstanceName) -> "ProviderErrorInfo":
@@ -131,6 +151,10 @@ class ProviderErrorInfo(ErrorInfo):
             exception_type=type(exception).__name__,
             message=str(exception),
             provider_name=provider_name,
+            is_provider_inaccessible=isinstance(exception, ProviderUnavailableError),
+            help_text=exception.user_help_text if isinstance(exception, MngrError) else None,
+            short_reason=exception.short_reason if isinstance(exception, ProviderUnavailableError) else None,
+            short_remediation=exception.short_remediation if isinstance(exception, ProviderUnavailableError) else None,
         )
 
 
@@ -414,15 +438,24 @@ def _construct_and_discover_for_provider(
         return
     except Exception as e:
         if params.error_behavior == ErrorBehavior.ABORT:
-            # Wrap so downstream handlers (e.g. discovery_events'
-            # _write_unfiltered_full_snapshot_logged, which only knows how to
-            # extract provider_name from ProviderDiscoveryError) can attribute
-            # the failure to this provider. The CONTINUE branch below already
-            # carries provider_name through emit_discovery_error_event; ABORT
-            # needs the same attribution so downstream consumers (e.g. minds'
-            # providers panel) see a usable provider_name on the emitted event.
+            # A ProviderError already carries provider_name and renders a clean,
+            # attributable message (e.g. ProviderUnavailableError /
+            # ProviderNotAuthorizedError), so re-raise it as-is -- this keeps the
+            # auth/unavailable message consistent and lets the CLI map it to the
+            # provider-inaccessible exit code. Only wrap genuinely
+            # non-attributable failures so downstream handlers (e.g.
+            # discovery_events' _write_unfiltered_full_snapshot_logged, minds'
+            # providers panel) can still recover a provider_name.
+            if isinstance(e, ProviderError):
+                raise
             raise ProviderDiscoveryError(provider_name, e) from e
-        logger.opt(exception=e).error("Error discovering agents for provider {}", provider_name)
+        # Expected, handled conditions (provider unreachable / unauthenticated) are
+        # surfaced cleanly via result.errors, so log them at debug to avoid noisy
+        # error-level duplicates; only unexpected failures get an error + traceback.
+        if isinstance(e, ProviderUnavailableError):
+            logger.debug("Provider {} is unavailable: {}", provider_name, e)
+        else:
+            logger.opt(exception=e).error("Error discovering agents for provider {}", provider_name)
         emit_discovery_error_event(
             mngr_ctx.config,
             error_type=type(e).__name__,
@@ -643,7 +676,13 @@ def _construct_discover_and_emit_for_provider(
             if isinstance(e, MngrError):
                 raise
             raise MngrError(str(e)) from e
-        logger.opt(exception=e).error("Error discovering agents for provider {}", provider_name)
+        # Expected, handled conditions (provider unreachable / unauthenticated) are
+        # surfaced cleanly via result.errors, so log them at debug to avoid noisy
+        # error-level duplicates; only unexpected failures get an error + traceback.
+        if isinstance(e, ProviderUnavailableError):
+            logger.debug("Provider {} is unavailable: {}", provider_name, e)
+        else:
+            logger.opt(exception=e).error("Error discovering agents for provider {}", provider_name)
         emit_discovery_error_event(
             mngr_ctx.config,
             error_type=type(e).__name__,

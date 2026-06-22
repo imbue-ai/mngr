@@ -41,6 +41,17 @@ def write_human_line(message: str, *args: Any) -> None:
     sys.stdout.flush()
 
 
+def write_stderr_line(message: str) -> None:
+    """Write a human-readable line to stderr.
+
+    Use this for end-of-command diagnostics that must not pollute stdout (so piped
+    stdout stays clean), e.g. the consolidated error block ``mngr list`` prints after
+    its results. Sibling to ``write_human_line`` (which targets stdout).
+    """
+    sys.stderr.write(message + "\n")
+    sys.stderr.flush()
+
+
 def write_command_stdout_and_stderr(stdout: str, stderr: str) -> None:
     """Write a captured command's stdout and stderr to the user's stdout/stderr.
 
