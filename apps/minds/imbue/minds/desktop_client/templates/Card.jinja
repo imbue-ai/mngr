@@ -16,7 +16,7 @@
                                 a flex-1 child pushes following items to the right edge).
                   - row-spread: flex items-center justify-between gap-1.5 (header/action layout).
     padding     "default" (p-4) or "tight" (px-4 py-2).
-    interactive Adds cursor-pointer + transition + hover:border-strong so the
+    interactive Adds cursor-pointer + hover:border-strong so the
                 surface reads as clickable. Typical with tag="a".
     tag         "div" (default), "a", or "button". Use "a" for click-anywhere
                 navigation; pass href=... when "a".
@@ -43,7 +43,7 @@
   "default": "p-4",
   "tight": "px-4 py-2",
 }[padding] -%}
-{%- set _interactive_cls = "cursor-pointer transition hover:border-strong hover:shadow-raised" if interactive else "" -%}
+{%- set _interactive_cls = "cursor-pointer hover:border-strong hover:shadow-raised" if interactive else "" -%}
 {%- set _anchor_cls = "no-underline text-inherit" if tag == "a" else "" -%}
 {%- set _cls = ["minds-card", _layout_cls, _padding_cls, _interactive_cls, _anchor_cls, extra] | reject("equalto", "") | join(" ") -%}
 {%- if tag == "a" -%}

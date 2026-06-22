@@ -8,7 +8,7 @@
 {% set _scripts %}
 <script src="/_static/auth.js" defer></script>
 {% endset %}
-<CardPage :title="title" scripts={{ _scripts }}>
+<PageNarrowContainer :title="title" scripts={{ _scripts }}>
   {% if message %}
     <Notice variant="info">{{ message }}</Notice>
   {% endif %}
@@ -67,4 +67,4 @@
       Don't have an account? <Link href="#" weight="medium" data-show-tab="signup">Create one</Link>
     </div>
   </div>
-</CardPage>
+</PageNarrowContainer>

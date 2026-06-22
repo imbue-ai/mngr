@@ -14,7 +14,7 @@
   });
 </script>
 {% endset %}
-<CardPage title="Account settings" max_width="max-w-[480px]" scripts={{ _scripts }}>
+<PageNarrowContainer title="Account settings" max_width="max-w-[480px]" scripts={{ _scripts }}>
   <h1 class="type-heading-lg text-primary mb-2">Account settings</h1>
   <p class="text-secondary mb-6">Manage your Imbue account</p>
   <div class="flex justify-between items-center py-3 border-b border-subtle">
@@ -42,4 +42,4 @@
     <Button variant="danger" size="lg" block id="signout-btn">Sign out</Button>
   </div>
   <div class="text-center mt-4 type-body text-secondary"><Link href="/" weight="medium">Back to home</Link></div>
-</CardPage>
+</PageNarrowContainer>

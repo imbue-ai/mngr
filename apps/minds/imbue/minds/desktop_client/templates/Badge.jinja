@@ -15,11 +15,14 @@
 
   The badge carries no position of its own (a reusable component owns no outer
   offset): the caller places it. The titlebar lays the icon + badge out in a
-  ``gap-[3px]`` row (the gap collapses when the badge is ``hidden``); chrome.js
-  sets the count text (with the same 99+ cap) and toggles ``class="hidden"`` as
-  the pending count changes. Any undeclared HTML attribute (id=, class=, data-*)
-  flows through JinjaX ``attrs``; ``class="..."`` is appended to the component's
-  canonical class set.
+  ``gap-[3px]`` row (the gap collapses when the badge is hidden); chrome.js sets
+  the count text (with the same 99+ cap) and toggles the native ``hidden``
+  attribute as the pending count changes. Hide it with that attribute, NOT a
+  ``hidden`` class: the count pill bakes in ``inline-flex``, which beats the
+  ``.hidden`` utility in the cascade, so a ``hidden`` class would leave the pill
+  showing; the ``[hidden]`` base rule (``display: none !important``) wins. Any
+  undeclared HTML attribute (id=, class=, hidden, data-*) flows through JinjaX
+  ``attrs``; ``class="..."`` is appended to the component's canonical class set.
 #}
 {%- if count == "" -%}
 <span {{ attrs.render(classes="inline-block align-middle w-2 h-2 rounded-full bg-important") }}></span>

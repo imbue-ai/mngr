@@ -40,6 +40,6 @@
   "default": "",
   "danger": "titlebar-btn-danger",
 } -%}
-{%- set _btn_base = "inline-flex items-center justify-center cursor-pointer transition-colors text-primary hover:bg-fill-hover active:bg-fill-active focus-visible:outline-2 focus-visible:outline-accent" -%}
+{%- set _btn_base = "inline-flex items-center justify-center cursor-pointer text-primary hover:bg-fill-hover active:bg-fill-active focus-visible:outline-2 focus-visible:outline-accent" -%}
 {%- set _cls = _btn_base ~ " " ~ _variants[variant] ~ " " ~ _tones[tone] ~ " " ~ extra -%}
 <button {{ attrs.render(type="button", classes=_cls) }}>{{ content }}</button>

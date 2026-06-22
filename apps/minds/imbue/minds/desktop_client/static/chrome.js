@@ -474,9 +474,13 @@
     if (count > 0) {
       // The badge is the Badge.jinja count pill; mirror its 99+ cap here.
       badge.textContent = count > 99 ? '99+' : String(count);
-      badge.classList.remove('hidden');
+      badge.hidden = false;
     } else {
-      badge.classList.add('hidden');
+      // Hide via the native `hidden` attribute, not a `hidden` class: the pill
+      // bakes in `inline-flex`, which beats the `.hidden` utility in the
+      // cascade (so a `hidden` class would leave a stray "0" showing). The
+      // `[hidden]` base rule is `display: none !important`, which wins.
+      badge.hidden = true;
     }
   }
 

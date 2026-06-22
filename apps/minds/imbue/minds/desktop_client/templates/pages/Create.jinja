@@ -246,13 +246,13 @@
   })();
 </script>
 {% endset %}
-<CardPage title="Create workspace" padding="form" max_width="max-w-[520px]" scripts={{ _scripts }}>
+<PageNarrowContainer title="Create workspace" padding="form" max_width="max-w-[520px]" scripts={{ _scripts }}>
   <form id="create-form" action="/create" method="post">
 
       <div class="flex items-center justify-between gap-4 mb-4">
         <h1 class="type-label text-secondary">Create workspace</h1>
         <select id="account_id" name="account_id"
-                class="max-w-[220px] type-helper text-right text-tertiary bg-transparent border-0 rounded-md px-1 py-1 outline-none cursor-pointer transition-colors hover:text-primary focus:outline-none focus:ring-0">
+                class="max-w-[220px] type-helper text-right text-tertiary bg-transparent border-0 rounded-md px-1 py-1 outline-none cursor-pointer hover:text-primary focus:outline-none focus:ring-0">
           {% for acct in accounts %}
             <option value="{{ acct.user_id }}"{% if acct.user_id == default_account_id %} selected{% endif %}>{{ acct.email }}</option>
           {% endfor %}
@@ -400,4 +400,4 @@
         </div>
       </div>
   </form>
-</CardPage>
+</PageNarrowContainer>

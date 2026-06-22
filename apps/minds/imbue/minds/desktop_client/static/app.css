@@ -407,7 +407,6 @@ html {
   border-radius: var(--radius-lg);
   cursor: pointer;
   background: var(--c-fill-subtle);
-  transition: border-color 150ms, background 150ms;
 }
 .opt:hover {
   border-color: var(--c-border-strong);
