@@ -1273,10 +1273,10 @@ def test_elevation_uses_shadow_roles_not_raw_steps() -> None:
 
 def test_notice_renders_each_variant() -> None:
     variants_to_class = {
-        "info": "bg-info/12",
-        "warn": "bg-warning/12",
-        "success": "bg-success/12",
-        "error": "bg-important/12",
+        "info": "bg-info/8",
+        "warn": "bg-warning/8",
+        "success": "bg-success/8",
+        "error": "bg-important/8",
     }
     for variant, css_class in variants_to_class.items():
         html = CATALOG.render("Notice", variant=variant, _content="msg")

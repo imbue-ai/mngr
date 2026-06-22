@@ -396,7 +396,7 @@
 
     {# Status / feedback tokens. One solid hue per semantic (Figma),
        mode-independent; notice / badge backgrounds are derived with an
-       opacity modifier (bg-success/12 etc.). data-token marks each
+       opacity modifier (bg-success/8 etc.). data-token marks each
        --color-* for the drift guard. #}
     <section id="status" class="scroll-mt-8 mb-12">
       <h2 class="type-heading text-primary mb-1">Status / feedback tokens</h2>
@@ -404,7 +404,7 @@
         One solid hue per semantic (<code>important</code> / <code>success</code>
         / <code>warning</code> / <code>info</code>). Same in both modes; notice /
         badge tints are derived via an opacity modifier (e.g.
-        <code>bg-success/12 border-success/30 text-success</code>).
+        <code>bg-success/8 border-success/50 text-success</code>).
       </p>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
 
@@ -418,8 +418,8 @@
               <div data-token="--color-info" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-info"></div><code class="type-helper font-mono text-secondary">info</code></div>
             </div>
             <div class="flex flex-col gap-2">
-              <div class="rounded-md border border-success/30 bg-success/12 text-success px-3 py-2 type-body">Success notice (hue + opacity)</div>
-              <div class="rounded-md border border-important/30 bg-important/12 text-important px-3 py-2 type-body">Error notice (important)</div>
+              <div class="rounded-md border border-success/50 bg-success/8 text-success px-3 py-2 type-body">Success notice (hue + opacity)</div>
+              <div class="rounded-md border border-important/50 bg-important/8 text-important px-3 py-2 type-body">Error notice (important)</div>
             </div>
           </div>
         </div>
@@ -434,8 +434,8 @@
               <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-info"></div><code class="type-helper font-mono text-secondary">info</code></div>
             </div>
             <div class="flex flex-col gap-2">
-              <div class="rounded-md border border-success/30 bg-success/12 text-success px-3 py-2 type-body">Success notice (hue + opacity)</div>
-              <div class="rounded-md border border-important/30 bg-important/12 text-important px-3 py-2 type-body">Error notice (important)</div>
+              <div class="rounded-md border border-success/50 bg-success/8 text-success px-3 py-2 type-body">Success notice (hue + opacity)</div>
+              <div class="rounded-md border border-important/50 bg-important/8 text-important px-3 py-2 type-body">Error notice (important)</div>
             </div>
           </div>
         </div>
@@ -502,14 +502,14 @@
     <section id="radius" class="scroll-mt-8 mb-12">
       <h2 class="type-heading text-primary mb-1">Corner radius</h2>
       <p class="type-helper text-secondary mb-4">
-        Four steps (2 / 6 / 8 / 16 px) plus <code>rounded-full</code>; each
+        Four steps (4 / 6 / 8 / 16 px) plus <code>rounded-full</code>; each
         plays one role. <code>rounded-xl</code> (16px) is reserved for the
         largest surfaces.
       </p>
       <div class="grid grid-cols-2 sm:grid-cols-5 gap-4">
         <div class="flex flex-col items-center text-center">
           <div class="w-16 h-16 bg-fill-active rounded-sm"></div>
-          <code class="type-helper font-mono text-secondary mt-1">rounded-sm (2px)</code>
+          <code class="type-helper font-mono text-secondary mt-1">rounded-sm (4px)</code>
           <span class="type-helper text-secondary">subtle accents, tiny badges</span>
         </div>
         <div class="flex flex-col items-center text-center">

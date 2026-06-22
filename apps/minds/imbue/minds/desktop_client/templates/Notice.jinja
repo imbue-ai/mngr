@@ -10,10 +10,10 @@
   collapsed (the auth pages toggle this via classList.add/remove).
 #}
 {% set _notice_variants = {
-  "info":    "bg-info/12 text-info border border-info/30",
-  "warn":    "bg-warning/12 text-warning border border-warning/30",
-  "success": "bg-success/12 text-success border border-success/30",
-  "error":   "bg-important/12 text-important border border-important/30",
+  "info":    "bg-info/8 text-info border border-info/50",
+  "warn":    "bg-warning/8 text-warning border border-warning/50",
+  "success": "bg-success/8 text-success border border-success/50",
+  "error":   "bg-important/8 text-important border border-important/50",
 } %}
 {% set _cls = "px-3 py-2 rounded-md type-body my-2 " ~ _notice_variants[variant] %}
 <div {{ attrs.render(classes=_cls) }}>

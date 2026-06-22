@@ -125,3 +125,11 @@ Gave the styleguide's floating light/dark toggle an opaque surface background (`
 Updated the status / feedback semantic hues to the Figma values (applied in both modes, as before): `success` `#5c8a3c` -> `#25931f`, `warning` `#d49a2c` -> `#e18c14`, `info` `#527ea3` -> `#2582d0`; `important` is unchanged (`#f50d00`). All the derived notice / badge tints (e.g. `bg-success/12`, `border-info/30`, `text-warning`) pick up the new hues automatically.
 
 Further decluttered the styleguide previews: dropped the background from the Elevation section (the two shadow cards now sit on the page, where the drop shadows still read), and removed the card frame (border / background / padding) from the single-mode component examples (buttons, form controls, spinner, notices, links, icons, badges, opt, oauth, section header, dialog close, the workspace-accent picker). The frame is kept only where it carries meaning: the dual-mode token cards, the colored self-theming titlebar surfaces, the dark sidebar / chrome-glyph islands, the accent-spine card, and the page-container / modal backdrop illustrations.
+
+Tuned the radius scale and a couple of tokens:
+
+- `rounded-sm` moved from 2px to 4px (scale is now 4 / 6 / 8 / 16).
+
+- `success` `#25931f` -> `#0fa108` and `info` `#2582d0` -> `#1773cf` (warning and important unchanged).
+
+- The `Notice` tints are lighter and more defined: the fill drops from 12% to 8% opacity and the border rises from 30% to 50% (`bg-<hue>/8` + `border-<hue>/50`).
