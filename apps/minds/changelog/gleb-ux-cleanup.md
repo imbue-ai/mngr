@@ -151,3 +151,5 @@ Restyled the status badges (`StatusBadge`):
 - The styleguide now shows a full second row of `xs` badges (every variant) instead of a single "Tiny" badge tacked onto the end.
 
 All buttons now scale to 98% on `:active` (a subtle press-in), animated via `transition` (which also smooths the hover/press color + opacity changes). The primary button's active dim was eased from 60% to 70% opacity to match -- the scale now carries most of the press feedback.
+
+Tuned the button press feedback: the scale-down now animates over 100ms on the standard ease-in-out curve (`duration-100 ease-in-out`, i.e. `cubic-bezier(0.4, 0, 0.2, 1)`), and the press (`:active`) no longer changes color/opacity on any variant -- the press is now scale-only, so the scale carries the whole press feedback.

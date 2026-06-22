@@ -55,11 +55,12 @@ TEMPLATE_DIR: Final[Path] = Path(__file__).resolve().parent / "templates"
 # The focus ring is an outline OUTSIDE the button (outline-offset) so it never
 # overwrites the variant border; the offset gap is transparent (shows the
 # background) in every mode. focus-visible keeps it to keyboard focus. Pressing
-# nudges the whole button to 98% scale (``transition`` animates the scale +
-# color/opacity changes) for a tactile click across every variant.
+# nudges the whole button to 98% scale -- animated over 100ms on the standard
+# ease-in-out curve (``cubic-bezier(0.4, 0, 0.2, 1)``) -- for a tactile click
+# across every variant. The press only scales; it does not change color/opacity.
 _BTN_BASE: Final[str] = (
     "inline-flex items-center justify-center gap-1.5 leading-tight "
-    "transition disabled:opacity-40 disabled:cursor-not-allowed "
+    "transition duration-100 ease-in-out disabled:opacity-40 disabled:cursor-not-allowed "
     "cursor-pointer no-underline whitespace-nowrap active:scale-[0.98] "
     "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
 )
@@ -73,14 +74,15 @@ _BTN_SIZES: Final[Mapping[str, str]] = {
 # Variant recipes (Figma "Button" component, node 342-4059). Every variant
 # carries a 1px border -- visible on secondary, transparent elsewhere -- so all
 # variants share the exact same box height (border-box) regardless of border.
-# Solid variants (primary / danger / success) dim via opacity on hover/press;
-# the no-fill variants (secondary / ghost) tint with the fill tokens instead.
+# Solid variants (primary / danger / success) dim via opacity on hover; the
+# no-fill variants (secondary / ghost) tint with the fill tokens on hover. The
+# press (active) state carries no color change -- only the shared scale-down.
 _BTN_VARIANTS: Final[Mapping[str, str]] = {
-    "primary": "bg-surface-inverse text-inverse-primary border border-transparent hover:opacity-80 active:opacity-70",
-    "secondary": "bg-transparent text-primary border border-default hover:bg-fill-hover active:bg-fill-active",
-    "danger": "bg-important text-white border border-transparent hover:opacity-90 active:opacity-75",
-    "success": "bg-success text-white border border-transparent hover:opacity-90 active:opacity-75",
-    "ghost": "bg-transparent text-primary border border-transparent hover:bg-fill-hover active:bg-fill-active",
+    "primary": "bg-surface-inverse text-inverse-primary border border-transparent hover:opacity-80",
+    "secondary": "bg-transparent text-primary border border-default hover:bg-fill-hover",
+    "danger": "bg-important text-white border border-transparent hover:opacity-90",
+    "success": "bg-success text-white border border-transparent hover:opacity-90",
+    "ghost": "bg-transparent text-primary border border-transparent hover:bg-fill-hover",
 }
 
 # Shared Tailwind class string for the three form-control components
