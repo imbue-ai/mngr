@@ -15,6 +15,7 @@ from pydantic import SecretStr
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
@@ -533,3 +534,75 @@ def test_ensure_host_key_pinned_pins_outer_key_when_only_container_entry_exists(
     contents = known_hosts_path.read_text()
     assert "AAAAcontainerkey" in contents
     assert "AAAAouterkey" in contents
+
+
+class _FastPathGuardProvider(ImbueCloudProvider):
+    """Reaches the ``fast_mode=require`` start-arg guard without real account/lease I/O."""
+
+    _did_reach_fast_path: bool = False
+
+    def _require_account(self, override: str | None = None) -> ImbueCloudAccount:
+        return ImbueCloudAccount("tester@imbue.com")
+
+    def _get_access_token(self, account: ImbueCloudAccount) -> SecretStr:
+        return SecretStr("fake-token")
+
+    def _create_host_fast_path(
+        self,
+        *,
+        name: HostName,
+        attributes: LeaseAttributes,
+        token: SecretStr,
+        region: str | None,
+    ) -> Host:
+        self._did_reach_fast_path = True
+        return cast(Host, OfflineHost.model_construct())
+
+
+# Minimal build args that select the fast (adopt) path with a valid repo identity.
+_FAST_PATH_BUILD_ARGS: tuple[str, ...] = (
+    "repo_url=https://github.com/imbue-ai/forever-claude-template.git",
+    "repo_branch_or_tag=minds-v0.3.2",
+    "fast_mode=require",
+)
+
+
+def _make_fast_path_guard_provider(mngr_ctx: MngrContext) -> _FastPathGuardProvider:
+    return _FastPathGuardProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"),
+        mngr_ctx=mngr_ctx,
+        _did_reach_fast_path=False,
+    )
+
+
+def test_fast_path_allows_start_args_the_baked_container_already_carries(temp_mngr_ctx: MngrContext) -> None:
+    """fast_mode=require must accept the pool_host template's docker run flags.
+
+    The pre-baked container is already created with these, so requesting them on
+    the adopt path is consistent rather than a conflict -- this is what keeps the
+    fast and slow paths accepting the same start args.
+    """
+    provider = _make_fast_path_guard_provider(temp_mngr_ctx)
+    host = provider.create_host(
+        HostName("mind-test"),
+        start_args=["--restart=unless-stopped", "--workdir=/", "--security-opt=no-new-privileges"],
+        build_args=list(_FAST_PATH_BUILD_ARGS),
+    )
+    assert provider._did_reach_fast_path
+    assert isinstance(host, OfflineHost)
+
+
+def test_fast_path_rejects_start_args_the_baked_container_cannot_honor(temp_mngr_ctx: MngrContext) -> None:
+    """A start arg outside the adoptable set still fails (the adopted container
+    cannot apply it without a rebuild), and the error names only that arg."""
+    provider = _make_fast_path_guard_provider(temp_mngr_ctx)
+    with pytest.raises(MngrError) as exc_info:
+        provider.create_host(
+            HostName("mind-test"),
+            start_args=["--restart=unless-stopped", "--privileged"],
+            build_args=list(_FAST_PATH_BUILD_ARGS),
+        )
+    message = str(exc_info.value)
+    assert "--privileged" in message
+    assert "--restart=unless-stopped" not in message
+    assert not provider._did_reach_fast_path
