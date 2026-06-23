@@ -363,9 +363,10 @@ minds-install:
     . apps/minds/scripts/select_node_version.sh || exit 2
     cd apps/minds && pnpm install
 
-# Override agent_name / branch / fct (FCT worktree path) via positional args:
-#   just minds-start agent_name=foo branch=some-branch
-#   just minds-start fct=.external_worktrees/my-fct-worktree
+# Override agent_name / branch / fct (FCT worktree path) via positional args
+# (just has no name=value form for recipe params -- pass them in order):
+#   just minds-start my-agent my-branch
+#   just minds-start mindtest "" .external_worktrees/my-fct-worktree   # 3rd arg = fct
 # `fct` defaults to .external_worktrees/forever-claude-template; an absolute
 # path is used as-is, a relative one is resolved against the mngr root. This
 # is what gets synced (vendor/mngr/) and exported as MINDS_WORKSPACE_GIT_URL,
