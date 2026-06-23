@@ -1,8 +1,9 @@
 # How `vendor/mngr` is synced
 
 `forever-claude-template` (FCT) vendors a full copy of the mngr monorepo at
-`vendor/mngr/`. The FCT `Dockerfile` builds the container's `mngr` from that
-directory (`uv tool install -e`), so whatever lands in `vendor/mngr/` *is* the
+`vendor/mngr/`. The FCT Docker build installs the container's `mngr` from that
+directory editable (`uv tool install -e vendor/mngr/libs/mngr`, run by
+`scripts/build_workspace.sh`), so whatever lands in `vendor/mngr/` *is* the
 mngr that runs inside every agent.
 
 `vendor/mngr/` is a plain copied-in snapshot. It is **not** a git subtree and
