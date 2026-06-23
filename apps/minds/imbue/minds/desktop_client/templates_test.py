@@ -1806,8 +1806,11 @@ def test_badge_count_caps_at_99_plus() -> None:
 
 def test_badge_class_and_id_pass_through() -> None:
     # The titlebar requests badge relies on id + the chrome.js-toggled `hidden`
-    # class flowing through onto the badge's root span.
-    html = CATALOG.render("Badge", **{"id": "requests-badge", "class": "hidden absolute top-0.5 right-0.5"})
+    # class flowing through onto the badge's root span. ``**{...}`` is required
+    # because ``class`` is a reserved word; ty flags the dict[str, str] unpack as
+    # possibly feeding render's typed ``caller`` kwarg, which it never does here.
+    badge_attrs = {"id": "requests-badge", "class": "hidden absolute top-0.5 right-0.5"}
+    html = CATALOG.render("Badge", **badge_attrs)  # ty: ignore[invalid-argument-type]
     assert 'id="requests-badge"' in html
     assert "hidden" in html
     assert "absolute" in html
