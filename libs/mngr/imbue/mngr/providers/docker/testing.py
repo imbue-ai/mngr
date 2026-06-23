@@ -7,6 +7,7 @@ from pathlib import Path
 import docker
 import docker.errors
 import docker.models.containers
+import pytest
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
@@ -205,20 +206,31 @@ def make_docker_provider_with_cleanup(
     worker_docker_state_prefixes.append(mngr_ctx.config.prefix)
     yield provider
 
+    # Best-effort teardown: attempt to tear down every host, collecting the
+    # specific failures these operations raise instead of silently swallowing a
+    # broad set, then fail loudly at the end. A host whose container or volume
+    # could not be removed would otherwise leak silently across tests.
+    cleanup_failures: list[str] = []
     try:
         cg = mngr_ctx.concurrency_group
         discovered = provider.discover_hosts(cg, include_destroyed=True)
-        for host in discovered:
-            try:
-                provider.destroy_host(host.host_id)
-            except (MngrError, CleanupFailedGroup, docker.errors.DockerException, OSError):
-                pass
-            try:
-                provider.delete_host(provider.get_host(host.host_id))
-            except (MngrError, CleanupFailedGroup, docker.errors.DockerException, OSError):
-                pass
-    except (MngrError, CleanupFailedGroup, docker.errors.DockerException, OSError):
-        pass
+    except (MngrError, docker.errors.DockerException) as e:
+        discovered = []
+        cleanup_failures.append(f"discover_hosts for cleanup failed: {e}")
+
+    for host in discovered:
+        try:
+            provider.destroy_host(host.host_id)
+        except CleanupFailedGroup as group:
+            cleanup_failures.extend(f.message for f in group.failures)
+        except (MngrError, docker.errors.DockerException) as e:
+            cleanup_failures.append(f"destroy_host({host.host_id}) failed: {e}")
+        try:
+            provider.delete_host(provider.get_host(host.host_id))
+        except CleanupFailedGroup as group:
+            cleanup_failures.extend(f.message for f in group.failures)
+        except (MngrError, docker.errors.DockerException) as e:
+            cleanup_failures.append(f"delete_host({host.host_id}) failed: {e}")
 
     try:
         for container in provider._list_containers():
@@ -244,3 +256,6 @@ def make_docker_provider_with_cleanup(
         provider.close()
     except (OSError, docker.errors.DockerException):
         pass
+
+    if cleanup_failures:
+        pytest.fail("docker provider test teardown failed to clean up:\n  " + "\n  ".join(cleanup_failures))

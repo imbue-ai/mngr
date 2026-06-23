@@ -46,6 +46,7 @@ from imbue.mngr.providers.docker.testing import make_docker_provider
 from imbue.mngr.providers.docker.testing import make_docker_provider_with_local_volume
 from imbue.mngr.providers.docker.testing import make_offline_docker_provider
 from imbue.mngr.providers.docker.testing import write_fake_docker_context
+from imbue.mngr.providers.local.volume import LocalVolume
 
 HOST_ID_A = "host-00000000000000000000000000000001"
 HOST_ID_B = "host-00000000000000000000000000000002"
@@ -855,25 +856,32 @@ class _BuildRemovalDockerClient:
         self.images = images
 
 
-def test_remove_build_image_unforced_by_default(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
-    """_remove_build_image deletes the image unforced by default; force passes through.
+def test_remove_build_image_force_untags_present_image(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """_remove_build_image drops mngr's tag with force=True.
 
-    An unforced removal deletes the underlying image (full cleanup) once no
-    container references it; force=True is reserved for the fallback that drops
-    only the tag.
+    Callers remove the host's container first, so force deletes the now-
+    unreferenced image; force also lets mngr relinquish its tag when something
+    unexpected still references the image, rather than failing with a 409.
     """
     provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
     fake_images = _BuildRemovalImages(present=True)
     provider.__dict__["_docker_client"] = _BuildRemovalDockerClient(fake_images)
 
     provider._remove_build_image(HostId(HOST_ID_A))
-    provider._remove_build_image(HostId(HOST_ID_A), force=True)
 
     expected_tag = DockerProviderInstance._build_image_tag(HostId(HOST_ID_A))
-    assert fake_images.remove_calls == [
-        {"tag": expected_tag, "force": False},
-        {"tag": expected_tag, "force": True},
-    ]
+    assert fake_images.remove_calls == [{"tag": expected_tag, "force": True}]
+
+
+def test_remove_build_image_noops_when_absent(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """_remove_build_image does nothing when the build image is not present."""
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    fake_images = _BuildRemovalImages(present=False)
+    provider.__dict__["_docker_client"] = _BuildRemovalDockerClient(fake_images)
+
+    provider._remove_build_image(HostId(HOST_ID_A))
+
+    assert fake_images.remove_calls == []
 
 
 def _image_in_use_conflict() -> docker.errors.APIError:
@@ -979,10 +987,9 @@ def test_delete_host_destroys_leaked_container_then_removes_build_image(
     """delete_host clears a leaked container so no trace of the host remains.
 
     A container left over from an earlier failed destroy still references the
-    build image, so the unforced removal hits a 409 conflict. delete_host must
-    destroy that container and then drop the build image -- leaving no
-    container, no image, and no host record -- rather than force-untagging the
-    image and leaking the container.
+    build image. delete_host re-runs destroy_host, which removes that container
+    before its build image, leaving no container, no image, and no host record
+    -- rather than force-untagging the image and leaking the container.
     """
     provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
     daemon = _LeakedContainerDaemon()
@@ -997,16 +1004,17 @@ def test_delete_host_destroys_leaked_container_then_removes_build_image(
     assert provider._host_store.read_host_record(HostId(HOST_ID_A), use_cache=False) is None
 
 
-@pytest.mark.allow_warnings(match=r"Failed to remove (build image|container) for host")
+@pytest.mark.allow_warnings(match=r"Failed to remove container for host")
 def test_delete_host_records_leak_when_container_removal_stays_stuck(
     temp_mngr_ctx: MngrContext, tmp_path: Path
 ) -> None:
     """A container that cannot be removed is surfaced as a leak, not a crash.
 
-    When destroy_host still cannot remove the conflicting container, delete_host
-    force-drops the build-image tag and records the leftover resource as a
-    CleanupFailedGroup (which GC aggregates and continues past) while still
-    deleting the host record so the host does not reappear next sweep.
+    When destroy_host still cannot remove the conflicting container, that
+    container is recorded as a CleanupFailedGroup leak (which GC aggregates and
+    continues past). The build image tag is force-dropped regardless -- mngr
+    relinquishes its claim -- and the host record is still deleted so the host
+    does not reappear next sweep.
     """
     provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
     daemon = _LeakedContainerDaemon()
@@ -1018,7 +1026,37 @@ def test_delete_host_records_leak_when_container_removal_stays_stuck(
         provider.delete_host(host)
 
     assert any(f.category == CleanupFailureCategory.HOST_RESOURCE_REMAINS for f in exc_info.value.failures)
-    # The build-image tag is force-dropped even though the container is stuck...
+    # The stuck container is reported as a leak and remains, but mngr force-drops
+    # its build image tag regardless...
+    assert daemon.containers_present != []
     assert daemon.image_tags == set()
     # ...and the host record is still deleted, so the host does not reappear next sweep.
+    assert provider._host_store.read_host_record(HostId(HOST_ID_A), use_cache=False) is None
+
+
+class _RemoveDirectoryFailingVolume(LocalVolume):
+    """LocalVolume whose remove_directory always fails (mirrors DockerVolume's `rm -rf` failure)."""
+
+    def remove_directory(self, path: str) -> None:
+        raise MngrError(f"failed to remove directory {path}")
+
+
+@pytest.mark.allow_warnings(match=r"Failed to remove host volume for host")
+def test_delete_host_records_volume_removal_failure_as_leak(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """A host volume that cannot be removed is recorded as a leak, not dismissed.
+
+    remove_directory is idempotent on a missing path, so an exception means the
+    volume data still exists and could not be removed -- a leftover resource,
+    not a benign "no volume" case. delete_host must record it as a
+    CleanupFailedGroup while still deleting the host record.
+    """
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    provider.__dict__["_state_volume"] = _RemoveDirectoryFailingVolume(root_path=tmp_path)
+    provider.__dict__["_docker_client"] = _LeakedContainerDaemon()
+    host = _write_destroyed_host_record(provider, HOST_ID_A)
+
+    with pytest.raises(CleanupFailedGroup) as exc_info:
+        provider.delete_host(host)
+
+    assert any("host volume" in f.message for f in exc_info.value.failures)
     assert provider._host_store.read_host_record(HostId(HOST_ID_A), use_cache=False) is None
