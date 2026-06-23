@@ -600,20 +600,20 @@ minds-build-fct-nixos fct="" tag="fct-nixos-contract:local":
         exit 2
     fi
     cd "$fct_wt"
-    if [ ! -f Dockerfile.nixos ]; then
-        echo "error: $fct_wt does not contain Dockerfile.nixos" >&2
+    if [ ! -f nix/Dockerfile ]; then
+        echo "error: $fct_wt does not contain nix/Dockerfile" >&2
         exit 2
     fi
     echo "Verifying Docker/NixOS closure manifest via fct-nix-profile target"
     docker build \
         --target fct-nix-profile \
-        --file Dockerfile.nixos \
+        --file nix/Dockerfile \
         --tag "${FCT_NIX_PROFILE_IMAGE_TAG:-fct-nixos-profile-verify:local}" \
         .
     echo "Running Docker/NixOS image contract"
     PYTEST_MAX_DURATION_SECONDS="${PYTEST_MAX_DURATION_SECONDS:-3600}" \
         FCT_DOCKER_IMAGE_CONTRACT=1 \
-        FCT_DOCKERFILE=Dockerfile.nixos \
+        FCT_DOCKERFILE=nix/Dockerfile \
         FCT_DOCKER_IMAGE_TAG="{{tag}}" \
         FCT_DOCKER_BUILD_TIMEOUT_SECONDS="${FCT_DOCKER_BUILD_TIMEOUT_SECONDS:-3600}" \
         uv run pytest -s test_docker_image_contract.py::test_fct_dockerfile_image_contract
