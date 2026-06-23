@@ -1,3 +1,3 @@
 Consolidated the docs describing how FCT's `vendor/mngr` is kept in sync, so the `git archive` (release) vs `rsync` (dev/bake) mechanisms are explained in one canonical place (`apps/minds/docs/vendor-mngr-sync.md`) instead of being re-described in each skill.
 
-Trimmed the duplicated rsync-form explanation out of the `minds-dev-workflow` skill and pointed the `minds-justfile` skill's `sync-vendor-mngr` entry at the canonical doc.
+Trimmed the duplicated rsync-form explanation out of the `minds-dev-workflow` skill and pointed the `minds-justfile` skill's `sync-vendor-mngr` entry at the canonical doc. Also corrected the `minds-dev-workflow` skill's "Editable installs" note to attribute `uv tool install -e` to `scripts/build_workspace.sh` (which the Dockerfile invokes) rather than the Dockerfile directly, and to name the actual mngr install target (`vendor/mngr/libs/mngr`).

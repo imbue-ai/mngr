@@ -170,7 +170,7 @@ If this chain breaks (orphaned `mngr observe`/`mngr event` processes appear), so
 
 ### Editable installs
 
-The Dockerfile uses `uv tool install -e` for mngr (vendored under `vendor/mngr/`) and for the system_interface (at `apps/system_interface/`), so Python code changes in either location are picked up immediately after rsync. Frontend changes require the `npm run build` step (done automatically by `propagate_changes`).
+The FCT Docker build installs mngr (`vendor/mngr/libs/mngr`) and the system_interface (`apps/system_interface/`) editable via `uv tool install -e`, run by `scripts/build_workspace.sh` (which the Dockerfile invokes with `RUN bash`), so Python code changes in either location are picked up immediately after rsync. Frontend changes require the `npm run build` step (done automatically by `propagate_changes`).
 
 ### Template settings
 
