@@ -188,14 +188,23 @@ The local gate for the current implementation is:
 just minds-build-fct-nixos
 ```
 
-That recipe:
+The recipe is intentionally heavyweight and opt-in. It is the local validation path for the FCT Docker/NixOS image, not part of the normal Minds packaging build.
+
+By default, it uses the repos2 FCT worktree at `.external_worktrees/forever-claude-template`. It also accepts an explicit FCT checkout path and an optional output image tag:
+
+```bash
+just minds-build-fct-nixos .external_worktrees/forever-claude-template fct-nixos-contract:local
+```
+
+The recipe performs two checks:
 
 1. Enters the repos2 forever-claude-template worktree by default.
-2. Builds `nix/Dockerfile` to the `fct-nix-profile` target.
-3. Verifies the checked-in Nix closure manifest during that build.
-4. Runs the heavyweight Docker/NixOS image contract test against the full workspace image.
+2. Confirms that `nix/Dockerfile` exists.
+3. Builds `nix/Dockerfile` to the `fct-nix-profile` target and tags that intermediate image as `fct-nixos-profile-verify:local` unless `FCT_NIX_PROFILE_IMAGE_TAG` is set.
+4. Verifies the checked-in Nix closure manifest during that target build. If the realized Nix closure differs from `nix/fct-workspace-closure.<system>.txt`, the Docker build fails before the full workspace image is built.
+5. Runs the heavyweight Docker/NixOS image contract test against the full workspace image with `FCT_DOCKER_IMAGE_CONTRACT=1`, `FCT_DOCKERFILE=nix/Dockerfile`, and `FCT_DOCKER_IMAGE_TAG` set to the recipe's `tag` argument.
 
-This is deliberately separate from normal `just minds-build`. The normal Minds build packages application code and FCT state for runtime workspace creation; `just minds-build-fct-nixos` additionally builds the FCT Docker/NixOS image and validates its heavy runtime contract at build time.
+This is deliberately separate from normal `just minds-build`. The normal Minds build packages application code and FCT state for runtime workspace creation; it does not build and contract-test the FCT Docker/NixOS image. `just minds-build-fct-nixos` is the explicit safe-build gate for the Docker/NixOS path: it proves the closure manifest still matches and that the resulting image still satisfies the runtime contract.
 
 ## Design Principles
 

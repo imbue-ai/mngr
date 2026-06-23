@@ -4,4 +4,4 @@ Added an explicit `just minds-build-fct-nixos` gate that runs the FCT Docker/Nix
 
 Added a Docker/NixOS compute option to the Minds create-workspace UI and route it through the `docker-nixos` FCT template when launching local Docker workspaces.
 
-Copied forward the NixOS Docker workspace design doc from the earlier mngr branch and updated it for the current FCT implementation, including the `nix/Dockerfile` path, stable flake pin, digest-pinned base, closure-manifest gate, Playwright fontconfig fix, and `just minds-build-fct-nixos` validation path.
+Copied forward the NixOS Docker workspace design doc from the earlier mngr branch and updated it for the current FCT implementation, including the `nix/Dockerfile` path, stable flake pin, digest-pinned base, closure-manifest gate, Playwright fontconfig fix, and detailed `just minds-build-fct-nixos` validation path.
