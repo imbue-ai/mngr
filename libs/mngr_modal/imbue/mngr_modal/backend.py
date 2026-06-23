@@ -1,5 +1,6 @@
 import contextlib
 import os
+from collections.abc import Callable
 from contextlib import AbstractContextManager
 from io import StringIO
 from pathlib import Path
@@ -9,8 +10,10 @@ from typing import Final
 from typing import assert_never
 
 from loguru import logger
+from pydantic import AnyUrl
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import SecretStr
 from tenacity import retry
 from tenacity import retry_if_exception_type
 from tenacity import stop_after_attempt
@@ -18,6 +21,7 @@ from tenacity import wait_exponential
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import ConfigStructureError
@@ -33,6 +37,10 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.deploy_utils import collect_provider_profile_files
 from imbue.mngr.utils.env_utils import TEST_ENV_PATTERN
+from imbue.mngr_imbue_cloud.config import get_sessions_dir
+from imbue.mngr_imbue_cloud.connector.auth_helper import get_active_token
+from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
+from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
 from imbue.mngr_modal import hookimpl
 from imbue.mngr_modal.config import ModalMode
 from imbue.mngr_modal.config import ModalProviderConfig
@@ -46,10 +54,42 @@ from imbue.modal_proxy.interface import AppInterface
 from imbue.modal_proxy.interface import ModalInterface
 from imbue.modal_proxy.interface import VolumeInterface
 from imbue.modal_proxy.log_utils import ModalLoguruWriter
+from imbue.modal_proxy.remote import RemoteModalInterface
 
 MODAL_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("modal")
 STATE_VOLUME_SUFFIX: Final[str] = "-state"
 MODAL_NAME_MAX_LENGTH: Final[int] = 64
+
+
+class _ProxiedTokenProvider(MutableModel):
+    """Callable returning a fresh connector bearer token for PROXIED Modal.
+
+    PROXIED routes through the imbue_cloud connector ("gateway"), so it reuses
+    the SuperTokens session the imbue_cloud provider manages. Implemented as a
+    callable model (not a closure) to keep the resolve path free of nested
+    functions, and called per request so a freshly-refreshed token is used.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    session_store: ImbueCloudSessionStore = Field(repr=False)
+    client: ImbueCloudConnectorClient = Field(repr=False)
+
+    def __call__(self) -> SecretStr:
+        account = self.session_store.get_active_account()
+        if account is None:
+            raise ModalProxyAuthError(
+                "PROXIED Modal requires an imbue_cloud sign-in: no active account found. "
+                "Run `mngr imbue_cloud auth use` to sign in to the gateway."
+            )
+        return get_active_token(self.session_store, self.client, account)
+
+
+def _build_proxied_token_provider(mngr_ctx: MngrContext, connector_url: str) -> Callable[[], SecretStr]:
+    """Build a bearer-token provider for PROXIED Modal, backed by the imbue_cloud session."""
+    client = ImbueCloudConnectorClient(base_url=AnyUrl(connector_url))
+    session_store = ImbueCloudSessionStore(sessions_dir=get_sessions_dir(mngr_ctx.profile_dir))
+    return _ProxiedTokenProvider(session_store=session_store, client=client)
 
 
 def truncate_modal_name(name: str, max_length: int) -> str:
@@ -460,13 +500,18 @@ Supported build arguments for the modal provider:
         return "No start arguments are supported for the modal provider."
 
     @staticmethod
-    def _resolve_modal_interface(config: ProviderInstanceConfig) -> ModalInterface:
+    def _resolve_modal_interface(config: ProviderInstanceConfig, mngr_ctx: MngrContext) -> ModalInterface:
         """Validate ``config`` is a ``ModalProviderConfig`` and pick the matching ``ModalInterface``.
 
         Shared by ``build_provider_instance`` and ``bootstrap_for_host_creation``; both call
         sites need the same isinstance guard and the same ``match config.mode`` dispatch.
         Factoring it out keeps the per-mode dispatch in exactly one place so adding a new
         ``ModalMode`` variant only needs editing here.
+
+        ``DIRECT`` uses the Modal SDK against the user's account. ``PROXIED``
+        returns a ``RemoteModalInterface`` that proxies sandbox lifecycle to the
+        imbue_cloud connector ("gateway"), so the client needs no Modal token;
+        the connector authenticates to Modal on the user's behalf.
         """
         if not isinstance(config, ModalProviderConfig):
             raise ConfigStructureError(f"Expected ModalProviderConfig, got {type(config).__name__}")
@@ -475,8 +520,11 @@ Supported build arguments for the modal provider:
             case ModalMode.DIRECT:
                 return DirectModalInterface()
             case ModalMode.PROXIED:
-                raise NotImplementedError(
-                    "ModalMode.PROXIED (routing through imbue_cloud gateway) is not yet implemented.",
+                connector_url = config.get_connector_url()
+                return RemoteModalInterface(
+                    base_url=connector_url,
+                    environment=config.environment,
+                    token_provider=_build_proxied_token_provider(mngr_ctx, connector_url),
                 )
             case _ as unreachable:
                 assert_never(unreachable)
@@ -498,7 +546,7 @@ Supported build arguments for the modal provider:
         which creates the environment if missing; the subsequent
         ``build_provider_instance`` call then succeeds normally.
         """
-        modal_interface = ModalProviderBackend._resolve_modal_interface(config)
+        modal_interface = ModalProviderBackend._resolve_modal_interface(config, mngr_ctx)
         return ModalProviderBackend._construct_modal_provider(
             name, config, mngr_ctx, modal_interface, is_environment_creation_allowed=False
         )
@@ -522,7 +570,7 @@ Supported build arguments for the modal provider:
         ``build_provider_instance`` call in the create path reuses the cached
         app via ``_get_or_create_app``.
         """
-        modal_interface = ModalProviderBackend._resolve_modal_interface(config)
+        modal_interface = ModalProviderBackend._resolve_modal_interface(config, mngr_ctx)
         ModalProviderBackend._construct_modal_provider(
             name, config, mngr_ctx, modal_interface, is_environment_creation_allowed=True
         )

@@ -67,6 +67,11 @@ class LaunchMode(UpperCaseStrEnum):
     LIMA = auto()
     IMBUE_CLOUD = auto()
     AWS = auto()
+    # Runs the agent in a Modal sandbox provisioned keyless through the
+    # imbue_cloud connector (ModalMode.PROXIED). Experimental + testing-only:
+    # Modal sandboxes are ephemeral (~1 day max), so it is surfaced as
+    # "Modal (experimental)" in the create form.
+    MODAL = auto()
 
 
 class AIProvider(UpperCaseStrEnum):

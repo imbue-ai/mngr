@@ -454,6 +454,7 @@ def reconcile_imbue_cloud_providers_from_sessions(connector_url: str, *, root_na
     entries = data.get("entries") if isinstance(data, dict) else None
     if not isinstance(entries, list):
         return
+    has_active_account = False
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -470,11 +471,21 @@ def reconcile_imbue_cloud_providers_from_sessions(connector_url: str, *, root_na
                 root_name=root_name,
                 force_enable=False,
             )
+            has_active_account = True
         except BootstrapError as e:
             # Bad email format (e.g. ``""``) -- log and keep going so a
             # single corrupt session entry doesn't block reconciliation
             # for the others.
             logger.warning("Skipping imbue_cloud provider registration for {!r}: {}", email, e)
+    # "Modal (experimental)" (PROXIED) authenticates through the same connector
+    # session, so register the single ``[providers.modal]`` block only when the
+    # user actually has a gateway account -- otherwise a keyless modal provider
+    # would just error on every ``mngr list`` discovery cycle.
+    if has_active_account:
+        try:
+            set_modal_provider(connector_url, root_name=root_name)
+        except BootstrapError as e:
+            logger.warning("Skipping modal (PROXIED) provider registration: {}", e)
 
 
 def read_active_profile_dir(mngr_host_dir: Path) -> Path | None:
@@ -543,6 +554,19 @@ _AWS_BACKEND_NAME: Final[str] = "aws"
 _AWS_DOCKER_RUNTIME: Final[str] = "runsc"
 _AWS_INSTALL_GVISOR_RUNTIME: Final[bool] = True
 _AWS_PROVIDER_NAME_PREFIX: Final[str] = "aws-"
+
+# The single ``[providers.modal]`` instance for "Modal (experimental)". PROXIED
+# mode routes sandbox creation through the imbue_cloud connector (same
+# connector_url + SuperTokens session), so the block is written alongside the
+# imbue_cloud reconcile and only when the user has a gateway session. The
+# ephemeral/testing knobs (no persistence, no host volume, no post-create
+# snapshot) keep the PROXIED capability surface small; a generous sandbox
+# timeout avoids build-first turns being killed mid-provision.
+_MODAL_BACKEND_NAME: Final[str] = "modal"
+_MODAL_MODE_PROXIED: Final[str] = "PROXIED"
+_MODAL_DEFAULT_CPU: Final[float] = 2.0
+_MODAL_DEFAULT_MEMORY_GB: Final[float] = 4.0
+_MODAL_DEFAULT_SANDBOX_TIMEOUT_SECONDS: Final[int] = 3600
 # EC2 instance size for minds AWS workspaces. The mngr_aws default (t3.small,
 # 2 GB) is too small for the full forever-claude-template build (uv sync + npm
 # ci/build OOMs/thrashes on 2 GB); minds workspaces default to t3.large (8 GB).
@@ -682,6 +706,54 @@ def set_imbue_cloud_provider_for_account(
     providers[provider_name] = new_block
     _atomic_write_settings(settings_path, doc)
     logger.info("imbue_cloud provider {} registered in {}", provider_name, settings_path)
+    return True
+
+
+def set_modal_provider(connector_url: str, *, root_name: str | None = None) -> bool:
+    """Register the single ``[providers.modal]`` block (PROXIED mode) in settings.toml.
+
+    "Modal (experimental)" (``LaunchMode.MODAL``) runs each agent in a Modal
+    sandbox provisioned keyless through the imbue_cloud connector, so it reuses
+    the same ``connector_url`` + SuperTokens session as the imbue_cloud provider.
+    Called from the imbue_cloud reconcile (only when a gateway session exists),
+    since keyless modal cannot authenticate without one.
+
+    Idempotent: a no-op when an equivalent block already exists. Returns ``True``
+    when the file was modified so callers know to bounce ``mngr observe``.
+    """
+    if root_name is None:
+        root_name = resolve_minds_root_name()
+    _ensure_mngr_settings(root_name)
+    settings_path = _resolve_active_settings_path(root_name)
+    if settings_path is None:
+        return False
+    if settings_path.exists():
+        doc = tomlkit.loads(settings_path.read_text())
+    else:
+        doc = tomlkit.document()
+    providers = doc.setdefault("providers", tomlkit.table())
+    desired: dict[str, object] = {
+        "backend": _MODAL_BACKEND_NAME,
+        "mode": _MODAL_MODE_PROXIED,
+        "connector_url": connector_url,
+        "is_enabled": True,
+        # Ephemeral, testing-only: keeps the PROXIED capability surface small.
+        "is_persistent": False,
+        "is_host_volume_created": False,
+        "is_snapshotted_after_create": False,
+        "default_cpu": _MODAL_DEFAULT_CPU,
+        "default_memory": _MODAL_DEFAULT_MEMORY_GB,
+        "default_sandbox_timeout": _MODAL_DEFAULT_SANDBOX_TIMEOUT_SECONDS,
+    }
+    existing = providers.get(_MODAL_BACKEND_NAME)
+    if isinstance(existing, dict) and all(existing.get(key) == value for key, value in desired.items()):
+        return False
+    block = tomlkit.table()
+    for key, value in desired.items():
+        block[key] = value
+    providers[_MODAL_BACKEND_NAME] = block
+    _atomic_write_settings(settings_path, doc)
+    logger.info("modal provider (PROXIED) registered in {}", settings_path)
     return True
 
 

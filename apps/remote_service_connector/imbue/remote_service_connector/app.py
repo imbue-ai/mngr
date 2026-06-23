@@ -33,6 +33,7 @@ from uuid import UUID
 
 import httpx
 import modal
+from modal.stream_type import StreamType as ModalStreamType
 import ovh
 import paramiko
 import psycopg2
@@ -2906,6 +2907,178 @@ def _deactivate_paid_entry(table: str, value_column: str, value: str) -> None:
     finally:
         conn.close()
     clear_paid_status_cache()
+
+
+# ---------------------------------------------------------------------------
+# Modal sandbox proxy ("Modal experimental" / ModalMode.PROXIED)
+# ---------------------------------------------------------------------------
+# These routes let a client provision Modal sandboxes without holding Modal
+# credentials: this connector is a Modal *function* and so has ambient
+# control-plane access to its own workspace (see
+# libs/mngr/future_specs/providers/modal.md). The request/response shapes mirror
+# imbue.modal_proxy.data_types (RemoteModalInterface); they are duplicated here
+# rather than imported because this connector module is deployed self-contained
+# (its Modal image carries no imbue.* source, only pip deps + the auto-injected
+# modal client).
+#
+# Every sandbox is tagged with its owner; all reads/mutations are scoped to the
+# authenticated caller via that tag so users can only see/control their own.
+
+_MODAL_OWNER_TAG = "rsc-leased-to-user"
+
+
+class ModalSandboxCreateBody(BaseModel):
+    app_name: str
+    environment_name: str
+    image_ref: str | None = None
+    apt_packages: list[str] = []
+    timeout: int
+    cpu: float
+    memory: int
+    unencrypted_ports: list[int] = []
+    gpu: str | None = None
+    region: str | None = None
+    cidr_allowlist: list[str] | None = None
+
+
+class ModalSandboxExecBody(BaseModel):
+    args: list[str]
+    is_background: bool = False
+    is_stdout_captured: bool = True
+
+
+class ModalSandboxTagsBody(BaseModel):
+    tags: dict[str, str]
+
+
+def _get_owned_modal_sandbox(sandbox_id: str, username: str) -> "modal.Sandbox":
+    """Look up a sandbox and verify the caller owns it (via the owner tag).
+
+    Raises 404 (not 403) when the sandbox is missing or owned by someone else,
+    so the route never leaks the existence of other users' sandboxes.
+    """
+    try:
+        sandbox = modal.Sandbox.from_id(sandbox_id)
+    except modal.exception.NotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Sandbox not found: {sandbox_id}") from exc
+    if sandbox.get_tags().get(_MODAL_OWNER_TAG) != username:
+        raise HTTPException(status_code=404, detail=f"Sandbox not found: {sandbox_id}")
+    return sandbox
+
+
+@web_app.post("/modal/sandboxes")
+def create_modal_sandbox(request: Request, body: ModalSandboxCreateBody) -> dict[str, object]:
+    """Create a Modal sandbox in this connector's workspace, owned by the caller."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        app_obj = modal.App.lookup(
+            body.app_name, create_if_missing=True, environment_name=body.environment_name
+        )
+        if body.image_ref is not None:
+            image = modal.Image.from_registry(body.image_ref)
+        else:
+            image = modal.Image.debian_slim()
+            if body.apt_packages:
+                image = image.apt_install(*body.apt_packages)
+        sandbox = modal.Sandbox.create(
+            app=app_obj,
+            image=image,
+            timeout=body.timeout,
+            cpu=body.cpu,
+            memory=body.memory,
+            unencrypted_ports=body.unencrypted_ports,
+            gpu=body.gpu,
+            region=body.region,
+            cidr_allowlist=body.cidr_allowlist,
+            tags={_MODAL_OWNER_TAG: admin.username},
+        )
+        return {"sandbox_id": sandbox.object_id}
+
+
+@web_app.post("/modal/sandboxes/{sandbox_id}/exec")
+def exec_in_modal_sandbox(request: Request, sandbox_id: str, body: ModalSandboxExecBody) -> dict[str, object]:
+    """Run a command in the caller's sandbox. Background commands start detached."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        sandbox = _get_owned_modal_sandbox(sandbox_id, admin.username)
+        stdout_stream = ModalStreamType.PIPE if body.is_stdout_captured else ModalStreamType.DEVNULL
+        process = sandbox.exec(*body.args, stdout=stdout_stream, stderr=ModalStreamType.DEVNULL)
+        if body.is_background:
+            # Started detached (e.g. ``sshd -D``); it keeps running in the sandbox.
+            return {"exit_code": 0, "stdout": ""}
+        stdout = process.stdout.read() if body.is_stdout_captured else ""
+        exit_code = process.wait()
+        return {"exit_code": exit_code, "stdout": stdout}
+
+
+@web_app.get("/modal/sandboxes/{sandbox_id}/tunnels")
+def get_modal_sandbox_tunnels(request: Request, sandbox_id: str, timeout: int = 50) -> dict[str, object]:
+    """Return the caller's sandbox's public TCP tunnels keyed by container port."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        sandbox = _get_owned_modal_sandbox(sandbox_id, admin.username)
+        raw_tunnels = sandbox.tunnels(timeout=timeout)
+        tunnels = {
+            str(port): {"tcp_socket": [tunnel.tcp_socket[0], tunnel.tcp_socket[1]]}
+            for port, tunnel in raw_tunnels.items()
+        }
+        return {"tunnels": tunnels}
+
+
+@web_app.get("/modal/sandboxes/{sandbox_id}/tags")
+def get_modal_sandbox_tags(request: Request, sandbox_id: str) -> dict[str, object]:
+    """Return the caller's sandbox's tags."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        sandbox = _get_owned_modal_sandbox(sandbox_id, admin.username)
+        return {"tags": sandbox.get_tags()}
+
+
+@web_app.put("/modal/sandboxes/{sandbox_id}/tags")
+def set_modal_sandbox_tags(request: Request, sandbox_id: str, body: ModalSandboxTagsBody) -> dict[str, object]:
+    """Replace the caller's sandbox's tags, always re-injecting the owner tag."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        sandbox = _get_owned_modal_sandbox(sandbox_id, admin.username)
+        # Re-inject the owner tag so callers can never strip their own scoping.
+        sandbox.set_tags({**body.tags, _MODAL_OWNER_TAG: admin.username})
+        return {"status": "ok"}
+
+
+@web_app.get("/modal/sandboxes")
+def list_modal_sandboxes(request: Request, app_id: str | None = None) -> dict[str, object]:
+    """List the caller's sandboxes (scoped to the owner tag)."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        sandboxes = [
+            {"sandbox_id": sb.object_id, "tags": sb.get_tags()}
+            for sb in modal.Sandbox.list(tags={_MODAL_OWNER_TAG: admin.username})
+        ]
+        return {"sandboxes": sandboxes}
+
+
+@web_app.delete("/modal/sandboxes/{sandbox_id}")
+def terminate_modal_sandbox(request: Request, sandbox_id: str) -> dict[str, object]:
+    """Terminate the caller's sandbox."""
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        sandbox = _get_owned_modal_sandbox(sandbox_id, admin.username)
+        sandbox.terminate()
+        return {"status": "terminated"}
 
 
 @web_app.get("/paid/domains")

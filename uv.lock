@@ -2516,6 +2516,7 @@ source = { editable = "libs/mngr_modal" }
 dependencies = [
     { name = "dockerfile-parse" },
     { name = "imbue-mngr" },
+    { name = "imbue-mngr-imbue-cloud" },
     { name = "modal" },
     { name = "modal-proxy" },
 ]
@@ -2524,6 +2525,7 @@ dependencies = [
 requires-dist = [
     { name = "dockerfile-parse", specifier = ">=2.0.0" },
     { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "imbue-mngr-imbue-cloud", editable = "libs/mngr_imbue_cloud" },
     { name = "modal", specifier = "==1.4.3" },
     { name = "modal-proxy", editable = "libs/modal_proxy" },
 ]
@@ -3391,6 +3393,7 @@ version = "0.1.18"
 source = { editable = "libs/modal_proxy" }
 dependencies = [
     { name = "concurrency-group" },
+    { name = "httpx" },
     { name = "imbue-common" },
     { name = "imbue-mngr" },
     { name = "modal" },
@@ -3400,6 +3403,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "concurrency-group", editable = "libs/concurrency_group" },
+    { name = "httpx", specifier = ">=0.27.0" },
     { name = "imbue-common", editable = "libs/imbue_common" },
     { name = "imbue-mngr", editable = "libs/mngr" },
     { name = "modal", specifier = "==1.4.3" },

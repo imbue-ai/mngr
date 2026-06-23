@@ -72,6 +72,8 @@ EXPECTED_CREATION_DURATION_SECONDS_BY_LAUNCH_MODE: Final[dict[LaunchMode, float]
     LaunchMode.VULTR: 300.0,
     LaunchMode.AWS: 300.0,
     LaunchMode.IMBUE_CLOUD: 30.0,
+    # Sandbox boots in seconds; the bulk is provisioning the toolchain over SSH.
+    LaunchMode.MODAL: 300.0,
 }
 
 # Fallback when the launch mode is somehow not in the map above.

@@ -97,6 +97,7 @@ from imbue.mngr.providers.ssh_host_setup import build_configure_ssh_command
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
 from imbue.mngr.providers.ssh_host_setup import build_start_volume_sync_command
 from imbue.mngr.providers.ssh_host_setup import parse_warnings_from_output
+from imbue.mngr_modal.config import ModalMode
 from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.errors import ModalSandboxTimeoutMngrError
 from imbue.mngr_modal.errors import NoSnapshotsModalMngrError
@@ -420,7 +421,9 @@ class ModalProviderInstance(BaseProviderInstance):
 
     @property
     def supports_snapshots(self) -> bool:
-        return True
+        # PROXIED ("Modal experimental") sandboxes are ephemeral, testing-only:
+        # the connector does not proxy snapshot operations.
+        return self.config.mode != ModalMode.PROXIED
 
     @property
     def supports_shutdown_hosts(self) -> bool:
@@ -428,7 +431,8 @@ class ModalProviderInstance(BaseProviderInstance):
 
     @property
     def supports_volumes(self) -> bool:
-        return True
+        # PROXIED does not proxy Modal Volumes (testing sandboxes are non-persistent).
+        return self.config.mode != ModalMode.PROXIED
 
     @property
     def supports_mutable_tags(self) -> bool:

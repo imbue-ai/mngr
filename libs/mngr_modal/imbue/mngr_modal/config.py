@@ -1,14 +1,26 @@
+import os
 from enum import auto
 from pathlib import Path
 
+from pydantic import AnyUrl
 from pydantic import Field
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import UserId
+
+# Env var that supplies the connector ("imbue_cloud gateway") base URL for
+# PROXIED mode. Falls back to the imbue_cloud var since it is the same gateway.
+MODAL_CONNECTOR_URL_ENV_VAR = "MNGR__PROVIDERS__MODAL__CONNECTOR_URL"
+_IMBUE_CLOUD_CONNECTOR_URL_ENV_VAR = "MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL"
+
+
+class MissingModalConnectorUrlError(MngrError):
+    """Raised when PROXIED mode has no connector URL (no field, no env)."""
 
 
 class ModalMode(UpperCaseStrEnum):
@@ -34,6 +46,14 @@ class ModalProviderConfig(ProviderInstanceConfig):
         description=(
             "How to reach Modal. ``DIRECT`` uses the Modal SDK against the "
             "user's Modal account. ``PROXIED`` routes Modal traffic through the imbue_cloud gateway."
+        ),
+    )
+    connector_url: AnyUrl | None = Field(
+        default=None,
+        description=(
+            "Connector ('imbue_cloud gateway') base URL for PROXIED mode. When None, reads "
+            f"${MODAL_CONNECTOR_URL_ENV_VAR} then ${_IMBUE_CLOUD_CONNECTOR_URL_ENV_VAR} from the "
+            "environment (same gateway as imbue_cloud). Unused in DIRECT mode."
         ),
     )
     user_id: UserId | None = Field(
@@ -132,3 +152,22 @@ class ModalProviderConfig(ProviderInstanceConfig):
             "while the host is online."
         ),
     )
+
+    def get_connector_url(self) -> str:
+        """Resolve the connector base URL for PROXIED mode.
+
+        Precedence: per-instance ``connector_url`` field >
+        ``$MNGR__PROVIDERS__MODAL__CONNECTOR_URL`` > the imbue_cloud connector
+        var (same gateway). Raises :class:`MissingModalConnectorUrlError` if
+        none is set.
+        """
+        if self.connector_url is not None:
+            return str(self.connector_url).rstrip("/")
+        for env_var in (MODAL_CONNECTOR_URL_ENV_VAR, _IMBUE_CLOUD_CONNECTOR_URL_ENV_VAR):
+            env_value = os.environ.get(env_var)
+            if env_value:
+                return env_value.rstrip("/")
+        raise MissingModalConnectorUrlError(
+            "No connector URL configured for PROXIED Modal: set `connector_url` on the modal "
+            f"provider config or export ${MODAL_CONNECTOR_URL_ENV_VAR}."
+        )

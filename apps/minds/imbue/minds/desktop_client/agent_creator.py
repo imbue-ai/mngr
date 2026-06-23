@@ -592,6 +592,11 @@ def _build_mngr_create_command(
                 raise MngrCommandError("IMBUE_CLOUD mode requires imbue_cloud_account")
             slug = _slugify_account(imbue_cloud_account)
             address = f"{_DEFAULT_AGENT_NAME}@{host_name}.imbue_cloud_{slug}"
+        case LaunchMode.MODAL:
+            # Modal runs as the single ``modal`` provider instance (PROXIED mode):
+            # the connector creates the sandbox keyless on the user's behalf, so
+            # the address needs no per-account/region suffix.
+            address = f"{_DEFAULT_AGENT_NAME}@{host_name}.modal"
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -720,6 +725,13 @@ def _build_mngr_create_command(
             # "no capacity in <region>" error if none is available there.
             if region:
                 mngr_command.extend(["-b", f"region={region}"])
+        case LaunchMode.MODAL:
+            # Modal (experimental): same shape as the other remote modes. The
+            # ``main`` + ``modal`` templates set the provisioning chain and
+            # ``pass_host_env``; PROXIED routing + keyless auth are handled by
+            # the modal provider config (mode + connector_url) written at startup.
+            mngr_command.extend(["--new-host", "--template", "main", "--template", "modal"])
+            mngr_command.extend(_remote_host_env_flags())
         case _ as unreachable:
             assert_never(unreachable)
 

@@ -16,7 +16,7 @@ _EXACT_PROVIDER_LABELS: Final[dict[str, str]] = {
     "lima": "Lima",
     "vultr": "Vultr",
     "ovh": "OVH",
-    "modal": "Modal",
+    "modal": "Modal (experimental)",
 }
 
 
