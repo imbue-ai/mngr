@@ -66,7 +66,7 @@ For an iteration of the same version, skip. To bump: set `apps/minds/package.jso
 
 On the FCT PR branch (cut from `origin/main`, clean tree), with the **mngr checkout positioned at the green SHA from step 2** (i.e. on the mngr release PR branch), run the sync recipe.
 
-`just sync-vendor-mngr` reads `FCT_DIR` from your `apps/minds/.env` (Session setup) — no path is baked into the justfile. It does `git archive HEAD` → FCT `vendor/mngr` (tracked files only; keep `apps/minds/`), commits `Sync vendor/mngr to <branch> (<short>)`, aborts if FCT is dirty, and **does not push** — it prints the exact `cd … && git push` line (with the resolved FCT path) for you to run.
+`just sync-vendor-mngr` reads `FCT_DIR` from your `apps/minds/.env` (Session setup) — no path is baked into the justfile. It does `git archive HEAD` → FCT `vendor/mngr` (tracked files only; keep `apps/minds/`), commits `Sync vendor/mngr to <branch> (<short>)`, aborts if FCT is dirty, and **does not push** — it prints the exact `cd … && git push` line (with the resolved FCT path) for you to run. For why releases use `git archive` (vs the dev loop's `rsync`), see `apps/minds/docs/vendor-mngr-sync.md`.
 
 ```bash
 just sync-vendor-mngr                       # reads FCT_DIR from .env

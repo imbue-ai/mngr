@@ -67,7 +67,12 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    rc.check_broad_exception_catch(_DIR, snapshot(9))
+    # The catches beyond the prior baseline are all in the ported Sentry module
+    # (``utils/sentry/``): the before_send wrapper, the traceback formatter, the
+    # custom HTTP transport, the loguru callback runner, and the S3 uploader all
+    # deliberately catch ``Exception`` so a failure inside error reporting can
+    # never crash the app or lose the original event.
+    rc.check_broad_exception_catch(_DIR, snapshot(16))
 
 
 def test_prevent_base_exception_catch() -> None:
@@ -79,7 +84,10 @@ def test_prevent_builtin_exception_raises() -> None:
 
 
 def test_prevent_silent_decode_error_catches() -> None:
-    rc.check_silent_decode_error_catches(_DIR, snapshot(8))
+    # The added catch is ``build_info.py`` parsing the desktop app's package.json
+    # for the Sentry release id: a malformed file degrades to a fallback version
+    # (logged at debug) rather than crashing startup.
+    rc.check_silent_decode_error_catches(_DIR, snapshot(9))
 
 
 # --- Import style ---
@@ -107,7 +115,10 @@ def test_prevent_importlib_import_module() -> None:
 
 
 def test_prevent_getattr() -> None:
-    rc.check_getattr(_DIR, snapshot(0))
+    # Both usages are one line in the ported Sentry HTTP transport, reading the
+    # response body whose attribute (``data`` vs ``content``) varies across
+    # sentry-sdk / urllib3 versions.
+    rc.check_getattr(_DIR, snapshot(2))
 
 
 def test_prevent_setattr() -> None:
@@ -123,8 +134,9 @@ def test_prevent_asyncio_import() -> None:
     # sibling permission handlers under ``latchkey/handlers/`` (``predefined.py``
     # and ``file_sharing.py``) both use ``run_in_executor`` to run the blocking
     # grant/deny path off the event loop -- all intrinsic to FastAPI
-    # integration.
-    rc.check_asyncio_import(_DIR, snapshot(1))
+    # integration. The ported Sentry loguru handler also references
+    # ``asyncio.CancelledError`` so task cancellations are not reported.
+    rc.check_asyncio_import(_DIR, snapshot(2))
 
 
 def test_prevent_pandas_import() -> None:
@@ -150,7 +162,10 @@ def test_prevent_yaml_usage() -> None:
 
 
 def test_prevent_functools_partial() -> None:
-    rc.check_functools_partial(_DIR, snapshot(0))
+    # All in the ported Sentry module: the import plus binding the before_send
+    # wrapper and the per-file S3 upload callbacks. Rewriting these as nested
+    # defs/lambdas would only trade the violation for an inline-function one.
+    rc.check_functools_partial(_DIR, snapshot(3))
 
 
 def test_prevent_exit_stack() -> None:
@@ -332,24 +347,36 @@ def test_prevent_if_elif_without_else() -> None:
     # Both violations are in apps/minds/scripts/launch_to_msg_e2e.py:
     # pre_run_sweep's cleanup dispatch (is_dir vs exists) and
     # _advance_approval's stage-machine switch. Both exhaustively cover
-    # the values they branch on; an else: pass would be cosmetic.
-    rc.check_if_elif_without_else(_DIR, snapshot(2))
+    # the values they branch on; an else: pass would be cosmetic. The two added
+    # branches are in the ported Sentry transport/uploader and likewise
+    # exhaustively handle their cases.
+    rc.check_if_elif_without_else(_DIR, snapshot(4))
 
 
 def test_prevent_inline_functions() -> None:
-    rc.check_inline_functions(_DIR, snapshot(11))
+    # The added inline function is the ``record_loss`` helper nested in the
+    # ported Sentry HTTP transport's ``_send_request`` (it closes over the
+    # envelope being sent).
+    rc.check_inline_functions(_DIR, snapshot(12))
 
 
 def test_prevent_underscore_imports() -> None:
-    rc.check_underscore_imports(_DIR, snapshot(0))
+    # ``loguru_handler.py`` imports sentry-sdk's ``_IGNORED_LOGGERS`` registry,
+    # the documented way to interoperate with sentry's logger-ignore mechanism.
+    rc.check_underscore_imports(_DIR, snapshot(1))
 
 
 def test_prevent_init_methods_in_non_exception_classes() -> None:
-    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(0))
+    # Both are the ported Sentry loguru ``logging.Handler`` subclasses, which
+    # need ``__init__`` to set up their executor / flags around super().__init__.
+    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(2))
 
 
 def test_prevent_cast_usage() -> None:
-    rc.check_cast_usage(_DIR, snapshot(0))
+    # All in the ported Sentry module: sentry-sdk's ``Event`` TypedDict types
+    # ``extra`` as ``object`` and scope contexts are loosely typed, so reading
+    # them back requires casts to satisfy the type checker.
+    rc.check_cast_usage(_DIR, snapshot(6))
 
 
 def test_prevent_assert_isinstance() -> None:
