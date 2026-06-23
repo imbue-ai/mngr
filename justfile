@@ -582,6 +582,42 @@ minds-build:
     . apps/minds/scripts/select_node_version.sh || exit 2
     cd apps/minds && pnpm build
 
+# Build and contract-test the FCT Docker/NixOS workspace path (heavy, opt-in).
+minds-build-fct-nixos fct="" tag="fct-nixos-contract:local":
+    #!/bin/bash
+    set -ueo pipefail
+    if [ -n "{{fct}}" ]; then
+        case "{{fct}}" in
+            /*) fct_wt="{{fct}}" ;;
+            *)  fct_wt="$(pwd)/{{fct}}" ;;
+        esac
+    else
+        fct_wt="$(pwd)/.external_worktrees/forever-claude-template"
+    fi
+    if [ ! -e "$fct_wt/.git" ]; then
+        echo "error: no FCT worktree at $fct_wt" >&2
+        echo "       pass it as the first arg, e.g. \`just minds-build-fct-nixos .external_worktrees/forever-claude-template\`" >&2
+        exit 2
+    fi
+    cd "$fct_wt"
+    if [ ! -f Dockerfile.nixos ]; then
+        echo "error: $fct_wt does not contain Dockerfile.nixos" >&2
+        exit 2
+    fi
+    echo "Verifying Docker/NixOS closure manifest via fct-nix-profile target"
+    docker build \
+        --target fct-nix-profile \
+        --file Dockerfile.nixos \
+        --tag "${FCT_NIX_PROFILE_IMAGE_TAG:-fct-nixos-profile-verify:local}" \
+        .
+    echo "Running Docker/NixOS image contract"
+    PYTEST_MAX_DURATION_SECONDS="${PYTEST_MAX_DURATION_SECONDS:-3600}" \
+        FCT_DOCKER_IMAGE_CONTRACT=1 \
+        FCT_DOCKERFILE=Dockerfile.nixos \
+        FCT_DOCKER_IMAGE_TAG="{{tag}}" \
+        FCT_DOCKER_BUILD_TIMEOUT_SECONDS="${FCT_DOCKER_BUILD_TIMEOUT_SECONDS:-3600}" \
+        uv run pytest -s test_docker_image_contract.py::test_fct_dockerfile_image_contract
+
 # Sync this repo's mngr changes (and the FCT worktree's template state)
 # into a running Docker agent's container, then restart the agent and the
 # desktop client. Wraps apps/minds/scripts/propagate_changes by auto-
