@@ -12,4 +12,6 @@ Report the desktop app version (from `package.json`) as the Sentry release and t
 
 Do not attach any user PII to Sentry error reports: the unused user-context wiring (`global_user_context` / `sentry_sdk.set_user`) has been removed, and `send_default_pii=False` is kept.
 
-Flush Sentry (and any pending S3 attachment uploads) during the desktop client's shutdown teardown, so errors captured late in a session -- including any logged while shutting down -- are sent before the process exits.
+Flush Sentry (and any pending S3 attachment uploads) during the desktop client's shutdown teardown, so errors captured late in a session -- including any logged while shutting down -- are sent before the process exits. The flush uses a short timeout so an unreachable Sentry/S3 endpoint cannot noticeably delay app exit.
+
+Disable Sentry performance tracing (`traces_sample_rate=0.0`): minds uses Sentry for error reporting, not performance monitoring, so it no longer emits a transaction per HTTP request. Error reports still carry full request context via the Flask integration.

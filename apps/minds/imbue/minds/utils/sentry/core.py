@@ -534,7 +534,11 @@ def setup_sentry(
     sentry_sdk.init(
         sample_rate=1.0,
         environment=environment.value,
-        traces_sample_rate=1.0,
+        # We use Sentry for error reporting, not performance monitoring. Leaving
+        # tracing on would emit a transaction for every HTTP request (including
+        # the long-lived SSE streams and polling), which is high-volume and adds
+        # Sentry cost for no benefit here, so disable it.
+        traces_sample_rate=0.0,
         # required for `logger.error` calls to include stacktraces
         attach_stacktrace=True,
         # note this will capture unhandled exceptions even if not explicitly logged, among other things
@@ -630,7 +634,12 @@ def get_sentry_event_handler() -> SentryEventHandler | None:
     return _SENTRY_EVENT_HANDLER
 
 
-def flush_sentry_on_shutdown(timeout: float = 10.0) -> None:
+# Keep this short: it runs on the desktop client's shutdown path, so a wedged or
+# unreachable Sentry/S3 endpoint must not stall the user's app exit for long.
+_SHUTDOWN_FLUSH_TIMEOUT_SECONDS: float = 3.0
+
+
+def flush_sentry_on_shutdown(timeout: float = _SHUTDOWN_FLUSH_TIMEOUT_SECONDS) -> None:
     """Flush Sentry and its pending attachment uploads before the process exits.
 
     Called from the desktop client's teardown so errors captured late in the
@@ -640,8 +649,10 @@ def flush_sentry_on_shutdown(timeout: float = 10.0) -> None:
     captured events resolve), then flush the Sentry client so queued events are
     actually sent.
 
-    Safe to call when Sentry was never set up (e.g. test factories that build the
-    app without ``setup_sentry``): each step no-ops on an uninitialized client.
+    The timeout is intentionally short so an unreachable Sentry/S3 endpoint can
+    only briefly delay shutdown. Safe to call when Sentry was never set up (e.g.
+    test factories that build the app without ``setup_sentry``): each step
+    no-ops on an uninitialized client.
     """
     handler = get_sentry_event_handler()
     if handler is not None:
