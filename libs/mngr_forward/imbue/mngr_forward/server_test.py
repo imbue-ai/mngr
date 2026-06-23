@@ -1036,8 +1036,14 @@ def test_subdomain_forward_emits_failure_on_ssh_tunnel_setup_error(tmp_path: Pat
     assert payload["reason"] == "CONNECT_ERROR"
 
 
-def test_subdomain_forward_websocket_emits_failure_on_backend_connection_error(tmp_path: Path) -> None:
-    """A websocket whose backend connection fails must emit ``CONNECT_ERROR``.
+def test_subdomain_forward_websocket_emits_failure_on_ssh_tunnel_setup_error(tmp_path: Path) -> None:
+    """A websocket whose SSH-tunnel setup fails must emit ``CONNECT_ERROR``.
+
+    The websocket analogue of
+    ``test_subdomain_forward_emits_failure_on_ssh_tunnel_setup_error``: a
+    stopped container still has a resolver entry, so the handler resolves a
+    target with ssh_info and then fails opening the tunnel, closing the socket
+    before ``accept()``.
 
     Regression test: the websocket forward path used to close the socket
     without emitting a failure envelope, unlike the HTTP path. A mind whose
@@ -1051,7 +1057,7 @@ def test_subdomain_forward_websocket_emits_failure_on_backend_connection_error(t
     agent_id = AgentId()
     resolver.add_known_agent(agent_id)
     # Non-loopback URL + ssh_info so the handler takes the SSH-tunnel path,
-    # which the failing tunnel manager then turns into a connection failure.
+    # where the failing tunnel manager raises during tunnel setup.
     resolver.update_services(agent_id, {"system_interface": "http://stub-backend:8000"})
     resolver.update_ssh_info(
         agent_id,
