@@ -492,7 +492,7 @@ def test_render_chrome_page_content_iframe_uses_12px_rounded_corners() -> None:
     # ``contentView.setBorderRadius(12)`` (= ``CONTENT_CORNER_RADIUS`` in
     # electron/main.js) so both modes render the same tucked-under shape
     # against the OS's outer window rounding. It is a structural exception to
-    # the 4-step radius scale (2/4/8/16) -- pinned as an arbitrary value so it
+    # the 4-step radius scale (4/6/8/16) -- pinned as an arbitrary value so it
     # stays locked to the Electron constant rather than tracking ``rounded-xl``.
     html = render_chrome_page()
     iframe_open = html.index('id="content-frame"')
@@ -1304,7 +1304,7 @@ def test_spacing_utilities_stay_on_scale() -> None:
 
 def test_radius_utilities_stay_on_scale() -> None:
     """Corner radius is limited to ``rounded-sm`` / ``-md`` / ``-lg`` / ``-xl``
-    (2/4/8/16 px) plus ``rounded-full`` / ``rounded-none``. The old
+    (4/6/8/16 px) plus ``rounded-full`` / ``rounded-none``. The old
     ``rounded-2xl`` / ``-3xl`` / ``-xs`` steps and arbitrary ``rounded-[..]``
     values are disallowed -- the sole exception is the chrome content frame's
     structural ``rounded-[12px]`` (matches Electron's CONTENT_CORNER_RADIUS)."""
@@ -1315,7 +1315,7 @@ def test_radius_utilities_stay_on_scale() -> None:
             offenders.append(f"{path.name}: {match.group(0)}")
     assert offenders == [], (
         "Disallowed corner-radius utilities found. Use rounded-sm/-md/-lg/-xl "
-        f"(2/4/8/16 px) or rounded-full/-none: {offenders}"
+        f"(4/6/8/16 px) or rounded-full/-none: {offenders}"
     )
 
 
