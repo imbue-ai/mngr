@@ -542,7 +542,8 @@ minds-start-cloud:
     . apps/minds/scripts/select_node_version.sh || exit 2
     cd apps/minds && pnpm start
 
-# Stop the minds desktop client started in this worktree by `just minds-start`.
+# Stop the minds desktop client started in this worktree by `just minds-start`
+# or `just minds-start-cloud` (both share this worktree-keyed PID file).
 #
 # Strategy: walk the recipe shell's process tree, find Electron's main
 # process, and SIGTERM that specifically. The Electron main process has a
