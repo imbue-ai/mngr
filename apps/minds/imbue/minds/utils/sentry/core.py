@@ -71,9 +71,11 @@ COMPRESSED_LOG_EXTENSION = "gz"
 MAX_SENTRY_ATTACHMENT_SIZE = 10 * 1024 * 1024
 
 
-SENTRY_DSN_PRODUCTION = 'https://d8658891db0c1246864df82eefd74b6d@o4504335315501056.ingest.us.sentry.io/4511609235636224'
-SENTRY_DSN_STAGING = 'https://221f676a7e3c99733e85dc5c8dd6d6e2@o4504335315501056.ingest.us.sentry.io/4511609241862145'
-SENTRY_DSN_DEV = 'https://0a66e5894c00f701e3c1b7c2daae4650@o4504335315501056.ingest.us.sentry.io/4511609244811264'
+SENTRY_DSN_PRODUCTION = (
+    "https://d8658891db0c1246864df82eefd74b6d@o4504335315501056.ingest.us.sentry.io/4511609235636224"
+)
+SENTRY_DSN_STAGING = "https://221f676a7e3c99733e85dc5c8dd6d6e2@o4504335315501056.ingest.us.sentry.io/4511609241862145"
+SENTRY_DSN_DEV = "https://0a66e5894c00f701e3c1b7c2daae4650@o4504335315501056.ingest.us.sentry.io/4511609244811264"
 
 
 class SentryDeployEnvironment(StrEnum):
@@ -512,7 +514,7 @@ def setup_sentry(
     default): they only happen when it is true *and* the environment is
     ``production`` or ``staging``. ``development`` never uploads to S3.
     """
-    assert "SENTRY_DSN" not in os.environ, ("Please `unset SENTRY_DSN` in your environment.")
+    assert "SENTRY_DSN" not in os.environ, "Please `unset SENTRY_DSN` in your environment."
 
     sentry_dsn = _SENTRY_DSN_BY_ENVIRONMENT[environment]
 
@@ -538,9 +540,7 @@ def setup_sentry(
         integrations=[
             FlaskIntegration(),
         ],
-        disabled_integrations=[
-            StdlibIntegration()
-        ],
+        disabled_integrations=[StdlibIntegration()],
         dsn=sentry_dsn,
         send_default_pii=False,
         # sentry has a max payload size of 1MB, so we can't make this infinite
@@ -641,9 +641,7 @@ class SentryMindsConfigDict(TypedDict):
 
 
 def _get_config_from_scope() -> SentryMindsConfigDict | None:
-    scope = get_current_scope()._contexts.get(
-        _SENTRY_MINDS_CONTEXT_KEY, SentryMindsConfigDict(log_folder_path=None)
-    )
+    scope = get_current_scope()._contexts.get(_SENTRY_MINDS_CONTEXT_KEY, SentryMindsConfigDict(log_folder_path=None))
     # we only put SentryMindsConfigDict in _contexts, but regrettably as a third-party library we can't tell pyre that
     return cast(SentryMindsConfigDict, scope)
 
@@ -656,6 +654,7 @@ def _get_log_folder_from_scope() -> Path | None:
         return log_folder_path
     logger.info("No log file path found")
     return None
+
 
 @cache
 def _get_platform_info() -> str:
@@ -780,8 +779,7 @@ def add_extra_info_hook(event: Event, hint: Hint) -> tuple[Event, Hint, tuple[_U
             exception = e
 
     s3_uri_groups, callbacks = _ATTACHMENTS_UPLOADER.collect_external_attachments(
-        exception=exception,
-        logs_folder=_get_log_folder_from_scope()
+        exception=exception, logs_folder=_get_log_folder_from_scope()
     )
 
     if s3_uri_groups:
