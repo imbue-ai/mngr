@@ -621,8 +621,8 @@ def _refuse_if_recover_target_blocks_activation(env_name: str) -> None:
     recover-target (the activate-then-recover path), and only hard-refuse
     when the pending recover-target(s) belong solely to *other* envs -- a
     forgotten failed deploy the operator should clear first. When
-    activating an affected env, any other envs' targets are surfaced as a
-    warning rather than blocking.
+    activating an affected env, any other envs' targets are surfaced as an
+    info notice rather than blocking.
     """
     try:
         repo_root = find_monorepo_root()
@@ -1272,7 +1272,7 @@ def env_deploy(
     help=(
         "Forward-compatible flag for the eventual `mngr destroy` integration. "
         "Agent teardown is not yet implemented; running workspace agents are "
-        "left alone today regardless of this flag (a warning is logged when "
+        "left alone today regardless of this flag (a notice is logged when "
         "the flag is omitted). Only consulted for dev-env destroys."
     ),
 )

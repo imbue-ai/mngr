@@ -3289,8 +3289,8 @@ def _run_host_health_probe(
     list_json: str | None = list_stdout or None
     if provider_error is None:
         provider_error = extract_provider_error(list_json, provider_name)
-    # The in-container probe stays quiet at warning level: its argv embeds a
-    # long base64 inner script that adds nothing to diagnostics, and the
+    # The in-container probe stays quiet (it is logged only at debug): its argv
+    # embeds a long base64 inner script that adds nothing to diagnostics, and the
     # dispatch_tier INFO line already records the outcome. Trust the stdout only
     # on a clean exit -- any non-clean outcome (a failed ``mngr exec`` such as
     # ``--no-start`` against a stopped host, a timeout, or a launch / group

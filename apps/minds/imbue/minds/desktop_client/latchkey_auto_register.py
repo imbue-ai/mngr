@@ -89,7 +89,7 @@ class LatchkeyAutoRegister(MutableModel):
         """Register ``agent_id`` on ``host_id`` if the host is minds-managed.
 
         Hosts without an existing ``latchkey_permissions.json`` are skipped. On
-        infrastructure failure (malformed file, IO error) we log a warning and
+        infrastructure failure (malformed file, IO error) we log an error and
         still mark the pair as processed so we do not retry on every subsequent
         discovery tick -- the operator can recover with ``mngr latchkey
         register-agent`` once the underlying file issue is resolved.

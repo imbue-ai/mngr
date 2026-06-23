@@ -43,7 +43,7 @@ _MINDS_PREFIX: Final[str] = "minds"
 #
 # Production has no suffix (``minds`` alone). Anything that does not
 # fit this pattern is treated as ``unset`` by ``resolve_minds_root_name``
-# and falls back to production with a warning.
+# (which logs an info notice) and falls back to production.
 _STAGING_SUFFIX_PATTERN: Final[str] = r"staging"
 _DYNAMIC_SUFFIX_PATTERN: Final[str] = r"(?:dev|ci)-[a-z0-9][a-z0-9_-]{0,33}[a-z0-9]"
 _ENV_NAME_PATTERN: Final[str] = rf"(?:{_STAGING_SUFFIX_PATTERN}|{_DYNAMIC_SUFFIX_PATTERN})"
@@ -59,7 +59,7 @@ def resolve_minds_root_name() -> str:
     env var is unset, returns :data:`DEFAULT_MINDS_ROOT_NAME` (production).
     When the env var holds a value that does not match the pattern (e.g.
     a stale ``devminds`` left in a parent shell from before the
-    per-env-root refactor), logs a warning and returns the default --
+    per-env-root refactor), logs an info notice and returns the default --
     callers that genuinely need an activated env check explicitly via
     :func:`is_minds_root_name_set_to_active_env` instead.
 
@@ -372,8 +372,8 @@ def apply_bootstrap() -> None:
 
     When ``MINDS_ROOT_NAME`` is set to a value that does not match
     :data:`MINDS_ROOT_NAME_PATTERN` (e.g. a stale ``devminds`` shell
-    from before the refactor), :func:`resolve_minds_root_name` logs a
-    warning and returns the default -- we then export the default's
+    from before the refactor), :func:`resolve_minds_root_name` logs an
+    info notice and returns the default -- we then export the default's
     derived ``MNGR_*`` vars so downstream mngr calls have *some*
     consistent host_dir to point at instead of half-honoring the bad
     value.

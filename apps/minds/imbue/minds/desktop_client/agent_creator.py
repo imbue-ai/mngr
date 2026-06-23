@@ -1638,8 +1638,8 @@ class AgentCreator(MutableModel):
                 # agent on the host shares the same gateway wiring and
                 # the same permissions file.
                 #
-                # We downgrade ``LatchkeyStoreError`` here to a warning
-                # rather than failing agent creation: the gateway still
+                # We log ``LatchkeyStoreError`` here as an error and absorb
+                # it rather than failing agent creation: the gateway still
                 # has the deny-all baseline at the opaque path (the JWT
                 # already points there), so the agent comes up working.
                 # If the link is never established, the first permission

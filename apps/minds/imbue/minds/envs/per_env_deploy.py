@@ -209,7 +209,7 @@ def build_per_env_secret_values(
 ) -> dict[str, str]:
     """Read tier-shared values for one service from Vault and layer overrides.
 
-    Missing Vault entries return an empty dict and emit a warning so
+    Missing Vault entries return an empty dict and emit an info notice so
     the operator can populate them later; the caller is expected to
     fall back to a placeholder when both the tier-shared values and
     overrides come up empty.

@@ -165,7 +165,7 @@ def _current_mngr_branch() -> str | None:
     executes inside a Modal sandbox whose source tree was uploaded via
     ``add_local_dir`` and the worktree's ``.git`` file points at a
     gitdir that does not exist on the sandbox; ``CalledProcessError``;
-    ``TimeoutExpired``) is logged at warning level and treated as
+    ``TimeoutExpired``) is logged at info level and treated as
     "branch unknown", which routes the caller through the documented
     fall-back to FCT ``main`` rather than crashing the whole run.
     """
@@ -197,7 +197,7 @@ def _fct_remote_has_branch(branch: str) -> bool:
 
     ``git ls-remote`` exits 0 either way; presence is signalled by stdout
     being non-empty. Network-level failures (DNS hiccup, GitHub 5xx,
-    proxy block, timeout) are logged as a warning and treated the same as
+    proxy block, timeout) are logged at info level and treated the same as
     "no such branch" so the caller still falls back to ``main`` per the
     documented 3-step chain rather than crashing the whole run on a
     transient probe failure.

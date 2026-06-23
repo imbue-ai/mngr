@@ -238,8 +238,8 @@ def cleanup_env_state_container(
 
     Resolves the env's ``MNGR_PREFIX`` and the mngr profile's ``user_id``
     to build the exact container name. When ``user_id`` can't be resolved
-    (e.g. the env root was already removed), skips with a warning rather
-    than matching anything broader.
+    (e.g. the env root was already removed), skips (logging an info
+    notice) rather than matching anything broader.
     """
     root_name = root_name_for_env_name(str(name))
     mngr_host_dir = mngr_host_dir_for(root_name)

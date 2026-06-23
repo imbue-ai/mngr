@@ -99,7 +99,8 @@ class RecoverTarget(FrozenModel):
     cloud back to the pre-deploy state -- nothing more. ``app_versions_
     to_restore`` is ``None`` for an app that had no prior deploy
     (first-ever deploy of that env / tier); ``recover_env`` skips Modal
-    rollback for those + logs a warning.
+    rollback for those (stopping the app instead, logging an error on
+    failure).
     """
 
     deploy_id: DeployId = Field(description="The deploy id this recover-target was minted FOR.")

@@ -453,7 +453,7 @@ def _write_last_good_agent_topology(path: Path, topology: _LastGoodAgentTopology
     """Persist the last-good topology atomically to ``path``.
 
     Writes to a sibling ``.tmp`` file then renames to defend against a crash
-    mid-write leaving a truncated file. A write failure logs a warning but
+    mid-write leaving a truncated file. A write failure logs an info notice but
     does not propagate -- the topology is a best-effort fallback, and crashing
     the discovery thread over a transient I/O error would be worse than
     losing one update.
@@ -532,7 +532,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
     # fallback when live discovery has lost the host.
     _last_good_agents_by_host: dict[str, tuple[_AgentRecord, ...]] = PrivateAttr(default_factory=dict)
     # Set of agent ids for which we've already logged a malformed-color-label
-    # warning, so the log line fires once per agent rather than on every SSE
+    # notice, so the log line fires once per agent rather than on every SSE
     # tick. Plain set is fine -- get_workspace_color holds ``_lock`` while
     # mutating it.
     _logged_malformed_color_agents: set[str] = PrivateAttr(default_factory=set)
