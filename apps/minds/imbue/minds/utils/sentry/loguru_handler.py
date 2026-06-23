@@ -22,6 +22,7 @@ from typing import Any
 from typing import Callable
 from typing import Iterable
 from typing import Sequence
+from typing import cast
 
 import sentry_sdk
 from loguru import logger
@@ -229,8 +230,10 @@ class SentryEventHandler(_BaseHandler):
 
         level = self._logging_to_event_level(record)
         if level in {"debug", "info", "warning", "error", "critical", "fatal"}:
-            # standard levels that sentry understands, it ignores any other types
-            event["level"] = level  # type: ignore[typeddict-item]
+            # standard levels that sentry understands, it ignores any other types.
+            # ``level`` is validated by the membership check above; cast so the
+            # checker accepts the assignment to the Literal-typed TypedDict key.
+            event["level"] = cast(Any, level)
 
         event["logger"] = record.name
 

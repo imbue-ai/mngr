@@ -10,4 +10,6 @@ S3 attachment uploads remain opt-in via the `MINDS_SENTRY_S3_UPLOADS` env var (d
 
 Report the desktop app version (from `package.json`) as the Sentry release and the git SHA the build was cut from as the `git_sha` tag. The Electron launcher passes both to the Python backend via `MINDS_RELEASE_ID`/`MINDS_GIT_SHA` (resolving the SHA live from the checkout in dev and from the build-time `build-info.json` in packaged builds); bare source runs fall back to reading `package.json` and report an `unknown` SHA.
 
+Do not attach any user PII to Sentry error reports: the unused user-context wiring (`global_user_context` / `sentry_sdk.set_user`) has been removed, and `send_default_pii=False` is kept.
+
 Bump the bundled latchkey CLI to 2.17.2.

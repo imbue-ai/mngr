@@ -176,9 +176,12 @@ def _first_line_of_log_message(event: Event) -> str | None:
 
 def _get_full_location_from_event(event: Event) -> str | None:
     """Extracts the `full_location` field that we are supposed to generate in our log handlers."""
-    extra = event.get("extra", {}).get("extra")
-    if extra and isinstance(extra, dict):
-        full_location = extra.get("full_location")
+    outer_extra = event.get("extra")
+    if not isinstance(outer_extra, dict):
+        return None
+    extra = cast(dict[str, Any], outer_extra).get("extra")
+    if isinstance(extra, dict):
+        full_location = cast(dict[str, Any], extra).get("full_location")
         if full_location and isinstance(full_location, str):
             return full_location.strip() or None
     return None
@@ -439,7 +442,7 @@ def get_traceback_with_vars(exception: BaseException | None = None) -> str:
         if exception is not None:
             # we are in an exception handler, use that for the traceback
             # for some reason this breaks when casting to an `Exception`, so just using type: ignore
-            return traceback_with_variables.format_exc(exception, fmt=tb_format)  # type: ignore
+            return traceback_with_variables.format_exc(exception, fmt=tb_format)
         else:
             # not in an exception handler, just get the current stack
             return traceback_with_variables.format_cur_tb(fmt=tb_format)
@@ -450,7 +453,6 @@ def get_traceback_with_vars(exception: BaseException | None = None) -> str:
 # We define BeforeSendType here to be one or more callables that match the signature of sentry's before_send hook.
 # The event will be passed through each one in our wrapping code.
 BaseBeforeSendType = Callable[[Event, Hint], Event | None]
-BeforeSendType = BaseBeforeSendType | list[BaseBeforeSendType]
 
 
 # NOTE: if the actual event (without attachments) being too large is a problem, then it will be handled
@@ -461,13 +463,13 @@ def _before_send_wrapper(
     before_send_list: Iterable[BaseBeforeSendType],
 ) -> Event | None:
     try:
+        result = event
         for before_send in before_send_list:
-            # pyre-fixme[9]: the result of before_send can be None which is not compatible with event annotation.
-            event = before_send(event, hint)
-            if event is None:
+            maybe_event = before_send(result, hint)
+            if maybe_event is None:
                 return None
-
-        return event
+            result = maybe_event
+        return result
     except Exception as e:
         # It is critical that we catch errors here and print them, because this is called from sentry
         # Failing to do so means that we will see NOTHING about the failure!
@@ -498,7 +500,6 @@ def setup_sentry(
     release_id: str,
     git_commit_sha: str,
     log_folder: Path,
-    global_user_context: Mapping[str, str] | None = None,
     is_s3_upload_enabled: bool = False,
 ) -> None:
     """Sets up the main Sentry instance for this process.
@@ -514,7 +515,11 @@ def setup_sentry(
     default): they only happen when it is true *and* the environment is
     ``production`` or ``staging``. ``development`` never uploads to S3.
     """
-    assert "SENTRY_DSN" not in os.environ, "Please `unset SENTRY_DSN` in your environment."
+    if "SENTRY_DSN" in os.environ:
+        # We pass ``dsn=`` explicitly below, so sentry_sdk ignores any SENTRY_DSN
+        # in the environment. Warn rather than crash the backend: an end user may
+        # have it set for unrelated reasons.
+        logger.warning("Ignoring SENTRY_DSN from the environment; minds selects its Sentry DSN by environment.")
 
     sentry_dsn = _SENTRY_DSN_BY_ENVIRONMENT[environment]
 
@@ -572,8 +577,8 @@ def setup_sentry(
     else:
         logger.info("Sentry S3 attachment uploads disabled (environment={} has no bucket)", environment.value)
 
-    if global_user_context is not None:
-        sentry_sdk.set_user(dict(global_user_context))
+    # We deliberately do not call ``sentry_sdk.set_user`` (and keep
+    # ``send_default_pii=False``) so error reports carry no user PII for now.
 
     # capture loguru errors/exceptions with a custom handler
     min_sentry_level: int = SentryLoguruLoggingLevels.LOW_PRIORITY.value
@@ -640,15 +645,14 @@ class SentryMindsConfigDict(TypedDict):
     log_folder_path: Path | None
 
 
-def _get_config_from_scope() -> SentryMindsConfigDict | None:
+def _get_config_from_scope() -> SentryMindsConfigDict:
     scope = get_current_scope()._contexts.get(_SENTRY_MINDS_CONTEXT_KEY, SentryMindsConfigDict(log_folder_path=None))
-    # we only put SentryMindsConfigDict in _contexts, but regrettably as a third-party library we can't tell pyre that
+    # we only put SentryMindsConfigDict in _contexts, but regrettably as a third-party library we can't tell the checker that
     return cast(SentryMindsConfigDict, scope)
 
 
 def _get_log_folder_from_scope() -> Path | None:
-    # TODO: _get_config_from_scope() can be None. do we want to return None in that case, or error?
-    log_folder_path = _get_config_from_scope().get("log_folder_path")  # pyre-fixme[16]
+    log_folder_path = _get_config_from_scope().get("log_folder_path")
     if log_folder_path and log_folder_path.exists():
         logger.debug("Using Sentry context log_folder_path: {}", str(log_folder_path))
         return log_folder_path
@@ -782,6 +786,7 @@ def add_extra_info_hook(event: Event, hint: Hint) -> tuple[Event, Hint, tuple[_U
         exception=exception, logs_folder=_get_log_folder_from_scope()
     )
 
+    extra = cast(dict[str, Any], event["extra"])
     if s3_uri_groups:
         for group_name, s3_uris in s3_uri_groups.items():
             # NOTE: EXTRAS_UPLOADED_FILES_KEY is not safe to write to, as it may get stomped by other code paths
@@ -789,9 +794,7 @@ def add_extra_info_hook(event: Event, hint: Hint) -> tuple[Event, Hint, tuple[_U
             # NOTE: It is possible that there are pre-existing contents of this list that
             #       will bump the list size over the MAX_SENTRY_LIST_SIZE. Ignoring this edge
             #       as no one is expected to actually write to these at the moment of committing this.
-            # TODO: perhaps move these to event["uploaded_files"][extra_name] so that
-            # the type checker knows that the outcome has to be a list?
-            event["extra"][extra_name] = event["extra"].get(extra_name, []) + s3_uris  # pyre-fixme[58]
+            extra[extra_name] = extra.get(extra_name, []) + list(s3_uris)
 
-    event["extra"]["platform"] = _get_platform_info()
+    extra["platform"] = _get_platform_info()
     return event, hint, tuple(callbacks)
