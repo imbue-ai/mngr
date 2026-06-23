@@ -13,5 +13,3 @@ Report the desktop app version (from `package.json`) as the Sentry release and t
 Do not attach any user PII to Sentry error reports: the unused user-context wiring (`global_user_context` / `sentry_sdk.set_user`) has been removed, and `send_default_pii=False` is kept.
 
 Flush Sentry (and any pending S3 attachment uploads) during the desktop client's shutdown teardown, so errors captured late in a session -- including any logged while shutting down -- are sent before the process exits.
-
-Bump the bundled latchkey CLI to 2.17.2.
