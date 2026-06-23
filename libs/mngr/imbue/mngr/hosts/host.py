@@ -4,10 +4,10 @@ import fcntl
 import importlib.resources
 import io
 import json
+import math
 import os
 import shlex
 import tempfile
-import time
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
@@ -53,6 +53,7 @@ from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import CommandTimeoutError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostDataSchemaError
+from imbue.mngr.errors import HostError
 from imbue.mngr.errors import InvalidActivityTypeError
 from imbue.mngr.errors import LockNotHeldError
 from imbue.mngr.errors import MngrError
@@ -210,45 +211,93 @@ def _get_ssh_transport(pyinfra_host: Any) -> Transport | None:
     return None
 
 
-# Dedicated lock file (separate from the idle-suppression "host_lock") used to
-# serialize concurrent `mngr start` runs for a host via flock(2). It is never
-# deleted so its inode stays stable across local and remote (over-SSH) holders.
-_START_LOCK_FILENAME: Final[str] = "host_start_lock"
+# The single host lock file. It is held via a real flock(2) -- directly on local
+# hosts, and over a long-lived SSH exec channel on remote hosts -- so a holder
+# running locally inside the host (e.g. a VM/container boot hook) and a holder
+# running remotely over SSH (e.g. the minds desktop client) mutually exclude.
+# It is never deleted so its inode stays stable across local and remote holders;
+# the idle-shutdown watcher and ``is_lock_held`` detect it via a flock probe, not
+# via file existence.
+_HOST_LOCK_FILENAME: Final[str] = "host_lock"
 
-# Printed by the remote lock holder once flock(2) has been acquired, so the
-# local side knows it may proceed (the remote flock blocks until then).
-_START_LOCK_ACQUIRED_MARKER: Final[str] = "__MNGR_START_LOCK_ACQUIRED__"
+# Default timeout for callers that want a bounded wait (e.g. gc). ``create`` and
+# ``start`` pass ``None`` to block indefinitely until the lock is acquired.
+_DEFAULT_HOST_LOCK_TIMEOUT_SECONDS: Final[float] = 300.0
+
+# Env var that retains a failed host (and keeps its lock held) for debugging.
+_RETAIN_LOCK_FOR_DEBUG_ENV_VAR: Final[str] = "MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE"
+
+# Markers printed by the remote lock holder so the local side can track progress.
+_LOCK_ACQUIRED_MARKER: Final[str] = "__MNGR_LOCK_ACQUIRED__"
+_LOCK_TIMED_OUT_MARKER: Final[str] = "__MNGR_LOCK_TIMED_OUT__"
+_LOCK_WAITING_MARKER: Final[str] = "__MNGR_LOCK_WAITING__"
+
+# Confirmation printed by the detached debug lock holder once it has been forked.
+_LOCK_HOLDER_LAUNCHED_MARKER: Final[str] = "__MNGR_LOCK_HOLDER_LAUNCHED__"
+
+
+def _is_retain_lock_for_debug_enabled() -> bool:
+    """Whether the debug flag that keeps a failed host (and its lock) alive is set."""
+    return os.environ.get(_RETAIN_LOCK_FOR_DEBUG_ENV_VAR) == "1"
 
 
 @pure
-def _build_remote_start_lock_command(lock_file_path: Path) -> str:
+def _build_remote_lock_command(lock_file_path: Path, timeout_seconds: float | None) -> str:
     """Build the remote shell command that holds a flock(2) until stdin closes.
 
-    Opens the lock fd, blocks on ``flock`` until acquired, prints a marker, then
-    reads stdin until EOF. When the controlling channel is closed, stdin hits
-    EOF, the loop ends, the shell exits, the fd closes, and the lock releases.
+    Opens the lock fd, tries a non-blocking acquire first (printing a "waiting"
+    marker if it must block), waits for the lock (bounded by ``timeout_seconds``
+    when given), prints the acquired marker, then reads stdin until EOF. Closing
+    the controlling channel sends EOF, so the shell exits, the fd closes, and the
+    lock releases. A bounded-wait timeout prints the timeout marker and exits 1;
+    any other failure (e.g. ``flock`` missing) exits without printing a marker so
+    the local side surfaces it as an unexpected error rather than a timeout.
     """
     quoted_path = shlex.quote(str(lock_file_path))
     quoted_dir = shlex.quote(str(lock_file_path.parent))
-    quoted_marker = shlex.quote(_START_LOCK_ACQUIRED_MARKER)
+    acquired = shlex.quote(_LOCK_ACQUIRED_MARKER)
+    timed_out = shlex.quote(_LOCK_TIMED_OUT_MARKER)
+    waiting = shlex.quote(_LOCK_WAITING_MARKER)
+    hold = f"printf '%s\\n' {acquired} && while IFS= read -r _; do :; done"
+    if timeout_seconds is None:
+        # Block indefinitely. ``flock -n`` first so we only emit the waiting marker
+        # under genuine contention; ``flock 9`` then blocks until released.
+        blocking_acquire = "flock 9"
+    else:
+        # flock -w expects whole seconds; round up so a sub-second budget still
+        # waits at least one second.
+        wait_seconds = max(1, math.ceil(timeout_seconds))
+        blocking_acquire = f"flock -w {wait_seconds} 9"
     return (
-        f"mkdir -p {quoted_dir} && exec 9>{quoted_path} && flock 9 && "
-        f"printf '%s\\n' {quoted_marker} && while IFS= read -r _; do :; done"
+        f"mkdir -p {quoted_dir} && exec 9>{quoted_path} && "
+        f"if flock -n 9; then {hold}; "
+        f"else printf '%s\\n' {waiting} && "
+        f"if {blocking_acquire}; then {hold}; "
+        f'else rc=$?; [ "$rc" = 1 ] && printf \'%s\\n\' {timed_out}; exit "$rc"; fi; fi'
     )
 
 
-def _wait_for_lock_acquired_marker(channel: Any) -> None:
-    """Block until the remote lock holder prints the acquired marker.
+def _wait_for_remote_lock_acquired(channel: Any) -> None:
+    """Block until the remote lock holder reports it has acquired the lock.
 
-    Raises LockNotHeldError if the channel closes first (e.g. ``flock`` missing
-    on the host or the lock command failed before acquiring the lock).
+    Raises LockNotHeldError if a bounded wait timed out. Raises HostError if the
+    channel closes before any result marker (e.g. ``flock`` missing on the host),
+    which should never happen and must not be mistaken for a timeout.
     """
-    marker_bytes = _START_LOCK_ACQUIRED_MARKER.encode()
+    acquired_bytes = _LOCK_ACQUIRED_MARKER.encode()
+    timed_out_bytes = _LOCK_TIMED_OUT_MARKER.encode()
+    waiting_bytes = _LOCK_WAITING_MARKER.encode()
     buffer = b""
-    while marker_bytes not in buffer:
+    is_waiting_logged = False
+    while acquired_bytes not in buffer:
+        if timed_out_bytes in buffer:
+            raise LockNotHeldError("Timed out waiting to acquire the host lock")
+        if waiting_bytes in buffer and not is_waiting_logged:
+            logger.info("Waiting to acquire host lock (another operation is using this host)...")
+            is_waiting_logged = True
         chunk = channel.recv(4096)
         if not chunk:
-            raise LockNotHeldError("Remote start lock channel closed before the lock was acquired")
+            raise HostError("Remote host lock command exited before acquiring the lock (is flock installed?)")
         buffer += chunk
 
 
@@ -742,60 +791,58 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     # =========================================================================
 
     @contextmanager
-    def lock_cooperatively(self, timeout_seconds: float = 300.0) -> Iterator[None]:
-        """Context manager for acquiring and releasing the host lock.
+    def lock_cooperatively(self, timeout_seconds: float | None = _DEFAULT_HOST_LOCK_TIMEOUT_SECONDS) -> Iterator[None]:
+        """Hold the host's exclusive, cross-actor lock for the duration of the block.
 
-        For local hosts, uses flock for process-level locking.
-        For remote hosts, writes/removes a lock file to prevent the idle shutdown script
-        from triggering during operations. On error, the lock file is removed by default
-        so the host can idle-shutdown; set MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1
-        to retain it for debugging.
+        Holds a real ``flock(2)`` on the ``host_lock`` file -- directly on local
+        hosts, and over a long-lived SSH exec channel on remote hosts -- so that
+        a holder running *locally* inside the host and a holder running *remotely*
+        over SSH mutually exclude. Because the in-host idle-shutdown watcher tests
+        the same flock, holding the lock also suppresses idle shutdown while we
+        operate on the host. The lock auto-releases when the block exits (even on
+        error): on remote hosts the SSH channel closes, the remote shell exits,
+        the fd closes, and the lock releases.
+
+        ``timeout_seconds=None`` blocks indefinitely until the lock is acquired
+        (used by ``create`` and ``start``); a finite value raises
+        ``LockNotHeldError`` if the lock cannot be acquired in time.
+
+        On error, if ``MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1``,
+        a detached on-host process re-holds the lock so the failed (remote) host
+        stays up for debugging instead of idle-shutting-down.
         """
-        lock_file_path = self.host_dir / "host_lock"
-
-        if not self.is_local:
-            # Write a lock file so the shutdown script does not trigger while we are operating on the host
-            self.write_text_file(lock_file_path, str(time.time()))
-            try:
+        lock_file_path = self.host_dir / _HOST_LOCK_FILENAME
+        if self.is_local:
+            with self._hold_local_host_lock(lock_file_path, timeout_seconds):
                 yield
-            except BaseException:
-                # On error, remove the lock file so the host can idle-shutdown normally,
-                # unless the user wants to retain it for debugging
-                is_retain_lock = os.environ.get("MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE") == "1"
-                if is_retain_lock:
-                    logger.debug(
-                        "Retaining host lock file for debugging (MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1)"
-                    )
-                else:
-                    logger.debug(
-                        "Removing host lock file on error to allow idle shutdown (set MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1 to prevent this and debug)"
-                    )
-                    try:
-                        self.execute_idempotent_command(f"rm -f '{lock_file_path}'")
-                    except (MngrError, OSError) as lock_removal_error:
-                        logger.warning(
-                            "Failed to remove host lock file during error cleanup: {}",
-                            lock_removal_error,
-                        )
-                raise
-            else:
-                self.execute_idempotent_command(f"rm -f '{lock_file_path}'")
-            return
+        else:
+            with self._hold_remote_host_lock(lock_file_path, timeout_seconds):
+                yield
 
+    @contextmanager
+    def _hold_local_host_lock(self, lock_file_path: Path, timeout_seconds: float | None) -> Iterator[None]:
+        """Hold a real flock(2) on the local filesystem for the duration of the block."""
         lock_file_path.parent.mkdir(parents=True, exist_ok=True)
-
         lock_file = open(str(lock_file_path), "w")
         try:
             with log_span("acquiring host lock at {}", lock_file_path):
-                try:
-                    wait_for(
-                        lambda: _try_acquire_flock(lock_file),
-                        timeout=timeout_seconds,
-                        poll_interval=0.1,
-                        error_message=f"Failed to acquire lock within {timeout_seconds}s",
-                    )
-                except TimeoutError as e:
-                    raise LockNotHeldError(str(e)) from e
+                if _try_acquire_flock(lock_file):
+                    pass
+                elif timeout_seconds is None:
+                    # Contended: log once, then block indefinitely.
+                    logger.info("Waiting to acquire host lock (another operation is using this host)...")
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                else:
+                    logger.info("Waiting to acquire host lock (another operation is using this host)...")
+                    try:
+                        wait_for(
+                            lambda: _try_acquire_flock(lock_file),
+                            timeout=timeout_seconds,
+                            poll_interval=0.1,
+                            error_message=f"Failed to acquire lock within {timeout_seconds}s",
+                        )
+                    except TimeoutError as e:
+                        raise LockNotHeldError(str(e)) from e
             yield
         finally:
             try:
@@ -805,83 +852,96 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             logger.trace("Released host lock")
 
     @contextmanager
-    def lock_for_starting(self) -> Iterator[None]:
-        """Hold an exclusive, cross-actor lock that serializes ``mngr start`` for this host.
-
-        Uses a real ``flock(2)`` on a dedicated lock file (separate from the
-        idle-suppression ``host_lock``) so that a start running *locally* inside
-        the host -- e.g. a VM/container boot hook -- and a start running
-        *remotely* over SSH -- e.g. the minds desktop client -- mutually
-        exclude. Both hold ``flock(2)`` on the same path, so they coordinate
-        even though one is local and the other is over SSH.
-
-        Blocks indefinitely until the lock is acquired (wrap the CLI in
-        ``timeout`` if a deadline is needed). The lock file is intentionally
-        never deleted so its inode stays stable across local and remote holders.
-        """
-        lock_file_path = self.host_dir / _START_LOCK_FILENAME
-        if self.is_local:
-            lock_file_path.parent.mkdir(parents=True, exist_ok=True)
-            lock_file = open(str(lock_file_path), "w")
-            try:
-                with log_span("acquiring start lock at {}", lock_file_path):
-                    # Blocking exclusive flock: waits indefinitely for any other holder.
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-                yield
-            finally:
-                try:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-                finally:
-                    lock_file.close()
-                logger.trace("Released start lock")
-        else:
-            with self._hold_remote_start_lock(lock_file_path):
-                yield
-
-    @contextmanager
-    def _hold_remote_start_lock(self, lock_file_path: Path) -> Iterator[None]:
+    def _hold_remote_host_lock(self, lock_file_path: Path, timeout_seconds: float | None) -> Iterator[None]:
         """Hold a real flock(2) on the host over SSH for the duration of the block.
 
-        A long-lived exec channel opens the lock fd, blocks on ``flock`` until
-        the lock is acquired, and then waits for stdin EOF. Closing the channel
-        on exit sends that EOF, so the remote shell exits, the fd closes, and
-        the lock releases.
+        A long-lived exec channel opens the lock fd, waits for the lock, and then
+        waits for stdin EOF. Closing the channel on exit sends that EOF, so the
+        remote shell exits, the fd closes, and the lock releases.
         """
-        # Establish the SSH connection before grabbing the transport: it is
-        # opened lazily, and the start lock can be the first thing to touch it
-        # (so the transport would otherwise be None). Mirrors every other
-        # transport user (read_file, exec, ...).
+        # Establish the SSH connection before grabbing the transport: it is opened
+        # lazily, and the lock can be the first thing to touch it (so the transport
+        # would otherwise be None). Mirrors every other transport user.
         self._ensure_connected()
         transport = self._get_paramiko_transport()
         channel = transport.open_session()
+        is_lock_acquired = False
         try:
-            with log_span("acquiring start lock at {} (over SSH)", lock_file_path):
-                channel.exec_command(_build_remote_start_lock_command(lock_file_path))
-                _wait_for_lock_acquired_marker(channel)
+            with log_span("acquiring host lock at {} (over SSH)", lock_file_path):
+                channel.exec_command(_build_remote_lock_command(lock_file_path, timeout_seconds))
+                _wait_for_remote_lock_acquired(channel)
+            is_lock_acquired = True
             yield
+        except BaseException:
+            # If an operation that held the lock fails, optionally keep the host
+            # alive for debugging: launch a detached holder that re-grabs the flock
+            # after our channel releases it (it blocks on flock until we release).
+            if is_lock_acquired and _is_retain_lock_for_debug_enabled():
+                logger.debug(
+                    "Launching detached host-lock holder for debugging "
+                    "(MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1)"
+                )
+                self._launch_detached_lock_holder(lock_file_path)
+            raise
         finally:
             try:
                 channel.shutdown_write()
             except (OSError, EOFError) as shutdown_error:
                 # Best-effort EOF to release the remote flock; the channel.close()
                 # below tears it down regardless. Log so a wedged teardown is visible.
-                logger.debug("Failed to send EOF when releasing remote start lock: {}", shutdown_error)
+                logger.debug("Failed to send EOF when releasing remote host lock: {}", shutdown_error)
             channel.close()
-            logger.trace("Released start lock (over SSH)")
+            logger.trace("Released host lock (over SSH)")
+
+    def _launch_detached_lock_holder(self, lock_file_path: Path) -> None:
+        """Launch a detached on-host process that holds the host-lock flock indefinitely.
+
+        Used only when the debug retain flag is set: it keeps a failed remote host
+        from idle-shutting-down by holding the same flock our channel is about to
+        release. It blocks on flock until our channel releases, then holds forever
+        (bounded only by the host's hard max-age timeout or a manual destroy).
+        """
+        quoted_path = shlex.quote(str(lock_file_path))
+        quoted_dir = shlex.quote(str(lock_file_path.parent))
+        launched_marker = shlex.quote(_LOCK_HOLDER_LAUNCHED_MARKER)
+        # setsid detaches into a new session so the holder survives the channel
+        # close; redirecting all stdio lets the parent shell exit immediately.
+        command = (
+            f"mkdir -p {quoted_dir} && "
+            f"setsid sh -c 'exec 9>{quoted_path}; flock 9; exec sleep infinity' "
+            f"</dev/null >/dev/null 2>&1 & "
+            f"printf '%s\\n' {launched_marker}"
+        )
+        self._ensure_connected()
+        transport = self._get_paramiko_transport()
+        channel = transport.open_session()
+        try:
+            channel.exec_command(command)
+            # Wait for the launch confirmation so the holder forks before we release.
+            marker_bytes = _LOCK_HOLDER_LAUNCHED_MARKER.encode()
+            buffer = b""
+            while marker_bytes not in buffer:
+                chunk = channel.recv(4096)
+                if not chunk:
+                    logger.warning("Detached host-lock holder did not confirm launch")
+                    break
+                buffer += chunk
+        finally:
+            channel.close()
 
     def get_reported_lock_time(self) -> datetime | None:
-        """Get the mtime of the lock file."""
-        lock_path = self.host_dir / "host_lock"
+        """Get the mtime of the lock file (set by the truncating open at acquire)."""
+        lock_path = self.host_dir / _HOST_LOCK_FILENAME
         return self._get_file_mtime(lock_path)
 
     def is_lock_held(self) -> bool:
-        """Check whether the host lock is currently held.
+        """Check whether the host lock is currently held via a non-blocking flock probe.
 
-        For local hosts, attempts a non-blocking flock to test if the lock is held by another
-        process (the lock file persists after release, so file existence alone is insufficient).
-        For remote hosts, checks whether the lock file exists (it is deleted on release).
+        The lock file persists after release (its inode must stay stable across
+        local and remote holders), so file existence alone is insufficient: a
+        non-blocking flock probe is the only way to tell whether it is held.
         """
-        lock_path = self.host_dir / "host_lock"
+        lock_path = self.host_dir / _HOST_LOCK_FILENAME
 
         if self.is_local:
             if not lock_path.exists():
@@ -894,7 +954,19 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             except (BlockingIOError, OSError):
                 return True
         else:
-            return self.get_reported_lock_time() is not None
+            return self._is_remote_lock_held(lock_path)
+
+    def _is_remote_lock_held(self, lock_path: Path) -> bool:
+        """Probe whether the remote host lock is held via a single non-blocking flock test."""
+        quoted_path = shlex.quote(str(lock_path))
+        # Guard on existence so the probe never creates the lock file when absent.
+        command = (
+            f"if [ ! -e {quoted_path} ]; then echo NOT_HELD; "
+            f"elif flock -n {quoted_path} -c true 2>/dev/null; then echo NOT_HELD; "
+            f"else echo HELD; fi"
+        )
+        result = self.execute_idempotent_command(command)
+        return result.success and "HELD" in result.stdout and "NOT_HELD" not in result.stdout
 
     # =========================================================================
     # Certified Data

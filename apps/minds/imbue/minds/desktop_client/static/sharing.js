@@ -29,7 +29,7 @@
 
     var link = document.createElement('a');
     link.href = mngrForwardOrigin + '/goto/' + agentId + '/';
-    link.className = 'text-blue-600 hover:underline';
+    link.className = 'text-accent hover:underline';
     link.textContent = wsName;
     h.appendChild(link);
 
@@ -37,7 +37,7 @@
       h.appendChild(document.createTextNode(' ('));
       var acctLink = document.createElement('a');
       acctLink.href = '/accounts';
-      acctLink.className = 'text-blue-600 hover:underline';
+      acctLink.className = 'text-accent hover:underline';
       acctLink.textContent = accountEmail;
       h.appendChild(acctLink);
       h.appendChild(document.createTextNode(')'));
@@ -54,9 +54,9 @@
   function createAclRow(email, variant) {
     var base = 'flex items-center justify-between px-3 py-2 border rounded-md my-1 ';
     var rowCls = {
-      existing: 'bg-white border-zinc-200',
-      added:    'bg-emerald-50 border-emerald-200',
-      removed:  'bg-red-50 border-red-200 line-through',
+      existing: 'bg-surface-primary border-default',
+      added:    'bg-success/12 border-success/30',
+      removed:  'bg-important/12 border-important/30 line-through',
     }[variant];
     var row = document.createElement('div');
     row.className = base + rowCls;
@@ -64,18 +64,18 @@
     var left = document.createElement('span');
     if (variant === 'added' || variant === 'removed') {
       var prefix = document.createElement('span');
-      prefix.className = 'font-semibold mr-1.5 ' + (variant === 'added' ? 'text-emerald-600' : 'text-red-600');
+      prefix.className = 'font-semibold mr-1.5 ' + (variant === 'added' ? 'text-success' : 'text-important');
       prefix.textContent = variant === 'added' ? '+' : '−';
       left.appendChild(prefix);
     }
     var emailEl = document.createElement('span');
-    emailEl.className = 'text-sm ' + (variant === 'removed' ? 'text-zinc-400' : 'text-zinc-800');
+    emailEl.className = 'type-body ' + (variant === 'removed' ? 'text-tertiary' : 'text-primary');
     emailEl.textContent = email;
     left.appendChild(emailEl);
     row.appendChild(left);
 
     var btn = document.createElement('button');
-    btn.className = 'bg-transparent border-none cursor-pointer text-zinc-400 text-lg leading-none px-1 hover:text-zinc-700';
+    btn.className = 'bg-transparent border-none cursor-pointer text-tertiary type-heading px-1 hover:text-primary';
     btn.setAttribute('aria-label', 'Remove');
     btn.setAttribute('data-action',
       variant === 'added' ? 'unmark-added'
@@ -106,7 +106,7 @@
     });
     if (rowCount === 0) {
       var empty = document.createElement('p');
-      empty.className = 'text-sm text-zinc-400';
+      empty.className = 'type-body text-tertiary';
       empty.textContent = 'No one in the access list';
       container.appendChild(empty);
     }
@@ -177,7 +177,7 @@
     if (existing) existing.remove();
     var box = document.createElement('div');
     box.id = 'sharing-error';
-    box.className = 'mt-3 mb-1 px-3 py-2 rounded-md bg-red-50 border border-red-200 text-sm text-red-800';
+    box.className = 'mt-3 mb-1 px-3 py-2 rounded-md bg-important/12 border border-important/30 type-body text-important';
     box.textContent = message;
     var actions = document.getElementById('action-buttons');
     actions.parentNode.insertBefore(box, actions);
@@ -333,7 +333,7 @@
     .catch(function (err) {
       var state = document.getElementById('loading-state');
       state.textContent = 'Failed to load sharing status: ' + err.message;
-      state.className = 'text-red-600 py-4';
+      state.className = 'text-important py-4';
       document.getElementById('editor-content').classList.remove('hidden');
       added = proposedEmails.slice();
       renderACL();

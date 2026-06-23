@@ -2,7 +2,7 @@
 {#
   Selectable radio-style onboarding option used by the creating-page question
   flow. ``val`` is the option's stable value (read by creating.js). Editable
-  options reveal a textarea when selected (CSS in tokens.css); the textarea
+  options reveal a textarea when selected (CSS in app.css); the textarea
   is prefilled with ``preset`` and its value is the answer. Visual state is
   driven by the ``opt-selected`` class, toggled by creating.js.
 #}
@@ -10,11 +10,11 @@
      data-val="{{ val }}"{% if editable %} data-editable="1"{% endif %}>
   <span class="opt-radio"></span>
   <div class="opt-body">
-    <span class="block text-sm font-medium text-zinc-900">{{ title }}</span>
-    <span class="opt-desc block text-[12.5px] text-zinc-500 leading-snug mt-0.5">{{ desc }}</span>
+    <span class="block type-label text-primary">{{ title }}</span>
+    <span class="opt-desc block type-helper text-secondary mt-0.5">{{ desc }}</span>
     {% if editable %}
       <div class="opt-edit mt-2">
-        <textarea class="opt-text w-full px-3 py-2 text-[13px] rounded-md border border-zinc-200 bg-white text-zinc-900 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15 leading-snug"
+        <textarea class="opt-text w-full px-3 py-2 type-body rounded-md border border-default bg-surface-primary text-primary outline-none focus:border-accent focus:ring-2 focus:ring-accent/40"
                   rows="{{ rows }}" placeholder="{{ placeholder }}">{{ preset }}</textarea>
       </div>
     {% endif %}

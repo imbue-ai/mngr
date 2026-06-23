@@ -40,6 +40,10 @@ REQUIRED_HOST_PACKAGES: Final[tuple[RequiredHostPackage, ...]] = (
     RequiredHostPackage(package="git", binary="git"),
     RequiredHostPackage(package="jq", binary="jq"),
     RequiredHostPackage(package="xxd", binary="xxd"),
+    # flock(1) backs the cross-actor host lock and the in-host idle-shutdown
+    # watcher's lock probe. Present on standard Debian images (util-linux is
+    # essential); listed here so minimal/custom images still get it.
+    RequiredHostPackage(package="util-linux", binary="flock"),
 )
 
 
@@ -76,7 +80,7 @@ def build_check_and_install_packages_command(
     """Build a single shell command that checks for and installs required packages.
 
     This command:
-    1. Checks for each required package (ca-certificates, sshd, tmux, curl, rsync, git, jq, xxd)
+    1. Checks for each required package (ca-certificates, sshd, tmux, curl, rsync, git, jq, xxd, util-linux)
     2. Echoes a prefixed warning for each missing package
     3. Installs all missing packages in a single apt-get call
     4. Creates the sshd run directory (/run/sshd)

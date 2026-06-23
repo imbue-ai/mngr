@@ -23,7 +23,7 @@ from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderEmptyError
-from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -577,11 +577,13 @@ Supported build arguments for the modal provider:
                 get_output_callback=lambda: context_handle.output_buffer.getvalue(),
             )
         except ModalProxyAuthError as e:
-            # The contract class for an unreachable provider is ProviderUnavailableError (read
-            # paths catch it and keep the provider visible); curate the help toward Modal auth.
-            raise ProviderUnavailableError(
+            # ProviderNotAuthorizedError is a ProviderUnavailableError, so read paths still
+            # catch it and keep the provider visible; the dedicated type makes the
+            # "not authenticated" case consistent with the other cloud providers.
+            raise ProviderNotAuthorizedError(
                 name,
-                f"Modal is not authorized (original error: {e})",
+                reason="Modal token missing or invalid",
+                short_remediation="run `uvx modal token set`",
                 user_help_text=(
                     "Modal is not authorized: run `uvx modal token set` to authenticate, or disable this "
                     f"provider with `mngr config set --scope local providers.{name}.is_enabled false`."

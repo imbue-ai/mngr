@@ -17,7 +17,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.data_types import ProviderResourceInfo
 from imbue.mngr.interfaces.host import OuterHostInterface
@@ -125,13 +125,31 @@ def _build_self_deallocate_script(sentinel_to_remove: str | None) -> str:
     )
 
 
-def _azure_unavailable_error(name: ProviderInstanceName, reason: str) -> ProviderUnavailableError:
-    """Build a ``ProviderUnavailableError`` with Azure-specific, actionable help text.
+# OAuth scope used to eagerly validate Azure credentials (the Azure Resource Manager
+# default scope). Requesting a token for it forces DefaultAzureCredential to authenticate.
+_AZURE_MANAGEMENT_SCOPE: Final[str] = "https://management.azure.com/.default"
 
-    The generic ``ProviderUnavailableError`` help text tells the user to "start
-    Docker", which is wrong advice for a cloud auth/subscription failure. Azure's
-    "unavailable" causes are a missing subscription, an unusable credential, or
-    skipped one-time setup -- so we curate the guidance accordingly.
+
+def _resolve_and_validate_azure_credential(config: AzureProviderConfig) -> Any:
+    """Build the Azure credential and force authentication by requesting a management-scope token.
+
+    Raises ``AzureError`` if the credential cannot authenticate.
+    """
+    credential = config.get_credential()
+    credential.get_token(_AZURE_MANAGEMENT_SCOPE)
+    return credential
+
+
+def _azure_not_authorized_error(
+    name: ProviderInstanceName, reason: str, short_remediation: str, short_reason: str | None = None
+) -> ProviderNotAuthorizedError:
+    """Build a ``ProviderNotAuthorizedError`` with Azure-specific, actionable help text.
+
+    The generic unavailable help text tells the user to "start Docker", which is wrong
+    advice for a cloud auth/subscription failure. Azure's causes are a missing
+    subscription, an unusable credential, or skipped one-time setup -- so we curate the
+    guidance accordingly. ``ProviderNotAuthorizedError`` is a ``ProviderUnavailableError``
+    subclass, so read paths still treat the provider as unavailable rather than empty.
     """
     help_text = (
         "Azure could not be reached. Check, in order:\n"
@@ -142,7 +160,13 @@ def _azure_unavailable_error(name: ProviderInstanceName, reason: str) -> Provide
         "  - one-time setup: run `mngr azure prepare` if you have not yet.\n"
         f"Or disable the provider: mngr config set --scope user providers.{name}.is_enabled false"
     )
-    return ProviderUnavailableError(name, reason, user_help_text=help_text)
+    return ProviderNotAuthorizedError(
+        name,
+        reason=reason,
+        short_remediation=short_remediation,
+        user_help_text=help_text,
+        short_reason=short_reason,
+    )
 
 
 class ParsedAzureBuildOptions(ParsedVpsBuildOptions):
@@ -555,18 +579,31 @@ class AzureProviderBackend(ProviderBackendInterface):
             # A missing/unresolvable subscription means Azure was never reached:
             # the state is *unknown* (agents may well exist on a configured
             # subscription we transiently couldn't read -- e.g. the az CLI
-            # rewriting azureProfile.json under us). That is ProviderUnavailableError,
-            # NOT ProviderEmptyError: read paths (mngr list) must surface a warning
-            # rather than silently dropping the provider and its agents from the
-            # listing. Host-creation paths surface this same error to the user.
-            raise _azure_unavailable_error(name, str(e)) from e
+            # rewriting azureProfile.json under us). That is ProviderNotAuthorizedError
+            # (a ProviderUnavailableError), NOT ProviderEmptyError: read paths (mngr
+            # list) must surface it rather than silently dropping the provider and its
+            # agents. Host-creation paths surface this same error to the user.
+            raise _azure_not_authorized_error(
+                name,
+                str(e),
+                "set subscription_id, AZURE_SUBSCRIPTION_ID, or run `az account set --subscription <id>`",
+                short_reason="Azure subscription not resolved",
+            ) from e
 
+        # DefaultAzureCredential constructs lazily and never validates, so eagerly
+        # request a management-scope token here to surface an unauthenticated
+        # environment *now* (instead of as a confusing API error on the first
+        # discovery call), matching how AWS/GCP resolve credentials at construction.
         try:
-            credential = config.get_credential()
+            credential = _resolve_and_validate_azure_credential(config)
         except AzureError as e:
-            # Same rationale: a credential we couldn't obtain leaves Azure's state
-            # unknown, so this is unavailable (warned), not empty (silently skipped).
-            raise _azure_unavailable_error(name, str(e)) from e
+            # A credential we couldn't obtain/validate leaves Azure's state unknown, so
+            # this is unauthorized (surfaced), not empty (silently skipped).
+            raise _azure_not_authorized_error(
+                name,
+                "Azure credentials not available",
+                "run `az login` (or set AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_CLIENT_SECRET)",
+            ) from e
 
         azure_client = AzureVpsClient(
             credential=credential,
