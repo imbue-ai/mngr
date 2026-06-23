@@ -536,6 +536,8 @@ def _build_mngr_create_command(
     state under a fictional id).
 
     DOCKER mode: --template main --template docker (runs in Docker container)
+    DOCKER_NIXOS mode: --template main --template docker-nixos (runs the
+        Nix-built Docker image on the local Docker provider)
     LIMA mode: --template main --template lima (runs in Lima VM)
     VULTR mode: --template main --template vultr (runs in Docker on a Vultr VPS)
     AWS mode: --new-host on the aws-<region> provider, --template main
@@ -574,6 +576,8 @@ def _build_mngr_create_command(
     """
     match launch_mode:
         case LaunchMode.DOCKER:
+            address = f"{_DEFAULT_AGENT_NAME}@{host_name}.docker"
+        case LaunchMode.DOCKER_NIXOS:
             address = f"{_DEFAULT_AGENT_NAME}@{host_name}.docker"
         case LaunchMode.LIMA:
             address = f"{_DEFAULT_AGENT_NAME}@{host_name}.lima"
@@ -674,6 +678,9 @@ def _build_mngr_create_command(
     match launch_mode:
         case LaunchMode.DOCKER:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "docker"])
+            mngr_command.extend(_remote_host_env_flags())
+        case LaunchMode.DOCKER_NIXOS:
+            mngr_command.extend(["--new-host", "--template", "main", "--template", "docker-nixos"])
             mngr_command.extend(_remote_host_env_flags())
         case LaunchMode.LIMA:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "lima"])
