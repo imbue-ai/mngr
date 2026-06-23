@@ -14,26 +14,41 @@ beyond this task. If you cannot determine what is wrong, report no changes.
 
 # If the test succeeds - or after you fixed a failing test
 
-Consider whether the test can be improved:
+A test exists to verify the claims its tutorial block makes -- nothing more.
+"What matters" for this test is fixed by the block, so the test has a natural
+size. A passing test already at that size needs no change: leaving the changes
+object empty is a correct, good outcome, NOT a failure. Do not add assertions or
+steps merely to be thorough -- thoroughness without a claim to verify is just
+brittleness.
 
-- Are the assertions good enough? Try to test by observing the actual effect of
-  commands, like how a human would do when debugging interactively, by looking at
-  e.g. files, git status, and so on. Avoid having too many specific assertions,
-  because this can make the tests very brittle.
+Bring the test to its natural size by checking it in BOTH directions:
 
-- Are there interesting edge cases worth covering?
+- Forward (coverage): is every claim the block makes actually verified? Observe
+  the real effect of commands, the way a human would when debugging
+  interactively (files, git status, command output). If the block creates an
+  agent in a directory, verify it is running there (e.g. `mngr exec $agent pwd`),
+  not merely that the command exited 0. If a claim is unverified, add an
+  assertion for it.
 
-- Is the code run in the pytest function close enough to the tutorial block?
+- Backward (trace): does every assertion trace back to a claim the block makes?
+  An assertion that checks something the block does not demonstrate is
+  gold-plating -- it adds brittleness without verifying documented behavior.
+  REMOVE it. This matters most on simple commands (e.g. help/flag output): that
+  the command succeeds and mentions the key thing is enough; do not accumulate
+  assertions on incidental wording.
 
-- Does it make sense to add additional pytest functions that cover the same
-  tutorial block? It is perfectly fine for two pytest functions to share the same
-  block. Think about "happy" and "unhappy" paths -- for example, a test that
-  verifies normal behavior and a separate test that verifies error handling or
-  edge cases for the same command.
+Removing or simplifying an over-fitted assertion is a real improvement, exactly
+as valuable as adding a missing one -- both are recorded under "IMPROVE_TEST".
 
-If you make improvements, record a change under the key "IMPROVE_TEST". If you
-identify an improvement that needs a larger-scale intervention, use status
-"BLOCKED". If no improvements are needed, leave the changes object empty.
+You may add a separate pytest function for an unhappy/error path when the
+command's documented behavior includes that failure mode (two functions may
+share one block). Only do so when the error behavior is part of what the block
+demonstrates -- not to manufacture extra coverage.
+
+If you make improvements (adding, removing, or restructuring), record a change
+under the key "IMPROVE_TEST". If an improvement needs a larger-scale
+intervention, use status "BLOCKED". If the test already verifies exactly its
+block's claims, leave the changes object empty.
 
 # Guidelines for test quality
 
@@ -46,19 +61,43 @@ optional extra flags) -- it must NOT simply run `mngr create --help` and verify
 that `--foo` is a supported flag. The test fixture already sets up an isolated
 environment, so using hardcoded agent names is fine.
 
-**Verify the actual behavior, not just surface-level output.** The script blocks
-usually don't contain verification code, but the test must verify the exact
-desired behavior as thoroughly as possible. For example, if a script block creates
-an agent in a specific directory, it is not sufficient to only verify that the
-agent appears in the result of `mngr list` -- you must also verify that the agent
-is running in that directory, e.g. by running `mngr exec $agent_name pwd` and
-checking its output. Think about what the command is supposed to accomplish and
-assert on the concrete effects.
+**Verify the behavior the block demonstrates, not just surface-level output.**
+The script blocks usually don't contain verification code, but the test must
+verify the behavior the block demonstrates, by observing concrete effects. For
+example, if a script block creates an agent in a specific directory, it is not
+sufficient to only verify that the agent appears in the result of `mngr list` --
+you must also verify that the agent is running in that directory, e.g. by running
+`mngr exec $agent_name pwd` and checking its output. Conversely, do not assert on
+effects the block does not demonstrate (see the forward/backward check above):
+over-specific assertions make tests brittle without verifying documented behavior.
 
 **Add comments to transcript commands.** The `e2e.run()` method accepts an
 optional `comment` parameter that is recorded in the transcript above the command
 (as `# ...` lines). Use this to annotate each command with a brief description of
 what it does. Reuse comments from the tutorial script block where available.
+
+# Cross-cutting setup blockers
+
+Some problems can only be fixed by a substantial, shared setup change that is out
+of scope for a single test -- for example, the suite mocking a claude or codex
+agent with a `sleep` command instead of a real fake-agent fixture, a missing
+shared helper, or a dependency on credentials absent from the environment (e.g.
+OpenAI credentials for codex). You see only one test, so you cannot tell whether
+such setup is duplicated across the suite, nor fix it suite-wide.
+
+When you hit one, do NOT paper over it with a brittle local hack. Instead:
+
+1. Leave a comment at the relevant spot in the code, on its own line, in exactly
+   this form so a later step can find it:
+
+     # FIXME(tmr): <one-line description of the shared setup change needed>
+
+2. Record a change (typically FIX_TEST or IMPROVE_TEST) with status "BLOCKED" and
+   explain the needed setup change in summary_markdown.
+
+A later integration step collects these comments, resolves the ones it can verify
+suite-wide, and surfaces the rest to the user. Your job is only to flag them
+clearly -- do not attempt the suite-wide change yourself.
 
 # Examining the CLI transcript
 

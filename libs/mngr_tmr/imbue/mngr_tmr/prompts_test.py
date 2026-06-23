@@ -40,6 +40,36 @@ def test_build_agent_prompt_instructs_one_entry_per_kind() -> None:
     assert "do not duplicate kinds" in prompt.lower()
 
 
+def test_build_agent_prompt_anchors_to_tutorial_and_allows_deletion() -> None:
+    """The convergence objective: bounded by the tutorial block, deletion is a
+    first-class action, and leaving a converged test unchanged is a valid outcome.
+    """
+    prompt = build_test_agent_prompt("t::t", ())
+    assert "tutorial block" in prompt
+    # Deletion / simplification of over-fitted assertions must be explicit.
+    assert "REMOVE" in prompt
+    # "No change needed" must be an allowed, good outcome.
+    assert "leave the changes object empty" in prompt
+
+
+def test_build_agent_prompt_has_fixme_channel() -> None:
+    """Mappers must be able to flag cross-cutting setup blockers as FIXME(tmr)."""
+    prompt = build_test_agent_prompt("t::t", ())
+    assert "FIXME(tmr):" in prompt
+
+
+def test_integrator_prompt_has_normalize_stage() -> None:
+    """The reducer must normalize: extract shared scaffolding (preserving the
+    tutorial 1:1) and triage FIXME(tmr) blockers into normalizations/escalations.
+    """
+    prompt = build_integrator_prompt()
+    assert "FIXME(tmr):" in prompt
+    assert "normalizations" in prompt
+    assert "escalations" in prompt
+    # The tutorial-1:1 extraction guardrail must be present.
+    assert "tutorial block" in prompt
+
+
 def test_collect_tests_with_real_pytest(tmp_path: Path, cg: ConcurrencyGroup) -> None:
     test_file = tmp_path / "test_sample.py"
     test_file.write_text("def test_one(): pass\ndef test_two(): pass\n")

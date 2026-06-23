@@ -89,6 +89,63 @@ branch with a flat list of commits that is easy to review.
 5. After cherry-picking, record the commit hashes using `git rev-parse HEAD` after
    each step (the squashed commit and each impl commit).
 
+# Normalize the integrated suite
+
+After cherry-picking you hold the whole integrated suite in one tree. This is the
+only point in the pipeline where cross-test relationships are visible, so do the
+two things no single test agent could. Keep each normalization change as its own
+commit prefixed `[NORMALIZE]`.
+
+## Extract shared scaffolding -- but preserve the tutorial 1:1
+
+Test functions often repeat the same *scaffolding* step: a verification command
+the tutorial does not itself demonstrate, e.g. running `mngr list` to confirm an
+agent launched. Genuinely-duplicated scaffolding can be extracted into a shared
+helper (on the e2e session or in conftest) to cut duplication.
+
+The hard rule: a step is extractable ONLY if it does NOT appear in that test's
+tutorial block. Tests must stay 1:1 with their tutorial -- commands that come from
+the block (each test reproduces its block via `e2e.write_tutorial_block`; ground
+truth is `libs/mngr/imbue/mngr/resources/mega_tutorial.sh`) MUST stay written out
+literally in every test, even when many tests repeat them. For example, if five
+blocks each run `mngr create`, all five tests keep that line inline -- do not
+extract it into a helper.
+
+Two more guardrails:
+
+- Only extract when the helper genuinely improves clarity. Do not over-extract:
+  turning every shared line into indirection makes tests harder to read, not
+  easier.
+- Verify every extraction by running the affected tests (the blast radius -- the
+  tests that used the step). If you cannot run them in this environment, perform
+  only pure, behavior-preserving moves of identical code, and mark the extraction
+  as unverified in its outcome entry. Never apply an unverified change with a
+  large blast radius: a subtle mistake there would break many tests on the next
+  run.
+
+Record each extraction under "normalizations" in the outcome.
+
+## Resolve or escalate cross-cutting blockers
+
+Test agents flag setup they could not fix suite-wide with `# FIXME(tmr): ...`
+comments (and a BLOCKED change in their outcome). Collect them from the integrated
+tree:
+
+```bash
+grep -rn "FIXME(tmr):" . || true
+```
+
+For each distinct blocker:
+
+- If you can resolve it suite-wide AND verify it by running the affected tests
+  (e.g. add a shared fake-claude fixture and switch tests onto it), do so, remove
+  the FIXME comment, commit as `[NORMALIZE]`, and record it under
+  "normalizations".
+- If it requires the environment to provide something absent (e.g. OpenAI
+  credentials for codex), or is otherwise beyond what you can verify here, leave
+  the FIXME in place and record it under "escalations" so it reaches the user. Do
+  NOT apply an unverifiable cross-cutting change.
+
 # Writing the outcome and publishing outputs
 
 After cherry-picking, write the result atomically to avoid races with the
@@ -103,7 +160,9 @@ The schema is:
  "squashed_commit_hash": "abc1234",
  "impl_priority": ["branch3"],
  "impl_commit_hashes": {"branch3": "def5678"},
- "failed": ["branch4"]}
+ "failed": ["branch4"],
+ "normalizations": [{"summary_markdown": "Extracted the mngr-list agent-running check into e2e.assert_agent_running (verified across 6 tests)"}],
+ "escalations": [{"title": "codex tests need OpenAI credentials", "detail_markdown": "test_create_codex mocks codex with sleep because OPENAI_API_KEY is absent from the test env; a real fake-codex fixture or credentials are needed."}]}
 
 Fields:
 - squashed_branches: branch names whose test/doc commits were squashed
@@ -111,6 +170,8 @@ Fields:
 - impl_priority: impl branch names in priority order, highest first
 - impl_commit_hashes: mapping of impl branch name to its commit hash on the integrated branch
 - failed: branch names that could not be integrated
+- normalizations: suite-wide cleanups you applied and verified (each with summary_markdown). Omit or use [] if none.
+- escalations: cross-cutting blockers you could NOT resolve or verify, to surface to the user (each with title and detail_markdown). Omit or use [] if none.
 
 Then, finally, publish the outputs archive. Run this from the git repo root:
 
