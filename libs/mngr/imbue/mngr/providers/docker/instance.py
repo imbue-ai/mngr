@@ -806,11 +806,11 @@ kill -TERM 1
         """Drop mngr's per-host build image tag (`mngr-build-<host_id>`).
 
         No-op when the tag is absent. Callers remove the host's container
-        first, so `force=True` deletes the now-unreferenced image outright; if
-        something unexpected still references it, `force` drops only mngr's tag
-        and leaves the underlying image for that user rather than failing.
-        Snapshot images are independent `docker commit` images, so this never
-        affects snapshot restore.
+        first, so `force=True` deletes the now-unreferenced image; if anything
+        else still references it -- another container, or a snapshot committed
+        from this host's container (which shares the build image's layers) --
+        `force` drops only mngr's tag and Docker keeps the underlying layers, so
+        snapshot restore is unaffected.
         """
         tag = self._build_image_tag(host_id)
         if not self._docker_client.images.list(name=tag):
@@ -1515,8 +1515,9 @@ kill -TERM 1
                     )
 
             # Remove the per-host build image so built images don't pile up. The
-            # container is gone, so the unforced removal deletes the image;
-            # snapshots keep their own layers.
+            # container is gone, so force-removing drops mngr's tag and deletes
+            # the image -- unless a snapshot still shares its layers, which
+            # Docker keeps.
             try:
                 self._remove_build_image(host_id)
             except docker.errors.DockerException as e:
