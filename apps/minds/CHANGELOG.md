@@ -12,7 +12,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Titlebar self-themes from the workspace color in pure CSS — derives black/white text contrast from `--titlebar-bg` via `lch(from …)` on a `.titlebar-surface` scope. `chrome.js` just toggles `.titlebar-surface` alongside `--titlebar-bg`; the previous server-side `accent_fg` calculation (and its SSE / IPC plumbing) is gone.
 - Added: New 16x16 icon set drawn from the Figma `Icon` frame replaces the lucide stroke icons throughout the chrome (`menu`, `home`, `user`, `inbox`, `settings`, `chevron-right` / `-left` / `-down` / `-up` / `-down-small`, `plus`, `close`, `restart`, `arrow-up-right`, `check`, `play`, `pause`). The `Icon24` component was renamed `Icon16` to reflect what it renders (16px by default; 24 only ever named lucide's authoring grid).
 - Added: `Badge` JinjaX component (Figma node 330-4472) with bare 8px `important` dot and count-pill shapes — the titlebar's requests counter and Landing-row health/backup badges now share this primitive.
-- Added: AWS as a workspace compute-provider option (alongside Docker, Lima, Vultr, Imbue Cloud) with a required per-region picker; the "Cloud" option was renamed to "Vultr"; the workspace listing shows a compute-provider label on every row.
 
 ### Changed
 
