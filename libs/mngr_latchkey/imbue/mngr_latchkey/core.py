@@ -180,11 +180,16 @@ GOOGLE_SERVICE_NAME_PREFIX: Final[str] = "google-"
 # ``latchkey auth prepare`` so the user signs in against the Minds consent
 # screen instead of self-provisioning their own Google Cloud project. A single
 # pair is reused for every google service (the underlying Google Cloud client
-# has all needed scopes enabled). These are placeholders until the real client
-# is published; for an installed/desktop OAuth app the "secret" is not truly
-# confidential.
-MINDS_GOOGLE_OAUTH_CLIENT_ID: Final[str] = "REPLACE_WITH_MINDS_GOOGLE_OAUTH_CLIENT_ID"
-MINDS_GOOGLE_OAUTH_CLIENT_SECRET: Final[str] = "REPLACE_WITH_MINDS_GOOGLE_OAUTH_CLIENT_SECRET"
+# has all needed scopes enabled).
+#
+# Sourced from the environment rather than hardcoded: the OAuth client secret is
+# a scanned-secret pattern, so committing it is blocked by push protection (and
+# undesirable regardless). Set ``MINDS_GOOGLE_OAUTH_CLIENT_ID`` /
+# ``MINDS_GOOGLE_OAUTH_CLIENT_SECRET`` in the environment (the packaged app's
+# launch env, or a dev ``.env``). When unset, the values are empty and the Minds
+# OAuth attempt simply falls through to the self-setup flow.
+MINDS_GOOGLE_OAUTH_CLIENT_ID: Final[str] = os.environ.get("MINDS_GOOGLE_OAUTH_CLIENT_ID", "")
+MINDS_GOOGLE_OAUTH_CLIENT_SECRET: Final[str] = os.environ.get("MINDS_GOOGLE_OAUTH_CLIENT_SECRET", "")
 
 
 class LatchkeyServiceInfo(FrozenModel):
