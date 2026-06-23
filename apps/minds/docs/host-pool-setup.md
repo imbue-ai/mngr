@@ -148,9 +148,16 @@ box must be `ready` and have a free slot):
 # Order / register / prep a bare-metal box; see `--help` on each subcommand.
 uv run mngr imbue_cloud admin server order   ...   # order a box from the supplier
 uv run mngr imbue_cloud admin server register ...  # record it in bare_metal_servers
-uv run mngr imbue_cloud admin server prep    ...   # make it `ready` for slices
+uv run mngr imbue_cloud admin server setup --server-id <id>   # reinstall (injects our host key) + prep -> `ready`
 uv run mngr imbue_cloud admin server list          # find the ready box's id
 ```
+
+`server prep --server-id <id>` re-runs just the prep step (qemu/lima/tooling +
+image staging). It SSHes the box with strict host-key pinning, so the box's sshd
+host key must already be recorded on its `bare_metal_servers` row -- which
+`server setup` does at OS reinstall, or `admin pool backfill-host-keys` captures
+once for a box installed out of band. `prep` fails closed (no trust-on-first-use)
+if no host key is recorded.
 
 Then bake slices onto a chosen box, after activating the tier:
 
@@ -202,10 +209,11 @@ When a user creates an imbue_cloud workspace, minds makes up to two `mngr create
 So a pool whose rows are baked at an older `repo_branch_or_tag` no longer hard-fails newer workspace creations -- they fall back to the slow path. Keeping the pool baked at the current version is still worthwhile because it keeps creations on the fast path. Only when the pool is genuinely empty (no `available` rows) does creation fail, with `ImbueCloudLeaseUnavailableError`.
 
 To rsync the local mngr working tree into the FCT worktree's `vendor/mngr/`
-for the duration of the bake (dev-loop pattern), forward `--mngr-source
-<monorepo-root>` as an extra flag through the recipe. The bake resets
-`vendor/mngr/` to HEAD when it finishes, so the worktree stays clean wrt mngr
-churn.
+for the duration of the bake (dev-loop pattern; see
+`apps/minds/docs/vendor-mngr-sync.md` for the sync mechanisms), forward
+`--mngr-source <monorepo-root>` as an extra flag through the recipe. The bake
+resets `vendor/mngr/` to HEAD when it finishes, so the worktree stays clean wrt
+mngr churn.
 
 List the rows (with the tier activated):
 

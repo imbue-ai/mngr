@@ -23,7 +23,6 @@ from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR_N
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
 from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
-from imbue.minds.desktop_client.workspace_color import pick_workspace_foreground
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
@@ -31,7 +30,9 @@ from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import default_docker_runtime
 from imbue.mngr.primitives import AgentId
 
-_TOKENS_CSS_PATH = Path(_templates_module.__file__).resolve().parent / "static" / "tokens.css"
+# The hand-written Tailwind v4 source. Holds the :root design tokens (the
+# styleguide cross-checks these) plus the component CSS; compiled to app.min.css.
+_TOKENS_CSS_PATH = Path(_templates_module.__file__).resolve().parent / "static" / "app.css"
 
 _AGENT_A: AgentId = AgentId("agent-00000000000000000000000000000001")
 _AGENT_B: AgentId = AgentId("agent-00000000000000000000000000000002")
@@ -62,8 +63,8 @@ def test_render_landing_page_has_open_in_new_window_button_before_settings() -> 
     # to the main process in Electron (or opens a new tab in a browser).
     html = render_landing_page(accessible_agent_ids=(_AGENT_A,))
     assert "window.landingOpenInNewWindow(this)" in html
-    # The diagonal shaft of the open-in-new arrow (Figma node 560-5109).
-    assert '<path d="M18 6L6 18"/>' in html
+    # The open-in-new arrow glyph (Icon16 ``arrow-up-right``, Figma node 857-5137).
+    assert '<path d="M12.9331 10.3336' in html
     # It sits before the settings button within the row.
     assert html.index("window.landingOpenInNewWindow") < html.index(f"/workspace/{_AGENT_A}/settings")
 
@@ -412,6 +413,60 @@ def test_render_chrome_page_contains_titlebar() -> None:
     assert "content-frame" in html
 
 
+def test_render_chrome_page_titlebar_centers_title_with_1_2_1_sections() -> None:
+    # The titlebar is three flex sections sized 1 / 2 / 1 (left controls |
+    # title | right controls) so the workspace title sits in the window's exact
+    # horizontal center regardless of how wide each side's controls are. The
+    # title's section grows at flex-[2] and centers its content; it is flanked
+    # by exactly two flex-1 sections (left + right). The center must NOT be a
+    # lone flex-1 -- that centered the title within the *leftover* space, so it
+    # drifted off-center whenever the two sides differed in width.
+    html = render_chrome_page()
+    titlebar = html[html.index('id="minds-titlebar"') : html.index('id="sidebar-backdrop"')]
+    assert "flex-[2] flex items-center justify-center" in titlebar
+    assert "flex-[2]" in titlebar[: titlebar.index('id="page-title"')]
+    assert titlebar.count("flex-1") == 2
+
+
+def test_render_chrome_page_titlebar_reserves_mac_traffic_lights_with_spacer() -> None:
+    # On macOS the traffic-light strip is reserved with a fixed shrink-0 spacer
+    # div *inside* the left flex-1 section -- NOT a left padding. With
+    # box-sizing: border-box a left padding clamps the section's flex base size
+    # up to the padding, making the equal-width left section wider than the
+    # right and shoving the centered title ~36px off-center; a spacer instead
+    # lives inside the section (which min-w-0 lets shrink to its flex share), so
+    # both sides stay equal width and the title stays truly centered. Non-mac
+    # has no such reservation (it draws its own controls on the right instead).
+    html_mac = render_chrome_page(is_mac=True)
+    html_other = render_chrome_page(is_mac=False)
+    # The padding approach is the bug being fixed: it must not come back.
+    assert "pl-[72px]" not in html_mac
+    assert "pl-[72px]" not in html_other
+    # The spacer sits at the very start of the left section, ahead of the menu
+    # button (#sidebar-toggle), only on macOS.
+    left_section_mac = html_mac[: html_mac.index('id="sidebar-toggle"')]
+    assert 'class="w-[72px] shrink-0" aria-hidden="true"' in left_section_mac
+    assert "w-[72px]" not in html_other
+
+
+def test_render_chrome_page_requests_badge_is_inline_count() -> None:
+    # The requests badge is the Badge count pill sat inline beside the messages
+    # icon (gap-[3px] row), not a dot overlapping the icon's corner: it carries
+    # the type-badge pill role and no absolute positioning (chrome.js fills the
+    # count text + toggles the native `hidden` attribute).
+    html = render_chrome_page()
+    assert 'id="requests-badge"' in html
+    assert "type-badge" in html
+    assert "gap-[3px]" in html
+    # No corner overlay: the badge no longer pins itself to the top-right.
+    assert "top-0.5 right-0.5" not in html
+    # Hidden at rest via the native `hidden` ATTRIBUTE, not a `hidden` class: the
+    # pill bakes in `inline-flex`, which beats the `.hidden` utility, so a class
+    # would leave a stray "0" showing. Match the bare attribute on the pill.
+    assert 'id="requests-badge" hidden>' in html
+    assert 'id="requests-badge" class="hidden"' not in html
+
+
 def test_render_chrome_page_drops_title_swatch_and_seam_border() -> None:
     # The full-width accent bar replaces the small swatch and the
     # ``border-b border-white/10`` seam: the rounded content corner
@@ -437,11 +492,12 @@ def test_render_chrome_page_titlebar_background_follows_titlebar_bg_var() -> Non
     assert "var(--titlebar-bg" in html
 
 
-def test_render_chrome_page_page_title_uses_titlebar_title_class() -> None:
-    # ``.titlebar-title`` reads ``--titlebar-fg`` so the page-title text
-    # flips between dark and light depending on the accent's lightness.
+def test_render_chrome_page_page_title_uses_text_primary_token() -> None:
+    # The page title is a plain ``text-primary`` token; the ``.titlebar-surface``
+    # scope re-bases that token off --titlebar-bg, so the title flips
+    # black/white with the accent's lightness (in pure CSS).
     html = render_chrome_page()
-    assert 'id="page-title" class="titlebar-title' in html
+    assert 'id="page-title" class="text-primary' in html
 
 
 def test_render_chrome_page_account_button_lives_in_sidebar() -> None:
@@ -457,15 +513,17 @@ def test_render_chrome_page_account_button_lives_in_sidebar() -> None:
 
 
 def test_render_chrome_page_content_iframe_uses_12px_rounded_corners() -> None:
-    # 12px radius (``rounded-xl``) matches Electron-side
+    # 12px radius (``rounded-[12px]``) matches Electron-side
     # ``contentView.setBorderRadius(12)`` (= ``CONTENT_CORNER_RADIUS`` in
     # electron/main.js) so both modes render the same tucked-under shape
-    # against the OS's outer window rounding.
+    # against the OS's outer window rounding. It is a structural exception to
+    # the 4-step radius scale (4/6/8/16) -- pinned as an arbitrary value so it
+    # stays locked to the Electron constant rather than tracking ``rounded-xl``.
     html = render_chrome_page()
     iframe_open = html.index('id="content-frame"')
     iframe_close = html.index(">", iframe_open)
     iframe_tag = html[iframe_open:iframe_close]
-    assert "rounded-xl" in iframe_tag
+    assert "rounded-[12px]" in iframe_tag
 
 
 def test_render_chrome_page_hides_window_controls_on_mac() -> None:
@@ -662,23 +720,21 @@ def test_render_recovery_page_script_branches_on_dispatch_tier() -> None:
         "'host_offline'",
         "'interface_unresponsive'",
         "'host_unresponsive'",
-        "'provider_unavailable'",
-        "'workspace_unreachable'",
+        "'backend_unreachable'",
     ):
         assert tier in html, f"recovery page JS missing branch for {tier}"
     # The shared landing places for each branch.
     assert "renderMisconfigured" in html
     assert "renderUnresponsive" in html
-    assert "renderProviderUnavailable" in html
-    assert "renderWorkspaceUnreachable" in html
+    assert "renderBackendUnreachable" in html
     assert "Workspace misconfigured" in html
     assert "Try restart anyway" in html
 
 
-def test_render_recovery_page_provider_unavailable_offers_retry_not_restart() -> None:
-    """The provider-unavailable state must surface a Retry affordance and a backed-off
-    background poll, and must NOT auto-dispatch or offer a host restart (a restart routes
-    through the unreachable backend, so it cannot help).
+def test_render_recovery_page_backend_unreachable_offers_retry_not_restart() -> None:
+    """The backend-unreachable state must surface a Retry affordance and a background
+    healthy-poll (auto-return on recovery), and must NOT auto-dispatch or offer a host
+    restart (a restart routes through the unreachable backend, so it cannot help).
     """
     html = render_recovery_page(
         agent_id=_AGENT_A,
@@ -687,15 +743,32 @@ def test_render_recovery_page_provider_unavailable_offers_retry_not_restart() ->
         initial_error="",
     )
     assert 'id="recovery-retry-btn"' in html
-    # The provider branch renders the page and starts the backed-off poll; it
+    # The backend render shows the Retry and the "Can't connect to" copy; it
     # must not fall through to a restart dispatch.
-    provider_start = html.find("function renderProviderUnavailable")
+    provider_start = html.find("function renderBackendUnreachable")
     assert provider_start >= 0
     provider_end = html.find("function ", provider_start + 1)
     provider_block = html[provider_start:provider_end]
-    assert "scheduleProviderPoll" in provider_block
     assert "Can't connect to" in provider_block
+    assert "show(retryBtn, true)" in provider_block
     assert "postRestart" not in provider_block
+    # The copy must be provider-agnostic: a local docker daemon is independent of
+    # the network, so the old "check your internet connection" line is wrong here
+    # and must not return.
+    assert "internet connection" not in provider_block.lower()
+    # Instead of a hand-authored per-provider message, the verbatim provider
+    # error rides along on the response (``unreachable_reason``) and is surfaced.
+    assert "unreachable_reason" in provider_block
+    assert "providerReasonEl.textContent = reason" in provider_block
+    # Diagnostics are suppressed on this tier (the cause is the external backend,
+    # shown verbatim, not anything the in-container probes inspect).
+    assert "show(debugDetailsEl, false)" in provider_block
+    # The backend_unreachable branch arms the healthy-poll (auto-return when the
+    # backend recovers) and returns before any restart dispatch.
+    apply_start = html.find("function applyHealth(")
+    apply_block = html[apply_start : html.find("function ", apply_start + 1)]
+    assert apply_block.find("'backend_unreachable'") < apply_block.find("postRestart")
+    assert "scheduleHealthyPoll()" in apply_block
 
 
 def test_render_recovery_page_loading_hides_diagnostic_dropdown() -> None:
@@ -743,11 +816,11 @@ def test_render_recovery_page_honors_misconfigured_before_autodispatch_short_cir
 
     A workspace whose services.toml lacks [services.system_interface] lands in
     restart_failed once its undeclared interface fails to come back up, so the
-    page runs runProbe(false). If the no-auto-dispatch short-circuit
-    (``if (!autoDispatch) renderUnresponsive()``) ran before the
-    workspace_misconfigured check, that workspace would render a misleading
-    "unresponsive" page even though no restart can recover it. Assert the
-    misconfigured branch precedes the short-circuit inside runProbe so the
+    page runs runProbe(false), which renders via applyHealth. If the
+    no-auto-dispatch short-circuit (``if (!autoDispatch) renderUnresponsive()``)
+    ran before the workspace_misconfigured check, that workspace would render a
+    misleading "unresponsive" page even though no restart can recover it. Assert
+    the misconfigured branch precedes the short-circuit inside applyHealth so the
     restart_failed path still reaches renderMisconfigured().
     """
     html = render_recovery_page(
@@ -756,7 +829,7 @@ def test_render_recovery_page_honors_misconfigured_before_autodispatch_short_cir
         initial_status="restart_failed",
         initial_error="boom",
     )
-    probe_body = html[html.index("function runProbe(") :]
+    probe_body = html[html.index("function applyHealth(") :]
     misconfigured_pos = probe_body.index("'workspace_misconfigured'")
     short_circuit_pos = probe_body.index("if (!autoDispatch)")
     assert misconfigured_pos < short_circuit_pos, (
@@ -790,7 +863,6 @@ def test_render_dev_styleguide_page_surfaces_tokens_and_component_widgets() -> N
     each catalog widget through its real JinjaX component (so the catalog
     can't drift silently from the components it documents)."""
     html = render_dev_styleguide_page()
-    assert "--shadow-seam" in html
     # The accent picker section is a separate runtime variable, not a :root token.
     assert "--workspace-accent" in html
     # Each pattern block should be present.
@@ -811,23 +883,30 @@ def test_render_dev_styleguide_page_surfaces_tokens_and_component_widgets() -> N
     # reaches the rendered page.
     assert ">Primary<" in html and ">Danger<" in html
     assert "All set: action completed." in html
-    assert 'name="styleguide-focus-ring-input"' in html
+    assert 'name="styleguide-accent-input"' in html
 
 
-def test_dev_styleguide_token_swatches_enumerate_root_declarations() -> None:
-    """Drift guard: every ``:root`` token in ``tokens.css`` must have a
-    matching ``data-token`` swatch in the styleguide template (and vice
-    versa). Failure means the catalog is out of sync with the live tokens.
+def test_dev_styleguide_token_swatches_enumerate_design_tokens() -> None:
+    """Drift guard: every design token in ``app.css`` must have a matching
+    ``data-token`` swatch in the styleguide template (and vice versa). Failure
+    means the catalog is out of sync with the live tokens.
+
+    Design tokens are the Tailwind color tokens registered in ``@theme``
+    (``--color-*``). The raw value layer (``--c-*``) and the runtime-set chrome
+    variables (``--workspace-accent`` / ``--titlebar-*``) are implementation
+    detail behind the tokens and are intentionally NOT surfaced.
     """
-    root_block = re.search(r":root\s*\{([^}]*)\}", _TOKENS_CSS_PATH.read_text(), re.DOTALL)
-    assert root_block is not None, "tokens.css must declare a :root block"
-    declared = {f"--{name}" for name in re.findall(r"--([a-z][a-z0-9-]*)\s*:", root_block.group(1))}
+    css = _TOKENS_CSS_PATH.read_text()
+    # ``--color-*: ...`` declarations only (the @theme token layer); the
+    # border-compat shim's ``var(--color-gray-200, ...)`` is a reference, not a
+    # declaration, so it is not matched.
+    declared = set(re.findall(r"(--color-[a-z0-9-]+)\s*:", css))
 
     html = render_dev_styleguide_page()
     surfaced = set(re.findall(r'data-token="(--[a-z][a-z0-9-]*)"', html))
 
     assert declared == surfaced, (
-        f"tokens.css :root declares {sorted(declared)} but the styleguide "
+        f"app.css design tokens {sorted(declared)} but the styleguide "
         f"surfaces {sorted(surfaced)}. Add or remove a "
         f'`data-token="--<name>"` swatch in templates/pages/DevStyleguide.jinja '
         f"to match."
@@ -851,12 +930,13 @@ def test_button_link_renders_anchor_with_href() -> None:
 
 
 def test_button_renders_each_variant_class_set() -> None:
-    # The five variants should each contribute their own background class.
+    # Each variant contributes a defining class: solid variants a fill,
+    # secondary its border (it has no resting fill), ghost its transparent base.
     variants_to_class = {
-        "primary": "bg-zinc-900",
-        "secondary": "bg-zinc-100",
-        "danger": "bg-red-50",
-        "success": "bg-emerald-800",
+        "primary": "bg-surface-inverse",
+        "secondary": "border-default",
+        "danger": "bg-important",
+        "success": "bg-success",
         "ghost": "bg-transparent",
     }
     for variant, css_class in variants_to_class.items():
@@ -872,24 +952,22 @@ def test_button_submit_has_form_attribute_when_passed() -> None:
 
 def test_button_default_size_uses_md_geometry() -> None:
     html = CATALOG.render("Button", variant="primary", _content="X")
-    # md size = px-3.5 py-2 rounded-md font-medium text-sm
-    assert "px-3.5" in html
+    # md size = px-4 py-2 rounded-md type-label (Figma default: 16px / 8px padding)
+    assert "px-4" in html
     assert "py-2" in html
     assert "rounded-md" in html
-    assert "font-medium" in html
-    assert "text-sm" in html
-    # Should not pick up lg-specific classes
+    assert "type-label" in html
+    # Should not pick up lg-specific geometry
     assert "py-3" not in html
     assert "rounded-lg" not in html
-    assert "font-semibold" not in html
 
 
 def test_button_size_lg_uses_block_cta_geometry() -> None:
     html = CATALOG.render("Button", variant="primary", size="lg", block=True, _content="Sign in")
     assert "py-3" in html
-    assert "rounded-lg" in html
-    assert "font-semibold" in html
-    assert "text-base" in html
+    # All button sizes share the md control radius (6px).
+    assert "rounded-md" in html
+    assert "type-label" in html
     assert "w-full" in html
 
 
@@ -897,7 +975,7 @@ def test_button_size_icon_uses_square_padding() -> None:
     html = CATALOG.render("Button", variant="ghost", size="icon", _content="<svg/>")
     assert "p-1.5" in html
     # No horizontal/vertical padding mismatch (only one padding utility)
-    assert "px-3.5" not in html
+    assert "px-3" not in html
     assert "py-2 " not in html and not html.rstrip().endswith("py-2")
 
 
@@ -947,13 +1025,14 @@ def test_color_swatch_unselected_and_small_and_disabled() -> None:
 
 def test_titlebar_button_default_is_nav_variant() -> None:
     html = CATALOG.render("TitlebarButton", _content="<svg/>")
-    # nav variant => w-8 h-7 rounded-md, default tone => the .titlebar-btn
-    # class (defined in tokens.css) carries the accent-aware color +
-    # hover + active rules.
-    assert "w-8" in html
-    assert "h-7" in html
+    # nav variant => square padded icon button (p-1.5 rounded-md, no fixed w/h);
+    # default tone => always text-primary + hover:bg-fill-hover, re-based
+    # per-workspace by the .titlebar-surface scope in app.css.
+    assert "p-1.5" in html
     assert "rounded-md" in html
-    assert "titlebar-btn" in html
+    assert "text-primary" in html
+    assert "text-secondary" not in html
+    assert "hover:bg-fill-hover" in html
     # The danger tone modifier should NOT be present on the default tone.
     assert "titlebar-btn-danger" not in html
     # Window-control geometry should NOT bleed into nav
@@ -970,10 +1049,10 @@ def test_titlebar_button_control_variant_renders_window_control_geometry() -> No
 
 def test_titlebar_button_danger_tone_applies_red_hover() -> None:
     html = CATALOG.render("TitlebarButton", variant="control", tone="danger", _content="<svg/>")
-    # ``.titlebar-btn-danger`` (in tokens.css) supplies the red hover.
+    # ``.titlebar-btn-danger`` (in app.css) supplies the red hover.
     assert "titlebar-btn-danger" in html
-    # Base ``.titlebar-btn`` still applies (geometry + base colors).
-    assert "titlebar-btn " in html
+    # The shared foreground token still applies (always text-primary).
+    assert "text-primary" in html
 
 
 # -- Workspace palette + WCAG contrast picker ----------------------------
@@ -981,10 +1060,11 @@ def test_titlebar_button_danger_tone_applies_red_hover() -> None:
 # The palette is the user-pickable set of workspace colors. It lives
 # server-side only (``WORKSPACE_PALETTE`` in workspace_color.py): the
 # pickers render server-side swatches carrying data-color attributes,
-# and the SSE workspaces payload emits the resolved accent/accent_fg.
-# static/workspace_accent.js keeps just the two runtime helpers
-# (normalizeHex / pickForegroundForHex); the guard test below ensures
-# no JS palette mirror gets reintroduced.
+# and the SSE workspaces payload emits the resolved accent. The titlebar
+# derives its contrasting foreground from that accent in pure CSS (see
+# .titlebar-surface in app.css). static/workspace_accent.js keeps just
+# the ``normalizeHex`` runtime helper; the guard test below ensures no
+# JS palette mirror gets reintroduced.
 
 # Order is significant: it drives the picker's render order and
 # pick_unused_create_color's preference walk. ``confusion`` (the
@@ -1038,41 +1118,11 @@ def test_workspace_accent_js_has_no_palette_mirror() -> None:
     reaches the client as server-rendered swatches with data-color
     attributes. A JS palette literal would be a second source of truth
     to keep in sync; this guard fails if someone reintroduces one.
-    The JS file keeps only the two runtime helpers (normalizeHex /
-    pickForegroundForHex)."""
+    The JS file keeps only the ``normalizeHex`` runtime helper -- the
+    titlebar derives its contrasting foreground in pure CSS now."""
     js_content = _WORKSPACE_ACCENT_JS_PATH.read_text()
     assert "WORKSPACE_PALETTE" not in js_content
     assert "normalizeHex" in js_content
-    assert "pickForegroundForHex" in js_content
-
-
-# ``pick_workspace_foreground`` runs on any hex (palette entries *and*
-# custom hexes typed into the settings input), so the cases below cover
-# both. Ordered: 3 dark palette entries (-> white text), 7 light palette
-# entries (-> black text), then 4 customs incl. the pure black/white
-# extremes (no longer palette entries) and two mid-range values that
-# exercise either side of the WCAG threshold.
-_PICK_FOREGROUND_CASES: Final[tuple[tuple[str, str], ...]] = (
-    ("#0b292b", "255 255 255"),
-    ("#492222", "255 255 255"),
-    ("#3c3d06", "255 255 255"),
-    ("#9fbbd3", "0 0 0"),
-    ("#e8a7a8", "0 0 0"),
-    ("#cecd0c", "0 0 0"),
-    ("#cfc7b3", "0 0 0"),
-    ("#f5d6a0", "0 0 0"),
-    ("#e9ecd9", "0 0 0"),
-    ("#fcefd4", "0 0 0"),
-    ("#000000", "255 255 255"),
-    ("#ffffff", "0 0 0"),
-    ("#808080", "0 0 0"),
-    ("#404040", "255 255 255"),
-)
-
-
-@pytest.mark.parametrize(("hex_color", "expected_foreground"), _PICK_FOREGROUND_CASES)
-def test_pick_workspace_foreground_chooses_legible_text(hex_color: str, expected_foreground: str) -> None:
-    assert pick_workspace_foreground(hex_color) == expected_foreground
 
 
 @pytest.mark.parametrize(
@@ -1158,20 +1208,20 @@ def test_pick_unused_create_color_is_case_insensitive() -> None:
     assert pick_unused_create_color(used) == WORKSPACE_PALETTE["courage"]
 
 
-def test_tokens_css_defines_titlebar_utility_classes() -> None:
-    """Drift guard: the chrome HTML emits these class names; tokens.css must
-    define them, otherwise the bar paints with no foreground hierarchy."""
+def test_app_css_defines_titlebar_self_theming() -> None:
+    """Drift guard: the titlebar self-themes via the ``.titlebar-surface``
+    scope, which re-bases the foreground tokens off --titlebar-bg in pure CSS
+    (lch relative color). app.css must define it (+ the red close hover)."""
     css = _TOKENS_CSS_PATH.read_text()
-    assert ".titlebar-title" in css
-    assert ".titlebar-btn" in css
+    assert ".titlebar-surface" in css
     assert ".titlebar-btn-danger" in css
-    # All of them read --titlebar-fg with an alpha for hierarchy.
-    assert "var(--titlebar-fg" in css
+    # The contrast base is derived from --titlebar-bg via relative color.
+    assert "lch(from var(--titlebar-bg)" in css
 
 
 def test_tokens_css_drops_page_workspace_top_stripe() -> None:
     """The 3px ``.page-workspace::before`` stripe is now redundant with
-    the colored chrome bar above; tokens.css must not redeclare it."""
+    the colored chrome bar above; app.css must not redeclare it."""
     css = _TOKENS_CSS_PATH.read_text()
     assert ".page-workspace::before" not in css
 
@@ -1193,26 +1243,168 @@ def test_tokens_css_accent_fallback_is_default_workspace_color() -> None:
 def test_no_legacy_oklch_accents_remain_in_templates_or_static() -> None:
     """The SHA-derived OKLCH accent system is gone: workspace accents are
     stored ``#rrggbb`` hexes, and every fallback / demo surface paints
-    the palette default. Scan the template and static-asset trees so a
-    lingering (or reintroduced) ``oklch(`` literal fails loudly; any
-    future legitimate oklch use should be a conscious decision recorded
-    by updating this guard."""
+    the palette default. Scan the hand-written template and static-asset
+    trees so a lingering (or reintroduced) ``oklch(`` literal fails loudly;
+    any future legitimate oklch use should be a conscious decision recorded
+    by updating this guard.
+
+    The compiled ``app.min.css`` is excluded: it is a generated, gitignored
+    build artifact, and Tailwind v4 defines its entire default palette in
+    ``oklch()`` -- so the scan targets only authored source, not output."""
     client_root = Path(_templates_module.__file__).resolve().parent
     offenders = [
         str(path.relative_to(client_root))
         for directory in (client_root / "templates", client_root / "static")
         for path in sorted(directory.rglob("*"))
-        if path.suffix in (".jinja", ".js", ".css") and "oklch(" in path.read_text()
+        if path.suffix in (".jinja", ".js", ".css") and path.name != "app.min.css" and "oklch(" in path.read_text()
     ]
     assert offenders == []
 
 
+# -- Design-system scale guards --
+#
+# We keep Tailwind's stock spacing scale (--spacing is the default 0.25rem, so
+# p-1 = 4px, p-4 = 16px) but constrain padding / margin / gap to a fixed subset
+# of the native steps; radius is constrained to four named steps. These guards
+# scan the authored source (templates / static / templates.py, never the
+# generated app.min.css) and fail if an off-scale value is introduced.
+
+# The allowed padding/margin/gap steps, as Tailwind multipliers
+# (x4 = px): 0.5/1/1.5/2/3/4/6/8/12/16 == 2/4/6/8/12/16/24/32/48/64 px.
+_SPACING_SCALE_STEPS: Final[frozenset[float]] = frozenset({0, 0.5, 1, 1.5, 2, 3, 4, 6, 8, 12, 16})
+# Only padding / margin / gap follow the scale; width / height / inset are
+# free layout dimensions and are intentionally NOT scanned.
+_SPACING_PREFIXES: Final[tuple[str, ...]] = (
+    "p",
+    "px",
+    "py",
+    "pt",
+    "pr",
+    "pb",
+    "pl",
+    "ps",
+    "pe",
+    "m",
+    "mx",
+    "my",
+    "mt",
+    "mr",
+    "mb",
+    "ml",
+    "ms",
+    "me",
+    "gap",
+    "gap-x",
+    "gap-y",
+    "space-x",
+    "space-y",
+)
+
+
+def _strip_svg_path_data(text: str) -> str:
+    """Remove SVG ``d="..."`` path attributes so their command+coord runs
+    (``h-1``, ``m-0.5``, ``v6`` ...) are not misread as spacing utilities."""
+    text = re.sub(r'(?<![\w-])d="[^"]*"', "", text)
+    return re.sub(r"(?<![\w-])d='[^']*'", "", text)
+
+
+def _design_system_source_files() -> list[Path]:
+    client_root = Path(_templates_module.__file__).resolve().parent
+    files = [
+        path
+        for directory in (client_root / "templates", client_root / "static")
+        for path in sorted(directory.rglob("*"))
+        if path.suffix in (".jinja", ".js") and path.name != "app.min.css"
+    ]
+    files.append(client_root / "templates.py")
+    return files
+
+
+def test_spacing_utilities_stay_on_scale() -> None:
+    """Padding / margin / gap utilities must use the constrained spacing scale
+    -- Tailwind steps 0.5 / 1 / 1.5 / 2 / 3 / 4 / 6 / 8 / 12 / 16 (= 2 / 4 / 6 /
+    8 / 12 / 16 / 24 / 32 / 48 / 64 px). A new off-scale value (e.g. ``py-2.5``,
+    10px) fails here; snap it to the nearest step or, if it is a deliberate
+    layout dimension, use width / height / inset instead (those are free and not
+    scanned)."""
+    alt = "|".join(sorted((re.escape(p) for p in _SPACING_PREFIXES), key=lambda s: len(s), reverse=True))
+    token = re.compile(r"(?<![\w-])-?(" + alt + r")-([0-9]+(?:\.[0-9]+)?)(?![\w./\[])")
+    offenders: list[str] = []
+    for path in _design_system_source_files():
+        text = _strip_svg_path_data(path.read_text())
+        for match in token.finditer(text):
+            if float(match.group(2)) not in _SPACING_SCALE_STEPS:
+                offenders.append(f"{path.name}: {match.group(0)}")
+    assert offenders == [], (
+        "Off-scale padding/margin/gap utilities found. The constrained spacing "
+        "scale is the Tailwind steps 0.5/1/1.5/2/3/4/6/8/12/16 "
+        f"(= 2/4/6/8/12/16/24/32/48/64 px). Snap to the nearest step: {offenders}"
+    )
+
+
+def test_radius_utilities_stay_on_scale() -> None:
+    """Corner radius is limited to ``rounded-sm`` / ``-md`` / ``-lg`` / ``-xl``
+    (4/6/8/16 px) plus ``rounded-full`` / ``rounded-none``. The old
+    ``rounded-2xl`` / ``-3xl`` / ``-xs`` steps and arbitrary ``rounded-[..]``
+    values are disallowed -- the sole exception is the chrome content frame's
+    structural ``rounded-[12px]`` (matches Electron's CONTENT_CORNER_RADIUS)."""
+    disallowed = re.compile(r"\brounded-(?:2xl|3xl|4xl|xs)\b|\brounded-\[(?!12px\])[^\]]*\]")
+    offenders: list[str] = []
+    for path in _design_system_source_files():
+        for match in disallowed.finditer(path.read_text()):
+            offenders.append(f"{path.name}: {match.group(0)}")
+    assert offenders == [], (
+        "Disallowed corner-radius utilities found. Use rounded-sm/-md/-lg/-xl "
+        f"(4/6/8/16 px) or rounded-full/-none: {offenders}"
+    )
+
+
+def test_text_uses_type_roles_not_raw_size_or_medium() -> None:
+    """Content text must use the type ramp roles (``type-heading-lg`` /
+    ``type-heading`` / ``type-label`` / ``type-body`` / ``type-helper`` /
+    ``type-section``), which bundle font-size + weight + line-height. Raw
+    font-size utilities (``text-sm``, ``text-[13px]`` ...) and ``font-medium``
+    (dropped from the ramp -- it's 400 / 600 only) are disallowed. Inline
+    ``font-normal`` / ``font-semibold`` / ``font-bold`` for emphasis within a
+    role are still allowed; SVG path data is skipped."""
+    banned = re.compile(r"\btext-(?:xs|sm|base|lg|xl|2xl|3xl)\b|\btext-\[[0-9.]+px\]|\bfont-medium\b")
+    offenders: list[str] = []
+    for path in _design_system_source_files():
+        text = _strip_svg_path_data(path.read_text())
+        for match in banned.finditer(text):
+            offenders.append(f"{path.name}: {match.group(0)}")
+    assert offenders == [], (
+        "Raw font-size / font-medium found. Use a type-* role (it bundles "
+        f"size + weight + line-height); the ramp weights are 400/600/bold: {offenders}"
+    )
+
+
+def test_elevation_uses_shadow_roles_not_raw_steps() -> None:
+    """Box-shadow is limited to the two elevation roles -- ``shadow-raised``
+    (interactive-card hover lift) and ``shadow-overlay`` (floating menus /
+    modals / tooltips) -- plus ``shadow-none``. Tailwind's raw shadow steps
+    (``shadow-sm`` ... ``shadow-2xl``, ``shadow-inner``) and arbitrary
+    ``shadow-[..]`` are disallowed. (Inline ``box-shadow:`` in a style attribute
+    -- e.g. the content-frame inset highlight -- is a raw CSS property, not a
+    utility, and is not matched.)"""
+    banned = re.compile(r"\bshadow-(?:2xs|xs|sm|md|lg|xl|2xl|inner)\b|\bshadow-\[[^\]]*\]")
+    offenders: list[str] = []
+    for path in _design_system_source_files():
+        for match in banned.finditer(path.read_text()):
+            offenders.append(f"{path.name}: {match.group(0)}")
+    assert offenders == [], (
+        f"Raw box-shadow utilities found. Use shadow-raised / shadow-overlay (or shadow-none): {offenders}"
+    )
+
+
 def test_notice_renders_each_variant() -> None:
+    # Each variant paints a per-mode surface token (--c-*-surface): a faint tint
+    # in light, a higher-opacity tint in dark so the shape stays visible on black.
     variants_to_class = {
-        "info": "bg-blue-50",
-        "warn": "bg-amber-50",
-        "success": "bg-emerald-50",
-        "error": "bg-red-50",
+        "info": "--c-info-surface",
+        "warn": "--c-warning-surface",
+        "success": "--c-success-surface",
+        "error": "--c-important-surface",
     }
     for variant, css_class in variants_to_class.items():
         html = CATALOG.render("Notice", variant=variant, _content="msg")
@@ -1224,7 +1416,7 @@ def test_card_renders_default_slot() -> None:
     html = CATALOG.render("Card", _content="<p>body</p>")
     assert "<p>body</p>" in html
     # The visual shell (bg/border/rounded; no baseline shadow) is in the
-    # ``.minds-card`` CSS class in tokens.css; the rendered HTML carries
+    # ``.minds-card`` CSS class in app.css; the rendered HTML carries
     # the class name rather than the underlying Tailwind utilities.
     assert "minds-card" in html
     # Default padding is "default" -> p-4.
@@ -1250,7 +1442,7 @@ def test_card_row_layout_omits_justify_between() -> None:
 def test_card_tight_padding_uses_px4_py25() -> None:
     html = CATALOG.render("Card", padding="tight", _content="x")
     assert "px-4" in html
-    assert "py-2.5" in html
+    assert "py-2" in html
     assert "p-4 " not in html and not html.rstrip().endswith("p-4")
 
 
@@ -1267,8 +1459,8 @@ def test_card_tag_anchor_renders_anchor_with_href() -> None:
 def test_card_interactive_adds_hover_classes() -> None:
     plain = CATALOG.render("Card", _content="x")
     interactive = CATALOG.render("Card", interactive=True, _content="x")
-    assert "hover:border-zinc-300" not in plain
-    assert "hover:border-zinc-300" in interactive
+    assert "hover:border-strong" not in plain
+    assert "hover:border-strong" in interactive
     assert "cursor-pointer" in interactive
 
 
@@ -1281,19 +1473,17 @@ def test_form_label_default_is_block_with_mb_1_5() -> None:
     assert 'for="email"' in html
     assert "block" in html
     assert "mb-1.5" in html
-    assert "text-sm" in html
-    assert "font-medium" in html
-    assert "text-zinc-900" in html
+    assert "type-label" in html
+    assert "text-primary" in html
 
 
 def test_form_label_inline_drops_block_and_mb() -> None:
     html = CATALOG.render("FormLabel", target="x", inline=True, _content="Provider")
     # Inline layout: no block / mb classes (the parent flex row handles
-    # spacing), but the shared color and weight tokens remain.
+    # spacing), but the shared type role + color remain.
     assert "block" not in html
     assert "mb-1.5" not in html
-    assert "text-sm" in html
-    assert "font-medium" in html
+    assert "type-label" in html
 
 
 def test_oauth_button_renders_google_label_and_brand_icon_with_hook_class() -> None:
@@ -1318,64 +1508,83 @@ def test_oauth_button_github_uses_github_label_and_glyph() -> None:
     assert "M12 0C5.37 0 0 5.37" in html
 
 
-def test_card_page_default_padding_and_max_width() -> None:
-    html = CATALOG.render("CardPage", title="x", _content="<p>body</p>")
-    # Card surface: bg/border/rounded/shadow + p-10 + max-w-[420px] + w-full.
-    assert "bg-white" in html
-    assert "rounded-xl" in html
-    assert "shadow-sm" in html
-    assert "p-10" in html
+def test_page_narrow_container_default_padding_and_max_width() -> None:
+    html = CATALOG.render("PageNarrowContainer", title="x", _content="<p>body</p>")
+    # Width/padding only: p-8 + max-w-[420px] + w-full, no surface chrome.
+    assert "p-8" in html
     assert "max-w-[420px]" in html
+    assert "w-full" in html
     assert "<p>body</p>" in html
-    # The body is flex-centered around the card.
+    # No border/rounding/shadow -- this is a plain width container, not a card.
+    assert "rounded-lg" not in html
+    assert "shadow-raised" not in html
+    assert "border border-default" not in html
+    # The body is flex-centered around the column.
     assert "flex items-center justify-center min-h-screen" in html
 
 
-def test_card_page_form_padding_uses_p6() -> None:
-    html = CATALOG.render("CardPage", title="x", padding="form", max_width="max-w-[520px]", _content="x")
+def test_page_narrow_container_form_padding_uses_p6() -> None:
+    html = CATALOG.render("PageNarrowContainer", title="x", padding="form", max_width="max-w-[520px]", _content="x")
     assert "p-6" in html
-    assert "p-10" not in html
+    assert "p-8" not in html
     assert "max-w-[520px]" in html
 
 
-def test_icon24_renders_with_stroke_shell_and_default_size() -> None:
-    # ``home`` is one of the icons in the ICONS_24 catalog global.
-    html = CATALOG.render("Icon24", name="home")
-    # Stroke-based shell attrs applied uniformly.
-    assert 'viewBox="0 0 24 24"' in html
-    assert 'fill="none"' in html
-    assert 'stroke="currentColor"' in html
-    assert 'stroke-width="2"' in html
+def test_icon16_renders_with_fill_shell_and_default_size() -> None:
+    # ``home`` is one of the icons in the ICONS_16 catalog global.
+    html = CATALOG.render("Icon16", name="home")
+    # The 16x16 fill shell: the SVG defaults to fill="currentColor" so each
+    # glyph takes the parent's text color (Figma's hardcoded black is dropped).
+    assert 'viewBox="0 0 16 16"' in html
+    assert 'fill="currentColor"' in html
     assert 'aria-hidden="true"' in html
+    # The fill icons carry no stroke shell (that was the old lucide style).
+    assert 'stroke-width="2"' not in html
     # Default size = md = w-4 h-4.
     assert "w-4 h-4" in html
-    # Path data from the catalog flows through unescaped.
-    assert '<path d="M3 12L12 3l9 9"/>' in html
+    # Path data flows through unescaped as a bare fill outline (no per-path
+    # fill -- it inherits currentColor from the shell, never Figma's black).
+    assert '<path d="M9.40039 9.01301' in html
+    assert "black" not in html
 
 
-def test_icon24_size_axis() -> None:
+def test_icon16_size_axis() -> None:
     for size, css_class in (("sm", "w-3.5 h-3.5"), ("md", "w-4 h-4"), ("lg", "w-5 h-5")):
-        html = CATALOG.render("Icon24", name="home", size=size)
+        html = CATALOG.render("Icon16", name="home", size=size)
         assert css_class in html
 
 
-def test_icon24_renders_arrow_up_right() -> None:
-    # The diagonal open-in-new arrow (Figma node 560-5109) backs the
-    # "open in new window" affordance on workspace rows (landing page + sidebar).
-    html = CATALOG.render("Icon24", name="arrow-up-right")
-    assert 'viewBox="0 0 24 24"' in html
-    assert '<path d="M18 16.5V6H7.5"/>' in html
-    assert '<path d="M18 6L6 18"/>' in html
+def test_icon16_renders_arrow_up_right() -> None:
+    # The diagonal open-in-new arrow backs the "open in new window"
+    # affordance on workspace rows (landing page).
+    html = CATALOG.render("Icon16", name="arrow-up-right")
+    assert 'viewBox="0 0 16 16"' in html
+    assert '<path d="M12.9331 10.3336' in html
 
 
-def test_icon24_renders_menu() -> None:
-    # The lucide ``menu`` glyph (three horizontal lines) is the titlebar
-    # button that opens the floating workspace menu.
-    html = CATALOG.render("Icon24", name="menu")
-    assert 'viewBox="0 0 24 24"' in html
-    assert '<line x1="4" y1="6" x2="20" y2="6"/>' in html
-    assert '<line x1="4" y1="12" x2="20" y2="12"/>' in html
-    assert '<line x1="4" y1="18" x2="20" y2="18"/>' in html
+def test_icon16_renders_menu() -> None:
+    # The ``menu`` glyph (three horizontal bars) is the titlebar button that
+    # opens the floating workspace menu.
+    html = CATALOG.render("Icon16", name="menu")
+    assert 'viewBox="0 0 16 16"' in html
+    assert '<path d="M13.3337 11.4004' in html
+
+
+def test_icon16_play_is_the_lone_stroked_glyph() -> None:
+    # Every other glyph is a filled outline, but ``play`` is a stroked
+    # triangle, so its path overrides the shell's fill with its own
+    # currentColor stroke (still no hardcoded black).
+    html = CATALOG.render("Icon16", name="play")
+    assert 'viewBox="0 0 16 16"' in html
+    assert 'fill="none" stroke="currentColor" stroke-width="1.2"' in html
+    assert "black" not in html
+
+
+def test_icon16_settings_is_offset_into_the_16_grid() -> None:
+    # ``settings`` is authored on a 15-unit grid, so it's nudged into the
+    # 16-unit frame with a translate group.
+    html = CATALOG.render("Icon16", name="settings")
+    assert '<g transform="translate(0.5 0.5)">' in html
 
 
 def test_icon12_renders_with_w3_h3_size_and_12_viewbox() -> None:
@@ -1477,32 +1686,33 @@ def test_select_renders_with_option_children_and_focus_ring() -> None:
     assert "<select" in html
     assert 'name="launch_mode"' in html
     assert '<option value="LIMA">lima</option>' in html
-    # Inherits the shared INPUT_BASE focus ring.
-    assert "focus:border-blue-600" in html
-    assert "focus:ring-2" in html
-    # Default width is w-full.
-    assert "w-full" in html
+    # Inherits the shared INPUT_BASE accent focus ring (drawn outside the field).
+    assert "focus:outline-accent" in html
+    assert "focus:outline-2" in html
+    # The chevron is overlaid via a themeable Icon16 (native arrow hidden).
+    assert "appearance-none" in html
+    # Default width sizes the wrapper; the inner <select> fills it (w-full).
+    assert 'class="relative w-full"' in html
 
 
 def test_select_honors_width_prop() -> None:
     html = CATALOG.render("Select", name="x", width="w-48", _content="")
-    assert "w-48" in html
-    # Default w-full should be replaced, not added alongside.
-    assert " w-full " not in html
+    # The width prop sizes the wrapper; the inner <select> fills it (w-full).
+    assert 'class="relative w-48"' in html
 
 
-def test_link_regular_uses_blue_underline_recipe() -> None:
+def test_link_regular_uses_accent_underline_recipe() -> None:
     html = CATALOG.render("Link", href="/x", _content="back").strip()
     assert "<a " in html
     assert 'href="/x"' in html
-    assert "text-blue-600" in html
+    assert "text-accent" in html
     assert "hover:underline" in html
     assert "font-medium" not in html
 
 
-def test_link_medium_weight_adds_font_medium() -> None:
+def test_link_medium_weight_adds_font_semibold() -> None:
     html = CATALOG.render("Link", href="/x", weight="medium", _content="Sign in")
-    assert "font-medium" in html
+    assert "font-semibold" in html
 
 
 def test_link_passes_through_arbitrary_attrs() -> None:
@@ -1529,7 +1739,7 @@ def test_textarea_renders_value_in_content_with_shared_shell() -> None:
     assert 'rows="6"' in html
     assert "line1\nline2" in html
     assert "font-mono" in html
-    assert "focus:border-blue-600" in html
+    assert "focus:outline-accent" in html
 
 
 def test_section_header_plain_has_no_divider_classes() -> None:
@@ -1543,17 +1753,18 @@ def test_section_header_divider_renders_top_border() -> None:
     html = CATALOG.render("SectionHeader", divider=True, _content="Sharing")
     assert "Sharing" in html
     assert "border-t" in html
-    assert "border-zinc-200" in html
+    assert "border-default" in html
     assert "mt-8" in html
-    assert "pt-5" in html
+    assert "pt-4" in html
 
 
 def test_dialog_close_button_renders_x_svg_and_onclick() -> None:
     html = CATALOG.render("DialogCloseButton", onclick="closePermissionDialog()")
     assert 'aria-label="Close"' in html
     assert 'onclick="closePermissionDialog()"' in html
-    # The X-glyph path data fragment that identifies the close SVG.
-    assert "M4.22 4.22a.75.75 0 0 1 1.06 0L10 8.94" in html
+    # Renders the shared Icon16 ``close`` glyph (16px); its path fragment.
+    assert "w-4 h-4" in html
+    assert '<path d="M11.5762 3.57617' in html
 
 
 def test_dialog_close_button_id_optional() -> None:
@@ -1567,7 +1778,7 @@ def test_modal_renders_hidden_overlay_with_default_card() -> None:
     html = CATALOG.render("Modal", id="my-dialog", _content="<p>body</p>")
     assert 'id="my-dialog"' in html
     assert "hidden fixed inset-0 z-50" in html
-    assert "bg-black/30" in html
+    assert "bg-surface-overlay" in html
     assert "<p>body</p>" in html
 
 
@@ -1578,22 +1789,25 @@ def test_modal_card_extra_appends_to_inner_card_classes() -> None:
 
 
 def test_status_badge_renders_each_variant_class_set() -> None:
+    # Done / Failed / Info are solid status fills; neutral a muted fill; warn
+    # the yellow caution surface (foreground stays the warning hue).
     variants_to_class = {
-        "neutral": "bg-zinc-100",
-        "success": "bg-emerald-100",
-        "error": "bg-red-100",
-        "warn": "bg-amber-100",
-        "info": "bg-blue-100",
+        "neutral": "bg-fill-subtle",
+        "success": "bg-success text-white",
+        "error": "bg-important text-white",
+        "warn": "--c-warning-surface",
+        "info": "bg-info text-white",
     }
     for variant, css_class in variants_to_class.items():
         html = CATALOG.render("StatusBadge", variant=variant, _content="x")
         assert css_class in html, f"variant={variant} missing {css_class}"
 
 
-def test_status_badge_size_xs_uses_text_xs() -> None:
+def test_status_badge_size_xs_uses_helper_role() -> None:
     html = CATALOG.render("StatusBadge", size="xs", _content="x")
-    assert "text-xs" in html
-    assert "text-sm" not in html
+    # xs inline tag reads as helper (12); sm slot badge reads as label (14).
+    assert "type-helper" in html
+    assert "type-label" not in html
 
 
 def test_status_badge_title_renders_when_present() -> None:
@@ -1604,3 +1818,39 @@ def test_status_badge_title_renders_when_present() -> None:
 def test_status_badge_title_omitted_when_empty() -> None:
     html = CATALOG.render("StatusBadge", _content="x")
     assert "title=" not in html
+
+
+def test_badge_dot_when_count_omitted() -> None:
+    # No count -> the bare 8px important dot: no number, no pill width / type role.
+    html = CATALOG.render("Badge")
+    assert "w-2 h-2 rounded-full bg-important" in html
+    assert "min-w-" not in html
+    assert "type-badge" not in html
+
+
+def test_badge_count_renders_number_in_pill() -> None:
+    html = CATALOG.render("Badge", count=4)
+    assert ">4<" in html
+    # The count pill: min-width keeps a single digit circular; bold 10px role.
+    assert "min-w-[16px]" in html
+    assert "type-badge" in html
+    assert "bg-important" in html
+
+
+def test_badge_count_caps_at_99_plus() -> None:
+    # Counts above 99 collapse to "99+" so the pill stays compact.
+    html = CATALOG.render("Badge", count=150)
+    assert ">99+<" in html
+    assert "150" not in html
+
+
+def test_badge_class_and_id_pass_through() -> None:
+    # The titlebar requests badge relies on id + the chrome.js-toggled `hidden`
+    # class flowing through onto the badge's root span. ``**{...}`` is required
+    # because ``class`` is a reserved word; ty flags the dict[str, str] unpack as
+    # possibly feeding render's typed ``caller`` kwarg, which it never does here.
+    badge_attrs = {"id": "requests-badge", "class": "hidden absolute top-0.5 right-0.5"}
+    html = CATALOG.render("Badge", **badge_attrs)  # ty: ignore[invalid-argument-type]
+    assert 'id="requests-badge"' in html
+    assert "hidden" in html
+    assert "absolute" in html

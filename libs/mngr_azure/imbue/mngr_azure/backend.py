@@ -405,7 +405,7 @@ class AzureProvider(OfflineCapableVpsProvider):
         """No-op: Azure's Static public IP is unchanged across deallocate/start, so the
         create-time known_hosts entries stay valid -- no rebind is needed."""
 
-    def _rebind_known_hosts_pre_connect(self, new_ip: str) -> None:
+    def _rebind_known_hosts_pre_connect(self, host_id: HostId, new_ip: str) -> None:
         """No-op: Azure's Static IP means the known_hosts entry is unchanged across a
         deallocate/start, so no pre-connect rebind is needed."""
 
