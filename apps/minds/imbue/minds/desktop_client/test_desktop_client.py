@@ -14,7 +14,6 @@ from flask.testing import FlaskClient
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
-from imbue.minds.desktop_client import recovery_probe as _recovery_probe
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
@@ -24,7 +23,7 @@ from imbue.minds.desktop_client.app import _build_requests_payload
 from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import _destroying_agent_ids
 from imbue.minds.desktop_client.app import _is_discovery_fresh
-from imbue.minds.desktop_client.app import _provider_error_for_workspace
+from imbue.minds.desktop_client.app import _provider_error_message_for_workspace
 from imbue.minds.desktop_client.app import _resolve_destroying_for_landing
 from imbue.minds.desktop_client.app import _run_restart_sequence
 from imbue.minds.desktop_client.app import _should_emit_system_interface_status
@@ -2026,12 +2025,12 @@ def test_build_mngr_start_argv_targets_the_agent() -> None:
     assert argv[:3] == ["/usr/local/bin/mngr", "start", str(aid)]
 
 
-def test_provider_error_for_workspace_keys_on_this_workspaces_provider() -> None:
-    """The provider error is attributed by exact provider name, mapping type + message.
+def test_provider_error_message_for_workspace_keys_on_this_workspaces_provider() -> None:
+    """The provider error message is attributed by exact provider name.
 
     This is the per-provider keying that keeps a docker mind's recovery from
-    being misclassified as provider-unavailable during a simultaneous imbue_cloud
-    outage: only an error whose provider name matches this workspace's is used.
+    being misclassified during a simultaneous imbue_cloud outage: only an error
+    whose provider name matches this workspace's is used.
     """
     errors = {
         ProviderInstanceName("imbue_cloud_acme"): DiscoveryError(
@@ -2040,13 +2039,11 @@ def test_provider_error_for_workspace_keys_on_this_workspaces_provider() -> None
             provider_name=ProviderInstanceName("imbue_cloud_acme"),
         ),
     }
-    matched = _provider_error_for_workspace(errors, "imbue_cloud_acme")
-    assert matched == _recovery_probe.ProviderProbeError(
-        exception_type="ProviderUnavailableError", message="could not reach Imbue Cloud"
-    )
+    matched = _provider_error_message_for_workspace(errors, "imbue_cloud_acme")
+    assert matched == "could not reach Imbue Cloud"
 
 
-def test_provider_error_for_workspace_ignores_other_providers() -> None:
+def test_provider_error_message_for_workspace_ignores_other_providers() -> None:
     """An error for a different provider is never blamed on this workspace."""
     errors = {
         ProviderInstanceName("imbue_cloud_acme"): DiscoveryError(
@@ -2055,10 +2052,10 @@ def test_provider_error_for_workspace_ignores_other_providers() -> None:
             provider_name=ProviderInstanceName("imbue_cloud_acme"),
         ),
     }
-    assert _provider_error_for_workspace(errors, "docker") is None
+    assert _provider_error_message_for_workspace(errors, "docker") is None
 
 
-def test_provider_error_for_workspace_is_none_when_provider_unknown() -> None:
+def test_provider_error_message_for_workspace_is_none_when_provider_unknown() -> None:
     """Pre-discovery (provider unknown), we cannot attribute any error to this workspace."""
     errors = {
         ProviderInstanceName("imbue_cloud_acme"): DiscoveryError(
@@ -2067,7 +2064,7 @@ def test_provider_error_for_workspace_is_none_when_provider_unknown() -> None:
             provider_name=ProviderInstanceName("imbue_cloud_acme"),
         ),
     }
-    assert _provider_error_for_workspace(errors, None) is None
+    assert _provider_error_message_for_workspace(errors, None) is None
 
 
 def test_is_discovery_fresh_distinguishes_recent_from_stale_and_missing() -> None:

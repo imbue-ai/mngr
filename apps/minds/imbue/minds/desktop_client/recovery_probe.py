@@ -141,37 +141,17 @@ class DispatchTier(str, Enum):
     WORKSPACE_MISCONFIGURED = "workspace_misconfigured"
     """services.toml lacks [services.system_interface] -- a restart won't help."""
 
-    PROVIDER_UNAVAILABLE = "provider_unavailable"
-    """The provider backend itself is unreachable (imbue_cloud connector down /
-    network down, or local docker daemon stopped). A host or interface restart
-    routes through that same backend, so it cannot help -- the page offers only
-    a Retry, never a restart. Takes precedence over every host/interface tier
-    because we cannot trust any host-state observation when the provider that
-    produces it is unreachable.
+    BACKEND_UNREACHABLE = "backend_unreachable"
+    """The provider/backend hosting this workspace can't be reached, or refused us
+    -- the connector is down, the local docker daemon is stopped or paused, or the
+    provider rejected us (e.g. an expired login). Whatever the cause, a host or
+    interface restart routes through that same backend, so it cannot help: the
+    page offers only a Retry, surfaces the provider's own error verbatim, and arms
+    a background poll that returns the user to the workspace the moment it
+    recovers. Takes precedence over every host/interface tier because no
+    host-state observation can be trusted when the backend that produces it is
+    unreachable.
     """
-
-    WORKSPACE_UNREACHABLE = "workspace_unreachable"
-    """The provider responded but with a non-connectivity error (expired login,
-    no account configured, ...). A restart cannot fix an auth/config problem, so
-    the page surfaces the reason with no restart affordance. Distinct from
-    PROVIDER_UNAVAILABLE, which is a transient outage worth retrying.
-    """
-
-
-class ProviderProbeError(FrozenModel):
-    """A provider-level error for this workspace's provider, sourced from discovery.
-
-    Carries just the fields the recovery classification needs: the exception
-    type (to tell a connector outage apart from an auth/config failure) and the
-    human-readable message (rendered on the unreachable page). Built from the
-    resolver's ``get_provider_errors()`` (the passive discovery snapshot's
-    per-provider ``error_by_provider_name``).
-    """
-
-    exception_type: str = Field(
-        description="Exception class name from the discovery error (e.g. ProviderUnavailableError)."
-    )
-    message: str = Field(description="Human-readable error message to surface to the user.")
 
 
 class HostHealthResponse(FrozenModel):
@@ -180,9 +160,9 @@ class HostHealthResponse(FrozenModel):
     Intentionally narrow: every datum the recovery page renders is a
     ``Probe`` in ``probes``, and the page's branching reads only
     ``dispatch_tier``. The two provider-error fields below are the sole
-    exception: the PROVIDER_UNAVAILABLE / WORKSPACE_UNREACHABLE tiers are not
-    derived from in-container probes (they short-circuit before those run), so
-    the reason and provider label travel alongside the tier instead.
+    exception: the BACKEND_UNREACHABLE tier is not derived from in-container
+    probes (it short-circuits before those run), so the reason and provider label
+    travel alongside the tier instead.
     """
 
     probes: tuple[Probe, ...] = Field(
@@ -194,15 +174,13 @@ class HostHealthResponse(FrozenModel):
     )
     unreachable_reason: str = Field(
         default="",
-        description=(
-            "Provider error message for the PROVIDER_UNAVAILABLE / WORKSPACE_UNREACHABLE "
-            "tiers; empty for all other tiers."
-        ),
+        description="Provider error message for the BACKEND_UNREACHABLE tier; empty for all other tiers.",
     )
     provider_label: str = Field(
         default="",
         description=(
-            "Friendly provider name for the unreachable page title (e.g. 'Imbue Cloud'); empty for non-provider tiers."
+            "Friendly provider name for the unreachable page title (e.g. 'Imbue Cloud', 'Docker'); "
+            "empty for non-BACKEND_UNREACHABLE tiers."
         ),
     )
 
@@ -318,7 +296,6 @@ def _coerce_optional_int(value: object) -> int | None:
 
 _RUNNING_STATE: Final[str] = "RUNNING"
 _OFFLINE_HOST_STATES: Final[frozenset[str]] = frozenset({"STOPPED", "STOPPING", "CRASHED", "FAILED"})
-_PROVIDER_UNAVAILABLE_EXCEPTION: Final[str] = "ProviderUnavailableError"
 
 
 # -- Per-probe builders ----------------------------------------------------
@@ -558,18 +535,19 @@ def _build_plugin_resolver_probe(plugin_resolver_services: dict[str, str]) -> Pr
 
 def _classify_dispatch_tier(
     probes: tuple[Probe, ...],
-    provider_error: ProviderProbeError | None,
+    provider_error_message: str | None,
 ) -> DispatchTier:
     """Derive the dispatch tier from probe answers and the provider error.
 
     Ordered by precedence:
 
-    * PROVIDER_UNAVAILABLE / WORKSPACE_UNREACHABLE beat every host/interface
-      tier: if the provider that produces the host-state observations is itself
-      unreachable (or rejecting us), no restart routed through it can help and
-      the host-state probes cannot be trusted, so the provider-error signal wins
-      outright. A ProviderUnavailableError is a transient outage (retry);
-      anything else from the provider is an auth/config problem (show reason).
+    * BACKEND_UNREACHABLE beats every host/interface tier: if the provider that
+      produces the host-state observations is itself unreachable (or rejecting
+      us), no restart routed through it can help and the host-state probes cannot
+      be trusted, so the provider-error signal wins outright. We do not
+      sub-classify by error kind (a stopped daemon, a paused daemon, an expired
+      login all land here): the user-facing impact is identical -- show the
+      provider's own message, offer Retry, and wait for it to recover.
     * WORKSPACE_MISCONFIGURED beats the remaining tiers: a missing
       [services.system_interface] block means no restart will help, so don't
       bury that behind any transport / container check.
@@ -584,10 +562,8 @@ def _classify_dispatch_tier(
       reached once discovery is fresh (the redirect is gated on freshness), so
       the RUNNING claim is trustworthy here.
     """
-    if provider_error is not None:
-        if provider_error.exception_type == _PROVIDER_UNAVAILABLE_EXCEPTION:
-            return DispatchTier.PROVIDER_UNAVAILABLE
-        return DispatchTier.WORKSPACE_UNREACHABLE
+    if provider_error_message is not None:
+        return DispatchTier.BACKEND_UNREACHABLE
     answers = {probe.question: probe.answer for probe in probes}
     if answers.get(_QUESTION_SERVICES_TOML_DECLARES) == ProbeAnswer.NO:
         return DispatchTier.WORKSPACE_MISCONFIGURED
@@ -607,26 +583,26 @@ def build_host_health_response(
     plugin_resolver_services: dict[str, str],
     mngr_exec_command: str = "",
     mngr_binary: str = "mngr",
-    provider_error: ProviderProbeError | None = None,
+    provider_error_message: str | None = None,
     provider_label: str = "",
 ) -> HostHealthResponse:
     """Assemble the host-health response (probes + dispatch tier) from raw inputs.
 
     Pure function so the integration is straightforward to unit-test: feed in
     the resolver-sourced host/provider state (``host_state``,
-    ``services_agent_id``, ``provider_error``) plus the in-container exec stdout
-    and plugin snapshot, and assert on the probe answers and derived tier.
+    ``services_agent_id``, ``provider_error_message``) plus the in-container exec
+    stdout and plugin snapshot, and assert on the probe answers and derived tier.
 
     ``host_state`` is the workspace host's lifecycle state read from the passive
     discovery resolver (``get_host_state``), e.g. ``"RUNNING"`` / ``"STOPPED"``;
     ``""`` when discovery has not surfaced the host. ``mngr_binary`` is used to
     render the ``mngr exec`` reproduction commands for the in-container probes.
 
-    ``provider_error`` is this workspace's provider-level error read from the
-    resolver's ``get_provider_errors()``; when present it drives the
-    PROVIDER_UNAVAILABLE / WORKSPACE_UNREACHABLE tiers and its message is carried
-    on the response as ``unreachable_reason``. ``provider_label`` is the friendly
-    provider name for that page's title.
+    ``provider_error_message`` is this workspace's provider-level error message
+    read from the resolver's ``get_provider_errors()``; when present (not None) it
+    drives the BACKEND_UNREACHABLE tier and is carried on the response as
+    ``unreachable_reason``. ``provider_label`` is the friendly provider name for
+    that page's title.
     """
     in_container = _parse_in_container_probe(in_container_stdout)
     exec_cmd = mngr_exec_command or "(mngr exec <system-services-agent>)"
@@ -639,13 +615,13 @@ def build_host_health_response(
         _build_curl_probe(in_container, mngr_binary, services_agent_id),
         _build_plugin_resolver_probe(plugin_resolver_services),
     )
-    dispatch_tier = _classify_dispatch_tier(probes, provider_error)
-    is_provider_tier = dispatch_tier in (DispatchTier.PROVIDER_UNAVAILABLE, DispatchTier.WORKSPACE_UNREACHABLE)
+    dispatch_tier = _classify_dispatch_tier(probes, provider_error_message)
+    is_backend_unreachable = dispatch_tier == DispatchTier.BACKEND_UNREACHABLE
     return HostHealthResponse(
         probes=probes,
         dispatch_tier=dispatch_tier,
-        unreachable_reason=(provider_error.message if provider_error is not None else ""),
-        provider_label=(provider_label if is_provider_tier else ""),
+        unreachable_reason=(provider_error_message if provider_error_message is not None else ""),
+        provider_label=(provider_label if is_backend_unreachable else ""),
     )
 
 

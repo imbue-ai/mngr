@@ -581,6 +581,26 @@ _RECOVERY_STYLE: Final[str] = """\
       #recovery-host-btn.secondary { background: #6b7280; }
       #recovery-host-btn.secondary:hover { background: #4b5563; }
 
+      /* The verbatim provider error (e.g. docker's "Docker Desktop is manually
+         paused..."), shown under the generic "may be temporarily unavailable"
+         copy on the provider-unavailable tier. Set as plain text by the JS, so
+         it carries whatever the provider returned -- a muted, left-bordered
+         block keeps it visually distinct from our own copy. ``overflow-wrap``
+         keeps a long unbroken token (e.g. the http+docker URL some messages
+         embed) from overflowing the card. */
+      .recovery-provider-reason {
+        margin: 12px 0 0;
+        padding: 8px 12px;
+        border-left: 3px solid #e4e4e7;
+        background: #fafafa;
+        border-radius: 4px;
+        color: #71717a;
+        font-size: 0.8125rem;
+        line-height: 1.4;
+        text-align: left;
+        overflow-wrap: anywhere;
+      }
+
       /* Secondary, rarely-needed troubleshooting block: the error and
          diagnostics disclosures, grouped below a muted label and a thin
          divider. The whole block self-hides whenever neither disclosure is
@@ -727,6 +747,10 @@ _RECOVERY_SCRIPT: Final[str] = """\
         // workspace-unreachable states, where a restart cannot help; re-runs the
         // host-health probe so the user can re-check reachability on demand.
         var retryBtn = document.getElementById('recovery-retry-btn');
+        // Holds the verbatim provider error on the backend-unreachable state;
+        // hidden (and emptied) on every other state. Populated by
+        // renderBackendUnreachable from the response's ``unreachable_reason``.
+        var providerReasonEl = document.getElementById('recovery-provider-reason');
         var debugDetailsEl = document.getElementById('recovery-debug-details');
         var debugContentEl = document.getElementById('recovery-debug-content');
         var copyBtn = document.getElementById('copy-diagnostics-btn');
@@ -843,6 +867,8 @@ _RECOVERY_SCRIPT: Final[str] = """\
           // cached payload so renderDebugMenu starts blank next time.
           show(debugDetailsEl, false);
           if (debugContentEl) debugContentEl.innerHTML = '';
+          // Drop any prior provider error so it never lingers into the next state.
+          if (providerReasonEl) { providerReasonEl.textContent = ''; show(providerReasonEl, false); }
           latestHealth = null;
         }
         // The shared "Workspace unresponsive" state -- shown for ambiguous-host
@@ -884,37 +910,35 @@ _RECOVERY_SCRIPT: Final[str] = """\
           hostBtn.classList.remove('secondary');
           show(hostBtn, true);
         }
-        // The provider backend (Imbue Cloud, or the local docker daemon) is
-        // unreachable. A restart routes through that same backend, so it can't
-        // help -- offer only a Retry. The background healthy-poll (armed by
-        // applyHealth) auto-returns the user to the workspace the moment it
-        // recovers and the tracker flips HEALTHY.
-        function renderProviderUnavailable(data) {
+        // The provider/backend hosting this workspace is unreachable or rejected
+        // us (connector down, docker daemon stopped or paused, expired login,
+        // ...). A restart routes through that same backend, so it can't help --
+        // offer only a Retry. The background healthy-poll (armed by applyHealth)
+        // auto-returns the user to the workspace the moment it recovers and the
+        // tracker flips HEALTHY. The copy is deliberately provider-agnostic (no
+        // "check your internet" -- a local docker daemon is independent of the
+        // network); the actual cause comes from the provider itself via
+        // ``unreachable_reason``, surfaced verbatim below so we never have to
+        // hand-author a message per provider.
+        function renderBackendUnreachable(data) {
           var label = (data && data.provider_label) || 'the workspace backend';
+          var reason = (data && data.unreachable_reason) || '';
           titleEl.textContent = "Can't connect to " + label;
           messageEl.textContent =
-            'Check your internet connection and try again. ' + label
-            + ' may be temporarily unavailable. This page will reconnect automatically '
-            + 'once it can reach your workspace again.';
+            label + ' may be temporarily unavailable. This page will reconnect '
+            + 'automatically once it can reach your workspace again.';
+          if (providerReasonEl) {
+            providerReasonEl.textContent = reason;
+            show(providerReasonEl, Boolean(reason));
+          }
           show(spinnerEl, false);
           show(errorEl, false);
           show(hostBtn, false);
           show(retryBtn, true);
-        }
-        // The provider answered but rejected us (expired login, no account
-        // configured, ...). A restart cannot fix an auth/config problem, so
-        // surface the reason and offer only a Retry.
-        function renderWorkspaceUnreachable(data) {
-          var reason = (data && data.unreachable_reason) || '';
-          titleEl.textContent = "Can't reach your workspace";
-          messageEl.textContent = reason
-            ? reason
-            : 'Your workspace could not be reached. This usually means your account or '
-              + 'login needs attention; a restart will not help.';
-          show(spinnerEl, false);
-          show(errorEl, false);
-          show(hostBtn, false);
-          show(retryBtn, true);
+          // No diagnostics here: when the backend itself is unreachable the
+          // in-container probes are moot -- the cause is the provider's own
+          // error, shown verbatim above -- so suppress the Diagnostics disclosure.
+          show(debugDetailsEl, false);
         }
 
         function postRestart(path) {
@@ -957,18 +981,14 @@ _RECOVERY_SCRIPT: Final[str] = """\
             renderMisconfigured();
             return;
           }
-          // Provider-level outcomes short-circuit before any restart dispatch on
-          // EVERY entry path: no restart can or should fire while the backend is
-          // unreachable or rejecting us. Render-only; provider_unavailable arms
-          // the background healthy-poll so it auto-returns once the workspace
-          // recovers.
-          if (tier === 'provider_unavailable') {
-            renderProviderUnavailable(data);
+          // A backend-unreachable outcome short-circuits before any restart
+          // dispatch on EVERY entry path: no restart can or should fire while the
+          // backend is unreachable or rejecting us. Render-only, and arm the
+          // background healthy-poll so the page auto-returns once the backend
+          // recovers (a resumed daemon and a restored login recover identically).
+          if (tier === 'backend_unreachable') {
+            renderBackendUnreachable(data);
             scheduleHealthyPoll();
-            return;
-          }
-          if (tier === 'workspace_unreachable') {
-            renderWorkspaceUnreachable(data);
             return;
           }
           if (!autoDispatch) {
@@ -1114,6 +1134,7 @@ def render_recovery_page(
     # ``_RECOVERY_STYLE`` self-hides that block (divider + label included)
     # whenever neither disclosure is currently visible.
     card_extra = (
+        '      <p id="recovery-provider-reason" class="recovery-provider-reason hidden"></p>\n'
         '      <button id="recovery-host-btn" class="hidden">Restart workspace</button>\n'
         '      <button id="recovery-retry-btn" class="hidden">Retry</button>\n'
         '      <div class="recovery-troubleshooting">\n'

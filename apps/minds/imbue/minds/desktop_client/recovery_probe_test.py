@@ -8,7 +8,6 @@ from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
 from imbue.minds.desktop_client.recovery_probe import PROBE_SENTINEL
 from imbue.minds.desktop_client.recovery_probe import Probe
 from imbue.minds.desktop_client.recovery_probe import ProbeAnswer
-from imbue.minds.desktop_client.recovery_probe import ProviderProbeError
 from imbue.minds.desktop_client.recovery_probe import build_host_health_response
 from imbue.minds.desktop_client.recovery_probe import build_probe_argv
 from imbue.minds.desktop_client.recovery_probe import parse_inner_port_from_command
@@ -29,7 +28,7 @@ def _response(
     services_agent_id: AgentId | None = _SERVICES_AGENT_ID,
     in_container_stdout: str | None = None,
     plugin_resolver_services: dict[str, str] | None = None,
-    provider_error: ProviderProbeError | None = None,
+    provider_error_message: str | None = None,
     provider_label: str = "",
     mngr_exec_command: str = "",
 ) -> HostHealthResponse:
@@ -43,7 +42,7 @@ def _response(
         services_agent_id=services_agent_id,
         in_container_stdout=in_container_stdout,
         plugin_resolver_services=plugin_resolver_services or {},
-        provider_error=provider_error,
+        provider_error_message=provider_error_message,
         provider_label=provider_label,
         mngr_exec_command=mngr_exec_command,
     )
@@ -244,27 +243,34 @@ def test_dispatch_tier_host_unresponsive_for_ambiguous_host_state() -> None:
 # --- provider reachability tiers -----------------------------------------
 
 
-def test_dispatch_tier_provider_unavailable_beats_host_state() -> None:
-    """An unreachable provider classifies as PROVIDER_UNAVAILABLE regardless of host state."""
+def test_dispatch_tier_backend_unreachable_beats_host_state() -> None:
+    """A provider error classifies as BACKEND_UNREACHABLE regardless of host state.
+
+    The provider that produces the host-state observations is itself unreachable,
+    so its error wins over any (now-untrustworthy) host probe.
+    """
     response = _response(
         host_state="RUNNING",
-        provider_error=ProviderProbeError(exception_type="ProviderUnavailableError", message="unreachable"),
-        provider_label="Imbue Cloud",
+        provider_error_message="Docker Desktop is manually paused.",
+        provider_label="Docker",
     )
-    assert response.dispatch_tier == DispatchTier.PROVIDER_UNAVAILABLE
-    assert response.unreachable_reason == "unreachable"
-    assert response.provider_label == "Imbue Cloud"
+    assert response.dispatch_tier == DispatchTier.BACKEND_UNREACHABLE
+    assert response.unreachable_reason == "Docker Desktop is manually paused."
+    assert response.provider_label == "Docker"
 
 
-def test_dispatch_tier_workspace_unreachable_for_non_connectivity_provider_error() -> None:
-    """A non-ProviderUnavailable provider error (auth/config) is the generic, non-retryable bucket."""
+def test_dispatch_tier_backend_unreachable_for_any_provider_error_kind() -> None:
+    """Any provider error -- connectivity outage or auth/config rejection -- is the
+    same BACKEND_UNREACHABLE tier; we no longer sub-classify by error kind because
+    the user-facing impact (show the error, retry, wait) is identical."""
     response = _response(
         host_state="RUNNING",
-        provider_error=ProviderProbeError(exception_type="ImbueCloudAuthError", message="Your login expired."),
+        provider_error_message="Your login expired.",
         provider_label="Imbue Cloud",
     )
-    assert response.dispatch_tier == DispatchTier.WORKSPACE_UNREACHABLE
+    assert response.dispatch_tier == DispatchTier.BACKEND_UNREACHABLE
     assert response.unreachable_reason == "Your login expired."
+    assert response.provider_label == "Imbue Cloud"
 
 
 # --- shape sanity --------------------------------------------------------

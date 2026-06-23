@@ -182,3 +182,33 @@ The destructive-restart safety gate that `REACHABILITY_UNCONFIRMED` provided now
 
 - `apps/minds` changelog entry: gate the recovery redirect on fresh discovery; remove the `REACHABILITY_UNCONFIRMED` tier, the `reachability_confirmed` plumbing, and the recovery-page convergence loop; rename the mngr-command timeout constant; derive the discovery-freshness threshold from the poll cadence.
 - `dev` changelog entry for the promoted `DISCOVERY_STREAM_POLL_INTERVAL_SECONDS` constant if the `libs/mngr` change warrants it (it is a rename/visibility change in `libs/mngr`, so a `libs/mngr` entry, not `dev`).
+
+## Follow-up: collapse the two backend-unreachable tiers into one
+
+> Branch `gabriel/recovery-redundancy`. This section revises the two-page provider/workspace split described above. It supersedes the `PROVIDER_UNAVAILABLE` / `WORKSPACE_UNREACHABLE` distinction throughout this document.
+
+### Motivation
+
+The shipped work split a backend-reachability failure into two tiers keyed on the **exception class name** the provider raised: `ProviderUnavailableError` → `PROVIDER_UNAVAILABLE` ("Can't connect to ..."; retry + auto-reconnect poll), anything else → `WORKSPACE_UNREACHABLE` ("Can't reach your workspace"; retry, no auto-reconnect). Two problems surfaced in testing:
+
+- The two pages are, to the user, the same page: an error message plus a Retry button. The only real behavioral difference was that `PROVIDER_UNAVAILABLE` armed the background healthy-poll (auto-return on recovery) and `WORKSPACE_UNREACHABLE` did not — and that difference isn't justified, since a restored login recovers via the same 302 healthy-watch as a resumed daemon. The auth/config framing ("your account or login needs attention") added nothing the provider's own message didn't already say.
+
+- The exception-name split **misroutes** the most common Docker case. A *stopped* daemon raises mngr's `ProviderUnavailableError` (→ `PROVIDER_UNAVAILABLE`), but a *paused* daemon answers with a `docker.errors.APIError` (503), which is deliberately **not** wrapped (an `APIError` means the daemon is reachable, which GC relies on). So "Docker Desktop is manually paused" fell through to `WORKSPACE_UNREACHABLE` — the wrong page — and silently lost the auto-reconnect. The same user intent ("Docker just isn't available right now") landed on different pages depending on the failure mode.
+
+### Decision
+
+Collapse `PROVIDER_UNAVAILABLE` and `WORKSPACE_UNREACHABLE` into a single `BACKEND_UNREACHABLE` tier: "a restart can't help, show the backend's own error and wait for it to recover." No sub-classification by error kind.
+
+- `_classify_dispatch_tier` returns `BACKEND_UNREACHABLE` whenever this workspace has any provider error; the exception-name check (`_PROVIDER_UNAVAILABLE_EXCEPTION`) is deleted. Only the error **message** is carried (as `unreachable_reason`); `ProviderProbeError` and its `exception_type` field are removed, and `_provider_error_for_workspace` becomes `_provider_error_message_for_workspace` returning `str | None`.
+- One render function, `renderBackendUnreachable`: a provider-agnostic message, the provider's own error surfaced verbatim, a Retry, and the background healthy-poll **always** armed. Diagnostics are suppressed on this tier — the cause is the external backend (shown verbatim), not anything the in-container probes inspect.
+- The `ProviderUnavailableError` mngr error class is untouched; it still serves the list/GC paths. Only minds' recovery classification stops branching on it.
+
+### Acceptance criteria (revision)
+
+- A paused Docker daemon and a stopped Docker daemon both classify as `BACKEND_UNREACHABLE` and render the same page (same title, the provider's own error, Retry, auto-reconnect) — neither loses the auto-return.
+- The page shows no "check your internet connection" copy and no Diagnostics disclosure.
+- The recovery page JS has a single `backend_unreachable` branch; there is no `provider_unavailable` / `workspace_unreachable` branch or render function.
+
+### Changelog (revision)
+
+- `apps/minds` changelog entry: collapse the two backend-unreachable recovery pages into one that always surfaces the provider's own error, offers Retry, and always auto-reconnects on recovery; drop the misleading "check your internet connection" copy and the diagnostics disclosure on that page.

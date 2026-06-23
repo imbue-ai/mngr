@@ -81,7 +81,6 @@ from imbue.minds.desktop_client.onboarding import OnboardingAnswers
 from imbue.minds.desktop_client.onboarding import OnboardingApplier
 from imbue.minds.desktop_client.provider_display import friendly_provider_label
 from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
-from imbue.minds.desktop_client.recovery_probe import ProviderProbeError
 from imbue.minds.desktop_client.recovery_probe import build_host_health_response
 from imbue.minds.desktop_client.recovery_probe import build_probe_argv
 from imbue.minds.desktop_client.region_preference import AWS_PROVIDER_KEY
@@ -3240,24 +3239,24 @@ def _handle_host_health_probe_api(
     )
 
 
-def _provider_error_for_workspace(
+def _provider_error_message_for_workspace(
     provider_errors: Mapping[ProviderInstanceName, DiscoveryError], provider_name: str | None
-) -> ProviderProbeError | None:
-    """Map this workspace's provider error (if any) from the discovery snapshot.
+) -> str | None:
+    """Map this workspace's provider error message (if any) from the discovery snapshot.
 
     ``get_provider_errors()`` keys per-provider discovery errors by provider
     name, so attribution to *this* workspace's provider is exact -- a docker
     mind's recovery is never blamed on a simultaneous imbue_cloud outage. Returns
     None in the brief pre-discovery window where the provider is unknown
-    (``provider_name is None``) rather than guess. The ``ProviderUnavailableError``
-    type name is preserved so classification can tell a connector outage (retry)
-    apart from an auth/config failure (show reason).
+    (``provider_name is None``) rather than guess, and None when this workspace's
+    provider has no surfaced error. Otherwise returns the provider's own error
+    message, which the recovery page surfaces verbatim.
     """
     if provider_name is None:
         return None
     for name, error in provider_errors.items():
         if str(name) == provider_name:
-            return ProviderProbeError(exception_type=error.type_name, message=error.message)
+            return error.message
     return None
 
 
@@ -3309,7 +3308,9 @@ def _run_host_health_probe(
         backend_resolver.get_host_state(HostId(display_info.host_id)) if display_info is not None else None
     )
     host_state = host_state_enum.value if host_state_enum is not None else ""
-    provider_error = _provider_error_for_workspace(backend_resolver.get_provider_errors(), provider_name)
+    provider_error_message = _provider_error_message_for_workspace(
+        backend_resolver.get_provider_errors(), provider_name
+    )
 
     # In-container exec probe, only when the provider is reachable and the host is
     # RUNNING. The exec SSHes to the container via ``get_host`` (the connector's
@@ -3320,7 +3321,7 @@ def _run_host_health_probe(
     # non-clean outcome leaves ``in_container_stdout`` None (parses to "no" on the
     # can-we-run-commands probe) and is recorded only at debug.
     in_container_stdout: str | None = None
-    if services_agent_id is not None and provider_error is None and host_state_enum == HostState.RUNNING:
+    if services_agent_id is not None and provider_error_message is None and host_state_enum == HostState.RUNNING:
         try:
             in_container_stdout = _run_mngr(
                 concurrency_group,
@@ -3345,7 +3346,7 @@ def _run_host_health_probe(
         plugin_resolver_services=plugin_resolver_services,
         mngr_exec_command=exec_command,
         mngr_binary=mngr_binary,
-        provider_error=provider_error,
+        provider_error_message=provider_error_message,
         provider_label=provider_label,
     )
 
