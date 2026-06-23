@@ -220,7 +220,7 @@ class DiscoveryHealthWatchdog(MutableModel):
             logger.error("Discovery watchdog: consumer subprocess died; discovery pipeline is down")
 
     def evaluate(self, last_full_snapshot_at: datetime | None) -> None:
-        """Re-assess pipeline health from the resolver's freshness and drive the ladder.
+        """Re-assess pipeline health from the resolver's freshness and drive remediation.
 
         Called every poll by the watchdog loop with the resolver's most recent
         ``last_full_snapshot_at`` (``None`` if no snapshot has arrived yet).
