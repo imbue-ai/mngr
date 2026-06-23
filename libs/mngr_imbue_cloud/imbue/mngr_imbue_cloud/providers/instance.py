@@ -117,6 +117,7 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
 from imbue.mngr_imbue_cloud.errors import RepoIdentityError
 from imbue.mngr_imbue_cloud.hosts.host import ImbueCloudHost
+from imbue.mngr_imbue_cloud.primitives import FAST_PATH_ADOPTABLE_START_ARGS
 from imbue.mngr_imbue_cloud.primitives import FastMode
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.providers.listing import derive_host_state_from_raw
@@ -1056,10 +1057,27 @@ class ImbueCloudProvider(BaseProviderInstance):
 
         match parsed.fast_mode:
             case FastMode.REQUIRE:
-                if image is not None or start_args:
+                # The fast path adopts the pre-baked pool-host container as-is. It
+                # can tolerate start args the baked container already carries (the
+                # pool_host template's docker run flags -- they are already in
+                # effect), keeping the fast and slow paths in sync. It cannot honor
+                # an --image swap or any other start arg, which would require a
+                # rebuild via fast_mode=prevent.
+                unsupported_start_args = tuple(
+                    arg for arg in (start_args or ()) if arg not in FAST_PATH_ADOPTABLE_START_ARGS
+                )
+                if image is not None or unsupported_start_args:
+                    # Name only the actual offender(s) so the message stays accurate
+                    # whether it was an --image, unsupported start args, or both.
+                    rejected_reasons: list[str] = []
+                    if image is not None:
+                        rejected_reasons.append(f"--image={image!r}")
+                    if unsupported_start_args:
+                        rejected_reasons.append(f"start args {list(unsupported_start_args)}")
                     raise MngrError(
-                        "imbue_cloud fast_mode=require does not accept --image or --start-arg; "
-                        "the pre-baked agent is adopted as-is. Use fast_mode=prevent to rebuild."
+                        "imbue_cloud fast_mode=require adopts the pre-baked agent as-is, so it cannot apply "
+                        + " and ".join(rejected_reasons)
+                        + ". Use fast_mode=prevent to rebuild."
                     )
                 return self._create_host_fast_path(
                     name=name,
