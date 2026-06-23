@@ -8,7 +8,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Changed
 
-- Changed: An unauthenticated OVH provider now raises the shared `ProviderNotAuthorizedError` at construction instead of silently reporting zero agents. Previously, with no OVH credentials resolvable anywhere (config, `OVH_*` env vars, `~/.ovh.conf`), the provider printed an ad-hoc `WARNING: Vultr [sic] API key not configured, skipping VPS discovery` and returned an empty listing (exit 0). It now contributes a non-zero exit in `mngr list`, consistent with the other cloud providers.
+- Changed: An unauthenticated OVH provider now raises the shared `ProviderNotAuthorizedError` at construction instead of silently reporting zero agents. Previously, with no OVH credentials resolvable anywhere (config, `OVH_*` env vars, `~/.ovh.conf`), the provider silently returned an empty listing (exit 0). It now contributes a non-zero exit in `mngr list`, consistent with the other cloud providers.
 - Changed: Updated for the `mngr_vps_docker` → `mngr_vps` package and class rename. Import-only.
 
 ## [v0.1.6] - 2026-06-18
