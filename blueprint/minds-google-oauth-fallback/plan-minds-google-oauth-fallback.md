@@ -32,7 +32,7 @@ Right now, it should be doing 1 and 3, but we need to add 2 in the middle, so it
 - On Approve, for a `google-` service whose credentials are **not valid**:
   - **No client registered yet:** Minds registers its client (`auth prepare`) and opens the **Minds consent screen** (`auth browser`). On success the grant is applied — the user never sees self-setup.
   - **Minds attempt fails for any reason** (prepare error, Google error, user closes/cancels the window): the flow falls through to the existing self-setup browser flow (`auth browser-prepare` + `auth browser`), exactly as today.
-  - **A client is already registered** (from a prior Minds attempt or a prior self-setup): skip prepare and go straight to `auth browser`, reusing that client; on failure the request stays pending (`FAILED`) without re-running self-setup.
+  - **A client is already registered** (from a prior Minds attempt or a prior self-setup): skip prepare and go straight to `auth browser`, reusing that client; on failure, fall through to the existing self-setup browser flow (same fallback as any other failure).
 - Credentials already valid → grant applied immediately, no browser (unchanged).
 - Non-`google-` services → identical to today (single `auth_browser` self-setup chain).
 - Services with no browser auth option (e.g. Coolify) → still `NEEDS_MANUAL_CREDENTIALS` (unchanged).
@@ -55,9 +55,9 @@ Right now, it should be doing 1 and 3, but we need to add 2 in the middle, so it
 
 - **`LatchkeyPermissionGrantHandler._authenticate_google(self, service_name: str) -> tuple[bool, str]`** — new private orchestration helper (keeps `grant()` readable; orchestration stays in the handler):
   - `already_registered = service_name in self.latchkey.auth_list()`.
-  - If `already_registered`: return `self.latchkey.auth_browser_login(service_name)` (reuse client; no prepare, no self-setup).
-  - Else (Minds attempt): `prepared, _ = self.latchkey.auth_prepare(service_name, MINDS_GOOGLE_OAUTH_CLIENT_ID, MINDS_GOOGLE_OAUTH_CLIENT_SECRET)`; if `prepared`, `ok, detail = self.latchkey.auth_browser_login(service_name)` and return on success.
-  - On any failure of the Minds attempt, fall through to `return self.latchkey.auth_browser(service_name)` (step 3 self-setup).
+  - If not `already_registered` (Minds attempt): `prepared, _ = self.latchkey.auth_prepare(service_name, MINDS_GOOGLE_OAUTH_CLIENT_ID, MINDS_GOOGLE_OAUTH_CLIENT_SECRET)`; if `prepared`, `ok, detail = self.latchkey.auth_browser_login(service_name)` and return on success.
+  - If `already_registered`: `ok, detail = self.latchkey.auth_browser_login(service_name)` (reuse the registered client, no prepare) and return on success.
+  - On **any** failure of the fast attempt above (Minds or already-registered), fall through to `return self.latchkey.auth_browser(service_name)` — the existing self-setup pathway (`browser-prepare` + `browser`), which intentionally overwrites a failed registration with the user's own client.
 - **Modify `grant()`** at the existing "not valid + browser supported" branch (currently the single `self.latchkey.auth_browser(...)` call): replace the call with a gate:
   - `if service_info.name.startswith(GOOGLE_SERVICE_NAME_PREFIX): is_success, detail = self._authenticate_google(service_info.name)`
   - `else: is_success, detail = self.latchkey.auth_browser(service_info.name)` (non-google unchanged).
@@ -67,7 +67,7 @@ Right now, it should be doing 1 and 3, but we need to add 2 in the middle, so it
 
 ### `libs/mngr_latchkey/imbue/mngr_latchkey/testing.py`
 
-- **Extend `FakeLatchkey`** to model the new primitives without subprocesses: configurable results/recording for `auth_list`, `auth_prepare`, `auth_browser_login`, plus the existing `services_info` / `auth_browser`. Record the ordered sequence of auth calls so tests can assert the 1→2→3 ordering. (Per CLAUDE.md, no test file for `testing.py` itself.)
+- **Add overrides to `FakeLatchkey`** for `services_info`, `auth_browser`, and the new primitives (`auth_list`, `auth_prepare`, `auth_browser_login`): configurable results and ordered call-sequence recording, without spawning subprocesses, so tests can assert the 1→2→3 ordering. (The current `FakeLatchkey` only fakes the gateway/password/jwt lifecycle, so these are new overrides. Per CLAUDE.md, no test file for `testing.py` itself.)
 
 ### Changelog (append to existing branch entries)
 
@@ -91,17 +91,20 @@ Right now, it should be doing 1 and 3, but we need to add 2 in the middle, so it
   - google, not registered, prepare ok, login ok → `GRANTED`; sequence is `auth_prepare` → `auth_browser_login`; self-setup `auth_browser` never called.
   - google, not registered, prepare ok, login fails → falls to `auth_browser` (self-setup); `GRANTED` if that succeeds, `FAILED` if not.
   - google, not registered, prepare fails → falls straight to `auth_browser` (self-setup).
-  - google, already registered → `auth_browser_login` only (no `auth_prepare`, no self-setup); `FAILED` on failure.
+  - google, already registered, login ok → `auth_browser_login` only (no `auth_prepare`); login fails → falls through to self-setup `auth_browser` (`GRANTED` if it succeeds, `FAILED` if not).
   - `auth_list` read failure → treated as not-registered → Minds `auth_prepare` attempted.
   - non-google, not valid → `auth_browser` (self-setup) only; behavior identical to today.
   - service without browser option → `NEEDS_MANUAL_CREDENTIALS` (unchanged).
 - **Acceptance (`@pytest.mark.acceptance`)** — one end-to-end test driving `grant()` through the three google paths in sequence (Minds-success, Minds-fail→self-setup, already-registered→straight-to-browser) via a configured `FakeLatchkey`, asserting the exact latchkey call ordering, the resulting `GrantResult`, and the post-grant `latchkey_permissions.json`.
 - **Edge cases:** placeholder/empty creds still attempted (no non-empty gate); `INVALID` (expired) and `MISSING` both treated as "not valid"; the `google-` prefix matches all 8 catalog services and nothing else; `will_open_browser` notice unchanged.
 
+## Resolved decisions
+
+- **Constants location:** the Minds Google client constants live in `mngr_latchkey/core.py` (the layering smell of Minds-specific values in an otherwise Minds-agnostic library is accepted).
+- **`auth list` read-failure default:** default to "not registered" and attempt `auth prepare`. The small risk of re-registering over an existing client on a (rare, local) read failure is accepted.
+- **Already-registered failure:** on a failed `auth browser` for an already-registered service, fall through to the existing self-setup pathway (not a terminal `FAILED`).
+- **Self-setup overwriting a registration:** intended — when the fast attempt fails and we fall to `auth browser-prepare`, it overwrites the failed (Minds or registered) client with the user's own.
+
 ## Open questions
 
-- **Layering:** answer 1a places the Minds-specific Google client constants in `mngr_latchkey/core.py`, but that library is otherwise Minds-agnostic. Acceptable as chosen; flagging as a mild smell (an alternative is a constants module under `apps/minds`).
-- **`auth list` read-failure default (2a):** defaulting to "not registered" means a transient `auth list` failure could re-run `auth prepare` and overwrite an existing user client. Rare (local read), but confirm this is acceptable vs. the conservative "treat as registered" default.
-- **Already-registered failure:** the registered path returns `FAILED` (stays pending) on a failed `auth browser` rather than re-running self-setup, to avoid clobbering the user's client. Confirm that's the desired terminal behavior.
-- **Self-setup overwriting a Minds registration:** when the Minds attempt fails and we fall to `auth browser-prepare`, it overwrites the just-registered Minds client with the user's own. Assumed desired.
 - **Out of code scope:** the real Minds Google Cloud OAuth client must have all needed scopes enabled (gmail, calendar, drive, docs, sheets, people, analytics, directions) and its consent screen published; that is an infra/config task, not part of this change.
