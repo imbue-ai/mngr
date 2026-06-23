@@ -16,6 +16,7 @@ from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.predefined import GrantOutcome
+from imbue.minds.desktop_client.latchkey.handlers.predefined import GrantResult
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionFlowError
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClient
@@ -27,10 +28,16 @@ from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.core import CredentialStatus
+from imbue.mngr_latchkey.core import LATCHKEY_AUTH_OPTION_BROWSER
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.core import LatchkeyServiceInfo
+from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_CLIENT_ID
+from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_CLIENT_SECRET
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import permissions_path_for_host
+from imbue.mngr_latchkey.testing import FakeLatchkey
 
 # An entered ConcurrencyGroup for the handlers built in this module. Handlers
 # now require one (their message sender dispatches the nudge on a tracked
@@ -816,3 +823,179 @@ def test_grant_preserves_existing_schemas_block_in_permissions_file(tmp_path: Pa
     assert on_disk["schemas"] == baseline["schemas"]
     assert {"latchkey-self": baseline["rules"][0]["latchkey-self"]} in on_disk["rules"]
     assert {"slack-api": ["slack-read-all"]} in on_disk["rules"]
+
+
+# -- grant() Google OAuth fallback ordering --
+#
+# These exercise the handler's 1->2->3 orchestration for ``google-*`` services
+# using a configured ``FakeLatchkey`` that records the auth-flow call sequence.
+# (The subprocess mechanics of the individual primitives are covered by
+# ``core_test.py``; here we assert the handler picks the right primitive in the
+# right order.) Non-google services keep the legacy single-``auth_browser`` path,
+# covered by the slack tests above.
+
+
+_GOOGLE_GMAIL_SERVICE_INFO = ServicePermissionInfo(
+    name="google-gmail",
+    scope="google-gmail-api",
+    display_name="Gmail",
+    permission_schemas=("any", "google-gmail-read", "google-gmail-send"),
+)
+
+
+def _missing_browser_service_info() -> LatchkeyServiceInfo:
+    return LatchkeyServiceInfo(
+        credential_status=CredentialStatus.MISSING,
+        auth_options=frozenset({LATCHKEY_AUTH_OPTION_BROWSER}),
+        set_credentials_example=None,
+    )
+
+
+def _build_google_handler(tmp_path: Path, fake_latchkey: FakeLatchkey) -> LatchkeyPermissionGrantHandler:
+    # ``grant()`` resolves everything it needs from the passed ``service_info``,
+    # so the catalog is unused here; the slack catalog just satisfies the field.
+    return LatchkeyPermissionGrantHandler(
+        data_dir=tmp_path,
+        latchkey=fake_latchkey,
+        services_catalog=_build_slack_services_catalog(),
+        mngr_message_sender=_message_sender(),
+        gateway_client=build_fake_gateway_client(),
+    )
+
+
+def _grant_gmail(handler: LatchkeyPermissionGrantHandler) -> GrantResult:
+    return handler.grant(
+        request_event_id="evt-g",
+        agent_id=AgentId(),
+        host_id=HostId(),
+        service_info=_GOOGLE_GMAIL_SERVICE_INFO,
+        granted_permissions=("google-gmail-read",),
+    )
+
+
+_PREPARE_CALL = ("auth_prepare", "google-gmail", MINDS_GOOGLE_OAUTH_CLIENT_ID, MINDS_GOOGLE_OAUTH_CLIENT_SECRET)
+
+
+def test_grant_google_with_valid_credentials_makes_no_auth_calls(tmp_path: Path) -> None:
+    fake = FakeLatchkey(latchkey_directory=tmp_path)
+    fake.configure_auth(
+        service_info=LatchkeyServiceInfo(
+            credential_status=CredentialStatus.VALID,
+            auth_options=frozenset({LATCHKEY_AUTH_OPTION_BROWSER}),
+            set_credentials_example=None,
+        ),
+    )
+    handler = _build_google_handler(tmp_path, fake)
+
+    result = _grant_gmail(handler)
+
+    assert result.outcome == GrantOutcome.GRANTED
+    assert fake.auth_calls == ()
+
+
+def test_grant_google_not_registered_minds_prepare_then_login_succeeds(tmp_path: Path) -> None:
+    fake = FakeLatchkey(latchkey_directory=tmp_path)
+    fake.configure_auth(service_info=_missing_browser_service_info(), registered_services=())
+    handler = _build_google_handler(tmp_path, fake)
+
+    result = _grant_gmail(handler)
+
+    assert result.outcome == GrantOutcome.GRANTED
+    # Step 2 succeeds: list (not registered) -> prepare -> bare login. No self-setup.
+    assert fake.auth_calls == (
+        ("auth_list",),
+        _PREPARE_CALL,
+        ("auth_browser_login", "google-gmail"),
+    )
+
+
+def test_grant_google_minds_login_fails_falls_through_to_self_setup(tmp_path: Path) -> None:
+    fake = FakeLatchkey(latchkey_directory=tmp_path)
+    fake.configure_auth(
+        service_info=_missing_browser_service_info(),
+        registered_services=(),
+        browser_login_result=(False, "minds consent declined"),
+        self_setup_result=(True, ""),
+    )
+    handler = _build_google_handler(tmp_path, fake)
+
+    result = _grant_gmail(handler)
+
+    assert result.outcome == GrantOutcome.GRANTED
+    assert fake.auth_calls == (
+        ("auth_list",),
+        _PREPARE_CALL,
+        ("auth_browser_login", "google-gmail"),
+        ("auth_browser", "google-gmail"),
+    )
+
+
+def test_grant_google_prepare_fails_skips_login_and_falls_through(tmp_path: Path) -> None:
+    fake = FakeLatchkey(latchkey_directory=tmp_path)
+    fake.configure_auth(
+        service_info=_missing_browser_service_info(),
+        registered_services=(),
+        prepare_result=(False, "prepare blew up"),
+        self_setup_result=(True, ""),
+    )
+    handler = _build_google_handler(tmp_path, fake)
+
+    result = _grant_gmail(handler)
+
+    assert result.outcome == GrantOutcome.GRANTED
+    # Prepare failed, so the bare login is skipped; straight to self-setup.
+    assert fake.auth_calls == (
+        ("auth_list",),
+        _PREPARE_CALL,
+        ("auth_browser", "google-gmail"),
+    )
+
+
+def test_grant_google_already_registered_skips_prepare(tmp_path: Path) -> None:
+    fake = FakeLatchkey(latchkey_directory=tmp_path)
+    fake.configure_auth(
+        service_info=_missing_browser_service_info(),
+        registered_services=("google-gmail",),
+    )
+    handler = _build_google_handler(tmp_path, fake)
+
+    result = _grant_gmail(handler)
+
+    assert result.outcome == GrantOutcome.GRANTED
+    # Already registered: reuse the client with a bare login, no prepare.
+    assert fake.auth_calls == (
+        ("auth_list",),
+        ("auth_browser_login", "google-gmail"),
+    )
+
+
+def test_grant_google_already_registered_login_failure_falls_through_to_self_setup(tmp_path: Path) -> None:
+    fake = FakeLatchkey(latchkey_directory=tmp_path)
+    fake.configure_auth(
+        service_info=_missing_browser_service_info(),
+        registered_services=("google-gmail",),
+        browser_login_result=(False, "token expired"),
+        self_setup_result=(False, "self-setup cancelled"),
+    )
+    handler = _build_google_handler(tmp_path, fake)
+
+    result = _grant_gmail(handler)
+
+    assert result.outcome == GrantOutcome.FAILED
+    assert fake.auth_calls == (
+        ("auth_list",),
+        ("auth_browser_login", "google-gmail"),
+        ("auth_browser", "google-gmail"),
+    )
+
+
+def test_grant_google_empty_auth_list_is_treated_as_not_registered(tmp_path: Path) -> None:
+    # ``auth_list`` returning empty (its read-failure degradation, or genuinely
+    # nothing registered) means the Minds prepare attempt is still made.
+    fake = FakeLatchkey(latchkey_directory=tmp_path)
+    fake.configure_auth(service_info=_missing_browser_service_info(), registered_services=())
+    handler = _build_google_handler(tmp_path, fake)
+
+    _grant_gmail(handler)
+
+    assert _PREPARE_CALL in fake.auth_calls

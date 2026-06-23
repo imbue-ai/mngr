@@ -57,8 +57,11 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import CredentialStatus
+from imbue.mngr_latchkey.core import GOOGLE_SERVICE_NAME_PREFIX
 from imbue.mngr_latchkey.core import LATCHKEY_AUTH_OPTION_BROWSER
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_CLIENT_ID
+from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_CLIENT_SECRET
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import permissions_path_for_host
@@ -361,11 +364,14 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                     ),
                 )
             logger.info(
-                "Credentials for {} reported as {}; running latchkey auth browser",
+                "Credentials for {} reported as {}; running browser sign-in",
                 service_info.name,
                 latchkey_service_info.credential_status,
             )
-            is_success, detail = self.latchkey.auth_browser(service_info.name)
+            if service_info.name.startswith(GOOGLE_SERVICE_NAME_PREFIX):
+                is_success, detail = self._authenticate_google(service_info.name)
+            else:
+                is_success, detail = self.latchkey.auth_browser(service_info.name)
             if not is_success:
                 # The browser sign-in (or its one-off ``auth
                 # browser-prepare`` step) did not complete. Treat this as a
@@ -403,6 +409,45 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             response_event=response_event,
             set_credentials_example=None,
         )
+
+    def _authenticate_google(self, service_name: str) -> tuple[bool, str]:
+        """Authenticate a ``google-*`` service, preferring the Minds OAuth client.
+
+        This is "step 2", inserted between the credential-validity check and
+        the self-setup fallback:
+
+        1. If no client is registered for the service yet, register the Minds
+           OAuth client (``auth prepare``) and try a bare sign-in against the
+           Minds consent screen (``auth browser``).
+        2. If a client is already registered (a prior Minds attempt or a user
+           self-setup), skip prepare and reuse it with a bare sign-in.
+        3. On *any* failure of the fast attempt above, fall through to the
+           existing self-setup pathway (``auth browser-prepare`` + ``auth
+           browser``), which lets the user provision their own Google project
+           -- and intentionally overwrites the failed registration.
+
+        ``auth_list`` read failures degrade to "not registered" (see
+        :meth:`Latchkey.auth_list`), so the Minds attempt is still made.
+
+        Returns ``(is_success, detail)`` like :meth:`Latchkey.auth_browser`.
+        """
+        is_already_registered = service_name in self.latchkey.auth_list()
+        if is_already_registered:
+            is_success, detail = self.latchkey.auth_browser_login(service_name)
+        else:
+            is_prepared, _prepare_detail = self.latchkey.auth_prepare(
+                service_name,
+                MINDS_GOOGLE_OAUTH_CLIENT_ID,
+                MINDS_GOOGLE_OAUTH_CLIENT_SECRET,
+            )
+            is_success, detail = (False, "")
+            if is_prepared:
+                is_success, detail = self.latchkey.auth_browser_login(service_name)
+        if is_success:
+            return True, detail
+        # Any failure of the fast attempt falls through to the existing
+        # self-setup pathway (browser-prepare + browser).
+        return self.latchkey.auth_browser(service_name)
 
     def deny(
         self,

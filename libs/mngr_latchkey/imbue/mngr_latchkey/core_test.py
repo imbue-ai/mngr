@@ -1639,3 +1639,123 @@ def test_auth_browser_does_not_retry_on_unrelated_failure(tmp_path: Path) -> Non
     assert detail == "user cancelled"
     argv_calls = [record["argv"] for record in _read_recording_report(tmp_path)]
     assert argv_calls == [["auth", "browser", "slack"]]
+
+
+# -- auth_browser_login / auth_prepare / auth_list --
+
+
+def test_auth_browser_login_reports_success_on_zero_exit(tmp_path: Path) -> None:
+    binary = _make_recording_binary(tmp_path, exit_code=0)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    is_success, detail = latchkey.auth_browser_login("slack")
+
+    assert is_success is True
+    assert detail == ""
+    argv_calls = [record["argv"] for record in _read_recording_report(tmp_path)]
+    assert argv_calls == [["auth", "browser", "slack"]]
+
+
+def test_auth_browser_login_does_not_run_browser_prepare_on_failure(tmp_path: Path) -> None:
+    """Unlike ``auth_browser``, the bare login never auto-runs ``browser-prepare``."""
+    binary = _make_prepare_required_binary(tmp_path)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    is_success, detail = latchkey.auth_browser_login("slack")
+
+    assert is_success is False
+    assert "browser-prepare" in detail.lower()
+    # Only the single bare ``auth browser`` call; no ``browser-prepare``, no retry.
+    argv_calls = [record["argv"] for record in _read_recording_report(tmp_path)]
+    assert argv_calls == [["auth", "browser", "slack"]]
+
+
+def test_auth_prepare_invokes_prepare_with_json_payload(tmp_path: Path) -> None:
+    binary = _make_recording_binary(tmp_path, exit_code=0)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    is_success, detail = latchkey.auth_prepare("google-gmail", "client-id-123", "secret-xyz")
+
+    assert is_success is True
+    assert detail == ""
+    records = _read_recording_report(tmp_path)
+    assert len(records) == 1
+    argv = records[0]["argv"]
+    assert isinstance(argv, list)
+    assert argv[:3] == ["auth", "prepare", "google-gmail"]
+    payload_arg = argv[3]
+    assert isinstance(payload_arg, str)
+    assert json.loads(payload_arg) == {"clientId": "client-id-123", "clientSecret": "secret-xyz"}
+
+
+def test_auth_prepare_reports_failure_on_non_zero_exit(tmp_path: Path) -> None:
+    binary = _make_recording_binary(tmp_path, exit_code=1, stderr="prepare failed")
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    is_success, detail = latchkey.auth_prepare("google-gmail", "id", "secret")
+
+    assert is_success is False
+    assert detail == "prepare failed"
+
+
+def _make_auth_list_binary(tmp_path: Path, *, payload: str, exit_code: int = 0) -> Path:
+    """Build a fake latchkey CLI that emits ``auth list`` output verbatim."""
+    script = tmp_path / "latchkey"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "if sys.argv[1:3] != ['auth', 'list']:\n"
+        "    print('unexpected args:', sys.argv, file=sys.stderr)\n"
+        "    sys.exit(99)\n"
+        f"print({payload!r})\n"
+        f"sys.exit({exit_code})\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def test_auth_list_returns_registered_service_names(tmp_path: Path) -> None:
+    payload = json.dumps(
+        {
+            "google-gmail": {"credentialType": "oauth", "credentialStatus": "missing"},
+            "slack": {"credentialType": "curl", "credentialStatus": "valid"},
+        }
+    )
+    binary = _make_auth_list_binary(tmp_path, payload=payload)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    assert latchkey.auth_list() == frozenset({"google-gmail", "slack"})
+
+
+def test_auth_list_returns_empty_set_when_nothing_registered(tmp_path: Path) -> None:
+    binary = _make_auth_list_binary(tmp_path, payload="{}")
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    assert latchkey.auth_list() == frozenset()
+
+
+def test_auth_list_returns_empty_on_non_zero_exit(tmp_path: Path) -> None:
+    binary = _make_auth_list_binary(tmp_path, payload="{}", exit_code=1)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    assert latchkey.auth_list() == frozenset()
+
+
+def test_auth_list_returns_empty_when_binary_does_not_exist(tmp_path: Path) -> None:
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(tmp_path / "does-not-exist"))
+
+    assert latchkey.auth_list() == frozenset()
+
+
+def test_auth_list_returns_empty_on_malformed_json(tmp_path: Path) -> None:
+    binary = _make_auth_list_binary(tmp_path, payload="not json{{{")
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    assert latchkey.auth_list() == frozenset()
+
+
+def test_auth_list_returns_empty_on_non_object_json(tmp_path: Path) -> None:
+    binary = _make_auth_list_binary(tmp_path, payload=json.dumps(["google-gmail"]))
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    assert latchkey.auth_list() == frozenset()

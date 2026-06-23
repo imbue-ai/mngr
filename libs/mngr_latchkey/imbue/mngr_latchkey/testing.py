@@ -4,15 +4,19 @@ Per CLAUDE.md, do not create tests for this module itself; the helpers
 are exercised through the tests that import them.
 """
 
+from collections.abc import Collection
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr_latchkey.core import CredentialStatus
+from imbue.mngr_latchkey.core import LATCHKEY_AUTH_OPTION_BROWSER
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
+from imbue.mngr_latchkey.core import LatchkeyServiceInfo
 
 
 class FakeLatchkey(Latchkey):
@@ -31,6 +35,25 @@ class FakeLatchkey(Latchkey):
     _jwt_error: BaseException | None = PrivateAttr(default=None)
     _is_stopped: bool = PrivateAttr(default=False)
 
+    # Auth-flow fakes (configured via ``configure_auth``). ``_service_info``
+    # is what ``services_info`` returns; ``_registered_services`` is the set
+    # ``auth_list`` reports; the ``*_result`` tuples are the ``(is_success,
+    # detail)`` returns of the corresponding auth methods. ``_auth_calls``
+    # records the ordered auth-flow calls so tests can assert the 1->2->3
+    # ordering.
+    _service_info: LatchkeyServiceInfo = PrivateAttr(
+        default=LatchkeyServiceInfo(
+            credential_status=CredentialStatus.MISSING,
+            auth_options=frozenset({LATCHKEY_AUTH_OPTION_BROWSER}),
+            set_credentials_example=None,
+        )
+    )
+    _registered_services: frozenset[str] = PrivateAttr(default=frozenset())
+    _prepare_result: tuple[bool, str] = PrivateAttr(default=(True, ""))
+    _browser_login_result: tuple[bool, str] = PrivateAttr(default=(True, ""))
+    _self_setup_result: tuple[bool, str] = PrivateAttr(default=(True, ""))
+    _auth_calls: list[tuple[str, ...]] = PrivateAttr(default_factory=list)
+
     def configure(
         self,
         *,
@@ -47,6 +70,55 @@ class FakeLatchkey(Latchkey):
         self._password_error = password_error
         self._jwt = jwt
         self._jwt_error = jwt_error
+
+    def configure_auth(
+        self,
+        *,
+        service_info: LatchkeyServiceInfo | None = None,
+        registered_services: Collection[str] = (),
+        prepare_result: tuple[bool, str] = (True, ""),
+        browser_login_result: tuple[bool, str] = (True, ""),
+        self_setup_result: tuple[bool, str] = (True, ""),
+    ) -> None:
+        """Configure the auth-flow fakes used by the credential-grant flow.
+
+        ``service_info`` is what :meth:`services_info` returns;
+        ``registered_services`` is the set :meth:`auth_list` reports;
+        ``prepare_result`` / ``browser_login_result`` / ``self_setup_result``
+        are the ``(is_success, detail)`` returns of :meth:`auth_prepare`,
+        :meth:`auth_browser_login`, and :meth:`auth_browser` respectively.
+        """
+        if service_info is not None:
+            self._service_info = service_info
+        self._registered_services = frozenset(registered_services)
+        self._prepare_result = prepare_result
+        self._browser_login_result = browser_login_result
+        self._self_setup_result = self_setup_result
+
+    @property
+    def auth_calls(self) -> tuple[tuple[str, ...], ...]:
+        """The ordered auth-flow calls made, for asserting the 1->2->3 ordering."""
+        return tuple(self._auth_calls)
+
+    def services_info(self, service_name: str, *, is_offline: bool = False) -> LatchkeyServiceInfo:
+        del service_name, is_offline
+        return self._service_info
+
+    def auth_list(self) -> frozenset[str]:
+        self._auth_calls.append(("auth_list",))
+        return self._registered_services
+
+    def auth_prepare(self, service_name: str, client_id: str, client_secret: str) -> tuple[bool, str]:
+        self._auth_calls.append(("auth_prepare", service_name, client_id, client_secret))
+        return self._prepare_result
+
+    def auth_browser_login(self, service_name: str) -> tuple[bool, str]:
+        self._auth_calls.append(("auth_browser_login", service_name))
+        return self._browser_login_result
+
+    def auth_browser(self, service_name: str) -> tuple[bool, str]:
+        self._auth_calls.append(("auth_browser", service_name))
+        return self._self_setup_result
 
     def initialize(self) -> None:
         # No-op: the real implementation runs ``latchkey --version`` and

@@ -170,6 +170,21 @@ _CREDENTIAL_STATUS_BY_LATCHKEY_VALUE: Final[dict[str, CredentialStatus]] = {
 LATCHKEY_AUTH_OPTION_BROWSER: Final[str] = "browser"
 LATCHKEY_AUTH_OPTION_SET: Final[str] = "set"
 
+# Latchkey service-name prefix for Google services (``google-gmail``,
+# ``google-calendar``, ...). Only these are eligible for the Minds-provided
+# OAuth client below.
+GOOGLE_SERVICE_NAME_PREFIX: Final[str] = "google-"
+
+# Minds-provided Google OAuth client, registered for a ``google-*`` service via
+# ``latchkey auth prepare`` so the user signs in against the Minds consent
+# screen instead of self-provisioning their own Google Cloud project. A single
+# pair is reused for every google service (the underlying Google Cloud client
+# has all needed scopes enabled). These are placeholders until the real client
+# is published; for an installed/desktop OAuth app the "secret" is not truly
+# confidential.
+MINDS_GOOGLE_OAUTH_CLIENT_ID: Final[str] = "REPLACE_WITH_MINDS_GOOGLE_OAUTH_CLIENT_ID"
+MINDS_GOOGLE_OAUTH_CLIENT_SECRET: Final[str] = "REPLACE_WITH_MINDS_GOOGLE_OAUTH_CLIENT_SECRET"
+
 
 class LatchkeyServiceInfo(FrozenModel):
     """Parsed output of ``latchkey services info <service>``."""
@@ -872,6 +887,55 @@ class Latchkey(MutableModel):
             set_credentials_example=_parse_set_credentials_example(payload, service_name),
         )
 
+    def auth_list(self) -> frozenset[str]:
+        """Run ``latchkey auth list`` and return the set of registered service names.
+
+        ``latchkey auth list`` emits a JSON object keyed by service name for
+        every service that has a registered client and/or stored credentials
+        (e.g. ``{"google-gmail": {"credentialType": "oauth", ...}}``). We only
+        need the key set: a service appears here once a client has been
+        registered (via ``auth prepare`` or ``auth browser-prepare``), which
+        is how callers distinguish "already set up" from "needs preparation".
+
+        Mirrors :meth:`services_info`'s degradation contract: any failure
+        (process error, non-zero exit, malformed/non-object JSON) yields an
+        empty set so callers treat the service as not yet registered rather
+        than crashing.
+        """
+        env = _build_env_with_latchkey_directory(self.latchkey_directory, encryption_key=self._load_encryption_key())
+        command = [self.latchkey_binary, "auth", "list"]
+        cg = ConcurrencyGroup(name="latchkey-auth-list")
+        try:
+            with cg:
+                result = cg.run_process_to_completion(
+                    command=command,
+                    timeout=_SERVICES_INFO_TIMEOUT_SECONDS,
+                    is_checked_after=False,
+                    env=env,
+                )
+        except ConcurrencyExceptionGroup as group:
+            # As in ``services_info``: a missing/unexecutable binary degrades
+            # to "nothing registered" rather than raising. Anything that isn't
+            # a process-setup failure is re-raised so real bugs still surface.
+            if not group.only_exception_is_instance_of(ProcessSetupError):
+                raise
+            logger.warning("latchkey auth list failed to start: {}", group)
+            return frozenset()
+        if result.returncode != 0:
+            logger.warning("latchkey auth list exited {}: {}", result.returncode, result.stderr.strip())
+            return frozenset()
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            logger.warning("Could not parse 'latchkey auth list' output as JSON: {}", e)
+            return frozenset()
+        if not isinstance(payload, dict):
+            logger.warning("'latchkey auth list' returned non-object JSON")
+            return frozenset()
+        # JSON object keys are always strings; ``str`` keeps the type checker
+        # happy without changing any value.
+        return frozenset(str(service_name) for service_name in payload)
+
     # -- Interactive auth ----------------------------------------------------
 
     def auth_browser(self, service_name: str) -> tuple[bool, str]:
@@ -887,11 +951,7 @@ class Latchkey(MutableModel):
         flow can run;. In such a case, we transparently run ``auth
         browser-prepare`` and retry ``auth browser`` once.
         """
-        is_success, detail = self._run_latchkey_auth_command(
-            log_label="auth browser",
-            argv=["auth", "browser", service_name],
-            service_name=service_name,
-        )
+        is_success, detail = self.auth_browser_login(service_name)
         if is_success:
             return True, ""
         if "latchkey auth browser-prepare" not in detail.lower():
@@ -907,9 +967,38 @@ class Latchkey(MutableModel):
         )
         if not is_prepared:
             return False, prepare_detail
+        return self.auth_browser_login(service_name)
+
+    def auth_browser_login(self, service_name: str) -> tuple[bool, str]:
+        """Run a single ``latchkey auth browser <service>`` with no preparation fallback.
+
+        Unlike :meth:`auth_browser`, this never auto-runs ``auth
+        browser-prepare`` on failure. It is the bare sign-in used once a
+        client has already been registered for the service -- either the
+        Minds OAuth client (via :meth:`auth_prepare`) or a client a prior
+        self-setup left behind. Returns ``(True, "")`` on a clean exit,
+        otherwise ``(False, detail)``.
+        """
         return self._run_latchkey_auth_command(
             log_label="auth browser",
             argv=["auth", "browser", service_name],
+            service_name=service_name,
+        )
+
+    def auth_prepare(self, service_name: str, client_id: str, client_secret: str) -> tuple[bool, str]:
+        """Register a service's OAuth client id/secret via ``latchkey auth prepare``.
+
+        Runs ``latchkey auth prepare <service>
+        '{"clientId":...,"clientSecret":...}'`` so a subsequent
+        :meth:`auth_browser_login` signs the user in against that client
+        (e.g. the Minds Google consent screen) instead of requiring them to
+        self-provision their own OAuth project. Returns ``(True, "")`` on a
+        clean exit, otherwise ``(False, detail)``.
+        """
+        payload = json.dumps({"clientId": client_id, "clientSecret": client_secret})
+        return self._run_latchkey_auth_command(
+            log_label="auth prepare",
+            argv=["auth", "prepare", service_name, payload],
             service_name=service_name,
         )
 
