@@ -1,7 +1,9 @@
 # TMR: bounded test convergence and suite-level normalization
 
-Status: **spec only -- not yet implemented.** Captures the design converged on while
-discussing how to improve the e2e tests TMR generates.
+Status: **partially implemented.** The prompt-level core and the report plumbing are
+done (see "Implementation status" below); the heavier orchestration is still a follow-up.
+Captures the design converged on while discussing how to improve the e2e tests TMR
+generates.
 
 **Audience:** developers working on `libs/mngr_tmr` (the test map-reduce recipe) and the
 e2e suite under `libs/mngr/imbue/mngr/e2e/`.
@@ -169,6 +171,29 @@ Running the e2e suite to verify normalization is feasible today:
   front even for tests that never create an agent. For the reducer to run arbitrary
   credential-free subsets, that blanket precondition should be relaxed or made
   subset-aware.
+
+## Implementation status
+
+Done (prompt-level + report plumbing, in `libs/mngr_tmr`):
+
+- Mapper prompt (`prompt_assets/mapper.j2`): tutorial-anchored objective with forward +
+  backward traceability, deletion as a first-class `IMPROVE_TEST`, "no change" as a valid
+  outcome, and a `# FIXME(tmr): ...` channel for cross-cutting setup blockers.
+- Reducer prompt (`prompt_assets/reducer.j2`): a normalize stage after cherry-pick that
+  extracts non-tutorial scaffolding (the "not in this test's tutorial block" predicate) and
+  triages `FIXME(tmr)` blockers into `normalizations` / `escalations`.
+- Report (`report.py`, `report_assets/report.html.j2`): parses and renders
+  `normalizations` and `escalations` so unresolved blockers are visible, not dropped.
+
+Deferred (orchestration / larger surface):
+
+- Wiring the reducer to actually run a blast-radius subset on offload (creds passthrough +
+  the credential-gate relaxation), so it can verify-and-apply rather than rely on whatever
+  it can run locally.
+- Posting escalations as a PR comment (today they land only in the HTML report).
+- The alongside-the-test metadata mechanism (recorded altitude + relative importance):
+  reader, prompt injection, and populating the e2e tests. The tutorial-anchoring above
+  bounds growth without it; the metadata is the jitter/importance refinement.
 
 ## Open questions
 
