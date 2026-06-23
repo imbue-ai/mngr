@@ -18,6 +18,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 from imbue.minds.cli.pool import _BACKEND_OVH_VPS
 from imbue.minds.cli.pool import _BACKEND_SLICE
 from imbue.minds.cli.pool import _SECRET_BEARING_FLAGS
+from imbue.minds.cli.pool import build_backfill_host_keys_admin_args
 from imbue.minds.cli.pool import build_create_admin_args
 from imbue.minds.cli.pool import build_destroy_admin_args
 from imbue.minds.cli.pool import build_list_admin_args
@@ -481,6 +482,15 @@ def test_pool_create_rejects_ovh_vps_backend(
 def test_build_list_admin_args() -> None:
     assert build_list_admin_args(database_url="postgres://x") == [
         "list",
+        "--database-url",
+        "postgres://x",
+    ]
+
+
+def test_build_backfill_host_keys_admin_args_forwards_dsn_when_present() -> None:
+    assert build_backfill_host_keys_admin_args(database_url=None) == ["backfill-host-keys"]
+    assert build_backfill_host_keys_admin_args(database_url="postgres://x") == [
+        "backfill-host-keys",
         "--database-url",
         "postgres://x",
     ]
