@@ -2795,17 +2795,15 @@ ipcMain.on('close-modal', (event) => {
 // we re-validate here defensively and only forward to the *sending
 // bundle's* chrome view so a stray sender can't paint another
 // window's titlebar.
-ipcMain.on('preview-workspace-accent', (event, agentId, accent, accentFg) => {
+ipcMain.on('preview-workspace-accent', (event, agentId, accent) => {
   if (typeof agentId !== 'string' || !/^agent-[a-f0-9]{1,64}$/i.test(agentId)) return;
   if (typeof accent !== 'string' || !/^#[0-9a-f]{6}$/.test(accent)) return;
-  if (typeof accentFg !== 'string' || !/^(?:0 0 0|255 255 255)$/.test(accentFg)) return;
   const bundle = getBundleFromEvent(event);
   if (!bundle || !bundle.chromeView || bundle.chromeView.webContents.isDestroyed()) return;
   bundle.chromeView.webContents.send('chrome-event', {
     type: 'workspace_accent_preview',
     agent_id: agentId,
     accent,
-    accent_fg: accentFg,
   });
 });
 
@@ -2816,16 +2814,14 @@ ipcMain.on('preview-workspace-accent', (event, agentId, accent, accentFg) => {
 // ``hasFreeformAccentPreview`` handling in ``onContentNavigate``. (Without
 // that, abandoning to a general screen is a null -> null accent transition,
 // which ``updateBundleAccentAgentId`` no-ops, leaving the preview stranded.)
-ipcMain.on('preview-freeform-accent', (event, accent, accentFg) => {
+ipcMain.on('preview-freeform-accent', (event, accent) => {
   if (typeof accent !== 'string' || !/^#[0-9a-f]{6}$/.test(accent)) return;
-  if (typeof accentFg !== 'string' || !/^(?:0 0 0|255 255 255)$/.test(accentFg)) return;
   const bundle = getBundleFromEvent(event);
   if (!bundle || !bundle.chromeView || bundle.chromeView.webContents.isDestroyed()) return;
   bundle.hasFreeformAccentPreview = true;
   bundle.chromeView.webContents.send('chrome-event', {
     type: 'freeform_accent_preview',
     accent,
-    accent_fg: accentFg,
   });
 });
 

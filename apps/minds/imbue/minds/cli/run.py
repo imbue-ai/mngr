@@ -33,9 +33,13 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.bootstrap import env_name_from_root_name
+from imbue.minds.bootstrap import is_minds_root_name_set_to_active_env
 from imbue.minds.bootstrap import minds_data_dir_for
 from imbue.minds.bootstrap import reconcile_imbue_cloud_providers_from_sessions
 from imbue.minds.bootstrap import resolve_minds_root_name
+from imbue.minds.build_info import resolve_git_sha
+from imbue.minds.build_info import resolve_release_id
 from imbue.minds.config.data_types import DEFAULT_DESKTOP_CLIENT_HOST
 from imbue.minds.config.data_types import DEFAULT_DESKTOP_CLIENT_PORT
 from imbue.minds.config.data_types import MNGR_BINARY
@@ -76,6 +80,8 @@ from imbue.minds.primitives import OutputFormat
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.output import emit_event
+from imbue.minds.utils.sentry.core import SentryDeployEnvironment
+from imbue.minds.utils.sentry.core import setup_sentry
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
@@ -168,6 +174,42 @@ def run(
     root_name = resolve_minds_root_name()
     data_directory = minds_data_dir_for(root_name)
     minds_config = MindsConfig(data_dir=data_directory)
+    paths = WorkspacePaths(data_dir=data_directory)
+
+    # Initialize Sentry for the minds backend process. ``setup_logging`` already ran
+    # in the CLI group callback, so the loguru sinks Sentry layers on top of exist.
+    #
+    # Sentry is off by default and only initialized when MINDS_SENTRY_ENABLED is
+    # set: until we're ready to rely on it, the backend sends nothing to Sentry
+    # unless explicitly opted in.
+    #
+    # When enabled, the activated minds env (from `minds env activate`) selects the
+    # Sentry DSN and, for production/staging, which S3 attachment bucket: production
+    # and staging each get their own, while every other env (dev-*, ci-*, or no
+    # activated env) reports to the dev project. We treat "not activated" as dev so
+    # an un-activated `minds run` never accidentally reports to the production
+    # project. S3 attachment uploads are additionally opt-in via
+    # MINDS_SENTRY_S3_UPLOADS (default off, even in production/staging) since they
+    # can carry potentially-sensitive data; development never uploads regardless.
+    # The release id (desktop app version) and git sha come from the Electron
+    # launcher via env vars, falling back to the in-repo package.json / "unknown"
+    # for bare source runs (see imbue.minds.build_info).
+    if os.environ.get("MINDS_SENTRY_ENABLED", "").strip().lower() in ("1", "true", "yes"):
+        activated_env_name = env_name_from_root_name(root_name) if is_minds_root_name_set_to_active_env() else None
+        is_sentry_s3_upload_enabled = os.environ.get("MINDS_SENTRY_S3_UPLOADS", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        setup_sentry(
+            environment=SentryDeployEnvironment.from_minds_env_name(activated_env_name),
+            release_id=resolve_release_id(),
+            git_commit_sha=resolve_git_sha(),
+            log_folder=paths.log_dir,
+            is_s3_upload_enabled=is_sentry_s3_upload_enabled,
+        )
+    else:
+        logger.info("Sentry is disabled (set MINDS_SENTRY_ENABLED=1 to enable error reporting).")
     client_config_path = config_file
     client_env_config = load_client_config(client_config_path)
     connector_url_str = str(client_env_config.connector_url).rstrip("/")
@@ -185,7 +227,6 @@ def run(
     # so the reconcile happens here once we've loaded the client config.
     reconcile_imbue_cloud_providers_from_sessions(connector_url_str, root_name=root_name)
 
-    paths = WorkspacePaths(data_dir=data_directory)
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
     is_electron = os.getenv("MINDS_ELECTRON") == "1"
     notification_dispatcher = NotificationDispatcher(is_electron=is_electron)

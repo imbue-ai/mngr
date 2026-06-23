@@ -246,13 +246,13 @@ minds-test-deployment-only *tests:
 minds-test-electron *args:
   xvfb-run -a uv run pytest apps/minds/test_desktop_client_e2e.py::test_create_local_docker_workspace_via_electron -v --no-cov --cov-fail-under=0 {{args}}
 
-# Download the Tailwind Play CDN JS bundle for the minds desktop client.
-# Idempotent and SHA-pinned via apps/minds/scripts/fetch_tailwind.sh -- the
-# same script also runs automatically as a pnpm `postinstall` hook, so
-# normally you do not need to invoke this recipe. Use it when you want to
-# force-verify the file or after nuking the static/ dir.
-minds-tailwind:
-  bash apps/minds/scripts/fetch_tailwind.sh
+# Compile the minds desktop client's Tailwind v4 stylesheet
+# (static/app.css -> static/app.min.css, minified + tree-shaken) via the
+# pinned @tailwindcss/cli. Runs automatically as a pnpm `postinstall` hook
+# and is watched live by `just minds-start`, so normally you do not need to
+# invoke this recipe -- use it after nuking static/ or to force a rebuild.
+minds-css:
+  bash -c '. apps/minds/scripts/select_node_version.sh && cd apps/minds && pnpm run build:css'
 
 # Sync vendor/mngr in forever-claude-template to this repo's HEAD and commit
 # in FCT. The FCT checkout path comes from the positional arg, else FCT_DIR read
@@ -363,12 +363,18 @@ minds-install:
     . apps/minds/scripts/select_node_version.sh || exit 2
     cd apps/minds && pnpm install
 
-# Override agent_name / branch via positional args:
-#   just minds-start agent_name=foo branch=some-branch
+# Override agent_name / branch / fct (FCT worktree path) via positional args
+# (just has no name=value form for recipe params -- pass them in order):
+#   just minds-start my-agent my-branch
+#   just minds-start mindtest "" .external_worktrees/my-fct-worktree   # 3rd arg = fct
+# `fct` defaults to .external_worktrees/forever-claude-template; an absolute
+# path is used as-is, a relative one is resolved against the mngr root. This
+# is what gets synced (vendor/mngr/) and exported as MINDS_WORKSPACE_GIT_URL,
+# so point it at whichever FCT worktree/branch you want to launch against.
 # Refuses to start if another minds-start is already running in this
 # worktree (PID file under /tmp keyed by worktree path). Use `just
 # minds-stop` to kill the running instance first.
-minds-start agent_name="mindtest" branch="":
+minds-start agent_name="mindtest" branch="" fct="":
     #!/bin/bash
     set -ueo pipefail
     if [ -z "${MINDS_ROOT_NAME:-}" ]; then
@@ -382,7 +388,14 @@ minds-start agent_name="mindtest" branch="":
         echo "       settings.toml than its bootstrap writes to." >&2
         exit 2
     fi
-    fct_wt="$(pwd)/.external_worktrees/forever-claude-template"
+    if [ -n "{{fct}}" ]; then
+        case "{{fct}}" in
+            /*) fct_wt="{{fct}}" ;;
+            *)  fct_wt="$(pwd)/{{fct}}" ;;
+        esac
+    else
+        fct_wt="$(pwd)/.external_worktrees/forever-claude-template"
+    fi
     if [ ! -e "$fct_wt/.git" ]; then
         echo "error: no FCT worktree at $fct_wt" >&2
         echo "       run \`git -C ~/project/forever-claude-template worktree add -b <branch> $fct_wt <base>\`" >&2
