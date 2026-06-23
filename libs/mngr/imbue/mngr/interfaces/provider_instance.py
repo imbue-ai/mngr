@@ -445,6 +445,18 @@ class ProviderInstanceInterface(MutableModel, ABC):
         """
         return None
 
+    # returns (outer_host_public_key, container_host_public_key)
+    def get_ssh_host_public_keys(self, host_id: HostId) -> tuple[str | None, str | None]:
+        """The host's outer (VPS/VM-root) and container sshd host public keys, when known.
+
+        Returns ``(None, None)`` by default. Providers that generate the host's
+        sshd host keys at bake time (so the public keys are deterministically
+        known, not scanned) override this so ``mngr create --format json`` can
+        report them and downstream tooling can pin them for strict host-key
+        checking.
+        """
+        return (None, None)
+
     @abstractmethod
     def get_max_destroyed_host_persisted_seconds(self) -> float:
         """

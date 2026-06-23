@@ -602,6 +602,7 @@ async def _handle_workspace_forward_websocket(
     tunnel_manager: SSHTunnelManager,
     preauth_cookie_value: str | None,
     allow_host_loopback: bool,
+    envelope_writer: EnvelopeWriter,
 ) -> None:
     host_header = websocket.headers.get("host", "")
     agent_id = _parse_workspace_subdomain(host_header)
@@ -619,6 +620,10 @@ async def _handle_workspace_forward_websocket(
 
     target = resolver.resolve(agent_id)
     if target is None:
+        # Mirror the HTTP path: an unresolved backend is a backend failure a
+        # consumer must hear about. A loaded SPA whose only live channel is a
+        # websocket would otherwise leave minds blind to the dead workspace.
+        _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.UNRESOLVED, None)
         await websocket.close(code=1013, reason="Backend not yet available")
         return
 
@@ -633,6 +638,7 @@ async def _handle_workspace_forward_websocket(
         )
     except (SSHTunnelError, paramiko.SSHException, OSError) as e:
         logger.debug("SSH tunnel setup failed for WS {}: {}", agent_id, e)
+        _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
         try:
             await websocket.close(code=1011, reason="SSH tunnel failed")
         except RuntimeError:
@@ -646,6 +652,7 @@ async def _handle_workspace_forward_websocket(
             agent_id,
             backend_url,
         )
+        _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
         try:
             await websocket.close(code=1013, reason=_WS_CLOSE_REASON_LOOPBACK_REFUSED)
         except RuntimeError:
@@ -681,6 +688,7 @@ async def _handle_workspace_forward_websocket(
         paramiko.SSHException,
     ) as connection_error:
         logger.debug("Backend WS connection failed for {}: {}", agent_id, connection_error)
+        _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
         try:
             await websocket.close(code=1011, reason="Backend connection failed")
         except RuntimeError:
@@ -940,6 +948,7 @@ def create_forward_app(
             tunnel_manager=tunnel_manager,
             preauth_cookie_value=preauth_cookie_value,
             allow_host_loopback=allow_host_loopback,
+            envelope_writer=envelope_writer,
         )
 
     return app

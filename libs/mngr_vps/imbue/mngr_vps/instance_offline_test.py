@@ -102,7 +102,7 @@ class _ResumeMirrorProvider(OfflineCapableVpsProvider):
     def _find_instance_for_host(self, host_id: HostId) -> dict[str, Any] | None:
         return {"id": "i-resume"}
 
-    def _rebind_known_hosts_pre_connect(self, new_ip: str) -> None:
+    def _rebind_known_hosts_pre_connect(self, host_id: HostId, new_ip: str) -> None:
         pass
 
     def _rebind_known_hosts(self, record: VpsHostRecord, new_ip: str) -> None:
@@ -228,6 +228,9 @@ def test_offline_resume_waits_for_expected_host_key_before_connecting(temp_mngr_
         vps_client=ExternallyManagedVpsClient(),
     )
     provider._realizer_cache = {IsolationMode.CONTAINER: cast(HostRealizer, _FakeRealizer(cast(VpsHostStore, store)))}
+    # Materialize this host's per-host VPS host key, as create would have, so resume
+    # has a key to wait for (resume reads the per-host key for this host_id).
+    expected_vps_host_key = provider._get_vps_host_keypair(host_id)[1]
 
     with pytest.raises(_MirrorCalled):
         provider.start_host(host_id)
@@ -236,7 +239,7 @@ def test_offline_resume_waits_for_expected_host_key_before_connecting(temp_mngr_
     assert provider._calls == ["wait_sshd", "wait_host_key", "open_outer"]
     # It waits for mngr's locally-held VPS host public key (the key sshd serves on
     # port 22 -- the bare agent endpoint), not a record/account-sourced value.
-    assert provider._expected_key_arg == provider._get_vps_host_keypair()[1]
+    assert provider._expected_key_arg == expected_vps_host_key
 
 
 # =========================================================================

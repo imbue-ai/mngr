@@ -202,6 +202,17 @@ class BackendResolverInterface(MutableModel, ABC):
         """
         return {}
 
+    def get_freshness_timestamps(self) -> tuple[datetime | None, datetime | None]:
+        """Return ``(last_event_at, last_full_snapshot_at)`` from discovery.
+
+        Default implementation returns ``(None, None)`` (resolvers without
+        discovery have no freshness to report); ``MngrCliBackendResolver``
+        overrides it. ``None`` for the last full snapshot means discovery has
+        not (recently) confirmed state, so callers that gate on freshness treat
+        it as stale.
+        """
+        return None, None
+
 
 class StaticBackendResolver(BackendResolverInterface):
     """Resolves backend URLs from a static mapping provided at construction time.
