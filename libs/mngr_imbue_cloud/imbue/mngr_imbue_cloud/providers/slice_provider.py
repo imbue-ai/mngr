@@ -212,10 +212,11 @@ class SliceVpsDockerProvider(VpsProvider):
         env_name = self.slice_config.slice_env_name
         logger.info("Creating slice host {} ({}) on box {} (env={})", name, host_id, box, env_name)
 
-        # The provider's VPS keypair authorizes root on the VM; the VPS host
-        # keypair is pre-injected as the VM's sshd host key (no first-connect TOFU).
+        # The provider's VPS keypair authorizes root on the VM; this host's unique
+        # VPS host keypair is pre-injected as the VM's sshd host key (no
+        # first-connect TOFU).
         _vps_key_path, vps_public_key = self._get_vps_ssh_keypair()
-        vps_host_key_path, vps_host_public_key = self._get_vps_host_keypair()
+        vps_host_key_path, vps_host_public_key = self._get_vps_host_keypair(host_id)
 
         instance_id = VpsInstanceId(slice_lima_instance_name(host_id, env_name))
         # Carving knobs have no defaults; they must have been set (per box) via -S.
@@ -348,7 +349,7 @@ class SliceVpsDockerProvider(VpsProvider):
 
     def _create_host_object(self, host_id: HostId, host_name: HostName, vps_ip: str, realizer: HostRealizer) -> Host:
         container_key_path, _container_pub = self._get_container_ssh_keypair()
-        _container_host_key_path, container_host_public_key = self._get_container_host_keypair()
+        _container_host_key_path, container_host_public_key = self._get_container_host_keypair(host_id)
         port = (
             self._current_container_port
             if self._current_container_port is not None
