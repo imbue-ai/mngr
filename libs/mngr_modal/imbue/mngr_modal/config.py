@@ -100,12 +100,12 @@ class ModalProviderConfig(ProviderInstanceConfig):
         description="Default activity sources that count toward keeping host active",
     )
     default_cpu: float = Field(
-        default=1.0,
-        description="Default CPU cores",
+        default=2.0,
+        description="Default CPU cores. Matches the lima/docker convention (--cpus=2) so a Modal sandbox is sized like the other compute providers rather than the old 1-core minimum.",
     )
     default_memory: float = Field(
-        default=1.0,
-        description="Default memory in GB",
+        default=4.0,
+        description="Default memory in GB. Matches the lima/docker convention (--memory=4).",
     )
     default_gpu: str | None = Field(
         default=None,
