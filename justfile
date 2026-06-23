@@ -948,6 +948,19 @@ add-paid-email email:
 list-pool-hosts:
     uv run minds pool list
 
+# One-time host-key backfill for the activated minds env. Keyscans every
+# pre-existing pool host + bare-metal box whose recorded sshd host key columns
+# are still null and records them, so rows baked before host-key pinning become
+# leasable / prep-able again. Run ONCE per tier right after deploying the
+# host-key-pinning connector (`just deploy`); after it runs, leasing and prep
+# fail closed on any row still missing a pinned key. Idempotent -- rows that
+# already have keys are skipped. Activate first (use-only is enough; this needs
+# Vault + the host_pool DB + ssh-keyscan, not Modal) and `vault login`.
+#
+#   eval "$(uv run minds env activate staging)" && just backfill-pool-host-keys
+backfill-pool-host-keys:
+    uv run minds pool backfill-host-keys
+
 # Destroy a single pool host: tear down its underlying machine, then drop its
 # pool_hosts row. The teardown mirrors the row's backend -- cancel the OVH VPS for
 # an ovh_vps row, or destroy the lima VM (freeing the box slot) for a slice row.
