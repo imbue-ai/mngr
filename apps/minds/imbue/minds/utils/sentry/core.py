@@ -519,7 +519,7 @@ def setup_sentry(
         # We pass ``dsn=`` explicitly below, so sentry_sdk ignores any SENTRY_DSN
         # in the environment. Warn rather than crash the backend: an end user may
         # have it set for unrelated reasons.
-        logger.warning("Ignoring SENTRY_DSN from the environment; minds selects its Sentry DSN by environment.")
+        logger.info("Ignoring SENTRY_DSN from the environment; minds selects its Sentry DSN by environment.")
 
     sentry_dsn = _SENTRY_DSN_BY_ENVIRONMENT[environment]
 
