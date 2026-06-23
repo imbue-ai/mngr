@@ -1,0 +1,3 @@
+The host-lease and slice-teardown paths now pin SSH host keys instead of trust-on-first-use.
+
+Added nullable `outer_host_public_key` / `container_host_public_key` columns to `pool_hosts` and `box_host_public_key` to `bare_metal_servers` (migration 011). `POST /hosts/lease` returns both pool-host keys and injects the user's key over SSH while strictly verifying each sshd against its recorded host key; a row missing its keys is not leasable (503, pointing at the one-time backfill). `GET /hosts` also returns the keys. Slice teardown and the reconcile sweep verify the bare-metal box against its recorded host key. The management SSH client no longer uses `AutoAddPolicy`.

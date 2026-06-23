@@ -40,6 +40,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import HostId
+from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_imbue_cloud.bake.pool_bake import BAKED_SERVICES_AGENT_NAME
 from imbue.mngr_imbue_cloud.bake.pool_bake import BakedPoolHost
@@ -175,28 +176,56 @@ def _derive_public_key(private_key_path: Path) -> str:
 _BOX_PREP_SSH_TIMEOUT_SECONDS: Final[float] = 1800.0
 
 
-def _run_root_script_over_ssh(server_address: str, ssh_user: str, private_key_path: Path, script: str) -> None:
+@contextmanager
+def _box_ssh_host_key_options(server_address: str, box_host_public_key: str | None) -> Iterator[list[str]]:
+    """Yield ssh ``-o`` options pinning the box's host key when it is known.
+
+    The provision flow injects the box's host key at OS reinstall, so it pins
+    strictly here (no trust-on-first-use). The standalone ``prep`` command on a box
+    we did not reinstall has no key to pin yet and falls back to accept-new
+    (operator-driven first contact; the key is later captured by the keyscan
+    backfill or a re-provision).
+    """
+    if not box_host_public_key:
+        yield ["-o", "StrictHostKeyChecking=accept-new"]
+        return
+    known_hosts_fd, known_hosts_path = tempfile.mkstemp(prefix="mngr_box_known_hosts_")
+    os.close(known_hosts_fd)
+    try:
+        add_host_to_known_hosts(Path(known_hosts_path), server_address, 22, box_host_public_key)
+        yield ["-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={known_hosts_path}"]
+    finally:
+        Path(known_hosts_path).unlink(missing_ok=True)
+
+
+def _run_root_script_over_ssh(
+    server_address: str,
+    ssh_user: str,
+    private_key_path: Path,
+    script: str,
+    box_host_public_key: str | None = None,
+) -> None:
     """Pipe a bash script to ``sudo bash`` on the box over SSH (base64 to dodge quoting)."""
     encoded = base64.b64encode(script.encode()).decode()
     remote = f"echo {encoded} | base64 -d | sudo bash"
     cg = ConcurrencyGroup(name="box-prep-ssh")
-    with cg:
-        result = cg.run_process_to_completion(
-            command=[
-                "ssh",
-                "-i",
-                str(private_key_path),
-                "-o",
-                "StrictHostKeyChecking=accept-new",
-                "-o",
-                "ConnectTimeout=30",
-                f"{ssh_user}@{server_address}",
-                remote,
-            ],
-            timeout=_BOX_PREP_SSH_TIMEOUT_SECONDS,
-            is_checked_after=False,
-            on_output=lambda line, _is_stdout: logger.info("  [box] {}", line.rstrip()),
-        )
+    with _box_ssh_host_key_options(server_address, box_host_public_key) as host_key_opts:
+        with cg:
+            result = cg.run_process_to_completion(
+                command=[
+                    "ssh",
+                    "-i",
+                    str(private_key_path),
+                    *host_key_opts,
+                    "-o",
+                    "ConnectTimeout=30",
+                    f"{ssh_user}@{server_address}",
+                    remote,
+                ],
+                timeout=_BOX_PREP_SSH_TIMEOUT_SECONDS,
+                is_checked_after=False,
+                on_output=lambda line, _is_stdout: logger.info("  [box] {}", line.rstrip()),
+            )
     if result.returncode != 0:
         raise BareMetalProvisioningError(
             f"box prep on {server_address} failed (exit {result.returncode}): {result.stderr.strip()}"
@@ -436,12 +465,23 @@ def _build_slice_create_args(
     bakes (this env's and other envs') pick distinct ports from the shared range, so
     every bake is handed the full range rather than a disjoint window.
     """
+    # Fail closed: the slice carve SSHes the box with strict host-key pinning, so
+    # the box's host key must be known. It is set at provision (or by the one-time
+    # keyscan backfill); refuse to bake against an un-keyscanned box rather than
+    # fall back to trust-on-first-use.
+    if not server.box_host_public_key:
+        raise BareMetalProvisioningError(
+            f"bare-metal server {server.id} has no box_host_public_key; run the one-time "
+            "`mngr imbue_cloud admin` host-key backfill (or re-provision the box) before baking slices"
+        )
     prefix = f"providers.{_SLICE_PROVIDER_INSTANCE}"
     overrides = {
         "box_public_address": str(server.public_address),
         "box_ssh_user": ssh_user,
         "pool_private_key_path": str(private_key_path),
         "pool_authorized_public_key": pool_public_key,
+        # The box's pinned sshd host key (same -S-with-spaces pattern as the pool key).
+        "box_host_public_key": server.box_host_public_key,
         # Lease-region label (the app's region code, e.g. US-EAST-VA), NOT the
         # box's raw datacenter code -- so the connector's region-filtered lease
         # matches what the minds create form requests.
@@ -480,6 +520,7 @@ def _rollback_slice_vm(
         box_address=str(server.public_address),
         box_ssh_user=ssh_user,
         private_key_path=str(private_key_path),
+        box_host_public_key=server.box_host_public_key,
     )
     instance_id = VpsInstanceId(slice_lima_instance_name(HostId(host_id), env_name))
     try:
@@ -502,32 +543,42 @@ def _slice_run_in_container(
     """
     if not baked.ssh_host or baked.ssh_port is None or not baked.ssh_key_path:
         return 1, "", f"baked slice {baked.host_name} missing container SSH connection info"
-    ssh_command = [
-        "ssh",
-        "-i",
-        baked.ssh_key_path,
-        # Bake-time op to a container we just created, reached at a box-forwarded
-        # port that earlier slices have reused with different host keys. Don't
-        # consult or write the operator's shared known_hosts (a stale entry for this
-        # box:port from a prior slice would fail strict checking and break the
-        # teardown). Mirrors the OVH admin bake's container SSH (`_run_ssh_command`).
-        "-o",
-        "StrictHostKeyChecking=no",
-        "-o",
-        "UserKnownHostsFile=/dev/null",
-        "-o",
-        "ConnectTimeout=20",
-        "-o",
-        "ServerAliveInterval=30",
-        "-p",
-        str(baked.ssh_port),
-        f"{baked.ssh_user}@{baked.ssh_host}",
-        f"bash -lc {shlex.quote(command)}",
-    ]
-    cg = ConcurrencyGroup(name=f"slice-container-{label}")
-    with cg:
-        result = cg.run_process_to_completion(command=ssh_command, timeout=timeout_seconds, is_checked_after=False)
-    return result.returncode, result.stdout, result.stderr
+    if not baked.container_host_public_key:
+        return 1, "", f"baked slice {baked.host_name} missing container host public key; cannot pin it"
+    # Bake-time op to a container we just created, reached at a box-forwarded port
+    # that earlier slices have reused with different host keys. Pin the container's
+    # known host key in a throwaway known_hosts file (NOT the operator's shared one,
+    # whose stale entry for this box:port from a prior slice would mismatch) -- so we
+    # still get strict host-key checking with no trust-on-first-use.
+    known_hosts_fd, known_hosts_path = tempfile.mkstemp(prefix="mngr_slice_known_hosts_")
+    os.close(known_hosts_fd)
+    try:
+        add_host_to_known_hosts(
+            Path(known_hosts_path), baked.ssh_host, baked.ssh_port, baked.container_host_public_key
+        )
+        ssh_command = [
+            "ssh",
+            "-i",
+            baked.ssh_key_path,
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            f"UserKnownHostsFile={known_hosts_path}",
+            "-o",
+            "ConnectTimeout=20",
+            "-o",
+            "ServerAliveInterval=30",
+            "-p",
+            str(baked.ssh_port),
+            f"{baked.ssh_user}@{baked.ssh_host}",
+            f"bash -lc {shlex.quote(command)}",
+        ]
+        cg = ConcurrencyGroup(name=f"slice-container-{label}")
+        with cg:
+            result = cg.run_process_to_completion(command=ssh_command, timeout=timeout_seconds, is_checked_after=False)
+        return result.returncode, result.stdout, result.stderr
+    finally:
+        Path(known_hosts_path).unlink(missing_ok=True)
 
 
 def _bake_one_slice(
@@ -619,6 +670,11 @@ def _bake_one_slice(
                     f"stopping the services agent on slice {host_name} failed (exit {stop_rc}): {stop_err.strip()}"
                 )
             host_id_obj = HostId(baked.host_id)
+            if not baked.outer_host_public_key or not baked.container_host_public_key:
+                raise BareMetalProvisioningError(
+                    f"baked slice {host_name} did not surface its sshd host public keys "
+                    "(needs a slice provider that emits them in `mngr create --format json`); cannot insert pool row"
+                )
             values = build_slice_pool_host_insert_values(
                 row_id=str(uuid4()),
                 box_public_address=str(server.public_address),
@@ -632,6 +688,8 @@ def _bake_one_slice(
                 bare_metal_server_id=str(server.id),
                 lima_instance_name=slice_lima_instance_name(host_id_obj, env_name),
                 lima_disk_name=slice_lima_disk_name(host_id_obj, env_name),
+                outer_host_public_key=baked.outer_host_public_key,
+                container_host_public_key=baked.container_host_public_key,
             )
             conn = psycopg2.connect(database_url)
             try:
@@ -784,6 +842,7 @@ def _reap_orphan_slice_resources(
         box_address=str(server.public_address),
         box_ssh_user=ssh_user,
         private_key_path=str(private_key_path),
+        box_host_public_key=server.box_host_public_key,
     )
 
     # Reap orphan VM instances.
@@ -865,6 +924,7 @@ def destroy_slice_vm(*, server: BareMetalServer, lima_instance_name: str) -> Non
             box_address=str(server.public_address),
             box_ssh_user=ssh_user,
             private_key_path=str(private_key_path),
+            box_host_public_key=server.box_host_public_key,
         )
         client.destroy_instance(VpsInstanceId(lima_instance_name))
 
@@ -895,6 +955,7 @@ def tear_down_unleased_slices(database_url: str) -> dict[str, Any]:
                 box_address=target.box_public_address,
                 box_ssh_user=target.lima_service_user,
                 private_key_path=str(private_key_path),
+                box_host_public_key=target.box_host_public_key,
             )
             try:
                 client.destroy_instance(VpsInstanceId(target.lima_instance_name))
@@ -986,6 +1047,7 @@ def allocate_slices(
             box_address=str(server.public_address),
             box_ssh_user=ssh_user,
             private_key_path=str(private_key_path),
+            box_host_public_key=server.box_host_public_key,
         )
         box_used_slots = count_slice_resource_names(occupancy_client.list_disk_names())
         free_slots = max(0, server.slot_count - box_used_slots)
@@ -1257,33 +1319,41 @@ def _require_ovh_config() -> OvhProviderConfig:
     return config
 
 
-def _probe_ssh_ready(server_address: str, ssh_user: str, private_key_path: Path) -> bool | None:
+def _probe_ssh_ready(
+    server_address: str, ssh_user: str, private_key_path: Path, box_host_public_key: str | None
+) -> bool | None:
     """One SSH-readiness probe: True once a login succeeds, else None (for poll_for_value)."""
     cg = ConcurrencyGroup(name="ssh-ready")
-    with cg:
-        result = cg.run_process_to_completion(
-            command=[
-                "ssh",
-                "-i",
-                str(private_key_path),
-                "-o",
-                "StrictHostKeyChecking=accept-new",
-                "-o",
-                "ConnectTimeout=15",
-                f"{ssh_user}@{server_address}",
-                "echo ok",
-            ],
-            timeout=30.0,
-            is_checked_after=False,
-        )
+    with _box_ssh_host_key_options(server_address, box_host_public_key) as host_key_opts:
+        with cg:
+            result = cg.run_process_to_completion(
+                command=[
+                    "ssh",
+                    "-i",
+                    str(private_key_path),
+                    *host_key_opts,
+                    "-o",
+                    "ConnectTimeout=15",
+                    f"{ssh_user}@{server_address}",
+                    "echo ok",
+                ],
+                timeout=30.0,
+                is_checked_after=False,
+            )
     return True if result.returncode == 0 else None
 
 
-def _wait_for_ssh_ready(server_address: str, ssh_user: str, private_key_path: Path, timeout_seconds: float) -> None:
+def _wait_for_ssh_ready(
+    server_address: str,
+    ssh_user: str,
+    private_key_path: Path,
+    timeout_seconds: float,
+    box_host_public_key: str | None = None,
+) -> None:
     """Poll until the box accepts an SSH login (it reboots into the freshly-installed OS). Raises on timeout."""
     with log_span("Waiting for SSH on {} as {}", server_address, ssh_user):
         is_ready, _polls, _elapsed = poll_for_value(
-            lambda: _probe_ssh_ready(server_address, ssh_user, private_key_path),
+            lambda: _probe_ssh_ready(server_address, ssh_user, private_key_path, box_host_public_key),
             timeout=timeout_seconds,
             poll_interval=10.0,
         )
@@ -1517,16 +1587,25 @@ def setup(
         # Reinstall only from 'delivered'; re-running from 'installing' assumes the reinstall completed and
         # resumes at SSH-wait + prep. No DB connection is held across the (long) reinstall/prep waits.
         if str(server.status) == SERVER_STATUS_DELIVERED:
-            task_id = start_os_reinstall(
+            reinstall = start_os_reinstall(
                 client,
                 service_name=service_name,
                 ssh_public_key=pool_public_key,
                 os_template=os_template,
             )
-            _update_server_fields(dsn, server_id, status=SERVER_STATUS_INSTALLING)
-            wait_for_os_reinstall(client, service_name=service_name, task_id=task_id)
+            # Persist the injected box host key with the status flip so a resume from
+            # 'installing' still has it (we discard the private half after injection).
+            _update_server_fields(
+                dsn,
+                server_id,
+                status=SERVER_STATUS_INSTALLING,
+                box_host_public_key=reinstall.box_host_public_key,
+            )
+            wait_for_os_reinstall(client, service_name=service_name, task_id=reinstall.task_id)
 
-        _wait_for_ssh_ready(address, ssh_user, private_key_path, ssh_ready_timeout)
+        # Re-read so a resume-from-'installing' picks up the box key persisted above.
+        box_host_public_key = _fetch_server_or_raise(dsn, server_id).box_host_public_key
+        _wait_for_ssh_ready(address, ssh_user, private_key_path, ssh_ready_timeout, box_host_public_key)
         script = build_box_prep_script(
             pool_public_key=pool_public_key,
             lima_service_user=lima_service_user,
@@ -1534,7 +1613,7 @@ def setup(
             slice_base_image_url=slice_base_image_url,
         )
         logger.info("Prepping delivered box {} ({})", server_id, address)
-        _run_root_script_over_ssh(address, ssh_user, private_key_path, script)
+        _run_root_script_over_ssh(address, ssh_user, private_key_path, script, box_host_public_key)
 
     _update_server_fields(dsn, server_id, lima_service_user=lima_service_user, status=SERVER_STATUS_READY)
     write_human_line(

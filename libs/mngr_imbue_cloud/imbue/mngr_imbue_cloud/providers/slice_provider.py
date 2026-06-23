@@ -77,6 +77,13 @@ class SliceVpsDockerProviderConfig(VpsProviderConfig):
             "Set by the bake (``admin pool create --backend slice``) from POOL_SSH_PRIVATE_KEY."
         ),
     )
+    box_host_public_key: str | None = Field(
+        default=None,
+        description=(
+            "The bare-metal box's sshd host public key, pinned by the lima slice client for strict "
+            "host-key checking (no trust-on-first-use). Set by the bake from the box's bare_metal_servers row."
+        ),
+    )
     slice_region: str | None = Field(
         default=None,
         description="Region recorded on the slice's host record (the owning bare-metal server's region).",

@@ -1,0 +1,1 @@
+`mngr create --format json` now surfaces the host's baked sshd host public keys (VPS/VM-root and container) via a new `get_ssh_host_public_keys` provider method, so pool-bake tooling can persist and pin them instead of scanning the host after creation.

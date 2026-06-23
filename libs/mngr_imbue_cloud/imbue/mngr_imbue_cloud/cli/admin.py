@@ -25,6 +25,7 @@ is not involved in pool provisioning at all.
 import json as _json
 import os
 import shlex
+import tempfile
 from enum import auto
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.pure import pure
+from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr_imbue_cloud.bake.bake_source import BakeSourceError
 from imbue.mngr_imbue_cloud.bake.bake_source import DEFAULT_FCT_REPO_URL
 from imbue.mngr_imbue_cloud.bake.bake_source import merge_bake_identity_attributes
@@ -92,8 +94,8 @@ _SSH_COMMAND_TIMEOUT_SECONDS: Final[int] = 60
 _INSERT_POOL_HOST_SQL: Final[str] = (
     "INSERT INTO pool_hosts "
     "(id, vps_address, vps_instance_id, agent_id, host_id, host_name, ssh_port, ssh_user, "
-    "container_ssh_port, status, attributes, region, created_at) "
-    "VALUES (%s, %s, %s, %s, %s, %s, 22, 'root', %s, 'available', %s::jsonb, %s, NOW())"
+    "container_ssh_port, status, attributes, region, outer_host_public_key, container_host_public_key, created_at) "
+    "VALUES (%s, %s, %s, %s, %s, %s, 22, 'root', %s, 'available', %s::jsonb, %s, %s, %s, NOW())"
 )
 
 
@@ -109,7 +111,11 @@ def build_pool_host_insert_values(
     # OVH datacenter code the VPS was ordered in; persisted so the connector can
     # apply region-aware lease filtering/ordering.
     region: str,
-) -> tuple[str, str, str, str, str, str, int, str, str]:
+    # Baked sshd host public keys (deterministic, from `mngr create --format json`),
+    # persisted so leasing/teardown pin them instead of scanning.
+    outer_host_public_key: str,
+    container_host_public_key: str,
+) -> tuple[str, str, str, str, str, str, int, str, str, str, str]:
     """Build the value tuple for :data:`_INSERT_POOL_HOST_SQL`.
 
     ``vps_instance_id`` MUST be the OVH service name -- it is what every
@@ -133,6 +139,8 @@ def build_pool_host_insert_values(
         container_ssh_port,
         attributes_json,
         region,
+        outer_host_public_key,
+        container_host_public_key,
     )
 
 
@@ -151,31 +159,42 @@ def _run_ssh_command(
     ssh_key_path: str,
     port: int,
     command: str,
+    host_public_key: str,
 ) -> bool:
-    """Run a command on a host via SSH. Returns True on success."""
-    ssh_command = [
-        "ssh",
-        "-o",
-        "StrictHostKeyChecking=no",
-        "-o",
-        "UserKnownHostsFile=/dev/null",
-        "-o",
-        "ConnectTimeout=15",
-        "-i",
-        ssh_key_path,
-        "-p",
-        str(port),
-        f"root@{vps_address}",
-        command,
-    ]
-    logger.info("  SSH {}:{}: {}", vps_address, port, command)
-    cg = ConcurrencyGroup(name="pool-ssh")
-    with cg:
-        result = cg.run_process_to_completion(
-            command=ssh_command,
-            timeout=float(_SSH_COMMAND_TIMEOUT_SECONDS),
-            is_checked_after=False,
-        )
+    """Run a command on a host via SSH, pinning ``host_public_key``. Returns True on success.
+
+    The host key is the one we baked into the VPS (deterministic), so we pin it
+    strictly (no trust-on-first-use) via a throwaway known_hosts file.
+    """
+    known_hosts_fd, known_hosts_path = tempfile.mkstemp(prefix="mngr_vps_known_hosts_")
+    os.close(known_hosts_fd)
+    try:
+        add_host_to_known_hosts(Path(known_hosts_path), vps_address, port, host_public_key)
+        ssh_command = [
+            "ssh",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            f"UserKnownHostsFile={known_hosts_path}",
+            "-o",
+            "ConnectTimeout=15",
+            "-i",
+            ssh_key_path,
+            "-p",
+            str(port),
+            f"root@{vps_address}",
+            command,
+        ]
+        logger.info("  SSH {}:{}: {}", vps_address, port, command)
+        cg = ConcurrencyGroup(name="pool-ssh")
+        with cg:
+            result = cg.run_process_to_completion(
+                command=ssh_command,
+                timeout=float(_SSH_COMMAND_TIMEOUT_SECONDS),
+                is_checked_after=False,
+            )
+    finally:
+        Path(known_hosts_path).unlink(missing_ok=True)
     if result.returncode != 0:
         logger.warning("SSH command failed: {}", result.stderr.strip())
         return False
@@ -216,14 +235,16 @@ def _ufw_provision_commands(container_ssh_port: int) -> tuple[str, ...]:
     )
 
 
-def _checked_ssh_command(vps_address: str, ssh_key_path: str, port: int, command: str, *, label: str) -> None:
+def _checked_ssh_command(
+    vps_address: str, ssh_key_path: str, port: int, command: str, *, label: str, host_public_key: str
+) -> None:
     """Run an SSH command and raise on non-zero exit.
 
     Used for steps that MUST succeed (ufw install/configure, management key
     install). The bake aborts on failure rather than continuing with a
     half-configured host that would silently land in the pool.
     """
-    if not _run_ssh_command(vps_address, ssh_key_path, port, command):
+    if not _run_ssh_command(vps_address, ssh_key_path, port, command, host_public_key):
         raise PoolBakeError(f"{label} failed on VPS {vps_address}; aborting bake")
 
 
@@ -240,14 +261,24 @@ def _harden_ovh_vps(management_public_key: str, baked: BakedPoolHost, full_addre
     """
     if not baked.ssh_host or not baked.ssh_key_path:
         raise PoolBakeError("`mngr create --format json` did not expose the VPS ssh endpoint for hardening")
+    if not baked.outer_host_public_key:
+        raise PoolBakeError("`mngr create --format json` did not expose the VPS host key for strict SSH hardening")
     vps_address = baked.ssh_host
     vps_key_path = str(Path(baked.ssh_key_path).parent / "vps_ssh_key")
+    vps_host_public_key = baked.outer_host_public_key
     # Install + configure ufw on the VPS. Each step must succeed; we bail on the
     # whole bake if anything fails (otherwise the host would land in the pool with
     # no firewall and a half-applied policy).
     logger.info("  Installing + configuring ufw on VPS {}", vps_address)
     for ufw_command in _ufw_provision_commands(_CONTAINER_SSH_PORT):
-        _checked_ssh_command(vps_address, vps_key_path, 22, ufw_command, label=f"ufw step {ufw_command!r}")
+        _checked_ssh_command(
+            vps_address,
+            vps_key_path,
+            22,
+            ufw_command,
+            label=f"ufw step {ufw_command!r}",
+            host_public_key=vps_host_public_key,
+        )
 
     key_line = shlex.quote(management_public_key.strip())
     install_cmd = (
@@ -255,7 +286,14 @@ def _harden_ovh_vps(management_public_key: str, baked: BakedPoolHost, full_addre
         + key_line
         + " >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
     )
-    _checked_ssh_command(vps_address, vps_key_path, 22, install_cmd, label="install management key on VPS")
+    _checked_ssh_command(
+        vps_address,
+        vps_key_path,
+        22,
+        install_cmd,
+        label="install management key on VPS",
+        host_public_key=vps_host_public_key,
+    )
     logger.info("  Installing management key in container via mngr exec")
     container_install = run_mngr_command(["exec", full_address, install_cmd], timeout=60)
     if container_install.returncode != 0:
@@ -332,6 +370,11 @@ def _create_single_pool_host(
     )
     if not baked.ssh_host:
         raise PoolBakeError(f"baked OVH host {host_name} has no ssh_host; cannot insert pool row")
+    if not baked.outer_host_public_key or not baked.container_host_public_key:
+        raise PoolBakeError(
+            f"baked OVH host {host_name} did not surface its sshd host public keys "
+            "(needs a vps_docker provider that emits them in `mngr create --format json`); cannot insert pool row"
+        )
 
     full_address = f"{BAKED_SERVICES_AGENT_NAME}@{host_name}.ovh"
     # Let the FCT deferred-install (heavy apt + browser download, kicked off at boot)
@@ -381,6 +424,8 @@ def _create_single_pool_host(
                         container_ssh_port=_CONTAINER_SSH_PORT,
                         attributes_json=_json.dumps(attributes),
                         region=region,
+                        outer_host_public_key=baked.outer_host_public_key,
+                        container_host_public_key=baked.container_host_public_key,
                     ),
                 )
     finally:
@@ -1023,3 +1068,109 @@ def pool_teardown_slices(database_url: str | None) -> None:
     resolved_database_url = resolve_pool_database_url(database_url)
     result = tear_down_unleased_slices(resolved_database_url)
     emit_json(result)
+
+
+_KEYSCAN_TIMEOUT_SECONDS: Final[int] = 15
+
+# SELECT pool rows still missing either pinned host key (pre-host-key-column bakes).
+_SELECT_POOL_HOSTS_MISSING_KEYS_SQL: Final[str] = (
+    "SELECT id, vps_address, ssh_port, container_ssh_port, outer_host_public_key, container_host_public_key "
+    "FROM pool_hosts WHERE outer_host_public_key IS NULL OR container_host_public_key IS NULL"
+)
+_SELECT_BOXES_MISSING_KEY_SQL: Final[str] = (
+    "SELECT id, public_address FROM bare_metal_servers "
+    "WHERE box_host_public_key IS NULL AND public_address IS NOT NULL"
+)
+
+
+def _keyscan_host_public_key(host: str, port: int) -> str | None:
+    """One-time TOFU scan of a host's ed25519 sshd key, for the migration backfill only.
+
+    Returns ``"ssh-ed25519 <base64>"`` or None on failure. This is the single
+    sanctioned trust-on-first-use in the system; all steady-state SSH pins a
+    recorded key.
+    """
+    cg = ConcurrencyGroup(name="keyscan")
+    with cg:
+        result = cg.run_process_to_completion(
+            command=["ssh-keyscan", "-t", "ed25519", "-T", str(_KEYSCAN_TIMEOUT_SECONDS), "-p", str(port), host],
+            timeout=float(_KEYSCAN_TIMEOUT_SECONDS + 5),
+            is_checked_after=False,
+        )
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = stripped.split()
+        # ssh-keyscan prints "<hostspec> ssh-ed25519 <base64>"; we want the key only.
+        if len(parts) >= 3 and parts[1] == "ssh-ed25519":
+            return f"{parts[1]} {parts[2]}"
+    return None
+
+
+@pool.command(name="backfill-host-keys")
+@click.option(
+    "--database-url",
+    required=False,
+    default=None,
+    type=str,
+    help=(
+        "Neon PostgreSQL direct connection string for the pool DB. Defaults to "
+        "MINDS_HOST_POOL_DSN env var, or the activated minds env's secrets.toml "
+        "NEON_HOST_POOL_DSN field. Pass explicitly when operating outside an activated env."
+    ),
+)
+def pool_backfill_host_keys(database_url: str | None) -> None:
+    """One-time: keyscan + record SSH host public keys for pre-existing pool rows and boxes.
+
+    The single sanctioned trust-on-first-use in the system, used ONLY to migrate
+    rows baked before the host-key columns existed. Run once after deploying the
+    host-key-pinning version of the connector; afterward leasing and teardown
+    enforce strict pinning with no scan fallback. Idempotent: rows that already have
+    keys are skipped, and a row whose host cannot be scanned is left null (logged)
+    for a later re-run.
+    """
+    resolved_database_url = resolve_pool_database_url(database_url)
+    conn = psycopg2.connect(resolved_database_url)
+    # Keyscans are slow network ops; autocommit each UPDATE rather than hold one
+    # long transaction open across them.
+    conn.autocommit = True
+    pool_updated = 0
+    box_updated = 0
+    skipped: list[str] = []
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_SELECT_POOL_HOSTS_MISSING_KEYS_SQL)
+            pool_rows = cur.fetchall()
+        for row_id, vps_address, ssh_port, container_ssh_port, outer_key, container_key in pool_rows:
+            new_outer = outer_key or _keyscan_host_public_key(vps_address, ssh_port)
+            new_container = container_key or _keyscan_host_public_key(vps_address, container_ssh_port)
+            if new_outer and new_container:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE pool_hosts SET outer_host_public_key = %s, container_host_public_key = %s WHERE id = %s",
+                        (new_outer, new_container, str(row_id)),
+                    )
+                pool_updated += 1
+            else:
+                skipped.append(f"pool host {row_id} ({vps_address})")
+                logger.warning("Could not keyscan host keys for pool host {} ({}); left null", row_id, vps_address)
+
+        with conn.cursor() as cur:
+            cur.execute(_SELECT_BOXES_MISSING_KEY_SQL)
+            box_rows = cur.fetchall()
+        for server_id, public_address in box_rows:
+            box_key = _keyscan_host_public_key(public_address, 22)
+            if box_key:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE bare_metal_servers SET box_host_public_key = %s, updated_at = NOW() WHERE id = %s",
+                        (box_key, str(server_id)),
+                    )
+                box_updated += 1
+            else:
+                skipped.append(f"box {server_id} ({public_address})")
+                logger.warning("Could not keyscan box key for server {} ({}); left null", server_id, public_address)
+    finally:
+        conn.close()
+    emit_json({"pool_hosts_backfilled": pool_updated, "boxes_backfilled": box_updated, "skipped": skipped})
