@@ -479,6 +479,69 @@ minds-start agent_name="mindtest" branch="" fct="":
     . apps/minds/scripts/select_node_version.sh || exit 2
     cd apps/minds && pnpm start
 
+# Launch the minds desktop client (electron) in dev mode against the
+# activated env for testing the IMBUE_CLOUD provider against pre-baked pool
+# slices. Unlike `just minds-start` (which targets LOCAL Lima/Docker dev),
+# this deliberately does NOT set MINDS_USE_LOCAL_WORKSPACE_DEFAULTS /
+# MINDS_WORKSPACE_*, so the create form keeps its shipped fallbacks: the
+# canonical forever-claude-template remote + FALLBACK_BRANCH (the
+# minds-v<version> release tag baked into production slices). Those shipped
+# defaults are exactly the identity stamped into a slice by
+# `just bake-slice-prod <region> minds-v<version>`, so an IMBUE_CLOUD create
+# gets a fast-path lease of that slice instead of falling back to the slow
+# rebuild path. (The local-worktree defaults that minds-start exports point
+# at a filesystem path + dev branch that no pool host can clone or match --
+# see _operator_workspace_default in desktop_client/templates.py.)
+#
+# It also skips the live-mngr -> vendor/mngr/ rsync that minds-start does on
+# every launch: a leased pool slice already carries the mngr snapshot baked
+# at its tag, so the local working tree is irrelevant to it.
+#
+# Requires an activated minds env in this shell (refuses without one, same as
+# minds-start). In the form's advanced settings, pick the SAME region the
+# slice was baked in -- region is a hard match and is never relaxed. Stop it
+# with `just minds-stop` (shared PID file, keyed by worktree path).
+minds-start-cloud:
+    #!/bin/bash
+    set -ueo pipefail
+    if [ -z "${MINDS_ROOT_NAME:-}" ]; then
+        echo "error: no minds env activated in this shell." >&2
+        echo "       Run \`eval \"\$(uv run minds env activate <name>)\"\` first," >&2
+        echo "       then re-run \`just minds-start-cloud\` from the same shell." >&2
+        exit 2
+    fi
+    pid_file="/tmp/minds-start-$(echo -n "$PWD" | sha1sum | cut -c1-12).pid"
+    if [ -f "$pid_file" ]; then
+        existing=$(cat "$pid_file" 2>/dev/null || echo "")
+        if [ -n "$existing" ] && kill -0 "$existing" 2>/dev/null; then
+            echo "error: a minds desktop client is already running in this worktree (pid=$existing)" >&2
+            echo "       run \`just minds-stop\` first." >&2
+            exit 2
+        fi
+        rm -f "$pid_file"
+    fi
+    if [ -f .env ]; then
+        set -a
+        . .env
+        set +a
+    fi
+    # Scrub ambient ANTHROPIC_* so the client doesn't forward a dev shell's
+    # keys into created agents, silently overriding the create form's auth
+    # mode. See minds-start for the full rationale.
+    unset ANTHROPIC_API_KEY ANTHROPIC_BASE_URL
+    echo "$$" > "$pid_file"
+    trap 'rm -f "$pid_file"' EXIT
+    if [ ! -x "apps/minds/node_modules/.bin/electron" ]; then
+        echo "" >&2
+        echo "error: minds desktop client isn't installed/built yet in this worktree." >&2
+        echo "       Run \`just minds-install\` first, then re-run \`just minds-start-cloud\`." >&2
+        exit 2
+    fi
+    # Put apps/minds's pinned Node (.nvmrc) first on PATH so pnpm's
+    # engine-strict check passes regardless of the shell's default node.
+    . apps/minds/scripts/select_node_version.sh || exit 2
+    cd apps/minds && pnpm start
+
 # Stop the minds desktop client started in this worktree by `just minds-start`.
 #
 # Strategy: walk the recipe shell's process tree, find Electron's main
