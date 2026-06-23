@@ -358,7 +358,7 @@ def run(
     # BLOCKED screen. The consumer-death callback is wired before
     # ``consumer.start()`` so an early exit is caught.
     discovery_health_watchdog = DiscoveryHealthWatchdog(
-        remediator=SupervisorProducerRemediator(latchkey_forward_supervisor),
+        remediator=SupervisorProducerRemediator(supervisor=latchkey_forward_supervisor),
     )
     consumer.add_on_unexpected_exit_callback(lambda _exit_code: discovery_health_watchdog.record_consumer_death())
 
