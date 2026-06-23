@@ -32,6 +32,7 @@ def _ready_server() -> BareMetalServer:
         slot_count=8,
         raid_level="RAID1",
         lima_service_user="limahost",
+        box_host_public_key="ssh-ed25519 AAAAbox",
         status=BareMetalServerStatus(SERVER_STATUS_READY),
         created_at=now,
         updated_at=now,
@@ -80,6 +81,8 @@ def test_slice_pool_host_insert_placeholder_count_matches_builder() -> None:
         bare_metal_server_id="srv-1",
         lima_instance_name="mngr-slice-abc",
         lima_disk_name="mngr-slice-abc-data",
+        outer_host_public_key="ssh-ed25519 AAAAouter",
+        container_host_public_key="ssh-ed25519 AAAAcontainer",
     )
     assert _INSERT_SLICE_POOL_HOST_SQL.count("%s") == len(values)
 
@@ -98,6 +101,8 @@ def test_slice_pool_host_insert_uses_lima_instance_as_vps_instance_id() -> None:
         bare_metal_server_id="srv-1",
         lima_instance_name="mngr-slice-abc",
         lima_disk_name="mngr-slice-abc-data",
+        outer_host_public_key="ssh-ed25519 AAAAouter",
+        container_host_public_key="ssh-ed25519 AAAAcontainer",
     )
     # vps_address is the box; vps_instance_id is the (non-null) lima instance;
     # the two forwarded ports are carried verbatim.
@@ -109,13 +114,20 @@ def test_slice_pool_host_insert_uses_lima_instance_as_vps_instance_id() -> None:
 
 def test_server_from_row_round_trips() -> None:
     server = _ready_server()
-    row = build_bare_metal_server_insert_values(server) + (server.created_at, server.updated_at)
+    # _server_from_row reads the SELECT column order: the insert values, then
+    # created_at / updated_at, then box_host_public_key.
+    row = build_bare_metal_server_insert_values(server) + (
+        server.created_at,
+        server.updated_at,
+        server.box_host_public_key,
+    )
     reconstructed = _server_from_row(row)
     assert reconstructed.id == server.id
     assert reconstructed.ovh_service_name == server.ovh_service_name
     assert reconstructed.slot_count == 8
     assert str(reconstructed.status) == "ready"
     assert reconstructed.ram_gb == 64
+    assert reconstructed.box_host_public_key == "ssh-ed25519 AAAAbox"
 
 
 class _FakeCursor:
@@ -150,9 +162,16 @@ class _FakeConn:
 
 def test_fetch_unleased_slice_teardown_targets_maps_rows_to_targets() -> None:
     rows = [
-        ("row-1", "mngr-slice-dev-josh-aaa", "mngr-slice-dev-josh-aaa-data", "15.0.0.1", "limahost"),
+        (
+            "row-1",
+            "mngr-slice-dev-josh-aaa",
+            "mngr-slice-dev-josh-aaa-data",
+            "15.0.0.1",
+            "limahost",
+            "ssh-ed25519 AAAAbox1",
+        ),
         # A row whose lima_service_user is NULL falls back to root.
-        ("row-2", "mngr-slice-dev-josh-bbb", None, "15.0.0.2", None),
+        ("row-2", "mngr-slice-dev-josh-bbb", None, "15.0.0.2", None, None),
     ]
     targets = fetch_unleased_slice_teardown_targets(_FakeConn(rows))
     assert [t.pool_host_row_id for t in targets] == ["row-1", "row-2"]
@@ -160,6 +179,7 @@ def test_fetch_unleased_slice_teardown_targets_maps_rows_to_targets() -> None:
     assert targets[1].lima_disk_name is None
     assert targets[0].box_public_address == "15.0.0.1"
     assert targets[1].lima_service_user == "root"
+    assert targets[0].box_host_public_key == "ssh-ed25519 AAAAbox1"
 
 
 def test_fetch_unleased_slice_teardown_targets_query_excludes_leased_and_removing() -> None:

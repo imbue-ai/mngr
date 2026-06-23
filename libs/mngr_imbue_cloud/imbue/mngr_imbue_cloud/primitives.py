@@ -133,6 +133,25 @@ class FastMode(UpperCaseStrEnum):
 DEFAULT_FAST_MODE: Final[FastMode] = FastMode.PREVENT
 
 
+# Docker ``--start-arg`` flags that the pre-baked pool-host container is already
+# created with -- these are the ``docker run`` flags the ``pool_host`` create
+# template applies at bake time (see forever-claude-template's
+# ``.mngr/settings.toml``). On the fast (adopt) path the container is reused
+# as-is, so a create that requests any of these is asking for state the running
+# container already has: harmless and consistent rather than a conflict. This is
+# what lets the fast and slow paths accept the same start args -- the slow path
+# applies them on rebuild, the fast path finds them already in effect. Any start
+# arg outside this set cannot be honored by an adopted container, so the fast
+# path still rejects it (use ``fast_mode=prevent`` to rebuild with it instead).
+FAST_PATH_ADOPTABLE_START_ARGS: Final[frozenset[str]] = frozenset(
+    {
+        "--security-opt=no-new-privileges",
+        "--workdir=/",
+        "--restart=unless-stopped",
+    }
+)
+
+
 class InvalidR2BucketAccess(ValueError):
     """Raised when an R2 key access scope is not 'read' or 'readwrite'."""
 

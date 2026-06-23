@@ -81,7 +81,6 @@ from imbue.minds.desktop_client.onboarding import OnboardingAnswers
 from imbue.minds.desktop_client.onboarding import OnboardingApplier
 from imbue.minds.desktop_client.provider_display import friendly_provider_label
 from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
-from imbue.minds.desktop_client.recovery_probe import ProviderProbeError
 from imbue.minds.desktop_client.recovery_probe import build_host_health_response
 from imbue.minds.desktop_client.recovery_probe import build_probe_argv
 from imbue.minds.desktop_client.region_preference import AWS_PROVIDER_KEY
@@ -143,7 +142,6 @@ from imbue.minds.desktop_client.webdav import create_webdav_app
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
 from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
-from imbue.minds.desktop_client.workspace_color import pick_workspace_foreground
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.envs.docker_cleanup import stop_active_env_state_container
 from imbue.minds.errors import BackupProvisioningError
@@ -210,36 +208,50 @@ def _system_interface_status_payload(
     return payload
 
 
-def _should_emit_system_interface_status(backend_resolver: BackendResolverInterface, status: AgentHealth) -> bool:
+def _should_emit_system_interface_status(
+    backend_resolver: BackendResolverInterface,
+    tracker: SystemInterfaceHealthTracker | None,
+    agent_id: AgentId,
+    status: AgentHealth,
+) -> bool:
     """Whether to push a ``system_interface_status`` event for an agent in ``status``.
 
     A STUCK status is what drives the chrome to redirect the content view to the
-    recovery page. Gate that redirect on fresh discovery: while the discovery
-    pipeline is stale -- cold start before the first snapshot, or a stalled
-    producer/consumer -- the host/provider state the recovery page would classify
-    from cannot be trusted, so keep the user on the auto-refreshing "Loading
-    workspace" loader until a fresh snapshot lands. The next emission (a fresh
-    transition, or the periodic re-assert once a snapshot has arrived) then pushes
-    STUCK and the redirect fires.
+    recovery page. Gate that redirect on a discovery snapshot taken *after* the
+    outage began: a snapshot that predates the outage still carries the pre-outage
+    host state (a just-stopped container still reads RUNNING), which would
+    misclassify the recovery tier and ask the user to confirm a restart instead of
+    auto-dispatching one. So suppress STUCK -- keeping the user on the
+    auto-refreshing "Loading workspace" loader -- until a full snapshot whose
+    producer timestamp is at or after the agent's outage onset
+    (``get_failure_run_started_wall_at``) has landed; by then discovery has
+    re-observed the host and the classification is trustworthy. The next emission
+    (the per-wake flip check or the periodic re-assert in the chrome-events loop)
+    then pushes STUCK and the redirect fires.
 
-    Non-STUCK statuses (RESTARTING, RESTART_FAILED, HEALTHY) are emitted
-    unconditionally -- they do not trigger the redirect, and the user is already
-    on the recovery page when they apply. Only the passive-discovery resolver
-    tracks snapshot freshness; for any other resolver the redirect is not gated.
+    When no onset is recorded (only the force-``mark_stuck`` path, used in tests,
+    lacks one) fall back to the absolute-age freshness gate so that path is not
+    stranded. Non-STUCK statuses (RESTARTING, RESTART_FAILED, HEALTHY) are emitted
+    unconditionally -- they do not trigger the redirect, and the user is already on
+    the recovery page when they apply. Only the passive-discovery resolver tracks
+    snapshot freshness; for any other resolver the redirect is not gated.
     """
     if status != AgentHealth.STUCK:
         return True
     if not isinstance(backend_resolver, MngrCliBackendResolver):
         return True
-    # FIXME: when discovery is *persistently* stale -- the producer/consumer
-    # pipeline has stalled, not merely a provider being down -- this gate never
-    # lets the STUCK redirect through, so the user is stranded on the "Loading
-    # workspace" loader indefinitely with no recourse. A discovery-health
-    # watchdog should detect a stalled pipeline (snapshot age), auto-restart it,
-    # and surface a distinct app-level state; once that exists this gate gains an
-    # escape and this FIXME should be removed.
     _, last_full_snapshot_at = backend_resolver.get_freshness_timestamps()
-    return _is_discovery_fresh(last_full_snapshot_at)
+    onset = tracker.get_failure_run_started_wall_at(agent_id) if tracker is not None else None
+    # FIXME: when discovery is *persistently* stale -- the producer/consumer
+    # pipeline has stalled, not merely a provider being down -- no post-onset
+    # snapshot ever arrives, so this gate never lets the STUCK redirect through and
+    # the user is stranded on the "Loading workspace" loader with no recourse. A
+    # discovery-health watchdog should detect a stalled pipeline (snapshot age),
+    # auto-restart it, and surface a distinct app-level state; once that exists
+    # this gate gains an escape and this FIXME should be removed.
+    if onset is None:
+        return _is_discovery_fresh(last_full_snapshot_at)
+    return last_full_snapshot_at is not None and last_full_snapshot_at >= onset
 
 
 # -- Request-body + dependency helpers --
@@ -2196,10 +2208,18 @@ def _handle_chrome_events() -> Response:
                 json.dumps({"type": "requests", **last_requests_payload, "auto_open": auto_open})
             )
 
+            # Agents for which a STUCK redirect has already been emitted on this
+            # connection, so the per-wake flip check below emits each stuck episode
+            # exactly once (the 15s re-assert still re-delivers for a chrome that
+            # lost the one-shot). An agent is dropped from the set when it leaves
+            # STUCK so a later re-STUCK re-promotes.
+            redirected_agent_ids: set[str] = set()
             if tracker is not None:
                 for aid, status in tracker.snapshot_all().items():
-                    if not _should_emit_system_interface_status(backend_resolver, status):
+                    if not _should_emit_system_interface_status(backend_resolver, tracker, aid, status):
                         continue
+                    if status == AgentHealth.STUCK:
+                        redirected_agent_ids.add(str(aid))
                     yield "data: {}\n\n".format(
                         json.dumps(_system_interface_status_payload(tracker, str(aid), status))
                     )
@@ -2254,9 +2274,32 @@ def _handle_chrome_events() -> Response:
 
                 while not health_queue.empty():
                     aid_str, status = health_queue.get_nowait()
-                    if not _should_emit_system_interface_status(backend_resolver, status):
+                    # Leaving STUCK clears the redirect latch so a later re-STUCK
+                    # is promoted again by the flip check below.
+                    if status != AgentHealth.STUCK:
+                        redirected_agent_ids.discard(aid_str)
+                    if not _should_emit_system_interface_status(backend_resolver, tracker, AgentId(aid_str), status):
                         continue
+                    if status == AgentHealth.STUCK:
+                        redirected_agent_ids.add(aid_str)
                     yield "data: {}\n\n".format(json.dumps(_system_interface_status_payload(tracker, aid_str, status)))
+
+                # Promote any STUCK agent whose suppression has just lifted: the
+                # STUCK edge fired earlier (and was suppressed because no post-onset
+                # snapshot had landed yet), and this wake is the snapshot arriving.
+                # Emit immediately rather than waiting for the 15s re-assert below,
+                # bounding redirect latency to one discovery poll. The latch keeps
+                # this to one emit per stuck episode.
+                if tracker is not None:
+                    for aid, status in tracker.snapshot_all().items():
+                        if status != AgentHealth.STUCK or str(aid) in redirected_agent_ids:
+                            continue
+                        if not _should_emit_system_interface_status(backend_resolver, tracker, aid, status):
+                            continue
+                        redirected_agent_ids.add(str(aid))
+                        yield "data: {}\n\n".format(
+                            json.dumps(_system_interface_status_payload(tracker, str(aid), status))
+                        )
 
                 # Periodic backstop: re-assert the current non-HEALTHY statuses
                 # even when no transition fired this tick. The tracker only
@@ -2266,10 +2309,9 @@ def _handle_chrome_events() -> Response:
                 # reloaded chrome webview) would otherwise never re-learn it and
                 # never redirect to the recovery page. Re-asserting is idempotent
                 # client-side (the recovery-redirect lock prevents re-navigation).
-                # This is also what promotes a STUCK agent to a redirect once
-                # discovery becomes fresh: while stale, the STUCK emission is
-                # suppressed (see ``_should_emit_system_interface_status``); the
-                # next re-assert after a snapshot arrives passes the gate.
+                # Prompt promotion of a suppressed STUCK once a post-onset snapshot
+                # lands is handled by the flip check above; this is the slower
+                # lost-event backstop.
                 now = time.monotonic()
                 if (
                     tracker is not None
@@ -2277,8 +2319,10 @@ def _handle_chrome_events() -> Response:
                 ):
                     last_status_reassert = now
                     for aid, status in tracker.snapshot_all().items():
-                        if not _should_emit_system_interface_status(backend_resolver, status):
+                        if not _should_emit_system_interface_status(backend_resolver, tracker, aid, status):
                             continue
+                        if status == AgentHealth.STUCK:
+                            redirected_agent_ids.add(str(aid))
                         yield "data: {}\n\n".format(
                             json.dumps(_system_interface_status_payload(tracker, str(aid), status))
                         )
@@ -2441,14 +2485,13 @@ def _build_workspace_list(
 ) -> list[dict[str, str]]:
     """Build a JSON-serializable list of workspaces from the backend resolver.
 
-    Each entry carries an ``accent`` (#rrggbb CSS color) and ``accent_fg``
-    (RGB triple for the contrasting titlebar foreground) for the chrome
-    and sidebar to render. The accent is the workspace's stored
-    ``color`` label (set at create time by the create-form picker, or via
-    the settings POST endpoint); workspaces that lack the label (i.e. they
-    were created before the picker shipped and the user hasn't repicked
-    yet) get the default workspace color. ``accent_fg`` is the
-    WCAG-contrasting foreground for the resolved hex.
+    Each entry carries an ``accent`` (#rrggbb CSS color) for the chrome and
+    sidebar to render. The accent is the workspace's stored ``color`` label
+    (set at create time by the create-form picker, or via the settings POST
+    endpoint); workspaces that lack the label (i.e. they were created before
+    the picker shipped and the user hasn't repicked yet) get the default
+    workspace color. The contrasting titlebar foreground is no longer sent --
+    the chrome derives it from the accent in pure CSS (``.titlebar-surface``).
 
     Entries whose provider's latest discovery poll errored carry
     ``is_stale="true"`` so the UI can flag them as
@@ -2475,7 +2518,6 @@ def _build_workspace_list(
             "id": str(aid),
             "name": ws_name,
             "accent": accent,
-            "accent_fg": pick_workspace_foreground(accent),
         }
         # Mark the workspace stale when its provider's most recent discovery
         # poll errored: it was retained from prior state, so its liveness is
@@ -3243,24 +3285,24 @@ def _handle_host_health_probe_api(
     )
 
 
-def _provider_error_for_workspace(
+def _provider_error_message_for_workspace(
     provider_errors: Mapping[ProviderInstanceName, DiscoveryError], provider_name: str | None
-) -> ProviderProbeError | None:
-    """Map this workspace's provider error (if any) from the discovery snapshot.
+) -> str | None:
+    """Map this workspace's provider error message (if any) from the discovery snapshot.
 
     ``get_provider_errors()`` keys per-provider discovery errors by provider
     name, so attribution to *this* workspace's provider is exact -- a docker
     mind's recovery is never blamed on a simultaneous imbue_cloud outage. Returns
     None in the brief pre-discovery window where the provider is unknown
-    (``provider_name is None``) rather than guess. The ``ProviderUnavailableError``
-    type name is preserved so classification can tell a connector outage (retry)
-    apart from an auth/config failure (show reason).
+    (``provider_name is None``) rather than guess, and None when this workspace's
+    provider has no surfaced error. Otherwise returns the provider's own error
+    message, which the recovery page surfaces verbatim.
     """
     if provider_name is None:
         return None
     for name, error in provider_errors.items():
         if str(name) == provider_name:
-            return ProviderProbeError(exception_type=error.type_name, message=error.message)
+            return error.message
     return None
 
 
@@ -3312,7 +3354,9 @@ def _run_host_health_probe(
         backend_resolver.get_host_state(HostId(display_info.host_id)) if display_info is not None else None
     )
     host_state = host_state_enum.value if host_state_enum is not None else ""
-    provider_error = _provider_error_for_workspace(backend_resolver.get_provider_errors(), provider_name)
+    provider_error_message = _provider_error_message_for_workspace(
+        backend_resolver.get_provider_errors(), provider_name
+    )
 
     # In-container exec probe, only when the provider is reachable and the host is
     # RUNNING. The exec SSHes to the container via ``get_host`` (the connector's
@@ -3323,7 +3367,7 @@ def _run_host_health_probe(
     # non-clean outcome leaves ``in_container_stdout`` None (parses to "no" on the
     # can-we-run-commands probe) and is recorded only at debug.
     in_container_stdout: str | None = None
-    if services_agent_id is not None and provider_error is None and host_state_enum == HostState.RUNNING:
+    if services_agent_id is not None and provider_error_message is None and host_state_enum == HostState.RUNNING:
         try:
             in_container_stdout = _run_mngr(
                 concurrency_group,
@@ -3348,7 +3392,7 @@ def _run_host_health_probe(
         plugin_resolver_services=plugin_resolver_services,
         mngr_exec_command=exec_command,
         mngr_binary=mngr_binary,
-        provider_error=provider_error,
+        provider_error_message=provider_error_message,
         provider_label=provider_label,
     )
 
@@ -4189,14 +4233,14 @@ def create_desktop_client(
     additionally requires ``notification_dispatcher`` to be provided;
     without it that endpoint returns 501.
     """
-    # Static assets: Tailwind Play CDN JS + hand-written tokens.css + per-page
-    # JS, served by Flask's built-in static handler at the same ``/_static``
-    # URL. The Tailwind JS is fetched once by `just minds-tailwind` (plain curl,
-    # no build step) and is gitignored; if it's missing the route still works
-    # and the server logs a hint at startup.
+    # Static assets: the compiled Tailwind v4 stylesheet (app.min.css) + per-page
+    # JS, served by Flask's built-in static handler at the ``/_static`` URL.
+    # app.min.css is built from static/app.css by `just minds-css`
+    # (pnpm run build:css) and is gitignored; if it's missing the route still
+    # works and the server logs a hint at startup.
     _static_dir = Path(__file__).resolve().parent / "static"
-    if not (_static_dir / "tailwind.js").exists():
-        logger.warning("Missing static/tailwind.js. Run `just minds-tailwind` from the repo root to fetch it.")
+    if not (_static_dir / "app.min.css").exists():
+        logger.warning("Missing static/app.min.css. Run `just minds-css` from the repo root to build it.")
     app = Flask(__name__, static_folder=str(_static_dir), static_url_path="/_static")
 
     @app.errorhandler(Exception)

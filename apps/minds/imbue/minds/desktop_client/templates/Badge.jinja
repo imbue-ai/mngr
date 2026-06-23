@@ -1,0 +1,32 @@
+{#def count="" #}
+{#
+  Notification badge. One component, two shapes, chosen by whether ``count``
+  is set (Figma node 330-4472):
+
+    - count (``count`` set) -- a solid ``important`` pill with the number in the
+      white bold ``type-badge`` role (10 / 12). ``min-w-[16px]`` keeps a single
+      digit circular and it grows horizontally for wider numbers ("12"); counts
+      above 99 collapse to "99+". This is what the titlebar requests button
+      shows: the pending-request count, sat inline beside the messages icon
+      (Figma node 330-4463).
+    - dot (default; ``count`` empty) -- an 8px solid ``important`` circle,
+      vertically centered. The bare "there's something new" indicator, for
+      callers that want presence without a number.
+
+  The badge carries no position of its own (a reusable component owns no outer
+  offset): the caller places it. The titlebar lays the icon + badge out in a
+  ``gap-[3px]`` row (the gap collapses when the badge is hidden); chrome.js sets
+  the count text (with the same 99+ cap) and toggles the native ``hidden``
+  attribute as the pending count changes. Hide it with that attribute, NOT a
+  ``hidden`` class: the count pill bakes in ``inline-flex``, which beats the
+  ``.hidden`` utility in the cascade, so a ``hidden`` class would leave the pill
+  showing; the ``[hidden]`` base rule (``display: none !important``) wins. Any
+  undeclared HTML attribute (id=, class=, hidden, data-*) flows through JinjaX
+  ``attrs``; ``class="..."`` is appended to the component's canonical class set.
+#}
+{%- if count == "" -%}
+<span {{ attrs.render(classes="inline-block align-middle w-2 h-2 rounded-full bg-important") }}></span>
+{%- else -%}
+{%- set _n = count | int -%}
+<span {{ attrs.render(classes="inline-flex items-center justify-center align-middle min-w-[16px] px-1 py-px rounded-full bg-important text-white type-badge whitespace-nowrap overflow-hidden") }}>{{ "99+" if _n > 99 else _n }}</span>
+{%- endif -%}

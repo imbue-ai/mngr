@@ -76,6 +76,28 @@ OnAgentDestroyedCallback = Callable[[AgentId], None]
 OnSystemInterfaceBackendFailureCallback = Callable[[AgentId, SystemInterfaceBackendFailureReason, int | None], None]
 
 
+def _full_snapshot_observed_at(event: FullDiscoverySnapshotEvent) -> datetime:
+    """Producer-side poll time of a full snapshot, for freshness comparisons.
+
+    The envelope ``timestamp`` is stamped when the discovery producer finished the
+    poll, so the host states the snapshot carries were observed at that instant.
+    Minds gates the recovery redirect on whether a snapshot postdates an outage's
+    onset, so it must compare against *when discovery observed the world*, not when
+    minds happened to receive the line -- using the producer time removes the
+    receive-tail-latency slop between the two. The producer and this consumer run
+    on the same machine, so the timestamps share a clock. Falls back to the receive
+    time if the envelope timestamp is unparseable (which only loosens the gate back
+    to the prior receive-time behavior).
+    """
+    try:
+        return datetime.fromisoformat(event.timestamp)
+    except ValueError:
+        logger.warning(
+            "Full discovery snapshot carried an unparseable timestamp {!r}; using receive time", event.timestamp
+        )
+        return datetime.now(timezone.utc)
+
+
 class ForwardSubprocessConfig(FrozenModel):
     """Args for the ``mngr forward`` subprocess that ``minds run`` spawns.
 
@@ -431,7 +453,7 @@ class EnvelopeStreamConsumer(MutableModel):
         self.resolver.update_providers(
             providers=event.providers,
             error_by_provider_name=event.error_by_provider_name,
-            last_full_snapshot_at=datetime.now(timezone.utc),
+            last_full_snapshot_at=_full_snapshot_observed_at(event),
         )
         if partition.retained:
             logger.debug(

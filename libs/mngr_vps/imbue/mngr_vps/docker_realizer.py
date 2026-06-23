@@ -23,7 +23,6 @@ from imbue.mngr.providers.listing_utils import extract_agent_data_from_parsed_li
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
-from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
 from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
 from imbue.mngr_vps.container_setup import CONTAINER_ENTRYPOINT_CMD
 from imbue.mngr_vps.container_setup import HOST_DIR_SUBPATH
@@ -63,6 +62,7 @@ from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.host_store import VpsHostStore
 from imbue.mngr_vps.host_store import open_host_store
 from imbue.mngr_vps.interfaces import SnapshotCapableRealizer
+from imbue.mngr_vps.primitives import load_or_create_per_host_host_keypair
 
 # Key-file names under ``key_dir`` for the container's client/host keys and its
 # known_hosts. The provider exposes thin accessors with the same names so the
@@ -185,8 +185,12 @@ class DockerRealizer(SnapshotCapableRealizer):
     def _container_ssh_keypair(self) -> tuple[Path, str]:
         return load_or_create_ssh_keypair(self.key_dir, CONTAINER_SSH_KEY_NAME)
 
-    def _container_host_keypair(self) -> tuple[Path, str]:
-        return load_or_create_host_keypair(self.key_dir, CONTAINER_HOST_KEY_NAME)
+    def _container_host_keypair(self, host_id: HostId) -> tuple[Path, str]:
+        # Per host: each container gets its own sshd host key so one host's key can
+        # never be reused to impersonate another. Matches the provider's
+        # ``_get_container_host_keypair(host_id)`` path (same key_dir), so the key
+        # this realizer injects is the one the provider later reads + pins.
+        return load_or_create_per_host_host_keypair(self.key_dir, host_id, CONTAINER_HOST_KEY_NAME)
 
     def _container_known_hosts_path(self) -> Path:
         return self.key_dir / CONTAINER_KNOWN_HOSTS_NAME
@@ -241,6 +245,7 @@ class DockerRealizer(SnapshotCapableRealizer):
     def _setup_container_ssh(
         self,
         outer: OuterHostInterface,
+        host_id: HostId,
         container_name: str,
         host_volume_mount_path: str | None,
         known_hosts_entries: tuple[str, ...],
@@ -248,7 +253,7 @@ class DockerRealizer(SnapshotCapableRealizer):
     ) -> None:
         """Set up SSH inside the container via docker exec."""
         _container_key_path, container_public_key = self._container_ssh_keypair()
-        container_host_key_path, container_host_public_key = self._container_host_keypair()
+        container_host_key_path, container_host_public_key = self._container_host_keypair(host_id)
         setup_container_ssh(
             outer,
             container_name,
@@ -350,13 +355,14 @@ class DockerRealizer(SnapshotCapableRealizer):
         with log_span("Setting up SSH in container"):
             self._setup_container_ssh(
                 outer=outer,
+                host_id=ctx.host_id,
                 container_name=container_name,
                 host_volume_mount_path=f"{HOST_VOLUME_MOUNT_PATH}/{HOST_DIR_SUBPATH}",
                 known_hosts_entries=tuple(ctx.known_hosts or ()),
                 authorized_keys_entries=tuple(ctx.authorized_keys or ()),
             )
 
-        _container_host_key_path, container_host_public_key = self._container_host_keypair()
+        _container_host_key_path, container_host_public_key = self._container_host_keypair(ctx.host_id)
         add_host_to_known_hosts(
             known_hosts_path=self._container_known_hosts_path(),
             hostname=ctx.vps_ip,
