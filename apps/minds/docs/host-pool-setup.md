@@ -176,10 +176,11 @@ When a user creates an imbue_cloud workspace, minds makes up to two `mngr create
 So a pool whose rows are baked at an older `repo_branch_or_tag` no longer hard-fails newer workspace creations -- they fall back to the slow path. Keeping the pool baked at the current version is still worthwhile because it keeps creations on the fast path. Only when the pool is genuinely empty (no `available` rows) does creation fail, with `ImbueCloudLeaseUnavailableError`.
 
 To rsync the local mngr working tree into the FCT worktree's `vendor/mngr/`
-for the duration of the bake (dev-loop pattern), forward `--mngr-source
-<monorepo-root>` as an extra flag through the recipe. The bake resets
-`vendor/mngr/` to HEAD when it finishes, so the worktree stays clean wrt mngr
-churn.
+for the duration of the bake (dev-loop pattern; see
+`apps/minds/docs/vendor-mngr-sync.md` for the sync mechanisms), forward
+`--mngr-source <monorepo-root>` as an extra flag through the recipe. The bake
+resets `vendor/mngr/` to HEAD when it finishes, so the worktree stays clean wrt
+mngr churn.
 
 List the rows (with the tier activated):
 
