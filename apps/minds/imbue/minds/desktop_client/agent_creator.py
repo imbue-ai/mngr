@@ -787,7 +787,7 @@ def resolve_template_version(
         )
 
     if result.returncode != 0:
-        logger.warning("git ls-remote --tags failed for {}, falling back to 'main'", git_url)
+        logger.info("git ls-remote --tags failed for {}, falling back to 'main'", git_url)
         return "main"
 
     tags: list[tuple[int, int, int, str]] = []
@@ -1638,8 +1638,8 @@ class AgentCreator(MutableModel):
                 # agent on the host shares the same gateway wiring and
                 # the same permissions file.
                 #
-                # We downgrade ``LatchkeyStoreError`` here to a warning
-                # rather than failing agent creation: the gateway still
+                # We log ``LatchkeyStoreError`` here as an error and absorb
+                # it rather than failing agent creation: the gateway still
                 # has the deny-all baseline at the opaque path (the JWT
                 # already points there), so the agent comes up working.
                 # If the link is never established, the first permission
@@ -1656,7 +1656,7 @@ class AgentCreator(MutableModel):
                             canonical_host_id,
                         )
                     except LatchkeyStoreError as link_error:
-                        logger.warning(
+                        logger.opt(exception=link_error).error(
                             "Failed to link latchkey permissions handle for host {}: {}",
                             canonical_host_id,
                             link_error,
@@ -1768,21 +1768,23 @@ class AgentCreator(MutableModel):
         self,
         log_queue: queue.Queue[str],
     ) -> AgentLatchkeySetup:
-        """Run :func:`prepare_agent_latchkey` and downgrade its errors to warnings.
+        """Run :func:`prepare_agent_latchkey`, logging and absorbing its errors.
 
         The plugin raises on infrastructure failures so the caller can
         decide. Minds's policy is to fall back to an empty setup -- the
         agent still comes up without latchkey wiring, and the user can
-        fix the latchkey installation and re-create the agent.
+        fix the latchkey installation and re-create the agent. The
+        underlying failure is logged as an error (and surfaced to
+        Sentry) since a broken latchkey install is not expected.
         """
         try:
             return prepare_agent_latchkey(self.latchkey, is_tunneled=True)
         except LatchkeyError as e:
-            logger.warning("Failed to prepare latchkey wiring: {}", e)
+            logger.opt(exception=e).error("Failed to prepare latchkey wiring: {}", e)
             log_queue.put("[minds] Warning: latchkey wiring skipped: {}".format(e))
             return AgentLatchkeySetup(env={}, opaque_permissions_path=None)
         except LatchkeyStoreError as e:
-            logger.warning("Failed to materialize latchkey permissions handle: {}", e)
+            logger.opt(exception=e).error("Failed to materialize latchkey permissions handle: {}", e)
             log_queue.put("[minds] Warning: latchkey wiring skipped: {}".format(e))
             return AgentLatchkeySetup(env={}, opaque_permissions_path=None)
 
@@ -1823,7 +1825,7 @@ class AgentCreator(MutableModel):
                         parent_cg=self.root_concurrency_group,
                     )
         except (BackupProvisioningError, ImbueCloudCliError) as exc:
-            logger.opt(exception=exc).warning(
+            logger.opt(exception=exc).error(
                 "Failed to configure backups for agent {} after {:.0f}s of retries",
                 agent_id,
                 self.backup_setup_retry_budget_seconds,
@@ -1905,7 +1907,7 @@ class AgentCreator(MutableModel):
                         self.system_interface_health_tracker.record_probe_success(agent_id)
                         return
                 threading.Event().wait(timeout=self.workspace_ready_poll_interval_seconds)
-        logger.warning(
+        logger.error(
             "Workspace readiness probe for {} timed out after {:.0f}s (last status={}); publishing redirect anyway",
             agent_id,
             self.workspace_ready_timeout_seconds,

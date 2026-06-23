@@ -188,7 +188,7 @@ def _run_tkinter_toast(
 ) -> None:
     """Create and display a tkinter toast window. Runs on a background thread."""
     if tk is None:
-        logger.warning("tkinter not available, cannot show notification toast")
+        logger.info("tkinter not available, cannot show notification toast")
         return
     try:
         root = tk.Tk()
@@ -205,7 +205,7 @@ def _run_tkinter_toast(
 
         root.mainloop()
     except (tk.TclError, OSError, RuntimeError) as e:
-        logger.warning("Failed to show tkinter notification: {}", e)
+        logger.info("Failed to show tkinter notification: {}", e)
 
 
 def _show_tkinter_toast(
@@ -234,7 +234,7 @@ def _run_macos_notification_subprocess(script: str) -> None:
                 is_checked_after=False,
             )
     except (OSError, ExceptionGroup) as e:
-        logger.warning("Failed to show macOS notification: {}", e)
+        logger.info("Failed to show macOS notification: {}", e)
 
 
 def _build_osascript_notification(

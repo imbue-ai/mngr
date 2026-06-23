@@ -123,5 +123,5 @@ def export_latest_snapshot_zip(
         try:
             shutil.rmtree(restore_dir, ignore_errors=True)
         except OSError as e:
-            logger.warning("Could not remove temp restore dir {}: {}", restore_dir, e)
+            logger.info("Could not remove temp restore dir {}: {}", restore_dir, e)
     return zip_path

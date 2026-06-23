@@ -436,7 +436,7 @@ def test_get_workspace_color_logs_each_malformed_agent_only_once() -> None:
     to the standard logging module that caplog hooks."""
     resolver, agent = _resolver_with_workspace_agent(extra_labels={"color": "junk"})
     log_records: list[str] = []
-    sink_id = loguru_logger.add(lambda msg: log_records.append(str(msg)), level="WARNING")
+    sink_id = loguru_logger.add(lambda msg: log_records.append(str(msg)), level="INFO")
     try:
         resolver.get_workspace_color(agent)
         resolver.get_workspace_color(agent)

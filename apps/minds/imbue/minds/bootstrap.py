@@ -43,7 +43,7 @@ _MINDS_PREFIX: Final[str] = "minds"
 #
 # Production has no suffix (``minds`` alone). Anything that does not
 # fit this pattern is treated as ``unset`` by ``resolve_minds_root_name``
-# and falls back to production with a warning.
+# (which logs an info notice) and falls back to production.
 _STAGING_SUFFIX_PATTERN: Final[str] = r"staging"
 _DYNAMIC_SUFFIX_PATTERN: Final[str] = r"(?:dev|ci)-[a-z0-9][a-z0-9_-]{0,33}[a-z0-9]"
 _ENV_NAME_PATTERN: Final[str] = rf"(?:{_STAGING_SUFFIX_PATTERN}|{_DYNAMIC_SUFFIX_PATTERN})"
@@ -59,7 +59,7 @@ def resolve_minds_root_name() -> str:
     env var is unset, returns :data:`DEFAULT_MINDS_ROOT_NAME` (production).
     When the env var holds a value that does not match the pattern (e.g.
     a stale ``devminds`` left in a parent shell from before the
-    per-env-root refactor), logs a warning and returns the default --
+    per-env-root refactor), logs an info notice and returns the default --
     callers that genuinely need an activated env check explicitly via
     :func:`is_minds_root_name_set_to_active_env` instead.
 
@@ -70,7 +70,7 @@ def resolve_minds_root_name() -> str:
     if value is None:
         return DEFAULT_MINDS_ROOT_NAME
     if not re.fullmatch(MINDS_ROOT_NAME_PATTERN, value):
-        logger.warning(
+        logger.info(
             "{}={!r} does not match {!r}; ignoring and falling back to {!r}. "
             'Run `eval "$(minds env activate <name>)"` to activate a valid env.',
             MINDS_ROOT_NAME_ENV_VAR,
@@ -344,7 +344,7 @@ def _cleanup_legacy_dynamic_hosts(root_name: str) -> None:
             else:
                 path.unlink()
         except OSError as e:
-            logger.warning("Could not remove legacy minds-leased-host artifact {}: {}", path, e)
+            logger.info("Could not remove legacy minds-leased-host artifact {}: {}", path, e)
         else:
             logger.info("Removed legacy minds-leased-host artifact {}", path)
 
@@ -372,8 +372,8 @@ def apply_bootstrap() -> None:
 
     When ``MINDS_ROOT_NAME`` is set to a value that does not match
     :data:`MINDS_ROOT_NAME_PATTERN` (e.g. a stale ``devminds`` shell
-    from before the refactor), :func:`resolve_minds_root_name` logs a
-    warning and returns the default -- we then export the default's
+    from before the refactor), :func:`resolve_minds_root_name` logs an
+    info notice and returns the default -- we then export the default's
     derived ``MNGR_*`` vars so downstream mngr calls have *some*
     consistent host_dir to point at instead of half-honoring the bad
     value.
@@ -444,12 +444,12 @@ def reconcile_imbue_cloud_providers_from_sessions(connector_url: str, *, root_na
     try:
         raw = accounts_path.read_text()
     except OSError as e:
-        logger.warning("Could not read imbue_cloud accounts index {}: {}", accounts_path, e)
+        logger.opt(exception=e).error("Could not read imbue_cloud accounts index {}: {}", accounts_path, e)
         return
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as e:
-        logger.warning("Malformed imbue_cloud accounts index {}: {}", accounts_path, e)
+        logger.opt(exception=e).error("Malformed imbue_cloud accounts index {}: {}", accounts_path, e)
         return
     entries = data.get("entries") if isinstance(data, dict) else None
     if not isinstance(entries, list):
@@ -474,7 +474,7 @@ def reconcile_imbue_cloud_providers_from_sessions(connector_url: str, *, root_na
             # Bad email format (e.g. ``""``) -- log and keep going so a
             # single corrupt session entry doesn't block reconciliation
             # for the others.
-            logger.warning("Skipping imbue_cloud provider registration for {!r}: {}", email, e)
+            logger.opt(exception=e).error("Skipping imbue_cloud provider registration for {!r}: {}", email, e)
 
 
 def read_active_profile_dir(mngr_host_dir: Path) -> Path | None:
@@ -493,7 +493,7 @@ def read_active_profile_dir(mngr_host_dir: Path) -> Path | None:
     try:
         config_data = tomllib.loads(config_path.read_text())
     except (OSError, tomllib.TOMLDecodeError) as e:
-        logger.warning("Could not read mngr config {}: {}", config_path, e)
+        logger.opt(exception=e).error("Could not read mngr config {}: {}", config_path, e)
         return None
     profile_id = config_data.get("profile")
     if not isinstance(profile_id, str) or not profile_id:

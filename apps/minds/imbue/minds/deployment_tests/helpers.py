@@ -202,7 +202,7 @@ def sweep_stale_users(
                     )
                     deleted += 1
                 except (MindError, httpx.HTTPError) as exc:
-                    logger.warning("Stale-user sweep: failed to delete {!r} ({})", user_id, exc)
+                    logger.info("Stale-user sweep: failed to delete {!r} ({})", user_id, exc)
             pagination_token = data.get("nextPaginationToken")
             has_unfetched_pages = bool(pagination_token)
     return deleted

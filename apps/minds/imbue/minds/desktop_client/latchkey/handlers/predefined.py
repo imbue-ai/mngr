@@ -545,7 +545,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             # The grant flow could not reach the gateway's permissions
             # extension; surface that as a 502 so the dialog can show a
             # meaningful error instead of a generic 500.
-            logger.warning("Could not apply latchkey permission grant via gateway: {}", e)
+            logger.opt(exception=e).error("Could not apply latchkey permission grant via gateway: {}", e)
             return _json_error(
                 f"Could not apply grant through the latchkey gateway: {e}",
                 status_code=502,
@@ -636,7 +636,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                     (service_info.scope,),
                 )
             except LatchkeyGatewayClientError as e:
-                logger.warning(
+                logger.info(
                     "Could not load permissions for host {} via the gateway extension; pre-check will "
                     "reflect only the agent's request: {}",
                     host_id,
@@ -698,7 +698,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         try:
             self.gateway_client.delete_permission_request(request_event_id)
         except LatchkeyGatewayClientError as e:
-            logger.warning(
+            logger.info(
                 "Could not DELETE permission request {} from gateway; will rely on next-restart cleanup: {}",
                 request_event_id,
                 e,

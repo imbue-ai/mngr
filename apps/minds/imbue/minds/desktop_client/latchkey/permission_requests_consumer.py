@@ -188,7 +188,7 @@ class PermissionRequestsConsumer(MutableModel):
                     # Reset backoff after a successful delivery.
                     delay = _RECONNECT_MIN_DELAY_SECONDS
             except LatchkeyGatewayClientError as e:
-                logger.warning(
+                logger.info(
                     "permission-requests stream dropped ({}); reconnecting in {:.1f}s",
                     e,
                     delay,

@@ -122,7 +122,7 @@ class MultiAccountSessionStore(MutableModel):
             try:
                 raw = json.loads(path.read_text())
             except (OSError, json.JSONDecodeError) as e:
-                logger.warning("Failed to load workspace associations: {}", e)
+                logger.opt(exception=e).error("Failed to load workspace associations: {}", e)
                 return {}
             if not isinstance(raw, dict):
                 return {}
@@ -139,7 +139,7 @@ class MultiAccountSessionStore(MutableModel):
         try:
             raw = json.loads(legacy.read_text())
         except (OSError, json.JSONDecodeError) as e:
-            logger.warning("Failed to load legacy sessions file: {}", e)
+            logger.opt(exception=e).error("Failed to load legacy sessions file: {}", e)
             return {}
         if not isinstance(raw, dict):
             return {}
@@ -183,7 +183,7 @@ class MultiAccountSessionStore(MutableModel):
             try:
                 accounts = self.cli.auth_list()
             except ImbueCloudCliError as exc:
-                logger.warning("Failed to list imbue_cloud accounts: {}", exc)
+                logger.info("Failed to list imbue_cloud accounts: {}", exc)
                 # Don't poison the cache with the empty fallback: a
                 # transient subprocess failure would otherwise stick
                 # ``no accounts`` until the next sign-in / sign-out

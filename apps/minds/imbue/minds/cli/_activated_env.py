@@ -85,7 +85,7 @@ def modal_profile_for_tier_or_none(tier: str) -> str | None:
     try:
         deploy_config = load_deploy_config(tier)
     except EnvConfigError as exc:
-        logger.warning(
+        logger.opt(exception=exc).error(
             "Could not load deploy.toml for tier {!r} ({}); MODAL_PROFILE will not be exported. "
             "modal shellouts will fall back to ~/.modal.toml's active profile.",
             tier,

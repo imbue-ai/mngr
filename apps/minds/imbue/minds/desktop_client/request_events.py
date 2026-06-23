@@ -324,7 +324,7 @@ def parse_request_event(line: str) -> RequestEvent | None:
         else:
             return RequestEvent.model_validate(data)
     except (json.JSONDecodeError, ValueError, TypeError) as e:
-        logger.warning("Failed to parse request event: {} (line: {})", e, line[:200])
+        logger.opt(exception=e).error("Failed to parse request event: {} (line: {})", e, line[:200])
         return None
 
 
@@ -349,7 +349,7 @@ def parse_response_event(line: str) -> RequestResponseEvent | None:
             data.pop(legacy_field, None)
         return RequestResponseEvent.model_validate(data)
     except (json.JSONDecodeError, ValueError, TypeError) as e:
-        logger.warning("Failed to parse response event: {} (line: {})", e, line[:200])
+        logger.opt(exception=e).error("Failed to parse response event: {} (line: {})", e, line[:200])
         return None
 
 
@@ -368,7 +368,7 @@ def load_response_events(data_dir: Path) -> list[RequestResponseEvent]:
             if event is not None:
                 events.append(event)
     except OSError as e:
-        logger.warning("Failed to read response events: {}", e)
+        logger.opt(exception=e).error("Failed to read response events: {}", e)
     return events
 
 

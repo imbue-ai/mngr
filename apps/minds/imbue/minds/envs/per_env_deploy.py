@@ -209,7 +209,7 @@ def build_per_env_secret_values(
 ) -> dict[str, str]:
     """Read tier-shared values for one service from Vault and layer overrides.
 
-    Missing Vault entries return an empty dict and emit a warning so
+    Missing Vault entries return an empty dict and emit an info notice so
     the operator can populate them later; the caller is expected to
     fall back to a placeholder when both the tier-shared values and
     overrides come up empty.
@@ -227,7 +227,7 @@ def build_per_env_secret_values(
             parent_concurrency_group=parent_cg,
         )
     except VaultReadError as exc:
-        logger.warning("Vault read for {} failed ({}); will push placeholder.", service, exc)
+        logger.info("Vault read for {} failed ({}); will push placeholder.", service, exc)
     merged = dict(base)
     merged.update(overrides)
     return {k: v for k, v in merged.items() if v}
@@ -249,7 +249,7 @@ def push_per_env_modal_secret(
     services are unpopulated.
     """
     if not values:
-        logger.warning("{!r}: no Vault values; pushing placeholder Modal Secret.", secret_name)
+        logger.info("{!r}: no Vault values; pushing placeholder Modal Secret.", secret_name)
         values = {_PLACEHOLDER_KEY: _PLACEHOLDER_VALUE}
     command = [
         "modal",
@@ -769,7 +769,7 @@ def terminate_modal_app_containers(*, app_name: str, modal_env: str, parent_cg: 
             )
             if stop_result.returncode != 0:
                 stderr = stop_result.stderr.strip() or stop_result.stdout.strip()
-                logger.warning(
+                logger.error(
                     "modal container stop {} failed (exit {}): {}; continuing.",
                     container_id,
                     stop_result.returncode,

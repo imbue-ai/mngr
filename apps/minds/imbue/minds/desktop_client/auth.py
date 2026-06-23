@@ -176,7 +176,7 @@ class FileAuthStore(AuthStoreInterface):
         try:
             raw = json.loads(codes_path.read_text())
         except (OSError, json.JSONDecodeError) as e:
-            logger.warning("Failed to load codes from {}: {}", codes_path, e)
+            logger.opt(exception=e).error("Failed to load codes from {}: {}", codes_path, e)
             return ()
         return tuple(StoredOneTimeCode.model_validate(entry) for entry in raw)
 

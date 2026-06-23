@@ -131,7 +131,7 @@ def delete_instances(
     client = _build_client(credentials)
     for resource in instances:
         if not resource.name:
-            logger.warning("Skipping OVH IAM resource with empty name: urn={}", resource.urn)
+            logger.error("Skipping OVH IAM resource with empty name: urn={}", resource.urn)
             continue
         try:
             client.destroy_instance(VpsInstanceId(resource.name))

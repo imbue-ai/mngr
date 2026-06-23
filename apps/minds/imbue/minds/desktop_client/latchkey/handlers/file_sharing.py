@@ -294,7 +294,7 @@ class FileSharingGrantHandler(RequestEventHandler):
                 override_path=override_path,
             )
         except LatchkeyGatewayClientError as e:
-            logger.warning(
+            logger.opt(exception=e).error(
                 "Could not approve file-sharing request {} via gateway: {}",
                 request_event_id,
                 e,
@@ -332,7 +332,7 @@ class FileSharingGrantHandler(RequestEventHandler):
         try:
             self.gateway_client.delete_permission_request(request_event_id)
         except LatchkeyGatewayClientError as e:
-            logger.warning(
+            logger.info(
                 "Could not DELETE file-sharing request {} from gateway; will rely on next-restart cleanup: {}",
                 request_event_id,
                 e,

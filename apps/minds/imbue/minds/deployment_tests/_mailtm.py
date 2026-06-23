@@ -186,5 +186,5 @@ def _parse_iso_timestamp(raw: str) -> datetime:
     try:
         return datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
-        logger.warning("Unparseable mail.tm timestamp {!r}; falling back to epoch.", raw)
+        logger.info("Unparseable mail.tm timestamp {!r}; falling back to epoch.", raw)
         return datetime.fromtimestamp(0, tz=timezone.utc)

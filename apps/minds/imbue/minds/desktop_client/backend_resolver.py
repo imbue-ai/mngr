@@ -269,7 +269,7 @@ def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
     try:
         data = json.loads(json_output)
     except json.JSONDecodeError as e:
-        logger.warning("Failed to parse mngr list output: {}", e)
+        logger.opt(exception=e).error("Failed to parse mngr list output: {}", e)
         return ParsedAgentsResult()
 
     agents = data.get("agents", [])
@@ -293,7 +293,7 @@ def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
             try:
                 host_state_by_host_id[host_id_value] = HostState(state_value)
             except ValueError:
-                logger.warning("Unknown host state {!r} for host {}", state_value, host_id_value)
+                logger.error("Unknown host state {!r} for host {}", state_value, host_id_value)
 
         ssh = host.get("ssh")
         if ssh is None:
@@ -308,7 +308,7 @@ def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
             )
             ssh_info_by_id[agent_id_str] = ssh_info
         except (KeyError, ValueError) as e:
-            logger.warning("Failed to parse SSH info for agent {}: {}", agent_id_str, e)
+            logger.opt(exception=e).error("Failed to parse SSH info for agent {}: {}", agent_id_str, e)
 
     return ParsedAgentsResult(
         agent_ids=tuple(agent_ids),
@@ -440,12 +440,12 @@ def _read_last_good_agent_topology(path: Path) -> _LastGoodAgentTopology:
     except FileNotFoundError:
         return _LastGoodAgentTopology()
     except OSError as exc:
-        logger.warning("Could not read last-good agent topology from {}: {}", path, exc)
+        logger.info("Could not read last-good agent topology from {}: {}", path, exc)
         return _LastGoodAgentTopology()
     try:
         return _LastGoodAgentTopology.model_validate_json(raw)
     except ValueError as exc:
-        logger.warning("Last-good agent topology at {} is not valid: {}", path, exc)
+        logger.info("Last-good agent topology at {} is not valid: {}", path, exc)
         return _LastGoodAgentTopology()
 
 
@@ -453,7 +453,7 @@ def _write_last_good_agent_topology(path: Path, topology: _LastGoodAgentTopology
     """Persist the last-good topology atomically to ``path``.
 
     Writes to a sibling ``.tmp`` file then renames to defend against a crash
-    mid-write leaving a truncated file. A write failure logs a warning but
+    mid-write leaving a truncated file. A write failure logs an info notice but
     does not propagate -- the topology is a best-effort fallback, and crashing
     the discovery thread over a transient I/O error would be worse than
     losing one update.
@@ -464,7 +464,7 @@ def _write_last_good_agent_topology(path: Path, topology: _LastGoodAgentTopology
         tmp.write_text(topology.model_dump_json(indent=2), encoding="utf-8")
         tmp.replace(path)
     except OSError as exc:
-        logger.warning("Could not write last-good agent topology to {}: {}", path, exc)
+        logger.info("Could not write last-good agent topology to {}: {}", path, exc)
 
 
 # -- MngrCliBackendResolver --
@@ -532,7 +532,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
     # fallback when live discovery has lost the host.
     _last_good_agents_by_host: dict[str, tuple[_AgentRecord, ...]] = PrivateAttr(default_factory=dict)
     # Set of agent ids for which we've already logged a malformed-color-label
-    # warning, so the log line fires once per agent rather than on every SSE
+    # notice, so the log line fires once per agent rather than on every SSE
     # tick. Plain set is fine -- get_workspace_color holds ``_lock`` while
     # mutating it.
     _logged_malformed_color_agents: set[str] = PrivateAttr(default_factory=set)
@@ -580,7 +580,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
             try:
                 callback()
             except (OSError, RuntimeError) as e:
-                logger.warning("Resolver change callback failed: {}", e)
+                logger.opt(exception=e).error("Resolver change callback failed: {}", e)
 
     def notify_change(self) -> None:
         """Public wake-up for SSE listeners after external state mutations.
@@ -812,7 +812,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
         Returns ``None`` when the agent has no ``color`` label (callers
         fall back to the default workspace color). Defensively parses the stored
         value: if it is non-empty but not a recognized hex literal, logs
-        once at WARNING and returns the default workspace color so the
+        once at INFO and returns the default workspace color so the
         UI never crashes on a bad label. Mngr itself does not validate
         label values, so a hand-edited or future-version label might
         carry junk.
@@ -826,7 +826,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
                     normalized = normalize_workspace_color(raw)
                     if normalized is None:
                         if str(agent_id) not in self._logged_malformed_color_agents:
-                            logger.warning(
+                            logger.info(
                                 "Ignoring malformed color label {!r} for agent {}; "
                                 "rendering as default. Repick in workspace settings to fix.",
                                 raw,
@@ -943,7 +943,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
             try:
                 callback(agent_id_str, raw_line)
             except (OSError, RuntimeError) as e:
-                logger.warning("Request event callback failed: {}", e)
+                logger.opt(exception=e).error("Request event callback failed: {}", e)
 
     def _fire_on_request(self, agent_id_str: str, raw_line: str) -> None:
         """Internal alias for ``fire_on_request`` retained for backward compatibility."""

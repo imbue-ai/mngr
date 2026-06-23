@@ -266,7 +266,9 @@ def _parse_in_container_probe(stdout: str | None) -> _InContainerProbe:
     try:
         payload = json.loads(json_line)
     except json.JSONDecodeError as exc:
-        logger.warning("In-container probe emitted a non-JSON payload line ({!r}): {}", json_line, exc)
+        logger.opt(exception=exc).error(
+            "In-container probe emitted a non-JSON payload line ({!r}): {}", json_line, exc
+        )
         return _InContainerProbe(sentinel_seen=True, raw_stdout=stdout)
     if not isinstance(payload, dict):
         return _InContainerProbe(sentinel_seen=True, raw_stdout=stdout)
@@ -323,7 +325,7 @@ def _extract_agent_row(list_json: str | None, agent_id: AgentId) -> dict | None:
     try:
         agents = json.loads(list_json).get("agents", [])
     except (json.JSONDecodeError, AttributeError) as exc:
-        logger.warning("Could not parse `mngr list` output while extracting agent row: {}", exc)
+        logger.opt(exception=exc).error("Could not parse `mngr list` output while extracting agent row: {}", exc)
         return None
     for agent in agents:
         if isinstance(agent, dict) and agent.get("id") == str(agent_id):
@@ -383,7 +385,7 @@ def extract_provider_error(list_json: str | None, provider_name: str | None) -> 
     try:
         errors = json.loads(list_json).get("errors", [])
     except (json.JSONDecodeError, AttributeError) as exc:
-        logger.warning("Could not parse `mngr list` output while extracting provider error: {}", exc)
+        logger.opt(exception=exc).error("Could not parse `mngr list` output while extracting provider error: {}", exc)
         return None
     if not isinstance(errors, list):
         return None
