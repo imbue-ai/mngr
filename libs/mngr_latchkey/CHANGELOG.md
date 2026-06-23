@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: Bumped the pinned latchkey CLI version installed on remote VPS environments (the secondary gateway) to 2.17.2.
+
 ## [v0.1.6] - 2026-06-18
 
 ### Added

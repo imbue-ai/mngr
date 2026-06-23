@@ -4,6 +4,21 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-22
+
+Added a `mngr forward --on-error {abort,continue}` flag (default `abort`). Under
+`continue`, the `--no-observe` startup snapshot tolerates an
+unauthenticated/unreachable provider: it runs `mngr list --on-error continue` and
+forwards the agents the healthy providers reported instead of failing to start.
+The flag affects only `--no-observe`; the observe and `--observe-via-file` modes
+already tolerate provider errors and are unchanged.
+
+## 2026-06-19
+
+Removed the now-vestigial `ForwardPluginConfig.merge_with` override; the config merge is routed through the overlay pipeline, which reproduces the same assign-by-default semantics. No user-visible behavior change.
+
+Trimmed the README to user-relevant content and tightened it for concision.
+
 ## 2026-06-11
 
 Hardened reverse SSH tunnel teardown so a half-dead connection no longer orphans the forwarded port on the remote sshd (which made the next run's port forward request get denied):

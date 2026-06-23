@@ -6,6 +6,23 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Bare placement (`isolation=NONE`) for Azure hosts — agents now run directly on the VM (no Docker container). Because an Azure OS shutdown does not halt compute billing, the bare agent's idle `shutdown.sh` runs the ARM self-deallocate directly (the same call the container idle watcher uses), keeping the self-deallocate role assignment.
+- Added: Per-instance `mngr-isolation` tag stamped at create, so a running bare host is discoverable and reachable with the default provider config.
+- Added: Azure release suite now runs the shared provider release harness's Trip 1 (full lifecycle, container + bare), Trip 2 (idle auto-shutdown), Trip 3 (snapshot-survives-destroy, asserting documented non-portability), and Trip 4 (error classification — `mngr create` with no resolvable subscription surfaces `ProviderUnavailableError` with curated `az login` / subscription-setup help; `--vps-*` build arg rejected with the migration hint).
+
+### Changed
+
+- Changed: A missing subscription or unusable credential now raises the shared `ProviderNotAuthorizedError`. Azure previously validated only the subscription id (`DefaultAzureCredential` authenticates lazily), so unauthenticated environments surfaced as a confusing API error on the first real call; the provider now eagerly requests a management-scope token at construction, matching AWS/GCP.
+- Changed: `mngr rename` now re-stamps the cheap `mngr-host-name` VM tag that offline discovery reads, so a renamed-then-stopped host lists under its new name (previously stamped only at create).
+- Changed: Updated for the `mngr_vps_docker` → `mngr_vps` package and class rename. Import-only.
+
+### Fixed
+
+- Fixed: `mngr start` of a deallocated Azure host now re-mirrors the resumed host record to the external (Blob bucket) store, so offline / `mngr list` reads no longer report a just-resumed VM as STOPPED until the next mirroring write.
+- Fixed: `start_host` for a bare host no longer fails reading the host record through the Docker volume; it resolves the store through the realizer.
+
 ## [v0.1.1] - 2026-06-18
 
 ### Added

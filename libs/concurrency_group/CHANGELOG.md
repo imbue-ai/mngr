@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Optional `pass_fds` parameter on `ConcurrencyGroup.run_process_in_background`, `run_background`, and `run_local_command_modern_version`, forwarded to `subprocess.Popen(pass_fds=...)`, so callers can hand an already-connected `socketpair` endpoint to a child without a rendezvous file on disk.
+
+### Changed
+
+- Changed: The force-termination log message now names the reason explicitly (timeout vs requested shutdown) instead of using identical wording for both.
+
 ## [v0.1.20] - 2026-06-13
 
 ### Changed

@@ -6,6 +6,11 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: An unauthenticated Vultr provider now raises the shared `ProviderNotAuthorizedError` at construction instead of silently reporting zero agents. Previously, with no API key configured, the provider printed an ad-hoc `WARNING: Vultr API key not configured, skipping VPS discovery` and returned an empty listing (exit 0). It now contributes a non-zero exit in `mngr list`, consistent with the other cloud providers.
+- Changed: Updated for the `mngr_vps_docker` → `mngr_vps` package and class rename. Import-only.
+
 ## [v0.1.10] - 2026-06-18
 
 ## [v0.1.9] - 2026-06-16

@@ -1,1 +1,0 @@
-Fixed host lock reporting for VPS/docker/bare hosts: a host's lock status is now derived from a real flock held-probe rather than the lock file's presence. The lock file now persists after release, so the previous mtime-based check would have reported every previously-locked host as permanently locked.

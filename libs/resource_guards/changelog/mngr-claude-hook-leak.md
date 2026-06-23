@@ -1,1 +1,0 @@
-Gave `test_blocked_resource_appended_to_failing_test` a longer (30s) per-test timeout. It spawns a pytest subprocess via `runpytest_subprocess`, whose startup is slow and variable under offload load and intermittently exceeded the default 10s timeout. No change to `resource_guards` runtime behavior.

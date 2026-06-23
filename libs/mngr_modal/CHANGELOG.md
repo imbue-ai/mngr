@@ -6,6 +6,18 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Modal release suite now runs the shared provider release harness's Trip 1 (full lifecycle, asserting `mngr stop --stop-host` is refused with `HostShutdownNotSupportedError` since Modal cannot stop a host's compute), Trip 2 (idle auto-shutdown, asserting Modal's own sandbox-lifetime termination — Modal has no resumable stopped state), Trip 3 (snapshot-survives-destroy — Modal snapshots are portable, so a fresh `mngr create --snapshot` restores the captured filesystem), and Trip 4 (error classification, asserting unresolvable Modal credentials surface as `ProviderUnavailableError` with curated `uvx modal token set` help).
+
+### Changed
+
+- Changed: A missing/invalid Modal token now raises the shared `ProviderNotAuthorizedError` from provider construction, and `ModalAuthError` is now a subclass of it. Modal auth failures are now categorized the same way as the other cloud providers in `mngr list` — one consistent error line and the granular provider-inaccessible exit code — instead of an ad-hoc plugin error.
+
+### Fixed
+
+- Fixed: Host lock reporting for Modal hosts is now derived from a real `flock` held-probe rather than the lock file's presence (the lock file now persists after release, so the previous mtime-based check would have reported every previously-locked host as permanently locked).
+
 ## [v0.2.17] - 2026-06-18
 
 ## [v0.2.16] - 2026-06-16

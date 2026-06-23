@@ -6,6 +6,12 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: mngr's Claude hooks are now baked into the per-agent config-dir `settings.json` (`$CLAUDE_CONFIG_DIR/settings.json`) instead of the project's `.claude/settings.local.json`. This stops mngr-injected hooks from leaking into plain (non-mngr) `claude` runs in the same directory (e.g. an `mkdir: cannot create directory '/events'` error from an activity-event hook firing outside mngr). Also means `mngr create` no longer requires `.claude/settings.local.json` to be gitignored across the board.
+- Changed: `settings_overrides` is now applied as a config-consistent patch folded onto `settings.json` (replacing the previous deep-merge-by-default). A bare key assigns with a recursive narrowing guard; `key__extend` merges onto the home value; `__extend` nests; `__assign` opts out of the guard. `settings_overrides` also accumulates across config scopes (user < project < local) and `parent_type` inheritance, instead of a higher/child scope replacing the entire lower/parent value.
+- Changed: Merge intent for `settings_overrides` is now declared with a Claude-compatible `__mngr_merge` map instead of the `__extend` / `__assign` key suffixes (which Claude would surface as junk keys). Raw `__extend` / `__assign` suffixes are rejected in `settings_overrides`; the narrowing error prints the exact `__mngr_merge` patch to add. mngr's own (non-`settings_overrides`) config still uses the suffixes.
+
 ## [v0.2.17] - 2026-06-18
 
 ### Added

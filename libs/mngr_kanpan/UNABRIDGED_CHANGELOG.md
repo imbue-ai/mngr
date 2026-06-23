@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-19
+
+The kanpan plugin's cross-scope config merge now follows the same standard config-merge semantics as every other config field. Previously `KanpanPluginConfig` carried a custom `merge_with` that automatically *unioned* its six dict fields (`commands`, `data_sources`, `shell_commands`, `columns`, `on_before_refresh`, `on_after_refresh`) across config scopes (user < project < local), so a key set by a lower scope always survived. That method is removed and the merge now runs through the standard overlay pipeline: these fields assign-by-default, guarded by the cross-scope narrowing detector.
+
+The user-visible effect: when a higher-precedence scope's `[plugins.kanpan]` block drops a key that a lower scope set in any of those six dict fields, it now raises the standard flag-gated settings-narrowing error (naming the scopes and how to opt in) instead of silently unioning the two scopes. To merge additively, use the `__extend` operator; to assign and drop keys without the warning, set `allow_settings_key_assignment_narrowing = true` (or use `key__assign`). Pure additions -- a higher scope that keeps every lower-scope key and adds more -- still apply unchanged.
+
+Trimmed the README to user-relevant content and tightened it for concision.
+
 ## 2026-06-15
 
 `mngr kanpan --help` synopsis: replace placeholder `[OPTIONS]` with an enumerated list of the filter flags users typically reach for -- `[--include CEL] [--exclude CEL] [--running] [--stopped] [--archived] [--active] [--local] [--remote] [--project PROJECT]`. The full agent-filter set is still available; rarely-used flags (`--label`, `--host-label`) are omitted from the synopsis but remain on the command.
