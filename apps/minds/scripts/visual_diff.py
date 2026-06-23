@@ -538,19 +538,17 @@ def _screenshot_all(scenarios: list[Scenario], png_dir: Path, port: int) -> None
                 target = f"http://127.0.0.1:{port}/html/{sc.name}.html"
                 try:
                     page.goto(target, wait_until="networkidle", timeout=15000)
-                    # Tailwind Play CDN generates utility styles at runtime
-                    # by injecting a large ``<style>`` element into the
-                    # document head once it has parsed every class name on
-                    # the page. ``networkidle`` doesn't guarantee that has
-                    # happened: the script tag is requested, but the script
-                    # itself still runs asynchronously after the network
-                    # settles. Wait for the generated stylesheet to be
-                    # present (and non-trivial in size) before snapping --
-                    # otherwise we screenshot the unstyled "ASCII-art"
-                    # version of the page.
+                    # The chrome links the compiled Tailwind sheet
+                    # (/_static/app.min.css). ``networkidle`` requests it but
+                    # doesn't guarantee the browser has parsed it into
+                    # cssRules. Wait until that sheet is present and non-empty
+                    # before snapping -- otherwise we screenshot the unstyled
+                    # "ASCII-art" version of the page.
                     page.wait_for_function(
-                        "() => Array.from(document.head.querySelectorAll('style'))"
-                        "  .some(s => s.textContent.length > 1000)",
+                        "() => Array.from(document.styleSheets).some(s => {"
+                        "  try { return (s.href || '').includes('app.min.css')"
+                        "    && s.cssRules.length > 0; }"
+                        "  catch (e) { return false; } })",
                         timeout=10000,
                     )
                     for action in sc.interactions:
@@ -563,6 +561,23 @@ def _screenshot_all(scenarios: list[Scenario], png_dir: Path, port: int) -> None
             browser.close()
 
 
+def _build_css() -> None:
+    """Compile static/app.css -> static/app.min.css for the current branch.
+
+    The chrome no longer ships a runtime Tailwind JIT; styles come from the
+    compiled sheet, so a capture is only faithful if the sheet was just built
+    from this branch's source. Delegates to the same `build:css` pnpm script
+    used by `just minds-css`, with the pinned Node on PATH.
+    """
+    minds_dir = REPO_ROOT / "apps" / "minds"
+    logger.info("[capture] building app.min.css (pnpm run build:css)")
+    subprocess.run(
+        ["bash", "-c", ". scripts/select_node_version.sh && pnpm run build:css"],
+        cwd=str(minds_dir),
+        check=True,
+    )
+
+
 def _do_capture(label: str) -> Path:
     output_dir = OUTPUT_ROOT / label
     html_dir = output_dir / "html"
@@ -572,8 +587,14 @@ def _do_capture(label: str) -> Path:
     html_dir.mkdir(parents=True)
     png_dir.mkdir(parents=True)
 
-    # Symlink static into the served root so /_static/tailwind.js etc.
-    # resolve. Symlink (not copy) so we always pick up the live file.
+    # The chrome's styles come from the compiled Tailwind sheet (app.min.css),
+    # which is gitignored and only exists after a build -- and must reflect the
+    # CURRENT branch's source so the diff is meaningful. Rebuild it here.
+    _build_css()
+
+    # Symlink static into the served root so /_static/app.min.css (+ the
+    # per-page JS) resolve. Symlink (not copy) so we always pick up the live
+    # file.
     (output_dir / "_static").symlink_to(STATIC_DIR)
 
     scenarios = _build_scenarios()

@@ -24,10 +24,10 @@ root of `templates/`. Auth-flow components live under `templates/auth/`.
 
 | Component | Role |
 |---|---|
-| `Base` | Universal HTML scaffold (html/head/body, Tailwind CDN, tokens.css). Every page wraps in this. |
+| `Base` | Universal HTML scaffold (html/head/body, compiled Tailwind v4 sheet `app.min.css`). Every page wraps in this. |
 | `PageContainer` | Centered `max-w-[720px]` body wrapper. Default for in-app settings-style pages (Landing, Accounts, WorkspaceSettings, Sharing, Destroying). |
-| `CardPage` | Centered-card layout for auth flow + form pages. `padding="default"` (`p-10`, auth) or `"form"` (`p-6`, Create); `max_width` is a Tailwind utility. |
-| `Card` | Card surface with `layout`/`padding`/`interactive`/`tag`/`href` props. Pulls `.minds-card` from `tokens.css` for the shared shell. |
+| `PageNarrowContainer` | Centered, narrow page layout for auth flow + form pages. Width/padding only -- no surface chrome. `padding="default"` (`p-8`, auth) or `"form"` (`p-6`, Create); `max_width` is a Tailwind utility. |
+| `Card` | Card surface with `layout`/`padding`/`interactive`/`tag`/`href` props. Pulls `.minds-card` from `app.css` for the shared shell. |
 | `Modal` | Overlay dialog with backdrop. Used for confirmation dialogs (Welcome's skip-account prompt, WorkspaceSettings' destroy modal). |
 | `PermissionsHeader` / `PermissionsForm` / `PermissionsError` / `PermissionsManualCredentials` | Composable building blocks for the latchkey permission-request detail fragments (`pages.LatchkeyPredefinedPermission`, `pages.LatchkeyFileSharingPermission`). The surrounding modal chrome lives in the inbox shell (`pages.Inbox`), not in a separate dialog primitive. |
 
@@ -49,7 +49,7 @@ root of `templates/`. Auth-flow components live under `templates/auth/`.
 | `Select` | `<select>`. Children are `<option>` elements. `width="w-full"` default; pass `w-48` for compact selects beside a label. |
 | `Textarea` | `<textarea>`. `rows`, `value`, `width`, `extra`. |
 | `FormLabel` | `<label for="...">`. `inline=False` (default) puts the label above the input (`block mb-1.5`); `inline=True` is for labels beside a control in a flex row. Prop is `target=` not `for=` because `for` is a Python keyword (JinjaX parses `{#def #}` as a Python signature). |
-| `ColorSwatch` | Circular `role="radio"` button for the workspace color pickers (settings + create form). `hex` / `name` (aria-label) / `selected` (aria-checked) / `size` (`"md"` 34px settings, `"sm"` 24px create) / `disabled`. Owns the markup contract the picker JS selects on (`.color-swatch`, `aria-checked`, `data-color`); the rim + selection-ring styles live in `tokens.css`. |
+| `ColorSwatch` | Circular `role="radio"` button for the workspace color pickers (settings + create form). `hex` / `name` (aria-label) / `selected` (aria-checked) / `size` (`"md"` 34px settings, `"sm"` 24px create) / `disabled`. Owns the markup contract the picker JS selects on (`.color-swatch`, `aria-checked`, `data-color`); the rim + selection-ring styles live in `app.css`. |
 
 ### Feedback
 
@@ -57,38 +57,39 @@ root of `templates/`. Auth-flow components live under `templates/auth/`.
 |---|---|
 | `Notice` | Info / warn / success / error banner. Use HTML attribute passthrough (`id=`, `class="hidden"`) for JS-toggled messages. |
 | `StatusBadge` | Compact pill. `variant="neutral"` / `success` / `error` / `warn` / `info`. |
+| `Badge` | Notification badge on the `important` hue. `count` set -> a count pill (`type-badge` text, caps at 99+); no `count` -> an 8px dot. The titlebar requests button shows the count inline beside the icon (icon + badge in a `gap-[3px]` row; chrome.js sets the text + toggles the native `hidden` attribute -- not a `hidden` class, which the pill's baked-in `inline-flex` would beat). Carries no position; the caller places it. |
 | `Spinner` | CSS-only animated circle. `size="sm"` / `"md"` / `"lg"` ; `tone="default"` / `"accent"` (blue, for primary-action spinners). |
 
 ### Icons
 
 | Component | Role |
 |---|---|
-| `Icon24` | 24x24 lucide-style stroke icon. `name=` picks from `ICONS_24` dict in `templates.py`. Sizes `sm` / `md` / `lg`. Inherits color via `currentColor`. |
+| `Icon16` | 16x16 icon from the shared Figma set (node 857-5091), rendered in a `viewBox="0 0 16 16"` shell defaulting to `fill="currentColor"`. Most glyphs are filled outlines; `play` is the lone stroked one (carries its own `stroke="currentColor"`). `name=` picks from `ICONS_16` dict in `templates.py`. Sizes `sm` / `md` (default = `w-4`) / `lg`. Inherits color via `currentColor`. |
 | `Icon12` | 12x12 title-bar chrome glyph (minimize / maximize / close). Single canonical `w-3 h-3` size; used only inside TitlebarButton `variant="control"`. |
-| `auth.OauthIcon` | Brand glyph (Google / GitHub). Stays separate from `Icon24` -- multi-color brand fills, no stroke shell. |
+| `auth.OauthIcon` | Brand glyph (Google / GitHub). Stays separate from `Icon16` -- multi-color brand fills, not the single-color icon set. |
 
 ### CSS classes for JS-rendered surfaces
 
 JavaScript can't call JinjaX components. When you build HTML in JS (e.g.
 `Landing.jinja`'s providers panel, `sharing.js`'s ACL rows), reference
-these CSS-only tokens defined in `static/tokens.css` so both sides stay
+these CSS-only tokens defined in `static/app.css` so both sides stay
 in sync:
 
 | Class | Role |
 |---|---|
-| `.minds-card` | Card surface (bg-white, border-zinc-200, rounded-xl). Match `Card.jinja`. |
-| `.spinner` / `.spinner-accent` | Animated circular spinner. Match `Spinner.jinja`. |
-| `.code-pill` | Inline `<code>` pill (zinc-100 bg, rounded-md, monospace, 0.95em). Match `Sharing.jinja`'s service-name pills. |
+| `.minds-card` | Card surface (bg-surface-primary, border-default, rounded-lg). Match `Card.jinja`. |
+| `.spinner` / `.spinner-accent` | Animated circular spinner (token-driven ring/top; `-accent` uses the accent token). Match `Spinner.jinja`. |
+| `.code-pill` | Inline `<code>` pill (bg-fill-subtle, rounded-md, monospace, 0.95em). Match `Sharing.jinja`'s service-name pills. |
 | `.accent-spine` | Vertical workspace-accent stripe on the left edge. Used by Landing project rows + Destroying. |
-| `.sidebar-dot` | Per-workspace accent circle in the workspace menu rows. Sized by Tailwind (`w-2.5 h-2.5 rounded-full`); colored inline per workspace by `sidebar.js` / `chrome.js`. Not a tokens.css class -- listed here as the accent-surface to keep in sync. (The workspace row itself carries the `.sidebar-item` class purely as a JS selector hook + `is-current` / `is-stale` state marker; it has no tokens.css styling.) |
-| `.titlebar-title` / `.titlebar-btn` / `.titlebar-btn-danger` | Accent-aware titlebar foreground utilities. Read `--titlebar-fg` with varying alpha for the title / nav-icon / hover-tint hierarchy; `-danger` keeps the destructive red hover regardless of accent. |
+| `.sidebar-dot` | Per-workspace accent circle in the workspace menu rows. Sized by Tailwind (`w-2.5 h-2.5 rounded-full`); colored inline per workspace by `sidebar.js` / `chrome.js`. Not an app.css class -- listed here as the accent-surface to keep in sync. (The workspace row itself carries the `.sidebar-item` class purely as a JS selector hook + `is-current` / `is-stale` state marker; it has no app.css styling.) |
+| `.titlebar-surface` / `.titlebar-btn-danger` | Titlebar self-theming. `.titlebar-surface` (toggled on the bar by `chrome.js` while a workspace accent is active) derives a black/white contrast from `--titlebar-bg` in pure CSS (lch relative color) and re-bases the foreground text tokens on it, so the title + buttons read on any accent -- no JS luminance. `-danger` keeps the destructive red hover regardless of accent. |
 
 ## Where the shared tokens live
 
 | Source | Contents |
 |---|---|
-| `templates.py` | `BTN_BASE` / `BTN_SIZES` / `BTN_VARIANTS` (button shell), `INPUT_BASE` (form-control shell), `ICONS_24` / `ICONS_12` (SVG path data). Exposed as JinjaX Catalog globals. |
-| `static/tokens.css` | `.minds-card`, `.spinner` + `.spinner-accent`, `.code-pill`, `.accent-spine`, `.accent-swatch`, `.color-swatch` / `.color-hex-pill` (workspace color picker rim + selection-ring / hex-input pill), `.titlebar-title` / `.titlebar-btn` / `.titlebar-btn-danger`, `--shadow-seam`, `--workspace-accent` / `--titlebar-bg` / `--titlebar-fg` (set via inline style on the document root by chrome.js). |
+| `templates.py` | `BTN_BASE` / `BTN_SIZES` / `BTN_VARIANTS` (button shell), `INPUT_BASE` (form-control shell), `ICONS_16` / `ICONS_12` (SVG path data). Exposed as JinjaX Catalog globals. |
+| `static/app.css` | The `@theme` design tokens (colors, radius, type ramp, elevation) plus hand-written recipes: `.minds-card`, `.spinner` + `.spinner-accent`, `.code-pill`, `.accent-spine`, `.accent-swatch`, `.color-swatch` / `.color-hex-pill` (workspace color picker rim + selection-ring / hex-input pill), `.titlebar-surface` / `.titlebar-btn-danger`, and the runtime `--workspace-accent` / `--titlebar-bg` (set via inline style on the document root by chrome.js). |
 | `templates/pages/DevStyleguide.jinja` | The live visual catalog. Mount at `/_dev/styleguide` in a running app. Tells you what exists and what each variant looks like. |
 
 The type ramp (h1/h2/body/caption sizes), the text-color ramp (the 5
@@ -173,14 +174,14 @@ The "ghost Button that looks like a text link" recipe in the styleguide
 needs every override prefixed with `!`:
 
 ```
-extra="!p-0 !bg-transparent !text-xs !font-normal !text-blue-600
-       hover:!bg-transparent hover:underline hover:!text-blue-700"
+extra="!p-0 !bg-transparent !type-helper !text-accent
+       hover:!bg-transparent hover:underline"
 ```
 
-The `!` is load-bearing -- the Button base's `font-medium text-sm` and
-the ghost variant's `text-zinc-700` have the same Tailwind specificity
-as the extras and land earlier in the generated stylesheet, so they
-win without `!`. Without it, the "link" reads as a heavy button.
+The `!` is load-bearing -- the Button base's `type-label` role and the
+ghost variant's color have the same Tailwind specificity as the extras
+and land earlier in the generated stylesheet, so they win without `!`.
+Without it, the "link" reads as a heavy button.
 
 ## Where to put new components
 

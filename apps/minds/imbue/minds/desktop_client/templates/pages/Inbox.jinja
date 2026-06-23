@@ -21,7 +21,6 @@
       padding: 10px 12px;
       cursor: pointer;
       border-left: 3px solid transparent;
-      transition: background 100ms;
     }
     .inbox-card:hover { background: rgba(0, 0, 0, 0.04); }
     .inbox-card.is-selected {
@@ -573,7 +572,7 @@
 </script>
 {% endset %}
 <Base title="Requests"
-      body_class="bg-transparent text-zinc-900 font-sans antialiased"
+      body_class="bg-transparent text-primary font-sans antialiased"
       body_style="-webkit-app-region: no-drag;"
       head={{ _head }}
       scripts={{ _scripts }}>
@@ -584,10 +583,10 @@
      rounded corners so it reads as a top-level panel attached to the
      screen edge. The backdrop dims the workspace strip on the right. #}
   <div id="inbox-backdrop"
-       class="fixed inset-0 bg-black/20 flex justify-start"
+       class="fixed inset-0 bg-surface-overlay flex justify-start"
        onclick="onBackdropClick(event)">
     <div id="inbox-dialog"
-         class="relative w-[90vw] lg:w-[75vw] max-w-[1100px] h-full flex flex-col bg-white border-r border-zinc-200 shadow-2xl overflow-hidden">
+         class="relative w-[90vw] lg:w-[75vw] max-w-[1100px] h-full flex flex-col bg-surface-primary border-r border-default shadow-overlay overflow-hidden">
       {# Header row. 3-column grid so the title sits in the visual
          center regardless of how wide the close button is. The fixed
          height matches the chrome titlebar (h-[38px] in Chrome.jinja)
@@ -599,19 +598,16 @@
          beneath is no-drag while the modal is open). The close button
          is opted back out via inline no-drag so its click is not
          eaten by the drag handler. #}
-      <div class="grid grid-cols-3 items-center px-2 h-[38px] border-b border-zinc-200"
+      <div class="grid grid-cols-3 items-center px-2 h-[38px] border-b border-default"
            style="-webkit-app-region: drag;">
         <div></div>
-        <h1 class="text-sm font-semibold text-zinc-800 uppercase tracking-wider leading-none text-center">Requests</h1>
+        <h1 class="type-section text-primary text-center">Requests</h1>
         <button type="button" aria-label="Close"
                 id="inbox-close-btn"
                 onclick="closeInbox()"
                 style="-webkit-app-region: no-drag;"
-                class="justify-self-end inline-flex items-center justify-center w-6 h-6 rounded-md text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 transition-colors cursor-pointer">
-          <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" class="w-4 h-4">
-            <path fill-rule="evenodd" clip-rule="evenodd"
-                  d="M4.22 4.22a.75.75 0 0 1 1.06 0L10 8.94l4.72-4.72a.75.75 0 1 1 1.06 1.06L11.06 10l4.72 4.72a.75.75 0 1 1-1.06 1.06L10 11.06l-4.72 4.72a.75.75 0 0 1-1.06-1.06L8.94 10 4.22 5.28a.75.75 0 0 1 0-1.06Z" />
-          </svg>
+                class="justify-self-end inline-flex items-center justify-center w-6 h-6 rounded-md text-tertiary hover:text-primary hover:bg-fill-hover cursor-pointer">
+          <Icon16 name="close" />
         </button>
       </div>
       <div id="inbox-body" class="flex flex-1 min-h-0 {% if is_empty %}is-empty{% endif %}">
@@ -619,12 +615,12 @@
            pinned auto-open footer at the bottom. The footer's horizontal
            alignment flips based on ``#inbox-body.is-empty`` (centered
            when empty, left-aligned otherwise). #}
-        <div id="inbox-left-column" class="flex flex-col w-72 border-r border-zinc-200 bg-zinc-50">
+        <div id="inbox-left-column" class="flex flex-col w-72 border-r border-default bg-fill-subtle">
           <div id="inbox-list" class="flex-1 overflow-y-auto">
             <InboxList :cards="cards" :selected_id="selected_id" />
           </div>
-          <div id="inbox-list-footer" class="border-t border-zinc-200 px-3 py-2 flex items-center">
-            <label class="text-xs text-zinc-500 cursor-pointer flex items-center gap-1.5 leading-none">
+          <div id="inbox-list-footer" class="border-t border-default px-3 py-2 flex items-center">
+            <label class="type-helper text-secondary cursor-pointer flex items-center gap-1.5">
               <input type="checkbox" id="inbox-auto-open"
                      {% if auto_open %}checked{% endif %}
                      onchange="onAutoOpenToggle(event)">
@@ -632,7 +628,7 @@
             </label>
           </div>
         </div>
-        <div id="inbox-detail" class="flex-1 overflow-y-auto p-6 sm:p-7">
+        <div id="inbox-detail" class="flex-1 overflow-y-auto p-6 sm:p-6">
           {{ detail_html|safe }}
         </div>
       </div>
