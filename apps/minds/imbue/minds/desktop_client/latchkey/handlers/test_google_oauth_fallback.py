@@ -128,6 +128,7 @@ def test_google_oauth_fallback_ordering_end_to_end(
         ("auth_list",),
         _PREPARE_CALL,
         ("auth_browser_login", "google-gmail"),
+        ("auth_clear", "google-gmail"),
         ("auth_browser", "google-gmail"),
     )
 

@@ -1008,6 +1008,23 @@ class Latchkey(MutableModel):
             service_name=service_name,
         )
 
+    def auth_clear(self, service_name: str) -> tuple[bool, str]:
+        """Clear the stored credentials (and registered client) for a service.
+
+        Runs ``latchkey auth clear -y <service>``. Used to discard a failed
+        OAuth client registration (e.g. the Minds client left behind by
+        :meth:`auth_prepare`) so the self-setup fallback can start clean:
+        :meth:`auth_browser` only runs ``auth browser-prepare`` when *no*
+        client is registered, so a stuck client would otherwise block it.
+        Clearing an already-empty service is a harmless no-op (exit 0).
+        Returns ``(is_success, detail)``.
+        """
+        return self._run_latchkey_auth_command(
+            log_label="auth clear",
+            argv=["auth", "clear", "-y", service_name],
+            service_name=service_name,
+        )
+
     def _run_latchkey_auth_command(
         self,
         log_label: str,

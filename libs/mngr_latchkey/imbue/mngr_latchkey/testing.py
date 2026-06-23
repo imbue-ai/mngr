@@ -112,6 +112,10 @@ class FakeLatchkey(Latchkey):
         self._auth_calls.append(("auth_prepare", service_name, client_id, client_secret))
         return self._prepare_result
 
+    def auth_clear(self, service_name: str) -> tuple[bool, str]:
+        self._auth_calls.append(("auth_clear", service_name))
+        return (True, "")
+
     def auth_browser_login(self, service_name: str) -> tuple[bool, str]:
         self._auth_calls.append(("auth_browser_login", service_name))
         return self._browser_login_result

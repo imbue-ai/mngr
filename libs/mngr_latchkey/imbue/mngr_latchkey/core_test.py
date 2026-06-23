@@ -1698,6 +1698,18 @@ def test_auth_prepare_reports_failure_on_non_zero_exit(tmp_path: Path) -> None:
     assert detail == "prepare failed"
 
 
+def test_auth_clear_invokes_clear_with_yes_flag(tmp_path: Path) -> None:
+    binary = _make_recording_binary(tmp_path, exit_code=0)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    is_success, detail = latchkey.auth_clear("google-sheets")
+
+    assert is_success is True
+    assert detail == ""
+    argv_calls = [record["argv"] for record in _read_recording_report(tmp_path)]
+    assert argv_calls == [["auth", "clear", "-y", "google-sheets"]]
+
+
 def _make_auth_list_binary(tmp_path: Path, *, payload: str, exit_code: int = 0) -> Path:
     """Build a fake latchkey CLI that emits ``auth list`` output verbatim."""
     script = tmp_path / "latchkey"

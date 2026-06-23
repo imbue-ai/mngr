@@ -421,10 +421,18 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
            Minds consent screen (``auth browser``).
         2. If a client is already registered (a prior Minds attempt or a user
            self-setup), skip prepare and reuse it with a bare sign-in.
-        3. On *any* failure of the fast attempt above, fall through to the
-           existing self-setup pathway (``auth browser-prepare`` + ``auth
-           browser``), which lets the user provision their own Google project
-           -- and intentionally overwrites the failed registration.
+        3. On *any* failure of the fast attempt above, clear the registered
+           client and fall through to the self-setup pathway (``auth
+           browser-prepare`` + ``auth browser``), which lets the user
+           provision their own Google project.
+
+        The clear in step 3 is essential: ``auth_prepare`` persists the Minds
+        client, and ``auth_browser`` only triggers ``browser-prepare`` (the
+        self-setup flow) when *no* client is registered. Without clearing, a
+        failed Minds client stays registered and the fallback keeps re-using
+        it (failing) instead of letting the user self-set-up. The clear also
+        self-heals a client left stuck by a prior failed attempt, and is a
+        harmless no-op when nothing is registered.
 
         ``auth_list`` read failures degrade to "not registered" (see
         :meth:`Latchkey.auth_list`), so the Minds attempt is still made.
@@ -445,8 +453,11 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 is_success, detail = self.latchkey.auth_browser_login(service_name)
         if is_success:
             return True, detail
-        # Any failure of the fast attempt falls through to the existing
-        # self-setup pathway (browser-prepare + browser).
+        # The fast attempt failed. Clear any client registered for the service
+        # (the Minds client we just prepared, or a stale one) so the self-setup
+        # ``auth_browser`` triggers ``browser-prepare`` from a clean slate
+        # instead of re-using the failing client.
+        self.latchkey.auth_clear(service_name)
         return self.latchkey.auth_browser(service_name)
 
     def deny(

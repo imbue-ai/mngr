@@ -922,10 +922,13 @@ def test_grant_google_minds_login_fails_falls_through_to_self_setup(tmp_path: Pa
     result = _grant_gmail(handler)
 
     assert result.outcome == GrantOutcome.GRANTED
+    # The Minds login failed, so we clear the (stuck) Minds client before the
+    # self-setup auth_browser -- otherwise browser-prepare can't trigger.
     assert fake.auth_calls == (
         ("auth_list",),
         _PREPARE_CALL,
         ("auth_browser_login", "google-gmail"),
+        ("auth_clear", "google-gmail"),
         ("auth_browser", "google-gmail"),
     )
 
@@ -943,10 +946,11 @@ def test_grant_google_prepare_fails_skips_login_and_falls_through(tmp_path: Path
     result = _grant_gmail(handler)
 
     assert result.outcome == GrantOutcome.GRANTED
-    # Prepare failed, so the bare login is skipped; straight to self-setup.
+    # Prepare failed, so the bare login is skipped; clear then self-setup.
     assert fake.auth_calls == (
         ("auth_list",),
         _PREPARE_CALL,
+        ("auth_clear", "google-gmail"),
         ("auth_browser", "google-gmail"),
     )
 
@@ -985,8 +989,34 @@ def test_grant_google_already_registered_login_failure_falls_through_to_self_set
     assert fake.auth_calls == (
         ("auth_list",),
         ("auth_browser_login", "google-gmail"),
+        ("auth_clear", "google-gmail"),
         ("auth_browser", "google-gmail"),
     )
+
+
+def test_grant_google_failed_minds_attempt_clears_client_before_self_setup(tmp_path: Path) -> None:
+    # Regression: auth_prepare persists the Minds client, and auth_browser only
+    # triggers browser-prepare (self-setup) when NO client is registered. If we
+    # don't clear the failed Minds client first, the self-setup fallback keeps
+    # re-using it (failing) instead of letting the user self-set-up. Assert the
+    # clear happens immediately before the self-setup auth_browser.
+    fake = FakeLatchkey(latchkey_directory=tmp_path)
+    fake.configure_auth(
+        service_info=_missing_browser_service_info(),
+        registered_services=(),
+        browser_login_result=(False, "minds client rejected for this scope"),
+        self_setup_result=(True, ""),
+    )
+    handler = _build_google_handler(tmp_path, fake)
+
+    result = _grant_gmail(handler)
+
+    assert result.outcome == GrantOutcome.GRANTED
+    calls = fake.auth_calls
+    assert ("auth_clear", "google-gmail") in calls
+    clear_index = calls.index(("auth_clear", "google-gmail"))
+    self_setup_index = calls.index(("auth_browser", "google-gmail"))
+    assert clear_index < self_setup_index, "must clear the stuck client before the self-setup auth_browser"
 
 
 def test_grant_google_empty_auth_list_is_treated_as_not_registered(tmp_path: Path) -> None:
