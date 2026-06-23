@@ -257,21 +257,34 @@ def test_build_mngr_create_command_forwards_region_for_imbue_cloud() -> None:
     assert "region=US-WEST-OR" in command
 
 
-def test_build_mngr_create_command_modal_targets_modal_provider() -> None:
-    """Modal (experimental) addresses the single ``modal`` provider via PROXIED."""
+def test_build_mngr_create_command_modal_direct_targets_modal_provider() -> None:
+    """Modal Direct addresses the ``modal`` provider instance (local-token mode)."""
     command = _build_mngr_create_command(
-        launch_mode=LaunchMode.MODAL,
+        launch_mode=LaunchMode.MODAL_DIRECT,
         host_name=HostName("hello"),
     )
-    joined = " ".join(command)
-    # Addresses the single modal provider instance (no per-account/region suffix).
-    assert "system-services@hello.modal" in joined
+    # Exact list-element match so it can't be confused with ``modal_proxied``.
+    assert "system-services@hello.modal" in command
+    assert "system-services@hello.modal_proxied" not in command
     # Same remote shape as vultr/aws: new host + main + modal templates.
     assert "--new-host" in command
     assert command.count("--template") == 2
     assert "modal" in command
     assert "main" in command
     # No --reuse (that is only for imbue_cloud pool adoption).
+    assert "--reuse" not in command
+
+
+def test_build_mngr_create_command_modal_proxied_targets_proxied_provider() -> None:
+    """Modal Proxied addresses the ``modal_proxied`` provider instance (keyless mode)."""
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.MODAL_PROXIED,
+        host_name=HostName("hello"),
+    )
+    assert "system-services@hello.modal_proxied" in command
+    # Shares the same provisioning template as Direct.
+    assert command.count("--template") == 2
+    assert "modal" in command
     assert "--reuse" not in command
 
 

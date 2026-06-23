@@ -234,7 +234,11 @@ def test_render_create_form_prefills_values() -> None:
 def test_render_create_form_contains_all_launch_modes() -> None:
     html = render_create_form()
     for mode in LaunchMode:
-        assert mode.value.lower() in html
+        # Assert on the option's ``value=`` attribute (the exact enum value),
+        # not the visible text: some modes render a friendly label instead of
+        # the lowercased value (e.g. the Modal modes show "Modal (1-day
+        # ephemeral) - Direct/Proxied").
+        assert f'value="{mode.value}"' in html
 
 
 def test_render_create_form_selects_lima_by_default_without_account() -> None:
