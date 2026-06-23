@@ -1414,7 +1414,7 @@ def test_chrome_events_sse_returns_workspaces_when_authenticated(tmp_path: Path)
 
 
 class _NoopRemediator(ProducerRemediator):
-    """A producer remediator whose rungs do nothing (the BLOCKED path never calls them)."""
+    """A producer remediator whose remediations do nothing (the BLOCKED path never calls them)."""
 
     def bounce(self) -> None:
         pass

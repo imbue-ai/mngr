@@ -472,7 +472,7 @@ def run(
     )
 
     # Background loop driving the discovery-pipeline watchdog: polls snapshot
-    # freshness, runs the producer bounce -> restart ladder on a stall, and
+    # freshness, runs the producer bounce -> restart remediations on a stall, and
     # transitions the app-global state. Started here (not inside
     # create_desktop_client) so test factories can skip the background thread.
     start_discovery_health_watchdog_loop(

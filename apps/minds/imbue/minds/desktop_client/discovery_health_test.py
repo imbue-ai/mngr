@@ -1,8 +1,8 @@
 """Unit tests for the discovery-pipeline health watchdog state machine.
 
-The watchdog is driven with a fake clock (so the inter-rung waits and the
-stall threshold are deterministic) and a fake producer remediator (so the
-bounce/restart ladder can be asserted without a real supervisor). The
+The watchdog is driven with a fake clock (so the inter-remediation waits and
+the stall threshold are deterministic) and a fake producer remediator (so the
+bounce/restart remediations can be asserted without a real supervisor). The
 background loop that calls ``evaluate`` in production is exercised separately;
 here we call ``evaluate`` / ``record_consumer_death`` directly.
 """
@@ -16,10 +16,11 @@ from pydantic import Field
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.discovery_health import ProducerRemediator
+from imbue.mngr_latchkey.core import LatchkeyError
 
 _T0 = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
 _STALL_SECONDS = 35.0
-_RUNG_WAIT_SECONDS = 15.0
+_REMEDIATION_WAIT_SECONDS = 15.0
 
 
 class _Clock:
@@ -36,15 +37,23 @@ class _Clock:
 
 
 class _FakeRemediator(ProducerRemediator):
-    """Records ladder calls instead of touching a real supervisor."""
+    """Records remediation calls instead of touching a real supervisor.
+
+    ``fail_restart``, when True, makes ``restart`` raise after recording the
+    call -- mirroring a real supervisor restart that fails (the last-resort
+    remediation giving out).
+    """
 
     calls: list[str] = Field(default_factory=list)
+    fail_restart: bool = Field(default=False)
 
     def bounce(self) -> None:
         self.calls.append("bounce")
 
     def restart(self) -> None:
         self.calls.append("restart")
+        if self.fail_restart:
+            raise LatchkeyError("simulated supervisor restart failure")
 
 
 def _make_watchdog(
@@ -53,7 +62,7 @@ def _make_watchdog(
     watchdog = DiscoveryHealthWatchdog(
         remediator=remediator,
         stall_threshold_seconds=_STALL_SECONDS,
-        rung_wait_seconds=_RUNG_WAIT_SECONDS,
+        remediation_wait_seconds=_REMEDIATION_WAIT_SECONDS,
         now_fn=clock,
     )
     # On-change callbacks are no-arg (mirroring the resolver): record the tier
@@ -89,7 +98,7 @@ def test_stall_enters_reconnecting_and_bounces_immediately() -> None:
     assert transitions == [DiscoveryHealth.RECONNECTING]
 
 
-def test_ladder_escalates_bounce_then_restart_then_blocked() -> None:
+def test_remediation_escalates_bounce_then_restart_then_blocked() -> None:
     clock = _Clock(_T0)
     remediator = _FakeRemediator()
     watchdog, transitions = _make_watchdog(clock, remediator)
@@ -99,25 +108,45 @@ def test_ladder_escalates_bounce_then_restart_then_blocked() -> None:
     watchdog.evaluate(_T0)
     assert remediator.calls == ["bounce"]
 
-    # A second evaluate before the inter-rung wait elapses does nothing new.
+    # A second evaluate before the inter-remediation wait elapses does nothing new.
     watchdog.evaluate(_T0)
     assert remediator.calls == ["bounce"]
 
-    # After the rung wait, the next rung is the heavier restart.
-    clock.advance(_RUNG_WAIT_SECONDS)
+    # After the wait, the next (heavier) remediation is the restart.
+    clock.advance(_REMEDIATION_WAIT_SECONDS)
     watchdog.evaluate(_T0)
     assert remediator.calls == ["bounce", "restart"]
     assert watchdog.get_health() is DiscoveryHealth.RECONNECTING
 
-    # After another rung wait with still no freshness, the watchdog gives up.
-    clock.advance(_RUNG_WAIT_SECONDS)
+    # After another wait with still no freshness, the watchdog gives up.
+    clock.advance(_REMEDIATION_WAIT_SECONDS)
     watchdog.evaluate(_T0)
     assert watchdog.get_health() is DiscoveryHealth.BLOCKED
     assert remediator.calls == ["bounce", "restart"]
     assert transitions == [DiscoveryHealth.RECONNECTING, DiscoveryHealth.BLOCKED]
 
 
-def test_recovery_mid_ladder_returns_to_healthy_and_resets_ladder() -> None:
+def test_failed_restart_blocks_immediately_without_waiting_a_poll() -> None:
+    clock = _Clock(_T0)
+    remediator = _FakeRemediator(fail_restart=True)
+    watchdog, transitions = _make_watchdog(clock, remediator)
+
+    clock.advance(40)
+    # Enter RECONNECTING and bounce.
+    watchdog.evaluate(_T0)
+    assert remediator.calls == ["bounce"]
+
+    # After the wait, the restart runs and fails. Because the last-resort
+    # remediation gave out, the watchdog blocks now rather than waiting another
+    # poll to give up to the same terminal state.
+    clock.advance(_REMEDIATION_WAIT_SECONDS)
+    watchdog.evaluate(_T0)
+    assert remediator.calls == ["bounce", "restart"]
+    assert watchdog.get_health() is DiscoveryHealth.BLOCKED
+    assert transitions == [DiscoveryHealth.RECONNECTING, DiscoveryHealth.BLOCKED]
+
+
+def test_recovery_mid_remediation_returns_to_healthy_and_resets() -> None:
     clock = _Clock(_T0)
     remediator = _FakeRemediator()
     watchdog, transitions = _make_watchdog(clock, remediator)
@@ -128,12 +157,12 @@ def test_recovery_mid_ladder_returns_to_healthy_and_resets_ladder() -> None:
     assert watchdog.get_health() is DiscoveryHealth.RECONNECTING
 
     # A fresh snapshot (stamped at the current time) restores health and resets
-    # the ladder bookkeeping.
+    # the remediation bookkeeping.
     fresh = clock()
     watchdog.evaluate(fresh)
     assert watchdog.get_health() is DiscoveryHealth.HEALTHY
 
-    # A subsequent stall starts the ladder over from the cheap bounce.
+    # A subsequent stall starts remediation over from the cheap bounce.
     clock.advance(40)
     watchdog.evaluate(fresh)
     assert remediator.calls == ["bounce", "bounce"]
@@ -208,7 +237,7 @@ def test_cold_start_has_grace_then_stalls_when_no_first_snapshot() -> None:
     assert remediator.calls == []
 
     # Past the grace window with still no first snapshot, the cold-start
-    # backstop kicks the ladder.
+    # backstop kicks off remediation.
     clock.advance(40)
     watchdog.evaluate(None)
     assert watchdog.get_health() is DiscoveryHealth.RECONNECTING
@@ -220,14 +249,14 @@ def test_cold_start_that_never_recovers_reaches_blocked() -> None:
     remediator = _FakeRemediator()
     watchdog, _transitions = _make_watchdog(clock, remediator)
 
-    # Anchor the baseline (healthy), then never deliver a first snapshot: the
-    # ladder runs to exhaustion and the watchdog blocks.
+    # Anchor the baseline (healthy), then never deliver a first snapshot:
+    # remediation runs to exhaustion and the watchdog blocks.
     watchdog.evaluate(None)
     clock.advance(40)
     watchdog.evaluate(None)
-    clock.advance(_RUNG_WAIT_SECONDS)
+    clock.advance(_REMEDIATION_WAIT_SECONDS)
     watchdog.evaluate(None)
-    clock.advance(_RUNG_WAIT_SECONDS)
+    clock.advance(_REMEDIATION_WAIT_SECONDS)
     watchdog.evaluate(None)
 
     assert watchdog.get_health() is DiscoveryHealth.BLOCKED

@@ -4542,8 +4542,8 @@ def _run_system_interface_health_probe_loop(
 
 
 # How often the discovery-health watchdog re-reads the resolver's snapshot
-# freshness. Comfortably below the watchdog's inter-rung wait so a due ladder
-# rung fires within a tick or two of becoming due.
+# freshness. Comfortably below the watchdog's inter-remediation wait so a due
+# producer remediation fires within a tick or two of becoming due.
 _DISCOVERY_WATCHDOG_POLL_INTERVAL_SECONDS: Final[float] = 5.0
 
 
@@ -4556,7 +4556,7 @@ def start_discovery_health_watchdog_loop(
 
     Each tick reads the resolver's ``last_full_snapshot_at`` and hands it to
     ``watchdog.evaluate``, which detects a producer stall, runs the
-    bounce -> restart ladder, and escalates to BLOCKED. The thread no-ops when
+    bounce -> restart remediations, and escalates to BLOCKED. The thread no-ops when
     there is no concurrency group (test factories that skip background threads).
     """
     if root_concurrency_group is None:

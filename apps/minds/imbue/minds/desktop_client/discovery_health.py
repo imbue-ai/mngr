@@ -18,11 +18,12 @@ fed from a background loop and the consumer's lifecycle watcher respectively:
   pipeline itself is broken rather than that a provider is down, because a
   provider outage keeps discovery *fresh* (snapshots keep flowing with the
   failure folded into ``error_by_provider_name``). On a stall the watchdog runs
-  a cheap->heavy producer ladder, with a ~one-poll wait between rungs:
+  two cheap->heavy producer remediations, with a ~one-poll wait between them:
   ``bounce`` (SIGHUP the supervisor's observe child; gateway + reverse tunnels
   untouched -- fixes a dead/stuck observe), then ``restart`` (full supervisor
-  restart -- fixes a wedged supervisor), then give up.
-- *Consumer death* -- the consumer subprocess exited. The producer ladder
+  restart -- fixes a wedged supervisor). If freshness still does not return,
+  or the ``restart`` itself fails, it gives up to ``BLOCKED``.
+- *Consumer death* -- the consumer subprocess exited. Producer remediation
   cannot fix a dead consumer (and respawning the consumer is out of scope), so
   this transitions straight to the terminal ``BLOCKED`` tier.
 
@@ -33,11 +34,11 @@ Electron shell, so respawning it is heavyweight and risks a port rebind.
 Health is a three-state machine surfaced to the chrome:
 
 - ``HEALTHY`` -- pipeline fresh; nothing surfaced.
-- ``RECONNECTING`` -- producer stall detected; the ladder is healing in the
+- ``RECONNECTING`` -- producer stall detected; remediation is healing in the
   background. The currently-loaded workspace still works, so nothing new is
   surfaced (the providers panel's "time since last discovery" counter is the
   only passive signal).
-- ``BLOCKED`` -- the ladder was exhausted, the consumer died, or a cold start
+- ``BLOCKED`` -- remediation was exhausted, the consumer died, or a cold start
   never produced a first snapshot. Forwarding is down / the app is unusable;
   the chrome redirects the whole app to an error-takeover screen. ``BLOCKED``
   is terminal: once entered it stays until the user restarts the app.
@@ -70,9 +71,9 @@ from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 # never fight over a single slow-but-healthy poll.
 _DEFAULT_STALL_THRESHOLD_SECONDS: Final[float] = 35.0
 
-# How long the watchdog waits after performing a ladder rung for freshness to
-# return before escalating to the next rung. ~one discovery poll cycle.
-_DEFAULT_RUNG_WAIT_SECONDS: Final[float] = 15.0
+# How long the watchdog waits after a producer remediation for freshness to
+# return before escalating to the next one. ~one discovery poll cycle.
+_DEFAULT_REMEDIATION_WAIT_SECONDS: Final[float] = 15.0
 
 
 def _utc_now() -> datetime:
@@ -88,12 +89,14 @@ class DiscoveryHealth(str, Enum):
 
 
 class ProducerRemediator(MutableModel, ABC):
-    """The producer-side restart ladder primitives the watchdog drives.
+    """The two producer-side remediations the watchdog drives, cheap -> heavy.
 
-    Two rungs, cheap -> heavy. Implementations MUST NOT raise: a rung that
-    fails is treated by the watchdog as "did not help" (the next freshness
-    check decides whether to escalate), so concrete implementations swallow and
-    log their own backend errors.
+    ``bounce`` is best-effort and MUST NOT raise: a failed bounce is treated by
+    the watchdog as "did not help" and the heavier ``restart`` is tried next, so
+    implementations swallow and log their own bounce errors. ``restart`` is the
+    last resort and MAY raise ``LatchkeyError``: a failed restart is a hard
+    failure with nothing left to try, which the watchdog surfaces as terminal
+    ``BLOCKED`` immediately.
     """
 
     @abstractmethod
@@ -102,7 +105,7 @@ class ProducerRemediator(MutableModel, ABC):
 
     @abstractmethod
     def restart(self) -> None:
-        """Fully restart the supervisor (bounces the gateway + reverse tunnels)."""
+        """Fully restart the supervisor (bounces the gateway + reverse tunnels); may raise ``LatchkeyError``."""
 
 
 class SupervisorProducerRemediator(ProducerRemediator):
@@ -110,9 +113,10 @@ class SupervisorProducerRemediator(ProducerRemediator):
 
     ``bounce`` maps to :meth:`LatchkeyForwardSupervisor.bounce` (SIGHUP the
     observe child, start-if-down) and ``restart`` to
-    :meth:`LatchkeyForwardSupervisor.restart` (terminate + respawn). Both
-    swallow ``LatchkeyError`` so a failed remediation degrades to "did not
-    help" rather than crashing the watchdog loop.
+    :meth:`LatchkeyForwardSupervisor.restart` (terminate + respawn). ``bounce``
+    swallows ``LatchkeyError`` so a failed re-kick degrades to "did not help"
+    and escalates; ``restart`` lets it propagate so the watchdog can block on a
+    failure of the last-resort remediation.
     """
 
     supervisor: LatchkeyForwardSupervisor = Field(description="The detached latchkey forward supervisor to re-kick.")
@@ -124,10 +128,7 @@ class SupervisorProducerRemediator(ProducerRemediator):
             logger.warning("Discovery watchdog: producer bounce failed: {}", e)
 
     def restart(self) -> None:
-        try:
-            self.supervisor.restart()
-        except LatchkeyError as e:
-            logger.warning("Discovery watchdog: producer restart failed: {}", e)
+        self.supervisor.restart()
 
 
 # No-arg, mirroring the resolver's own change callbacks: consumers re-read
@@ -137,7 +138,7 @@ OnChangeCallback = Callable[[], None]
 
 
 class DiscoveryHealthWatchdog(MutableModel):
-    """Three-state discovery-pipeline health machine + producer-restart ladder.
+    """Three-state discovery-pipeline health machine + producer remediation.
 
     Construct one per minds process. Drive it from two sources:
 
@@ -150,14 +151,14 @@ class DiscoveryHealthWatchdog(MutableModel):
     surfaces the ``BLOCKED`` transition.
     """
 
-    remediator: ProducerRemediator = Field(description="Producer-side bounce/restart ladder primitives.")
+    remediator: ProducerRemediator = Field(description="Producer-side bounce/restart remediations.")
     stall_threshold_seconds: float = Field(
         default=_DEFAULT_STALL_THRESHOLD_SECONDS,
         description="Seconds since the last full snapshot before the pipeline is treated as stalled.",
     )
-    rung_wait_seconds: float = Field(
-        default=_DEFAULT_RUNG_WAIT_SECONDS,
-        description="Seconds to wait after a ladder rung for freshness to return before escalating.",
+    remediation_wait_seconds: float = Field(
+        default=_DEFAULT_REMEDIATION_WAIT_SECONDS,
+        description="Seconds to wait after a producer remediation for freshness to return before escalating.",
     )
     now_fn: Callable[[], datetime] = Field(
         default=_utc_now,
@@ -172,11 +173,12 @@ class DiscoveryHealthWatchdog(MutableModel):
     # the cold-start case (no snapshot has ever arrived, so there is no
     # ``last_full_snapshot_at`` to age). Set on the first ``evaluate`` call.
     _started_at: datetime | None = PrivateAttr(default=None)
-    # How many ladder rungs have run in the current stall: 0 = none, 1 =
-    # bounced, 2 = restarted. Reset to 0 on recovery.
-    _rungs_attempted: int = PrivateAttr(default=0)
-    # When the most recent ladder rung ran, for the inter-rung wait.
-    _last_rung_at: datetime | None = PrivateAttr(default=None)
+    # Which producer remediations have run in the current stall. Both reset to
+    # False on recovery; ``restart`` is only tried after ``bounce``.
+    _bounce_attempted: bool = PrivateAttr(default=False)
+    _restart_attempted: bool = PrivateAttr(default=False)
+    # When the most recent remediation ran, for the inter-remediation wait.
+    _last_remediation_at: datetime | None = PrivateAttr(default=None)
     _on_change_callbacks: list[OnChangeCallback] = PrivateAttr(default_factory=list)
 
     # -- Public callback registration -------------------------------------
@@ -211,7 +213,7 @@ class DiscoveryHealthWatchdog(MutableModel):
 
         A dead consumer means no snapshots will ever be folded into the
         resolver again, and -- because it is also the traffic proxy -- agent
-        forwarding is down. The producer ladder cannot help, so this bypasses
+        forwarding is down. Producer remediation cannot help, so this bypasses
         the stall timer entirely. Idempotent once ``BLOCKED``.
         """
         if self._set_blocked():
@@ -223,8 +225,9 @@ class DiscoveryHealthWatchdog(MutableModel):
         Called every poll by the watchdog loop with the resolver's most recent
         ``last_full_snapshot_at`` (``None`` if no snapshot has arrived yet).
         Transitions HEALTHY <-> RECONNECTING on the stall edge, performs the
-        next due ladder rung while stalled, and escalates to terminal
-        ``BLOCKED`` once the ladder is exhausted. A no-op once ``BLOCKED``.
+        next due producer remediation while stalled, and escalates to terminal
+        ``BLOCKED`` once remediation is exhausted (or a ``restart`` fails). A
+        no-op once ``BLOCKED``.
         """
         now = self.now_fn()
         action: Callable[[], None] | None = None
@@ -238,18 +241,29 @@ class DiscoveryHealthWatchdog(MutableModel):
                 if self._health != DiscoveryHealth.HEALTHY:
                     self._health = DiscoveryHealth.HEALTHY
                     fire = DiscoveryHealth.HEALTHY
-                self._rungs_attempted = 0
-                self._last_rung_at = None
+                self._bounce_attempted = False
+                self._restart_attempted = False
+                self._last_remediation_at = None
             else:
-                action, fire_from_ladder = self._advance_ladder_locked(now)
+                action, fire_from_remediation = self._next_remediation_locked(now)
                 if self._health == DiscoveryHealth.HEALTHY:
                     self._health = DiscoveryHealth.RECONNECTING
                     fire = DiscoveryHealth.RECONNECTING
-                if fire_from_ladder is not None:
-                    fire = fire_from_ladder
+                if fire_from_remediation is not None:
+                    fire = fire_from_remediation
         # Perform the chosen remediation and fire callbacks outside the lock.
+        # Only ``restart`` may raise (``bounce`` is best-effort); a failed
+        # restart is the last-resort remediation giving out, so block now
+        # rather than waiting a poll to give up to the same terminal state.
         if action is not None:
-            action()
+            try:
+                action()
+            except LatchkeyError as e:
+                logger.error("Discovery watchdog: producer restart failed; blocking immediately: {}", e)
+                with self._lock:
+                    if self._health != DiscoveryHealth.BLOCKED:
+                        self._health = DiscoveryHealth.BLOCKED
+                        fire = DiscoveryHealth.BLOCKED
         if fire is not None:
             self._fire_on_change()
 
@@ -269,33 +283,34 @@ class DiscoveryHealthWatchdog(MutableModel):
         baseline = self._started_at if self._started_at is not None else now
         return (now - baseline).total_seconds() > self.stall_threshold_seconds
 
-    def _advance_ladder_locked(self, now: datetime) -> tuple[Callable[[], None] | None, DiscoveryHealth | None]:
-        """Return the next due ladder action and any health transition (must hold ``_lock``).
+    def _next_remediation_locked(self, now: datetime) -> tuple[Callable[[], None] | None, DiscoveryHealth | None]:
+        """Return the next due remediation and any health transition (must hold ``_lock``).
 
-        Rung 0 -> bounce immediately. Rung 1 -> restart once ``rung_wait_seconds``
-        has elapsed since the bounce. Rung 2 -> give up (transition to
-        ``BLOCKED``) once ``rung_wait_seconds`` has elapsed since the restart.
-        Returns ``(action, fire)`` where either may be ``None`` (e.g. waiting
-        out the inter-rung interval).
+        Bounce immediately if not yet bounced. Otherwise, once
+        ``remediation_wait_seconds`` has elapsed: restart if not yet restarted,
+        else give up (transition to ``BLOCKED``). Returns ``(action, fire)``
+        where either may be ``None`` (e.g. waiting out the inter-remediation
+        interval). A ``restart`` that *fails* is handled by the caller, which
+        blocks immediately rather than reaching the give-up branch here.
         """
-        if self._rungs_attempted == 0:
-            self._rungs_attempted = 1
-            self._last_rung_at = now
+        if not self._bounce_attempted:
+            self._bounce_attempted = True
+            self._last_remediation_at = now
             return self.remediator.bounce, None
-        if not self._rung_wait_elapsed_locked(now):
+        if not self._remediation_wait_elapsed_locked(now):
             return None, None
-        if self._rungs_attempted == 1:
-            self._rungs_attempted = 2
-            self._last_rung_at = now
+        if not self._restart_attempted:
+            self._restart_attempted = True
+            self._last_remediation_at = now
             return self.remediator.restart, None
         self._health = DiscoveryHealth.BLOCKED
         return None, DiscoveryHealth.BLOCKED
 
-    def _rung_wait_elapsed_locked(self, now: datetime) -> bool:
-        """Whether ``rung_wait_seconds`` has elapsed since the last rung (must hold ``_lock``)."""
-        if self._last_rung_at is None:
+    def _remediation_wait_elapsed_locked(self, now: datetime) -> bool:
+        """Whether ``remediation_wait_seconds`` has elapsed since the last remediation (must hold ``_lock``)."""
+        if self._last_remediation_at is None:
             return True
-        return (now - self._last_rung_at).total_seconds() >= self.rung_wait_seconds
+        return (now - self._last_remediation_at).total_seconds() >= self.remediation_wait_seconds
 
     def _set_blocked(self) -> bool:
         """Force the terminal ``BLOCKED`` tier; return True if this call transitioned it."""
