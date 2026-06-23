@@ -114,8 +114,8 @@ class _BaseHandler(logging.Handler):
 
     def _can_record(self, record: logging.LogRecord) -> bool:
         """Prevents ignored loggers from recording"""
-        for logger in _IGNORED_LOGGERS:
-            if fnmatch(record.name, logger):
+        for logger_ in _IGNORED_LOGGERS:
+            if fnmatch(record.name, logger_):
                 return False
         return True
 
@@ -278,7 +278,7 @@ class SentryEventHandler(_BaseHandler):
             event, hint, callbacks = future.result(timeout=timeout)
             executor.shutdown()
             return event, hint, callbacks
-        except TimeoutError as e:
+        except TimeoutError:
             executor.shutdown(wait=False)
             self.add_extra_info_previously_timed_out = True
 
