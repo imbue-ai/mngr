@@ -43,6 +43,8 @@ whether further traffic arrives.
 import threading
 import time
 from collections.abc import Callable
+from datetime import datetime
+from datetime import timezone
 from enum import Enum
 from typing import Final
 
@@ -108,6 +110,16 @@ class _AgentRecord(MutableModel):
             "time.monotonic() of the first probe failure in the current unbroken run of "
             "probe failures, or None if the last probe succeeded or no probe has run yet. "
             "The HEALTHY -> STUCK transition fires once this run reaches stuck_threshold_seconds."
+        ),
+    )
+    failure_run_started_wall_at: datetime | None = Field(
+        default=None,
+        description=(
+            "Wall-clock (UTC) companion to ``failure_run_started_at``, captured at the same "
+            "moment. ``failure_run_started_at`` is monotonic (correct for the stuck-threshold "
+            "duration math but not comparable to wall-clock timestamps); this field exists so "
+            "the recovery redirect can compare the outage onset against discovery snapshot "
+            "timestamps. None whenever ``failure_run_started_at`` is None."
         ),
     )
     last_restart_error: str | None = Field(
@@ -214,6 +226,7 @@ class SystemInterfaceHealthTracker(MutableModel):
             now = time.monotonic()
             if record.failure_run_started_at is None:
                 record.failure_run_started_at = now
+                record.failure_run_started_wall_at = datetime.now(timezone.utc)
             elapsed = now - record.failure_run_started_at
             if elapsed + 1e-6 < self.stuck_threshold_seconds:
                 return
@@ -280,6 +293,7 @@ class SystemInterfaceHealthTracker(MutableModel):
         with self._lock:
             record = self._records.setdefault(aid_str, _AgentRecord())
             record.failure_run_started_at = None
+            record.failure_run_started_wall_at = None
             # A fresh restart attempt supersedes any prior failure reason.
             record.last_restart_error = None
             if record.health != AgentHealth.RESTARTING:
@@ -301,6 +315,7 @@ class SystemInterfaceHealthTracker(MutableModel):
         with self._lock:
             record = self._records.setdefault(aid_str, _AgentRecord())
             record.failure_run_started_at = None
+            record.failure_run_started_wall_at = None
             record.last_restart_error = error
             # Always re-fire: a second failure with a new reason must reach
             # the recovery page even if the state is already RESTART_FAILED.
@@ -322,6 +337,21 @@ class SystemInterfaceHealthTracker(MutableModel):
             if record is None:
                 return None
             return record.last_restart_error
+
+    def get_failure_run_started_wall_at(self, agent_id: AgentId) -> datetime | None:
+        """Return the wall-clock (UTC) start of the current probe-failure run, or None.
+
+        Approximates the outage onset -- the run begins on the first failed probe,
+        which is when the workspace stopped answering. The recovery redirect uses
+        this to require a discovery snapshot taken *after* the outage began before
+        it trusts the snapshot's host state. None when no probe-failure run is
+        active (the agent is healthy, or was force-marked STUCK without a run).
+        """
+        with self._lock:
+            record = self._records.get(str(agent_id))
+            if record is None:
+                return None
+            return record.failure_run_started_wall_at
 
     def snapshot_all(self) -> dict[AgentId, AgentHealth]:
         """Return a copy of all currently-tracked non-HEALTHY agents.

@@ -1,6 +1,8 @@
 """Unit tests for SystemInterfaceHealthTracker."""
 
 import threading
+from datetime import datetime
+from datetime import timezone
 
 import pytest
 
@@ -97,6 +99,34 @@ def test_sustained_probe_failures_transition_to_stuck() -> None:
 
     assert tracker.get_health(aid) == AgentHealth.STUCK
     assert seen == [(aid, AgentHealth.STUCK)]
+
+
+def test_failure_run_wall_onset_is_recorded_then_cleared() -> None:
+    """The wall-clock outage onset is captured when the probe-failure run begins
+    and cleared when the agent leaves the failing state.
+
+    The recovery redirect compares this onset against discovery snapshot
+    timestamps, so it must track the run: set on the first failure, gone once a
+    restart supersedes it.
+    """
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    aid = AgentId.generate()
+
+    # No probe-failure run yet -> no onset.
+    assert tracker.get_failure_run_started_wall_at(aid) is None
+
+    before = datetime.now(timezone.utc)
+    _drive_to_stuck(tracker, aid)
+    after = datetime.now(timezone.utc)
+
+    onset = tracker.get_failure_run_started_wall_at(aid)
+    assert onset is not None
+    # Captured at the first probe failure, so it falls within the driven window.
+    assert before <= onset <= after
+
+    # A restart supersedes the run, clearing the onset.
+    tracker.mark_restarting(aid)
+    assert tracker.get_failure_run_started_wall_at(aid) is None
 
 
 def test_probe_failure_without_record_is_ignored() -> None:

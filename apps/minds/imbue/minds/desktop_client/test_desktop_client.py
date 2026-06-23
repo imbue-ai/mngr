@@ -2077,32 +2077,85 @@ def test_is_discovery_fresh_distinguishes_recent_from_stale_and_missing() -> Non
     assert _is_discovery_fresh(None) is False
 
 
-def test_should_emit_system_interface_status_gates_stuck_on_discovery_freshness() -> None:
-    """The recovery redirect (driven by a STUCK status push) waits for fresh discovery.
+def _drive_to_stuck_with_onset(tracker: SystemInterfaceHealthTracker, agent_id: AgentId) -> datetime:
+    """Drive ``agent_id`` to STUCK via the real probe path and return its onset.
 
-    STUCK is the only status the chrome redirects on, so it is suppressed while
-    discovery is stale -- keeping the user on the auto-refreshing loader -- and
-    emitted once a fresh snapshot lands. Other statuses never gate the redirect.
+    A zero stuck-threshold makes the first probe failure stick immediately, so the
+    outage onset is recorded deterministically without sleeping.
+    """
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+    assert tracker.get_health(agent_id) == AgentHealth.STUCK
+    onset = tracker.get_failure_run_started_wall_at(agent_id)
+    assert onset is not None
+    return onset
+
+
+def test_should_emit_system_interface_status_gates_stuck_on_post_onset_snapshot() -> None:
+    """The recovery redirect waits for a discovery snapshot taken *after* the outage began.
+
+    STUCK is the only status the chrome redirects on. A snapshot that predates the
+    outage still carries the pre-outage host state (a just-stopped container still
+    reads RUNNING), so it must not promote the redirect -- only a snapshot at or
+    after the outage onset does. Other statuses never gate the redirect.
     """
     resolver = MngrCliBackendResolver()
-    # Cold start, no snapshot yet: a STUCK agent must not be redirected.
-    assert _should_emit_system_interface_status(resolver, AgentHealth.STUCK) is False
-    # Non-STUCK statuses do not drive the redirect, so they are never gated.
-    assert _should_emit_system_interface_status(resolver, AgentHealth.RESTARTING) is True
-    assert _should_emit_system_interface_status(resolver, AgentHealth.RESTART_FAILED) is True
-    assert _should_emit_system_interface_status(resolver, AgentHealth.HEALTHY) is True
-    # A fresh snapshot promotes STUCK to a redirect.
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    agent_id = AgentId.generate()
+
+    # Non-STUCK statuses do not drive the redirect, so they are never gated --
+    # even with no discovery snapshot and no recorded onset.
+    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.RESTARTING) is True
+    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.RESTART_FAILED) is True
+    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.HEALTHY) is True
+
+    onset = _drive_to_stuck_with_onset(tracker, agent_id)
+
+    # A recent snapshot that nonetheless predates the outage is the exact bug case:
+    # it is well within the absolute freshness window but still shows the pre-outage
+    # host state, so it must stay suppressed.
+    resolver.update_providers(
+        providers=(), error_by_provider_name={}, last_full_snapshot_at=onset - timedelta(seconds=1)
+    )
+    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.STUCK) is False
+
+    # A snapshot taken after the outage began reflects it; promote the redirect.
+    resolver.update_providers(
+        providers=(), error_by_provider_name={}, last_full_snapshot_at=onset + timedelta(seconds=1)
+    )
+    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.STUCK) is True
+
+
+def test_should_emit_system_interface_status_without_onset_falls_back_to_age() -> None:
+    """Without a recorded onset, STUCK gating falls back to the absolute-age freshness check.
+
+    Only the force-``mark_stuck`` path (used in tests) reaches STUCK without a
+    probe-failure run, so there is no onset to compare against; the gate then
+    behaves as before -- cold start suppresses, a recent snapshot promotes. A
+    missing tracker entirely is treated the same way.
+    """
+    resolver = MngrCliBackendResolver()
+    tracker = SystemInterfaceHealthTracker()
+    agent_id = AgentId.generate()
+    tracker.mark_stuck(agent_id)
+    assert tracker.get_failure_run_started_wall_at(agent_id) is None
+
+    # Cold start, no snapshot yet: suppressed.
+    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.STUCK) is False
+    # A recent snapshot promotes via the age fallback.
     resolver.update_providers(
         providers=(), error_by_provider_name={}, last_full_snapshot_at=datetime.now(timezone.utc)
     )
-    assert _should_emit_system_interface_status(resolver, AgentHealth.STUCK) is True
-    # A snapshot past the freshness window (a stalled pipeline) suppresses it again.
+    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.STUCK) is True
+    # A stale snapshot (a stalled pipeline) suppresses it again.
     resolver.update_providers(
         providers=(),
         error_by_provider_name={},
         last_full_snapshot_at=datetime.now(timezone.utc) - timedelta(minutes=5),
     )
-    assert _should_emit_system_interface_status(resolver, AgentHealth.STUCK) is False
+    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.STUCK) is False
+    # No tracker at all behaves identically to a missing onset.
+    assert _should_emit_system_interface_status(resolver, None, agent_id, AgentHealth.STUCK) is False
 
 
 def test_recovery_page_requires_authentication(tmp_path: Path) -> None:
