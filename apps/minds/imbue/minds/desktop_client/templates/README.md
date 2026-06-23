@@ -57,7 +57,7 @@ root of `templates/`. Auth-flow components live under `templates/auth/`.
 |---|---|
 | `Notice` | Info / warn / success / error banner. Use HTML attribute passthrough (`id=`, `class="hidden"`) for JS-toggled messages. |
 | `StatusBadge` | Compact pill. `variant="neutral"` / `success` / `error` / `warn` / `info`. |
-| `Badge` | Notification badge on the `important` hue. `count` set -> a count pill (`type-badge` text, caps at 99+); no `count` -> an 8px dot. The titlebar requests button shows the count inline beside the icon (icon + badge in a `gap-[3px]` row; chrome.js sets the text + toggles `class="hidden"`). Carries no position; the caller places it. |
+| `Badge` | Notification badge on the `important` hue. `count` set -> a count pill (`type-badge` text, caps at 99+); no `count` -> an 8px dot. The titlebar requests button shows the count inline beside the icon (icon + badge in a `gap-[3px]` row; chrome.js sets the text + toggles the native `hidden` attribute -- not a `hidden` class, which the pill's baked-in `inline-flex` would beat). Carries no position; the caller places it. |
 | `Spinner` | CSS-only animated circle. `size="sm"` / `"md"` / `"lg"` ; `tone="default"` / `"accent"` (blue, for primary-action spinners). |
 
 ### Icons
