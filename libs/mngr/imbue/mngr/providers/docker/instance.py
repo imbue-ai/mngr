@@ -1486,6 +1486,10 @@ kill -TERM 1
             # Stop the host first (without creating a snapshot since we're destroying).
             try:
                 self.stop_host(host, create_snapshot=False)
+            except docker.errors.NotFound:
+                # Container already gone -- benign (defensive: stop_host happens to
+                # swallow this today, but that is not part of its contract).
+                pass
             except docker.errors.DockerException as e:
                 logger.warning("Failed to stop container for host {}: {}", host_id, e)
                 failures.append(
