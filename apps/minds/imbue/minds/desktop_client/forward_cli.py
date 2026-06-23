@@ -357,9 +357,7 @@ class EnvelopeStreamConsumer(MutableModel):
             for aid in event.agent_ids:
                 self._handle_agent_destroyed(aid)
         elif isinstance(event, DiscoveryErrorEvent):
-            logger.info(
-                "Discovery error from {}: {} ({})", event.source_name, event.error_message, event.error_type
-            )
+            logger.info("Discovery error from {}: {} ({})", event.source_name, event.error_message, event.error_type)
         else:
             # parse_discovery_event_line returns the union we already
             # exhaustively enumerated above; an unknown event type means
@@ -622,7 +620,9 @@ class EnvelopeStreamConsumer(MutableModel):
                 try:
                     callback(agent_id, reason, status_code)
                 except (OSError, RuntimeError, ValueError) as e:
-                    logger.opt(exception=e).error("system_interface_backend_failure callback failed for {}: {}", agent_id, e)
+                    logger.opt(exception=e).error(
+                        "system_interface_backend_failure callback failed for {}: {}", agent_id, e
+                    )
         elif payload_type == "listening":
             self._handle_listening(payload)
         elif payload_type == "login_url":

@@ -3007,9 +3007,7 @@ def _perform_mind_host_action(
     """
     services_agent_id = backend_resolver.get_system_services_agent_id(workspace_agent_id)
     if services_agent_id is None:
-        logger.error(
-            "Could not locate the system-services agent for host {} on {}", action.value, workspace_agent_id
-        )
+        logger.error("Could not locate the system-services agent for host {} on {}", action.value, workspace_agent_id)
         return False
     host_id = _resolve_host_id(backend_resolver, workspace_agent_id)
     env = dict(os.environ)
@@ -3285,7 +3283,9 @@ def _run_host_health_probe(
         # Failed to launch the process at all (no body); continue with an empty
         # listing and surface the reason on the host-state rows.
         list_error = str(exc)
-        logger.opt(exception=exc).error("`mngr list` for host-health probe of {} did not run: {}", agent_id, list_error)
+        logger.opt(exception=exc).error(
+            "`mngr list` for host-health probe of {} did not run: {}", agent_id, list_error
+        )
     list_json: str | None = list_stdout or None
     if provider_error is None:
         provider_error = extract_provider_error(list_json, provider_name)

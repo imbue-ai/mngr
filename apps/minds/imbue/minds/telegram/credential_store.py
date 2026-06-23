@@ -82,7 +82,9 @@ def load_agent_bot_credentials(
     try:
         return TelegramBotCredentials.model_validate(raw)
     except ValidationError as exc:
-        logger.opt(exception=exc).error("Bot credentials file has invalid schema for agent {} ({}): {}", agent_id, creds_path, exc)
+        logger.opt(exception=exc).error(
+            "Bot credentials file has invalid schema for agent {} ({}): {}", agent_id, creds_path, exc
+        )
         return None
 
 

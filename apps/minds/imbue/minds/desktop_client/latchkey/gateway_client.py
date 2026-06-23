@@ -400,7 +400,9 @@ class LatchkeyGatewayClient(MutableModel):
                         try:
                             data = json.loads(line)
                         except json.JSONDecodeError as e:
-                            logger.opt(exception=e).error("Could not parse permission-requests JSONL line {!r}: {}", line, e)
+                            logger.opt(exception=e).error(
+                                "Could not parse permission-requests JSONL line {!r}: {}", line, e
+                            )
                             continue
                         try:
                             yield StreamedPermissionRequest.model_validate(data)

@@ -266,7 +266,9 @@ def _parse_in_container_probe(stdout: str | None) -> _InContainerProbe:
     try:
         payload = json.loads(json_line)
     except json.JSONDecodeError as exc:
-        logger.opt(exception=exc).error("In-container probe emitted a non-JSON payload line ({!r}): {}", json_line, exc)
+        logger.opt(exception=exc).error(
+            "In-container probe emitted a non-JSON payload line ({!r}): {}", json_line, exc
+        )
         return _InContainerProbe(sentinel_seen=True, raw_stdout=stdout)
     if not isinstance(payload, dict):
         return _InContainerProbe(sentinel_seen=True, raw_stdout=stdout)
