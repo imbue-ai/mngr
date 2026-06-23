@@ -177,18 +177,20 @@ _BOX_PREP_SSH_TIMEOUT_SECONDS: Final[float] = 1800.0
 
 
 @contextmanager
-def _box_ssh_host_key_options(server_address: str, box_host_public_key: str | None) -> Iterator[list[str]]:
-    """Yield ssh ``-o`` options pinning the box's host key when it is known.
+def _box_ssh_host_key_options(server_address: str, box_host_public_key: str) -> Iterator[list[str]]:
+    """Yield ssh ``-o`` options that strictly pin the box's recorded host key.
 
-    The provision flow injects the box's host key at OS reinstall, so it pins
-    strictly here (no trust-on-first-use). The standalone ``prep`` command on a box
-    we did not reinstall has no key to pin yet and falls back to accept-new
-    (operator-driven first contact; the key is later captured by the keyscan
-    backfill or a re-provision).
+    Every box SSH pins the box's sshd host key -- there is no trust-on-first-use
+    fallback. The key is injected by us at OS reinstall (``server setup``) and
+    recorded on the ``bare_metal_servers`` row, or captured once by the sanctioned
+    ``admin pool backfill-host-keys`` keyscan; callers fail closed when it is
+    absent rather than reaching this helper.
     """
     if not box_host_public_key:
-        yield ["-o", "StrictHostKeyChecking=accept-new"]
-        return
+        raise BareMetalProvisioningError(
+            f"no recorded box host key to pin for {server_address}; refusing to SSH without strict host-key "
+            "checking (run `admin server setup` or the one-time `admin pool backfill-host-keys` first)"
+        )
     known_hosts_fd, known_hosts_path = tempfile.mkstemp(prefix="mngr_box_known_hosts_")
     os.close(known_hosts_fd)
     try:
@@ -203,7 +205,7 @@ def _run_root_script_over_ssh(
     ssh_user: str,
     private_key_path: Path,
     script: str,
-    box_host_public_key: str | None = None,
+    box_host_public_key: str,
 ) -> None:
     """Pipe a bash script to ``sudo bash`` on the box over SSH (base64 to dodge quoting)."""
     encoded = base64.b64encode(script.encode()).decode()
@@ -233,7 +235,9 @@ def _run_root_script_over_ssh(
 
 
 @server.command(name="prep")
-@click.option("--server-address", required=True, help="SSH-reachable address of the freshly-installed box.")
+@click.option(
+    "--server-id", required=True, help="bare_metal_servers row id (from `register`/`order`) of the box to prep."
+)
 @click.option("--ssh-user", default="debian", help="Bootstrap SSH user (the OS image's default cloud user).")
 @click.option("--lima-service-user", default="limahost", help="Dedicated non-root user to create for the lima VMs.")
 @click.option("--lima-version", default=DEFAULT_LIMA_VERSION, help="Lima release to install on the box.")
@@ -243,8 +247,14 @@ def _run_root_script_over_ssh(
     show_default=True,
     help="Guest OS image to stage on the box once (slices boot from this via file://, never the mirror).",
 )
+@click.option("--database-url", default=None, help="Neon pool DB DSN (defaults to the activated env's secrets).")
 def prep_box(
-    server_address: str, ssh_user: str, lima_service_user: str, lima_version: str, slice_base_image_url: str
+    server_id: str,
+    ssh_user: str,
+    lima_service_user: str,
+    lima_version: str,
+    slice_base_image_url: str,
+    database_url: str | None,
 ) -> None:
     """Install QEMU + lima + tooling on a delivered box, create the lima user, stage the OS image.
 
@@ -252,7 +262,22 @@ def prep_box(
     service user so the admin CLI can bake slices and the connector can tear them
     down, and stages the slice guest OS image once so bakes never depend on the
     Debian mirror. Run after the OS install, before ``admin pool create --backend slice``.
+
+    The box SSH strictly pins the box's recorded sshd host key (no
+    trust-on-first-use); the key is injected by ``server setup`` (OS reinstall) or
+    captured once by ``admin pool backfill-host-keys``. Fails closed if the row has
+    no recorded host key.
     """
+    dsn = resolve_pool_database_url(database_url)
+    server = _fetch_server_or_raise(dsn, server_id)
+    if not server.public_address:
+        raise BareMetalProvisioningError(f"server {server_id} has no public_address; cannot reach the box to prep it")
+    if not server.box_host_public_key:
+        raise BareMetalProvisioningError(
+            f"server {server_id} has no recorded box host key to pin; run `admin server setup` (reinstalls the OS "
+            "with our injected key) or the one-time `admin pool backfill-host-keys` before prepping"
+        )
+    server_address = server.public_address
     with _pool_private_key_path() as private_key_path:
         pool_public_key = _derive_public_key(private_key_path)
         script = build_box_prep_script(
@@ -264,7 +289,7 @@ def prep_box(
         logger.info(
             "Prepping box {} as {} (lima user {}, lima {})", server_address, ssh_user, lima_service_user, lima_version
         )
-        _run_root_script_over_ssh(server_address, ssh_user, private_key_path, script)
+        _run_root_script_over_ssh(server_address, ssh_user, private_key_path, script, server.box_host_public_key)
     logger.info("Box {} prepped: qemu+lima installed, {} ready, OS image staged", server_address, lima_service_user)
 
 
@@ -1320,7 +1345,7 @@ def _require_ovh_config() -> OvhProviderConfig:
 
 
 def _probe_ssh_ready(
-    server_address: str, ssh_user: str, private_key_path: Path, box_host_public_key: str | None
+    server_address: str, ssh_user: str, private_key_path: Path, box_host_public_key: str
 ) -> bool | None:
     """One SSH-readiness probe: True once a login succeeds, else None (for poll_for_value)."""
     cg = ConcurrencyGroup(name="ssh-ready")
@@ -1348,7 +1373,7 @@ def _wait_for_ssh_ready(
     ssh_user: str,
     private_key_path: Path,
     timeout_seconds: float,
-    box_host_public_key: str | None = None,
+    box_host_public_key: str,
 ) -> None:
     """Poll until the box accepts an SSH login (it reboots into the freshly-installed OS). Raises on timeout."""
     with log_span("Waiting for SSH on {} as {}", server_address, ssh_user):
@@ -1604,7 +1629,15 @@ def setup(
             wait_for_os_reinstall(client, service_name=service_name, task_id=reinstall.task_id)
 
         # Re-read so a resume-from-'installing' picks up the box key persisted above.
+        # The reinstall always records it alongside the status flip, so a missing key
+        # here means the row was tampered with -- fail closed rather than SSH without
+        # strict host-key checking.
         box_host_public_key = _fetch_server_or_raise(dsn, server_id).box_host_public_key
+        if not box_host_public_key:
+            raise BareMetalProvisioningError(
+                f"server {server_id} reached '{SERVER_STATUS_INSTALLING}' without a recorded box host key; "
+                "cannot SSH the box with strict host-key checking"
+            )
         _wait_for_ssh_ready(address, ssh_user, private_key_path, ssh_ready_timeout, box_host_public_key)
         script = build_box_prep_script(
             pool_public_key=pool_public_key,

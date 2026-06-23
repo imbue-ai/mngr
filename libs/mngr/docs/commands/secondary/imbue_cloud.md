@@ -885,11 +885,12 @@ mngr imbue_cloud admin server prep [OPTIONS]
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--server-address` | text | SSH-reachable address of the freshly-installed box. | None |
+| `--server-id` | text | bare_metal_servers row id (from `register`/`order`) of the box to prep. | None |
 | `--ssh-user` | text | Bootstrap SSH user (the OS image's default cloud user). | `debian` |
 | `--lima-service-user` | text | Dedicated non-root user to create for the lima VMs. | `limahost` |
 | `--lima-version` | text | Lima release to install on the box. | `2.1.2` |
 | `--slice-base-image-url` | text | Guest OS image to stage on the box once (slices boot from this via file://, never the mirror). | `https://cloud.debian.org/images/cloud/bookworm/20260601-2496/debian-12-genericcloud-amd64-20260601-2496.qcow2` |
+| `--database-url` | text | Neon pool DB DSN (defaults to the activated env's secrets). | None |
 
 ## mngr imbue_cloud admin server list
 
