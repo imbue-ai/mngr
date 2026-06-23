@@ -28,10 +28,10 @@ from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import ProviderError
 from imbue.mngr.errors import ProviderInstanceNotFoundError
 from imbue.mngr.errors import ProviderNotAuthorizedError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.errors import SnapshotsNotSupportedError
-from imbue.mngr.errors import TagLimitExceededError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -128,16 +128,6 @@ def test_snapshots_not_supported_error_includes_provider() -> None:
     assert "test-provider" in str(error)
 
 
-def test_tag_limit_exceeded_error_includes_limit_and_actual() -> None:
-    """TagLimitExceededError should include both limit and actual."""
-    error = TagLimitExceededError(_TEST_PROVIDER, limit=10, actual=15)
-    assert error.provider_name == _TEST_PROVIDER
-    assert error.limit == 10
-    assert error.actual == 15
-    assert "10" in str(error)
-    assert "15" in str(error)
-
-
 def test_agent_not_found_on_host_error_sets_both_ids() -> None:
     """AgentNotFoundOnHostError should set agent_id and host_id attributes."""
     agent_id = AgentId.generate()
@@ -232,15 +222,30 @@ def test_provider_not_authorized_error_sets_provider_name() -> None:
     provider_name = ProviderInstanceName("modal")
     error = ProviderNotAuthorizedError(provider_name)
     assert error.provider_name == provider_name
-    assert "not authorized" in str(error).lower()
+    assert "not authenticated" in str(error).lower()
 
 
-def test_provider_not_authorized_error_includes_auth_help() -> None:
-    """ProviderNotAuthorizedError should include auth_help in message when provided."""
+def test_provider_not_authorized_error_is_provider_unavailable_error() -> None:
+    """ProviderNotAuthorizedError should be a ProviderUnavailableError so read paths treat it as unavailable."""
+    error = ProviderNotAuthorizedError(ProviderInstanceName("modal"))
+    assert isinstance(error, ProviderUnavailableError)
+
+
+def test_provider_not_authorized_error_includes_reason() -> None:
+    """ProviderNotAuthorizedError should include the reason in the message when provided."""
     provider_name = ProviderInstanceName("modal")
-    auth_help = "Run 'modal token set' to authenticate."
-    error = ProviderNotAuthorizedError(provider_name, auth_help=auth_help)
-    assert auth_help in str(error)
+    reason = "Modal token missing or invalid"
+    error = ProviderNotAuthorizedError(provider_name, reason=reason)
+    assert reason in str(error)
+    assert error.short_reason == reason
+
+
+def test_provider_not_authorized_error_carries_short_remediation() -> None:
+    """ProviderNotAuthorizedError should expose short_remediation for consistent rendering."""
+    error = ProviderNotAuthorizedError(
+        ProviderInstanceName("modal"), reason="Modal token missing", short_remediation="run `modal token set`"
+    )
+    assert error.short_remediation == "run `modal token set`"
 
 
 def test_provider_not_authorized_error_has_user_help_text() -> None:

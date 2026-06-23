@@ -2,13 +2,25 @@
 
 How to set up the infrastructure for the imbue-cloud-leased pool host flow.
 
+Pool hosts are **bare-metal slices**: lima/QEMU VMs carved on bare-metal boxes we
+operate. (The boxes are currently rented from OVH, but that is an internal
+implementation detail of the slice backend; other suppliers may be added later.)
+
+> **Deprecated:** baking new **OVH classic VPS** pool hosts (one VPS per host) is
+> no longer supported. The pool is baked exclusively with slices. Existing OVH VPS
+> pool hosts already in the pool keep working and can still be listed and
+> destroyed -- see [Legacy OVH VPS teardown](#legacy-ovh-vps-teardown).
+
 ## Prerequisites
 
 - Neon PostgreSQL database (two connection strings: pooled for runtime, direct for migrations)
-- OVH API credentials (AK / AS / CK) for the endpoint the pool uses
-  (default `ovh-us`). Pool hosts are provisioned (OVH-backed) via
-  `minds pool create` -- the env-aware wrapper around `mngr imbue_cloud
-  admin pool create`; see the `--region` option.
+- One or more **bare-metal boxes** registered + prepped via the
+  `mngr imbue_cloud admin server` commands (see
+  [Step 5](#step-5-bake-one-or-more-pool-hosts)). Slice baking targets an
+  explicitly-chosen `ready` box.
+- Bare-metal box supplier credentials (currently OVH API AK / AS / CK). These
+  order the bare-metal boxes that slices run on, and also tear down legacy OVH
+  VPS hosts.
 - Modal account (for deploying the remote_service_connector)
 
 ## Step 1: Create the database schema
@@ -51,8 +63,8 @@ ssh-keygen -t ed25519 -f .minds/production/pool_management_key/id_ed25519 -N ""
 The private key goes into Vault at `secrets/minds/production/pool-ssh`
 (step 3), from which `minds env deploy` pushes it to the
 `pool-ssh-production` Modal secret (for the connector's lease-time SSH) and
-`minds pool create` derives the matching public key at bake time. You no
-longer pass the public key to the bake by hand.
+`minds pool create` uses it to authorize the pool key on each slice at carve
+time. You no longer pass the public key to the bake by hand.
 
 ## Step 3: Populate the tier's Vault entries
 
@@ -83,14 +95,15 @@ file itself never leaves the operator's laptop.)
 
 ### secrets/minds/<tier>/ovh
 
-The shared per-tier OVH AK/AS/CK trio. Read by `minds env deploy /
-destroy` (to enumerate + delete OVH VPSes belonging to a dev env) and
-by `mngr imbue_cloud admin pool create` (to provision OVH-backed pool
-hosts). NOT pushed to Modal.
+The shared per-tier bare-metal box supplier credentials (currently OVH
+AK / AS / CK). Read by `mngr imbue_cloud admin server` (to order the
+bare-metal boxes that slices run on) and by `minds env deploy / destroy`
+(to enumerate + delete legacy OVH VPSes belonging to a dev env). NOT
+pushed to Modal.
 
 Generate the trio once per tier at
 <https://api.us.ovhcloud.com/createApp> (endpoint `ovh-us`; pick
-whichever endpoint matches the pool's `--region`). Use a copy of
+whichever endpoint matches the boxes' region). Use a copy of
 `.minds/template/ovh.sh` to capture the three values, then push to
 Vault:
 
@@ -102,7 +115,7 @@ shred -u /tmp/production-ovh.sh
 ```
 
 The same steps work verbatim for `staging` and `dev` (substitute the
-tier in the path). Dev-tier OVH credentials are shared across all
+tier in the path). Dev-tier credentials are shared across all
 per-developer dev envs.
 
 ## Step 4: Push the Vault changes to Modal and redeploy
@@ -123,48 +136,68 @@ for the staging tier.
 
 ## Step 5: Bake one or more pool hosts
 
-Baking provisions an OVH VPS, runs the FCT template's `mngr create --template
-main --template ovh` to build + bake the agent state, installs the management
-SSH key on both the VPS and the container, then writes a `pool_hosts` row.
+Pool hosts are baked as bare-metal slices. A slice bake carves a lima VM on a
+`ready` bare-metal box, runs the FCT template's `mngr create --template main
+--template pool_host` to build + bake the agent state inside it, then writes a
+`pool_hosts` row (`backend_kind=slice`).
 
-Use the canonical justfile recipe, after activating the tier:
+First register + prep the bare-metal box(es) the slices will be carved on (the
+box must be `ready` and have a free slot):
+
+```bash
+# Order / register / prep a bare-metal box; see `--help` on each subcommand.
+uv run mngr imbue_cloud admin server order   ...   # order a box from the supplier
+uv run mngr imbue_cloud admin server register ...  # record it in bare_metal_servers
+uv run mngr imbue_cloud admin server setup --server-id <id>   # reinstall (injects our host key) + prep -> `ready`
+uv run mngr imbue_cloud admin server list          # find the ready box's id
+```
+
+`server prep --server-id <id>` re-runs just the prep step (qemu/lima/tooling +
+image staging). It SSHes the box with strict host-key pinning, so the box's sshd
+host key must already be recorded on its `bare_metal_servers` row -- which
+`server setup` does at OS reinstall, or `admin pool backfill-host-keys` captures
+once for a box installed out of band. `prep` fails closed (no trust-on-first-use)
+if no host key is recorded.
+
+Then bake slices onto a chosen box, after activating the tier:
 
 ```bash
 eval "$(uv run minds env activate production)"   # or `staging`
-just bake-pool-host '{"repo_branch_or_tag": "<branch-or-tag>"}' US-WEST-OR
+just bake-slice-prod US-WEST-OR v0.3.0 1 --server-id <bare-metal-server-id>
 ```
 
-`just bake-pool-host <attributes-json> <region> [workspace_dir] [count] [extra flags]`
-wraps `minds pool create` (`apps/minds/imbue/minds/cli/pool.py`), the env-aware
-layer that, from the activated tier:
+The `just bake-slice-{dev,prod}` recipes wrap `minds pool create --backend slice`
+(`apps/minds/imbue/minds/cli/pool.py`), the env-aware layer that, from the
+activated tier:
 
-- derives the management SSH public key from the tier's
+- reads the pool SSH private key from the tier's
   `secrets/minds/<tier>/pool-ssh.POOL_SSH_PRIVATE_KEY` Vault entry -- the same
   key the connector loads at lease time, so bake-time and lease-time SSH always
   match (you never generate or pass a key by hand);
-- reads the tier's OVH AK/AS/CK from `secrets/minds/<tier>/ovh` and injects
-  them into the bake;
-- auto-tags the VPS `minds_env=<tier>` so `minds env destroy` can tear it down;
 - for staging / production, reads the host_pool DSN from
   `secrets/minds/<tier>/neon.DATABASE_URL` (those tiers keep no local
   secrets.toml); dev / ci envs auto-resolve it from their per-env secrets.toml.
 
-The `--attributes` JSON only *labels* the row for lease matching -- it does NOT
-select the baked version. **The baked version comes entirely from the
-`workspace_dir` checkout** (default `~/project/forever-claude-template`), so
-check that workspace out at the branch/tag you want baked before running. The
-minds desktop client always sends `repo_branch_or_tag` in its lease request
-(the resolved FCT branch in dev, or the latest semver tag in production), so
-that key must be present on every row that should ever be leased. Other
-dimensions (`cpus`, `memory_gb`, `gpu_count`) can be set for a more constrained
-pool generation; they're only required on the row when the lease request also
-includes them.
+The `region` argument is the lease-region **label** stamped on each row (what the
+connector region-matches at lease time, e.g. `US-EAST-VA`) -- not the box's raw
+datacenter code.
 
-Under the hood `minds pool create` shells out to `mngr imbue_cloud admin pool
-create` (in `libs/mngr_imbue_cloud`), the provider-generic host-creation step
-that takes a required `--region`, repeatable `--tag KEY=VALUE`, and an explicit
-`--management-public-key-file`. Call it directly only for non-minds / one-off
-baking outside an activated env.
+The `--attributes` JSON only *labels* the row for lease matching -- it does NOT
+select the baked version. **The baked version comes entirely from the bake
+source:** `--from-tag <tag>` (production; clones the FCT remote at an exact tag)
+or `--workspace-dir <dir>` (dev; a working tree, default
+`~/project/forever-claude-template`). The minds desktop client always sends
+`repo_branch_or_tag` in its lease request (the resolved FCT branch in dev, or the
+latest semver tag in production), so that key must be present on every row that
+should ever be leased. Other dimensions (`cpus`, `memory_gb`, `gpu_count`) can be
+set for a more constrained pool generation; they're only required on the row when
+the lease request also includes them. For slices, the per-slice size
+(`memory_gb` / `cpus`) is computed from the box and stamped automatically.
+
+Under the hood `minds pool create --backend slice` shells out to `mngr
+imbue_cloud admin pool create` (in `libs/mngr_imbue_cloud`), the provider-generic
+host-creation step. Call it directly only for non-minds / one-off baking outside
+an activated env.
 
 ### Fast path vs. slow path
 
@@ -176,10 +209,11 @@ When a user creates an imbue_cloud workspace, minds makes up to two `mngr create
 So a pool whose rows are baked at an older `repo_branch_or_tag` no longer hard-fails newer workspace creations -- they fall back to the slow path. Keeping the pool baked at the current version is still worthwhile because it keeps creations on the fast path. Only when the pool is genuinely empty (no `available` rows) does creation fail, with `ImbueCloudLeaseUnavailableError`.
 
 To rsync the local mngr working tree into the FCT worktree's `vendor/mngr/`
-for the duration of the bake (dev-loop pattern), forward `--mngr-source
-<monorepo-root>` as an extra flag through the recipe. The bake resets
-`vendor/mngr/` to HEAD when it finishes, so the worktree stays clean wrt mngr
-churn.
+for the duration of the bake (dev-loop pattern; see
+`apps/minds/docs/vendor-mngr-sync.md` for the sync mechanisms), forward
+`--mngr-source <monorepo-root>` as an extra flag through the recipe. The bake
+resets `vendor/mngr/` to HEAD when it finishes, so the worktree stays clean wrt
+mngr churn.
 
 List the rows (with the tier activated):
 
@@ -190,16 +224,18 @@ just list-pool-hosts
 ## Step 6: Verify
 
 ```bash
-psql "$NEON_DB_DIRECT" -c "SELECT id, vps_address, status, attributes FROM pool_hosts ORDER BY created_at DESC"
+psql "$NEON_DB_DIRECT" -c "SELECT id, vps_address, status, backend_kind, attributes FROM pool_hosts ORDER BY created_at DESC"
 ```
 
 ## Cleanup
 
-Destroy a specific pool host (cancels its OVH VPS, then drops the row):
+Destroy a specific pool host (tears down its underlying machine, then drops the
+row -- for a slice it destroys the lima VM and frees the box slot; for a legacy
+OVH VPS row it cancels the VPS):
 
 ```bash
 just list-pool-hosts                          # find the row id (tier activated)
-just destroy-pool-host <pool-host-id>         # cancels the OVH VPS; creds + DSN from the tier's Vault entry
+just destroy-pool-host <pool-host-id>         # creds + DSN from the tier's Vault entry
 ```
 
 Released hosts (after a user destroys their lease) can be bulk-cleaned with:
@@ -209,7 +245,8 @@ uv run python apps/remote_service_connector/scripts/cleanup_released_hosts.py \
     --database-url "$NEON_DB_DIRECT"
 ```
 
-Both paths cancel the underlying OVH VPS and remove the database row.
+Both paths tear down the underlying machine (slice VM or legacy OVH VPS) and
+remove the database row.
 
 ## Development workflow
 
@@ -221,10 +258,28 @@ live mngr tree into the FCT worktree's `vendor/mngr/` for the bake):
 
 ```bash
 eval "$(uv run minds env activate dev-<your-user>)"
-just bake-pool-host \
-    "{\"repo_branch_or_tag\": \"$(git rev-parse --abbrev-ref HEAD)\"}" \
+just bake-slice-dev \
     US-WEST-OR \
     "$PWD/.external_worktrees/forever-claude-template" \
     1 \
+    --server-id <bare-metal-server-id> \
+    --repo-branch-or-tag "$(git rev-parse --abbrev-ref HEAD)" \
     --mngr-source "$PWD"
 ```
+
+## Legacy OVH VPS teardown
+
+Baking new OVH classic VPS pool hosts is deprecated, but VPS hosts already in the
+pool keep working until they are migrated off and destroyed. Until then:
+
+- `just list-pool-hosts` lists every pool host, including legacy `ovh_vps` rows.
+- `just destroy-pool-host <id>` tears down a legacy VPS row: it cancels the
+  underlying OVH VPS and drops the row. This uses the per-tier OVH credentials
+  from `secrets/minds/<tier>/ovh`.
+- `minds env destroy` removes every OVH VPS belonging to a whole dev env (it
+  walks the OVH IAM `minds_env=<env>` tags).
+- The connector releases + an hourly Modal cron sweep any stragglers, cancelling
+  the OVH VPS for released `ovh_vps` rows.
+
+The per-tier OVH credentials therefore remain required for as long as any legacy
+VPS host exists (and for ordering bare-metal slice boxes).

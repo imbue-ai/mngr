@@ -9,6 +9,7 @@ from claude_agent_sdk import StreamEvent
 
 from imbue.mngr.api.events import EventsTarget
 from imbue.mngr.hosts.host import Host
+from imbue.mngr_claude.stream_buffer import SnapshotDeltaReader
 from imbue.mngr_robinhood._agent_sdk.driver import LiveSession
 from imbue.mngr_robinhood._agent_sdk.driver import _TurnDrainTicker
 from imbue.mngr_robinhood._agent_sdk.driver import _build_agent_name
@@ -185,7 +186,7 @@ def _make_ticker(
         is_init_emitted=False,
     )
     synthesizer = StreamEventSynthesizer.model_construct(
-        host=_FakeBufferHost(buffer_content), buffer_path=Path("/buffer")
+        host=_FakeBufferHost(buffer_content), buffer_path=Path("/buffer"), reader=SnapshotDeltaReader()
     )
     captured: list[Message] = []
     ticker = _TurnDrainTicker(session=session, sink=captured.append, synthesizer=synthesizer)

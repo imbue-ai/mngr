@@ -1,5 +1,5 @@
 from imbue.mngr_imbue_cloud.slices.bare_metal_prep import build_box_prep_script
-from imbue.mngr_vps_docker.host_setup import PINNED_DOCKER_APT_VERSION
+from imbue.mngr_vps.host_setup import PINNED_DOCKER_APT_VERSION
 
 _POOL_PUB = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITESTpoolkey mngr-pool"
 _IMAGE_URL = (
@@ -25,6 +25,16 @@ def test_prep_script_stages_base_image_under_lima_user_via_file_path() -> None:
     assert "/home/limahost/.cache/mngr-slice-base/debian-base.qcow2" in script
     assert "qemu-img info" in script
     assert 'if [ ! -f "$img" ]; then' in script
+
+
+def test_prep_script_chowns_cache_dir_to_lima_user() -> None:
+    script = _script()
+    # The script runs as root; staging the image under ~/.cache must leave ~/.cache
+    # owned by the lima user, or `limactl` (run as that user) cannot create
+    # ~/.cache/lima and every VM start fails. The parent cache dir must be chowned,
+    # not just the leaf image dir.
+    assert 'cache_dir="$(dirname "$image_dir")"' in script
+    assert 'chown limahost:limahost "$cache_dir" "$image_dir"' in script
 
 
 def test_prep_script_installs_qemu_and_lima() -> None:

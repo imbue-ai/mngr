@@ -27,8 +27,6 @@ from azure.mgmt.network import NetworkManagementClient
 from azure.mgmt.network import models as network_models
 from azure.mgmt.resource import ResourceManagementClient
 from azure.mgmt.resource.resources.models import ResourceGroup
-from azure.mgmt.resource.resources.models import Tags
-from azure.mgmt.resource.resources.models import TagsPatchResource
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
@@ -47,11 +45,11 @@ from imbue.mngr_azure.config import DEFAULT_IMAGE_PUBLISHER
 from imbue.mngr_azure.config import DEFAULT_IMAGE_SKU
 from imbue.mngr_azure.config import DEFAULT_IMAGE_VERSION
 from imbue.mngr_azure.errors import InvalidAzureIdentifierError
-from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.errors import VpsProvisioningError
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
-from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.vps_client import VpsClientInterface
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.errors import VpsProvisioningError
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsInstanceStatus
+from imbue.mngr_vps.vps_client import VpsClientInterface
 
 # Tag key/value that ``create_instance`` adds to every VM launched while
 # ``PYTEST_CURRENT_TEST`` is set. The conftest session-end scanner uses this
@@ -530,6 +528,10 @@ class AzureVpsClient(VpsClientInterface):
         reclaim semantics). ``spot`` is Azure-specific: it widens this method's
         signature beyond the shared ``VpsClientInterface.create_instance``
         contract, so providers reach it via ``self.azure_client.create_instance``.
+
+        The VM is given a system-assigned managed identity (used by the in-VM idle
+        watcher to deallocate itself). Offline ``host_dir`` needs no VM identity --
+        it is captured operator-side at ``mngr stop``.
         """
         if region != self.region:
             raise VpsApiError(
@@ -704,14 +706,15 @@ class AzureVpsClient(VpsClientInterface):
             properties.priority = "Spot"
             properties.eviction_policy = "Delete"
             properties.billing_profile = compute_models.BillingProfile(max_price=-1.0)
+        # System-assigned managed identity: the in-VM idle watcher uses its IMDS
+        # token to deallocate this VM itself (see AzureProvider's idle watcher). A
+        # per-VM role assignment (assign_self_deallocate_role) grants it the
+        # least-privilege deallocate action scoped to just this VM. Offline
+        # host_dir needs no VM identity -- it is captured operator-side at stop.
         return compute_models.VirtualMachine(
             location=self.region,
             tags=dict(vm_tags),
             properties=properties,
-            # System-assigned managed identity: the in-VM idle watcher uses its IMDS
-            # token to deallocate this VM itself (see AzureProvider's idle watcher).
-            # A per-VM role assignment (assign_self_deallocate_role) grants it the
-            # least-privilege deallocate action scoped to just this VM.
             identity=compute_models.VirtualMachineIdentity(type="SystemAssigned"),
         )
 
@@ -852,6 +855,21 @@ class AzureVpsClient(VpsClientInterface):
             return
         logger.info("Deleted Azure VM {} (NIC, public IP and OS disk cascade via delete_option)", instance_id)
 
+    def set_instance_tags(self, instance_id: VpsInstanceId, tags: Mapping[str, str]) -> None:
+        """Upsert ``tags`` on an existing VM, preserving its other tags.
+
+        Azure's VM update replaces the whole tags dict, so read the current tags,
+        merge in the new ones, then write back. Widens ``AzureVpsClient`` beyond the
+        shared ``VpsClientInterface``; ``AzureProvider`` reaches it via ``self.azure_client``.
+        """
+        with self._translate_azure_errors():
+            vm = self._compute().virtual_machines.get(self.resource_group, str(instance_id))
+            merged = dict(vm.tags or {})
+            merged.update(tags)
+            self._compute().virtual_machines.begin_update(
+                self.resource_group, str(instance_id), compute_models.VirtualMachineUpdate(tags=merged)
+            ).result()
+
     def _await_long_running_operation(self, poller: LROPoller[None], timeout_seconds: float, description: str) -> None:
         """Block on an Azure long-running operation up to ``timeout_seconds``.
 
@@ -908,38 +926,6 @@ class AzureVpsClient(VpsClientInterface):
             f"/subscriptions/{self.subscription_id}/resourceGroups/{self.resource_group}"
             f"/providers/Microsoft.Compute/virtualMachines/{vm_name}"
         )
-
-    def add_tags(self, instance_id: VpsInstanceId, tags: Mapping[str, str]) -> None:
-        """Merge ``tags`` onto a VM via a server-side tag Merge (no read-modify-write race).
-
-        Used to mirror offline-discoverable metadata (per-agent records) onto the
-        VM so a deallocated VM -- SSH-unreachable -- still surfaces in ``mngr list``
-        and resumes by name. No-op when ``tags`` is empty. AWS does the equivalent
-        with EC2 ``CreateTags``; Azure tags accept large permissive values, like
-        EC2's.
-        """
-        if not tags:
-            return
-        with self._translate_azure_errors():
-            self._resource().tags.begin_update_at_scope(
-                self._vm_resource_id(str(instance_id)),
-                TagsPatchResource(operation="Merge", properties=Tags(tags=dict(tags))),
-            ).result()
-
-    def remove_tags(self, instance_id: VpsInstanceId, keys: Sequence[str]) -> None:
-        """Delete tags (by key) from a VM via a server-side tag Delete. No-op when ``keys`` is empty.
-
-        The Delete operation removes the listed keys regardless of value (the
-        values in the patch are ignored), so this drops a persisted-agent tag when
-        its agent is destroyed.
-        """
-        if not keys:
-            return
-        with self._translate_azure_errors():
-            self._resource().tags.begin_update_at_scope(
-                self._vm_resource_id(str(instance_id)),
-                TagsPatchResource(operation="Delete", properties=Tags(tags={key: "" for key in keys})),
-            ).result()
 
     def ensure_self_deallocate_role(self) -> str | None:
         """Create the least-privilege custom role that lets a VM deallocate itself. Best-effort.

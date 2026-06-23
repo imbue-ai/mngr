@@ -196,6 +196,7 @@ def test_stream_output_surfaces_pane_capture_when_files_missing(
     agent = _make_headless_command_agent(local_host, temp_mngr_ctx, tmp_path, is_always_stopped=True)
     session = agent.session_name
 
+    # Name the primary window so it matches agent.tmux_target (which targets by name).
     subprocess.run(
         [
             "tmux",
@@ -203,6 +204,8 @@ def test_stream_output_surfaces_pane_capture_when_files_missing(
             "-d",
             "-s",
             session,
+            "-n",
+            agent.mngr_ctx.config.tmux.primary_window_name,
             "-x",
             "200",
             "-y",

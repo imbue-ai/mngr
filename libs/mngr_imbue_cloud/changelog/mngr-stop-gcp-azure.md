@@ -1,1 +1,0 @@
-Removed the dead disk-snapshot and `list_ssh_keys` stubs from `LimaSliceVpsClient`, matching the slimmed-down `VpsClientInterface` (which no longer declares `create_snapshot`/`delete_snapshot`/`list_snapshots`/`list_ssh_keys`). Slice snapshots, like other host snapshots, go through the provider layer. No user-facing behavior change: these methods only ever raised "unavailable".

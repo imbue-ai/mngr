@@ -571,3 +571,39 @@ def build_codex_hooks_config() -> dict[str, Any]:
 def serialize_codex_hooks(hooks_config: Mapping[str, Any]) -> str:
     """Serialize a ``hooks.json`` body as two-space-indented JSON."""
     return json.dumps(dict(hooks_config), indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Rollout cwd rebind (session adoption)
+# ---------------------------------------------------------------------------
+
+# A codex rollout JSONL records the session's working directory at ``payload.cwd``
+# in two record types (verified against codex 0.138.0 rollouts): the single
+# ``session_meta`` header record, and one ``turn_context`` record per turn. On
+# launch, ``codex resume <id>`` compares the recorded cwd against the actual cwd; a
+# mismatch pops the "Choose working directory to resume this session" modal. Adopting
+# a session into a *new* work dir always mismatches, so adoption rewrites every
+# recorded cwd to the new work dir. Other record types (``response_item``,
+# ``event_msg``) carry no cwd; ``session_meta.payload.git`` records commit/branch
+# only, no path.
+_CWD_BEARING_ROLLOUT_RECORD_TYPES: frozenset[str] = frozenset({"session_meta", "turn_context"})
+_ROLLOUT_PAYLOAD_KEY: str = "payload"
+_ROLLOUT_CWD_KEY: str = "cwd"
+
+
+@pure
+def rewrite_rollout_record_cwd(record: Mapping[str, Any], new_cwd: str) -> dict[str, Any]:
+    """Return ``record`` with its recorded ``payload.cwd`` rewritten to ``new_cwd``.
+
+    Only the ``session_meta`` and ``turn_context`` records carry a ``payload.cwd``;
+    every other record (and one whose payload lacks a ``cwd``) is returned unchanged
+    as a plain dict. Operates on an already-parsed record so it stays pure: the JSONL
+    decoding (and any malformed-line handling) is the caller's concern.
+    """
+    result = dict(record)
+    if result.get("type") not in _CWD_BEARING_ROLLOUT_RECORD_TYPES:
+        return result
+    payload = result.get(_ROLLOUT_PAYLOAD_KEY)
+    if isinstance(payload, Mapping) and _ROLLOUT_CWD_KEY in payload:
+        result[_ROLLOUT_PAYLOAD_KEY] = {**payload, _ROLLOUT_CWD_KEY: new_cwd}
+    return result

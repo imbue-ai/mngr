@@ -21,11 +21,12 @@ dependencies = [
     "imbue-mngr-lima>=0.1.0",
     "imbue-mngr-modal>=0.2.0",
     "imbue-mngr-ovh>=0.1.0",
-    "imbue-mngr-vps-docker>=0.1.0",
+    "imbue-mngr-vps>=0.1.0",
     "imbue-common>=0.1.0",
     "concurrency-group>=0.1.0",
     "resource-guards>=0.1.0",
     "modal-proxy>=0.1.0",
+    "overlay>=0.1.0",
 ]
 
 # Supply-chain hardening: rolling 14-day cooldown. Refuses any wheel /
@@ -47,8 +48,9 @@ imbue-mngr-latchkey = { path = "../../../../libs/mngr_latchkey", editable = true
 imbue-mngr-lima = { path = "../../../../libs/mngr_lima", editable = true }
 imbue-mngr-modal = { path = "../../../../libs/mngr_modal", editable = true }
 imbue-mngr-ovh = { path = "../../../../libs/mngr_ovh", editable = true }
-imbue-mngr-vps-docker = { path = "../../../../libs/mngr_vps_docker", editable = true }
+imbue-mngr-vps = { path = "../../../../libs/mngr_vps", editable = true }
 imbue-common = { path = "../../../../libs/imbue_common", editable = true }
 concurrency-group = { path = "../../../../libs/concurrency_group", editable = true }
 resource-guards = { path = "../../../../libs/resource_guards", editable = true }
 modal-proxy = { path = "../../../../libs/modal_proxy", editable = true }
+overlay = { path = "../../../../libs/overlay", editable = true }

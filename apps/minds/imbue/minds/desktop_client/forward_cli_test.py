@@ -11,6 +11,8 @@ and lifecycle gating.
 import json
 import subprocess
 import threading
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import cast
@@ -195,6 +197,50 @@ def test_full_snapshot_populates_resolver_and_fires_discovered_callbacks(
     assert all(entry[1] is None for entry in discovered)
     # Provider name passthrough.
     assert all(entry[2] == "local" for entry in discovered)
+
+
+def test_full_snapshot_freshness_uses_producer_timestamp(consumer: EnvelopeStreamConsumer) -> None:
+    """``last_full_snapshot_at`` reflects the producer's poll time, not receive time.
+
+    The recovery redirect compares the snapshot timestamp against a locally-recorded
+    outage onset, so it must be *when discovery observed the world* (the envelope
+    timestamp), not when this consumer happened to read the line.
+    """
+    counter = [0]
+    snapshot = FullDiscoverySnapshotEvent(
+        timestamp=_TIMESTAMP,
+        event_id=_next_event_id(counter),
+        source=_EVENT_SOURCE,
+        agents=(_make_agent(_AGENT_ID_1),),
+        hosts=(),
+    )
+    _dispatch(consumer, _observe_envelope(snapshot))
+
+    last_event_at, last_full_snapshot_at = consumer.resolver.get_freshness_timestamps()
+    expected = datetime(2026, 5, 3, 0, 0, 0, tzinfo=timezone.utc)
+    assert last_full_snapshot_at == expected
+    assert last_event_at == expected
+
+
+def test_full_snapshot_freshness_falls_back_to_receive_time_on_bad_timestamp(
+    consumer: EnvelopeStreamConsumer,
+) -> None:
+    """An unparseable envelope timestamp falls back to the consumer's receive time."""
+    counter = [0]
+    before = datetime.now(timezone.utc)
+    snapshot = FullDiscoverySnapshotEvent(
+        timestamp=IsoTimestamp("not-a-real-timestamp"),
+        event_id=_next_event_id(counter),
+        source=_EVENT_SOURCE,
+        agents=(_make_agent(_AGENT_ID_1),),
+        hosts=(),
+    )
+    _dispatch(consumer, _observe_envelope(snapshot))
+    after = datetime.now(timezone.utc)
+
+    _, last_full_snapshot_at = consumer.resolver.get_freshness_timestamps()
+    assert last_full_snapshot_at is not None
+    assert before <= last_full_snapshot_at <= after
 
 
 def test_subsequent_snapshot_fires_destroyed_for_dropped_agents(

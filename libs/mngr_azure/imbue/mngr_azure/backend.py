@@ -1,9 +1,8 @@
-import json
 import os
+from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
-from datetime import datetime
-from datetime import timezone
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -17,20 +16,15 @@ from pydantic import Field
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
-from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import ProviderUnavailableError
-from imbue.mngr.hosts.offline_host import OfflineHost
-from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.errors import ProviderNotAuthorizedError
+from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.data_types import ProviderResourceInfo
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
-from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
-from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_azure import hookimpl
@@ -38,83 +32,78 @@ from imbue.mngr_azure.cli import azure_cli_group
 from imbue.mngr_azure.client import AzureVpsClient
 from imbue.mngr_azure.client import HOST_NAME_TAG_KEY
 from imbue.mngr_azure.config import AzureProviderConfig
-from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
-from imbue.mngr_vps_docker.instance import OfflineCapableVpsDockerProvider
-from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
-from imbue.mngr_vps_docker.instance import extract_git_depth
-from imbue.mngr_vps_docker.instance import extract_presence_flag
-from imbue.mngr_vps_docker.instance import extract_single_value_arg
-from imbue.mngr_vps_docker.instance import raise_if_unknown_provider_arg
-from imbue.mngr_vps_docker.instance import raise_if_vps_migration_arg
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
-from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
+from imbue.mngr_azure.state_bucket import BlobStateBucket
+from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
+from imbue.mngr_vps.build_args import extract_git_depth
+from imbue.mngr_vps.build_args import extract_presence_flag
+from imbue.mngr_vps.build_args import extract_single_value_arg
+from imbue.mngr_vps.build_args import raise_if_unknown_provider_arg
+from imbue.mngr_vps.build_args import raise_if_vps_migration_arg
+from imbue.mngr_vps.host_state_store import HostDirBackend
+from imbue.mngr_vps.host_state_store import HostStateStore
+from imbue.mngr_vps.host_store import VpsHostRecord
+from imbue.mngr_vps.instance_offline import OfflineCapableVpsProvider
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsInstanceStatus
+from imbue.mngr_vps.systemd import render_systemd_unit
 
 AZURE_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("azure")
 
-# Per-agent metadata is mirrored onto the VM as up to three tags per agent, keyed
-# ``mngr-agent-<agent_id>-<field>`` (the agent id lives in the key), so a
-# *deallocated* VM (SSH-unreachable) still surfaces its agents in discovery and
-# resolves by name. ``name``/``type`` are stored raw; ``labels`` as compact JSON.
-# Mirrors the AWS EC2-tag layout (Azure tags are similarly permissive).
-AGENT_TAG_PREFIX: Final[str] = "mngr-agent-"
-_AGENT_TAG_FIELDS: Final[tuple[str, ...]] = ("name", "type", "labels")
-# Azure tag values are capped at 256 chars; a field whose value overflows is
-# dropped, not failed (realistically only ``labels``).
-_MAX_TAG_VALUE_LEN: Final[int] = 256
-# ``mngr-host-name`` tag holds ``mngr-<host_name>``; strip the prefix on read.
-# Named to match ``AwsProvider`` (both mirror the host name into instance tags);
-# GCP differs (GCE metadata) and keeps its own ``_HOST_NAME_PREFIX``.
-_HOST_NAME_TAG_PREFIX: Final[str] = "mngr-"
 
-# Self-stopping idle watcher (host-side). The shared sentinel script + ``.path``
-# unit come from ``OfflineCapableVpsDockerProvider``; Azure differs only in the
-# ``.service`` action. Unlike AWS/GCP -- where a guest poweroff stops the instance
-# and halts billing -- an Azure OS shutdown leaves the VM "Stopped (not
-# deallocated)", STILL billing compute. So the Azure ``.service`` runs a script
-# that DEALLOCATES the VM via its managed-identity IMDS token + the ARM API (the
-# only in-guest way to halt compute billing). If the deallocate is refused (no
-# role assignment -- the graceful-degradation path) it just logs and exits: an OS
-# poweroff would not halt billing on Azure, so falling back to ``shutdown`` would
-# only strand the VM unreachable while it keeps billing.
+# The self-stopping idle watcher (in-container sentinel + host-side systemd
+# ``.path``/``.service``) is shared by the base ``OfflineCapableVpsProvider``.
+# Unlike AWS/GCP -- where a guest poweroff stops the instance and halts billing --
+# an Azure OS shutdown leaves the VM "Stopped (not deallocated)", STILL billing
+# compute. So the Azure ``.service`` runs a script that DEALLOCATES the VM via its
+# managed-identity IMDS token + the ARM API (the only in-guest way to halt compute
+# billing). If the deallocate is refused (no role assignment -- the
+# graceful-degradation path) it just logs and exits: an OS poweroff would not halt
+# billing on Azure, so falling back to ``shutdown`` would only strand the VM
+# unreachable while it keeps billing.
 # Where the host-side deallocate script is installed on the outer VM.
 _DEALLOCATE_SCRIPT_PATH: Final[str] = "/usr/local/sbin/mngr-azure-deallocate.sh"
 
 
 def _build_idle_watcher_service_unit() -> str:
     """Build the oneshot systemd ``.service`` that runs the self-deallocate script when idle."""
-    return (
-        "[Unit]\n"
-        "Description=Deallocate this Azure VM when mngr signals the host is idle\n"
-        "[Service]\n"
-        "Type=oneshot\n"
-        f"ExecStart={_DEALLOCATE_SCRIPT_PATH}\n"
+    return render_systemd_unit(
+        {
+            "Unit": [("Description", "Deallocate this Azure VM when mngr signals the host is idle")],
+            "Service": [("Type", "oneshot"), ("ExecStart", _DEALLOCATE_SCRIPT_PATH)],
+        }
     )
 
 
-def _build_self_deallocate_script(sentinel_on_outer: str) -> str:
-    """Build the host-side self-deallocate script the idle ``.service`` runs.
+def _build_self_deallocate_script(sentinel_to_remove: str | None) -> str:
+    """Build the host-side self-deallocate script that halts this VM's compute billing.
 
-    Halts Azure compute billing from inside the guest: fetch the VM's
-    managed-identity token from IMDS (no az CLI needed -- plain curl), read this
-    VM's ARM resource id from IMDS, then POST the ARM ``deallocate`` action (it
-    returns 202 before the guest is torn down). ``curl -f`` makes a 403 (no role
-    assignment -- the graceful-degradation config) exit non-zero; the script then
-    just logs and exits non-zero. It deliberately does NOT poweroff on failure: an
-    Azure OS shutdown does not halt compute billing, so a fallback ``shutdown``
-    would only strand the VM unreachable while it keeps billing. The sentinel is
-    removed first so a resumed VM does not immediately re-trigger (and so the
-    ``.path`` unit re-fires this deallocate next time the watcher re-creates it).
+    Fetches the VM's managed-identity token from IMDS (no az CLI needed -- plain
+    curl), reads this VM's ARM resource id from IMDS, then POSTs the ARM
+    ``deallocate`` action (it returns 202 before the guest is torn down).
+    ``curl -f`` makes a 403 (no role assignment -- the graceful-degradation
+    config) exit non-zero; the script then just logs and exits non-zero. It
+    deliberately does NOT poweroff on failure: an Azure OS shutdown does not halt
+    compute billing, so a fallback ``shutdown`` would only strand the VM
+    unreachable while it keeps billing.
+
+    ``sentinel_to_remove`` is the idle sentinel the script deletes before
+    deallocating, or ``None`` when there is nothing to remove. The container path
+    passes the sentinel (a resumed VM must not immediately re-trigger; the ``.path``
+    unit re-fires this deallocate next time the watcher re-creates it); the bare
+    path runs this directly as the agent's ``shutdown.sh`` -- it has no sentinel, so
+    it passes ``None`` and the removal line is omitted.
     """
     token_url = (
         "http://169.254.169.254/metadata/identity/oauth2/token"
         "?api-version=2018-02-01&resource=https%3A%2F%2Fmanagement.azure.com%2F"
     )
     resource_id_url = "http://169.254.169.254/metadata/instance/compute/resourceId?api-version=2021-02-01&format=text"
+    remove_sentinel_line = f'rm -f "{sentinel_to_remove}"\n' if sentinel_to_remove is not None else ""
     return (
         "#!/bin/sh\n"
         "# Installed by mngr (AzureProvider) -- deallocate this VM when idle.\n"
         "set -u\n"
-        f'rm -f "{sentinel_on_outer}"\n'
+        f"{remove_sentinel_line}"
         f'token=$(curl -s -H "Metadata:true" "{token_url}" | grep -o \'"access_token":"[^"]*"\' | cut -d\'"\' -f4)\n'
         f'rid=$(curl -s -H "Metadata:true" "{resource_id_url}")\n'
         'if [ -n "$token" ] && [ -n "$rid" ] && curl -fsS -X POST '
@@ -136,13 +125,31 @@ def _build_self_deallocate_script(sentinel_on_outer: str) -> str:
     )
 
 
-def _azure_unavailable_error(name: ProviderInstanceName, reason: str) -> ProviderUnavailableError:
-    """Build a ``ProviderUnavailableError`` with Azure-specific, actionable help text.
+# OAuth scope used to eagerly validate Azure credentials (the Azure Resource Manager
+# default scope). Requesting a token for it forces DefaultAzureCredential to authenticate.
+_AZURE_MANAGEMENT_SCOPE: Final[str] = "https://management.azure.com/.default"
 
-    The generic ``ProviderUnavailableError`` help text tells the user to "start
-    Docker", which is wrong advice for a cloud auth/subscription failure. Azure's
-    "unavailable" causes are a missing subscription, an unusable credential, or
-    skipped one-time setup -- so we curate the guidance accordingly.
+
+def _resolve_and_validate_azure_credential(config: AzureProviderConfig) -> Any:
+    """Build the Azure credential and force authentication by requesting a management-scope token.
+
+    Raises ``AzureError`` if the credential cannot authenticate.
+    """
+    credential = config.get_credential()
+    credential.get_token(_AZURE_MANAGEMENT_SCOPE)
+    return credential
+
+
+def _azure_not_authorized_error(
+    name: ProviderInstanceName, reason: str, short_remediation: str, short_reason: str | None = None
+) -> ProviderNotAuthorizedError:
+    """Build a ``ProviderNotAuthorizedError`` with Azure-specific, actionable help text.
+
+    The generic unavailable help text tells the user to "start Docker", which is wrong
+    advice for a cloud auth/subscription failure. Azure's causes are a missing
+    subscription, an unusable credential, or skipped one-time setup -- so we curate the
+    guidance accordingly. ``ProviderNotAuthorizedError`` is a ``ProviderUnavailableError``
+    subclass, so read paths still treat the provider as unavailable rather than empty.
     """
     help_text = (
         "Azure could not be reached. Check, in order:\n"
@@ -153,7 +160,13 @@ def _azure_unavailable_error(name: ProviderInstanceName, reason: str) -> Provide
         "  - one-time setup: run `mngr azure prepare` if you have not yet.\n"
         f"Or disable the provider: mngr config set --scope user providers.{name}.is_enabled false"
     )
-    return ProviderUnavailableError(name, reason, user_help_text=help_text)
+    return ProviderNotAuthorizedError(
+        name,
+        reason=reason,
+        short_remediation=short_remediation,
+        user_help_text=help_text,
+        short_reason=short_reason,
+    )
 
 
 class ParsedAzureBuildOptions(ParsedVpsBuildOptions):
@@ -177,13 +190,76 @@ class ParsedAzureBuildOptions(ParsedVpsBuildOptions):
     )
 
 
-class AzureProvider(OfflineCapableVpsDockerProvider):
+class AzureProvider(OfflineCapableVpsProvider):
     """Azure-specific provider that discovers hosts via the VM list in the resource group."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     azure_client: AzureVpsClient = Field(frozen=True, description="Azure VM API client")
     azure_config: AzureProviderConfig = Field(frozen=True, description="Azure-specific configuration")
+
+    @cached_property
+    def _state_bucket(self) -> BlobStateBucket | None:
+        """Return the Blob state bucket when account + container actually exist, else None.
+
+        The bucket is the sole source of truth for agent records and the offline
+        host record. None means the account/container do not exist yet (``mngr
+        azure prepare`` was never run) or the subscription can't be resolved;
+        ``_state_store`` then raises an actionable error. A storage error while
+        probing existence propagates rather than masquerading as "absent". The
+        existence probe runs at most once per provider lifetime (cached). Mirrors
+        ``AwsProvider._state_bucket``.
+        """
+        return self._resolve_existing_state_bucket()
+
+    def _resolve_existing_state_bucket(self) -> BlobStateBucket | None:
+        """Build the configured/derived bucket and return it only if it exists.
+
+        Returns None only when the bucket genuinely does not exist (or the
+        subscription is unresolvable). An ``account_exists`` / ``container_exists``
+        storage error propagates -- the bucket is required, so an inability to
+        check is an operational failure, not a silent "no bucket".
+        """
+        try:
+            subscription_id = self.azure_config.get_subscription_id()
+        except ValueError as e:
+            logger.debug("Could not resolve subscription for the Blob state bucket: {}", e)
+            return None
+        bucket = self.azure_config.build_state_bucket(subscription_id)
+        if not (bucket.account_exists() and bucket.container_exists()):
+            logger.debug(
+                "Azure state account/container {}/{} does not exist; offline host state is unavailable "
+                "(run `mngr azure prepare` to create it)",
+                bucket.account_name,
+                bucket.container_name,
+            )
+            return None
+        return bucket
+
+    @cached_property
+    def _state_store(self) -> HostStateStore:
+        """The external host/agent-record mirror: the Blob bucket, or raise when it is absent.
+
+        Delegates to the shared ``_select_bucket_store``, supplying only the resolved
+        Blob bucket, its label, and the ``mngr azure prepare`` remediation command.
+        The bucket is required: when it does not exist, the helper raises an
+        actionable error pointing at ``mngr azure prepare``. Offline ``host_dir``
+        reads are a separate, bucket-only feature keyed off ``_state_bucket``.
+        """
+        return self._select_bucket_store(
+            self._state_bucket, store_label="Azure state bucket", prepare_command="mngr azure prepare"
+        )
+
+    @cached_property
+    def _host_dir_backend(self) -> HostDirBackend:
+        """Select the offline host_dir backend once: bucket-backed when enabled + present, else no-op.
+
+        Delegates to the shared ``_select_bucket_host_dir_backend``, supplying the
+        resolved Blob bucket and the config's ``is_offline_host_dir_enabled`` flag.
+        """
+        return self._select_bucket_host_dir_backend(
+            self._state_bucket, enabled=self.azure_config.is_offline_host_dir_enabled
+        )
 
     def _fetch_provider_instances(self) -> list[dict[str, Any]]:
         """List Azure VMs tagged with this provider's name."""
@@ -292,15 +368,10 @@ class AzureProvider(OfflineCapableVpsDockerProvider):
         than the shared ``self.vps_client`` interface so the Azure-only ``spot``
         kwarg is statically visible.
         """
-        match parsed:
-            case ParsedAzureBuildOptions(spot=spot):
-                pass
-            case _:
-                raise MngrError(
-                    f"AzureProvider._create_vps_instance expected ParsedAzureBuildOptions, "
-                    f"got {type(parsed).__name__}. This indicates the parser hook returned a "
-                    "non-Azure shape; _parse_build_args must return ParsedAzureBuildOptions."
-                )
+        spot = self._require_parsed(parsed, ParsedAzureBuildOptions).spot
+        # Offline host_dir is operator-driven (captured at `mngr stop`), so no
+        # user-assigned identity is attached here; the VM still gets a
+        # system-assigned identity (for the idle self-deallocate role).
         return self.azure_client.create_instance(
             label=label,
             region=parsed.region,
@@ -311,144 +382,138 @@ class AzureProvider(OfflineCapableVpsDockerProvider):
             spot=spot,
         )
 
-    def _list_provider_vps_hostnames(self) -> list[str]:
-        """Return public IPs of Azure VMs tagged with this provider's name.
-
-        Credentials are guaranteed resolvable here: ``build_provider_instance``
-        raises ``ProviderUnavailableError`` when ``config.get_subscription_id()``
-        fails, so any AzureProvider that reaches this point has a subscription.
-
-        Note: Azure allocates the public IP ``Static``, so a *deallocated* VM keeps
-        its IP (unlike a stopped GCE/EC2 instance, which loses its ephemeral IP and
-        is thus naturally excluded by the ``if main_ip`` check below). We
-        deliberately do NOT special-case deallocated VMs out here: the shared
-        discovery probe applies a bounded SSH connect timeout (pyinfra's
-        ``CONNECT_TIMEOUT``, 10s), so an unreachable VM fails fast and is surfaced
-        offline -- the same path a crashed-but-still-"running" host takes. The
-        deallocated host is then reconstructed from tags in
-        ``discover_hosts_and_agents``. This keeps discovery uniform (no
-        power-state-specific branch) at the cost of one bounded timeout when a
-        paused VM is present.
-        """
-        instances = self._list_instances_cached()
-        vps_ips: list[str] = []
-        for instance in instances:
-            main_ip = instance.get("main_ip", "")
-            if main_ip:
-                vps_ips.append(main_ip)
-        return vps_ips
+    # The shared ``OfflineCapableVpsProvider._list_provider_vps_hostnames``
+    # (cached listing -> non-empty main_ip) covers Azure: a *deallocated* VM keeps
+    # its Static IP, so it is still listed and then fails fast over the bounded SSH
+    # connect timeout before being reconstructed offline -- see that base method.
 
     # =========================================================================
-    # Deallocate/start + idle-watcher hooks (for OfflineCapableVpsDockerProvider)
+    # Deallocate/start (idle-pause + resume) -- the base OfflineCapableVpsProvider
+    # owns the orchestration; here we supply the Azure-specific cloud-API hooks
+    # plus the static-IP rebind no-ops.
     # =========================================================================
 
     def _pause_cloud_instance(self, instance_id: VpsInstanceId) -> None:
-        """Deallocate the VM -- the only in-guest-free way to halt Azure compute billing.
-
-        NOT a mere OS shutdown, which leaves the VM "Stopped (not deallocated)" and
-        STILL billing compute; the OS disk and all state survive for ``start_host``.
-        """
         with log_span("Deallocating Azure VM"):
             self.azure_client.deallocate_instance(instance_id)
 
     def _resume_cloud_instance(self, instance_id: VpsInstanceId) -> str:
-        """Start the VM and return its public IP (allocated ``Static``, so unchanged across the pause)."""
         with log_span("Starting Azure VM"):
             return self.azure_client.start_instance(instance_id)
 
-    def _rebind_known_hosts(self, record: VpsDockerHostRecord, new_ip: str) -> None:
-        """No-op: Azure's public IP is allocated ``Static``, so it is unchanged across deallocate/start.
+    def _rebind_known_hosts(self, record: VpsHostRecord, new_ip: str) -> None:
+        """No-op: Azure's Static public IP is unchanged across deallocate/start, so the
+        create-time known_hosts entries stay valid -- no rebind is needed."""
 
-        The SSH host keys persist on the OS disk and the address does not move, so
-        the resume path needs no known_hosts rebind (unlike AWS/GCP).
+    def _rebind_known_hosts_pre_connect(self, host_id: HostId, new_ip: str) -> None:
+        """No-op: Azure's Static IP means the known_hosts entry is unchanged across a
+        deallocate/start, so no pre-connect rebind is needed."""
+
+    # =========================================================================
+    # Self-stopping idle watcher (sentinel + host-side systemd deallocate)
+    # =========================================================================
+
+    @property
+    def _supports_bare_isolation(self) -> bool:
+        # Azure VMs support deallocate/start, and the bare idle path self-deallocates
+        # directly (the agent runs the same ARM deallocate the container watcher uses),
+        # so bare placement is supported.
+        return True
+
+    def _provider_instance_kind(self) -> str:
+        return "Azure VM"
+
+    def _write_bare_idle_shutdown_script(self, host: Host) -> None:
+        """BARE Azure override: write the ARM self-deallocate script as ``shutdown.sh``.
+
+        A bare placement is the VM's root and has no container. An OS
+        ``shutdown -P now`` would not halt Azure compute billing, so the bare path
+        must deallocate via ARM like the container watcher does (the role assignment
+        in ``_post_finalize_steps`` still applies). There is no sentinel on the bare
+        path, so the script is built with ``None``.
         """
+        self._write_shutdown_script(host, _build_self_deallocate_script(sentinel_to_remove=None))
 
-    def _rebind_known_hosts_pre_connect(self, new_ip: str) -> None:
-        """No-op: see ``_rebind_known_hosts`` -- the static IP needs no pre-connect rebind."""
+    def _idle_watcher_service_unit(self) -> str:
+        """Azure override: the oneshot ``.service`` runs the installed ARM self-deallocate script.
 
-    def _idle_watcher_service_unit(self, sentinel_on_outer: str) -> str:
-        """Idle action: run the self-deallocate script (an Azure OS poweroff would not halt billing)."""
-        # The script has the sentinel path baked in at install time (see
-        # _write_idle_watcher_aux_files), so the service unit needs no argument.
-        del sentinel_on_outer
+        The sentinel removal lives in the deallocate script itself (written by
+        ``_prepare_idle_watcher_outer``), since an Azure OS poweroff would not halt
+        billing.
+        """
         return _build_idle_watcher_service_unit()
 
-    def _prepare_idle_self_stop(self, host_id: HostId) -> None:
-        """Assign the VM's self-deallocate role so the in-guest idle watcher can deallocate it.
+    def _prepare_idle_watcher_outer(self, outer: OuterHostInterface, sentinel_on_outer: str) -> None:
+        """Azure override: install curl and write the self-deallocate script before the units.
 
-        Best-effort and MUST NOT raise (the base ``_on_host_finalized`` relies on
-        that): ``_find_instance_for_host`` raises ``MngrError`` on an ambiguous
-        host-id match and ``assign_self_deallocate_role`` surfaces Azure API
-        failures as ``VpsApiError``/``AzureError``. It degrades gracefully when the
-        operator lacks roleAssignments/write, leaving ``mngr stop`` as the way to
-        halt billing.
+        The self-deallocate script calls the IMDS + ARM API with curl; ensure curl
+        is present (idempotent) so idle self-deallocate doesn't silently degrade.
+        The script removes ``sentinel_on_outer`` first, then deallocates. The
+        ``.path``/``.service`` units the base writes after this point fire this
+        script via its installed path.
+        """
+        outer.execute_idempotent_command(
+            "command -v curl >/dev/null 2>&1 || (apt-get update && apt-get install -y curl)"
+        )
+        outer.write_text_file(
+            Path(_DEALLOCATE_SCRIPT_PATH), _build_self_deallocate_script(sentinel_to_remove=sentinel_on_outer)
+        )
+        outer.execute_idempotent_command(f"chmod +x {_DEALLOCATE_SCRIPT_PATH}")
+
+    def _post_finalize_steps(self, *, host_id: HostId, vps_ip: str) -> list[tuple[str, Callable[[], None]]]:
+        """Prepend the Azure self-deallocate role assignment to the shared post-finalize steps.
+
+        A bare placement runs the self-deallocate ARM call directly from its idle
+        ``shutdown.sh`` (it is the VM's root), and a container placement's host-side
+        watcher does the same -- both need the role assignment, so it runs for both
+        shapes. The role assignment degrades gracefully when the operator lacks
+        roleAssignments/write (see ``AzureVpsClient.assign_self_deallocate_role``).
+        Best-effort like the rest: a failure is logged and the other steps still run.
+        """
+        del vps_ip
+        return [
+            (
+                "idle self-deallocate is disabled for this host, but `mngr stop` still works",
+                lambda: self._assign_self_deallocate_role(host_id),
+            )
+        ]
+
+    def _assign_self_deallocate_role(self, host_id: HostId) -> None:
+        """Assign the ARM self-deallocate role to this host's VM (best-effort body for the step).
+
+        ``assign_self_deallocate_role`` surfaces Azure API failures as ``VpsApiError``
+        (a ``MngrError``), but a raw ``AzureError`` could still escape the SDK; wrap
+        it so the base post-finalize loop -- which catches only ``MngrError`` -- keeps
+        the no-raise contract.
         """
         try:
             instance = self._find_instance_for_host(host_id)
             if instance is not None:
                 self.azure_client.assign_self_deallocate_role(str(instance["id"]))
-        except (MngrError, AzureError) as e:
-            logger.warning(
-                "Could not assign the self-deallocate role for host {} ({}); idle self-deallocate "
-                "is disabled for this host, but `mngr stop` still works",
-                host_id,
-                e,
-            )
+        except AzureError as e:
+            raise MngrError(f"Azure self-deallocate role assignment failed: {e}") from e
 
-    def _write_idle_watcher_aux_files(self, outer: OuterHostInterface, sentinel_on_outer: str) -> None:
-        """Install the self-deallocate script the watcher ``.service`` runs (and ensure curl is present).
+    # =========================================================================
+    # Offline discovery (so DEALLOCATED hosts list + resolve by name from the bucket)
+    # =========================================================================
 
-        The script calls the IMDS + ARM API with curl; ensure curl exists
-        (idempotent -- a no-op when already installed) so idle self-deallocate
-        doesn't silently degrade.
+    def _host_name_tag_key(self) -> str:
+        # The host name is mirrored into the Azure ``mngr-host-name`` tag (as
+        # ``mngr-<host_name>``); the shared ``_offline_discovered_host_from_instance``
+        # reads it through here.
+        return HOST_NAME_TAG_KEY
+
+    def _remirror_host_name(self, host_record: VpsHostRecord, name: HostName) -> None:
+        """Re-stamp the ``mngr-host-name`` VM tag (read by offline discovery) after a rename.
+
+        Merges into the VM's existing tags (does not replace them); the value matches
+        create's ``label`` (``mngr-<host_name>``).
         """
-        outer.execute_idempotent_command(
-            "command -v curl >/dev/null 2>&1 || (apt-get update && apt-get install -y curl)"
+        if host_record.config is None:
+            return
+        self.azure_client.set_instance_tags(
+            host_record.config.vps_instance_id, {self._host_name_tag_key(): f"mngr-{name}"}
         )
-        outer.write_text_file(Path(_DEALLOCATE_SCRIPT_PATH), _build_self_deallocate_script(sentinel_on_outer))
-        outer.execute_idempotent_command(f"chmod +x {_DEALLOCATE_SCRIPT_PATH}")
-
-    # =========================================================================
-    # Offline metadata via VM tags (so DEALLOCATED hosts list + resolve by name)
-    # =========================================================================
-
-    def persist_agent_data(self, host_id: HostId, agent_data: Mapping[str, object]) -> None:
-        """Persist an agent's record on the host volume *and* mirror it into VM tags.
-
-        Mirrors ``AwsProvider.persist_agent_data``: the base writes the
-        authoritative on-volume record (read by SSH-based discovery for *running*
-        hosts -- best-effort, raises ``HostNotFoundError`` when deallocated), and
-        this override mirrors a compact record into VM tags so a *deallocated* VM
-        still surfaces its agents and resolves for ``mngr start``.
-        """
-        try:
-            super().persist_agent_data(host_id, agent_data)
-        except HostNotFoundError:
-            logger.debug("Host {} unreachable; persisting agent data to Azure tags only", host_id)
-        agent_id = agent_data.get("id")
-        if agent_id is None:
-            logger.warning("Cannot mirror agent data to Azure tags without an id (name={!r})", agent_data.get("name"))
-            return
-        instance = self._find_instance_for_host(host_id)
-        if instance is None:
-            logger.warning("No Azure VM found for host {}; cannot persist agent tags", host_id)
-            return
-        set_tags, delete_keys = self._agent_field_tags(str(agent_id), agent_data, instance)
-        self.azure_client.add_tags(VpsInstanceId(instance["id"]), set_tags)
-        if delete_keys:
-            self.azure_client.remove_tags(VpsInstanceId(instance["id"]), delete_keys)
-
-    def remove_persisted_agent_data(self, host_id: HostId, agent_id: AgentId) -> None:
-        """Remove the agent's on-volume record *and* its ``mngr-agent-<id>-*`` tags."""
-        try:
-            super().remove_persisted_agent_data(host_id, agent_id)
-        except HostNotFoundError:
-            logger.debug("Host {} unreachable; removing agent data from Azure tags only", host_id)
-        instance = self._find_instance_for_host(host_id)
-        if instance is None:
-            return
-        keys = [f"{AGENT_TAG_PREFIX}{agent_id}-{field}" for field in _AGENT_TAG_FIELDS]
-        self.azure_client.remove_tags(VpsInstanceId(instance["id"]), keys)
 
     def _is_instance_offline(self, instance: Mapping[str, Any]) -> bool:
         """Whether the VM is halted (stopped/deallocated, and their in-flight transitions).
@@ -463,137 +528,6 @@ class AzureProvider(OfflineCapableVpsDockerProvider):
         misreported as STOPPED.
         """
         return self.azure_client.get_instance_status(VpsInstanceId(instance["id"])) == VpsInstanceStatus.HALTED
-
-    def _agent_field_value(self, field: str, agent_data: Mapping[str, object]) -> str | None:
-        """Render one agent field as a tag-value string, or ``None`` if absent/empty.
-
-        ``name``/``type`` raw; ``labels`` as compact JSON (empty labels treated as
-        absent). Mirrors ``AwsProvider._agent_field_value``.
-        """
-        if field == "labels":
-            labels = agent_data.get("labels")
-            return json.dumps(labels, separators=(",", ":")) if labels else None
-        value = agent_data.get(field)
-        return None if value is None else str(value)
-
-    def _agent_field_tags(
-        self, agent_id: str, agent_data: Mapping[str, object], instance: Mapping[str, Any]
-    ) -> tuple[dict[str, str], list[str]]:
-        """Compute the ``mngr-agent-<id>-<field>`` tags to set, and stale ones to delete.
-
-        ``persist_agent_data`` is an upsert sometimes called with a partial record,
-        so a field absent from ``agent_data`` is left alone (NOT removed -- deleting
-        it would clobber the ``name`` offline resolve-by-name depends on). A field
-        present but empty (e.g. ``labels={}``) or over the 256-char Azure tag limit
-        (realistically only ``labels``) is dropped and its existing tag deleted.
-        Mirrors ``AwsProvider._agent_field_tags``.
-        """
-        set_tags: dict[str, str] = {}
-        delete_keys: list[str] = []
-        existing = set(self._tag_dict_from_normalized(instance))
-        for field in _AGENT_TAG_FIELDS:
-            if field not in agent_data:
-                continue
-            key = f"{AGENT_TAG_PREFIX}{agent_id}-{field}"
-            value = self._agent_field_value(field, agent_data)
-            if value is not None and len(value) <= _MAX_TAG_VALUE_LEN:
-                set_tags[key] = value
-                continue
-            if value is not None:
-                logger.warning(
-                    "Agent {} {} ({} chars) exceeds the {}-char Azure tag limit; omitted from the "
-                    "stopped-host tag mirror",
-                    agent_data.get("name", agent_id),
-                    field,
-                    len(value),
-                    _MAX_TAG_VALUE_LEN,
-                )
-            if key in existing:
-                delete_keys.append(key)
-        return set_tags, delete_keys
-
-    def _persisted_agent_dicts_from_instance(self, instance: Mapping[str, Any]) -> list[dict]:
-        """Reassemble agent records from this VM's ``mngr-agent-<id>-<field>`` tags.
-
-        Mirrors ``AwsProvider._persisted_agent_dicts_from_instance`` (ids may
-        contain dashes, so split on the final ``-``).
-        """
-        by_id: dict[str, dict] = {}
-        for key, value in self._tag_dict_from_normalized(instance).items():
-            if not key.startswith(AGENT_TAG_PREFIX):
-                continue
-            agent_id, sep, field = key[len(AGENT_TAG_PREFIX) :].rpartition("-")
-            if not sep or field not in _AGENT_TAG_FIELDS:
-                continue
-            record = by_id.setdefault(agent_id, {"id": agent_id})
-            if field == "labels":
-                try:
-                    parsed = json.loads(value)
-                except json.JSONDecodeError:
-                    logger.warning("Skipping unparseable agent labels tag {!r}", key)
-                    continue
-                if not isinstance(parsed, dict):
-                    logger.warning("Skipping agent labels tag {!r}: value is not a JSON object", key)
-                    continue
-                record["labels"] = parsed
-            else:
-                record[field] = value
-        return list(by_id.values())
-
-    def _tag_dict_from_normalized(self, instance: Mapping[str, Any]) -> dict[str, str]:
-        """Turn the normalized ``["key=value", ...]`` tag list into a dict (split on first ``=``)."""
-        tags: dict[str, str] = {}
-        for kv in instance.get("tags", ()):
-            key, sep, value = kv.partition("=")
-            if sep:
-                tags[key] = value
-        return tags
-
-    def _host_name_from_tags(self, tags: Mapping[str, str]) -> HostName:
-        """Recover the host name from the ``mngr-host-name=mngr-<name>`` tag (fallback: host-id)."""
-        name_tag = tags.get(HOST_NAME_TAG_KEY, "")
-        if name_tag.startswith(_HOST_NAME_TAG_PREFIX):
-            return HostName(name_tag[len(_HOST_NAME_TAG_PREFIX) :])
-        if name_tag:
-            return HostName(name_tag)
-        return HostName(tags.get("mngr-host-id", "unknown"))
-
-    def _offline_discovered_host_from_instance(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
-        """Build a STOPPED-state DiscoveredHost from a VM's tags, or None if not a mngr host."""
-        tags = self._tag_dict_from_normalized(instance)
-        host_id_str = tags.get("mngr-host-id")
-        if host_id_str is None:
-            return None
-        return DiscoveredHost(
-            host_id=HostId(host_id_str),
-            host_name=self._host_name_from_tags(tags),
-            provider_name=self.name,
-            host_state=HostState.STOPPED,
-        )
-
-    def _offline_host_from_instance(self, host_id: HostId, instance: Mapping[str, Any]) -> OfflineHost:
-        """Reconstruct a minimal offline host (STOPPED) for a deallocated VM from its tags."""
-        tags = self._tag_dict_from_normalized(instance)
-        now = datetime.now(timezone.utc)
-        created_at = now
-        created_at_raw = tags.get("mngr-created-at")
-        if created_at_raw:
-            try:
-                created_at = datetime.fromisoformat(created_at_raw)
-            except ValueError as e:
-                logger.opt(exception=e).warning(
-                    "Malformed mngr-created-at tag {!r} on host {}; falling back to now()",
-                    created_at_raw,
-                    host_id,
-                )
-        certified = CertifiedHostData(
-            host_id=str(host_id),
-            host_name=str(self._host_name_from_tags(tags)),
-            created_at=created_at,
-            updated_at=now,
-            stop_reason=HostState.STOPPED.value,
-        )
-        return self._create_offline_host(VpsDockerHostRecord(certified_host_data=certified))
 
 
 class AzureProviderBackend(ProviderBackendInterface):
@@ -645,18 +579,31 @@ class AzureProviderBackend(ProviderBackendInterface):
             # A missing/unresolvable subscription means Azure was never reached:
             # the state is *unknown* (agents may well exist on a configured
             # subscription we transiently couldn't read -- e.g. the az CLI
-            # rewriting azureProfile.json under us). That is ProviderUnavailableError,
-            # NOT ProviderEmptyError: read paths (mngr list) must surface a warning
-            # rather than silently dropping the provider and its agents from the
-            # listing. Host-creation paths surface this same error to the user.
-            raise _azure_unavailable_error(name, str(e)) from e
+            # rewriting azureProfile.json under us). That is ProviderNotAuthorizedError
+            # (a ProviderUnavailableError), NOT ProviderEmptyError: read paths (mngr
+            # list) must surface it rather than silently dropping the provider and its
+            # agents. Host-creation paths surface this same error to the user.
+            raise _azure_not_authorized_error(
+                name,
+                str(e),
+                "set subscription_id, AZURE_SUBSCRIPTION_ID, or run `az account set --subscription <id>`",
+                short_reason="Azure subscription not resolved",
+            ) from e
 
+        # DefaultAzureCredential constructs lazily and never validates, so eagerly
+        # request a management-scope token here to surface an unauthenticated
+        # environment *now* (instead of as a confusing API error on the first
+        # discovery call), matching how AWS/GCP resolve credentials at construction.
         try:
-            credential = config.get_credential()
+            credential = _resolve_and_validate_azure_credential(config)
         except AzureError as e:
-            # Same rationale: a credential we couldn't obtain leaves Azure's state
-            # unknown, so this is unavailable (warned), not empty (silently skipped).
-            raise _azure_unavailable_error(name, str(e)) from e
+            # A credential we couldn't obtain/validate leaves Azure's state unknown, so
+            # this is unauthorized (surfaced), not empty (silently skipped).
+            raise _azure_not_authorized_error(
+                name,
+                "Azure credentials not available",
+                "run `az login` (or set AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_CLIENT_SECRET)",
+            ) from e
 
         azure_client = AzureVpsClient(
             credential=credential,

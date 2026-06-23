@@ -37,7 +37,7 @@ const MONOREPO_ROOT = path.resolve(ROOT, '../..');
  * path inside the monorepo.
  *
  * The packaged app only needs the transitive runtime closure of what minds
- * imports; other workspace members (e.g. mngr_vps_docker, mngr_kanpan) are
+ * imports; other workspace members (e.g. mngr_vps, mngr_kanpan) are
  * not included.
  *
  * This list is mirrored in electron/env-setup.js, electron/pyproject/
@@ -56,11 +56,12 @@ const WORKSPACE_PACKAGES = {
   'imbue-mngr-lima':        'libs/mngr_lima',
   'imbue-mngr-modal':       'libs/mngr_modal',
   'imbue-mngr-ovh':         'libs/mngr_ovh',
-  'imbue-mngr-vps-docker':  'libs/mngr_vps_docker',
+  'imbue-mngr-vps':         'libs/mngr_vps',
   'imbue-common':           'libs/imbue_common',
   'concurrency-group':      'libs/concurrency_group',
   'resource-guards':        'libs/resource_guards',
   'modal-proxy':            'libs/modal_proxy',
+  'overlay':                'libs/overlay',
 };
 
 /**
@@ -74,6 +75,21 @@ const WORKSPACE_PACKAGES = {
  * Returns a map of package name → wheel filename, used downstream when
  * rewriting `pyproject.toml` to reference the wheels.
  */
+/**
+ * Compile the desktop client's Tailwind v4 stylesheet
+ * (static/app.css -> static/app.min.css) before the minds wheel is built.
+ *
+ * app.min.css is gitignored and force-included into the wheel via
+ * `[tool.hatch.build] artifacts` in apps/minds/pyproject.toml, so it MUST
+ * exist on disk before buildWorkspaceWheels() runs -- otherwise the packaged
+ * app ships unstyled. Delegates to the pinned @tailwindcss/cli via the
+ * `build:css` pnpm script (already used by postinstall / `just minds-css`).
+ */
+function buildCss() {
+  console.log('Compiling Tailwind CSS (static/app.css -> static/app.min.css)...');
+  execSync('pnpm run build:css', { cwd: ROOT, stdio: 'inherit' });
+}
+
 function buildWorkspaceWheels() {
   const wheelsDir = path.join(RESOURCES_DIR, 'wheels');
   fs.mkdirSync(wheelsDir, { recursive: true });
@@ -591,6 +607,7 @@ async function main() {
     downloadRestic(RESOURCES_DIR, { platform, arch }),
   ]);
 
+  buildCss();
   bundleLatchkey();
   const wheelByPackage = buildWorkspaceWheels();
   stageRuntimePyproject(wheelByPackage);

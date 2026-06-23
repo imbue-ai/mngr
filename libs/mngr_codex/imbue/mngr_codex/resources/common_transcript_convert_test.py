@@ -64,6 +64,9 @@ def test_converts_user_and_assistant_messages(tmp_path: Path) -> None:
     }
     assert events[1]["type"] == "assistant_message"
     assert events[1]["text"] == "hi back"
+    # A text-only codex turn carries the text as a single (trivially ordered) part.
+    assert events[1]["parts"] == [{"type": "text", "content": "hi back"}]
+    assert events[1]["parts_ordered"] is True
     for event in events:
         assert validate_common_transcript_record(event) is None
 
@@ -75,10 +78,23 @@ def test_function_call_and_output_pair_into_tool_result(tmp_path: Path) -> None:
         [_function_call("shell", '{"cmd":"ls"}', "call-1"), _function_call_output("call-1", "file-a\nfile-b")],
     )
     common_transcript_convert.convert(str(input_file), str(output_file))
-    results = [e for e in _events(output_file) if e["type"] == "tool_result"]
+    events = _events(output_file)
+    results = [e for e in events if e["type"] == "tool_result"]
     assert len(results) == 1
     assert results[0]["tool_name"] == "shell"
     assert results[0]["output"] == "file-a\nfile-b"
+    # The call surfaces on the assistant turn as an ordered tool_call part (the
+    # authoritative view the reader renders), paired to the result by tool_call_id.
+    assistant = [e for e in events if e["type"] == "assistant_message"]
+    assert len(assistant) == 1
+    assert assistant[0]["parts"] == [
+        {"type": "tool_call", "tool_call_id": "line-1-tc", "tool_name": "shell", "input_preview": '{"cmd":"ls"}'}
+    ]
+    assert assistant[0]["parts_ordered"] is True
+    assert assistant[0]["tool_calls"][0]["tool_call_id"] == results[0]["tool_call_id"]
+    assert "stop_reason" not in assistant[0]
+    for event in events:
+        assert validate_common_transcript_record(event) is None
 
 
 def test_function_call_output_content_array_is_stringified(tmp_path: Path) -> None:

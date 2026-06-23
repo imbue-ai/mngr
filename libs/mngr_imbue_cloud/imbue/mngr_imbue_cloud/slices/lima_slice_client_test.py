@@ -1,9 +1,10 @@
 import pytest
 
+from imbue.mngr.primitives import HostId
+from imbue.mngr_imbue_cloud.errors import SliceCapacityError
 from imbue.mngr_imbue_cloud.slices.lima_slice_client import LimaSliceVpsClient
-from imbue.mngr_imbue_cloud.slices.lima_slice_client import parse_listening_ports
 from imbue.mngr_lima.errors import LimaCommandError
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsInstanceId
 
 # Note: provision_slice_vm / destroy_instance / get_instance_status drive limactl
 # over SSH against a real box and are exercised by the live slice smoke test, not
@@ -12,7 +13,12 @@ from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
 
 def _client() -> LimaSliceVpsClient:
-    return LimaSliceVpsClient(box_address="box.example", box_ssh_user="limahost", private_key_path="/tmp/id")
+    return LimaSliceVpsClient(
+        box_address="box.example",
+        box_ssh_user="limahost",
+        private_key_path="/tmp/id",
+        box_host_public_key="ssh-ed25519 AAAAtestboxhostkey",
+    )
 
 
 def test_cloud_only_operations_raise_not_implemented() -> None:
@@ -36,6 +42,10 @@ def test_box_ssh_command_targets_the_lima_user_with_the_pool_key() -> None:
     assert command[0] == "ssh"
     assert "-i" in command and "/tmp/id" in command
     assert "limahost@box.example" in command
+    # The box host key is pinned strictly (no trust-on-first-use).
+    assert "StrictHostKeyChecking=yes" in command
+    assert any(arg.startswith("UserKnownHostsFile=") for arg in command)
+    assert "StrictHostKeyChecking=accept-new" not in command
     # The remote command is the last arg, prefixed with an explicit PATH so a
     # non-login shell still finds limactl (extracted to /usr/local/bin by prep).
     assert command[-1].endswith("limactl list --json")
@@ -95,12 +105,89 @@ def test_destroy_instance_raises_on_genuine_delete_failure() -> None:
         client.destroy_instance(VpsInstanceId("mngr-slice-abc"))
 
 
-def test_parse_listening_ports_extracts_ipv4_ipv6_and_wildcard() -> None:
-    ss_output = (
-        "LISTEN 0      128          0.0.0.0:22         0.0.0.0:*\n"
-        "LISTEN 0      128             [::]:22            [::]:*\n"
-        "LISTEN 0      128       127.0.0.1:5432       0.0.0.0:*\n"
-        "LISTEN 0      128                *:22001              *:*\n"
-        "garbage line with too few fields\n"
+def test_list_disk_names_parses_jsonl_names() -> None:
+    disk_json = '{"name": "mngr-slice-aaa-data"}\n{"name": "mngr-slice-bbb-data"}\n'
+    client = _recording_client({"limactl disk list --json": (0, disk_json, "")})
+    assert client.list_disk_names() == {"mngr-slice-aaa-data", "mngr-slice-bbb-data"}
+
+
+def test_destroy_disk_unlocks_then_force_deletes() -> None:
+    # A leaked orphan disk is typically locked, so destroy_disk must unlock first.
+    client = _recording_client({})
+    client.destroy_disk("mngr-slice-abc-data")
+    recorded = client.recorded_commands
+    unlock_idx = next(
+        i for i, cmd in enumerate(recorded) if "limactl disk unlock" in cmd and "mngr-slice-abc-data" in cmd
     )
-    assert parse_listening_ports(ss_output) == {22, 5432, 22001}
+    delete_idx = next(
+        i for i, cmd in enumerate(recorded) if "limactl disk delete --force" in cmd and "mngr-slice-abc-data" in cmd
+    )
+    assert unlock_idx < delete_idx
+
+
+def test_destroy_disk_tolerates_already_absent_disk() -> None:
+    client = _recording_client({"limactl disk delete": (1, "", "disk does not exist")})
+    # An already-absent disk must not raise.
+    client.destroy_disk("mngr-slice-abc-data")
+
+
+def test_destroy_disk_raises_on_genuine_delete_failure() -> None:
+    client = _recording_client({"limactl disk delete": (1, "", "permission denied")})
+    with pytest.raises(LimaCommandError):
+        client.destroy_disk("mngr-slice-abc-data")
+
+
+def test_provision_slice_vm_reserves_under_lock_then_starts_and_returns_box_chosen_ports() -> None:
+    host_id = HostId.generate()
+    # The reserve runs as one base64'd bash command (it holds the box lock); it prints
+    # the ports it chose. The long boot is a separate, unlocked `limactl start`.
+    client = _recording_client(
+        {
+            "base64 -d | bash": (0, "MNGR_SLICE_RESERVED 22001 22002\n", ""),
+            "limactl --log-level=info start": (0, "", ""),
+        }
+    )
+    result = client.provision_slice_vm(
+        host_id=host_id,
+        env_name="dev-josh",
+        vcpus=2,
+        memory_mib=8192,
+        disk_gib=40,
+        host_dir="/mngr",
+        root_authorized_public_key="ssh-ed25519 AAAA",
+        host_private_key_pem="PEM",
+        host_public_key_openssh="ssh-ed25519 BBBB",
+        boot_disk_gib=32,
+        slot_count=6,
+        port_range_start=22000,
+        port_range_end=32000,
+    )
+    # The ports come from the box reservation, and the instance/disk names are env-stamped.
+    assert result.vm_ssh_host_port == 22001
+    assert result.container_ssh_host_port == 22002
+    assert result.instance_name == f"mngr-slice-dev-josh-{host_id.get_uuid().hex}"
+    assert result.disk_name == f"mngr-slice-dev-josh-{host_id.get_uuid().hex}-data"
+    # The reserve happened before the boot, and the boot was a separate command.
+    reserve_idx = next(i for i, cmd in enumerate(client.recorded_commands) if "base64 -d | bash" in cmd)
+    start_idx = next(i for i, cmd in enumerate(client.recorded_commands) if "limactl --log-level=info start" in cmd)
+    assert reserve_idx < start_idx
+
+
+def test_provision_slice_vm_raises_slice_capacity_error_when_box_is_full() -> None:
+    client = _recording_client({"base64 -d | bash": (4, "", "MNGR_SLICE_BOX_FULL 6/6")})
+    with pytest.raises(SliceCapacityError):
+        client.provision_slice_vm(
+            host_id=HostId.generate(),
+            env_name="dev-josh",
+            vcpus=2,
+            memory_mib=8192,
+            disk_gib=40,
+            host_dir="/mngr",
+            root_authorized_public_key="ssh-ed25519 AAAA",
+            host_private_key_pem="PEM",
+            host_public_key_openssh="ssh-ed25519 BBBB",
+            boot_disk_gib=32,
+            slot_count=6,
+            port_range_start=22000,
+            port_range_end=32000,
+        )

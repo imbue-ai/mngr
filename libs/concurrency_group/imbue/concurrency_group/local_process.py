@@ -185,6 +185,8 @@ def run_background(
     shutdown_event: MutableEvent | None = None,
     shutdown_timeout_sec: float = 30.0,
     env: Mapping[str, str] | None = None,
+    # Open file descriptors to keep open in (and inherit into) the spawned child, by their fd numbers.
+    pass_fds: Sequence[int] = (),
     process_class: type[ProcessClassType] = RunningProcess,  # ty: ignore[invalid-parameter-default]
     process_class_kwargs: Mapping[str, object] | None = None,
 ) -> ProcessClassType:
@@ -217,6 +219,7 @@ def run_background(
             shutdown_event=true_shutdown_event,
             shutdown_timeout_sec=shutdown_timeout_sec,
             env=env,
+            pass_fds=pass_fds,
         )
     )
     return process

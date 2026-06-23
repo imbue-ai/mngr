@@ -47,6 +47,8 @@ from __future__ import annotations
 
 import importlib.resources
 import shlex
+import shutil
+import tempfile
 import urllib.parse
 from collections.abc import Callable
 from collections.abc import Mapping
@@ -63,11 +65,18 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
+from imbue.mngr.agents.installation import ensure_cli_installed
+from imbue.mngr.agents.installation import verify_pinned_cli_version
+from imbue.mngr.agents.update_policy import AgentUpdatePolicy
+from imbue.mngr.agents.update_policy import is_self_update_disabled
 from imbue.mngr.api.preservation import PreservedItem
+from imbue.mngr.api.preservation import adopt_sessions
 from imbue.mngr.api.preservation import build_transcript_preserved_items
 from imbue.mngr.api.preservation import flag_gated_items
+from imbue.mngr.api.preservation import iter_agent_session_paths
 from imbue.mngr.api.preservation import preserve_agent_state
 from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
+from imbue.mngr.api.preservation import run_adopt_session_preflight
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentStartError
@@ -77,11 +86,20 @@ from imbue.mngr.hosts.common import copy_on_host
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.agent import CliBackedAgentMixin
+from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.interfaces.agent import HasPermissionPolicyMixin
+from imbue.mngr.interfaces.agent import HasSessionAdoptionMixin
+from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
+from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
+from imbue.mngr.interfaces.agent import InteractiveAgentMixin
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
@@ -91,6 +109,8 @@ from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_opencode import resources as _opencode_resources
 from imbue.mngr_opencode.opencode_config import ACTIVE_MARKER_FILENAME
+from imbue.mngr_opencode.opencode_config import AGENT_OPENCODE_DB_RELPATH
+from imbue.mngr_opencode.opencode_config import AGENT_OPENCODE_STORE_RELPATH
 from imbue.mngr_opencode.opencode_config import EMIT_COMMON_ENABLED_VALUE
 from imbue.mngr_opencode.opencode_config import EMIT_COMMON_ENV_VAR
 from imbue.mngr_opencode.opencode_config import LAUNCH_SCRIPT_NAME
@@ -105,7 +125,11 @@ from imbue.mngr_opencode.opencode_config import PERMISSIONS_WAITING_FILENAME
 from imbue.mngr_opencode.opencode_config import PLUGIN_FILENAME
 from imbue.mngr_opencode.opencode_config import READY_SENTINEL_FILENAME
 from imbue.mngr_opencode.opencode_config import ROOT_SESSION_FILENAME
+from imbue.mngr_opencode.opencode_config import apply_opencode_merge
+from imbue.mngr_opencode.opencode_config import apply_opencode_rebind
 from imbue.mngr_opencode.opencode_config import build_opencode_config
+from imbue.mngr_opencode.opencode_config import collect_adopt_search_db_paths
+from imbue.mngr_opencode.opencode_config import get_opencode_app_data_dir
 from imbue.mngr_opencode.opencode_config import get_opencode_auth_path_for_data_home
 from imbue.mngr_opencode.opencode_config import get_opencode_config_dir
 from imbue.mngr_opencode.opencode_config import get_opencode_config_file_path
@@ -114,7 +138,9 @@ from imbue.mngr_opencode.opencode_config import get_opencode_plugin_path
 from imbue.mngr_opencode.opencode_config import get_opencode_root_session_file_path
 from imbue.mngr_opencode.opencode_config import get_opencode_server_port_file_path
 from imbue.mngr_opencode.opencode_config import get_shared_opencode_auth_path
+from imbue.mngr_opencode.opencode_config import read_only_root_session_id
 from imbue.mngr_opencode.opencode_config import read_opencode_config
+from imbue.mngr_opencode.opencode_config import resolve_adopt_session_db
 from imbue.mngr_opencode.opencode_config import serialize_opencode_config
 
 # User's global OpenCode config, the base for the per-agent opencode.json when
@@ -140,6 +166,11 @@ _READY_POLL_INTERVAL_SECONDS: Final[float] = 0.25
 # (the agent's lifecycle marker tracks completion, so send is fire-and-forget).
 _PROMPT_ENDPOINT_TEMPLATE: Final[str] = "http://127.0.0.1:{port}/session/{session_id}/prompt_async"
 
+# OpenCode's native db file name plus its WAL sidecars. Adoption builds the agent db on a LOCAL
+# staging path and copies exactly this trio onto the (possibly remote) host -- the ``-wal``/``-shm``
+# sidecars carry writes not yet checkpointed into the main file, so they travel with it.
+_DB_SIDECAR_SUFFIXES: Final[tuple[str, ...]] = ("-wal", "-shm")
+
 
 def _build_prompt_post_command(port: str, session_id: str, message: str) -> str:
     """Build the host ``curl`` command that POSTs ``message`` to the agent's server.
@@ -158,6 +189,18 @@ def _load_opencode_resource(filename: str) -> str:
     return resource_files.joinpath(filename).read_text()
 
 
+def _adopt_search_db_paths(mngr_ctx: MngrContext) -> list[Path]:
+    """The ``opencode.db`` paths an ``--adopt`` session id is searched across (local only).
+
+    The user-native db plus every live and preserved local mngr agent's db. Used by both the
+    ``on_before_create`` fail-fast and the ``adopt_session`` resolution so they search the
+    same set.
+    """
+    local_host_dir = Path(mngr_ctx.config.default_host_dir).expanduser()
+    agent_db_paths = iter_agent_session_paths(local_host_dir, AGENT_OPENCODE_DB_RELPATH)
+    return collect_adopt_search_db_paths(agent_db_paths)
+
+
 class OpenCodeAgentConfig(AgentTypeConfig):
     """Config for the opencode agent type."""
 
@@ -167,7 +210,7 @@ class OpenCodeAgentConfig(AgentTypeConfig):
     )
     cli_args: tuple[str, ...] = Field(
         default=(),
-        description="Additional CLI arguments forwarded to the opencode attach (TUI) client.",
+        description="Extra arguments forwarded to the opencode attach (TUI) client.",
     )
     # config_overrides mirrors mngr_antigravity's settings_overrides: a free-form
     # blob merged last into the per-agent opencode.json. Covers ``model``
@@ -175,8 +218,8 @@ class OpenCodeAgentConfig(AgentTypeConfig):
     # "allow", "rm -rf *": "deny"}, "edit": "ask", ...}), ``small_model``, etc.
     config_overrides: dict[str, Any] = Field(
         default_factory=dict,
-        description="Key-value overrides merged last into the per-agent opencode.json. "
-        'Common keys: model ("provider/model"), permission ({"bash": {...}, "edit": "ask"}). '
+        description="Key/value blob merged last into the per-agent opencode.json "
+        "(e.g. model, the permission policy block). "
         'Example: {"model": "anthropic/claude-sonnet-4-5", "permission": {"bash": {"rm -rf *": "deny"}}}.',
     )
     # sync_global_config mirrors mngr_antigravity's sync_home_settings: when True
@@ -185,8 +228,8 @@ class OpenCodeAgentConfig(AgentTypeConfig):
     # the base is an empty config.
     sync_global_config: bool = Field(
         default=True,
-        description="Whether to base the per-agent opencode.json on a copy of the user's real "
-        "~/.config/opencode/opencode.json (True, default) or start from an empty base (False).",
+        description="Base the per-agent opencode.json on a copy of the user's "
+        "~/.config/opencode/opencode.json, or start from an empty base.",
     )
     # symlink_auth mirrors mngr_antigravity's symlink_oauth_token. With the
     # default (symlink), the per-agent auth.json symlinks to the shared
@@ -194,17 +237,36 @@ class OpenCodeAgentConfig(AgentTypeConfig):
     # agents (and refreshes propagate). Copy mode (False) gives full isolation.
     symlink_auth: bool = Field(
         default=True,
-        description="Symlink (True, default) each per-agent auth.json to the shared "
-        "~/.local/share/opencode/auth.json, so one agent's login authenticates all agents. "
-        "Copy (False) for full isolation (no sharing).",
+        description="Symlink the per-agent auth.json to the shared "
+        "~/.local/share/opencode/auth.json, so one login authenticates all agents. "
+        "Set False for full isolation.",
     )
     # auto_allow_permissions injects a wildcard ``permission`` allow into the
     # per-agent opencode.json (auto-approve every action not explicitly denied) --
     # the config analog of OpenCode's ``run --dangerously-skip-permissions``.
     auto_allow_permissions: bool = Field(
         default=False,
-        description="When True, auto-approve every action not explicitly denied "
+        description="Auto-approve everything not explicitly denied "
         "(injects a wildcard allow into the opencode.json permission block).",
+    )
+    check_installation: bool = Field(
+        default=True,
+        description="Check whether opencode is installed and install it if missing "
+        "(if False, assume it is already present).",
+    )
+    version: str | None = Field(
+        default=None,
+        description="Pin the opencode version to install (e.g., '0.4.10'). When set, installation runs the "
+        "opencode installer with VERSION=<version> and provisioning verifies the installed opencode matches, "
+        "erroring on a mismatch. When None (the default), installs the latest version.",
+    )
+    update_policy: AgentUpdatePolicy | None = Field(
+        default=None,
+        description='How to handle opencode\'s startup auto-update. NEVER sets `"autoupdate": false` in the '
+        "per-agent opencode.json so opencode does not update itself on launch; AUTO leaves auto-update enabled. "
+        "ASK has no interactive flow for opencode and behaves like AUTO. When unset (the default), resolves to "
+        "NEVER (auto-update disabled) -- set AUTO to leave opencode's auto-update enabled. An explicit "
+        "`autoupdate` key in `config_overrides` always wins.",
     )
     # emit_common_transcript gates the raw -> common-schema converter that writes
     # events/opencode/common_transcript/events.jsonl. The raw transcript at
@@ -212,7 +274,7 @@ class OpenCodeAgentConfig(AgentTypeConfig):
     # plugin); only the converter is gated by this flag.
     emit_common_transcript: bool = Field(
         default=True,
-        description="When True, emit a common-schema transcript that `mngr transcript` reads.",
+        description="Emit the common transcript that `mngr transcript` reads.",
     )
     preserve_on_destroy: bool = Field(
         default=True,
@@ -221,7 +283,17 @@ class OpenCodeAgentConfig(AgentTypeConfig):
     )
 
 
-class OpenCodeAgent(BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin):
+class OpenCodeAgent(
+    BaseAgent[OpenCodeAgentConfig],
+    InteractiveAgentMixin,
+    CliBackedAgentMixin,
+    HasCommonTranscriptMixin,
+    HasSessionPreservationMixin,
+    HasSessionAdoptionMixin,
+    HasUnattendedModeMixin,
+    HasPermissionPolicyMixin,
+    HasAutoInstallMixin,
+):
     """Agent implementation for OpenCode (driven via its server, not TUI keystrokes)."""
 
     # How long send_message waits for the launch script to have written the
@@ -418,6 +490,15 @@ class OpenCodeAgent(BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin):
         3. Point the per-agent ``auth.json`` at the shared host auth (symlink or copy).
         4. Install the launch orchestrator under ``$MNGR_AGENT_STATE_DIR/commands/``.
         """
+        if self.agent_config.check_installation:
+            ensure_cli_installed(host, mngr_ctx, self.get_install_binary_name(), self.get_install_command())
+            if self.agent_config.version is not None:
+                verify_pinned_cli_version(
+                    host,
+                    command=str(self.agent_config.command),
+                    binary_name=self.get_install_binary_name(),
+                    pinned_version=self.agent_config.version,
+                )
         host_home = self._resolve_host_home(host)
         self._provision_opencode_config(host, host_home)
         self._provision_plugin(host)
@@ -430,16 +511,183 @@ class OpenCodeAgent(BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin):
                 concurrency_group,
             )
 
+    def on_after_provisioning(
+        self,
+        host: OnlineHostInterface,
+        options: CreateAgentOptions,
+        mngr_ctx: MngrContext,
+    ) -> None:
+        """Adopt a session after provisioning so the agent's opencode resumes existing context."""
+        self.adopt_session(host, options, mngr_ctx)
+
+    def adopt_session(
+        self,
+        host: OnlineHostInterface,
+        options: CreateAgentOptions,
+        mngr_ctx: MngrContext,
+    ) -> None:
+        """Adopt existing OpenCode session(s) so the new agent resumes that conversation.
+
+        Delegates to :func:`~imbue.mngr.api.preservation.adopt_sessions`, which copies every
+        ``--adopt`` session (``copy_explicit``) and the ``--from`` clone (``copy_clone``) into
+        this agent, then resumes one (``resume``): the clone when ``--from`` is given, otherwise
+        the last ``--adopt`` value. The rest stay available in the agent's session switcher.
+
+        * ``--adopt`` (``options.adopt_session``, a tuple): each arg is a ``ses_...`` id (resolved
+          across the user-native db and every live/preserved mngr agent's db) or an absolute path
+          to a source ``opencode.db``. OpenCode's store is a single ``opencode.db``, so the *first*
+          adopted session seeds the staging db (its trio is copied) and each *subsequent* one is
+          **merged** into it (its session + descendant rows folded in), rather than overwriting.
+        * ``--from <agent>`` (``options.source_agent_state_location``): a generic clone copying the
+          source workspace but not its state dir; the source's native opencode store is brought in
+          and its lone root session resumed.
+
+        The agent's ``opencode.db`` is built entirely on a LOCAL staging path: the first source db is
+        copied there, subsequent sources are merged in, and every adopted session is rebound to this
+        agent's work dir -- all via the stdlib ``sqlite3`` module, so the destination host needs no
+        ``sqlite3`` CLI. The finished trio is copied onto the (possibly remote) host once, after every
+        session has been folded in: the staging db lives for the whole adoption, so the per-callback
+        copy-vs-merge decision keys off whether it exists yet (the first session creates it; later ones
+        merge). The work dir is resolved once and every adopted session is rebound to it. ``resume``
+        writes ``root_session_id`` to the session actually resumed (the clone, else the last ``--adopt``).
+        """
+        if not options.adopt_session and options.source_agent_state_location is None:
+            return
+        with tempfile.TemporaryDirectory(prefix="mngr_opencode_adopt_") as staging_root:
+            staging_db = Path(staging_root) / "opencode.db"
+            new_directory = self._resolve_work_dir_on_host()
+            adopt_sessions(
+                options.adopt_session,
+                options.source_agent_state_location,
+                copy_explicit=lambda arg: self._stage_explicit_session(mngr_ctx, staging_db, new_directory, arg),
+                copy_clone=lambda location: self._stage_cloned_session(staging_db, new_directory, location),
+                resume=lambda session_id: self._point_resume_at_session(host, session_id),
+            )
+            if staging_db.exists():
+                self._push_staging_db(host, staging_db)
+
+    def _stage_explicit_session(self, mngr_ctx: MngrContext, staging_db: Path, new_directory: Path, arg: str) -> str:
+        """Resolve one ``--adopt`` value into the local staging db, rebind it, and return its id."""
+        with log_span("Adopting OpenCode session from {}", arg):
+            session_id, source_db = resolve_adopt_session_db(arg, _adopt_search_db_paths(mngr_ctx))
+            self._add_session_to_staging_db(staging_db, source_db, session_id)
+            apply_opencode_rebind(staging_db, session_id, new_directory)
+        return session_id
+
+    def _stage_cloned_session(
+        self, staging_db: Path, new_directory: Path, source_location: HostLocation
+    ) -> str | None:
+        """Stage the source agent's conversation into the local staging db after a ``--from <agent>`` clone.
+
+        A ``--from`` clone copies the source workspace but not its state dir, so the source's native
+        opencode store (``opencode.db`` + ``-wal``/``-shm``) is brought in. The source db is localized
+        (pulled to a local staging copy when the source host is remote, used in place when local), its
+        lone root session id is read, and it is seeded into / merged into the local staging db just like
+        an explicit adopt, then rebound to this agent's work dir. The returned id is what the caller
+        resumes.
+
+        A ``--from`` clone is a workspace clone, so carrying the session forward is a bonus: a source
+        with no store warns and returns ``None`` (the agent starts fresh) rather than failing.
+        """
+        source_db = source_location.path / AGENT_OPENCODE_DB_RELPATH
+        if not source_location.host.path_exists(source_db):
+            logger.warning(
+                "Clone adopt: no OpenCode session store at source {}; starting fresh.",
+                source_location.path / AGENT_OPENCODE_STORE_RELPATH,
+            )
+            return None
+        local_source_db = self._localize_source_db(source_location, staging_db.parent)
+        session_id = read_only_root_session_id(local_source_db)
+        with log_span("Adopting cloned OpenCode session {}", session_id):
+            self._add_session_to_staging_db(staging_db, local_source_db, session_id)
+            apply_opencode_rebind(staging_db, session_id, new_directory)
+        return session_id
+
+    def _localize_source_db(self, source_location: HostLocation, staging_root: Path) -> Path:
+        """Return a LOCAL path to the clone source's ``opencode.db`` trio (pulling it when the source is remote).
+
+        The merge/rebind run via the stdlib ``sqlite3`` module against a local file, so a remote source
+        store is pulled to ``staging_root`` first (the db plus any ``-wal``/``-shm`` sidecars, read over
+        the host file interface). A local source is read in place.
+        """
+        source_db = source_location.path / AGENT_OPENCODE_DB_RELPATH
+        if source_location.host.is_local:
+            return source_db
+        pulled_db = staging_root / "clone_source.db"
+        pulled_db.write_bytes(source_location.host.read_file(source_db))
+        for suffix in _DB_SIDECAR_SUFFIXES:
+            sidecar = source_db.parent / f"{source_db.name}{suffix}"
+            if source_location.host.path_exists(sidecar):
+                (staging_root / f"{pulled_db.name}{suffix}").write_bytes(source_location.host.read_file(sidecar))
+        return pulled_db
+
+    def _add_session_to_staging_db(self, staging_db: Path, source_db: Path, session_id: str) -> None:
+        """Seed the local staging db from ``source_db`` (first session) or merge ``session_id`` into it (later).
+
+        OpenCode's store is a single ``opencode.db``, so the first adopted session copies the source trio
+        wholesale and each later one is folded in with :func:`apply_opencode_merge` (a file copy would
+        clobber the earlier session). Both run locally via the stdlib ``sqlite3`` module.
+        """
+        if staging_db.exists():
+            apply_opencode_merge(staging_db, source_db, session_id)
+            return
+        shutil.copyfile(source_db, staging_db)
+        for suffix in _DB_SIDECAR_SUFFIXES:
+            sidecar = source_db.parent / f"{source_db.name}{suffix}"
+            if sidecar.exists():
+                shutil.copyfile(sidecar, staging_db.parent / f"{staging_db.name}{suffix}")
+
+    def _push_staging_db(self, host: OnlineHostInterface, staging_db: Path) -> None:
+        """Copy the finished local staging db trio onto the (possibly remote) host's opencode data dir.
+
+        Run once, after every adopted session has been folded in and rebound, so the host only ever
+        receives a complete db -- no host ``sqlite3`` CLI is involved at any point. ``--checksum`` forces
+        rsync to compare file content rather than size+mtime, so any pre-existing db at the destination is
+        replaced regardless of a coincidentally-matching size and sub-second mtime.
+        """
+        dest_app_dir = get_opencode_app_data_dir(self._get_opencode_data_home())
+        db_include = "--checksum --include=opencode.db --include=opencode.db-wal --include=opencode.db-shm --exclude=*"
+        host.copy_local_directory(staging_db.parent, dest_app_dir, db_include)
+
+    def _point_resume_at_session(self, host: OnlineHostInterface, session_id: str) -> None:
+        """Write ``session_id`` into ``root_session_id`` so the launch script resumes it (not a fresh one)."""
+        host.write_text_file(self._get_root_session_file_path(), session_id)
+        logger.info("Resuming OpenCode session {} in agent {}", session_id, self.name)
+
+    def _resolve_work_dir_on_host(self) -> Path:
+        """Return ``self.work_dir`` with symlinks resolved as the host sees it.
+
+        OpenCode stores the *resolved* absolute path in its ``session``/``project`` rows (e.g.
+        ``/tmp`` -> ``/private/tmp`` on macOS, the volume target on Modal), so the rebind must
+        target the resolved form or the directory still won't match. Falls back to the
+        unresolved path if ``readlink -f`` fails (warning), as the claude adopt path does.
+        """
+        result = self.host.execute_idempotent_command(
+            f"readlink -f {shlex.quote(str(self.work_dir))}", timeout_seconds=5.0
+        )
+        if result.success and result.stdout.strip():
+            return Path(result.stdout.strip())
+        logger.warning(
+            "readlink -f {} failed (success={}, stderr={!r}); falling back to unresolved path for the adopt rebind",
+            self.work_dir,
+            result.success,
+            result.stderr.strip(),
+        )
+        return self.work_dir
+
     def _provision_opencode_config(self, host: OnlineHostInterface, host_home: Path) -> None:
         """Write the per-agent ``opencode.json`` (idempotent each provision)."""
         base_config: dict[str, Any] = {}
         if self.agent_config.sync_global_config:
             user_config_path = host_home.joinpath(*_USER_CONFIG_RELATIVE_PATH)
             base_config = read_opencode_config(host, user_config_path)
+        # Unattended is keyed off the host, matching the other agent plugins.
+        disable_auto_update = is_self_update_disabled(self.agent_config.update_policy, is_unattended=not host.is_local)
         per_agent_config = build_opencode_config(
             base_config,
             self.agent_config.config_overrides,
-            self.agent_config.auto_allow_permissions,
+            self.is_unattended_enabled(),
+            disable_auto_update=disable_auto_update,
         )
         config_path = get_opencode_config_file_path(self._get_opencode_config_dir())
         with log_span("Writing per-agent opencode config to {}", config_path):
@@ -528,10 +776,32 @@ class OpenCodeAgent(BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin):
             launch_command = f"{launch_command} {forwarded_args}"
         return CommandString(launch_command)
 
+    def preserve_session_state(self, host: OnlineHostInterface) -> None:
+        preserve_agent_state(_opencode_preserved_items(), self, host)
+
+    def is_unattended_enabled(self) -> bool:
+        return self.agent_config.auto_allow_permissions
+
+    def get_permission_policy(self) -> Mapping[str, Any]:
+        # opencode's per-resource policy lives in the `permission` config-overrides key.
+        policy = self.agent_config.config_overrides.get("permission", {})
+        return policy if isinstance(policy, Mapping) else {}
+
+    def get_install_binary_name(self) -> str:
+        return "opencode"
+
+    def get_install_command(self) -> str:
+        # The opencode installer reads ``requested_version=${VERSION:-}``, so a pinned
+        # version is passed by setting VERSION on the bash that runs the piped script.
+        version = self.agent_config.version
+        if version is None:
+            return "curl -fsSL https://opencode.ai/install | bash"
+        return f"curl -fsSL https://opencode.ai/install | VERSION={shlex.quote(version)} bash"
+
     def on_destroy(self, host: OnlineHostInterface) -> None:
         """Preserve transcripts and session-id history before the state dir is deleted."""
         if self.agent_config.preserve_on_destroy:
-            preserve_agent_state(_opencode_preserved_items(), self, host)
+            self.preserve_session_state(host)
 
 
 def _opencode_preserved_items() -> list[PreservedItem]:
@@ -571,6 +841,19 @@ def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
     preserve_host_agents_on_destroy(
         host, mngr_ctx, AgentTypeName("opencode"), _opencode_items_to_preserve_for_discovered_agent
     )
+
+
+@hookimpl
+def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBeforeCreateArgs | None:
+    """Fail-fast pre-resolution of opencode ``--adopt`` session ids (see ``run_adopt_session_preflight``)."""
+    run_adopt_session_preflight(
+        args.agent_options.agent_type,
+        args.agent_options.adopt_session,
+        mngr_ctx,
+        OpenCodeAgent,
+        lambda session_arg: resolve_adopt_session_db(session_arg, _adopt_search_db_paths(mngr_ctx)),
+    )
+    return None
 
 
 @hookimpl

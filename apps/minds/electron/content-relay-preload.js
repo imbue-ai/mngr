@@ -24,9 +24,6 @@ const AGENT_ID_PATTERN = /^agent-[a-f0-9]{1,64}$/i;
 // emits). Accepts only the strict shape so a malicious page can't paint
 // the titlebar with arbitrary CSS values via the preview channel.
 const ACCENT_HEX_PATTERN = /^#[0-9a-f]{6}$/;
-// Either "0 0 0" or "255 255 255" (the only two values
-// ``pick_workspace_foreground`` ever returns).
-const ACCENT_FG_PATTERN = /^(?:0 0 0|255 255 255)$/;
 
 window.addEventListener('message', (event) => {
   // Only honour messages posted by this same top-level page, never by a
@@ -70,11 +67,9 @@ window.addEventListener('message', (event) => {
   if (data.type === 'minds:preview-workspace-accent') {
     const agentId = data.agentId;
     const accent = data.accent;
-    const accentFg = data.accentFg;
     if (typeof agentId !== 'string' || !AGENT_ID_PATTERN.test(agentId)) return;
     if (typeof accent !== 'string' || !ACCENT_HEX_PATTERN.test(accent)) return;
-    if (typeof accentFg !== 'string' || !ACCENT_FG_PATTERN.test(accentFg)) return;
-    ipcRenderer.send('preview-workspace-accent', agentId, accent, accentFg);
+    ipcRenderer.send('preview-workspace-accent', agentId, accent);
     return;
   }
   // Create-form color picker: there's no workspace yet, so we can't
@@ -84,10 +79,8 @@ window.addEventListener('message', (event) => {
   // displayed/last workspace is.
   if (data.type === 'minds:preview-freeform-accent') {
     const accent = data.accent;
-    const accentFg = data.accentFg;
     if (typeof accent !== 'string' || !ACCENT_HEX_PATTERN.test(accent)) return;
-    if (typeof accentFg !== 'string' || !ACCENT_FG_PATTERN.test(accentFg)) return;
-    ipcRenderer.send('preview-freeform-accent', accent, accentFg);
+    ipcRenderer.send('preview-freeform-accent', accent);
     return;
   }
 });

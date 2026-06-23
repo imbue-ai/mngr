@@ -540,6 +540,66 @@ def test_clone_git_repo_checks_out_working_tree(tmp_path: Path) -> None:
     assert _git(dest, "status", "--porcelain") == ""
 
 
+def test_clone_no_branch_lands_on_default_branch_and_is_mirror_pushable(tmp_path: Path) -> None:
+    """Cloning a remote with no branch lands on a real local branch (the
+    remote's default), so the downstream mngr-create mirror push succeeds.
+
+    Regression for the github-URL create failure: the no-branch path used to
+    leave a detached HEAD (no caller renames it, unlike the branch-given
+    path), so ``refs/heads/*`` was empty and the mirror push -- which only
+    pushes ``refs/heads/*`` + ``refs/tags/*`` -- failed with "No refs in
+    common and none specified; doing nothing". The remote here defaults to
+    ``main``; the clone must check that branch out by name.
+    """
+    origin = tmp_path / "origin"
+    _make_origin_repo_with_branch(origin, "testing")
+
+    dest = tmp_path / "clone"
+    clone_git_repo(GitUrl("file://{}".format(origin)), dest)
+
+    # Landed on the remote's default branch (a named branch, not detached HEAD).
+    assert _git(dest, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+    assert (dest / "f").read_text() == "base\n"
+    assert not (dest / ".git" / "shallow").exists()
+
+    # The mirror push mngr create performs must succeed -- this is the exact
+    # operation that failed before the fix.
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True, capture_output=True)
+    push = subprocess.run(
+        ["git", "-C", str(dest), "push", "--force", "--prune", str(bare), *GIT_MIRROR_PUSH_REFSPECS],
+        capture_output=True,
+        text=True,
+    )
+    assert push.returncode == 0, push.stderr
+    assert _git(bare, "for-each-ref", "--format=%(refname:short)", "refs/heads") == "main"
+
+
+def test_clone_no_branch_uses_remotes_actual_default_branch_name(tmp_path: Path) -> None:
+    """The no-branch clone lands on the remote's *actual* default branch name,
+    not an assumed ``main``.
+
+    Guards the choice to resolve the default branch via ``git clone`` rather
+    than hardcoding ``main``: a repo whose default is ``master`` (or anything
+    else) must produce a local branch with that real name, since the name
+    becomes the agent's source-base branch downstream. A hardcoded ``main``
+    would silently mislabel it.
+    """
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "master")
+    _git(origin, "config", "user.email", "test@example.com")
+    _git(origin, "config", "user.name", "Test")
+    (origin / "f").write_text("base\n")
+    _git(origin, "add", "f")
+    _git(origin, "commit", "-qm", "base commit")
+
+    dest = tmp_path / "clone"
+    clone_git_repo(GitUrl("file://{}".format(origin)), dest)
+
+    assert _git(dest, "rev-parse", "--abbrev-ref", "HEAD") == "master"
+
+
 @pytest.mark.rsync
 def test_worktree_overlay_preserves_uncommitted_edits(tmp_path: Path) -> None:
     """The local-worktree create flow (clone -> rsync overlay -> checkout)
@@ -561,7 +621,7 @@ def test_worktree_overlay_preserves_uncommitted_edits(tmp_path: Path) -> None:
     (worktree / "f").write_text("uncommitted edit\n")
 
     dest = tmp_path / "clone"
-    clone_git_repo(GitUrl("file://{}".format(worktree)), dest)
+    clone_git_repo(GitUrl("file://{}".format(worktree)), dest, branch=GitBranch("testing"))
     _rsync_worktree_over_clone(worktree, dest)
     checkout_branch(dest, GitBranch("testing"))
 
@@ -990,8 +1050,14 @@ def _make_creator_with_cli(tmp_path: Path, cli: _RecordingImbueCloudCli) -> Agen
     )
 
 
-def _wait_until_finished(creator: AgentCreator, creation_id: CreationId, deadline_seconds: float = 10.0) -> None:
-    """Poll ``get_creation_info`` until status is DONE or FAILED, then return."""
+def _wait_until_finished(creator: AgentCreator, creation_id: CreationId, deadline_seconds: float = 30.0) -> None:
+    """Poll ``get_creation_info`` until status is DONE or FAILED, then return.
+
+    The deadline is only a ceiling -- the loop returns the instant the status is
+    terminal, so a passing test never waits for it. It is set to 30s (matching the
+    ``@pytest.mark.timeout(30)`` on the litellm-key tests) so heavy setup under
+    offload CI contention does not trip a spurious timeout at the old 10s.
+    """
     deadline = time.monotonic() + deadline_seconds
     while time.monotonic() < deadline:
         info = creator.get_creation_info(creation_id)
@@ -1081,6 +1147,10 @@ def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path
     assert cli.create_calls == []
 
 
+# Carries the same 30s pytest-timeout as the other creation tests: this caller
+# also uses _wait_until_finished's 30s default poll deadline, which without this
+# marker would be pre-empted by the global --timeout=10 under heavy parallel load.
+@pytest.mark.timeout(30)
 def test_start_creation_api_key_ai_without_key_fails_with_clear_message(tmp_path: Path) -> None:
     """The API_KEY branch must reject an empty key with a specific error rather than
     silently falling through to mngr create with no key set."""

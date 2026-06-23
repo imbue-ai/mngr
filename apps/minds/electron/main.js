@@ -2067,12 +2067,19 @@ async function promptMindShutdown() {
   return { proceed: true, stop: true, running };
 }
 
-function fetchInitialChromeState(timeoutMs = 4000) {
+function fetchInitialChromeState(timeoutMs = 10000) {
   // Drives one round-trip to /_chrome/events (SSE) to learn both auth status
   // and the current workspace list. Returns:
   //   { authenticated: true, workspaces: [...] }  on authenticated success
   //   { authenticated: false }                     when the backend says auth_required
   //   null                                          on timeout / network error
+  //
+  // The timeout must comfortably exceed the connect-time snapshot's slowest
+  // blocking step: the backend computes ``has_accounts`` (a cold ``mngr
+  // imbue_cloud auth list`` subprocess, ~5s on first call) before emitting the
+  // first ``workspaces`` event. A timeout shorter than that returned ``null``,
+  // which the startup path treats as unauthenticated and routes to /welcome --
+  // bouncing an already-signed-in user to the onboarding page.
   return new Promise((resolve) => {
     if (!backendBaseUrl) {
       resolve(null);
@@ -2788,17 +2795,15 @@ ipcMain.on('close-modal', (event) => {
 // we re-validate here defensively and only forward to the *sending
 // bundle's* chrome view so a stray sender can't paint another
 // window's titlebar.
-ipcMain.on('preview-workspace-accent', (event, agentId, accent, accentFg) => {
+ipcMain.on('preview-workspace-accent', (event, agentId, accent) => {
   if (typeof agentId !== 'string' || !/^agent-[a-f0-9]{1,64}$/i.test(agentId)) return;
   if (typeof accent !== 'string' || !/^#[0-9a-f]{6}$/.test(accent)) return;
-  if (typeof accentFg !== 'string' || !/^(?:0 0 0|255 255 255)$/.test(accentFg)) return;
   const bundle = getBundleFromEvent(event);
   if (!bundle || !bundle.chromeView || bundle.chromeView.webContents.isDestroyed()) return;
   bundle.chromeView.webContents.send('chrome-event', {
     type: 'workspace_accent_preview',
     agent_id: agentId,
     accent,
-    accent_fg: accentFg,
   });
 });
 
@@ -2809,16 +2814,14 @@ ipcMain.on('preview-workspace-accent', (event, agentId, accent, accentFg) => {
 // ``hasFreeformAccentPreview`` handling in ``onContentNavigate``. (Without
 // that, abandoning to a general screen is a null -> null accent transition,
 // which ``updateBundleAccentAgentId`` no-ops, leaving the preview stranded.)
-ipcMain.on('preview-freeform-accent', (event, accent, accentFg) => {
+ipcMain.on('preview-freeform-accent', (event, accent) => {
   if (typeof accent !== 'string' || !/^#[0-9a-f]{6}$/.test(accent)) return;
-  if (typeof accentFg !== 'string' || !/^(?:0 0 0|255 255 255)$/.test(accentFg)) return;
   const bundle = getBundleFromEvent(event);
   if (!bundle || !bundle.chromeView || bundle.chromeView.webContents.isDestroyed()) return;
   bundle.hasFreeformAccentPreview = true;
   bundle.chromeView.webContents.send('chrome-event', {
     type: 'freeform_accent_preview',
     accent,
-    accent_fg: accentFg,
   });
 });
 
@@ -3091,7 +3094,7 @@ async function runQuitSequence() {
 
 // Route POSIX SIGTERM / SIGINT through the quit sequence so they trigger the
 // same `backend.shutdown()` chain that window-close uses (SIGTERMing the python
-// backend and waiting for uvicorn's graceful exit). Without these handlers
+// backend and waiting for its graceful exit). Without these handlers
 // Node's default for these signals is to exit immediately, which orphans the
 // python backend and the `mngr forward` / `observe` subprocesses. The `just
 // minds-stop` recipe sends SIGTERM here; we mark it headless so it shuts down

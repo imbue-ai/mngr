@@ -9,11 +9,11 @@ from loguru import logger
 from pydantic import Field
 from pydantic import SecretStr
 
-from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.errors import VpsProvisioningError
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
-from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.vps_client import VpsClientInterface
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.errors import VpsProvisioningError
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsInstanceStatus
+from imbue.mngr_vps.vps_client import VpsClientInterface
 
 _VULTR_API_BASE: Final[str] = "https://api.vultr.com/v2"
 

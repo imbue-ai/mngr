@@ -24,6 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tini \
     tmux \
     unison \
+    util-linux \
     wget \
     xxd \
     && rm -rf /var/lib/apt/lists/*

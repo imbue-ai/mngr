@@ -1,0 +1,1 @@
+Updated the host-pool setup docs to reflect that `mngr imbue_cloud admin server prep` now strictly pins the box's recorded sshd host key (no trust-on-first-use): use `server setup` (OS reinstall, which injects the key) or the one-time `admin pool backfill-host-keys` keyscan before prepping a box.

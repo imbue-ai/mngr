@@ -12,8 +12,14 @@ with the item kinds this converter cares about carried under type
 "response_item":
   payload.type=="message", role=="user"      -> user_message
   payload.type=="message", role=="assistant" -> assistant_message
-  payload.type=="function_call"              -> remembered by payload.call_id
+  payload.type=="function_call"              -> assistant_message (tool_calls
+                                    attached); also remembered by payload.call_id
   payload.type=="function_call_output"       -> tool_result, paired by call_id
+
+codex models a tool invocation as its own rollout item, separate from the
+assistant's reasoning text (a distinct ``message`` item), so the call is emitted
+as a standalone assistant_message carrying the tool_call -- matching the other
+ports, whose native formats nest tool_calls in the assistant message.
 
 Event ids are synthesized from the line's 1-based index in the append-only raw
 input (stable across restarts) plus the item kind, so re-processing the same
@@ -165,6 +171,10 @@ def convert(input_file: str, output_file: str) -> int:
                 if event_id in existing_ids:
                     continue
                 text = _join_content_text(payload.get("content"), "output_text")
+                # codex assistant messages are text-only (tool calls are separate
+                # response_items surfaced as tool_results), so parts is just the text and
+                # its order is trivially faithful.
+                parts = [{"type": "text", "content": text}] if text else []
                 new_events.append(
                     (
                         timestamp,
@@ -178,7 +188,9 @@ def convert(input_file: str, output_file: str) -> int:
                             "model": None,
                             "text": text,
                             "tool_calls": [],
-                            "stop_reason": None,
+                            "parts": parts,
+                            "parts_ordered": True,
+                            "finish_reason": None,
                             "usage": None,
                         },
                     )
@@ -193,11 +205,43 @@ def convert(input_file: str, output_file: str) -> int:
                 if not isinstance(arguments, str):
                     arguments = json.dumps(arguments, separators=(",", ":"))
                 tool_call_id = f"line-{line_index}-tc"
-                pending_call_by_id[call_id] = {
+                tool_name = name if isinstance(name, str) else ""
+                input_preview = _truncate(arguments, _MAX_INPUT_PREVIEW_LENGTH)
+                tool_call = {
                     "tool_call_id": tool_call_id,
-                    "tool_name": name if isinstance(name, str) else "",
-                    "input_preview": _truncate(arguments, _MAX_INPUT_PREVIEW_LENGTH),
+                    "tool_name": tool_name,
+                    "input_preview": input_preview,
                 }
+                pending_call_by_id[call_id] = tool_call
+                # Emit the invocation on the assistant turn (see module docstring): codex
+                # carries no assistant `message` for a tool call, so without this the
+                # canonical envelope would record the tool_result with no assistant
+                # tool_call. The tool_call_id matches the paired tool_result below. Each
+                # call is its own rollout item, so the single tool_call part is trivially
+                # ordered -> parts_ordered=True.
+                event_id = f"line-{line_index}-assistant"
+                if event_id in existing_ids:
+                    continue
+                new_events.append(
+                    (
+                        timestamp,
+                        line_index,
+                        {
+                            "timestamp": timestamp,
+                            "type": "assistant_message",
+                            "event_id": event_id,
+                            "source": _SOURCE,
+                            "role": "assistant",
+                            "model": None,
+                            "text": "",
+                            "tool_calls": [tool_call],
+                            "parts": [{"type": "tool_call", **tool_call}],
+                            "parts_ordered": True,
+                            "finish_reason": None,
+                            "usage": None,
+                        },
+                    )
+                )
 
             elif payload_type == "function_call_output":
                 call_id = payload.get("call_id")

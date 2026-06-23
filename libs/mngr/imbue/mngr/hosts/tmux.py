@@ -31,6 +31,15 @@ class TmuxSessionTarget(FrozenModel):
 
     session_name: str = Field(min_length=1)
 
+    def as_target_arg(self) -> str:
+        """Return the raw, exact-match ``-t`` value (``=<session>``), unquoted.
+
+        Use in argv contexts that bypass the shell (a command token list handed
+        directly to exec), where shell quoting would wrongly become part of the
+        argument. For shell-command strings use :meth:`as_shell_arg` instead.
+        """
+        return f"={self.session_name}"
+
     def as_shell_arg(self) -> str:
         """Return the shell-quoted, exact-match ``-t`` argument string.
 
@@ -38,7 +47,7 @@ class TmuxSessionTarget(FrozenModel):
 
             cmd = f"tmux has-session -t {target.as_shell_arg()}"
         """
-        return shlex.quote(f"={self.session_name}")
+        return shlex.quote(self.as_target_arg())
 
 
 class TmuxWindowTarget(FrozenModel):

@@ -2,8 +2,10 @@ import subprocess
 from datetime import datetime
 from datetime import timezone
 
+import pytest
 from click.testing import CliRunner
 
+from imbue.mngr_imbue_cloud.cli.server import _box_ssh_host_key_options
 from imbue.mngr_imbue_cloud.cli.server import _format_capacity_table
 from imbue.mngr_imbue_cloud.cli.server import _kill_bake_worker_processes
 from imbue.mngr_imbue_cloud.cli.server import build_registered_server
@@ -11,6 +13,7 @@ from imbue.mngr_imbue_cloud.cli.server import compute_server_slice_sizing
 from imbue.mngr_imbue_cloud.cli.server import server
 from imbue.mngr_imbue_cloud.cli.server import slice_advertised_attributes
 from imbue.mngr_imbue_cloud.data_types import BareMetalServer
+from imbue.mngr_imbue_cloud.errors import BareMetalProvisioningError
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerStatus
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_READY
@@ -90,6 +93,22 @@ def test_format_capacity_table_shows_per_server_and_fleet_totals() -> None:
     assert "1/16" in table
     # Fleet line: 24 total slots, 4 used, 20 free.
     assert "4/24 slots used, 20 free" in table
+
+
+def test_box_ssh_host_key_options_pins_recorded_key() -> None:
+    """With a recorded box host key, box SSH strictly pins it (no trust-on-first-use)."""
+    with _box_ssh_host_key_options("203.0.113.7", "ssh-ed25519 AAAAtestboxkey") as opts:
+        assert "StrictHostKeyChecking=yes" in opts
+        assert any(o.startswith("UserKnownHostsFile=") for o in opts)
+    # The accept-new TOFU fallback is gone entirely.
+    assert "accept-new" not in " ".join(opts)
+
+
+def test_box_ssh_host_key_options_fails_closed_without_a_key() -> None:
+    """No recorded box host key -> refuse to SSH rather than trust-on-first-use."""
+    with pytest.raises(BareMetalProvisioningError, match="strict host-key"):
+        with _box_ssh_host_key_options("203.0.113.7", "") as _opts:
+            pass
 
 
 def test_server_group_help_lists_commands() -> None:

@@ -1,8 +1,11 @@
 import base64
+import hashlib
 import json
 import shlex
+import tempfile
 from collections.abc import Mapping
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Final
 
 from loguru import logger
@@ -12,14 +15,22 @@ from pydantic import Field
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.primitives import HostId
+from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
+from imbue.mngr_imbue_cloud.errors import SliceCapacityError
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_disk_name
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
+from imbue.mngr_imbue_cloud.slices.lima_slice import CONTAINER_SSH_PORT_PLACEHOLDER
+from imbue.mngr_imbue_cloud.slices.lima_slice import SLICE_BOX_FULL_MARKER
+from imbue.mngr_imbue_cloud.slices.lima_slice import SLICE_NO_PORTS_MARKER
+from imbue.mngr_imbue_cloud.slices.lima_slice import VM_SSH_PORT_PLACEHOLDER
 from imbue.mngr_imbue_cloud.slices.lima_slice import build_slice_lima_yaml
+from imbue.mngr_imbue_cloud.slices.lima_slice import build_slice_reserve_script
+from imbue.mngr_imbue_cloud.slices.lima_slice import parse_reserved_ports
 from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_lima.lima_yaml import write_lima_yaml
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
-from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.vps_client import VpsClientInterface
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsInstanceStatus
+from imbue.mngr_vps.vps_client import VpsClientInterface
 
 # Lima "Status" strings (from `limactl list --json`) mapped to VPS statuses.
 _LIMA_STATUS_MAP: Final[dict[str, VpsInstanceStatus]] = {
@@ -37,25 +48,11 @@ _BOX_PATH_PREFIX: Final[str] = "PATH=/usr/local/bin:$HOME/.local/bin:$PATH"
 # A slice VM boots in a few minutes; give limactl start a generous cap.
 _LIMA_START_TIMEOUT_SECONDS: Final[float] = 1800.0
 _LIMA_SHORT_TIMEOUT_SECONDS: Final[float] = 120.0
+# The reservation (under the box lock) is short but includes ``limactl create``,
+# which materializes the instance's boot disk from the staged base image -- give it
+# more room than a plain limactl call while keeping the lock hold bounded.
+_LIMA_RESERVE_TIMEOUT_SECONDS: Final[float] = 600.0
 _BOX_CONNECT_TIMEOUT_SECONDS: Final[int] = 30
-
-
-def parse_listening_ports(ss_output: str) -> set[int]:
-    """Parse TCP listening ports from ``ss -Htln`` output (numeric, no header).
-
-    The local-address field is the 4th whitespace-separated column; the port is
-    whatever follows its last ``:`` (handles IPv6 ``[::]:<port>`` and ``*:<port>``).
-    Lines that don't parse are skipped. Pure so it can be unit-tested without a box.
-    """
-    ports: set[int] = set()
-    for line in ss_output.splitlines():
-        fields = line.split()
-        if len(fields) < 4:
-            continue
-        port_text = fields[3].rsplit(":", 1)[-1]
-        if port_text.isdigit():
-            ports.add(int(port_text))
-    return ports
 
 
 def _is_already_absent_error(stderr: str) -> bool:
@@ -84,7 +81,7 @@ class LimaSliceVpsClient(VpsClientInterface):
     Drives ``limactl`` **over SSH on the box** (as the dedicated lima user, using
     the pool management key), so the whole bake runs from the operator's laptop
     exactly like an OVH VPS bake: this carves the bare VM (the "OS reinstall"
-    equivalent), then the shared ``VpsDockerProvider`` reaches the VM's
+    equivalent), then the shared ``VpsProvider`` reaches the VM's
     box-forwarded ports to build the container. Carving is multi-step (ship YAML
     -> create disk -> start VM), so ``create_instance`` raises like the OVH client
     and ``SliceVpsDockerProvider`` calls :meth:`provision_slice_vm` directly.
@@ -107,6 +104,30 @@ class LimaSliceVpsClient(VpsClientInterface):
         default=None,
         description="Optional override of the lima guest image URL (defaults to mngr_lima's Debian image).",
     )
+    box_host_public_key: str | None = Field(
+        default=None,
+        description=(
+            "The box's sshd host public key, pinned for strict host-key checking (no trust-on-first-use). "
+            "None only in unit tests that never SSH the box; an actual box SSH with no key fails closed."
+        ),
+    )
+
+    def _box_known_hosts_file(self) -> str:
+        """Write the box's pinned host key to a known_hosts file and return its path.
+
+        Fails closed when no pinned key is configured -- we never fall back to
+        trust-on-first-use. The file is idempotently (re)written next to the pool
+        key (or a temp dir) keyed by box address.
+        """
+        if not self.box_host_public_key:
+            raise LimaCommandError(
+                "ssh", 1, f"no pinned host key configured for box {self.box_address}; run the host-key backfill"
+            )
+        base_dir = Path(self.private_key_path).parent if self.private_key_path else Path(tempfile.gettempdir())
+        box_digest = hashlib.sha256(self.box_address.encode()).hexdigest()[:16]
+        known_hosts_path = base_dir / f".box_known_hosts_{box_digest}"
+        add_host_to_known_hosts(known_hosts_path, self.box_address, 22, self.box_host_public_key)
+        return str(known_hosts_path)
 
     def _unavailable(self, operation: str) -> NotImplementedError:
         return NotImplementedError(
@@ -124,7 +145,9 @@ class LimaSliceVpsClient(VpsClientInterface):
             "-i",
             self.private_key_path,
             "-o",
-            "StrictHostKeyChecking=accept-new",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            f"UserKnownHostsFile={self._box_known_hosts_file()}",
             "-o",
             f"ConnectTimeout={_BOX_CONNECT_TIMEOUT_SECONDS}",
             "-o",
@@ -148,22 +171,23 @@ class LimaSliceVpsClient(VpsClientInterface):
             )
         return result.returncode, result.stdout, result.stderr
 
-    def _remove_remote_file(self, remote_path: str) -> None:
-        """Best-effort ``rm -f`` of a file on the box (used to scrub the shipped YAML).
+    def _best_effort_destroy(self, instance_name: str) -> None:
+        """Tear down a half-reserved instance + its disk after a failed reserve/start.
 
-        Logged at debug and never raised: cleanup runs on both the success and the
-        failure path, so it must not mask the carve's own error.
+        Best-effort: a reserve that fails partway (e.g. after the data disk or the
+        instance exists) must not leak the box slot, but cleanup must not mask the
+        original error -- so this logs and never raises.
         """
-        rc, _out, err = self._run_on_box(
-            f"rm -f {shlex.quote(remote_path)}", timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="rm-yaml"
-        )
-        if rc != 0:
-            logger.debug("Could not remove remote file {} on {}: {}", remote_path, self.box_address, err.strip())
+        try:
+            self.destroy_instance(VpsInstanceId(instance_name))
+        except (LimaCommandError, OSError) as exc:
+            logger.warning("Could not clean up half-reserved slice {} on {}: {}", instance_name, self.box_address, exc)
 
     def provision_slice_vm(
         self,
         *,
         host_id: HostId,
+        env_name: str | None,
         vcpus: int,
         memory_mib: int,
         disk_gib: int,
@@ -171,20 +195,26 @@ class LimaSliceVpsClient(VpsClientInterface):
         root_authorized_public_key: str,
         host_private_key_pem: str,
         host_public_key_openssh: str,
-        vm_ssh_host_port: int,
-        container_ssh_host_port: int,
         boot_disk_gib: int,
+        slot_count: int,
+        port_range_start: int,
+        port_range_end: int,
         extra_root_authorized_keys: tuple[str, ...] = (),
     ) -> SliceProvisionResult:
-        """Create and start a VPS-parity lima VM for ``host_id`` on the box and return its handle.
+        """Reserve a box slot + ports, create the (env-stamped) VM, and boot it; return its handle.
 
-        Renders the slice YAML locally, ships it to the box, pre-creates the
-        lima-managed btrfs data disk (Lima only auto-formats an
-        ``additionalDisks`` entry whose disk record already exists), then starts
-        the VM -- all via ``limactl`` over SSH on the box.
+        Two phases. First, under a box-wide ``flock`` (one SSH command, released the
+        instant it returns), the reserve script enforces capacity against the box's
+        real occupancy, picks two free host ports against every existing instance's
+        forwards, and creates the data disk + the instance WITHOUT booting -- so the
+        slot + ports are durably claimed and visible to a sibling bake. Second, with
+        the lock released, the long ``limactl start`` boots the reserved VM.
+
+        Raises ``SliceCapacityError`` if the box is already full or has no free port
+        pair; cleans up a half-reserved instance on any other failure.
         """
-        instance_name = slice_lima_instance_name(host_id)
-        disk_name = slice_lima_disk_name(host_id)
+        instance_name = slice_lima_instance_name(host_id, env_name)
+        disk_name = slice_lima_disk_name(host_id, env_name)
         config = build_slice_lima_yaml(
             host_dir=host_dir,
             vcpus=vcpus,
@@ -195,50 +225,68 @@ class LimaSliceVpsClient(VpsClientInterface):
             root_authorized_public_key=root_authorized_public_key,
             host_private_key_pem=host_private_key_pem,
             host_public_key_openssh=host_public_key_openssh,
-            vm_ssh_host_port=vm_ssh_host_port,
-            container_ssh_host_port=container_ssh_host_port,
+            vm_ssh_host_port=VM_SSH_PORT_PLACEHOLDER,
+            container_ssh_host_port=CONTAINER_SSH_PORT_PLACEHOLDER,
             extra_root_authorized_keys=extra_root_authorized_keys,
         )
         if self.vm_image_url is not None:
             config["images"] = [{"location": self.vm_image_url}]
-        yaml_text = write_lima_yaml(config).read_text()
+        yaml_template_text = write_lima_yaml(config).read_text()
 
-        # Ship the YAML to the box (base64 to dodge quoting), pre-create the disk,
-        # then start the VM. The YAML embeds the VM's SSH host private key, so write
-        # it 0600 (``umask 077`` before the redirect) and always remove it once the
-        # VM has started -- it must not linger world-readable in /tmp on the box.
-        remote_yaml_path = f"/tmp/{instance_name}.yaml"
-        encoded = base64.b64encode(yaml_text.encode()).decode()
-        ship_command = f"umask 077 && echo {shlex.quote(encoded)} | base64 -d > {shlex.quote(remote_yaml_path)}"
-        ship_rc, _ship_out, ship_err = self._run_on_box(
-            ship_command, timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="ship-yaml"
+        # Phase 1: reserve the slot + ports and create the instance (no boot) under
+        # the box lock, all in one SSH command so the lock is held only this long.
+        reserve_script = build_slice_reserve_script(
+            instance_name=instance_name,
+            disk_name=disk_name,
+            disk_gib=disk_gib,
+            slot_count=slot_count,
+            port_range_start=port_range_start,
+            port_range_end=port_range_end,
+            yaml_template_text=yaml_template_text,
+            lima_service_user=self.box_ssh_user,
         )
-        if ship_rc != 0:
-            self._remove_remote_file(remote_yaml_path)
-            raise LimaCommandError("ship yaml", ship_rc or 1, ship_err)
+        encoded_script = base64.b64encode(reserve_script.encode()).decode()
+        reserve_command = f"echo {shlex.quote(encoded_script)} | base64 -d | bash"
+        reserve_rc, reserve_out, reserve_err = self._run_on_box(
+            reserve_command, timeout=_LIMA_RESERVE_TIMEOUT_SECONDS, label=f"reserve:{instance_name}", is_streaming=True
+        )
+        if reserve_rc != 0:
+            if SLICE_BOX_FULL_MARKER in reserve_err:
+                raise SliceCapacityError(
+                    f"bare-metal box {self.box_address} is at capacity; cannot reserve a slice: {reserve_err.strip()}"
+                )
+            if SLICE_NO_PORTS_MARKER in reserve_err:
+                raise SliceCapacityError(
+                    f"no free host ports on box {self.box_address} to reserve a slice: {reserve_err.strip()}"
+                )
+            # A reserve can fail after the disk or instance was created; scrub it so
+            # the box slot is not leaked.
+            self._best_effort_destroy(instance_name)
+            raise LimaCommandError("reserve", reserve_rc or 1, reserve_err)
+        vm_ssh_host_port, container_ssh_host_port = parse_reserved_ports(reserve_out)
 
+        # Phase 2: boot the reserved VM (the long step), with the lock already released.
         try:
-            disk_command = f"limactl disk create {shlex.quote(disk_name)} --size {shlex.quote(f'{disk_gib}GiB')}"
-            disk_rc, _disk_out, disk_err = self._run_on_box(
-                disk_command, timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="disk-create"
-            )
-            if disk_rc != 0:
-                raise LimaCommandError("disk create", disk_rc or 1, disk_err)
-
-            start_command = (
-                f"limactl --log-level=info start --name={shlex.quote(instance_name)} {shlex.quote(remote_yaml_path)}"
-            )
             start_rc, _start_out, start_err = self._run_on_box(
-                start_command, timeout=_LIMA_START_TIMEOUT_SECONDS, label=f"start:{instance_name}", is_streaming=True
+                f"limactl --log-level=info start {shlex.quote(instance_name)}",
+                timeout=_LIMA_START_TIMEOUT_SECONDS,
+                label=f"start:{instance_name}",
+                is_streaming=True,
             )
             if start_rc != 0:
                 raise LimaCommandError("start", start_rc or 1, start_err)
-        finally:
-            # The host-key-bearing YAML is no longer needed once the VM is started
-            # (or the carve has failed): never leave it on the box.
-            self._remove_remote_file(remote_yaml_path)
+        except (LimaCommandError, OSError):
+            self._best_effort_destroy(instance_name)
+            raise
 
-        logger.info("Provisioned slice VM {} (disk {}) on {}", instance_name, disk_name, self.box_address)
+        logger.info(
+            "Provisioned slice VM {} (disk {}, ports vm={}/container={}) on {}",
+            instance_name,
+            disk_name,
+            vm_ssh_host_port,
+            container_ssh_host_port,
+            self.box_address,
+        )
         return SliceProvisionResult(
             instance_name=instance_name,
             disk_name=disk_name,
@@ -295,6 +343,49 @@ class LimaSliceVpsClient(VpsClientInterface):
                 names.add(name)
         return names
 
+    def list_disk_names(self) -> set[str]:
+        """Return the names of all lima disks currently on the box."""
+        list_rc, list_out, list_err = self._run_on_box(
+            "limactl disk list --json", timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="disk-list"
+        )
+        if list_rc != 0:
+            raise LimaCommandError("disk list", list_rc or 1, list_err)
+        names: set[str] = set()
+        for line in list_out.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                disk = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                logger.warning("Failed to parse Lima disk JSON: {}", exc)
+                continue
+            name = disk.get("name")
+            if name:
+                names.add(name)
+        return names
+
+    def destroy_disk(self, disk_name: str) -> None:
+        """Delete a lima data disk on the box, unlocking it first so a leaked locked disk still goes.
+
+        Used to reap an orphan disk (one with no pool DB row) left behind when a failed
+        carve's ``limactl delete`` could not unlock the disk. ``limactl disk delete``
+        refuses a locked disk, so we ``disk unlock`` first (best-effort -- it errors when
+        the disk is not actually locked, which is fine), then force-delete, tolerating the
+        disk already being absent.
+        """
+        self._run_on_box(
+            f"limactl disk unlock {shlex.quote(disk_name)}", timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="disk-unlock"
+        )
+        delete_rc, _out, delete_err = self._run_on_box(
+            f"limactl disk delete --force {shlex.quote(disk_name)}",
+            timeout=_LIMA_SHORT_TIMEOUT_SECONDS,
+            label="disk-delete",
+        )
+        if delete_rc != 0 and not _is_already_absent_error(delete_err):
+            raise LimaCommandError("disk delete", delete_rc or 1, delete_err)
+        logger.info("Destroyed orphan slice disk {} on {}", disk_name, self.box_address)
+
     def get_instance_status(self, instance_id: VpsInstanceId) -> VpsInstanceStatus:
         list_rc, list_out, list_err = self._run_on_box(
             "limactl list --json", timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="list"
@@ -313,19 +404,6 @@ class LimaSliceVpsClient(VpsClientInterface):
             if instance.get("name") == str(instance_id):
                 return _LIMA_STATUS_MAP.get(str(instance.get("status", "")), VpsInstanceStatus.UNKNOWN)
         return VpsInstanceStatus.UNKNOWN
-
-    def get_listening_ports(self) -> set[int]:
-        """Return the set of TCP ports currently in LISTEN state on the box.
-
-        Used by the slice provider to pick free box-forwarded ports for a new VM.
-        Parses ``ss -Htln`` (numeric, no header): the local-address field is the
-        4th column; the port is whatever follows its last ``:`` (handles IPv6
-        ``[::]:<port>`` too).
-        """
-        rc, out, err = self._run_on_box("ss -Htln", timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="ss")
-        if rc != 0:
-            raise LimaCommandError("ss -Htln", rc or 1, err)
-        return parse_listening_ports(out)
 
     def get_instance_ip(self, instance_id: VpsInstanceId) -> str:
         # The slice's sshd is forwarded on the box's own interface; external

@@ -4,7 +4,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from starlette.testclient import TestClient
+from flask.testing import FlaskClient
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
@@ -696,7 +696,7 @@ def _build_authenticated_client(
     tmp_path: Path,
     handler: LatchkeyPermissionGrantHandler,
     inbox: RequestInbox,
-) -> TestClient:
+) -> FlaskClient:
     """Wire ``handler`` into a desktop-client app with a valid session cookie.
 
     Mirrors the helper used by ``file_sharing_test.py`` so the
@@ -715,9 +715,9 @@ def _build_authenticated_client(
         request_inbox=inbox,
         request_event_handlers=(handler,),
     )
-    client = TestClient(app, base_url="http://localhost")
+    client = app.test_client()
     cookie_value = create_session_cookie(signing_key=auth_store.get_signing_key())
-    client.cookies.set(SESSION_COOKIE_NAME, cookie_value, path="/")
+    client.set_cookie(SESSION_COOKIE_NAME, cookie_value)
     return client
 
 
@@ -755,7 +755,7 @@ def test_apply_deny_request_succeeds_for_unknown_scope(tmp_path: Path) -> None:
     response = client.post(f"/requests/{event.event_id}/deny")
 
     assert response.status_code == 200
-    assert response.json() == {"outcome": "DENIED"}
+    assert response.get_json() == {"outcome": "DENIED"}
     # Gateway DELETE for the pending request must have been issued.
     assert fake_client.deleted_request_ids == (str(event.event_id),)
     # Response event was appended on disk, carrying the raw scope.

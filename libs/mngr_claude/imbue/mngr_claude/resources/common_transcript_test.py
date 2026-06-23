@@ -229,7 +229,7 @@ def test_converts_assistant_message(tmp_path: Path, stub_mngr_log_sh: str) -> No
     assert events[0]["text"] == "Hi there!"
     assert events[0]["model"] == "claude-opus-4.6"
     assert events[0]["event_id"] == f"{assistant_uuid}-assistant"
-    assert events[0]["stop_reason"] == "end_turn"
+    assert events[0]["finish_reason"] == "end_turn"
     assert events[0]["usage"]["input_tokens"] == 100
 
 

@@ -5,10 +5,13 @@ description = "Specialized AI agents"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "boto3>=1.34",
+    "botocore>=1.34",
+    "cheroot>=10.0",
     "click>=8.0",
     "click-option-group>=0.5.6",
     "concurrency-group",
-    "fastapi>=0.115.0",
+    "flask>=3.0",
     "httpx>=0.27.0",
     "imbue-common",
     "itsdangerous>=2.2.0",
@@ -20,20 +23,19 @@ dependencies = [
     "imbue-mngr-forward",
     "imbue-mngr-latchkey",
     "imbue-mngr-ovh",
-    "imbue-mngr-vps-docker",
+    "imbue-mngr-vps",
     "modal>=1.4.3",
     "paramiko>=3.0",
     "playwright>=1.40.0",
     "psycopg2-binary>=2.9",
     "pydantic>=2.0",
-    "python-multipart>=0.0.9",
     "tenacity",
     "tomlkit>=0.12.0",
     "telethon>=1.40.0",
-    "uvicorn>=0.32.0",
-    "websockets>=13.0",
+    "werkzeug>=3.0",
     "wsgidav>=4.3",
-    "a2wsgi>=1.10",
+    "sentry-sdk>=2.59.0",
+    "traceback-with-variables>=2.0",
 ]
 license = {text = "FCL-1.0-MIT"}
 license-files = [
@@ -54,8 +56,17 @@ imbue-mngr-aws = { workspace = true }
 imbue-mngr-forward = { workspace = true }
 imbue-mngr-latchkey = { workspace = true }
 imbue-mngr-ovh = { workspace = true }
-imbue-mngr-vps-docker = { workspace = true }
+imbue-mngr-vps = { workspace = true }
 imbue-common = { workspace = true }
+
+# Force-include the compiled Tailwind stylesheet for the desktop client. It is
+# built from static/app.css by `just minds-css` (pnpm run build:css) and is
+# gitignored, so hatchling would otherwise omit it from the wheel. `scripts/
+# build.js` rebuilds it before packaging the Electron app.
+[tool.hatch.build]
+artifacts = [
+    "imbue/minds/desktop_client/static/app.min.css",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["imbue"]
