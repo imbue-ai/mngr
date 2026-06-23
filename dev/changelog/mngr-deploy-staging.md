@@ -1,0 +1,1 @@
+Added a `just backfill-pool-host-keys` recipe that wraps `minds pool backfill-host-keys` for the activated minds env -- the one-time SSH host-key backfill to run once per tier after deploying the host-key-pinning connector.

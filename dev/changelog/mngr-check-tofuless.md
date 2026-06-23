@@ -1,0 +1,3 @@
+Added a `just minds-start-cloud` recipe for launching the minds desktop client in dev mode to test the `imbue_cloud` provider against pre-baked pool slices.
+
+Unlike `just minds-start` (which targets local Lima/Docker dev and forces local-worktree create-form defaults), `minds-start-cloud` leaves the form's shipped fallbacks in place -- the canonical forever-claude-template remote plus `FALLBACK_BRANCH` -- so an `imbue_cloud` create matches and fast-path leases a slice baked at that tag instead of dropping to the slow rebuild path. It also skips the live-mngr to `vendor/mngr/` rsync, which is irrelevant to an already-baked pool slice.

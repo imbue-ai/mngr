@@ -702,23 +702,21 @@ def test_render_recovery_page_script_branches_on_dispatch_tier() -> None:
         "'host_offline'",
         "'interface_unresponsive'",
         "'host_unresponsive'",
-        "'provider_unavailable'",
-        "'workspace_unreachable'",
+        "'backend_unreachable'",
     ):
         assert tier in html, f"recovery page JS missing branch for {tier}"
     # The shared landing places for each branch.
     assert "renderMisconfigured" in html
     assert "renderUnresponsive" in html
-    assert "renderProviderUnavailable" in html
-    assert "renderWorkspaceUnreachable" in html
+    assert "renderBackendUnreachable" in html
     assert "Workspace misconfigured" in html
     assert "Try restart anyway" in html
 
 
-def test_render_recovery_page_provider_unavailable_offers_retry_not_restart() -> None:
-    """The provider-unavailable state must surface a Retry affordance and a backed-off
-    background poll, and must NOT auto-dispatch or offer a host restart (a restart routes
-    through the unreachable backend, so it cannot help).
+def test_render_recovery_page_backend_unreachable_offers_retry_not_restart() -> None:
+    """The backend-unreachable state must surface a Retry affordance and a background
+    healthy-poll (auto-return on recovery), and must NOT auto-dispatch or offer a host
+    restart (a restart routes through the unreachable backend, so it cannot help).
     """
     html = render_recovery_page(
         agent_id=_AGENT_A,
@@ -727,15 +725,32 @@ def test_render_recovery_page_provider_unavailable_offers_retry_not_restart() ->
         initial_error="",
     )
     assert 'id="recovery-retry-btn"' in html
-    # The provider branch renders the page and starts the backed-off poll; it
+    # The backend render shows the Retry and the "Can't connect to" copy; it
     # must not fall through to a restart dispatch.
-    provider_start = html.find("function renderProviderUnavailable")
+    provider_start = html.find("function renderBackendUnreachable")
     assert provider_start >= 0
     provider_end = html.find("function ", provider_start + 1)
     provider_block = html[provider_start:provider_end]
-    assert "scheduleProviderPoll" in provider_block
     assert "Can't connect to" in provider_block
+    assert "show(retryBtn, true)" in provider_block
     assert "postRestart" not in provider_block
+    # The copy must be provider-agnostic: a local docker daemon is independent of
+    # the network, so the old "check your internet connection" line is wrong here
+    # and must not return.
+    assert "internet connection" not in provider_block.lower()
+    # Instead of a hand-authored per-provider message, the verbatim provider
+    # error rides along on the response (``unreachable_reason``) and is surfaced.
+    assert "unreachable_reason" in provider_block
+    assert "providerReasonEl.textContent = reason" in provider_block
+    # Diagnostics are suppressed on this tier (the cause is the external backend,
+    # shown verbatim, not anything the in-container probes inspect).
+    assert "show(debugDetailsEl, false)" in provider_block
+    # The backend_unreachable branch arms the healthy-poll (auto-return when the
+    # backend recovers) and returns before any restart dispatch.
+    apply_start = html.find("function applyHealth(")
+    apply_block = html[apply_start : html.find("function ", apply_start + 1)]
+    assert apply_block.find("'backend_unreachable'") < apply_block.find("postRestart")
+    assert "scheduleHealthyPoll()" in apply_block
 
 
 def test_render_recovery_page_loading_hides_diagnostic_dropdown() -> None:
@@ -783,11 +798,11 @@ def test_render_recovery_page_honors_misconfigured_before_autodispatch_short_cir
 
     A workspace whose services.toml lacks [services.system_interface] lands in
     restart_failed once its undeclared interface fails to come back up, so the
-    page runs runProbe(false). If the no-auto-dispatch short-circuit
-    (``if (!autoDispatch) renderUnresponsive()``) ran before the
-    workspace_misconfigured check, that workspace would render a misleading
-    "unresponsive" page even though no restart can recover it. Assert the
-    misconfigured branch precedes the short-circuit inside runProbe so the
+    page runs runProbe(false), which renders via applyHealth. If the
+    no-auto-dispatch short-circuit (``if (!autoDispatch) renderUnresponsive()``)
+    ran before the workspace_misconfigured check, that workspace would render a
+    misleading "unresponsive" page even though no restart can recover it. Assert
+    the misconfigured branch precedes the short-circuit inside applyHealth so the
     restart_failed path still reaches renderMisconfigured().
     """
     html = render_recovery_page(
@@ -796,7 +811,7 @@ def test_render_recovery_page_honors_misconfigured_before_autodispatch_short_cir
         initial_status="restart_failed",
         initial_error="boom",
     )
-    probe_body = html[html.index("function runProbe(") :]
+    probe_body = html[html.index("function applyHealth(") :]
     misconfigured_pos = probe_body.index("'workspace_misconfigured'")
     short_circuit_pos = probe_body.index("if (!autoDispatch)")
     assert misconfigured_pos < short_circuit_pos, (

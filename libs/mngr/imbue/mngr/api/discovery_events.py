@@ -930,7 +930,12 @@ def extract_agents_and_hosts_from_full_listing(
 
 # === Discovery Stream ===
 
-_DISCOVERY_STREAM_POLL_INTERVAL_SECONDS: Final[float] = 10.0
+# Cadence of the discovery polling loop: each tick re-lists and writes a full
+# snapshot. Public because consumers (e.g. minds) derive freshness thresholds
+# from it -- a snapshot older than a small multiple of this means the pipeline
+# has stalled, not that any single provider is down (per-provider failures ride
+# along in each snapshot's ``error_by_provider_name``).
+DISCOVERY_STREAM_POLL_INTERVAL_SECONDS: Final[float] = 10.0
 
 
 def _discovery_stream_emit_line(
@@ -1221,7 +1226,7 @@ def run_discovery_stream(
     # Phase 4: periodically re-poll (unfiltered) and write full snapshots
     try:
         while not stop_event.is_set():
-            stop_event.wait(timeout=_DISCOVERY_STREAM_POLL_INTERVAL_SECONDS)
+            stop_event.wait(timeout=DISCOVERY_STREAM_POLL_INTERVAL_SECONDS)
             if stop_event.is_set():
                 break
             # Always emits a snapshot on success (including the all-providers-
