@@ -85,7 +85,7 @@ def compute_backup_status_for_workspace(
     env = parse_restic_env(content)
     repository = env.get("RESTIC_REPOSITORY", "")
     if not repository:
-        logger.warning("Canonical restic.env for {} has no RESTIC_REPOSITORY", agent_id)
+        logger.info("Canonical restic.env for {} has no RESTIC_REPOSITORY", agent_id)
         return BackupStatus(state=BackupStatusState.UNKNOWN)
     password = env.get("RESTIC_PASSWORD")
     backend_env = {key: value for key, value in env.items() if key not in ("RESTIC_REPOSITORY", "RESTIC_PASSWORD")}
@@ -109,7 +109,7 @@ def compute_backup_status_for_workspace(
             timeout_seconds=restic_timeout_seconds,
         )
     except BackupProvisioningError as e:
-        logger.warning("Could not read backup status for {}: {}", agent_id, e)
+        logger.info("Could not read backup status for {}: {}", agent_id, e)
         return BackupStatus(state=BackupStatusState.UNKNOWN)
 
     if last_success is None:
@@ -169,7 +169,7 @@ def compute_backup_status_for_workspaces(
             try:
                 result_by_agent_id[str(agent_id)] = future.result(timeout=0)
             except (FuturesTimeoutError, BackupProvisioningError) as e:
-                logger.warning("Backup status for {} unavailable: {}", agent_id, e)
+                logger.info("Backup status for {} unavailable: {}", agent_id, e)
                 result_by_agent_id[str(agent_id)] = BackupStatus(state=BackupStatusState.UNKNOWN)
     finally:
         # Non-blocking: don't wait on stragglers (that would defeat the batch

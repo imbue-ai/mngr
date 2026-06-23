@@ -374,7 +374,7 @@ class SystemInterfaceHealthTracker(MutableModel):
             try:
                 callback(agent_id, new_health)
             except (OSError, RuntimeError, ValueError) as e:
-                logger.warning("SystemInterfaceHealthTracker on-change callback failed for {}: {}", agent_id, e)
+                logger.opt(exception=e).error("SystemInterfaceHealthTracker on-change callback failed for {}: {}", agent_id, e)
 
     def _fire_on_recovery(self, agent_id: AgentId) -> None:
         with self._lock:
@@ -383,4 +383,4 @@ class SystemInterfaceHealthTracker(MutableModel):
             try:
                 callback(agent_id)
             except (OSError, RuntimeError, ValueError) as e:
-                logger.warning("SystemInterfaceHealthTracker on-recovery callback failed for {}: {}", agent_id, e)
+                logger.opt(exception=e).error("SystemInterfaceHealthTracker on-recovery callback failed for {}: {}", agent_id, e)

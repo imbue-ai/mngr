@@ -70,7 +70,7 @@ def resolve_minds_root_name() -> str:
     if value is None:
         return DEFAULT_MINDS_ROOT_NAME
     if not re.fullmatch(MINDS_ROOT_NAME_PATTERN, value):
-        logger.warning(
+        logger.info(
             "{}={!r} does not match {!r}; ignoring and falling back to {!r}. "
             'Run `eval "$(minds env activate <name>)"` to activate a valid env.',
             MINDS_ROOT_NAME_ENV_VAR,
@@ -344,7 +344,7 @@ def _cleanup_legacy_dynamic_hosts(root_name: str) -> None:
             else:
                 path.unlink()
         except OSError as e:
-            logger.warning("Could not remove legacy minds-leased-host artifact {}: {}", path, e)
+            logger.info("Could not remove legacy minds-leased-host artifact {}: {}", path, e)
         else:
             logger.info("Removed legacy minds-leased-host artifact {}", path)
 
@@ -444,12 +444,12 @@ def reconcile_imbue_cloud_providers_from_sessions(connector_url: str, *, root_na
     try:
         raw = accounts_path.read_text()
     except OSError as e:
-        logger.warning("Could not read imbue_cloud accounts index {}: {}", accounts_path, e)
+        logger.opt(exception=e).error("Could not read imbue_cloud accounts index {}: {}", accounts_path, e)
         return
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as e:
-        logger.warning("Malformed imbue_cloud accounts index {}: {}", accounts_path, e)
+        logger.opt(exception=e).error("Malformed imbue_cloud accounts index {}: {}", accounts_path, e)
         return
     entries = data.get("entries") if isinstance(data, dict) else None
     if not isinstance(entries, list):
@@ -474,7 +474,7 @@ def reconcile_imbue_cloud_providers_from_sessions(connector_url: str, *, root_na
             # Bad email format (e.g. ``""``) -- log and keep going so a
             # single corrupt session entry doesn't block reconciliation
             # for the others.
-            logger.warning("Skipping imbue_cloud provider registration for {!r}: {}", email, e)
+            logger.opt(exception=e).error("Skipping imbue_cloud provider registration for {!r}: {}", email, e)
 
 
 def read_active_profile_dir(mngr_host_dir: Path) -> Path | None:
@@ -493,7 +493,7 @@ def read_active_profile_dir(mngr_host_dir: Path) -> Path | None:
     try:
         config_data = tomllib.loads(config_path.read_text())
     except (OSError, tomllib.TOMLDecodeError) as e:
-        logger.warning("Could not read mngr config {}: {}", config_path, e)
+        logger.opt(exception=e).error("Could not read mngr config {}: {}", config_path, e)
         return None
     profile_id = config_data.get("profile")
     if not isinstance(profile_id, str) or not profile_id:

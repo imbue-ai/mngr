@@ -237,6 +237,6 @@ def gc_old_per_tier_secrets(
             try:
                 delete_modal_secret_fn(secret_name, modal_env, parent_cg)
             except ModalDeployError as exc:
-                logger.warning(
+                logger.opt(exception=exc).error(
                     "GC: failed to delete old Modal Secret {!r} in env {!r}: {}", secret_name, modal_env, exc
                 )

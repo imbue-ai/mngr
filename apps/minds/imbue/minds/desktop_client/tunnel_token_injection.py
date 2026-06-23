@@ -47,7 +47,7 @@ def inject_tunnel_token_into_agent(agent_id: AgentId, token: str) -> None:
             is_checked_after=False,
         )
     if result.returncode != 0:
-        logger.warning("Failed to inject tunnel token into agent {}: {}", agent_id, result.stderr.strip())
+        logger.error("Failed to inject tunnel token into agent {}: {}", agent_id, result.stderr.strip())
 
 
 def clear_tunnel_token_from_agent(agent_id: AgentId) -> None:
@@ -70,4 +70,4 @@ def clear_tunnel_token_from_agent(agent_id: AgentId) -> None:
             is_checked_after=False,
         )
     if result.returncode != 0:
-        logger.warning("Failed to clear tunnel token from agent {}: {}", agent_id, result.stderr.strip())
+        logger.error("Failed to clear tunnel token from agent {}: {}", agent_id, result.stderr.strip())

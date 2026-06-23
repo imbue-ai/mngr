@@ -348,7 +348,7 @@ def _recover_env_locked(
                 ):
                     providers.stop_modal_app(app_name=app_name, modal_env=target.modal_env, parent_cg=parent_cg)
             except (ModalDeployError, MindError) as exc:
-                logger.warning("Recover: stop of {!r} failed: {}", app_name, exc)
+                logger.opt(exception=exc).error("Recover: stop of {!r} failed: {}", app_name, exc)
                 errors.append(f"modal app stop {app_name}: {exc}")
             continue
         try:
@@ -357,7 +357,7 @@ def _recover_env_locked(
                     app_name=app_name, version=version, modal_env=target.modal_env, parent_cg=parent_cg
                 )
         except (ModalDeployError, MindError) as exc:
-            logger.warning("Recover: rollback of {!r} failed: {}", app_name, exc)
+            logger.opt(exception=exc).error("Recover: rollback of {!r} failed: {}", app_name, exc)
             errors.append(f"modal app rollback {app_name} {version}: {exc}")
 
     # Step 2: Neon instant restore from the captured snapshot branch.
@@ -370,7 +370,7 @@ def _recover_env_locked(
             ):
                 _restore_neon(target=target, credentials=credentials)
         except NeonProviderError as exc:
-            logger.warning("Recover: Neon restore failed: {}", exc)
+            logger.opt(exception=exc).error("Recover: Neon restore failed: {}", exc)
             errors.append(f"neon restore_branch_from_snapshot: {exc}")
     else:
         logger.info("Recover: no Neon snapshot branch captured; skipping Neon restore step.")
@@ -384,7 +384,7 @@ def _recover_env_locked(
         with info_span("Cleaning up orphan Modal Secrets from failed deploy id {!r}", str(target.deploy_id)):
             _cleanup_orphan_secrets(target=target, providers=providers, parent_cg=parent_cg)
     except ModalDeployError as exc:
-        logger.warning("Recover: orphan-secret cleanup failed: {}", exc)
+        logger.opt(exception=exc).error("Recover: orphan-secret cleanup failed: {}", exc)
         errors.append(f"orphan secret cleanup: {exc}")
 
     # Step 4: delete the recover-target file -- only if every prior

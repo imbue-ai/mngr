@@ -296,7 +296,7 @@ class OnboardingApplier(MutableModel):
                         is_checked=False,
                     )
                 else:
-                    logger.warning("Cannot send initial problem for creation {}: unknown host name", creation_id)
+                    logger.error("Cannot send initial problem for creation {}: unknown host name", creation_id)
             if is_permissions_pending:
                 delivery_group.start_new_thread(
                     target=self._apply_permissions_preference,
@@ -311,7 +311,7 @@ class OnboardingApplier(MutableModel):
         if agent_id is not None:
             self._write_permissions_preference(agent_id, permissions_text)
         else:
-            logger.warning(
+            logger.error(
                 "Gave up writing permissions preference for creation {}: no canonical agent id",
                 creation_id,
             )
@@ -354,7 +354,7 @@ class OnboardingApplier(MutableModel):
                 is_checked_after=False,
             )
         if result.returncode != 0:
-            logger.warning(
+            logger.error(
                 "Failed to write permissions preference to agent {} (exit {}): {}",
                 agent_id,
                 result.returncode,
@@ -381,4 +381,4 @@ class OnboardingApplier(MutableModel):
                 logger.debug("Delivered initial problem to chat agent {}", host_name)
                 return
             threading.Event().wait(timeout=self.poll_interval_seconds)
-        logger.warning("Gave up delivering initial problem to chat agent {} after timeout", host_name)
+        logger.error("Gave up delivering initial problem to chat agent {} after timeout", host_name)

@@ -708,7 +708,7 @@ def _restart_supervisor_then_prewarm_gateway_client(
     try:
         gateway_client.ensure_initialized()
     except LatchkeyGatewayClientError as e:
-        logger.warning(
+        logger.info(
             "Could not pre-warm the latchkey gateway client; first request will retry: {}",
             e,
         )
@@ -730,13 +730,13 @@ def _restart_mngr_latchkey_forward_supervisor(supervisor: LatchkeyForwardSupervi
     start, and the supervisor restart re-publishes the env var (baked
     into the supervisor's ``extra_env`` at construction time in ``run``).
 
-    Failures are logged as warnings rather than raised: a broken
-    supervisor degrades latchkey to "unreachable from inside agents"
-    but should not prevent minds itself from starting.
+    Failures are logged as errors (and reported to Sentry) rather than
+    raised: a broken supervisor degrades latchkey to "unreachable from
+    inside agents" but should not prevent minds itself from starting.
     """
     try:
         info = supervisor.restart()
     except LatchkeyError as e:
-        logger.warning("Could not start detached mngr latchkey forward supervisor: {}", e)
+        logger.opt(exception=e).error("Could not start detached mngr latchkey forward supervisor: {}", e)
         return
     logger.info("mngr latchkey forward supervisor running (pid={})", info.pid)

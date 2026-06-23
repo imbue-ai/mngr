@@ -39,13 +39,13 @@ def load_telegram_user_credentials(data_dir: Path) -> TelegramUserCredentials | 
     try:
         raw = json.loads(creds_path.read_text())
     except (json.JSONDecodeError, OSError) as exc:
-        logger.warning("Could not load Telegram user credentials from {}: {}", creds_path, exc)
+        logger.opt(exception=exc).error("Could not load Telegram user credentials from {}: {}", creds_path, exc)
         return None
 
     try:
         return TelegramUserCredentials.model_validate(raw)
     except ValidationError as exc:
-        logger.warning("Telegram user credentials file has invalid schema ({}): {}", creds_path, exc)
+        logger.opt(exception=exc).error("Telegram user credentials file has invalid schema ({}): {}", creds_path, exc)
         return None
 
 
@@ -72,7 +72,7 @@ def load_agent_bot_credentials(
     try:
         raw = json.loads(creds_path.read_text())
     except (json.JSONDecodeError, OSError) as exc:
-        logger.warning("Could not load bot credentials for agent {}: {}", agent_id, exc)
+        logger.opt(exception=exc).error("Could not load bot credentials for agent {}: {}", agent_id, exc)
         return None
 
     # SecretStr needs special handling when loading from JSON
@@ -82,7 +82,7 @@ def load_agent_bot_credentials(
     try:
         return TelegramBotCredentials.model_validate(raw)
     except ValidationError as exc:
-        logger.warning("Bot credentials file has invalid schema for agent {} ({}): {}", agent_id, creds_path, exc)
+        logger.opt(exception=exc).error("Bot credentials file has invalid schema for agent {} ({}): {}", agent_id, creds_path, exc)
         return None
 
 

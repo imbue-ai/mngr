@@ -324,7 +324,7 @@ class ImbueCloudCli(MutableModel):
         )
         if result.returncode == 0:
             return True
-        logger.warning(
+        logger.error(
             "imbue_cloud hosts release failed for {} (exit {}): {}",
             host_db_id,
             result.returncode,

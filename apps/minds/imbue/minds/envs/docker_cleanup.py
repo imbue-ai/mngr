@@ -62,7 +62,7 @@ def read_profile_user_id(mngr_host_dir: Path) -> str | None:
     try:
         return user_id_path.read_text().strip() or None
     except OSError as e:
-        logger.warning("Could not read mngr profile user_id {}: {}", user_id_path, e)
+        logger.opt(exception=e).error("Could not read mngr profile user_id {}: {}", user_id_path, e)
         return None
 
 
@@ -220,7 +220,7 @@ def stop_active_env_state_container(
     mngr_prefix = mngr_prefix_for(root_name)
     user_id = read_profile_user_id(mngr_host_dir)
     if user_id is None:
-        logger.warning(
+        logger.info(
             "Could not resolve mngr profile user_id under {}; skipping Docker state-container stop.", mngr_host_dir
         )
         return False
@@ -247,7 +247,7 @@ def cleanup_env_state_container(
 
     user_id = read_profile_user_id(mngr_host_dir)
     if user_id is None:
-        logger.warning(
+        logger.info(
             "Could not resolve mngr profile user_id under {} for env {!r}; skipping Docker "
             "state-container cleanup (cannot target the exact container by name).",
             mngr_host_dir,

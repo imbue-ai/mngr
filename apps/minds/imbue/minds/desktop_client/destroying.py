@@ -123,7 +123,7 @@ def read_host_id(agent_id: AgentId, paths: WorkspacePaths) -> HostId | None:
     try:
         value = path.read_text().strip()
     except OSError as e:
-        logger.warning("Could not read host_id file {} for destroying agent {}: {}", path, agent_id, e)
+        logger.opt(exception=e).error("Could not read host_id file {} for destroying agent {}: {}", path, agent_id, e)
         return None
     return HostId(value) if value else None
 
@@ -306,7 +306,7 @@ def read_destroying(
     try:
         pid = int(pid_path.read_text().strip())
     except (ValueError, OSError) as e:
-        logger.warning("Could not parse pid file {} for destroying agent {}: {}", pid_path, agent_id, e)
+        logger.opt(exception=e).error("Could not parse pid file {} for destroying agent {}: {}", pid_path, agent_id, e)
         return None
     pid_alive = _is_pid_alive(pid)
     if pid_alive:
@@ -348,7 +348,7 @@ def list_destroying(
         try:
             agent_id = AgentId(entry.name)
         except ValueError:
-            logger.warning("Skipping destroying entry with non-AgentId name: {}", entry.name)
+            logger.error("Skipping destroying entry with non-AgentId name: {}", entry.name)
             continue
         record = read_destroying(agent_id, paths, is_host_still_active=is_host_still_active(agent_id))
         if record is not None:
@@ -370,7 +370,7 @@ def delete_destroying(agent_id: AgentId, paths: WorkspacePaths) -> bool:
     try:
         shutil.rmtree(dir_path)
     except OSError as e:
-        logger.warning("Could not remove destroying dir {}: {}", dir_path, e)
+        logger.info("Could not remove destroying dir {}: {}", dir_path, e)
         return False
     return True
 

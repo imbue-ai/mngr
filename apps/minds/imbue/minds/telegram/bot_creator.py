@@ -112,7 +112,7 @@ def fetch_telegram_web_api_credentials() -> tuple[int, str]:
         raise TelegramCredentialExtractionError("Credential pattern not found in any bundle chunk")
 
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        logger.warning(
+        logger.info(
             "Could not extract API credentials from Telegram Web bundle ({}), using known defaults",
             exc,
         )

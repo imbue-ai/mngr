@@ -184,7 +184,7 @@ def _current_mngr_branch() -> str | None:
             timeout=10,
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
-        logger.warning("Could not determine current mngr branch ({!r}); treating as unknown", exc)
+        logger.info("Could not determine current mngr branch ({!r}); treating as unknown", exc)
         return None
     branch = result.stdout.strip()
     if not branch or branch == "HEAD":
@@ -211,7 +211,7 @@ def _fct_remote_has_branch(branch: str) -> bool:
             timeout=30,
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        logger.warning(
+        logger.info(
             "Failed to query FCT remote for branch {!r}; treating as absent so main fallback runs: {!r}",
             branch,
             exc,
@@ -483,7 +483,7 @@ def _terminate_electron_process_tree(process: subprocess.Popen[bytes]) -> None:
     try:
         process.wait(timeout=_ELECTRON_SIGTERM_GRACE_SECONDS)
     except subprocess.TimeoutExpired:
-        logger.warning(
+        logger.info(
             "Electron did not exit on SIGTERM within {}s; sending SIGKILL",
             _ELECTRON_SIGTERM_GRACE_SECONDS,
         )
@@ -491,7 +491,7 @@ def _terminate_electron_process_tree(process: subprocess.Popen[bytes]) -> None:
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            logger.warning("Electron process group did not exit within 5s of SIGKILL")
+            logger.info("Electron process group did not exit within 5s of SIGKILL")
 
 
 @contextmanager
@@ -691,7 +691,7 @@ def _advance_onboarding_screen(page: Page, screen_name: str) -> None:
             page.wait_for_selector(next_button, state="hidden", timeout=_ONBOARDING_ADVANCE_TIMEOUT_MS)
             return
         except PlaywrightTimeoutError:
-            logger.warning("Onboarding screen {!r} did not advance after click; retrying", screen_name)
+            logger.info("Onboarding screen {!r} did not advance after click; retrying", screen_name)
     raise AssertionError(
         f"Onboarding screen {screen_name!r} did not advance after {_ONBOARDING_CLICK_ATTEMPTS} "
         "clicks of its Next button (creating.js handlers may not have attached)"
@@ -729,10 +729,10 @@ def destroy_agent_best_effort(workspace_name: str, config_project_dir: Path | No
             timeout=120,
         )
     except (subprocess.TimeoutExpired, OSError) as exc:
-        logger.warning("mngr destroy {} raised {!r}", workspace_name, exc)
+        logger.info("mngr destroy {} raised {!r}", workspace_name, exc)
         return
     if completed.returncode != 0:
-        logger.warning(
+        logger.info(
             "mngr destroy {} exited {} (stderr: {})",
             workspace_name,
             completed.returncode,
@@ -986,7 +986,7 @@ def create_workspace_via_electron(
             return
         except _ElectronConnectError as exc:
             last_error = exc
-            logger.warning(
+            logger.info(
                 "Electron launch/CDP attempt {}/{} failed; relaunching: {}",
                 attempt,
                 _ELECTRON_LAUNCH_ATTEMPTS,

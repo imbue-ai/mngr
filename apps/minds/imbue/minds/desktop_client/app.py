@@ -385,7 +385,7 @@ def _color_for_new_workspace(raw_color: object) -> str:
     if normalized is not None:
         return normalized
     if stripped:
-        logger.warning("Ignoring malformed create-request color {!r}; using the default workspace color.", stripped)
+        logger.info("Ignoring malformed create-request color {!r}; using the default workspace color.", stripped)
     return DEFAULT_WORKSPACE_COLOR
 
 
@@ -673,7 +673,7 @@ def _handle_backup_export_api(
             paths=paths, agent_id=typed_agent_id, host_id=host_id, parent_cg=root_concurrency_group
         )
     except BackupProvisioningError as e:
-        logger.warning("Backup export failed for {}: {}", agent_id, e)
+        logger.opt(exception=e).error("Backup export failed for {}: {}", agent_id, e)
         return make_response(status_code=500, content=json.dumps({"error": str(e)}), media_type="application/json")
     return make_file_response(
         path=str(zip_path), media_type="application/zip", filename=f"{download_label}-backup.zip"
@@ -704,7 +704,7 @@ def _run_tunnel_setup(
     try:
         info = imbue_cloud_cli.create_tunnel(account=account_email, agent_id=str(agent_id))
     except ImbueCloudCliError as exc:
-        logger.warning("Failed to create tunnel for {}: {}", agent_id, exc)
+        logger.opt(exception=exc).error("Failed to create tunnel for {}: {}", agent_id, exc)
         _notify_tunnel_failure(
             notification_dispatcher=notification_dispatcher,
             agent_display_name=agent_display_name,
@@ -712,7 +712,7 @@ def _run_tunnel_setup(
         )
         return
     if info.token is None:
-        logger.warning("Tunnel created for {} but no token returned", agent_id)
+        logger.error("Tunnel created for {} but no token returned", agent_id)
         return
     inject_tunnel_token_into_agent(agent_id, info.token.get_secret_value())
     logger.debug("Injected tunnel token into agent {}", agent_id)
@@ -1653,7 +1653,7 @@ def _handle_destroy_agent_api(
     # can't determine the host, refuse rather than risk a partial destroy.
     host_id = _resolve_host_id(backend_resolver, parsed_id)
     if host_id is None:
-        logger.warning("Refusing to destroy {}: could not resolve its host id from discovery", agent_id)
+        logger.info("Refusing to destroy {}: could not resolve its host id from discovery", agent_id)
         return make_response(
             status_code=409,
             content=json.dumps(
@@ -1807,9 +1807,11 @@ def _handle_set_workspace_color_api(
     except (json.JSONDecodeError, ValueError) as exc:
         # ValueError also covers UnicodeDecodeError on a non-UTF-8 body
         # (matches the other request.json() call sites in this file).
-        # External (HTTP) input: log at warning level rather than silently
-        # swallowing so a buggy / hostile client's bad bodies are visible.
-        logger.warning("Color write for {} got malformed JSON body: {}", agent_id, exc)
+        # External (HTTP) input: log at error level rather than silently
+        # swallowing so a buggy / hostile client's bad bodies are visible
+        # (the desktop UI is the only authenticated caller, so a malformed
+        # body indicates a frontend bug rather than routine behavior).
+        logger.error("Color write for {} got malformed JSON body: {}", agent_id, exc)
         return make_response(
             status_code=400,
             content=json.dumps({"error": "invalid_hex"}),
@@ -1853,7 +1855,7 @@ def _handle_set_workspace_color_api(
     if concurrency_group is None:
         # The concurrency group is wired in production (see create_desktop_client
         # entrypoint); only test paths that explicitly skip it can hit this.
-        logger.warning("No concurrency group available; cannot write color label for {}", parsed_id)
+        logger.error("No concurrency group available; cannot write color label for {}", parsed_id)
         return make_response(
             status_code=502,
             content=json.dumps({"error": "host_unreachable", "detail": "concurrency group unavailable"}),
@@ -1872,7 +1874,7 @@ def _handle_set_workspace_color_api(
         # the handler returns the real outcome of the label write.
         _run_mngr(concurrency_group, argv, env)
     except MngrCommandError as exc:
-        logger.warning("mngr label failed for {}: {}", parsed_id, exc)
+        logger.opt(exception=exc).error("mngr label failed for {}: {}", parsed_id, exc)
         return make_response(
             status_code=502,
             content=json.dumps({"error": "host_unreachable", "detail": str(exc)}),
@@ -1988,7 +1990,7 @@ def _handle_provider_toggle(
     try:
         body = _read_json_body()
     except (json.JSONDecodeError, ValueError) as e:
-        logger.warning("Provider toggle request body was not valid JSON: {}", e)
+        logger.error("Provider toggle request body was not valid JSON: {}", e)
         return make_response(status_code=400, content='{"error": "Body must be JSON"}', media_type="application/json")
     # request.json() can return any JSON value (array, string, number, null, ...),
     # not just objects. Reject non-dict bodies before calling .get() so we return
@@ -2842,14 +2844,14 @@ def _run_restart_sequence(
         try:
             _run_mngr(concurrency_group, _build_mngr_stop_argv(mngr_binary, services_agent_id, is_host_restart), env)
         except MngrCommandError as exc:
-            logger.warning("Stop step of {} for {} failed: {}", tier_label, workspace_agent_id, exc)
+            logger.opt(exception=exc).error("Stop step of {} for {} failed: {}", tier_label, workspace_agent_id, exc)
             tracker.mark_restart_failed(workspace_agent_id, f"Stop step of {tier_label} failed: {exc}")
             return
 
     try:
         _run_mngr(concurrency_group, _build_mngr_start_argv(mngr_binary, services_agent_id), env)
     except MngrCommandError as exc:
-        logger.warning("Start step of {} for {} failed: {}", tier_label, workspace_agent_id, exc)
+        logger.opt(exception=exc).error("Start step of {} for {} failed: {}", tier_label, workspace_agent_id, exc)
         tracker.mark_restart_failed(workspace_agent_id, f"Start step of {tier_label} failed: {exc}")
         return
 
@@ -2927,7 +2929,7 @@ def _dispatch_restart(
             on_failure=_RestartWorkerFailureHandler(tracker=tracker, workspace_agent_id=aid),
         )
     except (OSError, RuntimeError, ConcurrencyGroupError) as exc:
-        logger.warning("Failed to spawn restart worker for {}: {}", aid, exc)
+        logger.opt(exception=exc).error("Failed to spawn restart worker for {}: {}", aid, exc)
         tracker.mark_restart_failed(aid, f"Could not start the restart worker: {exc}")
         return _json_error(f"Could not start the restart worker: {exc}", status_code=503)
     return make_response(status_code=202, content="{}", media_type="application/json")
@@ -3005,7 +3007,7 @@ def _perform_mind_host_action(
     """
     services_agent_id = backend_resolver.get_system_services_agent_id(workspace_agent_id)
     if services_agent_id is None:
-        logger.warning(
+        logger.error(
             "Could not locate the system-services agent for host {} on {}", action.value, workspace_agent_id
         )
         return False
@@ -3022,7 +3024,7 @@ def _perform_mind_host_action(
     try:
         _run_mngr(concurrency_group, argv, env)
     except MngrCommandError as exc:
-        logger.warning("Host {} for {} failed: {}", action.value, workspace_agent_id, exc)
+        logger.opt(exception=exc).error("Host {} for {} failed: {}", action.value, workspace_agent_id, exc)
         if host_id is not None:
             backend_resolver.clear_host_state_override(host_id)
         return False
@@ -3147,7 +3149,7 @@ def _handle_stop_mind_hosts_api() -> Response:
         aid = AgentId(agent_id)
         services_agent_id = backend_resolver.get_system_services_agent_id(aid)
         if services_agent_id is None:
-            logger.warning("Could not locate the system-services agent for host stop on {}", aid)
+            logger.error("Could not locate the system-services agent for host stop on {}", aid)
             continue
         services_agent_ids.append(services_agent_id)
         host_id = _resolve_host_id(backend_resolver, aid)
@@ -3160,7 +3162,7 @@ def _handle_stop_mind_hosts_api() -> Response:
         try:
             _run_mngr(concurrency_group, argv, env)
         except MngrCommandError as exc:
-            logger.warning("Bulk host stop failed for {}: {}", requested_ids, exc)
+            logger.opt(exception=exc).error("Bulk host stop failed for {}: {}", requested_ids, exc)
         else:
             for host_id in host_ids:
                 backend_resolver.set_host_state_override(host_id, HostState.STOPPED)
@@ -3191,7 +3193,7 @@ def _handle_stop_state_container_api() -> Response:
             parent_concurrency_group=concurrency_group,
         )
     except DockerCleanupError as exc:
-        logger.warning("Failed to stop the Docker state container at shutdown: {}", exc)
+        logger.opt(exception=exc).error("Failed to stop the Docker state container at shutdown: {}", exc)
         return _json_error(f"Could not stop the Docker state container: {exc}", status_code=500)
     return make_response(content=json.dumps({"stopped": was_attempted}), media_type="application/json")
 
@@ -3259,7 +3261,7 @@ def _run_host_health_probe(
         )
         if returncode != 0:
             list_error = f"exited {returncode}: {list_stderr.strip()}"
-            logger.warning("`mngr list` for host-health probe of {} did not exit cleanly: {}", agent_id, list_error)
+            logger.info("`mngr list` for host-health probe of {} did not exit cleanly: {}", agent_id, list_error)
     except MngrCommandTimeoutError as exc:
         # The listing never completed within the probe window. There is no body to
         # parse and -- crucially -- no positive evidence the host is reachable but
@@ -3274,7 +3276,7 @@ def _run_host_health_probe(
             f"Could not reach {provider_label}: the workspace listing timed out after "
             f"{int(_HOST_HEALTH_PROBE_TIMEOUT_SECONDS)}s."
         )
-        logger.warning(
+        logger.info(
             "`mngr list` for host-health probe of {} timed out; classifying provider as unreachable: {}",
             agent_id,
             list_error,
@@ -3283,7 +3285,7 @@ def _run_host_health_probe(
         # Failed to launch the process at all (no body); continue with an empty
         # listing and surface the reason on the host-state rows.
         list_error = str(exc)
-        logger.warning("`mngr list` for host-health probe of {} did not run: {}", agent_id, list_error)
+        logger.opt(exception=exc).error("`mngr list` for host-health probe of {} did not run: {}", agent_id, list_error)
     list_json: str | None = list_stdout or None
     if provider_error is None:
         provider_error = extract_provider_error(list_json, provider_name)
@@ -3513,7 +3515,7 @@ def _handle_workspace_disassociate(
                         cli.delete_tunnel(account=str(account.email), tunnel_name=tunnel.tunnel_name)
                         clear_tunnel_token_from_agent(AgentId(agent_id))
                 except ImbueCloudCliError as e:
-                    logger.warning("Failed to delete tunnel during disassociation: {}", e)
+                    logger.opt(exception=e).error("Failed to delete tunnel during disassociation: {}", e)
             session_store.disassociate_workspace(str(account.user_id), agent_id)
             # Mirror the associate handler: poke the chrome SSE so the
             # tile flips back to unassociated immediately instead of
@@ -3922,7 +3924,7 @@ def _handle_sharing_status_api(
     try:
         tunnel = cli.find_tunnel_for_agent(account=account_email, agent_id=str(parsed_id))
     except ImbueCloudCliError as exc:
-        logger.warning("Failed to list tunnels for {}: {}", parsed_id, exc)
+        logger.info("Failed to list tunnels for {}: {}", parsed_id, exc)
         return make_response(
             content=json.dumps({"enabled": False, "url": None, "policy": default_policy}),
             media_type="application/json",
@@ -3936,7 +3938,7 @@ def _handle_sharing_status_api(
     try:
         service_entries = cli.list_services(account_email, tunnel.tunnel_name)
     except ImbueCloudCliError as exc:
-        logger.warning("Failed to list services for tunnel {}: {}", tunnel.tunnel_name, exc)
+        logger.info("Failed to list services for tunnel {}: {}", tunnel.tunnel_name, exc)
         service_entries = []
     hostname = next(
         (entry.get("hostname") for entry in service_entries if entry.get("service_name") == service_name),
@@ -4172,7 +4174,7 @@ def create_desktop_client(
     # and the server logs a hint at startup.
     _static_dir = Path(__file__).resolve().parent / "static"
     if not (_static_dir / "tailwind.js").exists():
-        logger.warning("Missing static/tailwind.js. Run `just minds-tailwind` from the repo root to fetch it.")
+        logger.info("Missing static/tailwind.js. Run `just minds-tailwind` from the repo root to fetch it.")
     app = Flask(__name__, static_folder=str(_static_dir), static_url_path="/_static")
 
     @app.errorhandler(Exception)

@@ -738,7 +738,7 @@ def _deploy_env_locked(
                 neon_project_id_for_snapshot, neon_snapshot_branch_id, credentials.neon_api_token
             )
         except MindError as cleanup_exc:
-            logger.warning(
+            logger.opt(exception=cleanup_exc).error(
                 "Recover-target file write failed AND best-effort cleanup of the just-created "
                 "Neon snapshot branch {!r} in project {!r} also failed: {} -- the branch is "
                 "orphaned and must be deleted manually via the Neon console.",
@@ -986,7 +986,7 @@ def _deploy_env_locked(
                     neon_project_id_for_snapshot, neon_snapshot_branch_id, credentials.neon_api_token
                 )
             except MindError as exc:
-                logger.warning(
+                logger.opt(exception=exc).error(
                     "Failed to delete Neon snapshot branch {!r} after successful deploy: {} -- "
                     "leaving in place (operator can delete manually via the Neon console).",
                     neon_snapshot_branch_id,
@@ -1009,7 +1009,7 @@ def _deploy_env_locked(
                 parent_cg=parent_concurrency_group,
             )
         except ModalDeployError as exc:
-            logger.warning(
+            logger.opt(exception=exc).error(
                 "GC of old timestamped Modal Secrets failed in env {!r}: {} -- ignoring (deploy succeeded)",
                 modal_env,
                 exc,
@@ -1201,7 +1201,7 @@ def destroy_env(
     """
     env_root_was_present = env_root_exists(name)
     if not env_root_was_present:
-        logger.warning(
+        logger.info(
             "No env root for env {!r} at {}; proceeding with cloud-side cleanup based on the env name. "
             "Local state is keyed off the directory, but the cloud resources are keyed off the name -- "
             "every step below can converge on a missing-local-root env. mngr-agent destroy (step 1) will "
@@ -1218,7 +1218,7 @@ def destroy_env(
     # hosts / tunnels stop cleanly before we tear down the cloud
     # resources they reference.
     if keep_agents:
-        logger.warning(
+        logger.info(
             "minds env destroy {!r}: --keep-agents passed; skipping mngr-agent teardown "
             "(and the Docker state-container cleanup, since kept agents still rely on it). "
             "Run `mngr destroy <agent>` manually for any agents bound to this env.",

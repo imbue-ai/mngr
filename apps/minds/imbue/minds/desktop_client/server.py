@@ -133,7 +133,7 @@ def _shutdown_desktop_client(state: DesktopClientState, is_externally_managed_cl
         except ConcurrencyExceptionGroup as exc:
             # Strands reported failures or timed out during shutdown; log but
             # don't propagate so other cleanup can run.
-            logger.warning("Root concurrency group exit reported errors: {}", exc)
+            logger.opt(exception=exc).error("Root concurrency group exit reported errors: {}", exc)
     # Last: flush Sentry and any pending S3 attachment uploads so errors captured
     # during the session (including any logged above during teardown) are sent
     # before the process exits. No-op when Sentry was never initialized.

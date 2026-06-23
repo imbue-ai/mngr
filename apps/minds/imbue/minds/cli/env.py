@@ -415,7 +415,7 @@ def _load_dev_credentials_from_vault(vault_prefix: str, *, cg: ConcurrencyGroup)
     try:
         ovh_secret = read_vault_kv(VaultPath(f"{vault_prefix}/ovh"), parent_concurrency_group=cg)
     except VaultSecretNotFoundError as exc:
-        logger.warning("No ovh Vault entry at {}/ovh ({}); proceeding with empty OVH credentials.", vault_prefix, exc)
+        logger.info("No ovh Vault entry at {}/ovh ({}); proceeding with empty OVH credentials.", vault_prefix, exc)
         ovh_secret = {}
 
     org_id = neon_admin.get("NEON_ORG_ID", "")
@@ -539,7 +539,7 @@ def _exec_into_recover(*, deploy_error: Exception) -> None:
     )
     sys.stderr.flush()
     for remaining in range(_AUTO_ROLLBACK_COUNTDOWN_SECONDS, 0, -1):
-        logger.warning("Rolling back in {}...", remaining)
+        logger.info("Rolling back in {}...", remaining)
         time.sleep(1)
     logger.info("Running `minds env recover` now.")
     # Flush before exec -- otherwise buffered loguru output gets lost.
@@ -642,7 +642,7 @@ def _refuse_if_recover_target_blocks_activation(env_name: str) -> None:
         # env recover` can run next. Surface any unrelated failed deploys.
         if other_files:
             other_list = "\n".join(f"  - {recover_file.name}" for recover_file in other_files)
-            logger.warning(
+            logger.info(
                 "Other env(s) still have a pending recover-target file:\n{}\n"
                 "Activate each and run `minds env recover` before deploying them.",
                 other_list,
@@ -923,13 +923,13 @@ def _try_run_generation_check(*, env_name: str, client_config_path: Path, env_ro
     """Load ``client_config_path`` -> call the generation check, swallow / log on errors.
 
     Wrapped here so the activate path never blocks on a misconfigured
-    client config: a parse failure surfaces as a warning + skip rather
-    than tanking activation.
+    client config: a parse failure surfaces as a logged error + skip
+    rather than tanking activation.
     """
     try:
         client_config = load_client_config(client_config_path)
     except EnvConfigError as exc:
-        logger.warning(
+        logger.opt(exception=exc).error(
             "Could not load {} for generation-id check ({}); skipping the check.",
             client_config_path,
             exc,
@@ -972,7 +972,7 @@ def _check_generation_id_and_wipe_local_state_on_mismatch(
     """Fetch ``<connector_url>/generation`` and wipe local state on mismatch.
 
     Writes diagnostics to stderr (stdout is reserved for shell-sourceable
-    exports). Network or parse errors are logged as warnings and do NOT
+    exports). Network or parse errors are logged and do NOT
     block activation -- the operator can still go through the rest of
     the activation, and the next time they activate with a working
     connector the marker will get reconciled.
@@ -994,7 +994,7 @@ def _check_generation_id_and_wipe_local_state_on_mismatch(
         response.raise_for_status()
         payload = response.json()
     except (httpx.HTTPError, ValueError) as exc:
-        logger.warning(
+        logger.info(
             "Could not fetch {} ({}); skipping generation-id check. Local state may be stale "
             "if the tier was destroyed since you last activated.",
             url,
@@ -1015,7 +1015,7 @@ def _check_generation_id_and_wipe_local_state_on_mismatch(
         return
 
     if last_seen:
-        logger.warning(
+        logger.info(
             "Env {!r} generation id changed (was {}, now {}). Wiping local mngr/auth/logs "
             "state under {} so this shell doesn't see stale agents pointing at the previous "
             "deploy.",

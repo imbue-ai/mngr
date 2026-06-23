@@ -302,7 +302,7 @@ class EnvelopeStreamConsumer(MutableModel):
         try:
             envelope = json.loads(stripped)
         except json.JSONDecodeError as e:
-            logger.warning("Could not parse envelope line {!r}: {}", stripped[:200], e)
+            logger.opt(exception=e).error("Could not parse envelope line {!r}: {}", stripped[:200], e)
             return
         if not isinstance(envelope, dict):
             return
@@ -327,7 +327,7 @@ class EnvelopeStreamConsumer(MutableModel):
             line = json.dumps(payload, separators=(",", ":"))
             event = parse_discovery_event_line(line)
         except (ValueError, TypeError) as e:
-            logger.warning("Could not parse observe payload: {}", e)
+            logger.opt(exception=e).error("Could not parse observe payload: {}", e)
             return
         if event is None:
             return
@@ -357,7 +357,7 @@ class EnvelopeStreamConsumer(MutableModel):
             for aid in event.agent_ids:
                 self._handle_agent_destroyed(aid)
         elif isinstance(event, DiscoveryErrorEvent):
-            logger.warning(
+            logger.info(
                 "Discovery error from {}: {} ({})", event.source_name, event.error_message, event.error_type
             )
         else:
@@ -531,7 +531,7 @@ class EnvelopeStreamConsumer(MutableModel):
             try:
                 callback(agent_id, ssh_info, provider_name)
             except (OSError, RuntimeError, ValueError) as e:
-                logger.warning("on_agent_discovered callback failed for {}: {}", agent_id, e)
+                logger.opt(exception=e).error("on_agent_discovered callback failed for {}: {}", agent_id, e)
 
     def _fire_destroyed(self, agent_id: AgentId) -> None:
         with self._lock:
@@ -540,7 +540,7 @@ class EnvelopeStreamConsumer(MutableModel):
             try:
                 callback(agent_id)
             except (OSError, RuntimeError, ValueError) as e:
-                logger.warning("on_agent_destroyed callback failed for {}: {}", agent_id, e)
+                logger.opt(exception=e).error("on_agent_destroyed callback failed for {}: {}", agent_id, e)
 
     # -- Per-agent event lines (services / requests) ----------------------
 
@@ -556,7 +556,7 @@ class EnvelopeStreamConsumer(MutableModel):
         try:
             record = parse_service_log_record(payload)
         except (ValueError, TypeError) as e:
-            logger.warning("Could not parse service event for {}: {}", agent_id, e)
+            logger.opt(exception=e).error("Could not parse service event for {}: {}", agent_id, e)
             return
         with self._lock:
             services = self._services_by_agent.setdefault(aid_str, {})
@@ -584,7 +584,7 @@ class EnvelopeStreamConsumer(MutableModel):
         """Record the latest per-agent service map from a ``resolver_snapshot`` envelope."""
         services_by_agent = payload.get("services_by_agent")
         if not isinstance(services_by_agent, dict):
-            logger.warning("Malformed resolver_snapshot envelope: {}", payload)
+            logger.error("Malformed resolver_snapshot envelope: {}", payload)
             return
         new_snapshot: dict[str, dict[str, str]] = {}
         for aid, services in services_by_agent.items():
@@ -609,7 +609,7 @@ class EnvelopeStreamConsumer(MutableModel):
                 agent_id = AgentId(str(payload["agent_id"]))
                 reason = SystemInterfaceBackendFailureReason(str(payload["reason"]))
             except (KeyError, ValueError, TypeError) as e:
-                logger.warning("Could not parse system_interface_backend_failure payload: {}", e)
+                logger.opt(exception=e).error("Could not parse system_interface_backend_failure payload: {}", e)
                 return
             raw_status_code = payload.get("status_code")
             try:
@@ -622,7 +622,7 @@ class EnvelopeStreamConsumer(MutableModel):
                 try:
                     callback(agent_id, reason, status_code)
                 except (OSError, RuntimeError, ValueError) as e:
-                    logger.warning("system_interface_backend_failure callback failed for {}: {}", agent_id, e)
+                    logger.opt(exception=e).error("system_interface_backend_failure callback failed for {}: {}", agent_id, e)
         elif payload_type == "listening":
             self._handle_listening(payload)
         elif payload_type == "login_url":
@@ -639,12 +639,12 @@ class EnvelopeStreamConsumer(MutableModel):
         """
         raw_port = payload.get("port")
         if raw_port is None:
-            logger.warning("`listening` envelope is missing its port: {}", payload)
+            logger.error("`listening` envelope is missing its port: {}", payload)
             return
         try:
             port = int(raw_port)
         except (TypeError, ValueError):
-            logger.warning("Could not parse port from `listening` envelope: {}", payload)
+            logger.error("Could not parse port from `listening` envelope: {}", payload)
             return
         with self._lock:
             self._listening_port = port

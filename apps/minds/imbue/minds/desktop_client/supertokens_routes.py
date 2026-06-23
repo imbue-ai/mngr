@@ -123,7 +123,7 @@ class _AuthBackendShim(MutableModel):
         try:
             self._cli.auth_signout(account_email)
         except ImbueCloudCliError as exc:
-            logger.warning("`mngr imbue_cloud auth signout` failed for {}: {}", account_email, exc)
+            logger.info("`mngr imbue_cloud auth signout` failed for {}: {}", account_email, exc)
 
     def is_email_verified(self, _user_id: str, _email: str) -> bool:
         # The plugin doesn't currently expose this. Treat as verified to
@@ -137,7 +137,7 @@ class _AuthBackendShim(MutableModel):
             self._cli.auth_status(email)
             return True
         except ImbueCloudCliError as exc:
-            logger.warning("Could not invoke auth status for {}: {}", email, exc)
+            logger.info("Could not invoke auth status for {}: {}", email, exc)
             return False
 
     def forgot_password(self, email: str) -> None:
@@ -145,7 +145,7 @@ class _AuthBackendShim(MutableModel):
             # Plugin doesn't currently expose forgot-password.
             self._cli.auth_status(email)
         except ImbueCloudCliError as exc:
-            logger.warning("Forgot-password (placeholder) call failed for {}: {}", email, exc)
+            logger.info("Forgot-password (placeholder) call failed for {}: {}", email, exc)
 
     def get_user_provider(self, _user_id: str) -> str:
         return "email"
@@ -261,11 +261,11 @@ def bounce_latchkey_forward_supervisor(supervisor: LatchkeyForwardSupervisor | N
     try:
         supervisor.bounce()
     except (OSError, RuntimeError, LatchkeyError) as e:
-        logger.warning("Failed to bounce mngr latchkey forward: {}", e)
+        logger.opt(exception=e).error("Failed to bounce mngr latchkey forward: {}", e)
 
 
 def _auth_error_response(exc: AuthBackendError | ImbueCloudCliError) -> Response:
-    logger.warning("Auth backend unavailable: {}", exc)
+    logger.info("Auth backend unavailable: {}", exc)
     return _json_response(
         {"status": "ERROR", "message": "Authentication service is unavailable"},
         502,
@@ -370,7 +370,7 @@ def signout_user_via_plugin(user_id: str) -> None:
         signed_out_email = str(session.email)
         backend.signout_account(signed_out_email)
     else:
-        logger.warning("No mirrored account for user {}; skipping plugin signout", user_id[:8])
+        logger.info("No mirrored account for user {}; skipping plugin signout", user_id[:8])
     session_store.invalidate_identity_cache()
     if signed_out_email and unset_imbue_cloud_provider_for_account(signed_out_email):
         _bounce_forward_observe()
@@ -425,7 +425,7 @@ def _handle_email_verified_api() -> Response:
     try:
         verified = backend.is_email_verified(str(user_info.user_id), user_info.email)
     except ImbueCloudCliError as exc:
-        logger.warning("Auth backend unreachable during is-email-verified: {}", exc)
+        logger.info("Auth backend unreachable during is-email-verified: {}", exc)
         return _json_response({"verified": False, "signedIn": True, "error": "backend_unavailable"}, 502)
     return _json_response({"verified": verified, "signedIn": True})
 
@@ -440,7 +440,7 @@ def _handle_resend_verification_api() -> Response:
     try:
         ok = backend.send_verification_email(str(user_info.user_id), user_info.email)
     except ImbueCloudCliError as exc:
-        logger.warning("Auth backend unreachable during resend-verification: {}", exc)
+        logger.info("Auth backend unreachable during resend-verification: {}", exc)
         return _json_response({"status": "ERROR", "message": "Authentication service is unavailable"}, 502)
     if not ok:
         return _json_response({"status": "ERROR", "message": "Failed to send verification email"}, 502)
@@ -527,7 +527,7 @@ def _run_oauth_subprocess(
     try:
         result = imbue_cloud_cli.auth_oauth(account="", provider_id=provider_id)
     except ImbueCloudCliError as exc:
-        logger.warning("Plugin OAuth subprocess failed for {}: {}", provider_id, exc)
+        logger.info("Plugin OAuth subprocess failed for {}: {}", provider_id, exc)
         _record_oauth_status(
             flow_id,
             _OAuthFlowStatus(
@@ -668,7 +668,7 @@ def _handle_forgot_password_api() -> Response:
     try:
         backend.forgot_password(email)
     except (ImbueCloudCliError, AuthBackendError) as exc:
-        logger.warning("Auth backend unavailable during forgot-password; returning generic success: {}", exc)
+        logger.info("Auth backend unavailable during forgot-password; returning generic success: {}", exc)
     return _json_response({"status": "OK", "message": "If an account exists, a reset email has been sent"})
 
 
@@ -697,7 +697,7 @@ def _handle_settings_page() -> Response:
     try:
         provider = backend.get_user_provider(str(user_info.user_id))
     except ImbueCloudCliError as exc:
-        logger.warning("Auth backend unreachable during settings page load: {}", exc)
+        logger.info("Auth backend unreachable during settings page load: {}", exc)
         provider = "email"
 
     return make_html_response(
