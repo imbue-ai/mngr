@@ -1,8 +1,11 @@
 import base64
+import hashlib
 import json
 import shlex
+import tempfile
 from collections.abc import Mapping
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Final
 
 from loguru import logger
@@ -12,6 +15,7 @@ from pydantic import Field
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.primitives import HostId
+from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr_imbue_cloud.errors import SliceCapacityError
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_disk_name
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
@@ -100,6 +104,30 @@ class LimaSliceVpsClient(VpsClientInterface):
         default=None,
         description="Optional override of the lima guest image URL (defaults to mngr_lima's Debian image).",
     )
+    box_host_public_key: str | None = Field(
+        default=None,
+        description=(
+            "The box's sshd host public key, pinned for strict host-key checking (no trust-on-first-use). "
+            "None only in unit tests that never SSH the box; an actual box SSH with no key fails closed."
+        ),
+    )
+
+    def _box_known_hosts_file(self) -> str:
+        """Write the box's pinned host key to a known_hosts file and return its path.
+
+        Fails closed when no pinned key is configured -- we never fall back to
+        trust-on-first-use. The file is idempotently (re)written next to the pool
+        key (or a temp dir) keyed by box address.
+        """
+        if not self.box_host_public_key:
+            raise LimaCommandError(
+                "ssh", 1, f"no pinned host key configured for box {self.box_address}; run the host-key backfill"
+            )
+        base_dir = Path(self.private_key_path).parent if self.private_key_path else Path(tempfile.gettempdir())
+        box_digest = hashlib.sha256(self.box_address.encode()).hexdigest()[:16]
+        known_hosts_path = base_dir / f".box_known_hosts_{box_digest}"
+        add_host_to_known_hosts(known_hosts_path, self.box_address, 22, self.box_host_public_key)
+        return str(known_hosts_path)
 
     def _unavailable(self, operation: str) -> NotImplementedError:
         return NotImplementedError(
@@ -117,7 +145,9 @@ class LimaSliceVpsClient(VpsClientInterface):
             "-i",
             self.private_key_path,
             "-o",
-            "StrictHostKeyChecking=accept-new",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            f"UserKnownHostsFile={self._box_known_hosts_file()}",
             "-o",
             f"ConnectTimeout={_BOX_CONNECT_TIMEOUT_SECONDS}",
             "-o",

@@ -279,11 +279,11 @@ class _FakeImbueCloudProvider(ImbueCloudProvider):
 
     Overrides only the boundaries that would otherwise do real I/O: the lease
     cache, the outer-SSH connection, the on-disk keypair location, the
-    sshd-readiness wait and host-key re-scan (both real network round-trips to
-    the container), and the final host construction (pyinfra wiring). Everything
-    in between -- the container lookup, the ``docker inspect`` running-state
-    probe, ``docker start`` and the sshd relaunch -- runs for real against
-    ``_outer``. Mirrors the sibling vps_docker tests.
+    sshd-readiness wait (a real network round-trip to the container), and the
+    final host construction (pyinfra wiring). Everything in between -- the
+    container lookup, the ``docker inspect`` running-state probe, ``docker
+    start`` and the sshd relaunch -- runs for real against ``_outer``. Mirrors
+    the sibling vps_docker tests.
     """
 
     _lease: LeasedHostInfo | None = None
@@ -291,7 +291,6 @@ class _FakeImbueCloudProvider(ImbueCloudProvider):
     _keypair_dir: Path = Path("/tmp/fake-imbue-cloud-keypair")
     _built: ImbueCloudHost | None = None
     _waited_for: list[str] = []
-    _rescanned: list[tuple[str, int]] = []
 
     def _list_leased_hosts_cached(self) -> list[LeasedHostInfo]:
         return [self._lease] if self._lease is not None else []
@@ -305,10 +304,6 @@ class _FakeImbueCloudProvider(ImbueCloudProvider):
 
     def _wait_for_container_sshd(self, leased: LeasedHostInfo) -> None:
         self._waited_for.append(leased.vps_address)
-
-    def _scan_and_record_container_host_key(self, host_id: HostId, vps_address: str, container_ssh_port: int) -> Path:
-        self._rescanned.append((vps_address, container_ssh_port))
-        return self._keypair_dir / "known_hosts"
 
     def _build_host_object(self, lease: LeasedHostInfo, *, adopt_pre_baked_agent: bool = True) -> ImbueCloudHost:
         assert self._built is not None
@@ -345,7 +340,6 @@ def _make_provider(
         _keypair_dir=keypair_dir,
         _built=built,
         _waited_for=[],
-        _rescanned=[],
     )
 
 
@@ -422,11 +416,9 @@ def test_start_host_rebootstraps_container_ssh(tmp_path: Path, temp_mngr_ctx: Mn
 
     # The container is started before its sshd is relaunched.
     assert start_index < sshd_index
-    # We wait for sshd to come back, but neither re-seed authorized_keys nor
-    # re-scan the host key -- both persist in the container filesystem across a
-    # docker stop/start.
+    # We wait for sshd to come back, but do not re-seed authorized_keys -- it
+    # persists in the container filesystem across a docker stop/start.
     assert provider._waited_for == [lease.vps_address]
-    assert provider._rescanned == []
     assert not any("authorized_keys" in command for command in commands)
     # The returned host is the rebuilt host object (start_host completed).
     assert result is built
@@ -492,3 +484,52 @@ def test_list_leased_hosts_preserves_auth_error() -> None:
 
     with pytest.raises(ImbueCloudAuthError):
         provider._list_leased_hosts_cached()
+
+
+def test_ensure_host_key_pinned_does_not_clobber_a_recorded_key(temp_mngr_ctx: MngrContext) -> None:
+    """A slow-path rebuilt container key (authoritatively recorded) must survive a later
+    add-if-absent ensure from the connector's stale initial key."""
+    provider = ImbueCloudProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"), mngr_ctx=temp_mngr_ctx
+    )
+    host_id = HostId.generate()
+    provider._record_host_key(host_id, "203.0.113.7", 2222, "ssh-ed25519 AAAArebuiltkey")
+    known_hosts_path = provider._ensure_host_key_pinned(host_id, "203.0.113.7", 2222, "ssh-ed25519 AAAAinitialkey")
+    contents = known_hosts_path.read_text()
+    assert "AAAArebuiltkey" in contents
+    assert "AAAAinitialkey" not in contents
+
+
+def test_ensure_host_key_pinned_records_connector_key_on_a_fresh_host(temp_mngr_ctx: MngrContext) -> None:
+    """On a machine with no prior known_hosts entry, the connector-provided key is pinned (no scan)."""
+    provider = ImbueCloudProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"), mngr_ctx=temp_mngr_ctx
+    )
+    host_id = HostId.generate()
+    known_hosts_path = provider._ensure_host_key_pinned(host_id, "203.0.113.8", 2222, "ssh-ed25519 AAAAconnectorkey")
+    assert "AAAAconnectorkey" in known_hosts_path.read_text()
+
+
+def test_ensure_host_key_pinned_is_a_noop_when_key_is_none(temp_mngr_ctx: MngrContext) -> None:
+    """A None key (connector too old) leaves known_hosts empty -- never trust-on-first-use."""
+    provider = ImbueCloudProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"), mngr_ctx=temp_mngr_ctx
+    )
+    host_id = HostId.generate()
+    known_hosts_path = provider._ensure_host_key_pinned(host_id, "203.0.113.9", 2222, None)
+    assert known_hosts_path.read_text() == ""
+
+
+def test_ensure_host_key_pinned_pins_outer_key_when_only_container_entry_exists(temp_mngr_ctx: MngrContext) -> None:
+    """The outer (:22, bare-host pattern) key must still be pinned when a container
+    ([host]:2222) entry is already present -- the bare host is a substring of the
+    bracketed container line, so a substring check would wrongly skip it."""
+    provider = ImbueCloudProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"), mngr_ctx=temp_mngr_ctx
+    )
+    host_id = HostId.generate()
+    provider._ensure_host_key_pinned(host_id, "203.0.113.10", 2222, "ssh-ed25519 AAAAcontainerkey")
+    known_hosts_path = provider._ensure_host_key_pinned(host_id, "203.0.113.10", 22, "ssh-ed25519 AAAAouterkey")
+    contents = known_hosts_path.read_text()
+    assert "AAAAcontainerkey" in contents
+    assert "AAAAouterkey" in contents
