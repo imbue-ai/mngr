@@ -1067,11 +1067,17 @@ class ImbueCloudProvider(BaseProviderInstance):
                     arg for arg in (start_args or ()) if arg not in FAST_PATH_ADOPTABLE_START_ARGS
                 )
                 if image is not None or unsupported_start_args:
+                    # Name only the actual offender(s) so the message stays accurate
+                    # whether it was an --image, unsupported start args, or both.
+                    rejected_reasons: list[str] = []
+                    if image is not None:
+                        rejected_reasons.append(f"--image={image!r}")
+                    if unsupported_start_args:
+                        rejected_reasons.append(f"start args {list(unsupported_start_args)}")
                     raise MngrError(
-                        "imbue_cloud fast_mode=require adopts the pre-baked agent as-is, so it cannot "
-                        "apply --image or start args the baked container does not already carry "
-                        f"(image={image!r}, unsupported start args={list(unsupported_start_args)}). "
-                        "Use fast_mode=prevent to rebuild."
+                        "imbue_cloud fast_mode=require adopts the pre-baked agent as-is, so it cannot apply "
+                        + " and ".join(rejected_reasons)
+                        + ". Use fast_mode=prevent to rebuild."
                     )
                 return self._create_host_fast_path(
                     name=name,

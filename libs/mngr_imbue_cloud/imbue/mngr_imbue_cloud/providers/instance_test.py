@@ -28,6 +28,7 @@ from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
+from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.data_types import LeasedHostInfo
@@ -605,4 +606,21 @@ def test_fast_path_rejects_start_args_the_baked_container_cannot_honor(temp_mngr
     message = str(exc_info.value)
     assert "--privileged" in message
     assert "--restart=unless-stopped" not in message
+    assert not provider._did_reach_fast_path
+
+
+def test_fast_path_rejects_image_swap_and_names_only_the_image(temp_mngr_ctx: MngrContext) -> None:
+    """An --image swap cannot be adopted, and with no offending start args the
+    message names only the image (not an empty start-args list)."""
+    provider = _make_fast_path_guard_provider(temp_mngr_ctx)
+    with pytest.raises(MngrError) as exc_info:
+        provider.create_host(
+            HostName("mind-test"),
+            image=ImageReference("ghcr.io/example/custom:latest"),
+            start_args=["--restart=unless-stopped"],
+            build_args=list(_FAST_PATH_BUILD_ARGS),
+        )
+    message = str(exc_info.value)
+    assert "ghcr.io/example/custom:latest" in message
+    assert "start args" not in message
     assert not provider._did_reach_fast_path
