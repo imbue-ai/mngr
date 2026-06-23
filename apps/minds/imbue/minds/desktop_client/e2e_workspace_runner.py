@@ -192,6 +192,25 @@ def _current_mngr_branch() -> str | None:
     return branch
 
 
+def _current_workspace_branch(workspace_git_url: Path) -> str | None:
+    """Return the current branch for a local workspace checkout, if any."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(workspace_git_url), "rev-parse", "--abbrev-ref", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        logger.warning("Could not determine workspace branch for {} ({!r}); leaving branch default unset", workspace_git_url, exc)
+        return None
+    branch = result.stdout.strip()
+    if not branch or branch == "HEAD":
+        return None
+    return branch
+
+
 def _fct_remote_has_branch(branch: str) -> bool:
     """Return True iff the FCT public remote currently has ``branch``.
 
@@ -260,11 +279,24 @@ def _shallow_clone_fct(branch: str, destination: Path) -> Path:
     # when the working tree is dirty. Best effort: if the ref is not
     # reachable (e.g. tag not present on FCT remote yet), leave the clone
     # as-is and let `mngr create` surface the resulting error.
-    _checkout_best_effort(destination, _FORM_DEFAULT_BRANCH)
+    if not _checkout_best_effort(destination, _FORM_DEFAULT_BRANCH):
+        _point_fetch_head_at_current_checkout(destination)
     return destination
 
 
-def _checkout_best_effort(repo: Path, ref: str) -> None:
+def _point_fetch_head_at_current_checkout(repo: Path) -> None:
+    # Local-only fetch that makes FETCH_HEAD equal the current commit. The
+    # create flow later runs `git checkout -B <branch> FETCH_HEAD`.
+    subprocess.run(
+        ["git", "-C", str(repo), "fetch", "--no-tags", ".", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+def _checkout_best_effort(repo: Path, ref: str) -> bool:
     verify = subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "--verify", f"{ref}^{{commit}}"],
         capture_output=True,
@@ -273,7 +305,7 @@ def _checkout_best_effort(repo: Path, ref: str) -> None:
     )
     if verify.returncode != 0:
         logger.info("Skipping pre-checkout of FCT clone to {!r}: ref not reachable", ref)
-        return
+        return False
     subprocess.run(
         ["git", "-C", str(repo), "checkout", "--detach", ref],
         check=True,
@@ -291,13 +323,8 @@ def _checkout_best_effort(repo: Path, ref: str) -> None:
     # downstream checkout tries to switch content and aborts on the dirty file
     # ("Your local changes ... would be overwritten by checkout"). Fetching from
     # ``.`` is local-only (no network).
-    subprocess.run(
-        ["git", "-C", str(repo), "fetch", "--no-tags", ".", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    _point_fetch_head_at_current_checkout(repo)
+    return True
 
 
 def resolve_fct_path(scratch_dir: Path) -> Path:
@@ -355,7 +382,8 @@ def materialize_isolated_fct(fct_source: Path, scratch_dir: Path) -> Path:
         text=True,
         timeout=300,
     )
-    _checkout_best_effort(destination, _FORM_DEFAULT_BRANCH)
+    if not _checkout_best_effort(destination, _FORM_DEFAULT_BRANCH):
+        _point_fetch_head_at_current_checkout(destination)
     return destination
 
 
@@ -404,6 +432,9 @@ def _build_electron_env(workspace_git_url: Path, workspace_name: str) -> dict[st
     env = dict(os.environ)
     env["MINDS_WORKSPACE_GIT_URL"] = str(workspace_git_url)
     env["MINDS_WORKSPACE_NAME"] = workspace_name
+    workspace_branch = _current_workspace_branch(workspace_git_url)
+    if workspace_branch is not None:
+        env["MINDS_WORKSPACE_BRANCH"] = workspace_branch
     # Opt into the local-worktree create-form defaults (see just minds-start).
     env["MINDS_USE_LOCAL_WORKSPACE_DEFAULTS"] = "1"
     # Pin MNGR_ROOT_NAME back to "mngr" for the Electron child so the

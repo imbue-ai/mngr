@@ -1,4 +1,6 @@
+import subprocess
 from collections.abc import Sequence
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -7,7 +9,9 @@ from playwright.sync_api import Page
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from imbue.minds.desktop_client.e2e_workspace_runner import WorkspaceCreationFailedError
+from imbue.minds.desktop_client.e2e_workspace_runner import _build_electron_env
 from imbue.minds.desktop_client.e2e_workspace_runner import _current_mngr_branch
+from imbue.minds.desktop_client.e2e_workspace_runner import _point_fetch_head_at_current_checkout
 from imbue.minds.desktop_client.e2e_workspace_runner import _read_failure_message
 from imbue.minds.desktop_client.e2e_workspace_runner import _wait_for_workspace_ready_or_failure
 
@@ -15,6 +19,27 @@ from imbue.minds.desktop_client.e2e_workspace_runner import _wait_for_workspace_
 # backend URL (does not), used to drive the waiter's success/failure branches.
 _READY_URL = "http://agent-deadbeef.localhost:8080/"
 _PENDING_URL = "http://localhost:8080/create"
+
+
+def _git(repo: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return result.stdout.strip()
+
+
+def _make_workspace_repo(repo: Path, branch: str = "docker-nix-os") -> None:
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q", "-b", branch], check=True, capture_output=True)
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
+    (repo / "README.md").write_text("test\n")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-qm", "initial")
 
 
 class _FakeElement:
@@ -132,3 +157,49 @@ def test_current_mngr_branch_ignores_pr_merge_ref(monkeypatch: pytest.MonkeyPatc
     monkeypatch.delenv("GITHUB_HEAD_REF", raising=False)
     monkeypatch.setenv("GITHUB_REF_NAME", "2065/merge")
     assert _current_mngr_branch() != "2065/merge"
+
+
+def test_build_electron_env_prefills_workspace_branch_from_local_checkout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local-worktree e2e launches should create from the checked-out branch.
+
+    The release fallback tag may not exist in a fork checkout; the e2e runner
+    should prefill the form with the local branch instead.
+    """
+    monkeypatch.delenv("MINDS_WORKSPACE_BRANCH", raising=False)
+    workspace = tmp_path / "fct"
+    _make_workspace_repo(workspace)
+
+    env = _build_electron_env(workspace, "forever-test")
+
+    assert env["MINDS_WORKSPACE_GIT_URL"] == str(workspace)
+    assert env["MINDS_WORKSPACE_NAME"] == "forever-test"
+    assert env["MINDS_WORKSPACE_BRANCH"] == "docker-nix-os"
+    assert env["MINDS_USE_LOCAL_WORKSPACE_DEFAULTS"] == "1"
+
+
+def test_build_electron_env_leaves_branch_default_for_detached_checkout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Detached checkouts keep the form fallback instead of inventing a branch."""
+    monkeypatch.delenv("MINDS_WORKSPACE_BRANCH", raising=False)
+    workspace = tmp_path / "fct"
+    _make_workspace_repo(workspace)
+    _git(workspace, "checkout", "-q", "--detach", "HEAD")
+
+    env = _build_electron_env(workspace, "forever-test")
+
+    assert "MINDS_WORKSPACE_BRANCH" not in env
+
+
+def test_point_fetch_head_at_current_checkout(tmp_path: Path) -> None:
+    """The create path expects FETCH_HEAD to resolve to the requested branch tip."""
+    workspace = tmp_path / "fct"
+    _make_workspace_repo(workspace)
+
+    _point_fetch_head_at_current_checkout(workspace)
+
+    assert _git(workspace, "rev-parse", "FETCH_HEAD") == _git(workspace, "rev-parse", "HEAD")
