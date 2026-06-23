@@ -1,4 +1,4 @@
-Begin porting the Sentry error-reporting setup into the minds backend. `minds run` now calls `setup_sentry()` during startup (after logging is configured) so the Python backend reports errors and attaches logs to Sentry. The environment, release id, and git sha are placeholders for now and will be wired up to real values in a follow-up.
+Port the Sentry error-reporting setup into the minds backend. `minds run` now calls `setup_sentry()` during startup (after logging is configured) so the Python backend reports errors (and attaches logs) to Sentry.
 
 Enable the Sentry Flask integration so reported errors from web backend endpoints carry request context (transaction name, URL, method, query string, headers).
 
@@ -11,5 +11,7 @@ S3 attachment uploads remain opt-in via the `MINDS_SENTRY_S3_UPLOADS` env var (d
 Report the desktop app version (from `package.json`) as the Sentry release and the git SHA the build was cut from as the `git_sha` tag. The Electron launcher passes both to the Python backend via `MINDS_RELEASE_ID`/`MINDS_GIT_SHA` (resolving the SHA live from the checkout in dev and from the build-time `build-info.json` in packaged builds); bare source runs fall back to reading `package.json` and report an `unknown` SHA.
 
 Do not attach any user PII to Sentry error reports: the unused user-context wiring (`global_user_context` / `sentry_sdk.set_user`) has been removed, and `send_default_pii=False` is kept.
+
+Flush Sentry (and any pending S3 attachment uploads) during the desktop client's shutdown teardown, so errors captured late in a session -- including any logged while shutting down -- are sent before the process exits.
 
 Bump the bundled latchkey CLI to 2.17.2.

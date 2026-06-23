@@ -144,7 +144,8 @@ class ExceptionHistory(MutableModel):
     total_sent: int = 0
     total_throttled: int = 0
 
-    last_reported_at: float | None = None  # monotonic clock value
+    # monotonic clock value
+    last_reported_at: float | None = None
     throttled_since_last_report: int = 0
 
     @property
@@ -233,9 +234,8 @@ class _SentryEventRateLimiter(MutableModel):
             "application": {
                 "total_throttled": self._total_throttled,
                 "total_sent": self._total_sent,
-                "total_tracked": len(
-                    self._exception_history
-                ),  # thread-safe to read without lock since we don't care about consistency
+                # thread-safe to read without lock since we don't care about consistency
+                "total_tracked": len(self._exception_history),
             },
         }
         if past_history is not None:
@@ -480,7 +480,7 @@ def _before_send_wrapper(
         # - won't the call to `logger.exception` itself try to send something to Sentry causing recursion?
         # - the following message will likely hit an error inside Loguru handler because it is not allowed
         #   to call emit from inside emit (that's what we're in here).
-        logger.exception("Failure when processing event in before_send hook: {}", e)
+        logger.opt(exception=e).error("Failure when processing event in before_send hook: {}", e)
         # NOTE: this re-raise will get suppressed by Sentry and treated as if `before_send` returned `None`
         raise
 
@@ -628,6 +628,26 @@ def register_sentry_event_handler(handler: SentryEventHandler) -> None:
 
 def get_sentry_event_handler() -> SentryEventHandler | None:
     return _SENTRY_EVENT_HANDLER
+
+
+def flush_sentry_on_shutdown(timeout: float = 10.0) -> None:
+    """Flush Sentry and its pending attachment uploads before the process exits.
+
+    Called from the desktop client's teardown so errors captured late in the
+    session are not lost. The order matters: first drain the loguru handler's
+    add-extra-info callbacks (they enqueue the S3 attachment uploads), then wait
+    for the S3 uploader's own pool to finish (so the URLs already referenced in
+    captured events resolve), then flush the Sentry client so queued events are
+    actually sent.
+
+    Safe to call when Sentry was never set up (e.g. test factories that build the
+    app without ``setup_sentry``): each step no-ops on an uninitialized client.
+    """
+    handler = get_sentry_event_handler()
+    if handler is not None:
+        handler.close()
+    wait_for_s3_uploads(timeout=timeout, is_shutting_down=True)
+    sentry_sdk.flush(timeout=timeout)
 
 
 # sentry's size limits are annoyingly hard to evaluate before sending the event. we'll just try to be conservative.

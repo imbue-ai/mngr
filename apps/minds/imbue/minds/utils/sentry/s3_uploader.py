@@ -20,9 +20,8 @@ PRODUCTION_UPLOADS_BUCKET = "traceback-uploads-production"
 STAGING_UPLOADS_BUCKET = "traceback-uploads-staging"
 
 DEFAULT_REGION = "us-west-2"
-MAXIMUM_QUEUED_S3_UPLOADS = (
-    50  # rather arbitrary but better to err on the side of caution when going from the current unbounded
-)
+# rather arbitrary but better to err on the side of caution when going from the current unbounded
+MAXIMUM_QUEUED_S3_UPLOADS = 50
 
 
 class _S3Uploader(FrozenModel):

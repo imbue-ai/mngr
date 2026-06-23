@@ -57,9 +57,9 @@ class SentryLoguruLoggingLevels(enum.IntEnum):
     WARNING = 30
     # Additional loguru levels for sentry hot-wiring that we also present with custom colors in the console.
     # The mapping to sentry levels for both breadcrumbs and reporting is done in map_to_sentry_name()
-    LOW_PRIORITY = LOW_PRIORITY_LEVEL  # pyre-ignore[8]: pyre doesn't understand enums
-    MEDIUM_PRIORITY = MEDIUM_PRIORITY_LEVEL  # pyre-ignore[8]: pyre doesn't understand enums
-    HIGH_PRIORITY = HIGH_PRIORITY_LEVEL  # pyre-ignore[8]: pyre doesn't understand enums
+    LOW_PRIORITY = LOW_PRIORITY_LEVEL
+    MEDIUM_PRIORITY = MEDIUM_PRIORITY_LEVEL
+    HIGH_PRIORITY = HIGH_PRIORITY_LEVEL
     ERROR = 40
     CRITICAL = 50
 
@@ -162,9 +162,9 @@ class SentryEventHandler(_BaseHandler):
     def schedule_callbacks(self, callbacks: Sequence[Callable]) -> None:
         executor = self._executor
         if executor is not None:
-            logger.info(f"Sentry event handler registered {len(callbacks)} callbacks with an executor")
+            logger.info("Sentry event handler registered {} callbacks with an executor", len(callbacks))
             for callback in callbacks:
-                future = executor.submit(lambda c=callback: _wrap_callback(c))
+                future = executor.submit(_wrap_callback, callback)
                 self._futures.append(future)
         else:
             logger.debug(
@@ -242,7 +242,8 @@ class SentryEventHandler(_BaseHandler):
         if record_captured_from_warnings_module:
             # use the actual message and not "%s" as the message
             # this prevents grouping all warnings under one "%s" issue
-            msg = record.args[0]  # type: ignore
+            record_args = record.args
+            msg = record_args[0] if isinstance(record_args, tuple) and record_args else record.msg
 
             event["logentry"] = {
                 "message": msg,
@@ -251,7 +252,7 @@ class SentryEventHandler(_BaseHandler):
 
         else:
             event["logentry"] = {
-                # TODO: a bit lame, but we don't have access to the unformatted message, so we just reverse our current format...
+                # NOTE: a bit lame, but we don't have access to the unformatted message, so we just reverse our current format...
                 "message": to_string(record.msg).split(" - ")[-1],
                 "params": record.args,
             }
