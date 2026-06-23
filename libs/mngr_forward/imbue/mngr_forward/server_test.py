@@ -14,6 +14,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from starlette.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_forward.auth import FileAuthStore
@@ -1025,6 +1026,64 @@ def test_subdomain_forward_emits_failure_on_ssh_tunnel_setup_error(tmp_path: Pat
     assert html_response.status_code == 503
     assert "Loading workspace" in html_response.text
     # The failure envelope is what lets a consumer drive its recovery flow.
+    lines = _envelope_lines(envelope_output)
+    assert len(lines) == 1
+    envelope = json.loads(lines[0])
+    assert envelope["stream"] == "forward"
+    assert envelope["agent_id"] == str(agent_id)
+    payload = envelope["payload"]
+    assert payload["type"] == "system_interface_backend_failure"
+    assert payload["reason"] == "CONNECT_ERROR"
+
+
+def test_subdomain_forward_websocket_emits_failure_on_backend_connection_error(tmp_path: Path) -> None:
+    """A websocket whose backend connection fails must emit ``CONNECT_ERROR``.
+
+    Regression test: the websocket forward path used to close the socket
+    without emitting a failure envelope, unlike the HTTP path. A mind whose
+    only live channel is a websocket -- an already-loaded SPA after its system
+    interface dies -- would then leave minds blind to the dead backend: the
+    agent was never enrolled as a probe suspect, so it never reached STUCK and
+    the chrome never redirected to the recovery page.
+    """
+    auth_store = FileAuthStore(data_directory=tmp_path)
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    agent_id = AgentId()
+    resolver.add_known_agent(agent_id)
+    # Non-loopback URL + ssh_info so the handler takes the SSH-tunnel path,
+    # which the failing tunnel manager then turns into a connection failure.
+    resolver.update_services(agent_id, {"system_interface": "http://stub-backend:8000"})
+    resolver.update_ssh_info(
+        agent_id,
+        RemoteSSHInfo(user="root", host="stub-host", port=22, key_path=tmp_path / "fake_key"),
+    )
+    envelope_output = io.StringIO()
+    preauth = "preauth-cookie-ws-tunnel-fail"
+    app = create_forward_app(
+        auth_store=auth_store,
+        resolver=resolver,
+        tunnel_manager=_FailingTunnelManager(),
+        envelope_writer=EnvelopeWriter(output=envelope_output),
+        listen_host="127.0.0.1",
+        listen_port=18421,
+        preauth_cookie_value=preauth,
+    )
+
+    with TestClient(app, base_url=f"http://{agent_id}.localhost:18421") as client:
+        # ``websocket_connect`` ignores ``base_url`` and builds the URL against
+        # ``ws://testserver``, so the agent subdomain must be in the URL itself
+        # for the handler to route on the right host header. The handler closes
+        # the socket before accepting, which the test client surfaces as a
+        # WebSocketDisconnect on connect.
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect(
+                f"ws://{agent_id}.localhost:18421/api/ws",
+                headers={"cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}"},
+            ):
+                pass
+
+    # The failure envelope is what lets minds enroll the agent as a probe
+    # suspect and drive its recovery flow.
     lines = _envelope_lines(envelope_output)
     assert len(lines) == 1
     envelope = json.loads(lines[0])
