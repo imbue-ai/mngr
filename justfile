@@ -392,11 +392,10 @@ minds-start agent_name="mindtest" branch="":
     vendor_mngr="$fct_wt/vendor/mngr"
     mkdir -p "$vendor_mngr"
     echo "Syncing $(pwd) -> $vendor_mngr (rsync, uncommitted-friendly, no FCT commit)"
-    # Exclusions must match the _VENDOR_RSYNC_MANUAL_EXCLUDES + _GITIGNORE_RSYNC_FILTER
-    # constants in libs/mngr_imbue_cloud/.../bake/pool_bake.py (which cli/admin.py and
-    # minds cli/pool.py call) and the RSYNC_EXCLUDES array in
-    # apps/minds/scripts/propagate_changes -- all three populate the same vendor/mngr/
-    # destination. See apps/minds/docs/vendor-mngr-sync.md.
+    # Exclusions must match _RSYNC_MANUAL_EXCLUDES + _GITIGNORE_RSYNC_FILTER
+    # in libs/mngr_imbue_cloud/.../cli/admin.py and apps/minds/.../cli/pool.py,
+    # and the RSYNC_EXCLUDES array in apps/minds/scripts/propagate_changes --
+    # all four paths populate the same vendor/mngr/ destination.
     #
     # `--filter=:- .gitignore` reads .gitignore at each directory level under
     # the source and applies its exclude rules, so __pycache__, .venv,
