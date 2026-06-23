@@ -1564,7 +1564,7 @@ function handleChromeSSEEvent(evt) {
     if (evt.state === 'blocked' && !discoveryBlockedShown) {
       discoveryBlockedShown = true;
       showErrorInAllWindows(
-        "Minds has lost track of your workspaces and can't reconnect on its own. Restart Minds to recover.",
+        "Minds has disconnected from your workspaces and can't automatically reconnect. Restart the app to recover. Your data has not been lost.",
         null,
         'Restart Minds',
       );
