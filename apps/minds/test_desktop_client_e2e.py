@@ -148,13 +148,15 @@ def test_create_local_docker_workspace_via_electron(
     # The env is inherited by the Electron child via `_build_electron_env`.
     monkeypatch.setenv("MNGR__PROVIDERS__MODAL__IS_ENABLED", "false")
 
-    # FCT's `[providers.docker]` block sets `docker_runtime = "runsc"` to harden
-    # the local-docker provider with gVisor. CI runners (and most dev machines)
-    # do not have runsc installed, so `docker run --runtime runsc` would fail
-    # immediately with "unknown or invalid runtime name: runsc" and the test
-    # times out waiting for the agent navigation that never happens. Override
-    # back to the default runtime; FCT's settings.toml comment names this exact
-    # env var as the supported escape hatch for CI / Modal.
+    # Pin the local-docker provider to runc. The current FCT `docker` template
+    # defaults to runc, but the resolved FCT checkout may be an older one whose
+    # `[providers.docker]` block still hardcodes `docker_runtime = "runsc"` to
+    # harden the provider with gVisor. CI runners (and most dev machines) do not
+    # have runsc installed, so `docker run --runtime runsc` would fail immediately
+    # with "unknown or invalid runtime name: runsc" and the test would time out
+    # waiting for an agent navigation that never happens. Forcing runc here keeps
+    # the test robust regardless of the resolved FCT's default; this env var is
+    # the supported escape hatch for CI / Modal.
     monkeypatch.setenv("MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME", "runc")
 
     # The Electron-spawned `mngr` loads two project-config trees under
