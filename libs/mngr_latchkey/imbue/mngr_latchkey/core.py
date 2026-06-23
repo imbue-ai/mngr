@@ -171,10 +171,23 @@ _CREDENTIAL_STATUS_BY_LATCHKEY_VALUE: Final[dict[str, CredentialStatus]] = {
 LATCHKEY_AUTH_OPTION_BROWSER: Final[str] = "browser"
 LATCHKEY_AUTH_OPTION_SET: Final[str] = "set"
 
-# Latchkey service-name prefix for Google services (``google-gmail``,
-# ``google-calendar``, ...). Only these are eligible for the Minds-provided
-# OAuth client below.
-GOOGLE_SERVICE_NAME_PREFIX: Final[str] = "google-"
+# Google services that authenticate via the Minds-provided OAuth client (the
+# browser / consent-screen flow). ``google-directions`` is deliberately
+# excluded: it authenticates with an API key (latchkey ``set`` auth), not
+# OAuth, so it must never go through the Minds OAuth client. Keep this in sync
+# with the ``google-*`` entries in the services catalog that advertise the
+# ``browser`` auth option.
+MINDS_GOOGLE_OAUTH_SERVICES: Final[frozenset[str]] = frozenset(
+    {
+        "google-gmail",
+        "google-calendar",
+        "google-drive",
+        "google-docs",
+        "google-sheets",
+        "google-people",
+        "google-analytics",
+    }
+)
 
 # Minds-provided Google OAuth client, registered for a ``google-*`` service via
 # ``latchkey auth prepare`` so the user signs in against the Minds consent

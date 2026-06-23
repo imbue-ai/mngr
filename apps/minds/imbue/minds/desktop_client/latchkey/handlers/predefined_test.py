@@ -843,6 +843,16 @@ _GOOGLE_GMAIL_SERVICE_INFO = ServicePermissionInfo(
 )
 
 
+# google-directions authenticates with an API key (not OAuth), so it is NOT in
+# MINDS_GOOGLE_OAUTH_SERVICES and must take the legacy auth_browser path.
+_GOOGLE_DIRECTIONS_SERVICE_INFO = ServicePermissionInfo(
+    name="google-directions",
+    scope="google-directions-api",
+    display_name="Google Directions",
+    permission_schemas=("any", "google-directions-read"),
+)
+
+
 def _missing_browser_service_info() -> LatchkeyServiceInfo:
     return LatchkeyServiceInfo(
         credential_status=CredentialStatus.MISSING,
@@ -1029,3 +1039,26 @@ def test_grant_google_empty_auth_list_is_treated_as_not_registered(tmp_path: Pat
     _grant_gmail(handler)
 
     assert _PREPARE_CALL in fake.auth_calls
+
+
+def test_grant_google_directions_does_not_use_minds_oauth(tmp_path: Path) -> None:
+    # google-directions uses an API key, not OAuth, so it is excluded from
+    # MINDS_GOOGLE_OAUTH_SERVICES and must NOT route through the Minds OAuth
+    # client even though its name starts with "google-". It takes the legacy
+    # auth_browser path -- no auth_list / auth_prepare. (Configured here as
+    # browser-capable so it reaches the gate; in production its set-only auth
+    # would short-circuit to NEEDS_MANUAL_CREDENTIALS before the gate.)
+    fake = FakeLatchkey(latchkey_directory=tmp_path)
+    fake.configure_auth(service_info=_missing_browser_service_info())
+    handler = _build_google_handler(tmp_path, fake)
+
+    result = handler.grant(
+        request_event_id="evt-dir",
+        agent_id=AgentId(),
+        host_id=HostId(),
+        service_info=_GOOGLE_DIRECTIONS_SERVICE_INFO,
+        granted_permissions=("google-directions-read",),
+    )
+
+    assert result.outcome == GrantOutcome.GRANTED
+    assert fake.auth_calls == (("auth_browser", "google-directions"),)

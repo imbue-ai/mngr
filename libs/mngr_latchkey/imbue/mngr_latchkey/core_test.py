@@ -29,6 +29,7 @@ from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
 from imbue.mngr_latchkey.core import LatchkeyNotInitializedError
 from imbue.mngr_latchkey.core import LatchkeyVersionError
+from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_SERVICES
 from imbue.mngr_latchkey.core import _log_gateway_output_line
 from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
@@ -1696,6 +1697,13 @@ def test_auth_prepare_reports_failure_on_non_zero_exit(tmp_path: Path) -> None:
 
     assert is_success is False
     assert detail == "prepare failed"
+
+
+def test_minds_google_oauth_services_excludes_directions() -> None:
+    # google-directions authenticates with an API key (latchkey ``set`` auth),
+    # not OAuth, so it must never be routed through the Minds OAuth client.
+    assert "google-directions" not in MINDS_GOOGLE_OAUTH_SERVICES
+    assert "google-gmail" in MINDS_GOOGLE_OAUTH_SERVICES
 
 
 def test_auth_clear_invokes_clear_with_yes_flag(tmp_path: Path) -> None:

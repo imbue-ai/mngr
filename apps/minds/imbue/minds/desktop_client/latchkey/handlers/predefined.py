@@ -57,11 +57,11 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import CredentialStatus
-from imbue.mngr_latchkey.core import GOOGLE_SERVICE_NAME_PREFIX
 from imbue.mngr_latchkey.core import LATCHKEY_AUTH_OPTION_BROWSER
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_CLIENT_ID
 from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_CLIENT_SECRET
+from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_SERVICES
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import permissions_path_for_host
@@ -368,7 +368,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 service_info.name,
                 latchkey_service_info.credential_status,
             )
-            if service_info.name.startswith(GOOGLE_SERVICE_NAME_PREFIX):
+            if service_info.name in MINDS_GOOGLE_OAUTH_SERVICES:
                 is_success, detail = self._authenticate_google(service_info.name)
             else:
                 is_success, detail = self.latchkey.auth_browser(service_info.name)
@@ -411,7 +411,12 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         )
 
     def _authenticate_google(self, service_name: str) -> tuple[bool, str]:
-        """Authenticate a ``google-*`` service, preferring the Minds OAuth client.
+        """Authenticate a Minds-OAuth Google service, preferring the Minds OAuth client.
+
+        Called only for services in
+        :data:`~imbue.mngr_latchkey.core.MINDS_GOOGLE_OAUTH_SERVICES`
+        (the browser/consent-screen Google services; ``google-directions`` is
+        excluded because it uses an API key, not OAuth).
 
         This is "step 2", inserted between the credential-validity check and
         the self-setup fallback:
