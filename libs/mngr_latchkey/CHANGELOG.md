@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `LatchkeyForwardSupervisor` (and the underlying `spawn_detached_mngr_latchkey_forward`) now accept a `cwd` argument, so embedders can launch the detached `mngr latchkey forward` supervisor from a chosen working directory (e.g. `$HOME`) instead of inheriting the caller's cwd. Keeps the supervisor's `mngr` children from resolving project config out of a transient working directory.
+
+### Changed
+
+- Changed: Bumped the latchkey CLI to 2.17.2 (was 2.17.1 in this Unreleased window): the pinned version installed on remote VPS environments (the secondary gateway used by agents when the user's computer is down) is now 2.17.2, and the minimum latchkey CLI version the wrapper will operate against is 2.17.1 — initializing the gateway rejects any installed CLI older than that.
+
 ## [v0.1.6] - 2026-06-18
 
 ### Added

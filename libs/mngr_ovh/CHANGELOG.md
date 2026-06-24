@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: An unauthenticated OVH provider now errors (`ProviderNotAuthorizedError` at construction) instead of silently reporting zero agents. An enabled-but-unauthenticated OVH provider is now reported consistently with the other cloud providers (one consistent error line in `mngr list`, contributing a non-zero exit) rather than vanishing.
+
 ## [v0.1.6] - 2026-06-18
 
 ## [v0.1.5] - 2026-06-16

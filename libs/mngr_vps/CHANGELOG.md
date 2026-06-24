@@ -6,6 +6,32 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `HostRealizer` seam inside the VPS provider. Selected by a new `isolation` config knob (`IsolationMode.CONTAINER` | `NONE`); `CONTAINER` is the default. All Docker-container placement logic moved behind a `DockerRealizer`. A new `BareRealizer` (`isolation=NONE`) places the agent directly on the VM's OS (no Docker), reached at `vps_ip:22` as root. Bare placement is gated to providers with a machine stop/start lifecycle (AWS/GCP/Azure enable it); a provider without one rejects it at create time with `BareIsolationNotSupportedError`. Bare creates also reject container-only inputs (image override, Dockerfile build, docker run start-args) up front.
+
+- Added: `get_ssh_host_public_keys` provider method — `mngr create --format json` surfaces the host's baked sshd host public keys (VPS/VM-root and container) so pool-bake tooling can persist and pin them instead of scanning the host after creation.
+
+### Changed
+
+- Changed: **Breaking** — renamed the package from `mngr_vps_docker` to `mngr_vps` (distribution `imbue-mngr-vps-docker` to `imbue-mngr-vps`), since Docker is now one of two placement shapes rather than the whole package. The shape-agnostic classes dropped "Docker" from their names: `VpsDockerProvider` -> `VpsProvider`, `VpsDockerProviderConfig` -> `VpsProviderConfig`, `MinimalVpsDockerProvider` -> `MinimalVpsProvider`, `OfflineCapableVpsDockerProvider` -> `OfflineCapableVpsProvider`, `TagMirrorVpsDockerProvider` -> `TagMirrorVpsProvider`, `VpsDockerHostRecord` -> `VpsHostRecord`, `VpsDockerHostStore` -> `VpsHostStore`, `VpsDockerError` -> `VpsError`. The Docker-specific `DockerRealizer` and `container_setup` helpers keep their names.
+
+- Changed: SSH host keys are now unique per host. Every VPS-backed host (AWS/GCP/Azure/OVH/Vultr, plus imbue_cloud slices) gets its own freshly-generated VPS/VM-root and container sshd host keypair at create time, stored under `<key_dir>/host_keys/<host_id>/`, instead of one host keypair shared across every host. This removes the risk of one host's key being reused to impersonate another. Existing hosts created before this change keep working via a fallback to the legacy provider-global host key.
+
+- Changed: Register the gVisor (runsc) runtime with `--overlay2=none` so a container's writable layer is written through to the persistent Docker overlay2 layer and survives a `docker stop`/`start` or host reboot. Previously runsc used its default per-sandbox overlay, so the injected sshd host key, the `/mngr` host_dir symlink, and mngr's provisioning markers were silently lost on restart. Applies to every provider that installs runsc via the shared VPS host-setup.
+
+- Changed: The agent container's PID-1 entrypoint now self-heals sshd — on every (re)start it restarts sshd once mngr has provisioned a host key, so the container is reachable again after a VM reboot or `docker restart` without waiting for `mngr start`.
+
+### Fixed
+
+- Fixed: Host lock reporting for VPS/docker/bare hosts now derives a host's lock status from a real flock held-probe rather than the lock file's presence. The lock file persists after release, so the previous mtime-based check would have reported every previously-locked host as permanently locked.
+
+- Fixed: `mngr snapshot delete` on a VPS now actually takes effect. `delete_snapshot` previously removed the docker image but never dropped the snapshot from the host record, so `mngr snapshot list` kept showing a deleted snapshot. It now removes the entry from the record (raising `SnapshotNotFoundError` for an unknown id) and refreshes the cache.
+
+- Fixed: `mngr stop` on a bare (`isolation=NONE`) host no longer hangs for minutes while capturing the host's `host_dir`. The per-file uploads now run concurrently across a bounded worker pool.
+
+- Fixed: On resume, the shared `OfflineCapableVpsProvider.start_host` now waits for the VM to actually serve mngr's expected host key (not just any sshd handshake) before its strict-host-key-checked connect, riding out boot-time sshd restart windows (e.g. GCP's startup-script restart). This surfaced for bare placement specifically, whose agent endpoint *is* port 22.
+
 ## [v0.1.10] - 2026-06-18
 
 ### Added

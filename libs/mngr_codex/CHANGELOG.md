@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `version` field on the codex agent type that pins the installed codex CLI — installation runs `npm i -g @openai/codex@<version>` and provisioning verifies the installed codex matches, erroring on mismatch. A pin also suppresses the provision-time update check (`update_policy` is ignored).
+
+### Changed
+
+- Changed: Codex agent lifecycle detection now targets the agent's primary tmux window by name (the configurable `tmux.primary_window_name`, default `agent`) instead of the literal `:0` index, so it works regardless of the user's tmux `base-index` setting.
+
 ## [v0.1.4] - 2026-06-18
 
 ### Added

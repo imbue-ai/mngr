@@ -6,6 +6,26 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `update_policy` field on the claude agent type that governs Claude Code's background auto-updater. `NEVER` sets `DISABLE_AUTOUPDATER=1` in the agent environment so the installed (optionally `version`-pinned) binary stays put; `AUTO` leaves the auto-updater enabled; `ASK` behaves like `AUTO`. Ignored in `use_env_config_dir` (shared) mode.
+
+### Changed
+
+- Changed: Claude agents now disable Claude Code's auto-updater by default (local and remote). Previously mngr did not disable it on local agents, so local agents typically auto-updated by inheriting your `~/.claude.json` `autoUpdates` value. Set `update_policy = "AUTO"` to opt back in.
+
+- Changed: mngr's Claude hooks no longer leak into plain (non-mngr) `claude` runs. mngr now bakes its readiness/credential/permission hooks into the per-agent config-dir `settings.json` (`$CLAUDE_CONFIG_DIR`'s "user" settings layer), which a plain `claude` run in the work dir never reads — instead of into the project's `.claude/settings.local.json` as before. Hooks are built fresh on every provision, so no cross-version accumulation. Note: existing leaked hooks in old `.claude/settings.local.json` files are not auto-removed.
+
+- Changed: `settings_overrides` now expresses merge intent with a Claude-compatible `__mngr_merge` map instead of the previous `__extend` / `__assign` key suffixes — the suffixes leaked into the generated `settings.json` as keys Claude does not recognise. Declare merge intent in a top-level `__mngr_merge = {"permissions.allow" = "extend"}` (or `"assign"`) map that vanilla Claude ignores. A bare key still assigns under the narrowing guard, and the narrowing error prints the exact `__mngr_merge` patch to add.
+
+- Changed: `settings_overrides` is now applied as a config-consistent patch (replacing the previous deep-merge-by-default) and accumulates across config scopes (user < project < local) and `parent_type` inheritance rather than a higher/child scope replacing the entire lower/parent value; cross-scope narrowing drops are surfaced via the same `allow_settings_key_assignment_narrowing` flag used elsewhere. `Static*`-wrapped override values and a per-key `key__assign` form opt out of the narrowing guard.
+
+- Changed: `mngr create` no longer requires the project's `.claude/settings.local.json` to be gitignored across the board; the requirement now applies only when the `claude_subagent_proxy` plugin actually needs to rewrite user-defined Stop hooks there.
+
+- Changed: The Claude response-streaming snapshot watcher now captures the agent's tmux pane by the configured primary window name (`tmux.primary_window_name`, default `agent`) instead of the literal `:0` index, so response streaming works regardless of the user's tmux `base-index`.
+
+- Changed: In `use_env_config_dir` mode there is no per-agent config dir to bake hooks into, so mngr loads its hooks (and the resolved `settings_overrides` patch) from the private managed `--settings` file. A user-supplied `--settings` (in `cli_args`/`agent_args`) is now rejected at provision with a `UserInputError` in this mode (put those settings in `settings_overrides` or set `use_env_config_dir=False`).
+
 ## [v0.2.17] - 2026-06-18
 
 ### Added
