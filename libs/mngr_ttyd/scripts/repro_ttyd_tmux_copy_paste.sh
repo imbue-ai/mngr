@@ -95,6 +95,8 @@ tmux -L "$SOCKET" -f "$_CONF_FILE" new-session -d -s "$SESSION" -x 200 -y 50 \
 
 # --- Report what we're running ----------------------------------------------
 echo "================ ttyd + tmux copy-paste repro ================"
+echo "  open in browser : http://127.0.0.1:$PORT"
+echo "                    (with PORT=0, see ttyd's startup line for the actual port)"
 echo "  tmux socket   : $SOCKET   (separate from your default tmux)"
 echo "  tmux session  : $SESSION"
 echo "  mouse         : $MOUSE        (override with MOUSE=on|off)"
