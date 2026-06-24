@@ -1,7 +1,6 @@
 import functools
 import gzip
 import os
-from contextvars import ContextVar
 import re
 import sys
 import threading
@@ -11,6 +10,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from collections.abc import Collection
 from collections.abc import Hashable
+from contextvars import ContextVar
 from enum import StrEnum
 from functools import cache
 from functools import partial

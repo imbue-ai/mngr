@@ -1,4 +1,3 @@
-import functools
 from pathlib import Path
 
 import pytest
@@ -11,14 +10,14 @@ from sentry_sdk.transport import Transport
 from sentry_sdk.types import Event
 from sentry_sdk.types import Hint
 
-from imbue.minds.utils.sentry.core import _before_send_wrapper
-from imbue.minds.utils.sentry.core import _should_record_sentry_event
 from imbue.minds.utils.sentry.core import ErrorAttachmentsS3Uploader
 from imbue.minds.utils.sentry.core import SENTRY_DSN_DEV
 from imbue.minds.utils.sentry.core import SENTRY_DSN_PRODUCTION
 from imbue.minds.utils.sentry.core import SENTRY_DSN_STAGING
 from imbue.minds.utils.sentry.core import SentryDeployEnvironment
 from imbue.minds.utils.sentry.core import _SENTRY_DSN_BY_ENVIRONMENT
+from imbue.minds.utils.sentry.core import _before_send_wrapper
+from imbue.minds.utils.sentry.core import _should_record_sentry_event
 
 
 def test_from_minds_env_name_maps_production_and_staging() -> None:
@@ -110,7 +109,9 @@ def test_before_send_failure_reporting_does_not_recurse() -> None:
         def capture_envelope(self, envelope: Envelope) -> None:
             pass
 
-    before_send = functools.partial(_before_send_wrapper, before_send_list=[always_broken])
+    def before_send(event: Event, hint: Hint) -> Event | None:
+        return _before_send_wrapper(event, hint, [always_broken])
+
     client = Client(
         dsn="https://public@example.com/1",
         before_send=before_send,
