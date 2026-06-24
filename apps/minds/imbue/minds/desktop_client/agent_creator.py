@@ -546,12 +546,12 @@ def _resolve_workspace_source(repo_source: str, branch: str) -> _WorkspaceSource
     Raises ``MngrCommandError`` if ``repo_source`` is a local path that does not
     exist.
     """
+    clone_target = Path(tempfile.gettempdir()) / "minds-clone-{}".format(extract_repo_name(repo_source))
     if _is_local_path(repo_source):
         resolved_path = Path(os.path.expanduser(repo_source)).resolve()
         if not resolved_path.is_dir():
             raise MngrCommandError("Local path does not exist: {}".format(resolved_path))
         if _is_git_worktree(resolved_path):
-            clone_target = Path(tempfile.gettempdir()) / "minds-clone-{}".format(extract_repo_name(repo_source))
             return _WorkspaceSource(
                 clone_target=clone_target,
                 clone_url=GitUrl("file://{}".format(resolved_path)),
@@ -559,7 +559,6 @@ def _resolve_workspace_source(repo_source: str, branch: str) -> _WorkspaceSource
                 worktree_overlay_source=resolved_path,
             )
         return _WorkspaceSource(clone_target=None, in_place_dir=resolved_path)
-    clone_target = Path(tempfile.gettempdir()) / "minds-clone-{}".format(extract_repo_name(repo_source))
     return _WorkspaceSource(
         clone_target=clone_target,
         clone_url=GitUrl(repo_source),
