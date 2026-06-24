@@ -10,6 +10,7 @@ import pytest
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.offline_host import OfflineHost
+from imbue.mngr.hosts.offline_host import derive_offline_host_state
 from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
 from imbue.mngr.interfaces.data_types import ActivityConfig
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -357,6 +358,82 @@ def test_get_state_based_on_stop_reason(
     host = make_offline_host(certified_data, fake_provider, temp_mngr_ctx)
 
     state = host.get_state()
+    assert state == expected_state
+
+
+@pytest.mark.parametrize(
+    "stop_reason,expected_state",
+    [
+        (HostState.PAUSED.value, HostState.PAUSED),
+        (HostState.STOPPED.value, HostState.STOPPED),
+        (HostState.DESTROYED.value, HostState.DESTROYED),
+        ("not-a-real-state", HostState.CRASHED),
+        # An otherwise-valid HostState that is not a legitimate offline stop reason
+        # must not be trusted (e.g. an attacker-supplied "RUNNING") and falls back to CRASHED.
+        (HostState.RUNNING.value, HostState.CRASHED),
+        (None, HostState.CRASHED),
+    ],
+    ids=["paused", "stopped", "destroyed", "unknown_string", "untrusted_running", "none"],
+)
+def test_derive_offline_host_state_guards_stop_reason_when_shutdown_supported(
+    stop_reason: str | None,
+    expected_state: HostState,
+) -> None:
+    """Only legitimate offline stop reasons pass through; malformed values fall back to CRASHED.
+
+    Covers the supports_shutdown_hosts branch, where stop_reason (which may originate
+    from a free-form HTTP request body for Modal) is otherwise authoritative.
+    """
+    now = datetime.now(timezone.utc)
+    certified_data = CertifiedHostData(
+        host_id=str(HostId.generate()),
+        host_name="test-host",
+        stop_reason=stop_reason,
+        created_at=now,
+        updated_at=now,
+    )
+
+    state = derive_offline_host_state(
+        certified_data,
+        supports_shutdown_hosts=True,
+        supports_snapshots=False,
+        has_snapshots=False,
+    )
+    assert state == expected_state
+
+
+@pytest.mark.parametrize(
+    "stop_reason,expected_state",
+    [
+        (HostState.PAUSED.value, HostState.PAUSED),
+        (HostState.STOPPED.value, HostState.STOPPED),
+        (HostState.DESTROYED.value, HostState.DESTROYED),
+        ("not-a-real-state", HostState.CRASHED),
+        (HostState.RUNNING.value, HostState.CRASHED),
+        (None, HostState.CRASHED),
+    ],
+    ids=["paused", "stopped", "destroyed", "unknown_string", "untrusted_running", "none"],
+)
+def test_derive_offline_host_state_guards_stop_reason_in_snapshot_branch(
+    stop_reason: str | None,
+    expected_state: HostState,
+) -> None:
+    """Same guard applies in the snapshot branch (provider without shutdown support, e.g. Modal)."""
+    now = datetime.now(timezone.utc)
+    certified_data = CertifiedHostData(
+        host_id=str(HostId.generate()),
+        host_name="test-host",
+        stop_reason=stop_reason,
+        created_at=now,
+        updated_at=now,
+    )
+
+    state = derive_offline_host_state(
+        certified_data,
+        supports_shutdown_hosts=False,
+        supports_snapshots=True,
+        has_snapshots=True,
+    )
     assert state == expected_state
 
 

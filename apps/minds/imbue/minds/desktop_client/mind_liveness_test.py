@@ -7,8 +7,12 @@ from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.mind_liveness import MindLiveness
 from imbue.minds.desktop_client.mind_liveness import classify_host_state
 from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
+from imbue.minds.desktop_client.mind_liveness import get_resume_capable_workspace_agent_ids
 from imbue.minds.desktop_client.mind_liveness import get_shutdown_capable_workspace_agent_ids
+from imbue.minds.desktop_client.mind_liveness import provider_backend_suppresses_recovery_auto_restart
+from imbue.minds.desktop_client.mind_liveness import provider_backend_supports_resume
 from imbue.minds.desktop_client.mind_liveness import provider_backend_supports_shutdown
+from imbue.minds.desktop_client.mind_liveness import resolve_agent_backend
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import make_discovered_provider
 from imbue.mngr.config.data_types import ProviderInstanceConfig
@@ -68,11 +72,42 @@ def _resolver_with_capable_agent(
 
 
 def test_provider_backend_supports_shutdown_gates_on_local_backends() -> None:
-    # Only the local backends currently expose host shutdown to minds.
+    # Only the local backends expose host *stop* to minds; Modal cannot stop host compute.
     assert provider_backend_supports_shutdown("docker") is True
     assert provider_backend_supports_shutdown("lima") is True
     assert provider_backend_supports_shutdown("modal") is False
     assert provider_backend_supports_shutdown("ovh") is False
+
+
+def test_provider_backend_supports_resume_includes_modal() -> None:
+    # Resume (start) is a superset of shutdown: it also covers Modal, which can be
+    # resumed from a snapshot even though it cannot be manually stopped.
+    assert provider_backend_supports_resume("docker") is True
+    assert provider_backend_supports_resume("lima") is True
+    assert provider_backend_supports_resume("modal") is True
+    assert provider_backend_supports_resume("ovh") is False
+
+
+def test_provider_backend_suppresses_recovery_auto_restart_only_for_resume_only() -> None:
+    # Exactly the resume-only backends (resume-capable but not shutdown-capable)
+    # suppress the recovery page's auto-restart -- that is Modal today.
+    assert provider_backend_suppresses_recovery_auto_restart("modal") is True
+    # Shutdown-capable backends keep auto-dispatch.
+    assert provider_backend_suppresses_recovery_auto_restart("docker") is False
+    assert provider_backend_suppresses_recovery_auto_restart("lima") is False
+    # A backend that is neither resume- nor shutdown-capable does not suppress.
+    assert provider_backend_suppresses_recovery_auto_restart("ovh") is False
+
+
+def test_resolve_agent_backend_maps_through_provider_instance() -> None:
+    docker_agent = AgentId.generate()
+    resolver = _resolver_with_capable_agent(docker_agent, HostState.RUNNING)
+    assert resolve_agent_backend(resolver, docker_agent) == "docker"
+
+
+def test_resolve_agent_backend_returns_none_for_unknown_agent() -> None:
+    resolver = _resolver_with_capable_agent(AgentId.generate(), HostState.RUNNING)
+    assert resolve_agent_backend(resolver, AgentId.generate()) is None
 
 
 # -- host-state classification --
@@ -85,9 +120,10 @@ def test_classify_host_state_maps_running_stopped_unknown() -> None:
     assert classify_host_state(HostState.STOPPING) == MindLiveness.STOPPED
     assert classify_host_state(HostState.CRASHED) == MindLiveness.STOPPED
     assert classify_host_state(HostState.FAILED) == MindLiveness.STOPPED
+    # PAUSED means a snapshot-based host (Modal) is down but resumable -> STOPPED.
+    assert classify_host_state(HostState.PAUSED) == MindLiveness.STOPPED
     # Transient / unobserved states are UNKNOWN, not assumed stopped.
     assert classify_host_state(HostState.STARTING) == MindLiveness.UNKNOWN
-    assert classify_host_state(HostState.PAUSED) == MindLiveness.UNKNOWN
     assert classify_host_state(None) == MindLiveness.UNKNOWN
 
 
@@ -143,12 +179,13 @@ def test_compute_unknown_when_host_state_absent() -> None:
     assert states == {str(agent): MindLiveness.UNKNOWN}
 
 
-def test_compute_excludes_non_capable_minds() -> None:
+def test_compute_excludes_non_resume_capable_minds() -> None:
     resolver = MngrCliBackendResolver()
     capable_agent = AgentId.generate()
     remote_agent = AgentId.generate()
     resolver.update_providers(
-        providers=(_provider("docker", "docker"), _provider("modal", "modal")),
+        # vultr is neither shutdown- nor resume-capable; modal is resume-capable (covered below).
+        providers=(_provider("docker", "docker"), _provider("vultr", "vultr")),
         error_by_provider_name={},
         last_full_snapshot_at=datetime.now(timezone.utc),
     )
@@ -157,7 +194,7 @@ def test_compute_excludes_non_capable_minds() -> None:
             agent_ids=(capable_agent, remote_agent),
             discovered_agents=(
                 _workspace_agent(capable_agent, "docker", host=_HOST_A),
-                _workspace_agent(remote_agent, "modal", host=_HOST_B),
+                _workspace_agent(remote_agent, "vultr", host=_HOST_B),
             ),
             host_state_by_host_id={str(_HOST_A): HostState.RUNNING, str(_HOST_B): HostState.RUNNING},
         )
@@ -165,8 +202,59 @@ def test_compute_excludes_non_capable_minds() -> None:
 
     states = compute_mind_liveness_by_agent_id(resolver)
 
-    # Only the shutdown-capable (docker) mind is computed; the remote one never appears.
+    # Only the resume-capable (docker) mind is computed; the vultr one never appears.
     assert states == {str(capable_agent): MindLiveness.RUNNING}
+
+
+def test_compute_includes_modal_minds_which_are_resume_capable() -> None:
+    """Modal is resume-capable (not shutdown-capable), so it gets liveness in the list."""
+    resolver = MngrCliBackendResolver()
+    docker_agent = AgentId.generate()
+    modal_agent = AgentId.generate()
+    resolver.update_providers(
+        providers=(_provider("docker", "docker"), _provider("modal", "modal")),
+        error_by_provider_name={},
+        last_full_snapshot_at=datetime.now(timezone.utc),
+    )
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(docker_agent, modal_agent),
+            discovered_agents=(
+                _workspace_agent(docker_agent, "docker", host=_HOST_A),
+                _workspace_agent(modal_agent, "modal", host=_HOST_B),
+            ),
+            # The modal host is PAUSED (24h-snapshot) -> resumable -> STOPPED.
+            host_state_by_host_id={str(_HOST_A): HostState.RUNNING, str(_HOST_B): HostState.PAUSED},
+        )
+    )
+
+    states = compute_mind_liveness_by_agent_id(resolver)
+
+    assert states == {str(docker_agent): MindLiveness.RUNNING, str(modal_agent): MindLiveness.STOPPED}
+
+
+def test_get_resume_capable_includes_modal_but_shutdown_excludes_it() -> None:
+    resolver = MngrCliBackendResolver()
+    docker_agent = AgentId.generate()
+    modal_agent = AgentId.generate()
+    resolver.update_providers(
+        providers=(_provider("docker", "docker"), _provider("modal", "modal")),
+        error_by_provider_name={},
+        last_full_snapshot_at=datetime.now(timezone.utc),
+    )
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(docker_agent, modal_agent),
+            discovered_agents=(
+                _workspace_agent(docker_agent, "docker", host=_HOST_A),
+                _workspace_agent(modal_agent, "modal", host=_HOST_B),
+            ),
+        )
+    )
+
+    # Resume-capable spans both; shutdown-capable is docker only (Modal cannot stop).
+    assert set(get_resume_capable_workspace_agent_ids(resolver)) == {docker_agent, modal_agent}
+    assert get_shutdown_capable_workspace_agent_ids(resolver) == (docker_agent,)
 
 
 def test_compute_reflects_resolver_optimistic_override() -> None:

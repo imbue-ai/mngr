@@ -114,6 +114,23 @@ def test_container_running_probe_is_unknown_for_ambiguous_host_state() -> None:
     assert _answer(response, "container running") == ProbeAnswer.UNKNOWN
 
 
+def test_container_running_probe_says_no_when_host_state_is_paused() -> None:
+    """A PAUSED host (offline-but-resumable, e.g. Modal's idle/timeout path) is offline.
+
+    Kept consistent with ``mind_liveness._OFFLINE_HOST_STATES`` so opening a paused
+    Modal workspace drives the HOST_OFFLINE recovery tier (auto ``mngr start`` ->
+    resume) rather than an ambiguous UNKNOWN.
+    """
+    response = build_host_health_response(
+        list_json=_list_json(host_state="PAUSED"),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=None,
+        plugin_resolver_services={},
+    )
+    assert _answer(response, "container running") == ProbeAnswer.NO
+
+
 def test_services_agent_registered_probe_yes_when_row_present() -> None:
     response = build_host_health_response(
         list_json=_list_json(services_state="RUNNING"),
@@ -373,6 +390,33 @@ def test_dispatch_tier_host_unresponsive_for_ambiguous_host_state() -> None:
         plugin_resolver_services={},
     )
     assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
+
+
+def test_is_auto_restart_suppressed_passes_through_to_response() -> None:
+    """The auto-restart-suppression flag (resolved from the backend) rides on the response.
+
+    The recovery page reads it to decide whether to wait for an explicit click on
+    the host_offline / interface_unresponsive tiers instead of auto-dispatching.
+    """
+    suppressed = build_host_health_response(
+        list_json=_list_json(host_state="STOPPED"),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=None,
+        plugin_resolver_services={},
+        is_auto_restart_suppressed=True,
+    )
+    assert suppressed.is_auto_restart_suppressed is True
+
+    not_suppressed = build_host_health_response(
+        list_json=_list_json(host_state="STOPPED"),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=None,
+        plugin_resolver_services={},
+    )
+    # Defaults to False (docker / lima keep auto-dispatch).
+    assert not_suppressed.is_auto_restart_suppressed is False
 
 
 # --- provider reachability extraction + tiers ----------------------------

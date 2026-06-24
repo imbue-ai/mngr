@@ -3,3 +3,21 @@ Added "Modal (1-day ephemeral)" as a first-class compute provider in the Create 
 At startup minds registers a `[providers.modal]` block (DIRECT, `is_persistent = true`). The `is_persistent = true` is essential: each `mngr create` is a one-shot subprocess, and a non-persistent (ephemeral) Modal app would terminate the sandbox the instant that subprocess exits, leaving a registered-but-dead workspace. The `_ensure_mngr_settings` idempotency check now also detects + overwrites a stale `is_persistent = false` left by an earlier build. Sizing (2 CPU / 4 GB) and the 24h sandbox timeout come from the modal provider config defaults.
 
 (A keyless, connector-proxied Modal variant was prototyped but removed: Modal is imbue-internal, so users authenticate to it directly.)
+
+Modal workspaces now show correct lifecycle state in the Projects list and can be resumed. Previously the list showed no state for Modal (it was excluded from the liveness machinery, which was scoped to docker/lima), so a stopped/expired Modal workspace looked the same as a running one. Liveness is now computed for a new "resume-capable" provider tier (docker, lima, and Modal): a paused/stopped Modal host shows as Stopped with a **Resume** control that restarts it from its latest snapshot, while a running or unknown-state Modal row keeps the recovery **Restart** button so the row always has a lifecycle control. Modal still shows **no Stop button** and is excluded from the quit-time "shut down all" prompt, because Modal cannot stop host compute (`supports_shutdown_hosts=False`); it runs to its 24h limit and then becomes resumable. The Stop button and quit prompt remain scoped to the shutdown-capable backends (docker/lima).
+
+A paused host (`HostState.PAUSED`) now counts as offline in both the landing page and the recovery probe, so opening a paused Modal workspace drives the recovery flow's auto-restart (`mngr start`, which resumes the latest snapshot) instead of showing an ambiguous "unknown" state.
+
+Hardened minds workspace teardown and recovery for Modal hosts:
+
+Destroying a workspace now passes `MNGR_HOST_DIR` to the detached `mngr destroy` subprocess, matching every other minds->mngr shell-out (color, restart, start/stop, bulk-stop). Previously the destroy path omitted it, so the teardown targeted the wrong (default) host dir and silently found nothing to destroy.
+
+The Stop control is now guarded server-side: stopping a host on a resume-only provider (Modal) returns a clear 409 ("Stopping is not supported for this provider") instead of a 500 from `mngr stop --stop-host`. Start is never blocked.
+
+Recovery "Restart" now works for a running Modal host. The manual host-restart used to run `mngr stop --stop-host` before `mngr start`, which raises for a resume-only provider and failed the restart; the stop step is now skipped for providers that cannot stop host compute, going straight to `mngr start` (which terminates+resumes from a snapshot).
+
+Modal recovery no longer auto-restarts on page open. The recovery page used to auto-dispatch `mngr start` (a destructive terminate+resume for Modal) the moment it opened on an offline/unresponsive host. The host-health response now carries `is_auto_restart_suppressed` (true for resume-only providers like Modal), and the page renders the manual "Restart workspace" button for these instead of auto-restarting, so the user starts the host with an explicit click. Docker/lima auto-dispatch is unchanged.
+
+A restart that fails because the Modal host has only its initial snapshot (no resumable state) now reports an actionable reason telling the user to recreate the workspace, instead of a generic start failure.
+
+The "Destroying..." page can no longer trap the user forever. A destroy that hangs in the "running" state now reveals the Dismiss action (with a "taking longer than expected" note) once it has been running past ~75s, alongside the existing failed-path Retry/Dismiss behavior.

@@ -42,6 +42,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 
@@ -442,3 +443,55 @@ def test_build_workspace_list_falls_back_to_default_color_when_label_missing() -
 
     workspaces = _build_workspace_list(resolver)
     assert workspaces[0]["accent"] == DEFAULT_WORKSPACE_COLOR
+
+
+# -- _build_workspace_list resume / shutdown capability flags --
+
+
+def test_build_workspace_list_marks_modal_resume_capable_not_shutdown_capable() -> None:
+    """Modal workspaces carry supports_resume + liveness but not supports_shutdown.
+
+    docker is both resume- and shutdown-capable; modal is resume-only (it cannot
+    stop host compute), so only its Resume control is offered.
+    """
+    resolver = MngrCliBackendResolver()
+    resolver.update_providers(
+        providers=(_make_discovered_provider("docker", "docker"), _make_discovered_provider("modal", "modal")),
+        error_by_provider_name={},
+        last_full_snapshot_at=datetime.now(timezone.utc),
+    )
+    docker_host = HostId("host-" + "0" * 31 + "1")
+    modal_host = HostId("host-" + "0" * 31 + "2")
+    docker_agent = DiscoveredAgent(
+        host_id=docker_host,
+        agent_id=AgentId("agent-" + "0" * 31 + "1"),
+        agent_name=AgentName("docker-ws"),
+        provider_name=ProviderInstanceName("docker"),
+        certified_data={"labels": {"workspace": "docker-workspace", "is_primary": "true"}},
+    )
+    modal_agent = DiscoveredAgent(
+        host_id=modal_host,
+        agent_id=AgentId("agent-" + "0" * 31 + "2"),
+        agent_name=AgentName("modal-ws"),
+        provider_name=ProviderInstanceName("modal"),
+        certified_data={"labels": {"workspace": "modal-workspace", "is_primary": "true"}},
+    )
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(docker_agent.agent_id, modal_agent.agent_id),
+            discovered_agents=(docker_agent, modal_agent),
+            host_state_by_host_id={str(docker_host): HostState.RUNNING, str(modal_host): HostState.RUNNING},
+        )
+    )
+
+    by_id = {ws["id"]: ws for ws in _build_workspace_list(resolver)}
+
+    docker_ws = by_id[str(docker_agent.agent_id)]
+    assert docker_ws["supports_resume"] == "true"
+    assert docker_ws["supports_shutdown"] == "true"
+    assert docker_ws["liveness"] == "RUNNING"
+
+    modal_ws = by_id[str(modal_agent.agent_id)]
+    assert modal_ws["supports_resume"] == "true"
+    assert "supports_shutdown" not in modal_ws
+    assert modal_ws["liveness"] == "RUNNING"

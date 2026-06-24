@@ -201,6 +201,16 @@ class HostHealthResponse(FrozenModel):
             "Friendly provider name for the unreachable page title (e.g. 'Imbue Cloud'); empty for non-provider tiers."
         ),
     )
+    is_auto_restart_suppressed: bool = Field(
+        default=False,
+        description=(
+            "True for resume-only providers (Modal) whose recovery restart is too "
+            "destructive to auto-dispatch on page open: the recovery page must wait "
+            "for an explicit user click on the host_offline / interface_unresponsive "
+            "tiers instead of auto-restarting. False for shutdown-capable providers "
+            "(docker / lima), which keep auto-dispatch."
+        ),
+    )
 
 
 # -- Probe questions (canonical wording, shared with tests) ----------------
@@ -313,7 +323,11 @@ def _coerce_optional_int(value: object) -> int | None:
 
 
 _RUNNING_STATE: Final[str] = "RUNNING"
-_OFFLINE_HOST_STATES: Final[frozenset[str]] = frozenset({"STOPPED", "STOPPING", "CRASHED", "FAILED"})
+# Kept in sync with ``mind_liveness._OFFLINE_HOST_STATES``. ``PAUSED`` is
+# offline-but-resumable (a snapshotted+torn-down host, e.g. Modal's idle/timeout
+# path): treating it as offline here lets the recovery flow auto-restart it
+# (``mngr start`` resumes the latest snapshot) instead of leaving it UNKNOWN.
+_OFFLINE_HOST_STATES: Final[frozenset[str]] = frozenset({"STOPPED", "STOPPING", "CRASHED", "FAILED", "PAUSED"})
 
 
 def _extract_agent_row(list_json: str | None, agent_id: AgentId) -> dict | None:
@@ -726,6 +740,7 @@ def build_host_health_response(
     mngr_binary: str = "mngr",
     provider_error: ProviderProbeError | None = None,
     provider_label: str = "",
+    is_auto_restart_suppressed: bool = False,
 ) -> HostHealthResponse:
     """Assemble the host-health response (probes + dispatch tier) from raw inputs.
 
@@ -745,6 +760,11 @@ def build_host_health_response(
     it drives the PROVIDER_UNAVAILABLE / WORKSPACE_UNREACHABLE tiers and its
     message is carried on the response as ``unreachable_reason``.
     ``provider_label`` is the friendly provider name for that page's title.
+
+    ``is_auto_restart_suppressed`` is carried straight through to the response (see
+    ``provider_backend_suppresses_recovery_auto_restart``): when True the recovery
+    page must wait for an explicit click before restarting on the host_offline /
+    interface_unresponsive tiers, rather than auto-dispatching.
     """
     in_container = _parse_in_container_probe(in_container_stdout)
     agent_row = _extract_agent_row(list_json, agent_id)
@@ -766,6 +786,7 @@ def build_host_health_response(
         dispatch_tier=dispatch_tier,
         unreachable_reason=(provider_error.message if provider_error is not None else ""),
         provider_label=(provider_label if is_provider_tier else ""),
+        is_auto_restart_suppressed=is_auto_restart_suppressed,
     )
 
 

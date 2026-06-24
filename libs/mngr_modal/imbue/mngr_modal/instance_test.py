@@ -12,6 +12,7 @@ from unittest.mock import patch
 import pytest
 
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ModalAuthError
@@ -23,6 +24,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import UserId
+from imbue.mngr_modal.config import MODAL_MAX_SANDBOX_TIMEOUT_SECONDS
 from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.constants import MODAL_TEST_APP_PREFIX
 from imbue.mngr_modal.instance import HOST_VOLUME_INFIX
@@ -40,9 +42,15 @@ from imbue.mngr_modal.instance import _substitute_dockerfile_build_args
 from imbue.mngr_modal.instance import build_sandbox_tags
 from imbue.mngr_modal.instance import check_host_name_is_unique
 from imbue.mngr_modal.instance import parse_sandbox_tags
+from imbue.mngr_modal.instance import select_latest_resumable_snapshot
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
+from imbue.mngr_modal.errors import ModalMngrError
 from imbue.modal_proxy.errors import ModalProxyAuthError
+from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.interface import AppInterface
+from imbue.modal_proxy.testing import FakeModalInterface
+from imbue.modal_proxy.testing import FakeSandbox
 
 # =============================================================================
 # Unit tests for sandbox tag helper functions
@@ -370,6 +378,35 @@ def _make_snapshot_record(name: str = "initial") -> SnapshotRecord:
         name=name,
         created_at="2026-01-01T00:00:00Z",
     )
+
+
+def test_select_latest_resumable_snapshot_returns_none_for_initial_only() -> None:
+    """A host whose only snapshot is the bare 'initial' one has no resumable state."""
+    snapshots = [SnapshotRecord(id="im-initial", name="initial", created_at="2026-01-01T00:00:00Z")]
+    assert select_latest_resumable_snapshot(snapshots) is None
+
+
+def test_select_latest_resumable_snapshot_returns_none_for_empty() -> None:
+    assert select_latest_resumable_snapshot([]) is None
+
+
+def test_select_latest_resumable_snapshot_skips_initial_and_picks_stop() -> None:
+    """With both an 'initial' and a 'stop' snapshot, the resumable 'stop' one is chosen."""
+    initial = SnapshotRecord(id="im-initial", name="initial", created_at="2026-01-01T00:00:00Z")
+    stop = SnapshotRecord(id="im-stop", name="stop", created_at="2026-01-02T00:00:00Z")
+    selected = select_latest_resumable_snapshot([initial, stop])
+    assert selected is not None
+    assert selected.id == "im-stop"
+
+
+def test_select_latest_resumable_snapshot_picks_most_recent_resumable() -> None:
+    """Among several resumable snapshots, the most recent by created_at wins."""
+    initial = SnapshotRecord(id="im-initial", name="initial", created_at="2026-01-03T00:00:00Z")
+    older = SnapshotRecord(id="im-old", name="stop", created_at="2026-01-01T00:00:00Z")
+    newer = SnapshotRecord(id="im-new", name="stop", created_at="2026-01-02T00:00:00Z")
+    selected = select_latest_resumable_snapshot([older, newer, initial])
+    assert selected is not None
+    assert selected.id == "im-new"
 
 
 def test_list_all_host_records_returns_empty_when_volume_empty(
@@ -1073,6 +1110,21 @@ def test_modal_provider_config_user_id_can_be_set() -> None:
     """ModalProviderConfig user_id can be set to override profile user_id."""
     config = ModalProviderConfig(user_id=UserId("custom-user-id"))
     assert config.user_id == UserId("custom-user-id")
+
+
+def test_modal_provider_config_default_timeout_is_at_modal_cap() -> None:
+    """The default timeout + buffer lands exactly at Modal's hard cap and is accepted."""
+    config = ModalProviderConfig()
+    assert config.default_sandbox_timeout + config.shutdown_buffer_seconds == MODAL_MAX_SANDBOX_TIMEOUT_SECONDS
+
+
+def test_modal_provider_config_over_cap_timeout_raises() -> None:
+    """A config whose timeout + buffer exceeds Modal's hard cap is rejected."""
+    with pytest.raises(ConfigStructureError):
+        ModalProviderConfig(
+            default_sandbox_timeout=MODAL_MAX_SANDBOX_TIMEOUT_SECONDS,
+            shutdown_buffer_seconds=1,
+        )
 
 
 # =============================================================================
@@ -1903,3 +1955,53 @@ def test_check_host_name_is_unique_raises_when_name_exists_on_failed_host() -> N
         check_host_name_is_unique(
             _TEST_PROVIDER_NAME, HostName("failed-host"), host_records=[failed_record], running_host_ids=set()
         )
+
+
+# =============================================================================
+# Tests for terminate-failure surfacing in stop_host / destroy_host
+# =============================================================================
+
+
+class _TerminateFailingSandbox(FakeSandbox):
+    """A FakeSandbox whose terminate() always fails, simulating a Modal sandbox
+    that could not be torn down (and is thus still running -- a billing orphan)."""
+
+    def terminate(self) -> None:
+        raise ModalProxyError("simulated terminate failure")
+
+
+def _cache_failing_sandbox(
+    testing_provider: ModalProviderInstance,
+    host_id: HostId,
+    host_name: str,
+) -> None:
+    """Write a host record and cache a terminate-failing sandbox for the host."""
+    testing_provider._write_host_record(_make_host_record(host_id, host_name=host_name))
+    sandbox = _TerminateFailingSandbox(sandbox_id=f"sb-{host_id}")
+    sandbox.set_tags({TAG_HOST_ID: str(host_id), TAG_HOST_NAME: host_name})
+    testing_provider._cache_sandbox(host_id, HostName(host_name), sandbox)
+
+
+def test_stop_host_surfaces_terminate_failure(
+    testing_provider: ModalProviderInstance,
+    testing_modal: FakeModalInterface,
+) -> None:
+    """A failed sandbox.terminate() must surface from stop_host rather than be swallowed."""
+    host_id = HostId.generate()
+    _cache_failing_sandbox(testing_provider, host_id, "stuck-host")
+
+    with pytest.raises(ModalMngrError):
+        testing_provider.stop_host(host_id, create_snapshot=False)
+
+
+def test_destroy_host_surfaces_terminate_failure(
+    testing_provider: ModalProviderInstance,
+    testing_modal: FakeModalInterface,
+) -> None:
+    """A failed terminate during destroy must surface as a CleanupFailedGroup so the
+    destroy reports failure (billing orphan left behind) rather than false success."""
+    host_id = HostId.generate()
+    _cache_failing_sandbox(testing_provider, host_id, "stuck-host")
+
+    with pytest.raises(CleanupFailedGroup):
+        testing_provider.destroy_host(host_id)

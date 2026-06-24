@@ -1,0 +1,3 @@
+Hardened offline host state derivation against untrusted `stop_reason` values. `derive_offline_host_state` now only honors the legitimate offline stop reasons (`PAUSED`/`STOPPED`/`DESTROYED`); any unknown, malformed, or otherwise-untrusted value (e.g. a stop reason of `RUNNING` arriving via a provider's HTTP request body) falls back to `CRASHED` instead of raising a `ValueError` out of discovery or being interpreted as a live state. `None` continues to mean `CRASHED` as before.
+
+Corrected the `supports_shutdown_hosts` docstring on `ProviderInstanceInterface`: it gates stopping and starting a host's compute directly, not resuming from a snapshot.

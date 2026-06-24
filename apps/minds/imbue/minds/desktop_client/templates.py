@@ -189,6 +189,7 @@ def render_landing_page(
     destroying_status_by_agent_id: dict[str, str] | None = None,
     agent_accents: dict[str, str] | None = None,
     shutdown_capable_agent_ids: Sequence[AgentId] | None = None,
+    resume_capable_agent_ids: Sequence[AgentId] | None = None,
     mind_liveness_by_agent_id: dict[str, str] | None = None,
     agent_providers: dict[str, str] | None = None,
 ) -> str:
@@ -229,6 +230,14 @@ def render_landing_page(
     for aid in accessible_agent_ids:
         effective_accents[str(aid)] = supplied.get(str(aid), DEFAULT_WORKSPACE_COLOR)
     shutdown_capable_agent_id_strings = [str(aid) for aid in (shutdown_capable_agent_ids or ())]
+    # Resume-capable is a superset of shutdown-capable (it also includes Modal). A
+    # caller that does not supply it falls back to the shutdown-capable set so the
+    # rendered behavior is unchanged for callers predating resume support.
+    resume_capable_agent_id_strings = (
+        [str(aid) for aid in resume_capable_agent_ids]
+        if resume_capable_agent_ids is not None
+        else shutdown_capable_agent_id_strings
+    )
     return CATALOG.render(
         "pages.Landing",
         agent_ids=accessible_agent_ids,
@@ -240,6 +249,7 @@ def render_landing_page(
         agent_names=agent_names or {},
         destroying_status_by_agent_id=destroying_status_by_agent_id or {},
         shutdown_capable_agent_ids=shutdown_capable_agent_id_strings,
+        resume_capable_agent_ids=resume_capable_agent_id_strings,
         mind_liveness_by_agent_id=mind_liveness_by_agent_id or {},
         agent_providers=agent_providers or {},
     )
@@ -997,6 +1007,17 @@ _RECOVERY_SCRIPT: Final[str] = """\
             if (!autoDispatch) {
               // restart_failed entry: render unresponsive so the failure
               // reason and the diagnostics list both stay visible.
+              renderUnresponsive();
+              return;
+            }
+            // Resume-only providers (Modal) must not auto-restart on page open:
+            // ``mngr start`` terminates+resumes the live sandbox, which is too
+            // destructive to fire without explicit consent. Render the manual
+            // "Restart workspace" button so the user clicks (the click goes
+            // through the host-restart endpoint, which skips the unsupported stop
+            // step). Docker / lima keep their auto-dispatch below.
+            if (data && data.is_auto_restart_suppressed
+                && (tier === 'host_offline' || tier === 'interface_unresponsive')) {
               renderUnresponsive();
               return;
             }

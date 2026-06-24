@@ -12,9 +12,11 @@ from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.utils.polling import wait_for
+from imbue.mngr_modal.errors import NoResumableSnapshotModalMngrError
 from imbue.mngr_modal.errors import NoSnapshotsModalMngrError
 from imbue.mngr_modal.instance import ModalProviderInstance
 from imbue.mngr_modal.volume import ModalVolume
@@ -307,11 +309,15 @@ def test_start_host_on_running_host(real_modal_provider: ModalProviderInstance) 
 
 @pytest.mark.acceptance
 @pytest.mark.timeout(300)
-def test_start_host_on_stopped_host_uses_initial_snapshot(initial_snapshot_provider: ModalProviderInstance) -> None:
-    """start_host on a terminated host should restart from the initial snapshot.
+def test_start_host_on_stopped_host_uses_latest_resumable_snapshot(
+    initial_snapshot_provider: ModalProviderInstance,
+) -> None:
+    """start_host on a gracefully-stopped host auto-restarts from the latest resumable snapshot.
 
-    This test uses initial_snapshot_provider (is_snapshotted_after_create=True) to
-    verify that hosts can be restarted using the initial snapshot.
+    With is_snapshotted_after_create=True there is an "initial" snapshot, and a
+    graceful stop_host() adds a "stop" snapshot. Auto-restart (no snapshot_id)
+    skips the bare "initial" snapshot and uses the "stop" snapshot, which carries
+    the host's state.
     """
     host = None
     restarted_host = None
@@ -327,19 +333,73 @@ def test_start_host_on_stopped_host_uses_initial_snapshot(initial_snapshot_provi
         assert len(snapshots) == 1
         assert snapshots[0].name == "initial"
 
-        # Stop the host (this will also create a "stop" snapshot, but we ignore it)
+        # Write a marker AFTER the initial snapshot was taken. The marker is only
+        # captured by the later "stop" snapshot, so its presence after restart
+        # proves auto-restart restored the "stop" snapshot, not the bare "initial"
+        # one (the assertions below would pass either way without this marker).
+        marker = host.execute_idempotent_command("echo 'post-initial-work' > /tmp/resume_marker.txt")
+        assert marker.success
+
+        # Stop the host -- this creates the "stop" snapshot auto-restart resumes from.
         initial_snapshot_provider.stop_host(host)
 
-        # Start it again without specifying a snapshot - should use most recent snapshot
+        # Start it again without specifying a snapshot - should use the latest
+        # resumable ("stop") snapshot, not the bare "initial" one.
         restarted_host = initial_snapshot_provider.start_host(host_id)
 
         # Verify the host was restarted with the same ID
         assert restarted_host.id == host_id
 
-        # Verify we can execute commands on the restarted host
-        result = restarted_host.execute_idempotent_command("echo 'restarted successfully'")
-        assert result.success
-        assert "restarted successfully" in result.stdout
+        # The marker survives only if the "stop" snapshot (not "initial") was restored.
+        marker_result = restarted_host.execute_idempotent_command("cat /tmp/resume_marker.txt")
+        assert marker_result.success
+        assert "post-initial-work" in marker_result.stdout
+
+    finally:
+        if restarted_host:
+            initial_snapshot_provider.destroy_host(restarted_host)
+        elif host:
+            initial_snapshot_provider.destroy_host(host)
+        else:
+            pass
+
+
+@pytest.mark.acceptance
+@pytest.mark.timeout(300)
+def test_start_host_clears_stop_reason_on_resume(
+    initial_snapshot_provider: ModalProviderInstance,
+) -> None:
+    """Resuming a stopped host clears stop_reason on the persisted record.
+
+    stop_host records stop_reason=STOPPED. After start_host restores the host
+    into a running sandbox, the persisted host record must have stop_reason back
+    to None. Otherwise a resumed host that is later hard-killed would be
+    mis-derived as PAUSED/STOPPED (never GC'd, wrongly shows a Resume control)
+    instead of CRASHED.
+    """
+    host = None
+    restarted_host = None
+    try:
+        host = initial_snapshot_provider.create_host(HostName("test-host"))
+        host_id = host.id
+
+        # Create a resumable ("stop") snapshot via a graceful stop.
+        initial_snapshot_provider.on_agent_created(_UNUSED_AGENT, host)
+        initial_snapshot_provider.stop_host(host)
+
+        # After stop, the persisted record should carry stop_reason=STOPPED.
+        stopped_record = initial_snapshot_provider._read_host_record(host_id, use_cache=False)
+        assert stopped_record is not None
+        assert stopped_record.certified_host_data.stop_reason == HostState.STOPPED.value
+
+        # Resume from the latest resumable snapshot.
+        restarted_host = initial_snapshot_provider.start_host(host_id)
+        assert restarted_host.id == host_id
+
+        # The persisted record must no longer report a stop_reason.
+        resumed_record = initial_snapshot_provider._read_host_record(host_id, use_cache=False)
+        assert resumed_record is not None
+        assert resumed_record.certified_host_data.stop_reason is None
 
     finally:
         if restarted_host:
@@ -374,12 +434,16 @@ def test_get_host_by_name_not_found_raises_error(real_modal_provider: ModalProvi
 
 @pytest.mark.acceptance
 @pytest.mark.timeout(300)
-def test_restart_after_hard_kill_with_initial_snapshot(initial_snapshot_provider: ModalProviderInstance) -> None:
-    """Host can restart after hard kill when initial snapshot is enabled.
+def test_auto_restart_after_hard_kill_with_only_initial_snapshot_is_refused(
+    initial_snapshot_provider: ModalProviderInstance,
+) -> None:
+    """Auto-restart is refused when the only snapshot is the bare "initial" one.
 
-    This tests scenario 1: is_snapshotted_after_create=True.
-    Even if the sandbox is terminated directly (hard kill), the host should be
-    restartable because an initial snapshot exists.
+    is_snapshotted_after_create=True, then a hard kill (terminate the sandbox
+    without a graceful stop) leaves only the "initial" snapshot. Auto-restarting
+    from it would produce a sandbox with no agent -- an agent-less, billing
+    orphan -- so start_host (no snapshot_id) raises NoResumableSnapshotModalMngrError.
+    An explicit snapshot_id can still restore the initial snapshot.
     """
     host = None
     restarted_host = None
@@ -395,6 +459,7 @@ def test_restart_after_hard_kill_with_initial_snapshot(initial_snapshot_provider
         snapshots = initial_snapshot_provider.list_snapshots(host)
         assert len(snapshots) == 1
         assert snapshots[0].name == "initial"
+        initial_snapshot_id = snapshots[0].id
 
         # Hard kill: directly terminate the sandbox without using stop_host
         sandbox = initial_snapshot_provider._find_sandbox_by_host_id(host_id)
@@ -402,14 +467,16 @@ def test_restart_after_hard_kill_with_initial_snapshot(initial_snapshot_provider
         sandbox.terminate()
         initial_snapshot_provider._uncache_sandbox(host_id, host_name)
 
-        # Should be able to restart using the initial snapshot
-        restarted_host = initial_snapshot_provider.start_host(host_id)
-        assert restarted_host.id == host_id
+        # Auto-restart must refuse the bare initial-only snapshot (no resumable state).
+        with pytest.raises(NoResumableSnapshotModalMngrError):
+            initial_snapshot_provider.start_host(host_id)
 
-        # Verify the host is functional
-        result = restarted_host.execute_idempotent_command("echo 'restarted after hard kill'")
+        # But an explicit snapshot_id can still restore the initial snapshot.
+        restarted_host = initial_snapshot_provider.start_host(host_id, snapshot_id=initial_snapshot_id)
+        assert restarted_host.id == host_id
+        result = restarted_host.execute_idempotent_command("echo 'restored from initial'")
         assert result.success
-        assert "restarted after hard kill" in result.stdout
+        assert "restored from initial" in result.stdout
 
     finally:
         if restarted_host:

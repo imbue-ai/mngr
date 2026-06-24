@@ -71,7 +71,11 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.mind_liveness import MindLiveness
 from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
+from imbue.minds.desktop_client.mind_liveness import get_resume_capable_workspace_agent_ids
 from imbue.minds.desktop_client.mind_liveness import get_shutdown_capable_workspace_agent_ids
+from imbue.minds.desktop_client.mind_liveness import provider_backend_suppresses_recovery_auto_restart
+from imbue.minds.desktop_client.mind_liveness import provider_backend_supports_shutdown
+from imbue.minds.desktop_client.mind_liveness import resolve_agent_backend
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
@@ -442,6 +446,7 @@ def _handle_landing_page() -> Response:
             # single friendly compute-provider label (e.g. aws-us-west-2 -> AWS).
             agent_providers[str(aid)] = friendly_provider_label(info.provider_name if info else None)
         shutdown_capable_agent_ids = get_shutdown_capable_workspace_agent_ids(backend_resolver)
+        resume_capable_agent_ids = get_resume_capable_workspace_agent_ids(backend_resolver)
         mind_liveness_by_agent_id = {
             aid: state.value for aid, state in compute_mind_liveness_by_agent_id(backend_resolver).items()
         }
@@ -453,6 +458,7 @@ def _handle_landing_page() -> Response:
             destroying_status_by_agent_id=destroying_status_by_agent_id,
             agent_accents=agent_accents,
             shutdown_capable_agent_ids=shutdown_capable_agent_ids,
+            resume_capable_agent_ids=resume_capable_agent_ids,
             mind_liveness_by_agent_id=mind_liveness_by_agent_id,
             agent_providers=agent_providers,
         )
@@ -1660,7 +1666,13 @@ def _handle_destroy_agent_api(
             ),
             media_type="application/json",
         )
-    start_destroy(parsed_id, paths, host_id)
+    # The detached destroy shells out to ``mngr list | mngr destroy``, which must
+    # see the same host dir every other minds->mngr shell-out points at (color,
+    # restart, start/stop, bulk-stop); without it the destroy targets the wrong
+    # (default) host dir and silently finds nothing to tear down.
+    env = dict(os.environ)
+    env["MNGR_HOST_DIR"] = str(get_state().mngr_host_dir)
+    start_destroy(parsed_id, paths, host_id, env=env, mngr_binary=get_state().mngr_binary)
 
     return make_response(
         status_code=202,
@@ -1690,6 +1702,11 @@ def _handle_destroying_status_api(
                 "pid_alive": record.pid_alive,
                 "is_host_still_active": record.is_host_still_active,
                 "status": str(record.status).lower(),
+                # ISO-8601 start time so the page can reveal an escape hatch
+                # (Dismiss) once a still-"running" destroy has been spinning past a
+                # threshold -- a hung/no-op teardown would otherwise stay 'running'
+                # forever with no way out.
+                "started_at": record.started_at.isoformat(),
             }
         ),
         media_type="application/json",
@@ -2408,15 +2425,18 @@ def _build_workspace_list(
     ``is_stale="true"`` so the UI can flag them as
     retained-but-unverified (they remain fully interactive).
 
-    Shutdown-capable minds (those on a provider whose host minds can stop/start,
-    see :func:`provider_backend_supports_shutdown`) additionally carry
-    ``supports_shutdown="true"`` and a ``liveness`` of RUNNING / STOPPED /
-    UNKNOWN. Container liveness rides here rather than on a separate SSE channel:
-    a liveness change makes the entry differ, so the existing ``workspaces``
-    diff pushes it. Non-capable minds carry neither field.
+    Resume-capable minds (those on a provider whose host minds can start/resume,
+    see :func:`provider_backend_supports_resume` -- docker, lima, and Modal)
+    carry ``supports_resume="true"`` and a ``liveness`` of RUNNING / STOPPED /
+    UNKNOWN. The shutdown-capable subset (docker, lima -- Modal cannot stop host
+    compute) additionally carries ``supports_shutdown="true"``. Container
+    liveness rides here rather than on a separate SSE channel: a liveness change
+    makes the entry differ, so the existing ``workspaces`` diff pushes it.
+    Non-capable minds carry none of these fields.
     """
     errored_provider_names = {str(name) for name in backend_resolver.get_provider_errors()}
     liveness_by_agent_id = compute_mind_liveness_by_agent_id(backend_resolver)
+    shutdown_capable_ids = {str(aid) for aid in get_shutdown_capable_workspace_agent_ids(backend_resolver)}
     agent_ids = backend_resolver.list_active_workspace_ids()
     workspaces: list[dict[str, str]] = []
     for aid in agent_ids:
@@ -2437,7 +2457,11 @@ def _build_workspace_list(
             entry["is_stale"] = "true"
         liveness = liveness_by_agent_id.get(str(aid))
         if liveness is not None:
-            entry["supports_shutdown"] = "true"
+            # Liveness is computed for resume-capable minds; the shutdown-capable
+            # subset also gets a Stop button.
+            entry["supports_resume"] = "true"
+            if str(aid) in shutdown_capable_ids:
+                entry["supports_shutdown"] = "true"
             entry["liveness"] = liveness.value
         if session_store is not None:
             account = session_store.get_account_for_workspace(str(aid))
@@ -2540,6 +2564,20 @@ _SURGICAL_STARTUP_WAIT_SECONDS: Final[float] = 15.0
 _HOST_RESTART_STARTUP_WAIT_SECONDS: Final[float] = 30.0
 # Poll cadence while waiting for the system interface to come back post-restart.
 _RESTART_PROBE_INTERVAL_SECONDS: Final[float] = 1.0
+
+# Signal in ``mngr start``'s stderr when a Modal host has only its initial snapshot
+# and no resumable state. Matched textually because the failure surfaces through the
+# subprocess's stderr (the human-formatted error message under ``--quiet``), not as a
+# Python exception minds can catch -- the exception *class name* is NOT emitted in
+# human output, so we match a distinctive substring of the message itself. This MUST
+# stay in sync with the message raised by ``NoResumableSnapshotModalMngrError`` in
+# ``mngr_modal/instance.py::start_host``. A start that fails this way cannot be
+# retried -- the workspace must be recreated -- so the restart-failed reason says so.
+_NO_RESUMABLE_SNAPSHOT_ERROR_SIGNAL: Final[str] = "no resumable workspace state"
+_RECREATE_WORKSPACE_RESTART_FAILED_REASON: Final[str] = (
+    "This workspace cannot be restarted: its host has no resumable snapshot to restore from. "
+    "Please recreate the workspace."
+)
 
 
 def _build_mngr_stop_argv(mngr_binary: str, agent_id: AgentId, is_host_restart: bool) -> list[str]:
@@ -2833,8 +2871,25 @@ def _run_restart_sequence(
     env = dict(os.environ)
     env["MNGR_HOST_DIR"] = str(mngr_host_dir)
 
+    # A resume-only provider (Modal) cannot stop host compute: ``mngr stop
+    # --stop-host`` raises HostShutdownNotSupportedError, which would fail the
+    # restart outright. For a host restart on such a provider, skip the stop step
+    # and go straight to ``mngr start`` (which terminates+resumes from snapshot).
+    # Shutdown-capable providers (docker / lima) keep the stop-then-start flow.
+    backend = resolve_agent_backend(backend_resolver, workspace_agent_id)
+    is_resume_only_host_restart = (
+        is_host_restart and backend is not None and not provider_backend_supports_shutdown(backend)
+    )
+
     if skip_stop:
         logger.info("Skipping stop step for {} ({}): container already fully stopped", workspace_agent_id, tier_label)
+    elif is_resume_only_host_restart:
+        logger.info(
+            "Skipping stop step for {} ({}): provider backend {} cannot stop host compute (resume-only)",
+            workspace_agent_id,
+            tier_label,
+            backend,
+        )
     else:
         try:
             _run_mngr(concurrency_group, _build_mngr_stop_argv(mngr_binary, services_agent_id, is_host_restart), env)
@@ -2847,7 +2902,13 @@ def _run_restart_sequence(
         _run_mngr(concurrency_group, _build_mngr_start_argv(mngr_binary, services_agent_id), env)
     except MngrCommandError as exc:
         logger.warning("Start step of {} for {} failed: {}", tier_label, workspace_agent_id, exc)
-        tracker.mark_restart_failed(workspace_agent_id, f"Start step of {tier_label} failed: {exc}")
+        # A host with only its initial snapshot has no resumable state to start
+        # from; retrying never helps, so steer the user to recreate the workspace
+        # rather than surface a generic start failure.
+        if _NO_RESUMABLE_SNAPSHOT_ERROR_SIGNAL in str(exc):
+            tracker.mark_restart_failed(workspace_agent_id, _RECREATE_WORKSPACE_RESTART_FAILED_REASON)
+        else:
+            tracker.mark_restart_failed(workspace_agent_id, f"Start step of {tier_label} failed: {exc}")
         return
 
     # Without a plugin route there is no way to probe for recovery, so treat a
@@ -2946,14 +3007,19 @@ def _handle_restart_host_api(
 
 # -- Mind host Start / Stop --
 #
-# A "shutdown-capable mind" is a workspace on a provider whose host minds can
-# stop and start (see ``provider_backend_supports_shutdown`` -- the local docker
-# / lima backends today). Stopping one frees the user's machine while preserving
-# data and leaving it fully restartable. Stop = ``mngr stop --stop-host`` on the
-# host (same teardown the host-restart tier uses); Start = ``mngr start`` (boots
-# the stopped container). Both set an optimistic host-state override on the
-# resolver so the landing page and quit prompt flip at once; the next discovery
-# snapshot then confirms (or corrects) it.
+# Two capability tiers (see ``mind_liveness``):
+#  - "shutdown-capable" (docker / lima, ``provider_backend_supports_shutdown``):
+#    the host can be stopped *and* started. Stopping frees the user's machine
+#    while preserving data and leaving it restartable.
+#  - "resume-capable" (docker / lima / modal, ``provider_backend_supports_resume``):
+#    a superset that adds Modal, whose host cannot be manually stopped (``mngr
+#    stop --stop-host`` is unsupported) but can be resumed from a snapshot.
+# So the Stop surfaces are shutdown-capable only; the Start/Resume surface is
+# resume-capable. Stop = ``mngr stop --stop-host`` on the host (same teardown the
+# host-restart tier uses); Start = ``mngr start`` (boots the stopped container or,
+# for Modal, restores the latest resumable snapshot). Both set an optimistic
+# host-state override on the resolver so the landing page and quit prompt flip at
+# once; the next discovery snapshot then confirms (or corrects) it.
 #
 # The single-mind endpoints run the ``mngr`` command synchronously (on the
 # request's worker thread) and return the real outcome -- no fire-and-forget
@@ -3044,6 +3110,15 @@ def _dispatch_mind_host_action(
     aid = AgentId(agent_id)
     concurrency_group: ConcurrencyGroup | None = get_state().root_concurrency_group
     backend_resolver: BackendResolverInterface = get_state().backend_resolver
+    # Server-side capability guard for STOP: resume-only providers (Modal) cannot
+    # stop host compute, so ``mngr stop --stop-host`` raises and 500s. Refuse with
+    # a clear 409 before doing anything else. START is never blocked (every
+    # resume-capable provider, including Modal, can start), so this gate is
+    # STOP-only.
+    if action == _MindHostAction.STOP:
+        backend = resolve_agent_backend(backend_resolver, aid)
+        if backend is not None and not provider_backend_supports_shutdown(backend):
+            return _json_error("Stopping is not supported for this provider", status_code=409)
     if concurrency_group is None:
         return _json_error("Mind host control is unavailable in this configuration", status_code=503)
     succeeded = _perform_mind_host_action(
@@ -3079,10 +3154,18 @@ def _running_mind_entries(backend_resolver: BackendResolverInterface) -> list[di
     Reads liveness from the discovery snapshot (plus any optimistic override) in
     memory -- no subprocess -- so callers (the quit prompt, the bulk-stop result)
     are instant.
+
+    Liveness is computed for resume-capable minds (which now includes Modal), but
+    the quit prompt only offers to stop hosts minds can actually stop, so this is
+    scoped to the shutdown-capable subset (docker/lima) -- Modal cannot stop host
+    compute and must not appear here.
     """
+    shutdown_capable_ids = {str(aid) for aid in get_shutdown_capable_workspace_agent_ids(backend_resolver)}
     running: list[dict[str, str]] = []
     for aid_str, state in compute_mind_liveness_by_agent_id(backend_resolver).items():
         if state != MindLiveness.RUNNING:
+            continue
+        if aid_str not in shutdown_capable_ids:
             continue
         aid = AgentId(aid_str)
         name = backend_resolver.get_workspace_name(aid)
@@ -3233,6 +3316,12 @@ def _run_host_health_probe(
     services_agent_id = backend_resolver.get_system_services_agent_id(agent_id)
     display_info = backend_resolver.get_agent_display_info(agent_id)
     provider_name = display_info.provider_name if display_info is not None else None
+    # Resume-only providers (Modal) must not auto-restart on recovery-page open --
+    # ``mngr start`` terminates+resumes the live sandbox, which is too destructive
+    # to fire without an explicit click. The page reads this flag to render the
+    # manual "Restart workspace" button instead of auto-dispatching.
+    backend = resolve_agent_backend(backend_resolver, agent_id)
+    is_auto_restart_suppressed = backend is not None and provider_backend_suppresses_recovery_auto_restart(backend)
     list_argv = _build_mngr_host_state_argv(mngr_binary, agent_id, services_agent_id, provider_name)
     list_command = shlex.join(list_argv)
     # Friendly provider name for the "Can't connect to ..." page title; reuse the
@@ -3323,6 +3412,7 @@ def _run_host_health_probe(
         mngr_binary=mngr_binary,
         provider_error=provider_error,
         provider_label=provider_label,
+        is_auto_restart_suppressed=is_auto_restart_suppressed,
     )
 
 

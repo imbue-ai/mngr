@@ -1,14 +1,22 @@
 from enum import auto
 from pathlib import Path
+from typing import Final
 
 from pydantic import Field
+from pydantic import model_validator
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import UserId
+
+# Modal's hard cap on a sandbox's total lifetime, in seconds (24h). The timeout sent
+# to Modal is default_sandbox_timeout + shutdown_buffer_seconds, which must not exceed
+# this ceiling or Modal rejects the sandbox.
+MODAL_MAX_SANDBOX_TIMEOUT_SECONDS: Final[int] = 86_400
 
 
 class ModalMode(UpperCaseStrEnum):
@@ -111,10 +119,12 @@ class ModalProviderConfig(ProviderInstanceConfig):
     is_persistent: bool = Field(
         default=True,
         description=(
-            "Configuration marker for Modal app persistence. When True (default), indicates "
-            "the app is intended for production use. When False (set in tests), indicates "
-            "the app is for testing and should be cleaned up. This field enables tests to "
-            "signal their intent for easier identification and cleanup of test resources."
+            "Whether the Modal app backing this provider is persistent. This is load-bearing, "
+            "not a mere test marker: when True (default) the app is deployed/persistent, so its "
+            "sandboxes outlive the mngr-create subprocess that created them. When False the Modal "
+            "app is ephemeral and tied to the creating process -- the sandbox dies when the "
+            "mngr-create subprocess exits. It is set False in tests so test resources are "
+            "automatically torn down, but the consequence is real, not cosmetic."
         ),
     )
     is_snapshotted_after_create: bool = Field(
@@ -141,3 +151,18 @@ class ModalProviderConfig(ProviderInstanceConfig):
             "while the host is online."
         ),
     )
+
+    @model_validator(mode="after")
+    def _validate_timeout_within_modal_cap(self) -> "ModalProviderConfig":
+        # The actual sandbox timeout sent to Modal is default_sandbox_timeout +
+        # shutdown_buffer_seconds. Modal hard-caps a sandbox's total lifetime at
+        # MODAL_MAX_SANDBOX_TIMEOUT_SECONDS (24h), so reject configs that would exceed it.
+        total_timeout = self.default_sandbox_timeout + self.shutdown_buffer_seconds
+        if total_timeout > MODAL_MAX_SANDBOX_TIMEOUT_SECONDS:
+            raise ConfigStructureError(
+                f"default_sandbox_timeout ({self.default_sandbox_timeout}) + shutdown_buffer_seconds "
+                f"({self.shutdown_buffer_seconds}) = {total_timeout}s exceeds Modal's hard cap of "
+                f"{MODAL_MAX_SANDBOX_TIMEOUT_SECONDS}s. Lower default_sandbox_timeout or "
+                "shutdown_buffer_seconds so their sum is at most the cap."
+            )
+        return self

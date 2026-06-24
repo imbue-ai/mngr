@@ -11,11 +11,18 @@
   var actionsEl = document.getElementById('destroying-actions');
   var retryBtn = document.getElementById('destroying-retry-btn');
   var dismissBtn = document.getElementById('destroying-dismiss-btn');
+  var slowNoteEl = document.getElementById('destroying-slow-note');
+
+  // A still-"running" destroy can hang (or no-op) indefinitely; once it has been
+  // running past this threshold we reveal the Dismiss escape hatch (and a "taking
+  // longer than expected" note) so the user is never trapped on a spinning page.
+  var SLOW_DESTROY_THRESHOLD_MS = 75000;
 
   var logOffset = 0;
   var lastStatus = pageEl.getAttribute('data-initial-status') || 'running';
   var pollTimer = null;
   var stopped = false;
+  var slowRevealed = false;
 
   function setStatusBadge(status) {
     statusContainer.innerHTML = '';
@@ -60,18 +67,36 @@
       })
       .then(function (data) {
         if (!data) return null;
-        return data.status;
+        return data;
       })
       .catch(function () { return null; });
+  }
+
+  // While a destroy is still running, reveal the Dismiss escape hatch (but not
+  // Retry, which only makes sense on a failed run) once it has been running past
+  // the threshold. The failed-path reveal below shows both buttons as before.
+  function maybeRevealSlowEscape(data) {
+    if (slowRevealed || !data || !data.started_at) return;
+    var startedMs = Date.parse(data.started_at);
+    if (isNaN(startedMs)) return;
+    if (Date.now() - startedMs < SLOW_DESTROY_THRESHOLD_MS) return;
+    slowRevealed = true;
+    if (retryBtn) retryBtn.classList.add('hidden');
+    if (slowNoteEl) slowNoteEl.classList.remove('hidden');
+    actionsEl.classList.remove('hidden');
   }
 
   function tick() {
     if (stopped) return;
     Promise.all([fetchLog(), fetchStatus()]).then(function (results) {
-      var status = results[1];
+      var data = results[1];
+      var status = data && data.status;
       if (status && status !== lastStatus) {
         lastStatus = status;
         setStatusBadge(status);
+      }
+      if (status === 'running') {
+        maybeRevealSlowEscape(data);
       }
       if (status === 'done') {
         stopped = true;
@@ -83,6 +108,10 @@
       }
       if (status === 'failed') {
         stopped = true;
+        // A failed run offers both Retry and Dismiss; un-hide Retry in case the
+        // slow-running reveal had hidden it, and drop the "taking longer" note.
+        if (retryBtn) retryBtn.classList.remove('hidden');
+        if (slowNoteEl) slowNoteEl.classList.add('hidden');
         actionsEl.classList.remove('hidden');
         // Pull final log content too.
         fetchLog();
@@ -107,7 +136,9 @@
           logOffset = 0;
           lastStatus = 'running';
           stopped = false;
+          slowRevealed = false;
           actionsEl.classList.add('hidden');
+          if (slowNoteEl) slowNoteEl.classList.add('hidden');
           setStatusBadge('running');
           tick();
         })

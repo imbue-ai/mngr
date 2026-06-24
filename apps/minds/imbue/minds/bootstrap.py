@@ -557,12 +557,6 @@ _AWS_DOCKER_RUNTIME: Final[str] = "runsc"
 _AWS_INSTALL_GVISOR_RUNTIME: Final[bool] = True
 _AWS_PROVIDER_NAME_PREFIX: Final[str] = "aws-"
 
-# Two "Modal (1-day ephemeral)" provider instances, both on the ``modal``
-# backend but with different ``mode``:
-#   - ``[providers.modal]`` (DIRECT): the local machine talks to Modal with its
-#     own token (``modal token new``). Written unconditionally below so the
-#     "Direct" option works as soon as a token exists; if none is present the
-#     provider just reports unavailable during discovery.
 # The single ``[providers.modal]`` instance for "Modal (1-day ephemeral)" (DIRECT
 # mode): the local machine authenticates to Modal with its own token
 # (``modal token new``). Written unconditionally at startup so the option works
@@ -590,6 +584,8 @@ def _build_modal_direct_provider_block() -> Table:
     block["is_enabled"] = True
     block["is_persistent"] = True
     return block
+
+
 # EC2 instance size for minds AWS workspaces. The mngr_aws default (t3.small,
 # 2 GB) is too small for the full forever-claude-template build (uv sync + npm
 # ci/build OOMs/thrashes on 2 GB); minds workspaces default to t3.large (8 GB).

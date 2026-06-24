@@ -100,6 +100,43 @@ def _resolver_with_running_capable_agent(agent_id: AgentId) -> MngrCliBackendRes
     return _resolver_with_capable_agents({agent_id: HostState.RUNNING})
 
 
+def _modal_provider() -> DiscoveredProvider:
+    return make_discovered_provider(
+        ProviderInstanceName("modal"),
+        ProviderInstanceConfig(backend=ProviderBackendName("modal"), is_enabled=True),
+    )
+
+
+def _resolver_with_modal_agent(agent_id: AgentId, host_state: HostState | None) -> MngrCliBackendResolver:
+    """Build a resolver carrying one Modal workspace whose host has ``host_state``.
+
+    Modal is resume-capable but not shutdown-capable, so it exercises the
+    Resume-only landing control and quit-prompt exclusion.
+    """
+    resolver = MngrCliBackendResolver()
+    resolver.update_providers(
+        providers=(_modal_provider(),),
+        error_by_provider_name={},
+        last_full_snapshot_at=datetime.now(timezone.utc),
+    )
+    agent = DiscoveredAgent(
+        host_id=_HOST_A,
+        agent_id=agent_id,
+        agent_name=AgentName("ws-agent"),
+        provider_name=ProviderInstanceName("modal"),
+        certified_data={"labels": {"workspace": "my-workspace", "is_primary": "true"}},
+    )
+    host_state_by_host_id = {str(_HOST_A): host_state} if host_state is not None else {}
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(agent_id,),
+            discovered_agents=(agent,),
+            host_state_by_host_id=host_state_by_host_id,
+        )
+    )
+    return resolver
+
+
 # -- endpoint auth + availability --
 
 
@@ -260,3 +297,97 @@ def test_landing_page_unknown_mind_shows_neither_control(tmp_path: Path) -> None
 
     assert _button_display(html, "landing-start-btn") == "none"
     assert _button_display(html, "landing-stop-btn") == "none"
+
+
+# -- Modal (resume-capable, not shutdown-capable) --
+
+
+def test_running_minds_excludes_modal_which_cannot_stop(tmp_path: Path) -> None:
+    """A RUNNING Modal mind is not offered to the quit prompt (Modal cannot stop host compute)."""
+    agent = AgentId.generate()
+    resolver = _resolver_with_modal_agent(agent, HostState.RUNNING)
+    client, auth_store = _make_client(tmp_path, resolver)
+    _authenticate(client, auth_store)
+
+    response = client.get("/api/minds/running")
+
+    assert response.status_code == 200
+    assert response.get_json() == {"running": []}
+
+
+def test_landing_page_paused_modal_mind_shows_resume_with_restart_hidden(tmp_path: Path) -> None:
+    """A paused (resumable) Modal mind shows Resume; the recovery Restart is present but hidden."""
+    agent = AgentId.generate()
+    resolver = _resolver_with_modal_agent(agent, HostState.PAUSED)
+    client, auth_store = _make_client(tmp_path, resolver)
+    _authenticate(client, auth_store)
+
+    html = client.get("/").text
+
+    # PAUSED -> resumable -> the Resume (start) button is shown.
+    assert _button_display(html, "landing-start-btn") == ""
+    assert 'aria-label="Resume mind"' in html
+    # Modal cannot stop host compute, so no Stop button is rendered at all.
+    # (The ``.landing-stop-btn`` class still appears in the page's JS, so assert on
+    # the button's aria-label, which only appears on a rendered Stop button.)
+    assert 'aria-label="Stop mind"' not in html
+    # The recovery Restart button exists for non-stopped states but is hidden here.
+    assert _button_display(html, "landing-resume-restart-btn") == "none"
+
+
+def test_landing_page_running_modal_mind_shows_restart(tmp_path: Path) -> None:
+    """A running Modal mind shows the recovery Restart button (no Stop, Resume hidden).
+
+    Modal cannot be manually stopped, but a wedged running workspace must still have
+    a one-click path to the recovery page, so the row exposes Restart.
+    """
+    agent = AgentId.generate()
+    resolver = _resolver_with_modal_agent(agent, HostState.RUNNING)
+    client, auth_store = _make_client(tmp_path, resolver)
+    _authenticate(client, auth_store)
+
+    html = client.get("/").text
+
+    # The Resume (start) button exists but is hidden while the host is running.
+    assert _button_display(html, "landing-start-btn") == "none"
+    assert 'aria-label="Stop mind"' not in html
+    # The recovery Restart button is shown so a running modal row is never control-less.
+    assert _button_display(html, "landing-resume-restart-btn") == ""
+
+
+def test_landing_page_unknown_modal_mind_shows_restart(tmp_path: Path) -> None:
+    """A Modal mind whose host state discovery cannot classify still exposes Restart.
+
+    Regression guard: the modal lifecycle branch must never leave a row with zero
+    controls (previously an UNKNOWN modal row showed neither Resume nor Restart).
+    """
+    agent = AgentId.generate()
+    # No host state in discovery yet -> classified UNKNOWN.
+    resolver = _resolver_with_modal_agent(agent, None)
+    client, auth_store = _make_client(tmp_path, resolver)
+    _authenticate(client, auth_store)
+
+    html = client.get("/").text
+
+    assert _button_display(html, "landing-start-btn") == "none"
+    assert _button_display(html, "landing-resume-restart-btn") == ""
+
+
+def test_stop_host_guarded_with_409_for_modal_provider(tmp_path: Path) -> None:
+    """Stopping a Modal host is refused server-side with a 409, not a 500.
+
+    Modal cannot stop host compute (``mngr stop --stop-host`` raises and would
+    500), so the endpoint short-circuits with a clear 409 before ever shelling
+    out. The guard runs ahead of the concurrency-group check, so the test factory
+    (which wires no group) still exercises the guard rather than degrading to 503.
+    """
+    agent = AgentId.generate()
+    resolver = _resolver_with_modal_agent(agent, HostState.RUNNING)
+    client, auth_store = _make_client(tmp_path, resolver)
+    _authenticate(client, auth_store)
+
+    response = client.post(f"/api/agents/{agent}/stop-host")
+
+    assert response.status_code == 409
+    assert response.status_code != 500
+    assert "not supported" in response.get_json()["error"].lower()

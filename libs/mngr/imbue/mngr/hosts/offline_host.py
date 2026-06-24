@@ -242,6 +242,30 @@ class BaseHost(HostInterface):
         return self.get_certified_data().build_log
 
 
+# The only host states that are legitimate for a stored stop_reason to encode. The
+# value originates from free-form persisted data (and, for Modal, an HTTP request
+# body), so anything outside this set is treated as a crash rather than trusted.
+_VALID_OFFLINE_STOP_REASON_STATES: frozenset[HostState] = frozenset(
+    {HostState.PAUSED, HostState.STOPPED, HostState.DESTROYED}
+)
+
+
+def _coerce_offline_stop_reason(stop_reason: str) -> HostState:
+    """Map a persisted stop_reason string to a HostState, defending against bad input.
+
+    Only the legitimate offline stop reasons (PAUSED/STOPPED/DESTROYED) pass through.
+    Any unknown or malformed value falls back to CRASHED so that an arbitrary string
+    can never be interpreted as RUNNING/STARTING or raise out of state derivation.
+    """
+    try:
+        state = HostState(stop_reason)
+    except ValueError:
+        return HostState.CRASHED
+    if state not in _VALID_OFFLINE_STOP_REASON_STATES:
+        return HostState.CRASHED
+    return state
+
+
 def derive_offline_host_state(
     certified_data: CertifiedHostData,
     supports_shutdown_hosts: bool,
@@ -268,7 +292,7 @@ def derive_offline_host_state(
         # None means the host crashed (no controlled shutdown recorded).
         if stop_reason is None:
             return HostState.CRASHED
-        return HostState(stop_reason)
+        return _coerce_offline_stop_reason(stop_reason)
 
     # Provider does not support shutdown (e.g. Modal). stop_reason may be
     # unset, so fall through to snapshot-based state derivation.
@@ -281,7 +305,7 @@ def derive_offline_host_state(
     # Has snapshots -- use stop_reason if set, otherwise CRASHED.
     if stop_reason is None:
         return HostState.CRASHED
-    return HostState(stop_reason)
+    return _coerce_offline_stop_reason(stop_reason)
 
 
 class OfflineHost(BaseHost):

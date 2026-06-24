@@ -1,4 +1,4 @@
-{#def agent_ids, agent_accents, mngr_forward_origin, telegram_enabled, telegram_status_by_agent_id, is_discovering, agent_names, destroying_status_by_agent_id, shutdown_capable_agent_ids, mind_liveness_by_agent_id, agent_providers={} #}
+{#def agent_ids, agent_accents, mngr_forward_origin, telegram_enabled, telegram_status_by_agent_id, is_discovering, agent_names, destroying_status_by_agent_id, shutdown_capable_agent_ids, resume_capable_agent_ids=[], mind_liveness_by_agent_id, agent_providers={} #}
 {#
   Landing page: list of accessible workspaces with per-row health, backup,
   and telegram status. Subscribes to the chrome SSE so the page reloads
@@ -14,9 +14,10 @@
     var healthStatusByAgent = {};
 
     // Server-seeded mind container liveness. ``mindLivenessByAgent`` maps agent id
-    // -> 'RUNNING' | 'STOPPED' | 'UNKNOWN'; only shutdown-capable minds (those on a
-    // provider whose host minds can stop/start -- docker/lima today) appear, and
-    // they are the only rows that get Start/Stop controls.
+    // -> 'RUNNING' | 'STOPPED' | 'UNKNOWN'; resume-capable minds (docker/lima/modal)
+    // appear here and get the Start/Resume control. The shutdown-capable subset
+    // (docker/lima) additionally renders a Stop button; modal rows have no Stop
+    // button, so button-toggling code must tolerate its absence.
     var mindLivenessByAgent = {{ mind_liveness_by_agent_id | tojson }};
     // While a Start/Stop the user issued is in flight, the row shows an optimistic
     // transient ('STARTING'/'STOPPING'); this maps agent id -> the target state
@@ -108,8 +109,9 @@
 
     // -- Mind Start / Stop controls --
 
-    // Apply a (possibly transient) liveness label to a shutdown-capable row: swap
-    // which of the Start / Stop buttons is shown and set the status badge.
+    // Apply a (possibly transient) liveness label to a resume-capable row: swap
+    // which of the Start / Stop buttons is shown (modal rows have only a Start /
+    // Resume button) and set the status badge.
     // Transient 'STARTING' / 'STOPPING' are client-only optimistic labels set on
     // click; the authoritative 'RUNNING' / 'STOPPED' / 'UNKNOWN' arrive folded
     // into the ``workspaces`` SSE payload.
@@ -119,6 +121,7 @@
       if (!row) return;
       var startBtn = row.querySelector('.landing-start-btn');
       var stopBtn = row.querySelector('.landing-stop-btn');
+      var resumeRestartBtn = row.querySelector('.landing-resume-restart-btn');
       var badge = row.querySelector('.landing-mind-state-badge');
       var showStart = state === 'STOPPED';
       var showStop = state === 'RUNNING';
@@ -127,6 +130,12 @@
       // so a class-based hide would leave both buttons visible.
       if (startBtn) startBtn.style.display = showStart ? '' : 'none';
       if (stopBtn) stopBtn.style.display = showStop ? '' : 'none';
+      // Resume-only (modal) rows: show the recovery Restart button whenever the
+      // host is not stopped (running/unknown), complementary to Resume, so the row
+      // always exposes a lifecycle control.
+      if (resumeRestartBtn) {
+        resumeRestartBtn.style.display = (state === 'RUNNING' || state === 'UNKNOWN') ? '' : 'none';
+      }
       if (badge) {
         var text = '';
         var tone = 'bg-fill-subtle text-primary';
@@ -540,7 +549,7 @@
           location.reload();
           return;
         }
-        // Same set of rows: apply each shutdown-capable mind's liveness in place
+        // Same set of rows: apply each resume-capable mind's liveness in place
         // (it rides the workspace entry now, not a separate event).
         data.workspaces.forEach(function (w) {
           if (w.liveness) applyAuthoritativeMindLiveness(w.id, w.liveness);
@@ -579,12 +588,17 @@
           {% set goto_href = mngr_forward_origin ~ "/goto/" ~ agent_id ~ "/" %}
           {% set destroying_href = "/destroying/" ~ agent_id %}
           {% set supports_shutdown = (agent_id | string) in shutdown_capable_agent_ids %}
+          {% set supports_resume = (agent_id | string) in resume_capable_agent_ids %}
           {% set mind_state = mind_liveness_by_agent_id.get(agent_id | string, "UNKNOWN") %}
           {# Inline display (not a ``.hidden`` class) controls which control shows:
              the button base class is ``inline-flex`` and would win over ``.hidden``.
              JinjaX evaluates ``:``-prefixed attrs as Python, so precompute here. #}
           {% set start_btn_style = "" if mind_state == "STOPPED" else "display:none" %}
           {% set stop_btn_style = "" if mind_state == "RUNNING" else "display:none" %}
+          {# Resume-only (modal) rows: the recovery Restart button is shown whenever
+             the host is not stopped (running/unknown), complementary to Resume, so
+             the row always has a lifecycle control. #}
+          {% set resume_restart_btn_style = "display:none" if mind_state == "STOPPED" else "" %}
           {% if destroying_status %}
             <Card tag="a" layout="row" interactive
                   extra="accent-spine relative overflow-hidden"
@@ -638,6 +652,29 @@
                         title="Stop mind"
                         aria-label="Stop mind">
                   <Icon16 name="pause" />
+                </Button>
+              {% elif supports_resume %}
+                {# Resume-only (Modal) minds can be started from a snapshot but not
+                   manually stopped (Modal cannot stop host compute), so they get a
+                   Resume button (shown when STOPPED/resumable) instead of a Stop
+                   button. When the host is running or its state is unknown they keep
+                   the recovery Restart button, so the row always has a lifecycle
+                   control. JS toggles which of the two is shown. #}
+                <Button variant="ghost" size="icon"
+                        extra="landing-start-btn"
+                        :style="start_btn_style"
+                        onclick="event.stopPropagation(); window.landingStartClick(this)"
+                        title="Resume mind"
+                        aria-label="Resume mind">
+                  <Icon16 name="play" />
+                </Button>
+                <Button variant="ghost" size="icon"
+                        extra="landing-resume-restart-btn"
+                        :style="resume_restart_btn_style"
+                        onclick="event.stopPropagation(); window.landingRestartClick(this)"
+                        title="Restart workspace"
+                        aria-label="Restart workspace">
+                  <Icon16 name="restart" />
                 </Button>
               {% else %}
                 <Button variant="ghost" size="icon"

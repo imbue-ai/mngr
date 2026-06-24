@@ -1,6 +1,7 @@
 import json
 import os
 import queue
+import shlex
 import subprocess
 from datetime import datetime
 from datetime import timezone
@@ -41,6 +42,7 @@ from imbue.minds.desktop_client.conftest import make_service_log
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.minds.desktop_client.destroying import start_destroy
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
@@ -61,11 +63,15 @@ from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.api.discovery_events import DiscoveryError
+from imbue.mngr.api.discovery_events import make_discovered_provider
+from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.utils.polling import wait_for
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 
@@ -1501,6 +1507,125 @@ def test_resolve_destroying_for_landing_keeps_failed_when_host_still_up(tmp_path
     assert session_store.get_account_for_workspace(str(agent_id)) is not None
 
 
+def _resolver_with_single_workspace_agent(agent_id: AgentId, host_id: HostId) -> MngrCliBackendResolver:
+    """A resolver whose only agent is ``agent_id`` on ``host_id`` (so its host id resolves)."""
+    resolver = MngrCliBackendResolver()
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(agent_id,),
+            discovered_agents=(
+                DiscoveredAgent(
+                    host_id=host_id,
+                    agent_id=agent_id,
+                    agent_name=AgentName("ws-agent"),
+                    provider_name=ProviderInstanceName("docker"),
+                    certified_data={"labels": {"workspace": "ws", "is_primary": "true"}},
+                ),
+            ),
+        )
+    )
+    return resolver
+
+
+def test_destroy_agent_api_passes_mngr_host_dir_to_subprocess(tmp_path: Path) -> None:
+    """The detached destroy subprocess must carry MNGR_HOST_DIR in its env.
+
+    Every other minds->mngr shell-out exports MNGR_HOST_DIR so it targets the
+    user's host dir; the destroy path used to omit it, silently targeting the
+    default host dir and finding nothing to tear down. A fake ``mngr`` records its
+    ``$MNGR_HOST_DIR`` on the ``list`` subcommand so we can assert it was set.
+    """
+    agent_id = AgentId.generate()
+    host_id = HostId.generate()
+    resolver = _resolver_with_single_workspace_agent(agent_id, host_id)
+
+    host_dir = tmp_path / "host-dir"
+    host_dir.mkdir()
+    recorded_env_path = tmp_path / "recorded_host_dir.txt"
+    # The destroy command runs ``mngr list ... | mngr destroy -f -``; record the
+    # env on the ``list`` subcommand. Exit clean so the pipeline does not error.
+    fake_mngr = tmp_path / "fake_mngr"
+    fake_mngr.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        f'  list) printf "%s" "$MNGR_HOST_DIR" > {shlex.quote(str(recorded_env_path))} ;;\n'
+        "esac\n"
+        "exit 0\n"
+    )
+    fake_mngr.chmod(0o755)
+
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=resolver,
+        http_client=None,
+        paths=WorkspacePaths(data_dir=tmp_path / "data"),
+        mngr_binary=str(fake_mngr),
+        mngr_host_dir=host_dir,
+    )
+    client = app.test_client()
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.post(f"/api/destroy-agent/{agent_id}")
+    assert response.status_code == 202
+
+    # The destroy subprocess is detached; poll for the recorded env file.
+    wait_for(
+        lambda: recorded_env_path.exists() and bool(recorded_env_path.read_text()),
+        timeout=10.0,
+        error_message="fake mngr was never invoked by the detached destroy",
+    )
+    assert recorded_env_path.read_text() == str(host_dir)
+
+
+def test_destroying_status_api_includes_started_at(tmp_path: Path) -> None:
+    """GET /api/destroying/<id>/status must carry ``started_at``.
+
+    The destroying page's slow-destroy escape hatch (revealing Dismiss once a still-
+    "running" destroy has been spinning past a threshold) depends entirely on this
+    field; a refactor that dropped it would silently re-trap users on a hung destroy
+    with no failing test. This guards the endpoint's JSON contract.
+    """
+    agent_id = AgentId.generate()
+    host_id = HostId.generate()
+    resolver = _resolver_with_single_workspace_agent(agent_id, host_id)
+
+    fake_mngr = tmp_path / "fake_mngr"
+    fake_mngr.write_text("#!/bin/sh\nexit 0\n")
+    fake_mngr.chmod(0o755)
+
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    paths = WorkspacePaths(data_dir=tmp_path / "data")
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=resolver,
+        http_client=None,
+        paths=paths,
+        mngr_binary=str(fake_mngr),
+        mngr_host_dir=tmp_path / "host-dir",
+    )
+    client = app.test_client()
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    # Create a destroying marker synchronously in the same dir the status endpoint
+    # reads (read_destroying returns the record -- with started_at from the dir mtime
+    # -- whenever the marker exists, regardless of the subprocess's final state).
+    start_destroy(
+        agent_id,
+        paths,
+        host_id=host_id,
+        env={"PATH": os.environ.get("PATH", "")},
+        mngr_binary=str(fake_mngr),
+    )
+
+    response = client.get(f"/api/destroying/{agent_id}/status")
+    assert response.status_code == 200
+    body = response.get_json()
+    assert "started_at" in body, "destroy-status must include started_at (the slow-destroy escape depends on it)"
+    # It must parse as an ISO-8601 timestamp.
+    datetime.fromisoformat(body["started_at"])
+
+
 class _AllAgentsKnownStaticResolver(StaticBackendResolver):
     """Reports every queried agent as a known, host-resolvable agent.
 
@@ -2122,6 +2247,91 @@ def test_classify_host_health_ambiguous_state_is_neither() -> None:
     assert _classify_host_health_compat("not json", aid) == {"reachable": False, "host_offline": False}
 
 
+def _resolver_with_provider_backed_system_services(
+    workspace_agent: AgentId, services_agent: AgentId, backend: str
+) -> MngrCliBackendResolver:
+    """Resolver where workspace + system-services share a host on a registered provider.
+
+    The provider instance is registered so the provider-name -> backend mapping
+    resolves to ``backend`` (e.g. 'modal' or 'docker').
+    """
+    host_id = HostId.generate()
+    resolver = MngrCliBackendResolver()
+    resolver.update_providers(
+        providers=(
+            make_discovered_provider(
+                ProviderInstanceName(backend),
+                ProviderInstanceConfig(backend=ProviderBackendName(backend), is_enabled=True),
+            ),
+        ),
+        error_by_provider_name={},
+        last_full_snapshot_at=datetime.now(timezone.utc),
+    )
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(workspace_agent, services_agent),
+            discovered_agents=(
+                DiscoveredAgent(
+                    host_id=host_id,
+                    agent_id=workspace_agent,
+                    agent_name=AgentName("my-claude-agent"),
+                    provider_name=ProviderInstanceName(backend),
+                ),
+                DiscoveredAgent(
+                    host_id=host_id,
+                    agent_id=services_agent,
+                    agent_name=AgentName("system-services"),
+                    provider_name=ProviderInstanceName(backend),
+                ),
+            ),
+        )
+    )
+    return resolver
+
+
+def _host_health_via_endpoint(tmp_path: Path, resolver: MngrCliBackendResolver, workspace_agent: AgentId) -> dict:
+    """Drive the host-health endpoint with a real concurrency group + a stub mngr, return the JSON.
+
+    The stub mngr exits clean with no useful stdout, so the probe degrades to an
+    UNKNOWN/host_unresponsive shape -- we only assert on the backend-derived
+    ``is_auto_restart_suppressed`` flag, which does not depend on the probe data.
+    """
+    mngr_binary = _write_fake_mngr(tmp_path)
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    with ConcurrencyGroup(name="test-host-health") as cg:
+        app = create_desktop_client(
+            auth_store=auth_store,
+            backend_resolver=resolver,
+            http_client=None,
+            mngr_binary=mngr_binary,
+            mngr_host_dir=tmp_path,
+            root_concurrency_group=cg,
+        )
+        client = app.test_client()
+        _authenticate_client(client=client, auth_store=auth_store)
+        response = client.get(f"/api/agents/{workspace_agent}/host-health")
+    assert response.status_code == 200
+    return response.get_json()
+
+
+def test_host_health_is_auto_restart_suppressed_true_for_modal(tmp_path: Path) -> None:
+    """A Modal (resume-only) agent's host-health response suppresses auto-restart."""
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver = _resolver_with_provider_backed_system_services(workspace_agent, services_agent, "modal")
+    body = _host_health_via_endpoint(tmp_path, resolver, workspace_agent)
+    assert body["is_auto_restart_suppressed"] is True
+
+
+def test_host_health_is_auto_restart_suppressed_false_for_docker(tmp_path: Path) -> None:
+    """A docker (shutdown-capable) agent keeps auto-restart -- the flag is False."""
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver = _resolver_with_provider_backed_system_services(workspace_agent, services_agent, "docker")
+    body = _host_health_via_endpoint(tmp_path, resolver, workspace_agent)
+    assert body["is_auto_restart_suppressed"] is False
+
+
 def test_recovery_page_requires_authentication(tmp_path: Path) -> None:
     client, _, agent_id = _setup_test_server(tmp_path)
     response = client.get(f"/agents/{agent_id}/recovery", follow_redirects=False)
@@ -2511,22 +2721,73 @@ def test_sharing_readiness_requires_authentication(tmp_path: Path) -> None:
 # -- restart sequence (background worker) tests --
 
 
-def _write_fake_mngr(tmp_path: Path, stop_exit: int = 0, start_exit: int = 0) -> str:
+def _write_fake_mngr(tmp_path: Path, stop_exit: int = 0, start_exit: int = 0, start_stderr: str = "") -> str:
     """Write an executable stub that stands in for the ``mngr`` binary.
 
     Exits per-subcommand so a test can simulate a failing stop or start
     without a real mngr / provider. Every invocation appends its argv to a
     ``<script>.log`` sibling file so a test can assert which subcommands ran
-    (e.g. that the stop step was skipped).
+    (e.g. that the stop step was skipped). ``start_stderr`` is emitted on the
+    ``start`` subcommand's stderr, so a test can simulate the error signal a real
+    provider would surface (e.g. ``NoResumableSnapshotModalMngrError``).
     """
     script = tmp_path / "fake_mngr"
+    start_stderr_line = f'echo {shlex.quote(start_stderr)} >&2; ' if start_stderr else ""
     script.write_text(
         "#!/bin/sh\n"
         'echo "$@" >> "$0.log"\n'
-        f'case "$1" in\n  stop) exit {stop_exit} ;;\n  start) exit {start_exit} ;;\n  *) exit 0 ;;\nesac\n'
+        "case \"$1\" in\n"
+        f"  stop) exit {stop_exit} ;;\n"
+        f"  start) {start_stderr_line}exit {start_exit} ;;\n"
+        "  *) exit 0 ;;\n"
+        "esac\n"
     )
     script.chmod(0o755)
     return str(script)
+
+
+def _resolver_with_modal_system_services(
+    workspace_agent: AgentId, services_agent: AgentId
+) -> MngrCliBackendResolver:
+    """Build a resolver where workspace + system-services agents share a Modal host.
+
+    Modal is resume-capable but not shutdown-capable, so it exercises the
+    recovery-restart stop-skip and the auto-restart-suppression predicate. The
+    ``modal`` provider is registered so the provider-name -> backend mapping
+    resolves to ``modal``.
+    """
+    host_id = HostId.generate()
+    resolver = MngrCliBackendResolver()
+    resolver.update_providers(
+        providers=(
+            make_discovered_provider(
+                ProviderInstanceName("modal"),
+                ProviderInstanceConfig(backend=ProviderBackendName("modal"), is_enabled=True),
+            ),
+        ),
+        error_by_provider_name={},
+        last_full_snapshot_at=datetime.now(timezone.utc),
+    )
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(workspace_agent, services_agent),
+            discovered_agents=(
+                DiscoveredAgent(
+                    host_id=host_id,
+                    agent_id=workspace_agent,
+                    agent_name=AgentName("my-claude-agent"),
+                    provider_name=ProviderInstanceName("modal"),
+                ),
+                DiscoveredAgent(
+                    host_id=host_id,
+                    agent_id=services_agent,
+                    agent_name=AgentName("system-services"),
+                    provider_name=ProviderInstanceName("modal"),
+                ),
+            ),
+        )
+    )
+    return resolver
 
 
 def _read_fake_mngr_invocations(mngr_binary: str) -> list[str]:
@@ -2724,6 +2985,84 @@ def test_run_restart_sequence_stops_before_start_by_default(tmp_path: Path) -> N
     assert stop_index is not None, invocations
     assert start_index is not None, invocations
     assert stop_index < start_index
+
+
+def test_run_restart_sequence_skips_stop_for_modal_host_restart(tmp_path: Path) -> None:
+    """A Modal (resume-only) host restart goes straight to ``mngr start`` -- no stop step.
+
+    Modal cannot stop host compute (``mngr stop --stop-host`` raises
+    HostShutdownNotSupportedError), so the manual host restart must skip the stop
+    step and let ``mngr start`` terminate+resume from a snapshot.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    tracker.mark_restarting(workspace_agent)
+    resolver = _resolver_with_modal_system_services(workspace_agent, services_agent)
+    mngr_binary = _write_fake_mngr(tmp_path)
+
+    with ConcurrencyGroup(name="test-restart") as cg:
+        _run_restart_sequence(
+            workspace_agent_id=workspace_agent,
+            is_host_restart=True,
+            tracker=tracker,
+            backend_resolver=resolver,
+            mngr_binary=mngr_binary,
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            mngr_forward_port=0,
+            mngr_forward_preauth_cookie=None,
+        )
+
+    assert tracker.get_health(workspace_agent) == AgentHealth.HEALTHY
+    invocations = _read_fake_mngr_invocations(mngr_binary)
+    assert any(line.startswith("start ") for line in invocations)
+    # The stop step is skipped for a resume-only provider, even without skip_stop.
+    assert not any(line.startswith("stop ") for line in invocations)
+
+
+def test_run_restart_sequence_recreate_reason_on_no_resumable_snapshot(tmp_path: Path) -> None:
+    """A ``mngr start`` that fails with NoResumableSnapshotModalMngrError yields a recreate reason.
+
+    The host has only its initial snapshot, so a restart can never recover it; the
+    restart-failed reason must steer the user to recreate the workspace rather than
+    surface a generic start failure.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    tracker.mark_restarting(workspace_agent)
+    resolver = _resolver_with_modal_system_services(workspace_agent, services_agent)
+    # Inject the ACTUAL human-formatted message that ``mngr start`` emits under
+    # ``--quiet`` (the exception class name is never in human output) so this test
+    # exercises the real producer/consumer substring, not a fabricated signal.
+    mngr_binary = _write_fake_mngr(
+        tmp_path,
+        start_exit=1,
+        start_stderr=(
+            "Error: Modal sandbox host-abc123 has only its initial snapshot and no resumable "
+            "workspace state. Recreate the workspace instead of restarting it."
+        ),
+    )
+
+    with ConcurrencyGroup(name="test-restart") as cg:
+        _run_restart_sequence(
+            workspace_agent_id=workspace_agent,
+            is_host_restart=True,
+            tracker=tracker,
+            backend_resolver=resolver,
+            mngr_binary=mngr_binary,
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            mngr_forward_port=0,
+            mngr_forward_preauth_cookie=None,
+        )
+
+    assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
+    reason = tracker.get_last_restart_error(workspace_agent) or ""
+    assert "recreate" in reason.lower()
+    # The generic "Start step ... failed" phrasing is replaced by the actionable reason.
+    assert "Start step" not in reason
 
 
 def test_restart_host_api_requires_authentication(tmp_path: Path) -> None:
