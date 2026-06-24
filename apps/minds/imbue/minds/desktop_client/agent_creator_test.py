@@ -1093,11 +1093,11 @@ def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_
 
 
 # Flaky under heavy offload load: the setup spins up fresh ConcurrencyGroups and a
-# recording http-server fixture, so the creation can take longer than the 10s
-# default budget of `_wait_until_finished` (an internal completion assertion -- not
-# the pytest timeout that @pytest.mark.timeout(30) already covers). Give it the same
-# 20s internal budget as the local-compute sibling above, under the 30s pytest
-# timeout, and keep a flaky mark so offload retries if a contended sandbox overruns.
+# recording http-server fixture, which can be slow when offload sandboxes are
+# contended. @pytest.mark.timeout(30) raises the pytest kill-timer above the global
+# 10s default, _wait_until_finished uses its 30s default poll deadline (a true-hang
+# ceiling a passing test never waits for), and @pytest.mark.flaky lets offload retry
+# a contended sandbox.
 @pytest.mark.timeout(30)
 @pytest.mark.flaky
 def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> None:
@@ -1116,15 +1116,15 @@ def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> 
         ai_provider=AIProvider.API_KEY,
         anthropic_api_key="sk-ant-user-supplied",
     )
-    _wait_until_finished(creator, creation_id, deadline_seconds=20.0)
+    _wait_until_finished(creator, creation_id)
 
     assert cli.create_calls == []
 
 
-# Same flake as its API_KEY twin above: the creation work can exceed the 10s default
-# budget of `_wait_until_finished` (an internal completion assertion, not the pytest
-# timeout). Use the same 20s internal budget under the 30s pytest timeout, and keep a
-# flaky mark as a retry backstop.
+# Same flake as its API_KEY twin above: the creation setup can be slow under heavy
+# offload contention. @pytest.mark.timeout(30) covers the pytest kill-timer above the
+# global 10s default, _wait_until_finished keeps its 30s default poll deadline, and the
+# flaky mark is a retry backstop.
 @pytest.mark.timeout(30)
 @pytest.mark.flaky
 def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path) -> None:
@@ -1142,7 +1142,7 @@ def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path
         launch_mode=LaunchMode.DOCKER,
         ai_provider=AIProvider.SUBSCRIPTION,
     )
-    _wait_until_finished(creator, creation_id, deadline_seconds=20.0)
+    _wait_until_finished(creator, creation_id)
 
     assert cli.create_calls == []
 
