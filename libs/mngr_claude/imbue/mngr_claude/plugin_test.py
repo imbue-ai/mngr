@@ -614,7 +614,7 @@ def test_claude_agent_assemble_command_sets_is_sandbox_for_remote_host(
     sid_export = _sid_export_for(uuid)
     # Remote hosts SHOULD have IS_SANDBOX set
     assert command == CommandString(
-        f'{background_cmd} export IS_SANDBOX=1 && {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" ) || claude --session-id {uuid}'
+        f'{background_cmd} export IS_SANDBOX=1 && {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" ) || claude --session-id {uuid}'
     )
 
 
@@ -3948,7 +3948,7 @@ def test_on_after_provisioning_adopts_session_by_id(
     assert dest_memory_file.read_text() == "# Memory\n"
 
     # Regression: verify the session file is discoverable the same way Claude Code
-    # finds it at runtime: `find "$CLAUDE_CONFIG_DIR" -name "$SESSION_ID.jsonl"`.
+    # finds it at runtime: `find "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" -name "$SESSION_ID.jsonl"`.
     claude_config_dir = agent.get_claude_config_dir()
     matches = list(claude_config_dir.rglob(target_session_id + ".jsonl"))
     assert len(matches) == 1, (
@@ -5765,10 +5765,10 @@ def test_modify_env_vars_sets_shared_claude_config_dir_in_shared_mode(
     temp_mngr_ctx: MngrContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """In shared mode, modify_env_vars sets CLAUDE_CONFIG_DIR to the user's shared dir
-    (so the launch command's session-file lookup does not see an empty $CLAUDE_CONFIG_DIR),
-    but does NOT set ORIGINAL_CLAUDE_CONFIG_DIR or force DISABLE_AUTOUPDATER (it leaves the
-    user's claude environment otherwise alone)."""
+    """In shared mode, when the user's own shell already exported CLAUDE_CONFIG_DIR,
+    modify_env_vars propagates that value (their .claude.json already lives inside it,
+    so sharing stays consistent) but does NOT set ORIGINAL_CLAUDE_CONFIG_DIR or force
+    DISABLE_AUTOUPDATER (it leaves the user's claude environment otherwise alone)."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     shared = tmp_path / "shared"
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(shared))
@@ -5784,6 +5784,34 @@ def test_modify_env_vars_sets_shared_claude_config_dir_in_shared_mode(
 
     # CLAUDE_CONFIG_DIR points at the shared dir so claude reads the user's real config.
     assert env_vars == {"CLAUDE_CONFIG_DIR": str(shared)}
+
+
+def test_modify_env_vars_does_not_set_config_dir_in_shared_mode_when_env_unset(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In shared mode with $CLAUDE_CONFIG_DIR unset in the user's shell, modify_env_vars
+    must NOT export CLAUDE_CONFIG_DIR. Exporting it -- even to claude's own ~/.claude
+    default -- would relocate claude's global .claude.json lookup from ~/.claude.json
+    to ~/.claude/.claude.json (an inner stub lacking the user's onboarding state),
+    re-triggering the theme/onboarding screen on every shared-mode agent. The launch
+    command's session-file lookup falls back to $HOME/.claude on its own."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False),
+    )
+    env_vars: dict[str, str] = {}
+
+    agent.modify_env_vars(host, env_vars)
+
+    assert "CLAUDE_CONFIG_DIR" not in env_vars
+    assert "ORIGINAL_CLAUDE_CONFIG_DIR" not in env_vars
 
 
 def test_modify_env_vars_disables_autoupdater_when_policy_never(
