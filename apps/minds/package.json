@@ -14,7 +14,6 @@
     "watch:css": "tailwindcss -i imbue/minds/desktop_client/static/app.css -o imbue/minds/desktop_client/static/app.min.css --watch",
     "dist": "pnpm build && pnpm exec todesktop build",
     "todesktop:beforeInstall": "./scripts/download-binaries.js",
-    "postinstall": "pnpm run build:css",
     "test:e2e": "playwright test --config=test/e2e/playwright.config.js"
   },
   "dependencies": {
