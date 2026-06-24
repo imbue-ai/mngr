@@ -43,6 +43,8 @@ from imbue.minds.desktop_client.conftest import make_service_log
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
+from imbue.minds.desktop_client.discovery_health import ProducerRemediator
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
@@ -1409,6 +1411,65 @@ def test_chrome_events_sse_returns_workspaces_when_authenticated(tmp_path: Path)
     workspaces = _build_workspace_list(backend_resolver)
     assert len(workspaces) == 1
     assert workspaces[0]["id"] == str(agent_id)
+
+
+class _NoopRemediator(ProducerRemediator):
+    """A producer remediator whose remediations do nothing (the BLOCKED path never calls them)."""
+
+    def bounce(self) -> None:
+        pass
+
+    def restart(self) -> None:
+        pass
+
+
+def test_chrome_events_sse_emits_discovery_health_blocked_on_connect(tmp_path: Path) -> None:
+    """A BLOCKED watchdog makes the chrome SSE emit a discovery_health payload on connect.
+
+    The connect-time batch is emitted before the generator's wait loop, so
+    pre-setting the shutdown event lets the (otherwise infinite) stream finish
+    after that batch and keeps the test client from blocking.
+    """
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    watchdog = DiscoveryHealthWatchdog(remediator=_NoopRemediator())
+    # Force the terminal BLOCKED tier so the connect-time batch surfaces it.
+    watchdog.record_consumer_death()
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        http_client=None,
+        discovery_health_watchdog=watchdog,
+    )
+    # End the stream right after its connect-time batch so the client doesn't block.
+    get_state(app).shutdown_event.set()
+    client = app.test_client()
+    _authenticate_client(client, auth_store)
+
+    response = client.get("/_chrome/events")
+
+    assert response.status_code == 200
+    assert '"type": "discovery_health"' in response.text
+    assert '"state": "blocked"' in response.text
+
+
+def test_chrome_events_sse_omits_discovery_health_when_healthy(tmp_path: Path) -> None:
+    """A HEALTHY watchdog surfaces nothing -- the RECONNECTING/healthy tiers are silent."""
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    watchdog = DiscoveryHealthWatchdog(remediator=_NoopRemediator())
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        http_client=None,
+        discovery_health_watchdog=watchdog,
+    )
+    get_state(app).shutdown_event.set()
+    client = app.test_client()
+    _authenticate_client(client, auth_store)
+
+    response = client.get("/_chrome/events")
+
+    assert response.status_code == 200
+    assert "discovery_health" not in response.text
 
 
 def test_destroying_agent_ids_returns_ids_with_live_destroy(tmp_path: Path) -> None:
