@@ -620,7 +620,7 @@ def _proc_create_time() -> float | None:
         with open("/proc/uptime") as fh:
             uptime = float(fh.read().split()[0])
         return (time.time() - uptime) + starttime_ticks / os.sysconf("SC_CLK_TCK")
-    except Exception:
+    except (OSError, ValueError, IndexError):
         return None
 
 
@@ -642,9 +642,7 @@ def _emit_phase_timing() -> None:
     now = time.time()
     record = {
         "n_collected": _PHASE_TIMING.get("n_collected"),
-        "phase1_startup_s": round(sessionstart - proc_create, 3)
-        if (proc_create and sessionstart)
-        else None,
+        "phase1_startup_s": round(sessionstart - proc_create, 3) if (proc_create and sessionstart) else None,
         "phase2_collection_s": round(collection_done - sessionstart, 3)
         if (sessionstart and collection_done)
         else None,
@@ -652,7 +650,7 @@ def _emit_phase_timing() -> None:
     }
     try:
         _generate_output_filename("phase_timing", ".json").write_text(json.dumps(record))
-    except Exception:
+    except OSError:
         pass
 
 
