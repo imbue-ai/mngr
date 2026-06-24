@@ -27,7 +27,68 @@ provider = "modal"
 build_arg = ["file=libs/mngr/imbue/mngr/resources/Dockerfile", "context-dir=.mngr/dev/build/", "volume=code-review-json:/code_reviews"]
 extra_window = ["github_setup='ssh-keyscan github.com >> ~/.ssh/known_hosts && git remote set-url origin https://github.com/imbue-ai/mngr.git && gh auth setup-git'"]
 agent_args = ["--dangerously-skip-permissions"]
-pass_env = ["GH_TOKEN"]
+pass_env__extend = ["GH_TOKEN"]
+pass_host_env = ["EDITOR"]
+target_path = "/code/mngr"
+
+# Run an agent on this repo on an AWS EC2 host. Differs from modal because the VPS backend
+# resolves `--file=` inside the uploaded context, so modal's `.mngr/dev/build/` keyframe
+# tarball can't be used: the context is `.`, which the mngr_vps_docker build flow clones +
+# overlays with uncommitted changes and the Dockerfile's `COPY . /code/mngr/` consumes. The
+# image builds on depot's remote builders (builder=DEPOT on [providers.aws] below).
+#
+# Requires DEPOT_TOKEN (forwarded to the remote depot build) and GH_TOKEN (git/gh in the
+# container) exported at `mngr create -t aws` time.
+[create_templates.aws]
+provider = "aws"
+build_arg = ["--file=libs/mngr/imbue/mngr/resources/Dockerfile", "."]
+extra_window = ["github_setup='ssh-keyscan github.com >> ~/.ssh/known_hosts && git remote set-url origin https://github.com/imbue-ai/mngr.git && gh auth setup-git'"]
+agent_args = ["--dangerously-skip-permissions"]
+pass_env__extend = ["GH_TOKEN"]
+pass_host_env = ["EDITOR"]
+target_path = "/code/mngr"
+
+# `mngr create <name> -t azure` -> launch on Azure with a VM size that has
+# capacity in westus (B-series is currently NotAvailableForSubscription there);
+# switch back to Standard_B2s once B-series frees up. The subscription auto-resolves
+# from `az` (no config needed).
+#
+# Like `gcp` below (and unlike modal), azure builds the project Dockerfile through the
+# shared `mngr_vps_docker` backend, which resolves `--file=` inside the uploaded context,
+# so the context is `.` (the worktree -- the build flow clones + overlays uncommitted
+# changes and the Dockerfile's `COPY . /code/mngr/` consumes it) rather than modal's
+# `.mngr/dev/build/` keyframe tarball. This is what gets gh + the full mngr toolchain onto
+# the agent. The image builds on depot's remote builders (builder=DEPOT on
+# [providers.azure] below). Requires DEPOT_TOKEN (forwarded to the remote depot build) and
+# GH_TOKEN (git/gh in the container) exported at `mngr create -t azure` time.
+[create_templates.azure]
+provider = "azure"
+build_arg = ["--azure-vm-size=Standard_D2s_v3", "--file=libs/mngr/imbue/mngr/resources/Dockerfile", "."]
+extra_window = ["github_setup='ssh-keyscan github.com >> ~/.ssh/known_hosts && git remote set-url origin https://github.com/imbue-ai/mngr.git && gh auth setup-git'"]
+agent_args = ["--dangerously-skip-permissions"]
+pass_env__extend = ["GH_TOKEN"]
+pass_host_env = ["EDITOR"]
+target_path = "/code/mngr"
+
+# Run an agent on this repo on a Google Compute Engine VM (the analogue of the `modal`
+# template above). Like aws -- and unlike modal -- it builds through the shared
+# `mngr_vps_docker` backend, which resolves `--file=` inside the uploaded context, so the
+# context is `.` (the worktree) rather than modal's `.mngr/dev/build/` keyframe tarball:
+# the build flow clones + overlays uncommitted changes and the Dockerfile's
+# `COPY . /code/mngr/` consumes it. The image builds on depot's remote builders
+# (builder=DEPOT on [providers.gcp] below).
+#
+# Prerequisite: the SSH firewall rule is created once per project by an operator via
+# `mngr gcp prepare --allowed-ssh-cidr <cidr>` (privileged); `mngr create -t gcp` then only
+# resolves it read-only and errors with a pointer back to `prepare` if it is missing.
+# Requires DEPOT_TOKEN (forwarded to the remote depot build) and GH_TOKEN (git/gh in the
+# container) exported at `mngr create -t gcp` time.
+[create_templates.gcp]
+provider = "gcp"
+build_arg = ["--file=libs/mngr/imbue/mngr/resources/Dockerfile", "."]
+extra_window = ["github_setup='ssh-keyscan github.com >> ~/.ssh/known_hosts && git remote set-url origin https://github.com/imbue-ai/mngr.git && gh auth setup-git'"]
+agent_args = ["--dangerously-skip-permissions"]
+pass_env__extend = ["GH_TOKEN"]
 pass_host_env = ["EDITOR"]
 target_path = "/code/mngr"
 
@@ -45,8 +106,46 @@ default_memory = 8
 default_idle_timeout = 600
 default_sandbox_timeout = 7200
 
+# Build the agent image on depot's cached remote builders (like gcp), so creates after
+# the first reuse cached layers instead of building cold. Requires DEPOT_TOKEN at create
+# time (read from the create shell, not pass_env); depot.json in the repo supplies the
+# project id. Drop this block to fall back to a plain native `docker build` on the VM.
+[providers.azure]
+builder = "DEPOT"
+
+# Shared GCP config consumed by the `gcp` create-template above.
+[providers.gcp]
+backend = "gcp"
+default_region = "us-west1"
+# GCE VMs are zonal; the chosen zone must lie in default_region.
+default_zone = "us-west1-a"
+# 2 vCPU / 8 GB. The image build runs on depot's remote builders (builder below), so the
+# instance only needs to comfortably run the agent -- but the e2-small default's 2 GB is
+# too tight for that, so bump to e2-standard-2 (the parity of aws's t3.large).
+default_machine_type = "e2-standard-2"
+# Build on depot's cached remote builders. Requires DEPOT_TOKEN at create time; depot.json
+# in the repo supplies the project id.
+builder = "DEPOT"
+
+# Shared AWS config consumed by the `aws` create-template above.
+[providers.aws]
+backend = "aws"
+# us-west-2 (Oregon): has a pinned default Debian 12 AMI; no region is set in ~/.aws.
+default_region = "us-west-2"
+# 2 vCPU / 8 GB. The image build runs on depot's remote builders (builder below), so the
+# instance only needs to comfortably run the agent.
+default_instance_type = "t3.large"
+# Wall-clock safety net: cloud-init halts + terminates the instance after 2h, mirroring
+# the modal sandbox cap above. Guards against a forgotten host accruing EC2 cost.
+auto_shutdown_seconds = 7200
+# Build on depot's cached remote builders. Requires DEPOT_TOKEN at create time; depot.json
+# in the repo supplies the project id.
+builder = "DEPOT"
+
 [plugins.forward]
 enabled = true
 
+# This plugin is now disabled by default (it is opt-in; see its README), so
+# this is redundant -- kept explicit to document that we want it off here.
 [plugins.claude_subagent_proxy]
 enabled = false

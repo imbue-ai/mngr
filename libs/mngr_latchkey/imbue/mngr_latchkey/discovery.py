@@ -162,7 +162,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
         try:
             host_side_port = self.latchkey.start_gateway(self.concurrency_group)
         except LatchkeyError as e:
-            logger.warning("Failed to start shared Latchkey gateway for agent {}: {}", agent_id, e)
+            logger.opt(exception=e).error("Failed to start shared Latchkey gateway for agent {}: {}", agent_id, e)
             return
 
         if ssh_info is None:
@@ -175,7 +175,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
         agent_id_str = str(agent_id)
         with self._pending_lock:
             if agent_id_str in self._pending_remote_agents:
-                logger.debug("Latchkey tunnel setup already in flight for agent {}; skipping duplicate fire", agent_id)
+                # Latchkey tunnel setup already in flight; skipping duplicate fire.
                 return
             self._pending_remote_agents.add(agent_id_str)
         try:
@@ -250,7 +250,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 agent_id=str(agent_id),
             )
         except (SSHTunnelError, OSError, paramiko.SSHException) as e:
-            logger.warning(
+            logger.opt(exception=e).error(
                 "Failed to set up desktop-side Latchkey reachability for agent {} (host-side port {}): {}",
                 agent_id,
                 host_side_port,
@@ -287,7 +287,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 # Already provisioned this host this supervisor lifetime; skip the
                 # expensive idempotent re-run that every discovery cycle would
                 # otherwise trigger. A supervisor restart re-provisions.
-                logger.debug(
+                logger.trace(
                     "VPS-resident gateway already provisioned for host {} this session; "
                     "skipping re-provision for agent {}",
                     host_id,
@@ -301,7 +301,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 # redundant and would race the first on the same VPS files;
                 # coalesce it away. A later discovery fire re-runs once the
                 # in-flight pass clears the flag.
-                logger.debug(
+                logger.trace(
                     "VPS-resident gateway provisioning already in flight for host {}; coalescing agent {}",
                     host_id,
                     agent_id,
@@ -321,7 +321,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
             # coalesced away forever.
             with self._remote_hosts_lock:
                 self._provisioning_hosts.discard(host_id_str)
-            logger.warning(
+            logger.opt(exception=e).error(
                 "Failed to dispatch VPS-resident Latchkey gateway provisioning for agent {}: {}",
                 agent_id,
                 e,
@@ -368,7 +368,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
             with provider.outer_host_for(host_id) as outer:
                 if outer is None:
                     # Raced: the outer host vanished between the cheap check and now.
-                    logger.warning(
+                    logger.info(
                         "Outer host for agent {} (host {}) vanished before provisioning; skipping",
                         agent_id,
                         host_id,
@@ -377,7 +377,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 if outer.is_local:
                     # The outer is this very machine (e.g. a local docker daemon),
                     # not a remote VPS -- nothing to provision and nothing to sync.
-                    logger.debug(
+                    logger.trace(
                         "Outer host for agent {} (host {}) is local; skipping VPS gateway provisioning",
                         agent_id,
                         host_id,
@@ -543,7 +543,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 self._remote_host_provider_by_id.pop(host_id_str, None)
             logger.debug("Remote host {} no longer exists; dropped from latchkey sync", host_id_str)
         except (RemoteGatewayError, MngrError, OSError, paramiko.SSHException) as e:
-            logger.warning("Failed to sync latchkey state to remote host {}: {}", host_id_str, e)
+            logger.opt(exception=e).error("Failed to sync latchkey state to remote host {}: {}", host_id_str, e)
 
 
 class LatchkeyDestructionHandler(FrozenModel):

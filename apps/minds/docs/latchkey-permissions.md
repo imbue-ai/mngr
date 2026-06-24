@@ -25,7 +25,7 @@ and how the agent receives the answer.
    service name and a one-paragraph rationale, then ends its turn and goes
    idle.
 4. **Desktop notifies the user.** The desktop client tails the agent's
-   request events file via `mngr events --follow`, adds a card to the
+   request events file via `mngr event --follow`, adds a card to the
    inbox drawer, and surfaces a notification.
 5. **User opens the dialog.** Clicking the card opens
    `/inbox?selected=<event_id>` in a **modal overlay** over the current

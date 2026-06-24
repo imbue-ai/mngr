@@ -6,6 +6,65 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.8] - 2026-06-18
+
+### Added
+
+- Added: Session adoption — `mngr create antigravity --adopt <id>` (or absolute store path) makes a newly created agent resume an existing agy conversation. The conversation is resolved across the user-native agy store, every live local mngr antigravity agent, and every preserved (destroyed) antigravity agent; ambiguous ids are rejected. `--adopt-session` is accepted as an alias. The flag is repeatable (each conversation coexists in the new agent's switcher; the last value is resumed) and may be combined with `--from` (the clone's conversation is the one resumed).
+- Added: `--from <agent>` cloning now carries the source agy conversation forward — the clone transfers the source's agy conversation store and resumes its root conversation. If the source has no resumable conversation, the clone warns and starts fresh rather than failing.
+- Added: `AntigravityAgent` declares the new capability mixins (`HasSessionPreservationMixin`, `HasUnattendedModeMixin`, `HasPermissionPolicyMixin`, `HasAutoInstallMixin`, `CliBackedAgentMixin`), so these capabilities are code-detectable in the agent capability matrix.
+- Added: Auto-install of the `agy` CLI — provisioning installs it (`curl -fsSL https://antigravity.google/cli/install.sh | bash`) when missing, gated by consent on local hosts and the remote-install config flag on remote hosts. New `check_installation` config field (default `True`) disables the check.
+
+### Changed
+
+- Changed: The antigravity common-transcript converter now emits `finish_reason` instead of `stop_reason` on assistant records (aligning with the OpenTelemetry GenAI vocabulary) and a `parts[]` array. antigravity's native format records text and tool calls separately with no relative ordering, so `parts[]` is a best-effort order and `parts_ordered` is false.
+
+### Fixed
+
+- Fixed: antigravity TUI-readiness detection for agy 1.0.9 (which removed the "? for shortcuts" footer hint mngr polled). `mngr message` / `create --message` no longer time out with "Timeout waiting for TUI to be ready" even though agy is up. The readiness signal now matches the input box itself (rule, `>`, rule) via a regex.
+
+## [v0.1.7] - 2026-06-16
+
+### Added
+
+- Added: agy (antigravity) agents now preserve transcripts (raw + common) and conversation-id history on destroy, mirroring the claude plugin. New `preserve_on_destroy` config option (default `true`) — copied to `<local_host_dir>/preserved/<agent-name>--<agent-id>/`. Works for both online destroys and offline host destruction. agy's native resumable conversation store (`plugin/antigravity/home/.gemini/antigravity-cli/conversations/`) is preserved too, so the agent can be resumed or adopted. Known limitation: on macOS the store is encrypted by the login-keychain "Antigravity Safe Storage" key, so a macOS-created store is not portable to another machine or user.
+
+### Changed
+
+- Changed: Common-transcript converter's event-conversion logic moved out of the inline `python3` heredoc into a standalone `common_transcript_convert.py` (provisioned alongside `common_transcript.sh`), so it is type-checked, linted, and unit-tested directly. Malformed raw-transcript lines, unreadable existing-output lines, non-string USER_INPUT content, and CODE_ACTION records with non-string content are dropped silently rather than crashing the converter.
+- Changed: Common-transcript watcher no longer echoes converter errors to the agent's pane — a genuine conversion error is recorded in the structured log only.
+
+### Fixed
+
+- Fixed: Stale `queue_log_path_template=None` kwarg in the antigravity submission path's call to `send_enter_via_tmux_wait_for_hook`; the parameter was removed upstream. agy supplies no acceptance marker so behavior is unchanged, but the plugin now type-checks against the current `tui_utils` signature.
+
+## [v0.1.6] - 2026-06-16
+
+### Changed
+
+- Changed: `statusline.sh` now flushes the transcript pipeline (synchronous `--single-pass` of the raw streamer and common-transcript converter) on the busy->idle edge before clearing the `active` marker, so consumers reading the common transcript on a WAITING transition cannot outrun the converter. The flush and the convert lock come from the shared `mngr_common_transcript_lib.sh` rather than being duplicated per agent.
+
+## [v0.1.5] - 2026-06-15
+
+### Changed
+
+- Changed: Ported the antigravity transcript streamer to agy's new SQLite conversation store (agy 1.0.4+ stopped writing the per-conversation JSONL transcript the old streamer tailed). A new self-contained `decode_agy_transcript.py` reads steps from each `.db` and emits the same record shape, so the common-transcript converter is unchanged; assistant tool calls (name + args) are now decoded too.
+
+### Fixed
+
+- Fixed: On macOS, antigravity (`agy`) agents no longer hang on a modal "A keychain cannot be found to store Antigravity Safe Storage" dialog. Provisioning now symlinks each per-agent home's `Library/Keychains` to the user's real one; Linux is unaffected (Chromium falls back to its file-based store).
+
+## [v0.1.4] - 2026-06-13
+
+### Added
+
+- Added: `agy` alias for the `antigravity` agent type (`mngr create my-agent agy` is equivalent to `mngr create my-agent antigravity`).
+
+### Changed
+
+- Changed: Agent lifecycle replaced the fragile `PreInvocation` / `Stop` marker hooks with a single mngr-owned `statusline.sh` driven by agy's `statusLine`. It maintains the RUNNING/WAITING `active` marker (busy iff `agent_state` is not idle/initializing/authenticating), records the root conversation for resume, and fires the tmux signal confirming submission. A user-provided `statusLine` is composed (mngr runs it with the same payload and emits only its output); a non-runnable command is dropped with a warning.
+- Changed: `mngr message` to an antigravity agent now returns only after the agent has started processing the submission (gated on the statusLine signal); the agent reports RUNNING for the whole turn including while subagents run.
+
 ## [v0.1.3] - 2026-06-08
 
 ### Fixed

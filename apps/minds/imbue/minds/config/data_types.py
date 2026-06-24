@@ -40,6 +40,16 @@ class WorkspacePaths(FrozenModel):
         """Directory where mngr stores agent state for this minds install (e.g. ~/.minds/mngr)."""
         return self.data_dir / "mngr"
 
+    @property
+    def log_dir(self) -> Path:
+        """Directory for log files (e.g. ~/.minds/logs).
+
+        Mirrors the Electron shell's ``getLogDir()``: the Python backend's JSONL
+        log (``minds-events.jsonl``, via ``--log-file``) and the Electron
+        main-process log (``minds.log``) both live here.
+        """
+        return self.data_dir / "logs"
+
     def workspace_dir(self, agent_id: AgentId) -> Path:
         """Directory for a specific workspace's repo (e.g. ~/.minds/<agent-id>/)."""
         return self.data_dir / str(agent_id)

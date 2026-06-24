@@ -367,18 +367,6 @@ def test_on_host_created_calls_provision() -> None:
     host.execute_idempotent_command.assert_called()
 
 
-# --- Data types tests ---
-
-
-def test_recursive_plugin_config_merge_with() -> None:
-    """merge_with should let override values win over base values."""
-    base = RecursivePluginConfig(is_errors_fatal=False, install_mode=MngrInstallMode.AUTO)
-    override = RecursivePluginConfig(is_errors_fatal=True, install_mode=MngrInstallMode.PACKAGE)
-    merged = base.merge_with(override)
-    assert merged.is_errors_fatal is True
-    assert merged.install_mode == MngrInstallMode.PACKAGE
-
-
 # --- _build_uv_env_prefix test ---
 
 

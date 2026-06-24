@@ -16,7 +16,12 @@
 #      skips writing the converter when emit_common_transcript=False, so
 #      disabled-emit takes effect simply via the on-disk -x check.
 #
-# Usage: claude_background_tasks.sh <tmux_session_name>
+# Usage: claude_background_tasks.sh <tmux_session_name> [primary_window_name]
+#
+# primary_window_name is the agent's primary tmux window name (config
+# tmux.primary_window_name, default "agent"); it is passed through to
+# stream_snapshot.py so pane capture targets the window by name rather than the
+# literal :0 index (base-index agnostic).
 #
 # Requires environment variables:
 #   MNGR_AGENT_STATE_DIR  - the agent's state directory (contains commands/)
@@ -26,9 +31,11 @@
 set -euo pipefail
 
 SESSION_NAME="${1:-}"
+# Default to "agent" when omitted so older callers keep working.
+PRIMARY_WINDOW_NAME="${2:-agent}"
 
 if [ -z "$SESSION_NAME" ]; then
-    echo "Usage: claude_background_tasks.sh <tmux_session_name>" >&2
+    echo "Usage: claude_background_tasks.sh <tmux_session_name> [primary_window_name]" >&2
     exit 1
 fi
 
@@ -81,7 +88,7 @@ fi
 STREAM_SNAPSHOT_SCRIPT="$MNGR_AGENT_STATE_DIR/commands/stream_snapshot.py"
 _STREAM_SNAPSHOT_PID=""
 if [ -f "$STREAM_SNAPSHOT_SCRIPT" ]; then
-    python3 "$STREAM_SNAPSHOT_SCRIPT" "$SESSION_NAME" &
+    python3 "$STREAM_SNAPSHOT_SCRIPT" "$SESSION_NAME" "$PRIMARY_WINDOW_NAME" &
     _STREAM_SNAPSHOT_PID=$!
     log_info "Started response stream snapshot watcher (PID: $_STREAM_SNAPSHOT_PID)"
 fi
@@ -141,7 +148,7 @@ while tmux has-session -t "=$SESSION_NAME" 2>/dev/null; do
     if [ -n "$_STREAM_SNAPSHOT_PID" ] && ! kill -0 "$_STREAM_SNAPSHOT_PID" 2>/dev/null; then
         log_warn "Response stream snapshot watcher died, restarting"
         if [ -f "$STREAM_SNAPSHOT_SCRIPT" ]; then
-            python3 "$STREAM_SNAPSHOT_SCRIPT" "$SESSION_NAME" &
+            python3 "$STREAM_SNAPSHOT_SCRIPT" "$SESSION_NAME" "$PRIMARY_WINDOW_NAME" &
             _STREAM_SNAPSHOT_PID=$!
             log_info "Restarted response stream snapshot watcher (PID: $_STREAM_SNAPSHOT_PID)"
         fi

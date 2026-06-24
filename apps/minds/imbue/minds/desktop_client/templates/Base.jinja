@@ -1,10 +1,12 @@
-{#def title="Minds", body_class="bg-zinc-50 text-zinc-900 font-sans antialiased", body_style="", body_attrs="", head="", scripts="" #}
+{#def title="Minds", body_class="bg-surface-primary text-primary font-sans antialiased", body_style="", body_attrs="", head="", scripts="" #}
 {#
   Base layout. Every page wraps its content in this component.
-  Pulls in the Tailwind Play CDN JS (downloaded once into /_static/tailwind.js
-  and served locally, so this is offline-safe after the first fetch) plus the
-  hand-written tokens.css. The Play CDN script generates utility classes at
-  runtime, so there is no "rebuild when you add a class" step.
+  Pulls in the compiled, minified Tailwind v4 stylesheet (/_static/app.min.css)
+  -- a single tree-shaken sheet built from static/app.css by `just minds-css`
+  (no runtime JIT, fully offline). app.css holds both the Tailwind directives
+  and the hand-written tokens/component CSS that used to live in tokens.css.
+  Because the sheet is compiled, a new/changed Tailwind class only takes effect
+  after a rebuild; `just minds-start` runs the compiler in --watch mode for dev.
 
   Args:
     title       contents. Defaults to "Minds".
@@ -27,8 +29,13 @@
 <head>
   <meta charset="UTF-8">
   <title>{{ title }}</title>
-  <script src="/_static/tailwind.js"></script>
-  <link rel="stylesheet" href="/_static/tokens.css">
+  <script>
+    // Apply the persisted theme before first paint (no flash). The styleguide
+    // dev toggle writes localStorage['minds-theme'] = 'dark' | 'light'; the
+    // formal light/dark UX lands in a later stage. Absent flag => light.
+    try { if (localStorage.getItem('minds-theme') === 'dark') document.documentElement.classList.add('dark'); } catch (e) {}
+  </script>
+  <link rel="stylesheet" href="/_static/app.min.css">
   {{ head }}
 </head>
 <body class="{{ body_class }}" style="{{ body_style }}" {{ body_attrs }}>

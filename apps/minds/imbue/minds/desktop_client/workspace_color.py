@@ -1,9 +1,16 @@
 """Workspace color palette and pure helpers.
 
-The 12-color palette users can pick from (11 named entries from the Figma
-source at node 356:4113 plus literal ``#ffffff`` white), plus the WCAG
-luminance contrast picker and the lenient hex normalizer the picker UI
-needs.
+The 10-color palette users can pick from (the chromatic entries from the
+Figma source at node 356:4113), plus the WCAG luminance contrast picker
+and the lenient hex normalizer the picker UI needs.
+
+Pure black (``#000000``) and pure white (``#ffffff``) are intentionally
+*not* in the palette: non-workspace minds screens now paint themselves
+pure white (or pure black in dark mode) per the system theme, so a
+workspace whose accent was black or white would be indistinguishable
+from the neutral, workspace-less chrome. Users who really want one can
+still type it into the settings hex input; only the preset swatches and
+the auto-pick exclude them.
 
 This module sits below ``templates.py`` in the import graph -- it has
 no other minds imports -- so the ``BackendResolver`` (which is below
@@ -11,13 +18,13 @@ no other minds imports -- so the ``BackendResolver`` (which is below
 imports ``backend_resolver``) can read the default color and normalize
 stored labels without creating a cycle.
 
-The two pure helpers (``normalize_workspace_color`` and
-``pick_workspace_foreground``) are mirrored as ``normalizeHex`` /
-``pickForegroundForHex`` in ``static/workspace_accent.js`` for the
-picker pages' local validation and previews. The palette itself is
-server-side only; a guard test in ``templates_test.py`` asserts the JS
-keeps exporting the two helpers and never reintroduces a palette
-mirror.
+``normalize_workspace_color`` is mirrored as ``normalizeHex`` in
+``static/workspace_accent.js`` for the picker pages' local input
+validation. The palette itself is server-side only; a guard test in
+``templates_test.py`` asserts the JS never reintroduces a palette mirror.
+(Titlebar foreground contrast is no longer computed here -- the chrome
+derives it from the workspace color in pure CSS; see ``.titlebar-surface``
+in ``static/app.css``.)
 """
 
 import re
@@ -27,19 +34,16 @@ from typing import Final
 
 from imbue.imbue_common.pure import pure
 
-# Twelve user-pickable workspace colors. Eleven named entries come from
-# the Figma source (Minds Early IA Explorations, node 356:4113); the
-# twelfth ("white") is added so users have a neutral light option
-# distinct from the warm-cream Figma entries. Names are kebab-case and
-# are not surfaced visually in the UI today (the picker shows unlabeled
+# Ten user-pickable workspace colors, all from the Figma source (Minds
+# Early IA Explorations, node 356:4113). Names are kebab-case and are
+# not surfaced visually in the UI today (the picker shows unlabeled
 # swatches); they exist so code can refer to the default by name and as
 # the swatches' screen-reader labels (the ColorSwatch aria-label).
 #
 # Order matters: the picker renders swatches in this order and
 # ``pick_unused_create_color`` walks it to find the first free color.
-# The 10 chromatic entries come first so new workspaces get a real
-# color before falling back to the two achromatic neutrals
-# (``indifference`` = black, ``white``), which are grouped at the end.
+# ``confusion`` (the default) leads. The achromatic neutrals (pure black
+# and pure white) were removed deliberately -- see the module docstring.
 WORKSPACE_PALETTE: Final[Mapping[str, str]] = {
     "confusion": "#0b292b",
     "courage": "#492222",
@@ -51,8 +55,6 @@ WORKSPACE_PALETTE: Final[Mapping[str, str]] = {
     "comfort": "#f5d6a0",
     "inspiration": "#e9ecd9",
     "clarity": "#fcefd4",
-    "indifference": "#000000",
-    "white": "#ffffff",
 }
 
 # Default workspace color: preselected on the create form when no other
@@ -62,13 +64,6 @@ WORKSPACE_PALETTE: Final[Mapping[str, str]] = {
 # proactively writes the label).
 DEFAULT_WORKSPACE_COLOR_NAME: Final[str] = "confusion"
 DEFAULT_WORKSPACE_COLOR: Final[str] = WORKSPACE_PALETTE[DEFAULT_WORKSPACE_COLOR_NAME]
-
-# WCAG relative luminance threshold below which white text reads
-# better than black against the background. The exact crossover is
-# sqrt(1.05 * 0.05) - 0.05 ~= 0.1791; we use the rounded 0.179
-# directly. The standard 0.03928 / 12.92 / 1.055 / 2.4 sRGB linearization
-# numbers come from the WCAG 2.x relative-luminance definition.
-_FOREGROUND_LUMINANCE_THRESHOLD: Final[float] = 0.179
 
 _HEX_PATTERN: Final[re.Pattern[str]] = re.compile(r"^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
 
@@ -115,32 +110,3 @@ def normalize_workspace_color(value: str) -> str | None:
     if len(body) == 3:
         body = "".join(ch * 2 for ch in body)
     return f"#{body}"
-
-
-@pure
-def _srgb_to_linear(channel: float) -> float:
-    """Inverse sRGB gamma. Used by ``pick_workspace_foreground``; kept at
-    module scope (rather than nested) so the ratchet test that forbids
-    nested defs in production code stays green."""
-    if channel <= 0.03928:
-        return channel / 12.92
-    return ((channel + 0.055) / 1.055) ** 2.4
-
-
-@pure
-def pick_workspace_foreground(hex_color: str) -> str:
-    """Return the contrasting RGB triple for titlebar text/icons over ``hex_color``.
-
-    The returned value is ``"0 0 0"`` (black) or ``"255 255 255"``
-    (white), suitable for dropping into ``rgb(var(--titlebar-fg) / <alpha>)``.
-    Chooses by WCAG relative luminance so the titlebar text stays legible
-    across the whole 12-color palette and any custom hex.
-
-    ``hex_color`` must be a normalized lowercase ``#rrggbb`` hex string.
-    Callers should pass values through ``normalize_workspace_color`` first.
-    """
-    r = int(hex_color[1:3], 16) / 255.0
-    g = int(hex_color[3:5], 16) / 255.0
-    b = int(hex_color[5:7], 16) / 255.0
-    luminance = 0.2126 * _srgb_to_linear(r) + 0.7152 * _srgb_to_linear(g) + 0.0722 * _srgb_to_linear(b)
-    return "0 0 0" if luminance > _FOREGROUND_LUMINANCE_THRESHOLD else "255 255 255"

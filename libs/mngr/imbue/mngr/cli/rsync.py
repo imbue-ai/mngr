@@ -4,10 +4,7 @@ from typing import Any
 import click
 from click_option_group import optgroup
 
-from imbue.mngr.api.discover import discover_hosts_and_agents
-from imbue.mngr.api.find import ensure_host_started
-from imbue.mngr.api.find import resolve_host_location_address
-from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.api.find import resolve_host_location
 from imbue.mngr.api.rsync import RsyncEndpointError
 from imbue.mngr.api.rsync import rsync
 from imbue.mngr.cli.address_params import HOST_LOCATION_ADDRESS
@@ -15,16 +12,12 @@ from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
-from imbue.mngr.cli.output_helpers import output_rsync_result
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import HostLocationAddress
-from imbue.mngr.primitives import HostName
-from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import UncommittedChangesMode
-from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 
 
 class RsyncCliOptions(CommonCliOptions):
@@ -61,27 +54,7 @@ def _resolve_endpoint(
     -- that's rsync's "copy contents into destination" shorthand, which is almost
     always what the user wants when they referred to an agent/host by name only.
     """
-    if parsed.agent is None and parsed.host is None:
-        if parsed.path is None:
-            raise UserInputError("Endpoint must include an agent, a host, or a path")
-        provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
-        host = provider.get_host(HostName(LOCAL_HOST_NAME))
-        online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
-        return online_host, _user_path_to_str(parsed.path, parsed.has_trailing_path_slash)
-
-    agents_by_host, _ = discover_hosts_and_agents(
-        mngr_ctx,
-        provider_names=None,
-        agent_identifiers=None,
-        include_destroyed=False,
-        reset_caches=False,
-    )
-    resolved = resolve_host_location_address(
-        parsed,
-        agents_by_host,
-        mngr_ctx,
-        is_start_desired=is_start_desired,
-    )
+    resolved = resolve_host_location(parsed, mngr_ctx, is_start_desired=is_start_desired)
     if parsed.path is None:
         # mngr-generated path (the agent/host workdir): suffix with ``/`` so
         # rsync copies contents into destination.
@@ -123,7 +96,7 @@ def _resolve_endpoint(
 @add_common_options
 @click.pass_context
 def rsync_command(ctx: click.Context, **kwargs: Any) -> None:
-    mngr_ctx, output_opts, opts = setup_command_context(
+    mngr_ctx, _output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="rsync",
         command_class=RsyncCliOptions,
@@ -153,7 +126,7 @@ def rsync_command(ctx: click.Context, **kwargs: Any) -> None:
 
     uncommitted_changes_mode = UncommittedChangesMode(opts.uncommitted_changes.upper())
 
-    result = rsync(
+    rsync(
         source_host=source_host,
         source_path=source_path_str,
         destination_host=destination_host,
@@ -161,9 +134,8 @@ def rsync_command(ctx: click.Context, **kwargs: Any) -> None:
         extra_args=opts.rsync_args,
         uncommitted_changes=uncommitted_changes_mode,
         cg=mngr_ctx.concurrency_group,
+        run_in_terminal=True,
     )
-
-    output_rsync_result(result, output_opts.output_format)
 
 
 # Register as ``mngr rsync`` (click's default name is the function name)

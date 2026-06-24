@@ -4,6 +4,150 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-17
+
+`mngr imbue_cloud admin pool destroy` is now backend-aware, mirroring the `--backend` branch in `pool create`. Previously it only knew the OVH-VPS teardown path: cancel the OVH VPS, then drop the row. Run against a bare-metal `slice` row it would try to cancel a non-existent OVH VPS (404) and, with `--skip-vps-cancel`, drop the row while leaving the slice's lima VM running on the box -- stranding a slot indefinitely (no cron reaps slice-VM orphans; only a subsequent bake does).
+
+Now the teardown follows the row's `backend_kind`: a `slice` row destroys its lima VM (and data disk) on the bare-metal box -- freeing the slot -- before the row is dropped, while an `ovh_vps` row (including legacy rows written before the column existed) cancels its OVH VPS as before. Either teardown runs before the row delete, so a failure keeps the row and the operation stays retryable. The slice teardown reads the pool management key from `POOL_SSH_PRIVATE_KEY` (the same key the carve authorizes), so direct `admin pool destroy` of a slice requires that env var (the `minds pool destroy` wrapper injects it from Vault). `--skip-vps-cancel` still drops the row only, for any backend.
+
+`mngr imbue_cloud admin server prep` now pre-installs the pinned Docker Engine (the same version the OVH VPS path pins) and inotify-tools into the staged golden slice image via `virt-customize` (adds a `libguestfs-tools` box dependency).
+
+Because each slice VM's first-boot provisioning guards on presence (`command -v docker` / `command -v inotifywait`), baking these into the golden image makes those steps skip entirely — so slice carves no longer download/install Docker per VM. This speeds up baking (especially in parallel) and removes a per-slice network dependency. To re-stage an already-prepped box with the new image, delete the staged image and re-run `prep` (the step is idempotent and re-customizes on a fresh download).
+
+`mngr imbue_cloud admin pool create --backend slice` now bounds parallelism with `--max-concurrency` (default 4): it bakes at most that many slices at once and queues the rest, reporting progress as each completes. This keeps box contention low enough that each `mngr create` finishes within its per-create timeout (raised to 45 minutes for slices). The timeout is per single create, so one slice timing out no longer aborts the others.
+
+After the bakes finish, the slice backend reconciles the box's lima VMs against the pool DB and reaps any orphan — a VM with no `pool_hosts` row, e.g. one left by a create that was killed by its own timeout after carving but before the row insert (the provider's rollback can't run on a hard kill). Only slice-prefixed VMs absent from the DB are deleted; tracked slices (any status) are kept. The reap also runs on a top-level SIGTERM/SIGINT (e.g. the caller's subprocess timeout): the bake first kills its in-flight `mngr create` workers so they can't keep carving VMs, then reaps, so a killed bake never leaks worker processes or VMs.
+
+Corrected bare-metal slice sizing so a box's slot count reflects what it can *realistically* run (this also flows into `admin server pricing`, which divides amortized cost by the slot count):
+
+- RAM overhead is now modeled in two parts: a per-machine host reserve (`HOST_RAM_RESERVE_GIB`, kernel/OS + headroom, subtracted once) and a per-VM overhead (`PER_VM_RAM_OVERHEAD_MIB`, QEMU + lima supervisor, added to each slice's footprint). The guest now gets its full advertised `memory_per_slice_gb` (previously it was silently shortchanged by the overhead). `slot_count = (ram - host_reserve) / (slice + per_vm_overhead)`, so the box keeps real host headroom instead of being packed to 100%.
+
+- Disk no longer overcommits: the reserve is now `max(DISK_RESERVE_GB, ceil(disk_gb * DISK_RESERVE_FRACTION))`, which absorbs the GB-vs-GiB gap (a nominal "N TB" spec is ~0.93·N GiB) plus partition/filesystem overhead, so per-slice disk allocations stay within the real usable filesystem.
+
+`server prep` now also provisions a 32 GiB swapfile (the OS-install default of two ~0.5 GiB partitions was useless on a RAM-committed slice host).
+
+`mngr imbue_cloud admin server order` now lets you order plans whose mandatory
+option families (e.g. bandwidth, vrack) offer more than one choice. Previously the
+cart build failed with "expected exactly one X option to auto-pick" on such plans
+(e.g. the `24sys*` SYS line). Choose the offer per family explicitly with the new
+repeatable `--option <planCode>` flag; single-offer families are still auto-selected.
+Run `order` without it once and the error lists each ambiguous family's offers and
+their monthly prices so you can re-run with the right `--option` values.
+
+`mngr imbue_cloud admin pool create --backend slice` now requires `--server-id`
+(the bare-metal box to bake the slices onto, from `admin server list`). It no
+longer auto-selects the box with the most free slots -- baking always targets an
+explicitly-chosen, ready server.
+
+Fixed a bare-metal box-prep bug that made every slice bake fail with `mkdir
+~/.cache/lima: permission denied`. The prep script (run as root) staged the slice
+base image under the lima user's `~/.cache` but left `~/.cache` itself root-owned,
+so `limactl` (run as the lima user) could not create `~/.cache/lima`. Prep now
+creates and chowns the cache dir chain to the lima user (and repairs an
+already-root-owned `~/.cache` when re-run on an existing box).
+
+The post-bake orphan reap now also reaps leaked lima **data disks**, not just VM
+instances. A failed carve whose rollback `limactl delete` could not unlock the
+disk leaves the disk behind (the VM is gone but the disk keeps holding the box
+slot); the reap now reconciles the box's disks against the pool DB and force-deletes
+(unlocking first) any slice disk with no row.
+
+Removed the dead disk-snapshot and `list_ssh_keys` stubs from `LimaSliceVpsClient`, matching the slimmed-down `VpsClientInterface` (which no longer declares `create_snapshot`/`delete_snapshot`/`list_snapshots`/`list_ssh_keys`). Slice snapshots, like other host snapshots, go through the provider layer. No user-facing behavior change: these methods only ever raised "unavailable".
+
+## 2026-06-16
+
+Dropped the dead `create_snapshot`, `delete_snapshot`, `list_snapshots`, and `list_ssh_keys` stub overrides from `LimaSliceVpsClient`, matching the removal of those abstract methods from the shared `VpsClientInterface`. These had no production callers and only raised "unavailable". The now-unused `VpsSnapshotId` / `VpsSnapshotInfo` / `VpsSshKeyInfo` imports and the unit-test calls that exercised the stubs were removed as well.
+
+`destroy_host` now raises a `CleanupFailedGroup` carrying the classified cleanup failures (instead of returning them, or swallowing errors as warnings) when a resource is left behind, and returns normally otherwise. A resource that was already gone is treated as benign (no failure); a resource that exists but could not be destroyed is recorded as a `HOST_RESOURCE_REMAINS` failure (or `OTHER` for a bookkeeping/record write failure), so `mngr destroy`/`cleanup` can surface it and exit with an informative, cause-specific code. See `specs/cleanup-error-aggregation.md`.
+
+## 2026-06-15
+
+Added a `--skip-deferred-install-wait` flag to `admin pool create` (slice + ovh_vps): when set, the bake does NOT wait for the FCT deferred-install (heavy apt + Playwright/Chromium) to finish before stopping the baked services agent. Saves a few minutes per bake for dev/throwaway hosts; the tradeoff is the baked container's deferred-install may be left incomplete (stopping mid-apt can corrupt dpkg), so it must never be used for production pool hosts.
+
+Added `mngr imbue_cloud admin server pricing`: an operator-only, read-only command that prints a per-slice pricing table for OVH bare-metal plans, to help decide what to buy before ordering.
+
+- Each row is a server x RAM config x region. It reports the effective slice sizing (slots, vCPUs/slice, disk/slice) computed with the same `slices/bare_metal` math used to carve real slices, and the true monthly cost per slice (month-to-month price plus the one-time setup fee amortized over a year, divided by slot count). Rows are sorted cheapest-per-slice first and printed to stdout.
+
+- Rows are split per region (vin = US-EAST-VA, hil = US-WEST-OR) because delivery time and stock differ by datacenter; each row shows the delivery-time and stock columns for its region (parsed from OVH availability). Knobs: `--region` (repeatable; default both US datacenters), `--memory-per-slice-gb` (default 8), `--cpu-overcommit` (default 2.0). Storage-upgrade options are listed at the end of each row as a marginal $/GB. A `CPU(c/t)` column shows the server's physical cores/threads so the (overcommitted) CPU/slice value is legible.
+
+- A config is only excluded when NO available storage can host a slice at the chosen size; the base columns use the cheapest storage that IS sliceable, so RAM-dense servers that need a larger disk to fit a slice still appear (on that larger disk) instead of being dropped.
+
+- The command only reads the OVH catalog and availability APIs; it never places an order. It needs `OVH_APPLICATION_KEY` / `OVH_APPLICATION_SECRET` / `OVH_CONSUMER_KEY` in the environment (from the activated env's ovh secret).
+
+Added the bare-metal purchase + provisioning lifecycle commands under `mngr imbue_cloud admin server`:
+
+- `order` — places a real OVH eco order for a chosen `--plan-code` / `--region` (vin/hil) / `--memory-gb` / `--storage`, driving the eco cart (mandatory bandwidth/memory/storage/vrack options, `dedicated_os=none_64.en`). It assigns the cart and shows OVH's real price preview for confirmation (`--yes` to skip), places the order, and records a `bare_metal_servers` row at status `ordered` with specs derived from the catalog. THIS CHARGES the account.
+
+- `await-delivery` — polls the OVH order until the server is delivered (serviceName + public IP assigned), then advances the row to `delivered`. Resumable (no-op if already delivered); delivery can take ~1h.
+
+- `setup` — provisions a delivered box to `ready`: reinstalls our OS via `/dedicated/server/{s}/reinstall` (Debian, RAID1, pool SSH key; destructive), waits for the install, waits for SSH, then runs the existing box prep (qemu/lima/tooling/service user/stage image). Resumable via status.
+
+Together with `pricing`, this codifies the full RAM-pricing -> order -> deliver -> provision -> slice flow (previously the box was ordered and OS-installed by hand).
+
+The pool bake now waits for the FCT `deferred-install` service (heavy apt + Playwright/Chromium download, started at agent boot) to finish before stopping the services agent, on both the OVH-VPS and slice paths. Stopping mid-apt previously corrupted dpkg (a package left reinst-required), so the deferred install failed on every post-lease retry until repaired.
+
+Fixed slice pool bakes failing with "Conflicting providers: address has 'imbue_cloud_slice' but --provider is 'ovh'". The pool bake stacks a shared FCT container-build template on top of `main`; that template hardcoded `provider = "ovh"`, which is correct for an OVH VPS (whose create address is `@host.ovh`) but conflicts with a slice's `@host.imbue_cloud_slice` address. The build recipe is provider-agnostic, so the template (renamed `ovh` -> `pool_host`, in the FCT) no longer declares a provider -- the provider is selected entirely by the create address, mirroring the existing `aws` / `imbue_cloud` templates. `FCT_BAKE_TEMPLATES` is now `("main", "pool_host")`.
+
+imbue_cloud fast path now matches on the **repository** as well as the branch/tag, so it can no longer adopt a pool host running different code than the request asked for.
+
+- A new canonicalization function (`repo_identity.canonicalize_repo_source`) is the single source of truth for "the same repo": it normalizes remote URL forms (ssh/https, `.git`, trailing slash, host case) and resolves a local path to its `origin` remote, applied identically at bake time and request time. The provider canonicalizes the request's `repo_url` before the lease; `fast_mode=require` now raises `FastPathUnavailableError` (so the caller falls back to the slow rebuild) when it cannot establish a canonical `repo_url` and a `repo_branch_or_tag`, rather than matching on a subset.
+
+- `admin pool create` no longer accepts hand-typed identity in `--attributes`; instead it derives and stamps the canonical `repo_url` + `repo_branch_or_tag` from the bake source, which is now exactly one of two mutually-exclusive selectors: `--from-tag <tag>` (production -- clones `--repo-url` at the tag into a fresh temp dir and bakes from it, so the content provably equals the tag) or `--workspace-dir <dir>` (dev -- bakes from a working tree, labelling it with the folder's `origin` + current branch, overridable via `--repo-branch-or-tag`). `--attributes` is now optional and rejects the `repo_url` / `repo_branch_or_tag` keys. Applies to both the `slice` and `ovh_vps` backends. The connector match (JSONB `@>` + region) is unchanged -- no migration.
+
+Slice VMs now install `inotify-tools` during provisioning. The `host_backup` snapshot helper (the `OUTER_TRIGGER` btrfs helper that `mngr_vps_docker` runs on the slice's "outer" VM) execs `inotifywait` to watch for snapshot requests; the slice base image shipped without it, so the helper's systemd unit crash-looped (exit 127) and only serviced requests by accident of its restart cadence, leaving a spurious "snapshot path already exists" failure behind each successful snapshot. The OVH-VPS path already gets `inotify-tools` from `host_setup`'s base packages; the slice path now installs it in the lima VM provisioning alongside Docker (`jq`, the helper's other dependency, was already provided by the base lima script).
+
+Added the OVH bare-metal "slices" feature: an alternative to ordering OVH VPSes where we carve VPS-like hosts out of bare-metal servers we rent by running lima/QEMU VMs on them. A slice is indistinguishable from a baked VPS pool host to minds and the imbue_cloud provider, but with cleaner btrfs (the lima data disk, no loopback).
+
+- OVH order pricing helper (`pricing.compute_order_pricing`): true all-in month-to-month cost (base plan + every selected add-on delta + one-time setup + first payment), so the catalog's bare "base" price can't be mistaken for the real cost.
+
+- Slice data model + pure logic (`bare_metal.py`): `BareMetalServer`/`BareMetalServerCapacity` types, `BackendKind`/`BareMetalServerStatus` primitives, and helpers for slot count, slice vCPU sizing with mild CPU overcommit, RAID-level choice, lima naming, slice port allocation, server lifecycle transitions, and "most-free ready server" placement.
+
+- Lima slice creation: `build_slice_lima_yaml` produces a VPS-parity lima VM (root SSH, btrfs data disk at the host dir, Docker, two external port-forwards for the VM and inner-container sshds), and `LimaSliceVpsClient` provisions/destroys it via limactl. `SliceVpsDockerProvider` runs the shared vps_docker container bake on the VM (overriding only the per-host-port + btrfs-subvolume seams), producing a baked, reachable host. Verified end-to-end against a real lima VM.
+
+- Admin CLI (`mngr imbue_cloud admin server`): `list` (per-server + fleet slot accounting), `register` (record a delivered box), `allocate-slice` (placement + the slice's lease attributes), `set-status` (advance the resumable order->delivered->installing->ready lifecycle), backed by a Neon access layer (`bare_metal_db`) that writes `bare_metal_servers` + slice `pool_hosts` rows directly.
+
+- Made the fast/slow lease path work on slices end-to-end: the imbue_cloud provider now reaches a leased host's outer (VPS-root) sshd at the lease's `ssh_port` (a slice's box-forwarded VM-root port) instead of a hardcoded 22, so `mngr list`/discovery and destroy-time wipe target the slice VM rather than the bare-metal box's own sshd. The slice provider authorizes the pool management key on both the VM root and the inner container so the connector's lease-time key injection succeeds, and records the per-host forwarded ports so `mngr create --format json` reports them.
+
+- `admin server allocate-slice` now actually allocates: it syncs this branch's mngr + the forever-claude-template workspace onto the chosen ready box(es), bakes the slice(s) there in parallel (`--count N`), authorizes the pool key, tears down the bootstrap-created chat agent + initial-chat sentinel, and inserts an `available` slice `pool_hosts` row. Adds `--dry-run` (placement preview), `--workspace-dir`, and `--mngr-source`.
+
+- Per-slice sizing is no longer hardcoded. A bare-metal server now records its RAM-per-slice, CPU-overcommit factor, and usable disk at `admin server register`; `allocate-slice` computes each slice's vCPUs, RAM, and btrfs disk from those plus the box's specs (disk = usable space minus a reserve, split across slots). Because a box's per-slice values are fixed by its registration, `allocate-slice --count N` now targets a single server per invocation. Slices also record the server's real region (not a placeholder), and the per-box slice port-forward range was widened (~10k ports).
+
+- The imbue_cloud slow-path rebuild now pins the leased host's outer (VPS-root) SSH host key in the rebuilding provider's known_hosts, so the certified-data sync over the outer connection no longer fails strict host-key checking (applies to OVH VPSes and slices alike).
+
+- `allocate-slice` now also tears down the freshly-baked slice VM if parsing the bake's create-result JSON fails (e.g. a missing/invalid port field), closing a gap where such a failure could leave an orphaned VM holding a box slot with no `pool_hosts` row referencing it.
+
+- Fixed slice disk overcommit: each slice VM has a fixed boot disk (OS + Docker) plus a btrfs data disk whose sizes now sum to the per-slice disk budget ((usable_disk - reserve) / slots). Previously only the data disk was sized and lima defaulted the boot disk to 100 GiB unaccounted, so a box was over-provisioned on disk (thin-provisioned via qcow2 -- it would run out of space if slices filled up). The boot disk is now set explicitly and `compute_slice_disk_gib` returns budget-minus-boot.
+
+- Removed the duplicated, on-box slice bake. The slice path no longer ships the monorepo + forever-claude-template to the box and runs `mngr create` there; instead a slice is now provisioned (carved) and baked exactly like an OVH VPS, from the operator's machine. `LimaSliceVpsClient` drives `limactl` over SSH on the box (carve a bare Debian VM = the "OS reinstall" equivalent), and the shared container bake then reaches the VM's box-forwarded ports -- so `allocate-slice` just vendors mngr into the FCT workspace once and runs the bake from here. The FCT bake itself (templates, `system-services` agent, chat-agent teardown, sentinel) now lives in one provider-generic place (`pool_bake.py`) shared by both the OVH and slice paths, instead of being copy-pasted into the slice tooling. This deletes `slice_bake.py` and the box-side rsync/`uv sync`/git-init machinery; behavior for the operator is unchanged (`allocate-slice` still parallel-bakes `--count N` slices onto one ready box and inserts their rows).
+
+- Restructured the now-large `mngr_imbue_cloud` plugin from a flat module list into layered sub-packages (`plugin`, `cli`, `bake`, `providers`, `hosts`, `slices`, `connector`) plus the shared root leaf modules (`config`, `data_types`, `errors`, `primitives`), with an `import-linter` "mngr_imbue_cloud layers contract" enforcing the ordering (and a meta-ratchet test that gates it). The slice/bare-metal subsystem is isolated in `slices/`, the provider-generic pool bake in `bake/` (an extraction seam toward the minds app), and both provider backends are co-located in `plugin/backends.py`. Pure refactor: no behavior, CLI, wire-format, or schema change. Plugin entry points moved to `imbue.mngr_imbue_cloud.plugin.entrypoints` / `plugin.slice_entrypoints`.
+
+- Decomposed the oversized `providers/instance.py` (~2,000 lines): extracted the pure listing-shaping helpers into `providers/listing.py`, the pre-release data-wipe script generator into `providers/wipe.py`, and the slow-path VPS-vs-slice rebuild provider/config builders into `providers/rebuild.py` (with their unit tests co-located). `ImbueCloudProvider` and its self-bound methods stay in `instance.py`. Removed a dead helper (`_certified_host_name`). No behavior change.
+
+- Folded `admin server allocate-slice` into `admin pool create --backend [ovh_vps|slice]`, so there is now a single command to bake a leasable pool host regardless of backend (the machine-provisioning step differs; the bake + row insert are shared). `admin server` keeps only the bare-metal fleet verbs (`prep`, `list`, `register`, `set-status`). Crucially, slice rows now go through the same lease-metadata path as OVH: they carry the operator's `--attributes` (e.g. `repo_branch_or_tag`) with the derived `{memory_gb, cpus}` size stamped on top, and record the operator-supplied `--region` (the app's region code, e.g. `US-EAST-VA`) instead of the box's raw datacenter code -- so a slice can be matched by a minds fast-path lease without hand-patching. `minds pool create` is unaffected (`--backend` defaults to `ovh_vps`).
+
+- Fixed slice fast-path leases hanging at "Waiting for initial chat agent...": the slice bake now stops the `system-services` agent post-bake (inside the container), matching what the OVH bake already did via local mngr. Previously a slice was baked with the agent left running, so the fast-path lease adopted an already-bootstrapped agent whose initial chat agent had been torn down at bake finalize -- and the one-shot FCT bootstrap never recreated it. Stopping it means the lease starts it fresh, re-running the bootstrap, which recreates the chat agent under the leasing user's workspace name. (Audited the OVH vs slice bake paths for other such divergences; the remaining differences -- OVH ufw + management-key install, cancelled-VPS recycle, OVH IAM tags -- are intentionally OVH-only, and the row inserts are at parity.)
+
+Fixed `mngr imbue_cloud admin server order` failing with "expected exactly one vrack option to auto-pick, got []" on bare-metal plans that do not offer a vrack option (e.g. the cheaper SK line such as `24sk602-v1-us`).
+
+The eco-cart option selection no longer hardcodes `(bandwidth, vrack)` as the auto-picked families. Instead it derives the auto-pick set from the catalog's own `mandatory` flags: the operator chooses memory + storage, and every *other* family OVH marks mandatory (e.g. bandwidth, and vrack only where the plan offers it) is auto-picked and must have exactly one offer. Optional add-on families (mandatory=false) are never silently added to the cart.
+
+## 2026-06-12
+
+Internal: routed the agent `data.json` path constructions through the shared `get_agent_state_dir_path` helper (now in `imbue.mngr.hosts.common`). No behavior change.
+
+## AWS provider support: ProviderBackendInterface refactor
+
+`is_for_host_creation` was removed from `ProviderBackendInterface` (Modal-specific flag was being `del`'d in every other backend). Replaced with a default-no-op `bootstrap_for_host_creation(name, config, mngr_ctx)` method on the interface that Modal overrides. The imbue-cloud backend's now-unused `del`-of-`is_for_host_creation` is removed. No behavior change.
+
+`mngr imbue_cloud admin pool create` now passes `--ovh-datacenter=` instead of `--vps-datacenter=` to the inner `mngr create --provider ovh` command. The OVH provider's `--vps-*` build-arg prefix was retired in this branch and now raises a migration error; the call site here is updated to the new per-provider prefix so pool creation continues to work.
+
+`_build_delegated_vps_provider` now returns a `MinimalVpsDockerProvider` (moved into `mngr_vps_docker` itself, since it's a generally useful role for any externally-managed-VPS host-setup path -- not imbue_cloud-specific). The base `VpsDockerProvider._parse_build_args` was made abstract in this branch (each concrete provider binds its own `--<provider>-*` prefix); `MinimalVpsDockerProvider`'s override extracts `--git-depth=N` and forwards everything else to docker, which is the correct behavior for the no-provisioning path that pairs with `ExternallyManagedVpsClient`. Without this, every slow-path container rebuild would raise before any docker work happened. The corresponding parser unit tests moved alongside.
+
+## 2026-06-11
+
+Replaced direct ValueError/RuntimeError raises in build-arg parsing and host provisioning with dedicated custom exception types.
+
 ## 2026-06-10
 
 Raised the stale coverage floor from 19% to 45% to match the coverage CI already measures (~50%).

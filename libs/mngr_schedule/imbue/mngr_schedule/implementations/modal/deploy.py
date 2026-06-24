@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any
 from typing import Final
 from typing import assert_never
+from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfoNotFoundError
 
 import modal
 import modal.exception
@@ -92,6 +94,29 @@ def detect_local_timezone() -> str:
         etc_timezone_path=Path("/etc/timezone"),
         etc_localtime_path=Path("/etc/localtime"),
     )
+
+
+def resolve_cron_timezone(requested_timezone: str | None) -> str:
+    """Resolve the IANA timezone the cron schedule is interpreted in.
+
+    When ``requested_timezone`` is given, validate that it names a real IANA
+    zone and use it -- so the schedule fires at the same wall-clock time no
+    matter which machine deployed it. When it is ``None``, fall back to the
+    deploy machine's local timezone (the historical behavior), which makes the
+    fire time depend on where the deploy ran from.
+
+    Raises ScheduleDeployError if ``requested_timezone`` is not a known zone.
+    """
+    if requested_timezone is None:
+        return detect_local_timezone()
+    try:
+        ZoneInfo(requested_timezone)
+    except (ZoneInfoNotFoundError, ValueError) as e:
+        raise ScheduleDeployError(
+            f"Invalid timezone {requested_timezone!r}: not a known IANA timezone name "
+            "(e.g. 'America/Los_Angeles', 'UTC')."
+        ) from e
+    return requested_timezone
 
 
 def get_repo_root() -> Path:
@@ -708,7 +733,10 @@ def remove_modal_schedule(
         if app_id:
             with ConcurrencyGroup(name=f"modal-app-stop-{trigger_name}") as cg:
                 stop_result = cg.run_process_to_completion(
-                    ["uv", "run", "modal", "app", "stop", app_id, "--env", environment_name],
+                    # --yes: newer Modal CLIs prompt to confirm `app stop` and
+                    # abort with "no interactive terminal detected" when run
+                    # non-interactively (e.g. from a deploy script).
+                    ["uv", "run", "modal", "app", "stop", app_id, "--env", environment_name, "--yes"],
                     is_checked_after=False,
                     timeout=30.0,
                 )
@@ -813,6 +841,7 @@ def deploy_schedule(
     target_repo_path: str = _DEFAULT_TARGET_REPO_PATH,
     auto_merge_branch: str | None = None,
     is_full_copy: bool = False,
+    requested_timezone: str | None = None,
 ) -> str:
     """Deploy a scheduled trigger to Modal, optionally verifying it works.
 
@@ -858,7 +887,7 @@ def deploy_schedule(
         repo_root = maybe_git_root
 
     app_name = get_modal_app_name(trigger.name)
-    cron_timezone = detect_local_timezone()
+    cron_timezone = resolve_cron_timezone(requested_timezone)
     modal_env_name = provider.environment_name
 
     repo_root_hash = hashlib.md5(str(repo_root.absolute()).encode("utf-8")).hexdigest()

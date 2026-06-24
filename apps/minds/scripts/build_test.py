@@ -43,6 +43,7 @@ import pytest
 WORKSPACE_PACKAGES = [
     "minds",
     "imbue-mngr",
+    "imbue-mngr-aws",
     "imbue-mngr-claude",
     "imbue-mngr-forward",
     "imbue-mngr-imbue-cloud",
@@ -50,11 +51,12 @@ WORKSPACE_PACKAGES = [
     "imbue-mngr-lima",
     "imbue-mngr-modal",
     "imbue-mngr-ovh",
-    "imbue-mngr-vps-docker",
+    "imbue-mngr-vps",
     "imbue-common",
     "concurrency-group",
     "resource-guards",
     "modal-proxy",
+    "overlay",
 ]
 
 APP_ROOT = Path(__file__).resolve().parents[1]

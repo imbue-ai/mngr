@@ -382,6 +382,27 @@ class OuterHostInterface(HostFileReadInterface, HostFileWriteInterface, ABC):
         """
         ...
 
+    def get_outer_ssh_port(self) -> int | None:
+        """Port of the host's outer/management sshd, when distinct from the agent connection.
+
+        Returns ``None`` by default. A provider whose host reaches a separate
+        outer sshd on a non-obvious port (e.g. a slice's VM-root sshd via a
+        box-forwarded port) surfaces it here so ``mngr create --format json``
+        can report it. The default is sufficient for hosts whose only SSH
+        endpoint is the one ``get_ssh_connection_info`` returns.
+        """
+        return None
+
+    # returns (outer_host_public_key, container_host_public_key)
+    def get_ssh_host_public_keys(self) -> tuple[str | None, str | None]:
+        """The host's outer (VPS/VM-root) and container sshd host public keys, when known.
+
+        Returns ``(None, None)`` by default. A provider that generates the host's
+        sshd host keys at bake time surfaces them here so ``mngr create --format
+        json`` can report them for strict host-key pinning.
+        """
+        return (None, None)
+
     def disconnect(self) -> None:
         """Disconnect from this host, releasing any held connections.
 
@@ -440,18 +461,25 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
 
     @abstractmethod
     @contextmanager
-    def lock_cooperatively(self, timeout_seconds: float = 30.0) -> Iterator[None]:
-        """Context manager for acquiring and releasing the host lock."""
+    def lock_cooperatively(self, timeout_seconds: float | None = 300.0) -> Iterator[None]:
+        """Hold the host's exclusive, cross-actor lock for the duration of the block.
+
+        Holds a real flock(2) (directly on local hosts, over SSH on remote hosts)
+        that coordinates local (in-host) and remote (over-SSH) holders and
+        suppresses idle shutdown while held. ``timeout_seconds=None`` blocks
+        indefinitely; a finite value raises LockNotHeldError if it cannot be
+        acquired in time.
+        """
         ...
 
     @abstractmethod
     def get_reported_lock_time(self) -> datetime | None:
-        """Return the last modification time of the host lock file, or None if not locked."""
+        """Return the last modification time of the host lock file, or None if absent."""
         ...
 
     @abstractmethod
     def is_lock_held(self) -> bool:
-        """Check whether the host lock is currently held."""
+        """Check whether the host lock is currently held (via a non-blocking flock probe)."""
         ...
 
     # =========================================================================
@@ -619,7 +647,13 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
 
     @abstractmethod
     def destroy_agent(self, agent: AgentInterface) -> None:
-        """Remove an agent and all its associated state from this host."""
+        """Remove an agent and all its associated state from this host.
+
+        Best-effort and aggregate-and-continue: attempts every teardown step and collects
+        every real failure. Returns normally on full success or benign "already gone"
+        outcomes; raises ``CleanupFailedGroup`` if any real resources were left behind.
+        See specs/cleanup-error-aggregation.md.
+        """
         ...
 
     @abstractmethod
@@ -629,7 +663,13 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
 
     @abstractmethod
     def stop_agents(self, agent_ids: Sequence[AgentId], timeout_seconds: float = 5.0) -> None:
-        """Stop the specified agents gracefully within the given timeout."""
+        """Stop the specified agents gracefully within the given timeout.
+
+        Best-effort and aggregate-and-continue: attempts every step for every agent and
+        collects every real failure. Returns normally on full success or benign "already
+        gone" outcomes; raises ``CleanupFailedGroup`` if any real resources were left
+        behind. See specs/cleanup-error-aggregation.md.
+        """
         ...
 
     @abstractmethod
@@ -1018,7 +1058,14 @@ class CreateAgentOptions(FrozenModel):
     plugin_data: dict[str, Any] = Field(
         default_factory=dict,
         description="Opaque dict for plugins to pass data through the creation pipeline. "
-        "Keys are namespaced by plugin (e.g. 'adopt_session' for ClaudeAgent).",
+        "Keys are namespaced by plugin.",
+    )
+    adopt_session: tuple[str, ...] = Field(
+        default=(),
+        description="Session id(s) or path(s) to adopt into the new agent so it resumes that "
+        "conversation (the --adopt option). Repeatable; the last named session is the one resumed "
+        "on startup. Only valid for agent types that support session adoption "
+        "(HasSessionAdoptionMixin); mutually exclusive with cloning via --from.",
     )
     source_agent_state_location: HostLocation | None = Field(
         default=None,
@@ -1084,6 +1131,13 @@ class HostProvisioningOptions(FrozenModel):
         "synchronously, after the host is ready but before any agent work_dir "
         "is touched. Each command runs in order; a non-zero exit aborts the create.",
     )
+    post_host_create_outer_commands: tuple[CommandString, ...] = Field(
+        default=(),
+        description="Shell commands to run once on the host's outer machine (the "
+        "underlying VM/daemon host), synchronously, after the host is ready. Run "
+        "in order; a non-zero exit aborts the create. Skipped (with a warning) "
+        "when the provider exposes no outer host.",
+    )
 
 
 # Mapping from raw-string config/CLI field names to HostProvisioningOptions
@@ -1092,6 +1146,7 @@ class HostProvisioningOptions(FrozenModel):
 # sync.
 HOST_PROVISIONING_FIELD_MAP: tuple[tuple[str, str, Any], ...] = (
     ("post_host_create_command", "post_host_create_commands", CommandString),
+    ("post_host_create_outer_command", "post_host_create_outer_commands", CommandString),
 )
 
 

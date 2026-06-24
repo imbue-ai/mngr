@@ -67,15 +67,15 @@ contextBridge.exposeInMainWorld('minds', {
     ipcRenderer.on('current-workspace-changed', (_event, agentId) => callback(agentId));
   },
 
-  // Persisted "last opened workspace" agent id. The chrome page reads this
-  // on bootstrap to paint the titlebar accent before the first
-  // ``current-workspace-changed`` event arrives. Main owns writes
-  // (driven by ``current-workspace-changed`` + SSE-driven cleanup) and
-  // broadcasts updates via ``onLastWorkspaceAgentIdChanged`` (workspace
-  // deleted, user signed out, a different bundle opened a workspace).
-  getLastWorkspaceAgentId: () => ipcRenderer.invoke('get-last-workspace-agent-id'),
-  onLastWorkspaceAgentIdChanged: (callback) => {
-    ipcRenderer.on('last-workspace-agent-id-changed', (_event, agentId) => callback(agentId));
+  // The accent source for THIS window's current screen: the workspace id on
+  // a workspace-scoped screen (the workspace itself plus its settings /
+  // sharing / destroying / recovery screens) and null on a general screen.
+  // Main pushes it on every navigation (and on workspace-delete / sign-out),
+  // and re-pushes the current value when the chrome view (re)loads, so the
+  // titlebar paints the right accent -- or the neutral chrome -- without the
+  // renderer remembering anything.
+  onAccentChanged: (callback) => {
+    ipcRenderer.on('accent-changed', (_event, agentId) => callback(agentId));
   },
 
   // Actions

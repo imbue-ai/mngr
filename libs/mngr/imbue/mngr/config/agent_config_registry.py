@@ -1,20 +1,29 @@
-from typing import Any
-
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
+from imbue.mngr.config.agent_alias_registry import normalize_agent_type_name
 from imbue.mngr.config.agent_class_registry import get_agent_class
 from imbue.mngr.config.agent_class_registry import is_agent_class_registered
+from imbue.mngr.config.agent_plugin_registry import get_agent_type_owner
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
+from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.primitives import AgentTypeName
 
-# Fields on AgentTypeConfig that are routing metadata (not runtime config values).
-# These are skipped when applying custom overrides to a parent config.
-_METADATA_FIELDS: frozenset[str] = frozenset({"parent_type", "plugin"})
+
+def _without_routing_metadata(config: AgentTypeConfig) -> AgentTypeConfig:
+    """Return a copy of ``config`` with the inheritance-routing metadata
+    (``parent_type`` / ``plugin``) cleared, so a parent/child merge never carries it into
+    the merged runtime config. These two fields are routing metadata, not runtime config."""
+    return config.model_copy_update(
+        to_update(config.field_ref().parent_type, None),
+        to_update(config.field_ref().plugin, None),
+    )
+
 
 # =============================================================================
 # Agent Config Registry
@@ -58,15 +67,19 @@ def reset_agent_config_registry() -> None:
 
 
 def is_known_agent_type(agent_type: str, config: MngrConfig) -> bool:
-    """Whether an agent type is known anywhere: a registered class, a registered
-    config, or a user-defined [agent_types.X] block in the loaded config.
+    """Whether an agent type is known anywhere: a registered alias, a registered
+    class, a registered config, or a user-defined [agent_types.X] block.
 
     This is the canonical predicate for "is this a real agent type name?" --
-    callers should prefer this over checking individual registries.
+    callers should prefer this over checking individual registries. An alias
+    is resolved to its canonical type before the registries are consulted.
     """
-    name = AgentTypeName(agent_type)
+    canonical_type = normalize_agent_type_name(agent_type)
+    name = AgentTypeName(canonical_type)
     return (
-        name in config.agent_types or is_agent_class_registered(agent_type) or is_agent_config_registered(agent_type)
+        name in config.agent_types
+        or is_agent_class_registered(canonical_type)
+        or is_agent_config_registered(canonical_type)
     )
 
 
@@ -89,31 +102,26 @@ def _apply_custom_overrides_to_parent_config(
     parent_config: AgentTypeConfig,
     custom_config: AgentTypeConfig,
 ) -> AgentTypeConfig:
-    """Apply custom type overrides onto a parent config instance.
+    """Apply a custom agent type's overrides onto its parent type's config.
 
-    Handles the case where parent_config may be a subclass of AgentTypeConfig
-    (e.g., ClaudeAgentConfig) by constructing a new instance of the parent's
-    concrete class with the base fields overridden. Iterates over all fields
-    that were explicitly set in the custom config (including subclass-specific
-    fields like auto_dismiss_dialogs).
-
-    All fields use assign-by-default. Tuple/list/dict fields no longer
-    auto-concatenate across parent inheritance; use the ``field__extend``
-    operator in TOML to opt into additive behavior.
+    The ``parent_type`` inheritance arm of the config merge (see ``config/README.md``):
+    delegates to ``overlay_merge.merge_models_via_overlay`` with ``parent_config`` as the
+    base, so the result reparses into ``type(parent_config)`` -- the class-switching crux,
+    where a base-class ``custom_config`` folded onto a ``ClaudeAgentConfig`` parent yields
+    a ``ClaudeAgentConfig`` with the parent's subclass-only fields. Both layers have their
+    inheritance-routing metadata (``parent_type`` / ``plugin``) cleared first
+    (``_without_routing_metadata``) so it never flows into the merged runtime config, and
+    ``serialize_as_any`` keeps subclass-only fields. Assign-by-default, except
+    ``SettingsPatchField`` fields accumulate across the boundary; cross-scope
+    ``settings_overrides`` narrowing here is intentionally not surfaced (deferred with the
+    broader narrowing-philosophy decision).
     """
-    explicitly_set_fields = custom_config.model_fields_set
-    if not explicitly_set_fields - _METADATA_FIELDS:
-        return parent_config
-
-    custom_values = custom_config.model_dump()
-    updates: list[tuple[str, Any]] = [
-        (field_name, custom_values[field_name])
-        for field_name in explicitly_set_fields
-        if field_name not in _METADATA_FIELDS
-    ]
-    if not updates:
-        return parent_config
-    return parent_config.model_copy_update(*updates)
+    merged, _narrowings = merge_models_via_overlay(
+        _without_routing_metadata(parent_config),
+        _without_routing_metadata(custom_config),
+        serialize_as_any=True,
+    )
+    return merged
 
 
 def _check_agent_type_not_disabled(
@@ -122,9 +130,12 @@ def _check_agent_type_not_disabled(
 ) -> None:
     """Raise MngrError if the agent type or any ancestor in its parent chain is disabled.
 
-    At each level, uses the explicit ``plugin`` field if set, otherwise
-    falls back to ``parent_type`` (if set) or the type name -- mirroring
-    how ``_parse_providers`` resolves the plugin for a provider block.
+    At each level, the plugin name to compare against ``disabled_plugins`` is
+    resolved by this precedence: the explicit ``plugin`` field if set,
+    otherwise the type's recorded owning plugin (the authoritative source --
+    it knows the real registering plugin even when the type name differs from
+    the entry-point name, e.g. ``pi-coding`` registered by the ``pi_coding``
+    entry point), otherwise the type name itself.
 
     Walks the chain: agent_type -> parent_type -> parent's parent_type -> ...
     until we hit a type with no parent_type or one that is not defined in
@@ -144,11 +155,14 @@ def _check_agent_type_not_disabled(
                     f"mngr plugin enable {current_cfg.plugin}"
                 )
             return
-        if checked in config.disabled_plugins:
+        # Prefer the owning plugin recorded for this type; fall back to the
+        # type name when nothing was recorded (e.g. config-only custom types).
+        plugin_name = get_agent_type_owner(checked) or checked
+        if plugin_name in config.disabled_plugins:
             raise MngrError(
                 f"Agent type '{agent_type}' cannot be used because plugin "
-                f"'{checked}' is disabled. Enable the plugin with: "
-                f"mngr plugin enable {checked}"
+                f"'{plugin_name}' is disabled. Enable the plugin with: "
+                f"mngr plugin enable {plugin_name}"
             )
         if current_cfg is not None and current_cfg.parent_type is not None:
             checked = str(current_cfg.parent_type)
@@ -172,17 +186,25 @@ def resolve_agent_type(
     For plugin-registered or direct command types, returns the registered
     class and config directly.
 
+    A name that is a registered alias is resolved to its canonical type first.
+    If a custom ``[agent_types.X]`` block shares a name with an alias, the alias
+    is dropped at config-load time so the custom type wins -- by the time this
+    runs the name is no longer an alias and resolves to the custom type. A custom
+    type's ``parent_type`` is normalized to canonical at config-load time too.
+
     Raises UnknownAgentTypeError if the agent type name is not known via any
     registry or user config (or, in the parent-type branch, if the parent
     type itself is not known). Raises MngrError if the agent type (or its
     parent type) belongs to a disabled plugin.
     """
-    _check_agent_type_not_disabled(agent_type, config)
+    canonical_type = AgentTypeName(normalize_agent_type_name(agent_type))
 
-    if not is_known_agent_type(str(agent_type), config):
-        raise UnknownAgentTypeError(str(agent_type))
+    _check_agent_type_not_disabled(canonical_type, config)
 
-    custom_config = config.agent_types.get(agent_type)
+    if not is_known_agent_type(str(canonical_type), config):
+        raise UnknownAgentTypeError(str(canonical_type))
+
+    custom_config = config.agent_types.get(canonical_type)
 
     if custom_config is not None and custom_config.parent_type is not None:
         parent_type = custom_config.parent_type
@@ -206,8 +228,8 @@ def resolve_agent_type(
             agent_config=merged_config,
         )
 
-    agent_class = get_agent_class(str(agent_type))
-    config_class = get_agent_config_class(str(agent_type))
+    agent_class = get_agent_class(str(canonical_type))
+    config_class = get_agent_config_class(str(canonical_type))
 
     if custom_config is not None:
         agent_config = custom_config

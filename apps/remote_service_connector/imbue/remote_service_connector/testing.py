@@ -5,6 +5,7 @@ import json
 import secrets
 import uuid
 from typing import Any
+from typing import Final
 from uuid import UUID
 
 import pytest
@@ -850,6 +851,13 @@ def make_fake_supertokens_backend() -> FakeSuperTokensBackend:
 # ---------------------------------------------------------------------------
 
 
+# Placeholder host public keys for fake pool rows. The fake replaces the real
+# SSH layer (``_append_authorized_key``), so these are never parsed/pinned -- they
+# only need to be non-null so the lease fail-closed check passes.
+_FAKE_OUTER_HOST_PUBLIC_KEY: Final[str] = "ssh-ed25519 AAAAFAKEouterhostkey"
+_FAKE_CONTAINER_HOST_PUBLIC_KEY: Final[str] = "ssh-ed25519 AAAAFAKEcontainerhostkey"
+
+
 class FakePoolRow:
     """In-memory record for a single pool_hosts row."""
 
@@ -869,6 +877,12 @@ class FakePoolRow:
     leased_to_user: str | None
     leased_at: str | None
     released_at: str | None
+    backend_kind: str
+    lima_instance_name: str | None
+    lima_disk_name: str | None
+    bare_metal_server_id: UUID | None
+    outer_host_public_key: str | None
+    container_host_public_key: str | None
 
 
 def _row_attributes(row: "FakePoolRow") -> dict[str, Any]:
@@ -907,6 +921,8 @@ def _make_pool_row(
     leased_at: str | None = None,
     host_name: str | None = None,
     region: str | None = None,
+    outer_host_public_key: str | None = _FAKE_OUTER_HOST_PUBLIC_KEY,
+    container_host_public_key: str | None = _FAKE_CONTAINER_HOST_PUBLIC_KEY,
 ) -> FakePoolRow:
     row = FakePoolRow()
     row.host_id = host_id
@@ -927,6 +943,13 @@ def _make_pool_row(
     row.released_at = None
     row.attributes = None
     row.region = region
+    # Default to a real OVH VPS; slice-specific tests set these explicitly.
+    row.backend_kind = "ovh_vps"
+    row.lima_instance_name = None
+    row.lima_disk_name = None
+    row.bare_metal_server_id = None
+    row.outer_host_public_key = outer_host_public_key
+    row.container_host_public_key = container_host_public_key
     return row
 
 
@@ -973,6 +996,8 @@ class FakeCursor:
                         chosen.agent_id,
                         chosen.host_id_str,
                         _row_attributes(chosen),
+                        chosen.outer_host_public_key,
+                        chosen.container_host_public_key,
                     )
                 ]
 
@@ -1004,14 +1029,33 @@ class FakeCursor:
             host_id = UUID(raw_host_id) if isinstance(raw_host_id, str) else raw_host_id
             for row in self._backend.pool_rows:
                 if row.host_id == host_id:
-                    self._results = [(row.leased_to_user, row.status, row.vps_instance_id)]
+                    self._results = [
+                        (
+                            row.leased_to_user,
+                            row.status,
+                            row.vps_instance_id,
+                            row.backend_kind,
+                            row.lima_instance_name,
+                            row.lima_disk_name,
+                            row.bare_metal_server_id,
+                        )
+                    ]
                     break
 
-        elif "select id, vps_instance_id from pool_hosts where status = 'removing'" in query_lower:
+        elif "select id, vps_instance_id" in query_lower and "status = 'removing'" in query_lower:
             # Cleanup sweep: every row still marked 'removing'.
             for row in self._backend.pool_rows:
                 if row.status == "removing":
-                    self._results.append((row.host_id, row.vps_instance_id))
+                    self._results.append(
+                        (
+                            row.host_id,
+                            row.vps_instance_id,
+                            row.backend_kind,
+                            row.lima_instance_name,
+                            row.lima_disk_name,
+                            row.bare_metal_server_id,
+                        )
+                    )
 
         elif (
             "from pool_hosts" in query_lower and "status = 'leased'" in query_lower and "leased_to_user" in query_lower
@@ -1032,6 +1076,8 @@ class FakeCursor:
                             row.host_name,
                             _row_attributes(row),
                             row.leased_at,
+                            row.outer_host_public_key,
+                            row.container_host_public_key,
                         )
                     )
 
@@ -1167,7 +1213,7 @@ class FakePoolBackend:
     """In-memory pool database replacement for testing host pool + paid-list endpoints."""
 
     pool_rows: list[FakePoolRow]
-    append_key_calls: list[tuple[str, int, str, str, str]]
+    append_key_calls: list[tuple[str, int, str, str, str, str]]
     ovh_ops: FakeOvhOps
     # Paid-list stores: value -> {"is_paid", "created_at", "updated_at"}.
     paid_domains: dict[str, dict[str, Any]]
@@ -1240,8 +1286,11 @@ class FakePoolBackend:
         user: str,
         management_key_pem: str,
         public_key_to_add: str,
+        expected_host_public_key: str,
     ) -> None:
-        self.append_key_calls.append((host, port, user, management_key_pem, public_key_to_add))
+        self.append_key_calls.append(
+            (host, port, user, management_key_pem, public_key_to_add, expected_host_public_key)
+        )
 
     def add_available_host(
         self,
@@ -1255,6 +1304,8 @@ class FakePoolBackend:
         host_id_str: str = "host-xyz",
         host_name: str | None = None,
         region: str | None = None,
+        outer_host_public_key: str | None = _FAKE_OUTER_HOST_PUBLIC_KEY,
+        container_host_public_key: str | None = _FAKE_CONTAINER_HOST_PUBLIC_KEY,
     ) -> FakePoolRow:
         """Add an available host to the in-memory pool."""
         row = _make_pool_row(
@@ -1268,6 +1319,8 @@ class FakePoolBackend:
             version=version,
             host_name=host_name,
             region=region,
+            outer_host_public_key=outer_host_public_key,
+            container_host_public_key=container_host_public_key,
         )
         self.pool_rows.append(row)
         return row

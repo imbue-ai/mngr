@@ -11,8 +11,15 @@ from imbue.mngr_mapreduce.mngr_cli import _parse_list_json
 from imbue.mngr_mapreduce.mngr_cli import _run_mngr_raw
 
 
+# The subprocess gets a 25s budget (was 10s, which left no headroom for a cold
+# `mngr` start under heavy parallel load and intermittently raised CliError before
+# the work actually finished); the 30s pytest-timeout stays the hard backstop above
+# it. Still flaky-marked as a belt-and-suspenders retry. This asserts the wrapper
+# returns a finished process, not that `mngr config` completes within any tight bound.
+@pytest.mark.timeout(30)
+@pytest.mark.flaky
 def test_run_mngr_raw_returns_finished_process(cg: ConcurrencyGroup) -> None:
-    result = _run_mngr_raw(["config", "list"], cg, timeout=10.0)
+    result = _run_mngr_raw(["config", "list"], cg, timeout=25.0)
     assert result.returncode == 0
 
 

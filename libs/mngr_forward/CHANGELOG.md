@@ -6,6 +6,20 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.6] - 2026-06-18
+
+## [v0.1.5] - 2026-06-16
+
+## [v0.1.4] - 2026-06-16
+
+## [v0.1.3] - 2026-06-15
+
+## [v0.1.2] - 2026-06-13
+
+### Fixed
+
+- Fixed: Reverse SSH tunnel teardown no longer leaves the forwarded port allocated on the remote sshd (which had caused the next run's port-forward request to be denied). `SSHTunnelManager.cleanup()` now attempts to cancel each reverse port forward unconditionally, instead of skipping the cancel when the connection looks inactive. Every tunnel SSH connection also sends periodic keepalives so an idle reverse tunnel does not silently die and the health check can repair a dead connection promptly.
+
 ## [v0.1.1] - 2026-06-08
 
 ### Added

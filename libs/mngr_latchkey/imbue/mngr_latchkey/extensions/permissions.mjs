@@ -22,9 +22,12 @@
  *       Detent's ``$comment``), and ``permissions`` (an array of
  *       ``{name, description}`` objects -- the Detent permission-schema
  *       name plus its own plain-English summary -- that may be granted
- *       under the scope). Returns 404 when the service is unknown.
- *       Backed by the ``services.json`` file that ships alongside this
- *       extension, which is keyed by raw service name.
+ *       under the scope). The catch-all ``any`` permission is always
+ *       injected at index 0 of every scope's ``permissions`` array, so
+ *       a caller can *       always request unrestricted access under
+ *       a known scope. Returns 404 when the service is unknown. Backed
+ *       by the ``services.json`` file that ships alongside this extension,
+ *       which is keyed by raw service name.
  *   GET    /permissions/rules?path=<path>&rule_key=<key>
  *       Return the rule whose scope key is <key>.
  *   POST   /permissions/rules?path=<path>&rule_key=<key>
@@ -56,6 +59,7 @@
 import { randomBytes } from 'node:crypto';
 import {
   existsSync,
+  mkdirSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -79,6 +83,15 @@ const AVAILABLE_SERVICES_PATH = resolve(
 // to lowercase letters, digits, and ``-`` so a caller cannot smuggle
 // path-traversal segments or other surprises into the lookup key.
 const VALID_SERVICE_NAME_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+
+// Detent's catch-all *permission* schema. It matches every request, so a
+// rule like ``{"linear-api": ["any"]}`` grants all access under that
+// scope. The ``services.json`` catalog never lists it explicitly (every
+// scope implicitly admits it).
+const ALWAYS_AVAILABLE_PERMISSION = 'any';
+const ALWAYS_AVAILABLE_PERMISSION_DESCRIPTION =
+  'Unrestricted access: every request permitted under this scope. Use only ' +
+  'when no narrower permission covers what you need.';
 
 class PermissionsExtensionError extends Error {
   constructor(statusCode, message) {
@@ -274,6 +287,14 @@ function writePermissionsFileAtomic(filePath, value) {
   const tempPath = `${filePath}.tmp.${randomBytes(6).toString('hex')}`;
   const serialized = `${JSON.stringify(value, null, 2)}\n`;
   try {
+    // Materialize the parent directory before writing. POST /permissions/rules
+    // creates the target file if it does not yet exist, and the minds desktop
+    // client points it at ``<root>/hosts/<host_id>/latchkey_permissions.json``
+    // -- a per-host directory that may not exist yet (e.g. when agent
+    // creation's finalize/link step was skipped or failed). Without this, the
+    // atomic write of the temp sibling fails with ENOENT and the grant
+    // surfaces as a confusing 500.
+    mkdirSync(directory, { recursive: true });
     writeFileSync(tempPath, serialized, 'utf-8');
     renameSync(tempPath, filePath);
   } catch (error) {
@@ -282,7 +303,6 @@ function writePermissionsFileAtomic(filePath, value) {
     } catch {
       // best-effort cleanup
     }
-    void directory;
     const message = error instanceof Error ? error.message : String(error);
     throw new PermissionsExtensionError(500, `Failed to write ${filePath}: ${message}`);
   }
@@ -515,7 +535,31 @@ function handleGetAvailableForService(response, rawServiceName) {
   if (!Object.prototype.hasOwnProperty.call(catalog, rawServiceName)) {
     throw new ServiceNotFoundError(rawServiceName);
   }
-  sendJson(response, 200, catalog[rawServiceName]);
+  sendJson(response, 200, catalog[rawServiceName].map(withAlwaysAvailablePermission));
+}
+
+/**
+ * Prepend the always-available ``any`` permission to a scope entry's
+ * ``permissions`` array (deduplicating in case the catalog lists it
+ * explicitly). This ensures every scope -- even one with no enumerated
+ * permissions, like Linear -- surfaces at least the ``any`` option so a
+ * caller can request unrestricted access under it.
+ */
+function withAlwaysAvailablePermission(entry) {
+  const existing = Array.isArray(entry.permissions) ? entry.permissions : [];
+  const withoutAny = existing.filter(
+    (permission) => permission.name !== ALWAYS_AVAILABLE_PERMISSION,
+  );
+  return {
+    ...entry,
+    permissions: [
+      {
+        name: ALWAYS_AVAILABLE_PERMISSION,
+        description: ALWAYS_AVAILABLE_PERMISSION_DESCRIPTION,
+      },
+      ...withoutAny,
+    ],
+  };
 }
 
 function handleGetSelf(response, context) {

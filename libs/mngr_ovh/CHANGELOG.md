@@ -6,6 +6,31 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.6] - 2026-06-18
+
+## [v0.1.5] - 2026-06-16
+
+### Changed
+
+- Changed: `mngr ovh list` now reads its defaults from the user's `[providers.<name>]` settings.toml block (selected with `--provider`, default `ovh`), matching `mngr aws prepare` / `mngr gcp prepare` / `mngr azure prepare`. Previously it built `OvhProviderConfig()` with class defaults unconditionally, so a user who pinned a non-default `endpoint` / `ovh_subsidiary` (e.g. `ovh-eu`) would inspect a different account than `mngr create --provider <name>` actually used. Credentials still fall back to env / `~/.ovh.conf`; a warning is logged if the named `--provider` block exists but is not an OVH backend.
+- Changed: `mngr ovh list` groups OVH-specific options (`--provider`, `--all`) under a "Provider" option group, so `--help` and the generated docs list them ahead of the shared common options.
+- Changed: OVH release-test settings now also disable the `azure` provider (`[providers.azure] is_enabled = false`), mirroring the existing gcp/aws/vultr disables, so `mngr list` inside the OVH lifecycle tests no longer exits non-zero when Azure credentials aren't resolvable.
+
+### Removed
+
+- Removed: Dead `create_snapshot`, `delete_snapshot`, `list_snapshots`, and `list_ssh_keys` stubs (and the now-unused `_safe_get_snapshot` and `_snapshot_info_from_payload` helpers) from `OvhVpsClient`, matching the removal of those abstract methods from the shared `VpsClientInterface`.
+
+## [v0.1.4] - 2026-06-16
+
+## [v0.1.3] - 2026-06-15
+
+## [v0.1.2] - 2026-06-13
+
+### Changed
+
+- Changed: **Breaking** -- per-host build args renamed: `--vps-datacenter=` is now `--ovh-datacenter=` (`--ovh-region=` accepted as an alias) and `--vps-plan=` is now `--ovh-plan=`. The old `--vps-*` prefix raises a migration error. `--git-depth=` stays shared.
+- Changed: `vps_boot_timeout` config field renamed to `instance_boot_timeout` (matches the shared base-config rename).
+
 ## [v0.1.1] - 2026-06-08
 
 ### Added

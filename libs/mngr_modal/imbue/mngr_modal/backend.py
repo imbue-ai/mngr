@@ -23,6 +23,7 @@ from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderEmptyError
+from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -459,29 +460,20 @@ Supported build arguments for the modal provider:
         return "No start arguments are supported for the modal provider."
 
     @staticmethod
-    def build_provider_instance(
-        name: ProviderInstanceName,
-        config: ProviderInstanceConfig,
-        mngr_ctx: MngrContext,
-        is_for_host_creation: bool = False,
-    ) -> ProviderInstanceInterface:
-        """Build a Modal provider instance.
+    def _resolve_modal_interface(config: ProviderInstanceConfig) -> ModalInterface:
+        """Validate ``config`` is a ``ModalProviderConfig`` and pick the matching ``ModalInterface``.
 
-        ``is_for_host_creation`` is the single switch that determines whether
-        this construction is allowed to bootstrap a missing Modal environment.
-        Only the ``mngr create`` path passes ``True``; everything else leaves
-        it at the default ``False`` so a brand-new install does not silently
-        create environments from ``mngr list`` / ``mngr gc`` / etc. When the
-        environment is missing and ``is_for_host_creation`` is ``False``, this
-        raises ``ProviderEmptyError`` so the higher-level provider loader can
-        skip the modal provider entirely instead of constructing it.
+        Shared by ``build_provider_instance`` and ``bootstrap_for_host_creation``; both call
+        sites need the same isinstance guard and the same ``match config.mode`` dispatch.
+        Factoring it out keeps the per-mode dispatch in exactly one place so adding a new
+        ``ModalMode`` variant only needs editing here.
         """
         if not isinstance(config, ModalProviderConfig):
             raise ConfigStructureError(f"Expected ModalProviderConfig, got {type(config).__name__}")
 
         match config.mode:
             case ModalMode.DIRECT:
-                modal_interface: ModalInterface = DirectModalInterface()
+                return DirectModalInterface()
             case ModalMode.PROXIED:
                 raise NotImplementedError(
                     "ModalMode.PROXIED (routing through imbue_cloud gateway) is not yet implemented.",
@@ -489,8 +481,50 @@ Supported build arguments for the modal provider:
             case _ as unreachable:
                 assert_never(unreachable)
 
+    @staticmethod
+    def build_provider_instance(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
+    ) -> ProviderInstanceInterface:
+        """Build a Modal provider instance.
+
+        Always treated as a read-or-existing-host construction: if the per-
+        user Modal environment does not yet exist, raise ``ProviderEmptyError``
+        so read paths (``mngr list`` / ``mngr gc`` / discovery) can skip the
+        modal provider entirely rather than silently creating an environment.
+
+        The ``mngr create`` path calls ``bootstrap_for_host_creation`` first,
+        which creates the environment if missing; the subsequent
+        ``build_provider_instance`` call then succeeds normally.
+        """
+        modal_interface = ModalProviderBackend._resolve_modal_interface(config)
         return ModalProviderBackend._construct_modal_provider(
-            name, config, mngr_ctx, modal_interface, is_for_host_creation=is_for_host_creation
+            name, config, mngr_ctx, modal_interface, is_environment_creation_allowed=False
+        )
+
+    @staticmethod
+    def bootstrap_for_host_creation(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
+    ) -> None:
+        """Ensure the per-user Modal environment exists; create it if missing.
+
+        Idempotent. Called by ``mngr create`` exactly once per host-create;
+        all other call paths build the provider via ``build_provider_instance``
+        which never creates an environment.
+
+        Implementation: drive a full ``_construct_modal_provider`` call with
+        environment creation allowed. The constructed provider is intentionally
+        discarded -- this method's job is the side effect of creating the
+        environment (and warming the class-level app registry); the subsequent
+        ``build_provider_instance`` call in the create path reuses the cached
+        app via ``_get_or_create_app``.
+        """
+        modal_interface = ModalProviderBackend._resolve_modal_interface(config)
+        ModalProviderBackend._construct_modal_provider(
+            name, config, mngr_ctx, modal_interface, is_environment_creation_allowed=True
         )
 
     @staticmethod
@@ -499,22 +533,23 @@ Supported build arguments for the modal provider:
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
         modal_interface: ModalInterface,
-        is_for_host_creation: bool = False,
+        is_environment_creation_allowed: bool = False,
     ) -> ProviderInstanceInterface:
         """Build a ``ModalProviderInstance`` against the given ``ModalInterface``.
 
-        Production calls via ``build_provider_instance`` (which selects a
-        ``DirectModalInterface`` per ``ModalMode.DIRECT``); tests call via
+        Production calls via ``build_provider_instance`` (which passes
+        ``is_environment_creation_allowed=False``) or
+        ``bootstrap_for_host_creation`` (which passes True). Tests call via
         ``mngr_modal.testing.make_testing_provider`` (which passes a
         ``FakeModalInterface``). Output capture is yielded off
         ``modal_interface.enable_output_capture(...)`` so this function has
         no per-implementation branches.
 
-        ``is_for_host_creation`` gates whether a missing Modal environment may
-        be created here. When ``False`` and the environment does not exist,
-        ``ProviderEmptyError`` is raised so that read-only loaders (used by
-        ``mngr list`` / ``mngr gc`` / discovery) can skip the modal provider
-        entirely rather than creating an environment on first use.
+        ``is_environment_creation_allowed`` gates whether a missing Modal
+        environment may be created here. When ``False`` and the environment
+        does not exist, ``ProviderEmptyError`` is raised so that read-only
+        loaders skip the modal provider entirely rather than creating an
+        environment on first use.
         """
         if not isinstance(config, ModalProviderConfig):
             raise ConfigStructureError(f"Expected ModalProviderConfig, got {type(config).__name__}")
@@ -528,7 +563,7 @@ Supported build arguments for the modal provider:
                 environment_name,
                 config.is_persistent,
                 modal_interface,
-                is_environment_creation_allowed=is_for_host_creation,
+                is_environment_creation_allowed=is_environment_creation_allowed,
             )
             volume = ModalProviderBackend.get_volume_for_app(app_name, modal_interface)
 
@@ -542,9 +577,17 @@ Supported build arguments for the modal provider:
                 get_output_callback=lambda: context_handle.output_buffer.getvalue(),
             )
         except ModalProxyAuthError as e:
-            raise MngrError(
-                "Modal is not authorized: run 'uvx modal token set' to authenticate, or disable this provider with "
-                f"'mngr config set --scope local providers.{name}.is_enabled false'. (original error: {e})",
+            # ProviderNotAuthorizedError is a ProviderUnavailableError, so read paths still
+            # catch it and keep the provider visible; the dedicated type makes the
+            # "not authenticated" case consistent with the other cloud providers.
+            raise ProviderNotAuthorizedError(
+                name,
+                reason="Modal token missing or invalid",
+                short_remediation="run `uvx modal token set`",
+                user_help_text=(
+                    "Modal is not authorized: run `uvx modal token set` to authenticate, or disable this "
+                    f"provider with `mngr config set --scope local providers.{name}.is_enabled false`."
+                ),
             ) from e
         except ModalProxyNotFoundError as e:
             # Modal environment doesn't exist yet. Only the create-host path is

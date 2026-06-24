@@ -23,6 +23,7 @@ There are two variants:
 
 import json
 import shlex
+from collections.abc import Mapping
 from typing import Any
 from typing import Final
 
@@ -42,8 +43,13 @@ SEP_PS_END: Final[str] = "---MNGR_PS_END---"
 
 
 @pure
-def build_listing_collection_script(host_dir: str, prefix: str) -> str:
-    """Build a shell script that collects all listing data in one command."""
+def build_listing_collection_script(host_dir: str, prefix: str, window_name: str = "agent") -> str:
+    """Build a shell script that collects all listing data in one command.
+
+    ``window_name`` is the name of the agent's primary tmux window (config
+    ``tmux.primary_window_name``); lifecycle detection targets that window by
+    name so it works regardless of the user's tmux ``base-index``.
+    """
     return f"""
 # Uptime
 echo "UPTIME=$(cat /proc/uptime 2>/dev/null | awk '{{print $1}}')"
@@ -51,7 +57,10 @@ echo "UPTIME=$(cat /proc/uptime 2>/dev/null | awk '{{print $1}}')"
 # Boot time
 echo "BTIME=$(grep '^btime ' /proc/stat 2>/dev/null | awk '{{print $2}}')"
 
-# Lock file mtime
+# Host lock: held-state (a real flock, probed non-blockingly) and mtime (for
+# display). The lock file persists after release, so existence != held; guard on
+# existence so the probe never creates it.
+echo "LOCK_HELD=$([ -e '{host_dir}/host_lock' ] && ! flock -n '{host_dir}/host_lock' -c true 2>/dev/null && echo true || echo false)"
 echo "LOCK_MTIME=$(stat -c %Y '{host_dir}/host_lock' 2>/dev/null)"
 
 # SSH activity mtime
@@ -85,10 +94,10 @@ if [ -d '{host_dir}/agents' ]; then
         echo "START_MTIME=$(stat -c %Y "${{agent_dir}}activity/start" 2>/dev/null)"
         agent_name=$(jq -r '.name // empty' "$data_file" 2>/dev/null)
         session_name='{prefix}'"$agent_name"
-        # `=$session:0` mirrors TmuxWindowTarget; required for list-panes since `-t`
+        # `=$session:{window_name}` mirrors TmuxWindowTarget; required for list-panes since `-t`
         # resolves as target-window/-pane (a bare `=name` would be parsed as a literal
-        # window/pane name).
-        tmux_info=$(tmux list-panes -t "=${{session_name}}:0" -F '#{{pane_dead}}|#{{pane_current_command}}|#{{pane_pid}}' 2>/dev/null | head -n 1)
+        # window/pane name). Targeting the window by name keeps this base-index agnostic.
+        tmux_info=$(tmux list-panes -t "=${{session_name}}:{window_name}" -F '#{{pane_dead}}|#{{pane_current_command}}|#{{pane_pid}}' 2>/dev/null | head -n 1)
         echo "TMUX_INFO=$tmux_info"
         if [ -f "${{agent_dir}}active" ]; then
             echo "ACTIVE=true"
@@ -115,6 +124,8 @@ def _build_stopped_listing_collection_script(prefix: str) -> str:
     container (uptime, btime, ps output, tmux info, active marker).
     """
     return f"""
+# A stopped container has no running process, so the lock cannot be held.
+echo "LOCK_HELD=false"
 echo "LOCK_MTIME=$(stat -c %Y "$HOST_DIR/host_lock" 2>/dev/null)"
 echo "SSH_ACTIVITY_MTIME=$(stat -c %Y "$HOST_DIR/activity/ssh" 2>/dev/null)"
 echo '{SEP_DATA_JSON_START}'
@@ -159,6 +170,7 @@ def build_outer_listing_collection_script(
     host_dir: str,
     prefix: str,
     host_id_label: str = "com.imbue.mngr.host-id",
+    window_name: str = "agent",
 ) -> str:
     """Build a script that runs on the outer (VPS root) and collects listing data.
 
@@ -172,7 +184,7 @@ def build_outer_listing_collection_script(
     the caller can map the docker container status to a ``HostState`` without
     a second round-trip.
     """
-    inner_running = build_listing_collection_script(host_dir, prefix)
+    inner_running = build_listing_collection_script(host_dir, prefix, window_name)
     inner_stopped = _build_stopped_listing_collection_script(prefix)
     quoted_host_id = shlex.quote(str(host_id))
     quoted_host_dir = shlex.quote(host_dir)
@@ -295,6 +307,8 @@ def parse_listing_collection_output(stdout: str) -> dict[str, Any]:
             result["uptime_seconds"] = parse_optional_float(line[len("UPTIME=") :])
         elif line.startswith("BTIME=") and "btime" not in result:
             result["btime"] = parse_optional_int(line[len("BTIME=") :])
+        elif line.startswith("LOCK_HELD=") and "is_lock_held" not in result:
+            result["is_lock_held"] = line[len("LOCK_HELD=") :].strip() == "true"
         elif line.startswith("LOCK_MTIME=") and "lock_mtime" not in result:
             result["lock_mtime"] = parse_optional_int(line[len("LOCK_MTIME=") :])
         elif line.startswith("SSH_ACTIVITY_MTIME=") and "ssh_activity_mtime" not in result:
@@ -330,3 +344,25 @@ def parse_listing_collection_output(stdout: str) -> dict[str, Any]:
 
     result["agents"] = agents
     return result
+
+
+def extract_agent_data_from_parsed_listing(parsed_listing: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Pull each agent's ``data.json`` dict out of a parsed listing.
+
+    An entry whose ``data`` is present but not a JSON object (a list/scalar from a
+    corrupt or hand-edited ``data.json``) is skipped with a warning rather than
+    silently, matching the other listing skip-sites (host_store "Skipped invalid
+    agent record file"; the Modal provider's "Skipped agent ..."). A genuine JSON
+    parse failure was already warned and dropped upstream in ``_parse_agent_section``.
+    """
+    agent_data: list[dict[str, Any]] = []
+    for agent in parsed_listing.get("agents", []):
+        data = agent.get("data")
+        if isinstance(data, dict):
+            agent_data.append(data)
+        else:
+            logger.warning(
+                "Skipping agent entry with missing or non-object 'data' in listing output (found {})",
+                type(data).__name__,
+            )
+    return agent_data

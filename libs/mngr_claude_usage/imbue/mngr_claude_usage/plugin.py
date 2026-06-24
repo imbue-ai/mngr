@@ -1,6 +1,6 @@
-"""Claude usage data writer for `mngr usage`.
+"""Claude usage data writer and reader for `mngr usage`.
 
-Single responsibility: install a host-stable statusline shim that, when invoked
+Install a host-stable statusline shim that, when invoked
 by Claude Code, appends one ``cost_snapshot`` event (carrying rate_limits +
 cost + session_id) to ``$MNGR_AGENT_STATE_DIR/events/claude/usage/events.jsonl``
 and chains to any user-defined ``statusLine.command``.
@@ -19,9 +19,10 @@ e.g. claude is invoked standalone, outside of an mngr agent -- the shim exits
 Discovery is by convention -- ``mngr usage`` enumerates agents via
 ``list_agents`` and reads each agent's ``events/<source>/usage/events.jsonl``
 via the events API (``discover_event_sources`` + ``read_event_content``), the
-same mechanism ``mngr event`` uses. We don't implement a reader hookspec; we
-just write to the conventional path and let the generic CLI find the data
-uniformly for local and remote agents.
+same mechanism ``mngr event`` uses. This module also provides the matching
+``aggregate_usage_source`` reader hookimpl (like the other usage packages): it
+claims the ``claude`` source and aggregates it with the process-cumulative
+strategy, declining every other source.
 
 Provisioning runs from a single ``on_before_provisioning`` hookimpl on mngr
 core, so this plugin doesn't depend on any Claude-specific hookspec. All file
@@ -36,13 +37,21 @@ from pathlib import Path
 
 from imbue.mngr import hookimpl
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.hosts.host import get_agent_state_dir_path
+from imbue.mngr.hosts.common import get_agent_state_dir_path
+from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.hosts.host import install_packaged_script_on_host
 from imbue.mngr.hosts.host import read_json_dict_via_host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
-from imbue.mngr_claude.plugin import ClaudeAgent
+from imbue.mngr_claude.plugin import ClaudeCoreAgent
 from imbue.mngr_claude_usage import resources as _resources
+from imbue.mngr_usage.api import aggregate_process_cumulative
+from imbue.mngr_usage.data_types import UsageEvent
+from imbue.mngr_usage.data_types import UsageSnapshot
+
+# Source name the Claude writer emits under ($STATE_DIR/events/claude/usage/...);
+# the reader strips "/usage", so this hookimpl claims exactly "claude".
+_CLAUDE_USAGE_SOURCE_NAME = "claude"
 
 _USAGE_WRITER_SCRIPT = "claude_usage_writer.sh"
 _STATUSLINE_SHIM_SCRIPT = "claude_statusline.sh"
@@ -92,7 +101,7 @@ def _is_mngr_owned_shim_path(command: str, host_dir: Path) -> bool:
         return False
     if candidate == _stable_shim_path(host_dir):
         return True
-    return candidate.parent.parent.parent == host_dir / "agents"
+    return candidate.parent.parent.parent == get_agents_root_dir(host_dir)
 
 
 def _capture_existing_statusline_command(host: OnlineHostInterface, work_dir: Path) -> str:
@@ -205,14 +214,34 @@ def on_before_provisioning(agent: AgentInterface, host: OnlineHostInterface, mng
 
     All writes go through ``host.write_file`` so the provisioner works for local
     and remote agents the same way. Skips non-Claude agents only; the
-    ``isinstance`` check covers ``claude``, ``headless_claude``, and user-defined
+    ``isinstance`` check is against ``ClaudeCoreAgent`` (the shared base of every
+    Claude agent), so it covers ``claude``, ``headless_claude``, and user-defined
     agent types whose ``parent_type`` chain reaches ``claude`` (e.g.
-    config-defined templates like ``write-plus``).
+    config-defined templates like a custom ``coder``).
     """
-    if not isinstance(agent, ClaudeAgent):
+    if not isinstance(agent, ClaudeCoreAgent):
         return
     _provision_statusline_shim(
         host,
         get_agent_state_dir_path(host.host_dir, agent.id),
         agent.work_dir,
     )
+
+
+@hookimpl
+def aggregate_usage_source(
+    source_name: str,
+    agents_events: dict[str, list[UsageEvent]],
+    since_seconds: int,
+    now: int,
+) -> UsageSnapshot | None:
+    """Aggregate the Claude usage source; decline every other source.
+
+    Claude Code reports cost cumulatively across a process's lifetime (a
+    ``/clear`` rotates ``session_id`` without resetting cost), so this is the
+    process-cumulative strategy. Returning None for non-Claude sources lets the
+    firstresult hook fall through to another plugin (or the dispatcher fallback).
+    """
+    if source_name != _CLAUDE_USAGE_SOURCE_NAME:
+        return None
+    return aggregate_process_cumulative(source_name, agents_events, since_seconds=since_seconds, now=now)

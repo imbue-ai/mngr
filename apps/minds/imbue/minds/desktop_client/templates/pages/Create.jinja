@@ -39,7 +39,7 @@
     // Color picker: palette-only (no custom hex on create). Clicking a
     // swatch updates the hidden ``color`` input the form POSTs, and
     // flips aria-checked so the visual selection ring (driven by an
-    // aria-checked CSS attribute selector in tokens.css) tracks.
+    // aria-checked CSS attribute selector in app.css) tracks.
     var colorInput = document.getElementById('create-color-input');
     var colorSwatches = document.querySelectorAll('#create-color-picker .color-swatch');
     function previewCreateAccent(hex) {
@@ -47,18 +47,16 @@
       // content-relay-preload validates + forwards to main + main
       // forwards to this bundle's chrome view as
       // ``freeform_accent_preview``, which sets the CSS variables
-      // directly. Naturally cleared by the next navigation event
-      // (submit -> ``current-workspace-changed`` repaints from the new
-      // workspace; cancel -> last-workspace fallback repaints).
+      // directly. main drops this override when the window leaves
+      // ``/create`` -- submit repaints from the new workspace, abandon
+      // repaints to the neutral chrome (see hasFreeformAccentPreview in
+      // electron/main.js).
       if (typeof hex !== 'string') return;
-      var fg = window.mindsAccent && window.mindsAccent.pickForegroundForHex
-        ? window.mindsAccent.pickForegroundForHex(hex)
-        : null;
-      if (!fg) return;
+      // Only the accent is sent; the chrome derives the contrasting titlebar
+      // foreground from it in pure CSS (see .titlebar-surface in app.css).
       window.postMessage({
         type: 'minds:preview-freeform-accent',
         accent: hex,
-        accentFg: fg,
       }, '*');
     }
     function selectColorSwatch(hex) {
@@ -81,10 +79,8 @@
     // Paint the initial default-color preview so the bar shows the
     // form's pre-selected color even before the user clicks (matches
     // the "what you see on submit" expectation). Deferred to
-    // DOMContentLoaded: this inline IIFE runs during parsing, before
-    // the deferred workspace_accent.js has executed, so window.mindsAccent
-    // (which previewCreateAccent needs for pickForegroundForHex) isn't
-    // ready yet. DOMContentLoaded fires after deferred scripts run.
+    // DOMContentLoaded as a stable init point (parsing finished, all
+    // page scripts run) rather than firing mid-parse.
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', function () {
         previewCreateAccent(colorInput.value);
@@ -99,6 +95,7 @@
     var apiKeyRow = document.getElementById('api-key-row');
     var apiKeyInput = document.getElementById('anthropic_api_key');
     var launchModeError = document.getElementById('launch-mode-account-error');
+    var awsCredentialsNote = document.getElementById('aws-credentials-note');
     var aiProviderError = document.getElementById('ai-provider-account-error');
     var backupSelect = document.getElementById('backup_provider');
     var backupApiKeyRow = document.getElementById('backup-api-key-row');
@@ -114,7 +111,7 @@
     var REGION_OPTIONS = {{ region_options_by_launch_mode | tojson }};
     var REGION_SELECTED = {{ region_selected_by_launch_mode | tojson }};
 
-    var COMPUTE_LABELS = {IMBUE_CLOUD: 'Imbue Cloud', DOCKER: 'Docker', LIMA: 'Lima', CLOUD: 'a cloud VM'};
+    var COMPUTE_LABELS = {IMBUE_CLOUD: 'Imbue Cloud', DOCKER: 'Docker', LIMA: 'Lima', VULTR: 'Vultr', AWS: 'AWS'};
     var AI_LABELS = {IMBUE_CLOUD: 'Imbue Cloud', API_KEY: 'your Anthropic API key', SUBSCRIPTION: 'your Claude subscription'};
     var BACKUP_LABELS = {IMBUE_CLOUD: 'Imbue Cloud', API_KEY: 'your own storage', CONFIGURE_LATER: 'off for now'};
 
@@ -176,7 +173,7 @@
 
     function updateRegion() {
       // The region dropdown is only shown for providers that place a machine in
-      // a chosen region (imbue_cloud, vultr). For others it is hidden and
+      // a chosen region (imbue_cloud, vultr, aws). For others it is hidden and
       // disabled so no region value is submitted.
       var mode = launchSelect.value;
       var options = REGION_OPTIONS[mode];
@@ -231,6 +228,7 @@
       var aiInvalid = !hasAccount && aiProviderSelect.value === 'IMBUE_CLOUD';
       var backupInvalid = !hasAccount && backupValue === 'IMBUE_CLOUD';
       launchModeError.classList.toggle('hidden', !launchInvalid);
+      if (awsCredentialsNote) awsCredentialsNote.classList.toggle('hidden', launchSelect.value !== 'AWS');
       aiProviderError.classList.toggle('hidden', !aiInvalid);
       backupProviderError.classList.toggle('hidden', !backupInvalid);
       submitBtn.disabled = launchInvalid || aiInvalid || backupInvalid;
@@ -248,13 +246,13 @@
   })();
 </script>
 {% endset %}
-<CardPage title="Create workspace" padding="form" max_width="max-w-[520px]" scripts={{ _scripts }}>
+<PageNarrowContainer title="Create workspace" padding="form" max_width="max-w-[520px]" scripts={{ _scripts }}>
   <form id="create-form" action="/create" method="post">
 
-      <div class="flex items-center justify-between gap-4 mb-5">
-        <h1 class="text-sm font-medium text-zinc-500">Create workspace</h1>
+      <div class="flex items-center justify-between gap-4 mb-4">
+        <h1 class="type-label text-secondary">Create workspace</h1>
         <select id="account_id" name="account_id"
-                class="max-w-[220px] text-xs text-right text-zinc-400 bg-transparent border-0 rounded-md px-1 py-1 outline-none cursor-pointer transition-colors hover:text-zinc-700 focus:outline-none focus:ring-0">
+                class="max-w-[220px] type-helper text-right text-tertiary bg-transparent border-0 rounded-md px-1 py-1 outline-none cursor-pointer hover:text-primary focus:outline-none focus:ring-0">
           {% for acct in accounts %}
             <option value="{{ acct.user_id }}"{% if acct.user_id == default_account_id %} selected{% endif %}>{{ acct.email }}</option>
           {% endfor %}
@@ -280,15 +278,15 @@
         </div>
       </div>
 
-      <div class="flex items-center justify-between gap-3 mt-2.5 px-1 text-xs">
-        <span id="config-summary" class="text-zinc-400 leading-snug"></span>
+      <div class="flex items-center justify-between gap-3 mt-2 px-1 type-helper">
+        <span id="config-summary" class="text-tertiary leading-snug"></span>
         <Button variant="ghost" id="configure-toggle"
-                extra="!p-0 !bg-transparent !text-xs !font-normal !text-blue-600 hover:!bg-transparent hover:underline hover:!text-blue-700 whitespace-nowrap">
+                extra="!p-0 !bg-transparent !type-helper !text-accent hover:!bg-transparent hover:underline whitespace-nowrap">
           Configure&hellip;
         </Button>
       </div>
 
-      <div id="configure-panel" class="hidden mt-5 flex flex-col gap-4">
+      <div id="configure-panel" class="hidden mt-4 flex flex-col gap-4">
 
         <div>
           <div class="flex items-center justify-between gap-3">
@@ -300,7 +298,13 @@
               {% endfor %}
             </Select>
           </div>
-          <p id="launch-mode-account-error" class="hidden mt-1 text-xs text-amber-600 text-right">imbue_cloud requires a selected account.</p>
+          <p id="launch-mode-account-error" class="hidden mt-1 type-helper text-warning text-right">imbue_cloud requires a selected account.</p>
+          <p id="aws-credentials-note" class="hidden mt-1 type-helper text-tertiary">
+            AWS credentials are read from this machine's environment
+            (<code>AWS_ACCESS_KEY_ID</code> / <code>AWS_SECRET_ACCESS_KEY</code>,
+            or <code>AWS_PROFILE</code>, or <code>~/.aws/credentials</code>).
+            Pick a region under advanced settings.
+          </p>
         </div>
 
         <div>
@@ -313,7 +317,7 @@
               {% endfor %}
             </Select>
           </div>
-          <p id="ai-provider-account-error" class="hidden mt-1 text-xs text-amber-600 text-right">imbue_cloud requires a selected account.</p>
+          <p id="ai-provider-account-error" class="hidden mt-1 type-helper text-warning text-right">imbue_cloud requires a selected account.</p>
           <div id="api-key-row" class="mt-2 hidden">
             <FormLabel target="anthropic_api_key">Anthropic API key</FormLabel>
             <TextInput name="anthropic_api_key" :value="anthropic_api_key" placeholder="sk-ant-..." id="anthropic_api_key" type="password" />
@@ -330,11 +334,11 @@
               {% endfor %}
             </Select>
           </div>
-          <p id="backup-provider-account-error" class="hidden mt-1 text-xs text-amber-600 text-right">imbue_cloud requires a selected account.</p>
+          <p id="backup-provider-account-error" class="hidden mt-1 type-helper text-warning text-right">imbue_cloud requires a selected account.</p>
 
           <div id="backup-api-key-row" class="mt-2 hidden">
             <FormLabel target="backup_api_key_env">restic environment</FormLabel>
-            <p class="mb-1 text-xs text-zinc-400">
+            <p class="mb-1 type-helper text-tertiary">
               Written verbatim to <code>restic.env</code>. Don't set <code>RESTIC_PASSWORD</code> -- minds assigns each
               workspace its own. See the
               <Link href="https://restic.readthedocs.io/en/stable/040_backup.html#environment-variables"
@@ -358,11 +362,11 @@
           <div id="backup-master-password-row" class="mt-2 hidden">
             <FormLabel target="backup_master_password">Backup master password</FormLabel>
             {% if has_saved_backup_password %}
-              <p class="text-xs text-zinc-500">A saved backup password will be used for this workspace.</p>
+              <p class="type-helper text-secondary">A saved backup password will be used for this workspace.</p>
             {% else %}
               <TextInput type="password" name="backup_master_password" id="backup_master_password"
                          placeholder="remember this -- backups are unrecoverable without it" />
-              <label class="mt-2 flex items-center gap-2 text-xs text-zinc-500">
+              <label class="mt-2 flex items-center gap-2 type-helper text-secondary">
                 <input type="checkbox" id="backup_save_password" name="backup_save_password" value="1" />
                 Save this password for all my workspaces
               </label>
@@ -371,7 +375,7 @@
         </div>
 
         <Button variant="ghost" id="toggle-advanced"
-                extra="self-start !p-0 !bg-transparent !text-xs !font-normal !text-blue-600 hover:!bg-transparent hover:underline hover:!text-blue-700">
+                extra="self-start !p-0 !bg-transparent !type-helper !text-accent hover:!bg-transparent hover:underline">
           Show advanced settings
         </Button>
 
@@ -381,19 +385,19 @@
               <FormLabel target="region" inline>Region</FormLabel>
               <Select id="region" name="region" width="w-48"></Select>
             </div>
-            <p class="mt-1 text-xs text-zinc-400 text-right">Where the machine is created. If a region is out of capacity, try another.</p>
+            <p class="mt-1 type-helper text-tertiary text-right">Where the machine is created. If a region is out of capacity, try another.</p>
           </div>
           <div>
             <FormLabel target="git_url">Repository</FormLabel>
-            <p class="mb-1 text-xs text-zinc-400">Git URL or local path</p>
+            <p class="mb-1 type-helper text-tertiary">Git URL or local path</p>
             <TextInput name="git_url" :value="git_url" placeholder="https://github.com/user/repo.git" id="git_url" required />
           </div>
           <div>
             <FormLabel target="branch">Branch</FormLabel>
-            <p class="mb-1 text-xs text-zinc-400">Leave empty for latest version</p>
+            <p class="mb-1 type-helper text-tertiary">Leave empty for latest version</p>
             <TextInput name="branch" :value="branch" placeholder="latest tag" id="branch" />
           </div>
         </div>
       </div>
   </form>
-</CardPage>
+</PageNarrowContainer>

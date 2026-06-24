@@ -343,17 +343,34 @@ def clone_git_repo(
 
     The clone_dir must not already exist -- this function creates it.
 
-    ``branch`` accepts a branch name, a tag name, or a commit SHA -- git
-    fetch handles all three uniformly. The fetched ref lands in
-    ``FETCH_HEAD``; the caller materialises HEAD by calling
-    :func:`checkout_branch` next.
+    The two cases take deliberately different code paths:
 
-    Implementation is ``git init`` + ``git remote add origin`` + ``git
-    fetch origin <ref>`` rather than ``git clone --single-branch --branch
-    <ref>``. ``--branch`` rejects commit SHAs (``fatal: Remote branch
-    <sha> not found in upstream origin``); ``git fetch`` does not. The
-    fetch downloads only the requested ref's full ancestry -- same shape
-    as ``--single-branch``, still non-shallow.
+    No ``branch`` given: a plain ``git clone <url> <dir>``. This resolves
+    the remote's default branch natively (in one connection), creates a
+    matching *named* local branch, and checks it out -- exactly the state a
+    user gets from ``git clone``. The named branch is load-bearing: the
+    downstream ``mngr create`` mirror push only pushes ``refs/heads/*`` +
+    ``refs/tags/*`` (a detached HEAD leaves ``refs/heads/*`` empty and the
+    push fails with "No refs in common and none specified; doing nothing"),
+    and the resolved name becomes the agent's source-base branch. Letting
+    git resolve the default branch avoids parsing ``ls-remote`` output or
+    making a second round trip whose name could disagree with the fetch.
+
+    Explicit ``branch`` (a branch name, tag name, or commit SHA): ``git
+    init`` + ``git remote add origin`` + ``git fetch origin <ref>`` + ``git
+    checkout --detach FETCH_HEAD``, then the caller renames the detached
+    HEAD to a real local branch via :func:`checkout_branch`. We avoid ``git
+    clone --branch <ref>`` here because ``--branch`` rejects commit SHAs
+    (``fatal: Remote branch <sha> not found in upstream origin``); ``git
+    fetch`` accepts a branch, tag, or SHA uniformly. The fetch downloads
+    only the requested ref's full ancestry.
+
+    Both paths materialise a checked-out working tree, which is
+    load-bearing: callers that overlay a worktree via
+    :func:`rsync_worktree_over_clone` need a *checked-out* clone, else the
+    rsync'd files land untracked and the subsequent ``checkout_branch``
+    aborts with "untracked working tree files would be overwritten by
+    checkout".
 
     We deliberately do NOT shallow-clone (no ``--depth``): this clone is
     the source ``mngr create`` mirror-pushes into the agent container's
@@ -372,20 +389,27 @@ def clone_git_repo(
     # which would otherwise leak tokens from credentialed URLs into logs.
     redacted_on_output = _RedactingOutputCallback(inner=on_output) if on_output is not None else None
 
-    # `init` and `remote add` are local-only and never fail in healthy
-    # environments; `fetch` is the step that can legitimately error
-    # (auth, network, ref-not-found). All three are wrapped under the
-    # same child concurrency group so cancellation is uniform; the
-    # failure is raised AFTER the `with cg` block to keep GitCloneError
-    # from being wrapped in a ConcurrencyExceptionGroup.
+    # All steps run under the same child concurrency group so cancellation is
+    # uniform; the failure is raised AFTER the `with cg` block to keep
+    # GitCloneError from being wrapped in a ConcurrencyExceptionGroup. For the
+    # explicit-ref path, `init`/`remote add` are local-only and never fail in
+    # healthy environments; `fetch` is the step that can legitimately error
+    # (auth, network, ref-not-found).
     cg = _make_child_cg("git-clone", parent_cg)
     failed: tuple[str, str] | None = None
     with cg:
-        for command in (
-            ["git", "init", "-q"],
-            ["git", "remote", "add", "origin", str(git_url)],
-            ["git", "fetch", "origin", str(branch) if branch is not None else "HEAD"],
-        ):
+        if branch is None:
+            # Plain clone: git resolves the remote's default branch and leaves a
+            # named local branch checked out (see docstring for why this matters).
+            commands: tuple[list[str], ...] = (["git", "clone", str(git_url), str(clone_dir)],)
+        else:
+            commands = (
+                ["git", "init", "-q"],
+                ["git", "remote", "add", "origin", str(git_url)],
+                ["git", "fetch", "origin", str(branch)],
+                ["git", "checkout", "--detach", "FETCH_HEAD"],
+            )
+        for command in commands:
             result = cg.run_process_to_completion(
                 command=command,
                 cwd=clone_dir,
@@ -460,7 +484,7 @@ def _rsync_worktree_over_clone(
 
     Thin wrapper around :func:`imbue.mngr.utils.git_utils.rsync_worktree_over_clone`
     that owns the per-call ``rsync-worktree`` child CG. The shared helper
-    is also what ``mngr_vps_docker`` uses for its docker-build-context
+    is also what ``mngr_vps`` uses for its docker-build-context
     assembly, so the two paths can't drift again.
     """
     cg = _make_child_cg("rsync-worktree", parent_cg)
@@ -513,7 +537,10 @@ def _build_mngr_create_command(
 
     DOCKER mode: --template main --template docker (runs in Docker container)
     LIMA mode: --template main --template lima (runs in Lima VM)
-    CLOUD mode: --template main --template vultr (runs in Docker on a Vultr VPS)
+    VULTR mode: --template main --template vultr (runs in Docker on a Vultr VPS)
+    AWS mode: --new-host on the aws-<region> provider, --template main
+        --template aws (runs in a runsc Docker container on an EC2 instance;
+        the region-specific provider block is written by minds at startup)
     IMBUE_CLOUD mode: --new-host on the imbue_cloud_<slug> provider (the
         plugin's create_host adopts the pool's pre-baked agent under
         the lease's baked name); ``imbue_cloud_*`` arguments encode the
@@ -550,8 +577,16 @@ def _build_mngr_create_command(
             address = f"{_DEFAULT_AGENT_NAME}@{host_name}.docker"
         case LaunchMode.LIMA:
             address = f"{_DEFAULT_AGENT_NAME}@{host_name}.lima"
-        case LaunchMode.CLOUD:
+        case LaunchMode.VULTR:
             address = f"{_DEFAULT_AGENT_NAME}@{host_name}.vultr"
+        case LaunchMode.AWS:
+            # AWS is region-locked per provider instance (EC2's API is
+            # per-region), so minds writes one ``[providers.aws-<region>]``
+            # block per configured region at startup and the create address
+            # selects the region-specific provider. The region is required.
+            if not region:
+                raise MngrCommandError("AWS mode requires a region")
+            address = f"{_DEFAULT_AGENT_NAME}@{host_name}.aws-{region}"
         case LaunchMode.IMBUE_CLOUD:
             if not imbue_cloud_account:
                 raise MngrCommandError("IMBUE_CLOUD mode requires imbue_cloud_account")
@@ -643,14 +678,23 @@ def _build_mngr_create_command(
         case LaunchMode.LIMA:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "lima"])
             mngr_command.extend(_remote_host_env_flags())
-        case LaunchMode.CLOUD:
+        case LaunchMode.VULTR:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "vultr"])
             mngr_command.extend(_remote_host_env_flags())
             # The user always picks a Vultr region in the create form (advanced
             # settings). It is a hard placement requirement: the VPS is created
             # in exactly this region.
             if region:
-                mngr_command.extend(["-b", f"--vps-region={region}"])
+                mngr_command.extend(["-b", f"--vultr-region={region}"])
+        case LaunchMode.AWS:
+            mngr_command.extend(["--new-host", "--template", "main", "--template", "aws"])
+            mngr_command.extend(_remote_host_env_flags())
+            # The create address already selects the ``aws-<region>`` provider
+            # (whose block is pinned to this region). Pass the matching
+            # ``--aws-region`` build arg too so intent is explicit and the
+            # provider's cross-region guard confirms the placement.
+            if region:
+                mngr_command.extend(["-b", f"--aws-region={region}"])
         case LaunchMode.IMBUE_CLOUD:
             # imbue_cloud follows the same shape as the other modes: the
             # ``main`` + ``imbue_cloud`` templates set ``idle_mode = disabled``
@@ -935,6 +979,53 @@ def run_mngr_create(
     return capture.canonical_agent_id, canonical_host_id
 
 
+def run_mngr_aws_prepare(
+    region: str,
+    on_output: OutputCallback | None = None,
+    *,
+    parent_cg: ConcurrencyGroup | None = None,
+) -> None:
+    """Ensure the AWS security group for ``region`` exists before an AWS create.
+
+    Runs ``mngr aws prepare --provider aws-<region> --region <region>``, which is
+    read-only-first: when the ``mngr-aws`` security group already exists with the
+    required SSH ingress it issues no write call, so this succeeds even with an
+    AWS key that only has ``ec2:DescribeSecurityGroups``. It only attempts the
+    privileged create/authorize when the group (or a rule) is missing.
+
+    ``AwsProvider.create_host`` refuses to launch an instance when the security
+    group is absent (it looks it up read-only), so minds runs this first for the
+    chosen region. Failures -- missing credentials, or a missing group the key
+    cannot create -- raise ``MngrCommandError`` so the creation flow surfaces a
+    clear message on the creating page rather than a deferred opaque create
+    failure.
+    """
+    # AWS is region-locked per provider instance, so a region is required to
+    # name the ``aws-<region>`` provider. Fail fast with the same message
+    # ``_build_mngr_create_command`` raises so the empty-region case is rejected
+    # consistently regardless of which step trips first.
+    if not region:
+        raise MngrCommandError("AWS mode requires a region")
+    provider_name = f"aws-{region}"
+    command = [MNGR_BINARY, "aws", "prepare", "--provider", provider_name, "--region", region]
+    logger.info("Running: {}", " ".join(command))
+    cg = _make_child_cg("mngr-aws-prepare", parent_cg)
+    with cg:
+        result = cg.run_process_to_completion(
+            command=command,
+            is_checked_after=False,
+            on_output=on_output,
+        )
+    if result.returncode != 0:
+        raise MngrCommandError(
+            "mngr aws prepare failed for region {} (exit code {}):\n{}".format(
+                region,
+                result.returncode,
+                result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
+            )
+        )
+
+
 class _MngrCreateAttemptParams(FrozenModel):
     """Per-creation inputs shared across a ``fast_mode`` retry loop.
 
@@ -949,6 +1040,7 @@ class _MngrCreateAttemptParams(FrozenModel):
     on_output: OutputCallback
     latchkey_env: Mapping[str, str] | None
     account_email: str | None
+    repo_source: str | None
     branch_or_tag: str | None
     region: str | None
     anthropic_api_key: str | None
@@ -972,18 +1064,18 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         on_output=params.on_output,
         latchkey_env=params.latchkey_env,
         imbue_cloud_account=params.account_email if is_imbue_cloud else None,
-        # Don't constrain the lease on ``repo_url`` here: ``repo_source`` is
-        # whatever the user picked in the UI (often a local FCT clone path),
-        # but pool hosts are operator-baked with whatever ``--attributes`` JSON
-        # the admin chose -- typically ``cpus``/``memory_gb``/
-        # ``repo_branch_or_tag`` and not ``repo_url``. Including ``repo_url``
-        # here would make every lease request fail the JSONB ``@>`` match.
-        # Constraining on ``repo_branch_or_tag`` (when minds knows it) is enough
-        # to pick the right pool generation.
+        # Pass the form's repository through verbatim (a remote URL in
+        # production, a local clone path in dev). The provider canonicalizes it
+        # -- resolving a local path to its ``origin`` remote -- so the fast path
+        # adopts a pool host only when the request's repo *and* branch genuinely
+        # match what was baked. minds must not canonicalize here (it shells out
+        # to ``mngr`` and cannot import the plugin).
+        imbue_cloud_repo_url=(params.repo_source if is_imbue_cloud and params.repo_source else None),
         imbue_cloud_branch_or_tag=(params.branch_or_tag if is_imbue_cloud and params.branch_or_tag else None),
         imbue_cloud_fast_mode=fast_mode,
-        # ``region`` is honored by both IMBUE_CLOUD (-b region=) and CLOUD/vultr
-        # (-b --vps-region=); the command builder ignores it for DOCKER/LIMA.
+        # ``region`` is honored by IMBUE_CLOUD (-b region=), VULTR
+        # (-b --vultr-region=), and AWS (-b --aws-region=); the command builder
+        # ignores it for DOCKER/LIMA.
         region=(params.region or None),
         anthropic_api_key=params.anthropic_api_key,
         anthropic_base_url=params.anthropic_base_url,
@@ -1373,10 +1465,17 @@ class AgentCreator(MutableModel):
                         if clone_target.exists():
                             shutil.rmtree(clone_target)
                         file_url = GitUrl("file://{}".format(resolved_path))
+                        # Pass the branch through (like the remote-URL case
+                        # below) so that when one is requested the clone takes
+                        # the fetch-into-FETCH_HEAD path that the subsequent
+                        # ``checkout_branch`` depends on. With no branch, the
+                        # plain ``git clone`` lands on the worktree's own branch
+                        # and ``checkout_branch`` is skipped.
                         clone_git_repo(
                             file_url,
                             clone_target,
                             on_output=emit_log,
+                            branch=GitBranch(branch) if branch else None,
                             parent_cg=self.root_concurrency_group,
                         )
                         # Rsync the worktree's working directory over so that
@@ -1494,6 +1593,14 @@ class AgentCreator(MutableModel):
                 # re-creating the agent.
                 latchkey_setup = self._prepare_latchkey_or_warn(log_queue)
 
+                # AWS hosts need the region's security group to exist before
+                # ``mngr create`` (the provider looks it up read-only and
+                # refuses to launch without it). prepare is read-only-first, so
+                # this is a no-op describe when the region is already prepared.
+                if launch_mode is LaunchMode.AWS:
+                    log_queue.put(f"[minds] Ensuring AWS security group is ready in {region}...")
+                    run_mngr_aws_prepare(region, on_output=emit_log, parent_cg=self.root_concurrency_group)
+
                 parsed_host = HostName(host_name)
                 log_queue.put("[minds] Creating workspace '{}' (mode: {})...".format(host_name, launch_mode.value))
 
@@ -1507,6 +1614,7 @@ class AgentCreator(MutableModel):
                     on_output=emit_log,
                     latchkey_env=latchkey_setup.env,
                     account_email=account_email,
+                    repo_source=repo_source,
                     branch_or_tag=branch_or_tag,
                     region=region,
                     anthropic_api_key=effective_anthropic_api_key,
@@ -1533,10 +1641,13 @@ class AgentCreator(MutableModel):
                 # We downgrade ``LatchkeyStoreError`` here to a warning
                 # rather than failing agent creation: the gateway still
                 # has the deny-all baseline at the opaque path (the JWT
-                # already points there), so the agent comes up working
-                # but any later UI-driven permission grants will not
-                # take effect. The user can recover by re-creating the
-                # agent.
+                # already points there), so the agent comes up working.
+                # If the link is never established, the first permission
+                # request the agent files is repaired on the fly by
+                # ``recover_missing_host_permissions`` (see
+                # ``_StreamedPermissionRequestHandler`` in ``cli/run.py``),
+                # which swings the opaque handle to the canonical path so
+                # later UI-driven grants take effect without a re-create.
                 if self.latchkey is not None:
                     try:
                         finalize_host_permissions(
@@ -1552,8 +1663,8 @@ class AgentCreator(MutableModel):
                         )
                         log_queue.put(
                             "[minds] Warning: could not link latchkey permissions handle to "
-                            f"canonical path for host {canonical_host_id}; permission grants will not "
-                            f"take effect until the agent is re-created. Reason: {link_error}"
+                            f"canonical path for host {canonical_host_id}; this will be repaired "
+                            f"automatically the first time the agent requests a permission. Reason: {link_error}"
                         )
 
                 log_queue.put("[minds] Agent created successfully.")

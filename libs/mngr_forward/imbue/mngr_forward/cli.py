@@ -25,6 +25,7 @@ from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.parent_process import start_parent_death_watcher
@@ -60,6 +61,7 @@ class ForwardCliOptions(CommonCliOptions):
     reverse: tuple[str, ...] = ()
     no_observe: bool = False
     observe_via_file: bool = False
+    on_error: str = "abort"
     agent_include: tuple[str, ...] = ()
     agent_exclude: tuple[str, ...] = ()
     event_include: tuple[str, ...] = ()
@@ -180,6 +182,15 @@ def _bind_listen_socket(host: str, requested_port: int | None) -> socket.socket:
     help="Do not spawn `mngr observe`; instead tail the shared discovery events file written by another "
     "`mngr observe --discovery-only` (e.g. the one `mngr latchkey forward` runs). Per-agent `mngr event` "
     "streams are still spawned. Mutually exclusive with --no-observe.",
+)
+@click.option(
+    "--on-error",
+    type=click.Choice(["abort", "continue"], case_sensitive=False),
+    default="abort",
+    help="What to do when a provider errors during the `--no-observe` `mngr list` snapshot (both the "
+    "startup snapshot and SIGHUP re-snapshots): abort (fail fast, the default) or continue (tolerate "
+    "unauthenticated/unreachable providers and forward the agents the healthy providers reported). Has "
+    "no effect in the observe / --observe-via-file modes, which always tolerate provider errors.",
 )
 @click.option(
     "--agent-include",
@@ -419,7 +430,7 @@ def _seed_resolver_from_snapshot(
     on ``SIGHUP`` (``require_non_empty=False``: keeps the previous set on an
     empty snapshot, treating it as a transient).
     """
-    snapshot = mngr_list_snapshot()
+    snapshot = mngr_list_snapshot(error_behavior=ErrorBehavior(opts.on_error.upper()))
     kept = _filter_snapshot(snapshot, opts.agent_include, opts.agent_exclude)
     if not kept.agents:
         if require_non_empty:

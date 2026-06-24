@@ -3,7 +3,6 @@
 import json
 import os
 import platform
-import shutil
 import tomllib
 from collections.abc import Callable
 from pathlib import Path
@@ -14,14 +13,15 @@ import click
 from loguru import logger
 from pydantic import Field
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.cli.common_opts import add_common_options
-from imbue.mngr.cli.complete import generate_bash_script
-from imbue.mngr.cli.complete import generate_zsh_script
+from imbue.mngr.cli.completion_install import COMPLETION_SHIM_MARKER
+from imbue.mngr.cli.completion_install import generate_completion_shim
+from imbue.mngr.cli.completion_install import get_managed_completion_script_path
+from imbue.mngr.cli.completion_install import strip_legacy_completion_block
+from imbue.mngr.cli.completion_install import write_managed_completion_scripts
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import AbortError
@@ -35,6 +35,9 @@ from imbue.mngr.config.loader import get_or_create_profile_dir
 from imbue.mngr.config.pre_readers import find_profile_dir_lightweight
 from imbue.mngr.config.pre_readers import get_user_config_path
 from imbue.mngr.plugin_catalog import PLUGIN_CATALOG
+from imbue.mngr.utils.deps import CLAUDE
+from imbue.mngr.utils.deps import SUBPROCESS_ERRORS
+from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.toml_config import load_config_file_tomlkit
 from imbue.mngr.utils.toml_config import save_config_file
 from imbue.mngr.utils.toml_config import set_nested_value
@@ -64,17 +67,21 @@ def _get_shell_rc(shell_type: str) -> Path:
 
 
 def _is_completion_configured(rc_path: Path) -> bool:
-    """Check if mngr shell completion is already configured."""
+    """Check if the (current, managed) mngr shell completion shim is installed.
+
+    Looks for the managed-shim marker rather than just ``_mngr_complete``: an rc
+    that still holds the old self-contained completion function (no marker) is
+    treated as *not* configured, so installing adds the up-to-date shim (which,
+    sourced last, supersedes the old function).
+    """
     if not rc_path.exists():
         return False
-    return "_mngr_complete" in rc_path.read_text()
+    return COMPLETION_SHIM_MARKER in rc_path.read_text()
 
 
 def _generate_completion_script(shell_type: str) -> str:
-    """Generate the completion script using the existing complete module."""
-    if shell_type == "zsh":
-        return generate_zsh_script()
-    return generate_bash_script()
+    """Generate the rc shim that sources the managed completion file."""
+    return generate_completion_shim(shell_type)
 
 
 # -- Shared picker helper --
@@ -105,6 +112,20 @@ def _completion_status() -> tuple[bool, str, Path]:
     return configured, shell_type, rc_path
 
 
+def _default_completion_confirm(rc_path: Path, will_replace: bool) -> bool:
+    """Prompt to install/replace shell completion, surfacing whether an old block was detected."""
+    if will_replace:
+        question = (
+            f"Found an existing mngr completion in {rc_path} from an older version. "
+            "Replace it with the auto-updating managed shim?"
+        )
+        install_label = "Replace shell completion"
+    else:
+        question = f"Enable shell completion? This sets up an auto-updating mngr completion in {rc_path}."
+        install_label = "Enable shell completion"
+    return _confirm_install(question, install_label)
+
+
 def _install_completion(
     auto: bool,
     *,
@@ -112,32 +133,61 @@ def _install_completion(
     # in-memory fakes without monkeypatching module-level callables.
     status_fn: Callable[[], tuple[bool, str, Path]] = _completion_status,
     is_interactive_fn: Callable[[], bool] = has_interactive_terminal,
-    confirm_fn: Callable[[Path], bool] = lambda rc_path: _confirm_install(
-        f"Enable shell completion? This will add a line to {rc_path}.",
-        "Enable shell completion",
-    ),
+    confirm_fn: Callable[[Path, bool], bool] = _default_completion_confirm,
 ) -> bool:
-    """Install shell completion. Returns True if installed (or already configured)."""
+    """Install shell completion. Returns True if installed (or already configured).
+
+    The rc gets a small shim that sources a managed completion file mngr keeps up
+    to date; the managed files are (re)written here so completion-logic changes
+    reach the user without further rc edits. An old self-contained completion
+    block left by a previous version is detected and replaced (the confirm prompt
+    says so).
+    """
     configured, shell_type, rc_path = status_fn()
 
+    # Always refresh the managed files so they reflect the current logic, even
+    # when the shim is already installed.
+    write_managed_completion_scripts()
+
+    rc_text = rc_path.read_text() if rc_path.exists() else ""
+    cleaned_text, removed_legacy = strip_legacy_completion_block(rc_text)
+
     if configured:
-        write_human_line("Shell completion already configured in {}", rc_path)
+        # The managed shim is already installed; just tidy up an old self-contained
+        # block if one is left over (and byte-matches a form we generated).
+        if removed_legacy:
+            atomic_write(rc_path, cleaned_text)
+            write_human_line("Removed the old completion block from {} (managed shim already present)", rc_path)
+        else:
+            write_human_line("Shell completion already configured in {} (refreshed completion files)", rc_path)
         return True
+
+    if removed_legacy:
+        write_human_line(
+            "Found an existing mngr completion in {} from an older version; it will be replaced.", rc_path
+        )
 
     if not auto:
         if not is_interactive_fn():
             write_human_line("No interactive terminal available. Skipping shell completion.")
             return False
-        if not confirm_fn(rc_path):
+        if not confirm_fn(rc_path, removed_legacy):
             write_human_line("Skipping shell completion.")
             return False
 
-    script = _generate_completion_script(shell_type)
+    shim = _generate_completion_script(shell_type)
+    if cleaned_text and not cleaned_text.endswith("\n"):
+        cleaned_text += "\n"
+    atomic_write(rc_path, f"{cleaned_text}\n{shim}\n")
 
-    with rc_path.open("a") as f:
-        f.write(f"\n{script}\n")
-
-    write_human_line("Shell completion enabled in {}", rc_path)
+    if removed_legacy:
+        write_human_line("Replaced the old completion block with the managed shim in {}", rc_path)
+    else:
+        write_human_line("Shell completion enabled in {}", rc_path)
+    # A child process can't load completion into the parent shell, so tell the user
+    # how to activate it. The source command is on its own line for easy copying.
+    write_human_line("To use it, start a new shell, or run:")
+    write_human_line("source {}", get_managed_completion_script_path(shell_type))
     return True
 
 
@@ -160,13 +210,6 @@ class ClaudeCodePlugin(FrozenModel):
     )
 
 
-# ConcurrencyGroup wraps a synchronous subprocess failure (or spawn error)
-# from inside its `with` block in a ConcurrencyExceptionGroup before
-# re-raising, so a bare `except ProcessError` would miss it. Mirror the
-# tuple used by imbue.mngr.utils.deps.
-_SUBPROCESS_ERRORS: Final[tuple[type[Exception], ...]] = (OSError, ProcessError, ConcurrencyExceptionGroup)
-
-
 # The Claude Code plugins mngr knows how to install. Each lives in its own
 # GitHub repo, published as a Claude Code plugin marketplace.
 _CLAUDE_CODE_PLUGINS: Final[tuple[ClaudeCodePlugin, ...]] = (
@@ -185,21 +228,21 @@ _CLAUDE_CODE_PLUGINS: Final[tuple[ClaudeCodePlugin, ...]] = (
 )
 
 
-def _claude_plugin_status() -> tuple[bool, dict[str, bool]]:
+def _claude_native_plugin_status() -> tuple[bool, dict[str, bool]]:
     """Return (claude_available, {plugin_name: is_installed}).
 
     When Claude Code is not on PATH, the per-plugin map reports every plugin
     as not installed.
     """
     not_installed = {plugin.name: False for plugin in _CLAUDE_CODE_PLUGINS}
-    claude_available = shutil.which("claude") is not None
+    claude_available = CLAUDE.is_available()
     if not claude_available:
         return False, not_installed
 
     try:
         with ConcurrencyGroup(name="extras-claude-check") as cg:
             result = cg.run_process_to_completion(["claude", "plugin", "list", "--json"], is_checked_after=False)
-    except _SUBPROCESS_ERRORS:
+    except SUBPROCESS_ERRORS:
         return True, not_installed
 
     if result.returncode != 0:
@@ -239,7 +282,7 @@ def _install_one_claude_plugin(plugin: ClaudeCodePlugin) -> bool:
                     detail = result.stderr.strip() or result.stdout.strip()
                     logger.warning("Failed to install {}. {}", plugin.name, detail)
                     return False
-    except _SUBPROCESS_ERRORS as e:
+    except SUBPROCESS_ERRORS as e:
         logger.warning("Failed to install {}. {}", plugin.name, str(e))
         return False
 
@@ -274,7 +317,7 @@ def _install_claude_plugin(
     *,
     # Dependencies are exposed as keyword arguments so tests can substitute
     # in-memory fakes without monkeypatching module-level callables.
-    status_fn: Callable[[], tuple[bool, dict[str, bool]]] = _claude_plugin_status,
+    status_fn: Callable[[], tuple[bool, dict[str, bool]]] = _claude_native_plugin_status,
     is_interactive_fn: Callable[[], bool] = has_interactive_terminal,
     select_fn: Callable[[tuple[ClaudeCodePlugin, ...]], tuple[ClaudeCodePlugin, ...]] = _prompt_claude_plugins_choice,
     install_fn: Callable[[ClaudeCodePlugin], bool] = _install_one_claude_plugin,
@@ -474,8 +517,18 @@ def _install_default_agent_type(
 # -- Status display --
 
 
-def _print_extras_status() -> None:
-    """Print the status of all extras."""
+def _print_extras_status(
+    *,
+    claude_native_plugin_status_fn: Callable[[], tuple[bool, dict[str, bool]]] = _claude_native_plugin_status,
+) -> None:
+    """Print the status of all extras.
+
+    ``claude_native_plugin_status_fn`` reports whether claude is available and which
+    known Claude Code plugins are installed. It is injectable (mirroring the
+    ``status_fn`` seam on the ``_install_*`` helpers) so tests can avoid shelling
+    out to ``claude plugin list`` -- a Node process whose startup is the slow,
+    variable part of this call.
+    """
     write_human_line("Extras")
     write_human_line("")
 
@@ -491,7 +544,7 @@ def _print_extras_status() -> None:
         write_human_line("  completion       not configured")
 
     # Claude Code plugins
-    claude_available, installed_by_name = _claude_plugin_status()
+    claude_available, installed_by_name = claude_native_plugin_status_fn()
     if not claude_available:
         write_human_line("  claude-plugin    claude not installed")
     else:

@@ -1,10 +1,11 @@
 """``mngr ovh ...`` CLI subcommands.
 
-Plugin-local commands that don't need the full ``MngrContext`` -- they
-read credentials directly from env / ``~/.ovh.conf`` via
-``OvhProviderConfig``. The intent is operator-grade inspection of the
-OVH account so you can sanity-check what ``mngr create`` and the recycle
-path see.
+Operator-grade inspection of the OVH account so you can sanity-check what
+``mngr create`` and the recycle path see. ``list`` reads its defaults from the
+user's ``[providers.<name>]`` settings.toml block (selected with ``--provider``)
+so it talks to the same endpoint / account / credentials the runtime ``mngr
+create --provider <name>`` path uses; credentials still fall back to env /
+``~/.ovh.conf`` when the block leaves them unset.
 """
 
 from collections.abc import Mapping
@@ -12,10 +13,15 @@ from typing import Any
 from typing import Final
 
 import click
+from click_option_group import optgroup
 from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
+from imbue.mngr.cli.common_opts import add_common_options
+from imbue.mngr.cli.common_opts import setup_command_context
+from imbue.mngr.config.data_types import CommonCliOptions
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr_ovh.client import OvhVpsClient
 from imbue.mngr_ovh.client import build_ovh_client
@@ -24,10 +30,40 @@ from imbue.mngr_ovh.iam_tags import MNGR_HOST_ID_TAG_KEY
 from imbue.mngr_ovh.iam_tags import MNGR_PROVIDER_TAG_KEY
 from imbue.mngr_ovh.iam_tags import MNGR_RECYCLING_LOCK_TAG_KEY
 from imbue.mngr_ovh.iam_tags import list_vps_resources
-from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps.cli_helpers import resolve_provider_config
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.primitives import VpsInstanceId
 
 _MAX_PARALLEL_VPS_FETCHES: Final[int] = 16
+
+
+class _OvhListCliOptions(CommonCliOptions):
+    """Option shape for ``mngr ovh list`` (select a provider block + the --all toggle)."""
+
+    provider: str
+    show_all: bool
+
+
+def _resolve_provider_config(mngr_ctx: MngrContext, provider_name: str) -> OvhProviderConfig:
+    """Return the user's ``[providers.<provider_name>]`` block, or class defaults.
+
+    ``list`` must inspect the same OVH endpoint / account / credentials the
+    runtime ``mngr create --provider <provider_name>`` path uses, so it reads the
+    user's resolved config rather than ``OvhProviderConfig()`` class defaults
+    (which would talk to the default endpoint / subsidiary regardless of what the
+    user pinned). Credentials still fall back to env / ``~/.ovh.conf`` via
+    ``build_ovh_client`` when the block leaves them unset. Thin wrapper over the
+    shared ``resolve_provider_config`` (see it for the {configured / wrong-backend
+    / missing} contract).
+    """
+    return resolve_provider_config(
+        mngr_ctx,
+        provider_name,
+        config_cls=OvhProviderConfig,
+        default_factory=OvhProviderConfig,
+        cloud_label="an OVH backend",
+        override_hint="Point --provider at an OVH-backed block to inspect it.",
+    )
 
 
 @click.group(name="ovh")
@@ -36,7 +72,20 @@ def ovh() -> None:
 
 
 @ovh.command(name="list")
-@click.option(
+@optgroup.group("Provider")
+@optgroup.option(
+    "--provider",
+    "provider",
+    default="ovh",
+    show_default=True,
+    help=(
+        "Name of the [providers.NAME] block in settings.toml to read defaults from "
+        "(endpoint, credentials, ovh_subsidiary, project_id). When the block does not "
+        "exist, OvhProviderConfig class defaults are used as the fallback; credentials "
+        "still fall back to env / ~/.ovh.conf when unset."
+    ),
+)
+@optgroup.option(
     "--all",
     "show_all",
     is_flag=True,
@@ -46,14 +95,22 @@ def ovh() -> None:
         "By default, only VPSes tagged with `mngr-provider` are shown."
     ),
 )
-def list_command(show_all: bool) -> None:
+@add_common_options
+@click.pass_context
+def list_command(ctx: click.Context, **_kwargs: Any) -> None:
     """List OVH VPSes visible to this account, with mngr-relevant details.
 
     Columns:
       SERVICENAME, PLAN, DATACENTER, STATE, EXPIRATION,
       CANCEL?, MNGR-PROVIDER, MNGR-HOST-ID, RECYCLING-BY.
     """
-    config = OvhProviderConfig()
+    mngr_ctx, _output_opts, opts = setup_command_context(
+        ctx=ctx,
+        command_name="ovh list",
+        command_class=_OvhListCliOptions,
+    )
+    show_all = opts.show_all
+    config = _resolve_provider_config(mngr_ctx, opts.provider)
     client = build_ovh_client(config)
     if client.is_unconfigured:
         raise click.ClickException(

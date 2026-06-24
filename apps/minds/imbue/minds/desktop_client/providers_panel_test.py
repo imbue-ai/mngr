@@ -20,7 +20,7 @@ from datetime import timezone
 from pathlib import Path
 
 import pytest
-from starlette.testclient import TestClient
+from flask.testing import FlaskClient
 
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.desktop_client.app import _build_providers_state_payload
@@ -33,7 +33,6 @@ from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
-from imbue.minds.desktop_client.workspace_color import pick_workspace_foreground
 from imbue.minds.testing import stub_mngr_host_dir
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
@@ -49,7 +48,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 _ROOT_NAME = "minds-dev-tname"
 
 
-def _make_test_client(tmp_path: Path) -> tuple[TestClient, FileAuthStore]:
+def _make_test_client(tmp_path: Path) -> tuple[FlaskClient, FileAuthStore]:
     """Build a desktop client backed by a real MngrCliBackendResolver + on-disk authn."""
     auth_dir = tmp_path / "auth"
     auth_store = FileAuthStore(data_directory=auth_dir)
@@ -59,13 +58,12 @@ def _make_test_client(tmp_path: Path) -> tuple[TestClient, FileAuthStore]:
         backend_resolver=resolver,
         http_client=None,
     )
-    client = TestClient(app, base_url="http://localhost")
-    return client, auth_store
+    return app.test_client(), auth_store
 
 
-def _authenticate(client: TestClient, auth_store: FileAuthStore) -> None:
+def _authenticate(client: FlaskClient, auth_store: FileAuthStore) -> None:
     cookie_value = create_session_cookie(signing_key=auth_store.get_signing_key())
-    client.cookies.set(SESSION_COOKIE_NAME, cookie_value, path="/")
+    client.set_cookie(SESSION_COOKIE_NAME, cookie_value)
 
 
 # -- _handle_provider_toggle -----------------------------------------------
@@ -92,7 +90,7 @@ def test_provider_toggle_returns_400_on_non_json_body(monkeypatch: pytest.Monkey
 
     response = client.post(
         "/api/providers/modal/toggle",
-        content=b"not json",
+        data=b"not json",
         headers={"Content-Type": "application/json"},
     )
 
@@ -166,7 +164,7 @@ def test_provider_toggle_writes_settings_and_returns_changed_true(
     response = client.post("/api/providers/modal/toggle", json={"is_enabled": False})
 
     assert response.status_code == 200
-    payload = response.json()
+    payload = response.get_json()
     assert payload == {"provider_name": "modal", "is_enabled": False, "changed": True}
     parsed = tomllib.loads(settings_path.read_text())
     assert parsed["providers"]["modal"] == {"is_enabled": False}
@@ -181,12 +179,12 @@ def test_provider_toggle_is_idempotent(monkeypatch: pytest.MonkeyPatch, tmp_path
 
     first = client.post("/api/providers/modal/toggle", json={"is_enabled": False})
     assert first.status_code == 200
-    assert first.json()["changed"] is True
+    assert first.get_json()["changed"] is True
     mtime_after_first = settings_path.stat().st_mtime_ns
 
     second = client.post("/api/providers/modal/toggle", json={"is_enabled": False})
     assert second.status_code == 200
-    assert second.json()["changed"] is False
+    assert second.get_json()["changed"] is False
     # File untouched
     assert settings_path.stat().st_mtime_ns == mtime_after_first
 
@@ -412,12 +410,14 @@ def test_build_workspace_list_does_not_mark_stale_for_unrelated_provider_error()
     assert "is_stale" not in workspaces[0]
 
 
-# -- _build_workspace_list color + accent_fg emission --
+# -- _build_workspace_list color emission --
 #
-# These assert the SSE workspaces payload carries the stored color and
-# the WCAG-derived foreground triple. Pre-migration workspaces (no
-# ``color`` label) fall back to ``DEFAULT_WORKSPACE_COLOR`` so the
-# rollout doesn't visually break existing workspaces.
+# These assert the SSE workspaces payload carries the stored color.
+# Pre-migration workspaces (no ``color`` label) fall back to
+# ``DEFAULT_WORKSPACE_COLOR`` so the rollout doesn't visually break
+# existing workspaces. The titlebar derives its contrasting foreground
+# from the accent in pure CSS (see .titlebar-surface in app.css), so the
+# payload no longer carries an ``accent_fg``.
 
 
 def test_build_workspace_list_emits_stored_color_when_label_present() -> None:
@@ -428,33 +428,17 @@ def test_build_workspace_list_emits_stored_color_when_label_present() -> None:
     workspaces = _build_workspace_list(resolver)
     assert len(workspaces) == 1
     assert workspaces[0]["accent"] == "#0b292b"
-    # Confusion is dark -> white foreground.
-    assert workspaces[0]["accent_fg"] == "255 255 255"
-
-
-def test_build_workspace_list_emits_black_foreground_for_light_palette_entries() -> None:
-    # #fcefd4 is the "clarity" palette entry, used here because it's
-    # near the upper end of the lightness range -- exercises the
-    # > 0.179 luminance branch of pick_workspace_foreground.
-    resolver = MngrCliBackendResolver()
-    agent = _make_workspace_agent("docker", extra_labels={"color": "#fcefd4"})
-    resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))
-
-    workspaces = _build_workspace_list(resolver)
-    assert workspaces[0]["accent"] == "#fcefd4"
-    assert workspaces[0]["accent_fg"] == "0 0 0"
+    assert "accent_fg" not in workspaces[0]
 
 
 def test_build_workspace_list_falls_back_to_default_color_when_label_missing() -> None:
     """Workspaces without a ``color`` label (created before the picker
     shipped, or backfilled but not yet written through ``mngr label``)
     render as ``DEFAULT_WORKSPACE_COLOR`` -- the same value new
-    workspaces get pre-selected in the picker. ``accent_fg`` matches
-    via the same WCAG luminance computation."""
+    workspaces get pre-selected in the picker."""
     resolver = MngrCliBackendResolver()
     agent = _make_workspace_agent("imbue_cloud_acct")
     resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))
 
     workspaces = _build_workspace_list(resolver)
     assert workspaces[0]["accent"] == DEFAULT_WORKSPACE_COLOR
-    assert workspaces[0]["accent_fg"] == pick_workspace_foreground(DEFAULT_WORKSPACE_COLOR)

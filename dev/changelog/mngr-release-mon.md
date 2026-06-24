@@ -1,0 +1,3 @@
+Rewrote the `release-minds` skill to be a thin pointer to `apps/minds/docs/release.md`, the canonical release runbook, instead of describing its own (now-obsolete) release flow.
+
+The old skill assumed a `~/project/minds_prod` clone and a long-lived `minds_v<version>` release branch, and walked through a manual `vendor/mngr` sync — none of which matches the documented process (release from `main` via two PRs, `just sync-vendor-mngr`, and `minds-v<version>` tags on both repos). The skill now resolves the target version from its args and defers entirely to the runbook, so the release process is maintained in exactly one place.

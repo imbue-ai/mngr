@@ -25,7 +25,7 @@ selection runs through :func:`list_vps_resources_for_provider`, which
 filters to VPSes whose ``mngr-provider`` tag matches the running
 provider instance's name. So a VPS that was ordered by mngr but whose
 provisioning aborted *before* the post-delivery tag attach (e.g. an OVH
-order that didn't deliver before ``vps_boot_timeout`` elapsed) is
+order that didn't deliver before ``instance_boot_timeout`` elapsed) is
 **invisible** to the recycle path and would leak indefinitely on its
 own.
 
@@ -61,8 +61,8 @@ from imbue.mngr_ovh.iam_tags import attach_tags
 from imbue.mngr_ovh.iam_tags import delete_tag
 from imbue.mngr_ovh.iam_tags import get_vps_resource
 from imbue.mngr_ovh.iam_tags import list_vps_resources_for_provider
-from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.primitives import VpsInstanceId
 
 _UNCANCEL_PROPAGATION_TIMEOUT_SECONDS: Final[float] = 30.0
 _UNCANCEL_POLL_INTERVAL_SECONDS: Final[float] = 2.0

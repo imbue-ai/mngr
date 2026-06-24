@@ -1,0 +1,1 @@
+Added the design plan document for unifying the `mngr start` host lock with the cooperative host lock (`blueprint/unify-remote-host-lock/`). No runtime or tooling behavior changes at the repo-root level.

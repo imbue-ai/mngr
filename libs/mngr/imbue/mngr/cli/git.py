@@ -4,8 +4,7 @@ from typing import Any
 import click
 from click_option_group import optgroup
 
-from imbue.mngr.api.discover import discover_hosts_and_agents
-from imbue.mngr.api.find import resolve_host_location_address
+from imbue.mngr.api.find import resolve_host_location
 from imbue.mngr.api.git import git_pull
 from imbue.mngr.api.git import git_push
 from imbue.mngr.cli.address_params import HOST_LOCATION_ADDRESS
@@ -15,8 +14,6 @@ from imbue.mngr.cli.default_command_group import DefaultCommandGroup
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import emit_info
-from imbue.mngr.cli.output_helpers import output_git_pull_success
-from imbue.mngr.cli.output_helpers import output_git_push_success
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
@@ -70,19 +67,7 @@ def _resolve_remote_endpoint(
             "for local-only operations"
         )
 
-    agents_by_host, _ = discover_hosts_and_agents(
-        mngr_ctx,
-        provider_names=None,
-        agent_identifiers=None,
-        include_destroyed=False,
-        reset_caches=False,
-    )
-    resolved = resolve_host_location_address(
-        parsed,
-        agents_by_host,
-        mngr_ctx,
-        is_start_desired=is_start_desired,
-    )
+    resolved = resolve_host_location(parsed, mngr_ctx, is_start_desired=is_start_desired)
     return resolved.location
 
 
@@ -118,9 +103,8 @@ def git_push_command(ctx: click.Context, **kwargs: Any) -> None:
         remote_path=location.path,
         extra_args=opts.git_args,
         cg=mngr_ctx.concurrency_group,
+        run_in_terminal=True,
     )
-
-    output_git_push_success(output_opts.output_format)
 
 
 @git_command.command(
@@ -155,9 +139,8 @@ def git_pull_command(ctx: click.Context, **kwargs: Any) -> None:
         remote_path=location.path,
         extra_args=opts.git_args,
         cg=mngr_ctx.concurrency_group,
+        run_in_terminal=True,
     )
-
-    output_git_pull_success(output_opts.output_format)
 
 
 CommandHelpMetadata(

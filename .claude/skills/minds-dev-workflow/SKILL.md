@@ -138,6 +138,20 @@ Do NOT use a key from `~/.mngr/profiles/...` -- that belongs to non-minds mngr a
 | `just deploy [--yes-i-mean-<tier>]` | Run `minds env deploy` on the activated env. For dev envs: provisions Modal env / Neon / SuperTokens + deploys both Modal apps + writes `~/.minds-<env>/{client.toml,secrets.toml}`. For tier deploys: pushes Vault secrets to Modal + deploys both Modal apps, no local state written. |
 | `just sync-vendor-mngr <fct-path>` | One-shot: snapshot mngr HEAD into FCT's vendor/mngr/ via `git archive` and commit in FCT. Use for "release" syncs, not dev iteration (it commits and only carries committed mngr content). |
 
+### Vault (for pool / slice bakes)
+
+Slice bakes (`minds pool create`, `just bake-slice-{dev,prod}`) read secrets from Vault (the tier's `POOL_SSH_PRIVATE_KEY`, the host-pool DSN, etc.). (Baking new OVH classic VPS pool hosts is deprecated and no longer supported.) Two things to know:
+
+- **Login is interactive.** Run `vault login -method=oidc` once per session (browser OIDC); the token lands at `~/.vault-token`.
+- **`VAULT_ADDR` / `VAULT_NAMESPACE` are usually NOT set in a non-interactive shell.** The minds wrappers (`minds pool ...` and the `bake-*` recipes) apply the imbue HCP defaults automatically via `apps/minds/imbue/minds/envs/vault_reader.py`, so they "just work" with only the token -- **prefer them**. If you run a **raw** `vault` or `mngr imbue_cloud admin ...` command, a bare `vault` defaults to `https://127.0.0.1:8200` and fails with "connection refused" -- that is a missing address, **NOT** "logged out" (don't ask the operator to re-login, and don't ask them for `VAULT_ADDR`). Export the defaults first:
+
+  ```bash
+  export VAULT_ADDR=https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200
+  export VAULT_NAMESPACE=admin
+  ```
+
+  Single source of truth: `_DEFAULT_VAULT_ADDR` / `_DEFAULT_VAULT_NAMESPACE` in `vault_reader.py` -- read them from there in case they drift.
+
 ### Env vars `just minds-start` sets
 
 `MINDS_ROOT_NAME` / `MNGR_HOST_DIR` / `MNGR_PREFIX` / `MINDS_CLIENT_CONFIG_PATH` come from `minds env activate <name>` in your shell -- `minds-start` requires them to be set and refuses otherwise. Beyond those:
@@ -164,24 +178,13 @@ If this chain breaks (orphaned `mngr observe`/`mngr event` processes appear), so
 
 ### Rsync exclusions
 
-`just minds-start`, `mngr imbue_cloud admin pool create --mngr-source ...`, and `propagate_changes` all share one form when rsyncing into `vendor/mngr/`:
-
-```
-rsync -a --delete --filter=':- .gitignore' --exclude=.git --exclude=uv.lock ...
-```
-
-`--filter=':- .gitignore'` is rsync's dir-merge filter: it reads `.gitignore` at each directory level under the source and applies its `-` (exclude) rules. That covers `__pycache__`, `.venv`, `node_modules`, `.test_output`, `.mypy_cache`, `.ruff_cache`, `.pytest_cache`, `.external_worktrees`, and anything else listed in the source repo's gitignore.
-
-The two manual excludes are for things gitignore deliberately doesn't list:
-
-- `.git` -- gitignore never lists it (git's internal dir).
-- `uv.lock` -- intentionally committed at the mngr root, but each install context should regenerate its own.
+`just minds-start`, `mngr imbue_cloud admin pool create --mngr-source ...`, and `propagate_changes` all rsync into `vendor/mngr/` using one shared form (`rsync -a --delete --filter=':- .gitignore' --exclude=.git --exclude=uv.lock`). The form, the rationale for each exclude, and the source-of-truth constants live in `apps/minds/docs/vendor-mngr-sync.md`.
 
 `propagate_changes` additionally protects `runtime/`, `.mngr/`, and `.claude/settings.local.json` from deletion when rsyncing into `/code/`.
 
 ### Editable installs
 
-The Dockerfile uses `uv tool install -e` for mngr (vendored under `vendor/mngr/`) and for the system_interface (at `apps/system_interface/`), so Python code changes in either location are picked up immediately after rsync. Frontend changes require the `npm run build` step (done automatically by `propagate_changes`).
+The FCT Docker build installs mngr (`vendor/mngr/libs/mngr`) and the system_interface (`apps/system_interface/`) editable via `uv tool install -e`, run by `scripts/build_workspace.sh` (which the Dockerfile invokes with `RUN bash`), so Python code changes in either location are picked up immediately after rsync. Frontend changes require the `npm run build` step (done automatically by `propagate_changes`).
 
 ### Template settings
 

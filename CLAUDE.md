@@ -40,6 +40,8 @@ Only after doing all of the above should you begin writing code.
 - During your final reflection, if you see a potentially better way to do something (e.g. by using an existing library or reusing existing code), flag that as a potential task for future improvement.
 - Never use emojis. Remove any emojis you see in the code or docs whenever you are modifying that code or those docs.
 - Be concise in your communications. Don't hype up your results, say "perfect!", or use emojis. Be serious and professional.
+- All changes should have a corresponding changelog entry in the correct project!
+- During your final reflection, if you notice that there was no changelog entry for a change, fix it immediately!  And definitely flag it.
 
 # When coding, follow these guidelines:
 
@@ -57,7 +59,7 @@ Only after doing all of the above should you begin writing code.
 - Use the shared fixtures (`temp_host_dir`, `temp_mngr_ctx`, `local_provider`, etc.) instead of creating your own.
 - Do NOT create tests for test utilities (e.g. never create `testing_test.py`). Code in `testing.py` and `conftest.py` is exercised by the tests that use it and does not need its own test file.
 - Do NOT create tests that code raises NotImplementedError.
-- If you see a flaky test, YOU MUST HIGHLIGHT THIS IN YOUR RESPONSE. Mark it with `@pytest.mark.flaky` so offload retries it automatically. Then try to fix the underlying flakiness in a separate commit.
+- If you see a flaky test, YOU MUST HIGHLIGHT THIS IN YOUR RESPONSE. Mark it with `@pytest.mark.flaky` so offload retries it automatically. Then try to fix the underlying flakiness in a separate commit. First investigate *why* the test is flaky. If it can be made more robust, do so. If the test is correct but it fundamentally requires additional time, increase the timeout for that individual test (but do NOT allow unreasonably long timeouts--in such a case, prefer to leave the test marked as flaky instead, eg, if this happened because of a weird infrastructure level fluke that sometimes makes an operation take *much* longer).
 - Do not add TODO or FIXME unless explicitly asked to do so
 - Code must work on both macOS and Linux. It's ok if it doesn't work on Windows.
 - `mngr` is installed by end users from PyPI, so the built wheel must be self-contained: it only packages the `imbue` package (`packages = ["imbue"]`), so production code must not read files outside it at runtime unless they're shipped into the package (e.g. via wheel `force-include`, as the help-topic docs are).

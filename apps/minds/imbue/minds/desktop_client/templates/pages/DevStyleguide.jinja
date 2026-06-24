@@ -1,620 +1,1091 @@
 {#def #}
 {#
   Dev styleguide: hand-authored inventory of design tokens and UI patterns.
-  Mounted at /_dev/styleguide. Always visible (no tier gate). Each swatch
-  declares its token via data-token="--<name>"; the templates_test.py
-  ratchet cross-checks this set against the :root declarations in
-  static/tokens.css and fails if either side drifts.
+  Mounted at /_dev/styleguide. Always visible (no tier gate). Each color
+  swatch declares its token via data-token="--color-<name>"; the
+  templates_test.py drift guard cross-checks this set against the @theme
+  color tokens in static/app.css and fails if either side drifts. The scale
+  ramps (type, radius, spacing, elevation) are each held by their own guard
+  test instead of data-token swatches.
+
+  Layout: a sticky left table of contents (window.styleguideToc scrollspy in
+  dev_styleguide.js) beside the catalog body. The page splits into two top-
+  level groups -- Design System (foundational tokens + the icon set) and
+  Patterns & Components (the composed UI primitives). Each section carries an
+  id + scroll-mt so a TOC jump lands the heading below the viewport top rather
+  than flush against it.
 #}
 {% set _scripts %}
 <script src="/_static/workspace_accent.js" defer></script>
 <script src="/_static/sidebar_workspace_row.js" defer></script>
 <script src="/_static/dev_styleguide.js" defer></script>
 {% endset %}
+
+{# TOC entries, kept beside the sections they jump to. (id, label) pairs;
+   ids match the scroll-mt sections below. #}
+{% set _ds_sections = [
+  ("type-ramp", "Type ramp"),
+  ("text-colors", "Text colors"),
+  ("borders", "Borders"),
+  ("surfaces", "Surfaces & fills"),
+  ("status", "Status / feedback"),
+  ("accent", "Accent"),
+  ("radius", "Corner radius"),
+  ("spacing", "Spacing"),
+  ("elevation", "Elevation"),
+  ("icons-16", "Icons (16px)"),
+  ("icons-12", "Icons (12px)"),
+] %}
+{% set _pattern_sections = [
+  ("color-swatches", "Color swatches"),
+  ("titlebar-buttons", "Titlebar buttons"),
+  ("notification-badge", "Notification badge"),
+  ("window-controls", "Window controls"),
+  ("sidebar-items", "Sidebar items"),
+  ("accent-spine", "Accent spine"),
+  ("form-controls", "Form controls"),
+  ("spinner", "Spinner"),
+  ("buttons", "Buttons"),
+  ("button-sizes", "Button sizes"),
+  ("links", "Links"),
+  ("button-links", "Link-style buttons"),
+  ("notices", "Notices"),
+  ("cards", "Cards"),
+  ("page-container", "Page container"),
+  ("opt", "Onboarding option"),
+  ("oauth-icons", "OAuth icons"),
+  ("status-badges", "Status badges"),
+  ("section-header", "Section header"),
+  ("dialog-close", "Dialog close button"),
+  ("modal", "Modal"),
+] %}
+
 <Base title="Minds Styleguide" scripts={{ _scripts }}>
-  <div class="max-w-5xl mx-auto px-8 py-10">
 
-    <header class="mb-10">
-      <h1 class="text-2xl font-semibold text-zinc-900">Minds Styleguide</h1>
-      <p class="text-sm text-zinc-500 mt-1">
-        Tokens are in
-        <code class="text-zinc-700">apps/minds/imbue/minds/desktop_client/static/tokens.css</code>.
-      </p>
-    </header>
+  {# Dev-only light/dark toggle. Fixed top-right so it stays reachable at any
+     scroll position; it floats over the page (no backing bar). Flips `.dark`
+     on <html> + persists to localStorage (wired in dev_styleguide.js); every
+     minds page honors it via Base.jinja's pre-paint script. Built on the
+     Button secondary primitive; the `.styleguide-toggle` recipe (app.css)
+     gives it an opaque surface so floating over content stays legible, with
+     the hover/active fills composited over that surface. #}
+  <Button id="styleguide-theme-toggle" variant="secondary"
+          extra="styleguide-toggle fixed top-4 right-4 z-50 shadow-overlay">
+    Switch to dark
+  </Button>
 
-    {# Tokens #}
-    <section class="mb-12">
-      <h2 class="text-lg font-semibold text-zinc-900 mb-1">Tokens</h2>
-      <p class="text-xs text-zinc-500 mb-4">
-        CSS custom properties declared on <code>:root</code> in
-        <code>static/tokens.css</code>.
+  <div class="max-w-6xl mx-auto px-8 py-8 flex items-start gap-12">
+
+    {# Sticky table of contents. Hidden on narrow viewports (the catalog just
+       scrolls); shown from lg up where there's room beside the body. #}
+    <nav aria-label="Styleguide sections"
+         class="styleguide-toc sticky top-8 shrink-0 w-48 hidden lg:block max-h-screen overflow-y-auto">
+      <a href="#design-system" class="styleguide-toc-link block type-section text-tertiary hover:text-primary mb-2">Design System</a>
+      <ul class="flex flex-col gap-0.5 mb-6">
+        {% for _id, _label in _ds_sections %}
+        <li><a href="#{{ _id }}" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">{{ _label }}</a></li>
+        {% endfor %}
+      </ul>
+      <a href="#patterns" class="styleguide-toc-link block type-section text-tertiary hover:text-primary mb-2">Patterns &amp; Components</a>
+      <ul class="flex flex-col gap-0.5">
+        {% for _id, _label in _pattern_sections %}
+        <li><a href="#{{ _id }}" class="styleguide-toc-link block type-helper text-secondary hover:text-primary py-0.5">{{ _label }}</a></li>
+        {% endfor %}
+      </ul>
+    </nav>
+
+    <main class="flex-1 min-w-0">
+
+      <header class="mb-12">
+        <h1 class="type-heading-lg text-primary">Minds Styleguide</h1>
+        <p class="type-body text-secondary mt-1">
+          Tokens are in
+          <code class="text-primary">apps/minds/imbue/minds/desktop_client/static/app.css</code>.
+        </p>
+      </header>
+
+      {# ===================================================================
+         Design System -- foundational tokens + the shared icon set.
+         =================================================================== #}
+      <div id="design-system" class="scroll-mt-8 mb-8">
+        <h2 class="type-heading-lg text-primary">Design System</h2>
+        <p class="type-helper text-secondary mt-1">
+          The foundational tokens -- type, color, border, surface, radius,
+          spacing, elevation -- plus the shared icon set.
+        </p>
+      </div>
+
+    {# Type ramp (Figma). Six semantic roles defined as type-* utilities in
+       app.css; each bundles font-size + weight + line-height (+ caps / tracking
+       for the section eyebrow), so a text element's role is one class. Colour is
+       orthogonal -- compose with text-primary / -secondary / -tertiary. A
+       ratchet keeps content text on these roles instead of raw text-size /
+       font-weight. #}
+    <section id="type-ramp" class="scroll-mt-8 mb-12">
+      <h2 class="type-heading text-primary mb-1">Type ramp</h2>
+      <p class="type-helper text-secondary mb-4">
+        Six roles, one class each (size + weight + line-height bundled). Sizes
+        reuse Tailwind's steps -- 24 / 18 / 14 / 12 px. Compose with a colour
+        token, e.g. <code>type-label text-primary</code>.
       </p>
-      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-        <div data-token="--shadow-seam"
-             class="flex items-center gap-3 bg-white border border-zinc-200 rounded-lg p-3 shadow-sm">
-          <div class="w-10 h-10 rounded-md bg-white shrink-0"
-               style="box-shadow: var(--shadow-seam);"></div>
-          <div class="min-w-0 flex-1">
-            <div class="text-xs font-mono text-zinc-900 truncate">--shadow-seam</div>
-            <div class="text-[11px] font-mono text-zinc-500 truncate">0 4px 10px -6px rgba(0, 0, 0, 0.35)</div>
-          </div>
+      <div class="flex flex-col gap-4">
+        <div>
+          <p class="type-heading-lg text-primary">Large heading</p>
+          <p class="type-helper text-tertiary font-mono mt-0.5">type-heading-lg -- 24 / bold</p>
+        </div>
+        <div>
+          <p class="type-heading text-primary">Regular heading</p>
+          <p class="type-helper text-tertiary font-mono mt-0.5">type-heading -- 18 / semibold</p>
+        </div>
+        <div>
+          <p class="type-label text-primary">Label</p>
+          <p class="type-helper text-tertiary font-mono mt-0.5">type-label -- 14 / semibold</p>
+        </div>
+        <div>
+          <p class="type-body text-primary">Body -- the default readable paragraph text on a surface.</p>
+          <p class="type-helper text-tertiary font-mono mt-0.5">type-body -- 14 / regular</p>
+        </div>
+        <div>
+          <p class="type-helper text-primary">Helper -- captions, hints, and metadata sit at this size.</p>
+          <p class="type-helper text-tertiary font-mono mt-0.5">type-helper -- 12 / regular</p>
+        </div>
+        <div>
+          <p class="type-section text-secondary">Section title</p>
+          <p class="type-helper text-tertiary font-mono mt-0.5">type-section -- 12 / semibold / all caps</p>
         </div>
       </div>
     </section>
 
-    {# Type ramp + text-color tokens. These are conventions enforced by
-       sweep rather than CSS tokens; documenting them here is the source
-       of truth for new templates. #}
-    <section class="mb-12">
-      <h2 class="text-lg font-semibold text-zinc-900 mb-1">Type ramp</h2>
-      <p class="text-xs text-zinc-500 mb-4">
-        Heading hierarchy and body text. Every heading is
-        ``font-semibold text-zinc-900``; the only axis is size. Body and
-        captions use ``text-sm`` / ``text-xs``.
+    {# Text color tokens. The semantic, themeable text ramp that replaced the
+       raw zinc text utilities across the app. Pure black/white at three alpha
+       steps; regular text contrasts the surface, inverse contrasts an inverted
+       surface; both swap black<->white between modes. Shown in both modes side
+       by side (the right card is scoped `.dark`); use the header toggle to flip
+       the whole app. data-token marks each --color-* token for the
+       templates_test.py drift guard. #}
+    <section id="text-colors" class="scroll-mt-8 mb-12">
+      <h2 class="type-heading text-primary mb-1">Text color tokens</h2>
+      <p class="type-helper text-secondary mb-4">
+        Semantic, themeable text colors (<code>app.css</code>).
+        <code>text-primary</code> / <code>-secondary</code> / <code>-tertiary</code>
+        for text on the current surface; <code>text-inverse-*</code> for text on
+        an inverted surface. Pure black / white with alpha; values flip
+        light&harr;dark.
       </p>
-      <div class="bg-white border border-zinc-200 rounded-lg p-4 flex flex-col gap-3">
-        <div>
-          <p class="text-3xl font-bold text-zinc-900">Splash heading</p>
-          <p class="text-[11px] text-zinc-500 font-mono mt-0.5">text-3xl font-bold -- one-off, Welcome only</p>
-        </div>
-        <div>
-          <p class="text-2xl font-semibold text-zinc-900">Big page heading (h1)</p>
-          <p class="text-[11px] text-zinc-500 font-mono mt-0.5">text-2xl font-semibold -- auth pages, Sharing, DevStyleguide, PermissionsHeader</p>
-        </div>
-        <div>
-          <p class="text-xl font-semibold text-zinc-900">Standard page heading (h1)</p>
-          <p class="text-[11px] text-zinc-500 font-mono mt-0.5">text-xl font-semibold -- Landing, Login, AuthError, Destroying, InboxUnavailable, WorkspaceSettings, Accounts</p>
-        </div>
-        <div>
-          <p class="text-lg font-semibold text-zinc-900">Section / modal heading (h2)</p>
-          <p class="text-[11px] text-zinc-500 font-mono mt-0.5">text-lg font-semibold -- Creating step questions, modal dialogs, DevStyleguide section headers</p>
-        </div>
-        <div>
-          <p class="text-sm text-zinc-700">Default body text. Readable paragraph on a card.</p>
-          <p class="text-[11px] text-zinc-500 font-mono mt-0.5">text-sm -- default body</p>
-        </div>
-        <div>
-          <p class="text-xs text-zinc-500">Caption / secondary text. Goes under headings and beside controls.</p>
-          <p class="text-[11px] text-zinc-500 font-mono mt-0.5">text-xs -- secondary / caption</p>
-        </div>
-      </div>
-    </section>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
 
-    {# Text-color ramp. Five roles, five shades. Banished:
-       text-zinc-600 (consolidated into 500 or 700 depending on role)
-       and text-zinc-100 (folded into text-zinc-200 for on-dark text). #}
-    <section class="mb-12">
-      <h2 class="text-lg font-semibold text-zinc-900 mb-1">Text colors</h2>
-      <p class="text-xs text-zinc-500 mb-4">
-        Five distinct zinc shades, one role each. Use the role, not the
-        shade number; if your text doesn't fit a role here, pick the
-        closest fit rather than reaching for a new shade.
-      </p>
-      <div class="bg-white border border-zinc-200 rounded-lg p-4 flex flex-col gap-2.5">
-        <div class="flex items-baseline gap-3">
-          <span class="text-zinc-900 text-sm font-medium w-40 shrink-0">Primary text</span>
-          <code class="text-[11px] font-mono text-zinc-500 shrink-0">text-zinc-900</code>
-          <span class="text-zinc-500 text-xs">headings, emphasized body, labels for form fields</span>
-        </div>
-        <div class="flex items-baseline gap-3">
-          <span class="text-zinc-700 text-sm font-medium w-40 shrink-0">Body</span>
-          <code class="text-[11px] font-mono text-zinc-500 shrink-0">text-zinc-700</code>
-          <span class="text-zinc-500 text-xs">readable paragraph text on a card; ghost button label</span>
-        </div>
-        <div class="flex items-baseline gap-3">
-          <span class="text-zinc-500 text-sm font-medium w-40 shrink-0">Secondary / label</span>
-          <code class="text-[11px] font-mono text-zinc-500 shrink-0">text-zinc-500</code>
-          <span class="text-zinc-500 text-xs">captions, section labels, "loading..." spinners</span>
-        </div>
-        <div class="flex items-baseline gap-3">
-          <span class="text-zinc-400 text-sm font-medium w-40 shrink-0">Muted / tertiary</span>
-          <code class="text-[11px] font-mono text-zinc-500 shrink-0">text-zinc-400</code>
-          <span class="text-zinc-500 text-xs">placeholder-feel; tertiary buttons that lift on hover</span>
-        </div>
-        <div class="bg-zinc-900 rounded-md p-2 flex items-baseline gap-3">
-          <span class="text-zinc-200 text-sm font-medium w-40 shrink-0">On dark</span>
-          <code class="text-[11px] font-mono text-zinc-400 shrink-0">text-zinc-200</code>
-          <span class="text-zinc-400 text-xs">title bar / sidebar text on dark chrome</span>
-        </div>
-      </div>
-    </section>
-
-    {# Corner-radius ramp. Bare ``rounded`` (Tailwind v3 default = 4px,
-       == rounded-md) was banished in favor of explicit ``rounded-md``
-       everywhere for grep-ability. ``rounded-xl`` (12px) is shared by
-       cards, modal/dialog chrome, and the chrome content surface that
-       tucks under the colored titlebar (Chrome.jinja's #content-frame)
-       -- the 12px radius matches Electron's ``CONTENT_CORNER_RADIUS``
-       so both browser-mode iframe and Electron WebContentsView render
-       the same shape. ``rounded-2xl`` (16px) has no active site today;
-       it stays on the ramp so future heavier surfaces can reach for it
-       without re-deriving the step. #}
-    <section class="mb-12">
-      <h2 class="text-lg font-semibold text-zinc-900 mb-1">Corner radius</h2>
-      <p class="text-xs text-zinc-500 mb-4">
-        Five steps; each plays one role. Prefer the explicit ``rounded-md``
-        over bare ``rounded`` so call sites are grep-able for radius
-        rather than for the no-suffix shorthand.
-      </p>
-      <div class="bg-white border border-zinc-200 rounded-lg p-4 grid grid-cols-2 sm:grid-cols-5 gap-4">
-        <div class="flex flex-col items-center text-center">
-          <div class="w-16 h-16 bg-zinc-200 border border-zinc-300 rounded-md"></div>
-          <code class="text-[11px] font-mono text-zinc-500 mt-1">rounded-md (4px)</code>
-          <span class="text-[11px] text-zinc-500">buttons, badges, swatches</span>
-        </div>
-        <div class="flex flex-col items-center text-center">
-          <div class="w-16 h-16 bg-zinc-200 border border-zinc-300 rounded-lg"></div>
-          <code class="text-[11px] font-mono text-zinc-500 mt-1">rounded-lg (8px)</code>
-          <span class="text-[11px] text-zinc-500">inputs (lg radius), large-CTA buttons</span>
-        </div>
-        <div class="flex flex-col items-center text-center">
-          <div class="w-16 h-16 bg-zinc-200 border border-zinc-300 rounded-xl"></div>
-          <code class="text-[11px] font-mono text-zinc-500 mt-1">rounded-xl (12px)</code>
-          <span class="text-[11px] text-zinc-500">cards, modal / dialog chrome, chrome content tuck-under (Chrome.jinja)</span>
-        </div>
-        <div class="flex flex-col items-center text-center">
-          <div class="w-16 h-16 bg-zinc-200 border border-zinc-300 rounded-2xl"></div>
-          <code class="text-[11px] font-mono text-zinc-500 mt-1">rounded-2xl (16px)</code>
-          <span class="text-[11px] text-zinc-500">unused (reserved on ramp)</span>
-        </div>
-        <div class="flex flex-col items-center text-center">
-          <div class="w-16 h-16 bg-zinc-200 border border-zinc-300 rounded-full"></div>
-          <code class="text-[11px] font-mono text-zinc-500 mt-1">rounded-full</code>
-          <span class="text-[11px] text-zinc-500">pills, dots, spinner outline</span>
-        </div>
-      </div>
-    </section>
-
-    {# Workspace accent picker #}
-    <section class="mb-12">
-      <h2 class="text-lg font-semibold text-zinc-900 mb-1">Workspace accent</h2>
-      <p class="text-xs text-zinc-500 mb-4">
-        Per-workspace identity color: a user-picked <code>#rrggbb</code> hex
-        (12-swatch palette + custom hex in workspace settings, stored as an
-        mngr <code>color</code> label). Pick a color; everything below that
-        uses <code>--workspace-accent</code> updates live.
-      </p>
-      <div class="bg-white border border-zinc-200 rounded-lg p-4 shadow-sm">
-        <div class="flex items-center gap-4">
-          <div class="accent-swatch w-12 h-12 rounded-md border border-zinc-200 shrink-0"></div>
-          <div class="flex-1">
-            <label for="styleguide-accent-color" class="block text-xs text-zinc-500 mb-1">
-              accent hex
-            </label>
-            <input id="styleguide-accent-color" type="color" value="#0b292b">
-          </div>
-          <code id="styleguide-accent-value" class="text-xs text-zinc-700"></code>
-        </div>
-      </div>
-
-      {# ColorSwatch primitive: the circular radio buttons the workspace
-         color pickers (settings + create form) compose. aria-checked drives
-         the blue selection ring via tokens.css; the create page additionally
-         narrows the rim to 1px via its own picker-scoped override. #}
-      <div class="mt-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Color swatches</div>
-        <div class="flex items-center gap-2" role="radiogroup" aria-label="Color swatch demo, settings size">
-          <ColorSwatch hex="#0b292b" name="confusion" selected size="md" />
-          <ColorSwatch hex="#9fbbd3" name="peace" size="md" />
-          <ColorSwatch hex="#cecd0c" name="energy" size="md" />
-          <ColorSwatch hex="#ffffff" name="white" size="md" />
-          <ColorSwatch hex="#492222" name="courage" size="md" disabled />
-        </div>
-        <div class="flex items-center gap-2 mt-2" role="radiogroup" aria-label="Color swatch demo, create-form size">
-          <ColorSwatch hex="#0b292b" name="confusion" selected size="sm" />
-          <ColorSwatch hex="#9fbbd3" name="peace" size="sm" />
-          <ColorSwatch hex="#cecd0c" name="energy" size="sm" />
-        </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">ColorSwatch.jinja (size="md" settings / "sm" create; selected ring via aria-checked, last md swatch disabled) + tokens.css :: .color-swatch</div>
-      </div>
-    </section>
-
-    {# Pattern catalog #}
-    <section class="mb-12">
-      <h2 class="text-lg font-semibold text-zinc-900 mb-1">Patterns</h2>
-      <p class="text-xs text-zinc-500 mb-4">
-        Common chrome and workspace UI patterns. Source files linked under
-        each example.
-      </p>
-
-      {# Titlebar buttons. Demo container paints the full-width accent
-         bar with the default workspace color (#0b292b, the palette's
-         "confusion" entry) and sets --titlebar-fg to the WCAG-luminance
-         contrast pick pick_workspace_foreground makes for that hex
-         ("255 255 255" -- white text on the dark bar), so the page
-         title + nav-button glyphs render against the bar exactly as
-         they do in Chrome.jinja. #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Titlebar buttons</div>
-        <div class="rounded-lg overflow-hidden border border-zinc-200"
-             style="--titlebar-bg: #0b292b; --titlebar-fg: 255 255 255;">
-          <div class="h-[38px] flex items-center select-none px-1"
-               style="background-color: var(--titlebar-bg);">
-            <div class="flex gap-0.5">
-              <TitlebarButton title="Projects"><Icon24 name="menu" /></TitlebarButton>
-              <TitlebarButton title="Home"><Icon24 name="home" /></TitlebarButton>
-              <TitlebarButton title="Back"><Icon24 name="back" /></TitlebarButton>
-              <TitlebarButton title="Forward"><Icon24 name="forward" /></TitlebarButton>
+        {# Light (scoped via `.light` so it stays light even when the whole
+           app is toggled to dark) #}
+        <div>
+          <div class="light rounded-lg border border-default bg-surface-primary p-4 flex flex-col gap-4">
+            <div class="flex flex-col gap-2">
+              <div data-token="--color-primary" class="flex items-baseline justify-between gap-3">
+                <span class="text-primary type-label">Primary</span>
+                <code class="text-secondary type-helper font-mono">text-primary</code>
+              </div>
+              <div data-token="--color-secondary" class="flex items-baseline justify-between gap-3">
+                <span class="text-secondary type-label">Secondary</span>
+                <code class="text-secondary type-helper font-mono">text-secondary</code>
+              </div>
+              <div data-token="--color-tertiary" class="flex items-baseline justify-between gap-3">
+                <span class="text-tertiary type-label">Tertiary</span>
+                <code class="text-secondary type-helper font-mono">text-tertiary</code>
+              </div>
             </div>
-            <div class="flex-1 flex items-center justify-center px-2 min-w-0">
-              <span class="titlebar-title text-xs whitespace-nowrap overflow-hidden text-ellipsis">my-workspace</span>
-            </div>
-            <TitlebarButton title="Requests" extra="relative"><Icon24 name="messages" /></TitlebarButton>
-          </div>
-        </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">TitlebarButton.jinja (variant="nav") + .titlebar-title (tokens.css)</div>
-      </div>
-
-      {# Notification badge #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Notification badge</div>
-        <div class="rounded-lg overflow-hidden border border-zinc-200 bg-zinc-900">
-          <div class="h-[38px] flex items-center justify-end px-1">
-            <TitlebarButton title="Requests" extra="relative">
-              <Icon24 name="messages" />
-              <span class="absolute top-0.5 right-0.5 w-2 h-2 rounded-full bg-red-500"></span>
-            </TitlebarButton>
-          </div>
-        </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">templates/pages/Chrome.jinja :: #requests-badge</div>
-      </div>
-
-      {# Window controls (only rendered on non-mac in real chrome) #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Window controls</div>
-        <div class="rounded-lg overflow-hidden border border-zinc-200 bg-zinc-900">
-          <div class="h-[38px] flex items-center justify-end">
-            <TitlebarButton variant="control" title="Minimize"><Icon12 name="minimize" /></TitlebarButton>
-            <TitlebarButton variant="control" title="Maximize"><Icon12 name="maximize" /></TitlebarButton>
-            <TitlebarButton variant="control" tone="danger" title="Close"><Icon12 name="close" /></TitlebarButton>
-          </div>
-        </div>
-        <p class="mt-1 text-[11px] text-zinc-500">
-          Only rendered on non-mac platforms in real chrome (macOS has native traffic lights).
-        </p>
-        <div class="mt-0.5 text-[11px] text-zinc-500 font-mono">TitlebarButton.jinja (variant="control", tone="danger" for close)</div>
-      </div>
-
-      {# Sidebar items. The sidebar is a floating menu (shared modal
-         WebContentsView in Electron, inline overlay in browser). Each row
-         is built by the shared window.mindsSidebarRow.buildRow helper; the
-         styleguide renders its samples through that exact builder (see
-         dev_styleguide.js) so this catalog can't drift from the live menu.
-         The empty container below is filled in on load. #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Sidebar items</div>
-        <div id="styleguide-sidebar-rows"
-             class="w-[280px] flex flex-col gap-0.5 p-1 rounded-[10px] border border-white/10 bg-black overflow-hidden"></div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">window.mindsSidebarRow.buildRow (sidebar_workspace_row.js) -- the one row builder shared by static/sidebar.js + static/chrome.js; SidebarBottom.jinja supplies the "New workspace" / "Manage account(s)" rows below the workspace list.</div>
-      </div>
-
-      {# Accent spine #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Accent spine</div>
-        <div class="accent-spine relative flex items-center gap-3 bg-white border border-zinc-200 rounded-xl px-4 py-3.5 overflow-hidden">
-          <div class="text-sm text-zinc-700">Card with workspace accent stripe on the left edge.</div>
-        </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">templates/pages/Landing.jinja, templates/pages/Destroying.jinja :: .accent-spine from tokens.css</div>
-      </div>
-
-      {# Focus ring -- shared by TextInput, Select, Textarea via INPUT_BASE #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Form controls (TextInput / Select / Textarea)</div>
-        <div class="bg-white border border-zinc-200 rounded-lg p-4 flex flex-col gap-3">
-          <TextInput name="styleguide-focus-ring-input" placeholder="TextInput -- click to focus" />
-          <div class="flex items-center gap-2">
-            <Select name="styleguide-select" width="w-48">
-              <option>Option A</option>
-              <option>Option B</option>
-              <option>Option C</option>
-            </Select>
-            <span class="text-xs text-zinc-500">Select width="w-48"</span>
-          </div>
-          <Textarea name="styleguide-textarea" rows="3" extra="font-mono" :value="'shared focus ring\\nshared border\\nshared px-3 py-2.5'" />
-        </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">TextInput.jinja / Select.jinja / Textarea.jinja :: INPUT_BASE (focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15)</div>
-      </div>
-
-      {# Shadow seam #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Shadow seam</div>
-        <div class="bg-zinc-50 p-6 rounded-lg">
-          <div class="bg-white rounded-md p-4 text-sm text-zinc-700"
-               style="box-shadow: var(--shadow-seam);">
-            Below the titlebar, separating chrome from workspace content.
-          </div>
-        </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">tokens.css :: --shadow-seam</div>
-      </div>
-
-      {# Spinner #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Spinner</div>
-        <div class="bg-white border border-zinc-200 rounded-lg p-4 flex items-center gap-6">
-          <div class="flex items-center gap-3">
-            <Spinner size="sm" />
-            <Spinner size="md" />
-            <Spinner size="lg" />
-          </div>
-          <div class="flex items-center gap-3 pl-6 border-l border-zinc-200">
-            <Spinner size="sm" tone="accent" />
-            <Spinner size="md" tone="accent" />
-            <Spinner size="lg" tone="accent" />
-          </div>
-        </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">tokens.css :: .spinner (+ .spinner-accent) + Spinner.jinja</div>
-      </div>
-
-      {# Icons -- 24x24 lucide-style stroke icons + 12x12 chrome glyphs.
-         Brand marks (Google / GitHub) live in auth/OauthIcon.jinja
-         because they are multi-color and don't share the stroke shell.
-         The 20x20 filled icons (DialogCloseButton X, Latchkey check)
-         stay inline next to their use sites. #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Icons -- 24x24 (Icon24)</div>
-        <div class="bg-white border border-zinc-200 rounded-lg p-4 flex flex-wrap items-center gap-4 text-zinc-700">
-          <div class="flex flex-col items-center gap-1 w-16">
-            <Icon24 name="menu" />
-            <code class="text-[11px] font-mono text-zinc-500">menu</code>
-          </div>
-          <div class="flex flex-col items-center gap-1 w-16">
-            <Icon24 name="home" />
-            <code class="text-[11px] font-mono text-zinc-500">home</code>
-          </div>
-          <div class="flex flex-col items-center gap-1 w-16">
-            <Icon24 name="back" />
-            <code class="text-[11px] font-mono text-zinc-500">back</code>
-          </div>
-          <div class="flex flex-col items-center gap-1 w-16">
-            <Icon24 name="forward" />
-            <code class="text-[11px] font-mono text-zinc-500">forward</code>
-          </div>
-          <div class="flex flex-col items-center gap-1 w-16">
-            <Icon24 name="messages" />
-            <code class="text-[11px] font-mono text-zinc-500">messages</code>
-          </div>
-          <div class="flex flex-col items-center gap-1 w-16">
-            <Icon24 name="restart" />
-            <code class="text-[11px] font-mono text-zinc-500">restart</code>
-          </div>
-          <div class="flex flex-col items-center gap-1 w-16">
-            <Icon24 name="settings" />
-            <code class="text-[11px] font-mono text-zinc-500">settings</code>
-          </div>
-          <div class="flex flex-col items-center gap-1 w-16">
-            <Icon24 name="external" />
-            <code class="text-[11px] font-mono text-zinc-500">external</code>
-          </div>
-          <div class="flex flex-col items-center gap-1 w-16">
-            <Icon24 name="arrow-up-right" />
-            <code class="text-[11px] font-mono text-zinc-500">arrow-up-right</code>
-          </div>
-        </div>
-        <p class="mt-1 text-[11px] text-zinc-500">
-          Stroke icons inherit color from the parent via
-          ``currentColor``. Sizes: ``sm`` (w-3.5), ``md`` (w-4, default),
-          ``lg`` (w-5).
-        </p>
-        <div class="mt-0.5 text-[11px] text-zinc-500 font-mono">Icon24.jinja :: ICONS_24 in templates.py</div>
-      </div>
-
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Icons -- 12x12 chrome glyphs (Icon12)</div>
-        <div class="bg-zinc-900 border border-zinc-200 rounded-lg p-4 flex items-center gap-4 text-zinc-200">
-          <div class="flex flex-col items-center gap-1 w-16">
-            <Icon12 name="minimize" />
-            <code class="text-[11px] font-mono text-zinc-400">minimize</code>
-          </div>
-          <div class="flex flex-col items-center gap-1 w-16">
-            <Icon12 name="maximize" />
-            <code class="text-[11px] font-mono text-zinc-400">maximize</code>
-          </div>
-          <div class="flex flex-col items-center gap-1 w-16">
-            <Icon12 name="close" />
-            <code class="text-[11px] font-mono text-zinc-400">close</code>
-          </div>
-        </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">Icon12.jinja :: ICONS_12 in templates.py (used only inside TitlebarButton variant="control")</div>
-      </div>
-
-      {# Buttons #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Buttons -- variants</div>
-        <div class="bg-white border border-zinc-200 rounded-lg p-4 flex flex-wrap items-center gap-2">
-          <Button variant="primary">Primary</Button>
-          <Button variant="secondary">Secondary</Button>
-          <Button variant="danger">Danger</Button>
-          <Button variant="success">Success</Button>
-          <Button variant="ghost">Ghost</Button>
-        </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">Button.jinja :: variant=...</div>
-      </div>
-
-      {# Button sizes #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Buttons -- sizes</div>
-        <div class="bg-white border border-zinc-200 rounded-lg p-4 flex flex-col gap-3">
-          <div class="flex flex-wrap items-center gap-2">
-            <Button variant="primary" size="md">Default (md)</Button>
-            <Button variant="primary" size="lg">Large (lg, prominent CTA)</Button>
-            <Button variant="ghost" size="icon" title="Settings" aria-label="Settings"><Icon24 name="settings" /></Button>
-          </div>
-          <Button variant="primary" size="lg" block>Block (w-full, used for auth CTAs)</Button>
-        </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">Button.jinja :: size=md|lg|icon, block=true</div>
-      </div>
-
-      {# Inline links. Use the Link component for real navigations -- it
-         picks up the ``text-blue-600 hover:underline`` recipe with an
-         optional ``weight="medium"`` for prominent auth-flow affordances. #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Links</div>
-        <div class="bg-white border border-zinc-200 rounded-lg p-4 flex flex-wrap items-center gap-4">
-          <Link href="#">Back to projects</Link>
-          <Link href="#" weight="medium">Sign in</Link>
-          <Link href="#" extra="text-xs">Forgot password</Link>
-        </div>
-        <p class="mt-1 text-[11px] text-zinc-500">
-          ``weight="medium"`` is the auth-flow tab-switch / back-link
-          treatment. Size overrides (``text-xs`` etc.) go through ``extra``.
-        </p>
-        <div class="mt-0.5 text-[11px] text-zinc-500 font-mono">Link.jinja</div>
-      </div>
-
-      {# Link-styled buttons -- the recurring pattern for inline
-         disclosure TOGGLES that look like links but aren't navigations
-         ("Configure...", "Show advanced", "Adjust"). Compose via Button
-         ghost + ``extra`` rather than adding a ``variant="link"`` so the
-         Button primitive's surface stays small. Prefer the Link component
-         over this pattern when the affordance is a real navigation --
-         keyboard focus and accessibility are cleaner on a plain anchor. #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Buttons -- link style (via extra=)</div>
-        <div class="bg-white border border-zinc-200 rounded-lg p-4 flex flex-wrap items-center gap-4">
-          <Button variant="ghost"
-                  extra="!p-0 !bg-transparent !text-xs !font-normal !text-blue-600 hover:!bg-transparent hover:underline hover:!text-blue-700">
-            Configure&hellip;
-          </Button>
-          <Button variant="ghost"
-                  extra="!p-0 !bg-transparent !text-xs !font-normal !text-zinc-400 hover:!bg-transparent hover:!text-zinc-700 hover:underline">
-            Continue without an account
-          </Button>
-        </div>
-        <p class="mt-1 text-[11px] text-zinc-500">
-          For text-link toggles use a ghost Button with ``extra=&quot;!p-0 !bg-transparent !text-xs !font-normal !text-blue-600 hover:!bg-transparent hover:underline hover:!text-blue-700&quot;``. The ``!`` prefix is load-bearing -- without it, the Button's base ``font-medium text-sm`` and the ghost variant's ``text-zinc-700`` win and the toggle reads as a heavy button rather than a link.
-        </p>
-        <div class="mt-0.5 text-[11px] text-zinc-500 font-mono">Button.jinja :: variant=&quot;ghost&quot; with extra= overrides</div>
-      </div>
-
-      {# Notices #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Notices</div>
-        <div class="bg-white border border-zinc-200 rounded-lg p-4">
-          <Notice variant="info">Heads up: informational message.</Notice>
-          <Notice variant="warn">Careful: something may need attention.</Notice>
-          <Notice variant="success">All set: action completed.</Notice>
-          <Notice variant="error">Failed: something went wrong.</Notice>
-        </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">Notice.jinja</div>
-      </div>
-
-      {# Cards #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Cards</div>
-        <div class="flex flex-col gap-2">
-          <Card>
-            <span class="text-sm text-zinc-700">Default block card -- caller arranges children.</span>
-          </Card>
-          <Card layout="row-spread">
-            <span class="font-medium text-zinc-700">my-service</span>
-            <Button variant="secondary">Manage</Button>
-          </Card>
-          <Card layout="row" padding="tight">
-            <span class="font-medium text-zinc-700">provider</span>
-            <span class="text-xs text-zinc-500">backend</span>
-            <span class="flex-1"></span>
-            <Button variant="secondary">Disable</Button>
-          </Card>
-          <Card tag="a" href="#" layout="row" interactive>
-            <span class="flex-1 font-medium text-zinc-900">Interactive card (tag=&quot;a&quot;)</span>
-            <span class="text-xs text-zinc-500">click anywhere</span>
-          </Card>
-        </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">Card.jinja :: .minds-card from tokens.css</div>
-      </div>
-
-      {# Page container #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Page container</div>
-        <div class="bg-zinc-100 border border-zinc-200 rounded-lg">
-          <PageContainer>
-            <div class="bg-white border border-zinc-200 rounded-md p-3 text-sm text-zinc-700">
-              Centered, max-width body wrapper used by most page templates.
-            </div>
-          </PageContainer>
-        </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">PageContainer.jinja</div>
-      </div>
-
-      {# Opt (onboarding option card) #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Opt (onboarding option)</div>
-        <div class="bg-white border border-zinc-200 rounded-lg p-4 flex flex-col gap-2.5">
-          <Opt val="example-a" title="Example option" desc="Non-editable selectable card." />
-          <Opt val="example-b" title="Selected" desc="Marker for the chosen option." selected />
-          <Opt val="example-c" title="Editable" desc="Expands a textarea when selected." editable preset="prefilled text" placeholder="placeholder text" />
-        </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">Opt.jinja (.opt / .opt-selected from tokens.css)</div>
-      </div>
-
-      {# OAuth icons #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">OAuth icons</div>
-        <div class="bg-white border border-zinc-200 rounded-lg p-4 flex items-center gap-6">
-          <span class="inline-flex items-center gap-2 text-sm text-zinc-700">
-            <auth.OauthIcon provider="google" /> Google
-          </span>
-          <span class="inline-flex items-center gap-2 text-sm text-zinc-700">
-            <auth.OauthIcon provider="github" /> GitHub
-          </span>
-        </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">auth/OauthIcon.jinja</div>
-      </div>
-
-      {# Status badges #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Status badges</div>
-        <div class="bg-white border border-zinc-200 rounded-lg p-4 flex flex-wrap items-center gap-3">
-          <StatusBadge>Neutral</StatusBadge>
-          <StatusBadge variant="success">Done</StatusBadge>
-          <StatusBadge variant="error">Failed</StatusBadge>
-          <StatusBadge variant="warn">Warning</StatusBadge>
-          <StatusBadge variant="info">Info</StatusBadge>
-          <StatusBadge variant="warn" size="xs">Tiny</StatusBadge>
-        </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">StatusBadge.jinja</div>
-      </div>
-
-      {# Section header #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Section header</div>
-        <div class="bg-white border border-zinc-200 rounded-lg p-4">
-          <SectionHeader>Plain</SectionHeader>
-          <p class="text-sm text-zinc-700 mb-2">Content under the plain header.</p>
-          <SectionHeader divider>With divider</SectionHeader>
-          <p class="text-sm text-zinc-700">Content under the divider header.</p>
-        </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">SectionHeader.jinja</div>
-      </div>
-
-      {# Dialog close button #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Dialog close button</div>
-        <div class="bg-white border border-zinc-200 rounded-lg p-4 relative h-16">
-          <DialogCloseButton onclick="void(0)" />
-          <p class="text-sm text-zinc-500">Top-right X used by overlay dialogs.</p>
-        </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">DialogCloseButton.jinja</div>
-      </div>
-
-      {# Modal -- styleguide only shows the *inside* of the modal because
-         the real wrapper occupies the whole viewport. #}
-      <div class="mb-6">
-        <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Modal (inner card preview)</div>
-        <div class="bg-zinc-100 border border-zinc-200 rounded-lg p-6 flex items-center justify-center">
-          <div class="bg-white rounded-xl shadow-lg border border-zinc-200 max-w-sm w-full p-6">
-            <h2 class="text-lg font-semibold text-zinc-900 mb-3">Confirm action?</h2>
-            <p class="text-sm text-zinc-700 mb-4">This is what the inner card of a Modal looks like.</p>
-            <div class="flex justify-end gap-3">
-              <Button variant="secondary">Cancel</Button>
-              <Button variant="danger">Confirm</Button>
+            <div class="rounded-md bg-surface-inverse p-3 flex flex-col gap-2">
+              <div data-token="--color-inverse-primary" class="flex items-baseline justify-between gap-3">
+                <span class="text-inverse-primary type-label">Inverse primary</span>
+                <code class="text-inverse-secondary type-helper font-mono">text-inverse-primary</code>
+              </div>
+              <div data-token="--color-inverse-secondary" class="flex items-baseline justify-between gap-3">
+                <span class="text-inverse-secondary type-label">Inverse secondary</span>
+                <code class="text-inverse-secondary type-helper font-mono">text-inverse-secondary</code>
+              </div>
+              <div data-token="--color-inverse-tertiary" class="flex items-baseline justify-between gap-3">
+                <span class="text-inverse-tertiary type-label">Inverse tertiary</span>
+                <code class="text-inverse-secondary type-helper font-mono">text-inverse-tertiary</code>
+              </div>
             </div>
           </div>
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">Modal.jinja (full overlay wraps a hidden flex container; preview shows the card only)</div>
-      </div>
 
+        {# Dark (scoped via `.dark` on the card) #}
+        <div>
+          <div class="dark rounded-lg border border-default bg-surface-primary p-4 flex flex-col gap-4">
+            <div class="flex flex-col gap-2">
+              <div class="flex items-baseline justify-between gap-3">
+                <span class="text-primary type-label">Primary</span>
+                <code class="text-secondary type-helper font-mono">text-primary</code>
+              </div>
+              <div class="flex items-baseline justify-between gap-3">
+                <span class="text-secondary type-label">Secondary</span>
+                <code class="text-secondary type-helper font-mono">text-secondary</code>
+              </div>
+              <div class="flex items-baseline justify-between gap-3">
+                <span class="text-tertiary type-label">Tertiary</span>
+                <code class="text-secondary type-helper font-mono">text-tertiary</code>
+              </div>
+            </div>
+            <div class="rounded-md bg-surface-inverse p-3 flex flex-col gap-2">
+              <div class="flex items-baseline justify-between gap-3">
+                <span class="text-inverse-primary type-label">Inverse primary</span>
+                <code class="text-inverse-secondary type-helper font-mono">text-inverse-primary</code>
+              </div>
+              <div class="flex items-baseline justify-between gap-3">
+                <span class="text-inverse-secondary type-label">Inverse secondary</span>
+                <code class="text-inverse-secondary type-helper font-mono">text-inverse-secondary</code>
+              </div>
+              <div class="flex items-baseline justify-between gap-3">
+                <span class="text-inverse-tertiary type-label">Inverse tertiary</span>
+                <code class="text-inverse-secondary type-helper font-mono">text-inverse-tertiary</code>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+      <div class="mt-2 type-helper text-secondary font-mono">app.css :: --color-primary / -secondary / -tertiary (+ -inverse-*)</div>
     </section>
 
+    {# Border tokens. Themeable borders: subtle / default / strong (Figma
+       10/16/25% alpha), pure black in light and pure white in dark, same
+       alphas both modes. Shown in both modes (right card scoped `.dark`);
+       data-token marks each --color-* token for the drift guard. #}
+    <section id="borders" class="scroll-mt-8 mb-12">
+      <h2 class="type-heading text-primary mb-1">Border tokens</h2>
+      <p class="type-helper text-secondary mb-4">
+        Themeable borders (<code>app.css</code>): <code>border-subtle</code>
+        (faint dividers), <code>border-default</code> (standard card / input
+        border), <code>border-strong</code> (emphasis, the input rest edge),
+        <code>border-stronger</code> (the darker input-hover edge). Black in
+        light, white in dark, same alpha steps.
+      </p>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+
+        {# Light #}
+        <div>
+          <div class="light rounded-lg border border-default bg-surface-primary p-4 grid grid-cols-4 gap-3">
+            <div data-token="--color-subtle" class="flex flex-col items-center gap-2">
+              <div class="w-full h-12 rounded-md border border-subtle"></div>
+              <code class="type-helper font-mono text-secondary">border-subtle</code>
+            </div>
+            <div data-token="--color-default" class="flex flex-col items-center gap-2">
+              <div class="w-full h-12 rounded-md border border-default"></div>
+              <code class="type-helper font-mono text-secondary">border-default</code>
+            </div>
+            <div data-token="--color-strong" class="flex flex-col items-center gap-2">
+              <div class="w-full h-12 rounded-md border border-strong"></div>
+              <code class="type-helper font-mono text-secondary">border-strong</code>
+            </div>
+            <div data-token="--color-stronger" class="flex flex-col items-center gap-2">
+              <div class="w-full h-12 rounded-md border border-stronger"></div>
+              <code class="type-helper font-mono text-secondary">border-stronger</code>
+            </div>
+          </div>
+        </div>
+
+        {# Dark (scoped via `.dark`) #}
+        <div>
+          <div class="dark rounded-lg border border-default bg-surface-primary p-4 grid grid-cols-4 gap-3">
+            <div class="flex flex-col items-center gap-2">
+              <div class="w-full h-12 rounded-md border border-subtle"></div>
+              <code class="type-helper font-mono text-secondary">border-subtle</code>
+            </div>
+            <div class="flex flex-col items-center gap-2">
+              <div class="w-full h-12 rounded-md border border-default"></div>
+              <code class="type-helper font-mono text-secondary">border-default</code>
+            </div>
+            <div class="flex flex-col items-center gap-2">
+              <div class="w-full h-12 rounded-md border border-strong"></div>
+              <code class="type-helper font-mono text-secondary">border-strong</code>
+            </div>
+            <div class="flex flex-col items-center gap-2">
+              <div class="w-full h-12 rounded-md border border-stronger"></div>
+              <code class="type-helper font-mono text-secondary">border-stronger</code>
+            </div>
+          </div>
+        </div>
+
+      </div>
+      <div class="mt-2 type-helper text-secondary font-mono">app.css :: --color-subtle / -default / -strong / -stronger (border-*)</div>
+    </section>
+
+    {# Surface & fill tokens. Surfaces are solid backgrounds (primary/inverse
+       are exact mirrors; overlay = inverse @ 20%); fills are translucent
+       resting/state tints over a surface (selected dropped). Both modes; the
+       panels themselves use bg-surface-primary + border-default. data-token
+       marks each --color-* token for the drift guard. #}
+    <section id="surfaces" class="scroll-mt-8 mb-12">
+      <h2 class="type-heading text-primary mb-1">Surface &amp; fill tokens</h2>
+      <p class="type-helper text-secondary mb-4">
+        Surfaces (<code>bg-surface-primary</code> / <code>-inverse</code> /
+        <code>-overlay</code>) are solid backgrounds; primary &amp; inverse
+        mirror (white&harr;black), overlay is the inverse color at 20%. Fills
+        (<code>bg-fill-subtle</code> / <code>-hover</code> / <code>-active</code>)
+        are translucent tints over a surface.
+      </p>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+
+        {# Light #}
+        <div>
+          <div class="light bg-surface-primary border border-default rounded-lg p-4">
+            <div class="type-section text-tertiary mb-1.5">Surfaces</div>
+            <div class="grid grid-cols-3 gap-3 mb-4">
+              <div data-token="--color-surface-primary" class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-surface-primary border border-default"></div>
+                <code class="type-helper font-mono text-secondary">primary</code>
+              </div>
+              <div data-token="--color-surface-inverse" class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-surface-inverse"></div>
+                <code class="type-helper font-mono text-secondary">inverse</code>
+              </div>
+              <div data-token="--color-surface-overlay" class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-surface-overlay"></div>
+                <code class="type-helper font-mono text-secondary">overlay</code>
+              </div>
+            </div>
+            <div class="type-section text-tertiary mb-1.5">Fills</div>
+            <div class="grid grid-cols-3 gap-3">
+              <div data-token="--color-fill-subtle" class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-fill-subtle border border-subtle"></div>
+                <code class="type-helper font-mono text-secondary">subtle</code>
+              </div>
+              <div data-token="--color-fill-hover" class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-fill-hover border border-subtle"></div>
+                <code class="type-helper font-mono text-secondary">hover</code>
+              </div>
+              <div data-token="--color-fill-active" class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-fill-active border border-subtle"></div>
+                <code class="type-helper font-mono text-secondary">active</code>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {# Dark (scoped via `.dark`) #}
+        <div>
+          <div class="dark bg-surface-primary border border-default rounded-lg p-4">
+            <div class="type-section text-tertiary mb-1.5">Surfaces</div>
+            <div class="grid grid-cols-3 gap-3 mb-4">
+              <div class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-surface-primary border border-default"></div>
+                <code class="type-helper font-mono text-secondary">primary</code>
+              </div>
+              <div class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-surface-inverse"></div>
+                <code class="type-helper font-mono text-secondary">inverse</code>
+              </div>
+              <div class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-surface-overlay"></div>
+                <code class="type-helper font-mono text-secondary">overlay</code>
+              </div>
+            </div>
+            <div class="type-section text-tertiary mb-1.5">Fills</div>
+            <div class="grid grid-cols-3 gap-3">
+              <div class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-fill-subtle border border-subtle"></div>
+                <code class="type-helper font-mono text-secondary">subtle</code>
+              </div>
+              <div class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-fill-hover border border-subtle"></div>
+                <code class="type-helper font-mono text-secondary">hover</code>
+              </div>
+              <div class="flex flex-col items-center gap-1.5">
+                <div class="w-full h-12 rounded-md bg-fill-active border border-subtle"></div>
+                <code class="type-helper font-mono text-secondary">active</code>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+      <div class="mt-2 type-helper text-secondary font-mono">app.css :: --color-surface-* (bg-surface-*) + --color-fill-* (bg-fill-*)</div>
+    </section>
+
+    {# Status / feedback tokens. One hue per semantic (Figma); .dark lifts each
+       to a brighter value (the deep light hues go muddy on the pure-black
+       surface). Notice / badge backgrounds use a per-mode surface token
+       (--c-*-surface) -- a faint tint in light, a higher-opacity tint in dark
+       so the shape stays visible on black. data-token marks each --color-* for
+       the drift guard. #}
+    <section id="status" class="scroll-mt-8 mb-12">
+      <h2 class="type-heading text-primary mb-1">Status / feedback tokens</h2>
+      <p class="type-helper text-secondary mb-4">
+        One hue per semantic (<code>important</code> / <code>success</code>
+        / <code>warning</code> / <code>info</code>). Dark mode lifts each hue to a
+        brighter value (the deep light hues go muddy on black); notice / badge
+        backgrounds use a per-mode surface token (<code>--c-success-surface</code>),
+        faint in light and lifted in dark so the shape stays visible.
+      </p>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+
+        {# Light #}
+        <div>
+          <div class="light bg-surface-primary border border-default rounded-lg p-4">
+            <div class="grid grid-cols-4 gap-2 mb-4">
+              <div data-token="--color-important" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-important"></div><code class="type-helper font-mono text-secondary">important</code></div>
+              <div data-token="--color-success" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-success"></div><code class="type-helper font-mono text-secondary">success</code></div>
+              <div data-token="--color-warning" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-warning"></div><code class="type-helper font-mono text-secondary">warning</code></div>
+              <div data-token="--color-info" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-info"></div><code class="type-helper font-mono text-secondary">info</code></div>
+            </div>
+            <div class="flex flex-col gap-2">
+              <div class="rounded-md bg-[var(--c-success-surface)] text-success px-3 py-2 type-body">Success notice (hue + opacity)</div>
+              <div class="rounded-md bg-[var(--c-important-surface)] text-important px-3 py-2 type-body">Error notice (important)</div>
+            </div>
+          </div>
+        </div>
+
+        {# Dark #}
+        <div>
+          <div class="dark bg-surface-primary border border-default rounded-lg p-4">
+            <div class="grid grid-cols-4 gap-2 mb-4">
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-important"></div><code class="type-helper font-mono text-secondary">important</code></div>
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-success"></div><code class="type-helper font-mono text-secondary">success</code></div>
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-warning"></div><code class="type-helper font-mono text-secondary">warning</code></div>
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-info"></div><code class="type-helper font-mono text-secondary">info</code></div>
+            </div>
+            <div class="flex flex-col gap-2">
+              <div class="rounded-md bg-[var(--c-success-surface)] text-success px-3 py-2 type-body">Success notice (hue + opacity)</div>
+              <div class="rounded-md bg-[var(--c-important-surface)] text-important px-3 py-2 type-body">Error notice (important)</div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+      <div class="mt-2 type-helper text-secondary font-mono">app.css :: --color-important / -success / -warning / -info</div>
+    </section>
+
+    {# Accent / interactive token. One mode-independent blue -- the system
+       accent -- behind links, selected states, focus rings and progress.
+       Solid for selection/progress, derived tints/rings via /opacity.
+       data-token marks --color-accent for the drift guard. #}
+    <section id="accent" class="scroll-mt-8 mb-12">
+      <h2 class="type-heading text-primary mb-1">Accent / interactive token</h2>
+      <p class="type-helper text-secondary mb-4">
+        One <code>accent</code> hue (a WCAG-AA blue), lifted to a brighter blue
+        in dark mode so links and low-opacity tints stay legible on the black
+        surface. Behind links, selected states, focus rings and progress. Solid
+        for selection / progress (<code>bg-accent</code>, <code>border-accent</code>);
+        lighter rings and tints derive via an opacity modifier (e.g.
+        <code>ring-accent/40</code>, <code>bg-accent/15</code>).
+      </p>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+
+        {# Light #}
+        <div>
+          <div class="light bg-surface-primary border border-default rounded-lg p-4 flex flex-col gap-3">
+            <div class="grid grid-cols-4 gap-2">
+              <div data-token="--color-accent" class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-accent"></div><code class="type-helper font-mono text-secondary">accent</code></div>
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-accent/40"></div><code class="type-helper font-mono text-secondary">/40</code></div>
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-accent/15"></div><code class="type-helper font-mono text-secondary">/15</code></div>
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md border border-accent"></div><code class="type-helper font-mono text-secondary">border</code></div>
+            </div>
+            <a href="#" class="text-accent hover:underline type-body">A text link (text-accent)</a>
+            <div class="h-1.5 bg-fill-subtle rounded-full overflow-hidden"><div class="h-full w-2/3 rounded-full bg-accent"></div></div>
+          </div>
+        </div>
+
+        {# Dark #}
+        <div>
+          <div class="dark bg-surface-primary border border-default rounded-lg p-4 flex flex-col gap-3">
+            <div class="grid grid-cols-4 gap-2">
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-accent"></div><code class="type-helper font-mono text-secondary">accent</code></div>
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-accent/40"></div><code class="type-helper font-mono text-secondary">/40</code></div>
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md bg-accent/15"></div><code class="type-helper font-mono text-secondary">/15</code></div>
+              <div class="flex flex-col items-center gap-1.5"><div class="w-full h-10 rounded-md border border-accent"></div><code class="type-helper font-mono text-secondary">border</code></div>
+            </div>
+            <a href="#" class="text-accent hover:underline type-body">A text link (text-accent)</a>
+            <div class="h-1.5 bg-fill-subtle rounded-full overflow-hidden"><div class="h-full w-2/3 rounded-full bg-accent"></div></div>
+          </div>
+        </div>
+
+      </div>
+      <div class="mt-2 type-helper text-secondary font-mono">app.css :: --color-accent (links, selection, focus rings, progress)</div>
+    </section>
+
+    {# Corner-radius scale. Four steps (4/6/8/16 px) defined in app.css
+       (@theme --radius-*) plus the built-in rounded-full / rounded-none; a
+       ratchet holds the set. The one exception is the chrome content surface
+       that tucks under the colored titlebar (Chrome.jinja's #content-frame),
+       which keeps a structural ``rounded-[12px]`` -- that 12px matches
+       Electron's ``CONTENT_CORNER_RADIUS`` and the OS window's outer rounding,
+       so both browser-mode iframe and Electron WebContentsView nest the same. #}
+    <section id="radius" class="scroll-mt-8 mb-12">
+      <h2 class="type-heading text-primary mb-1">Corner radius</h2>
+      <p class="type-helper text-secondary mb-4">
+        Four steps (4 / 6 / 8 / 16 px) plus <code>rounded-full</code>; each
+        plays one role. <code>rounded-xl</code> (16px) is reserved for the
+        largest surfaces.
+      </p>
+      <div class="grid grid-cols-2 sm:grid-cols-5 gap-4">
+        <div class="flex flex-col items-center text-center">
+          <div class="w-16 h-16 bg-fill-active rounded-sm"></div>
+          <code class="type-helper font-mono text-secondary mt-1">rounded-sm (4px)</code>
+          <span class="type-helper text-secondary">subtle accents, tiny badges</span>
+        </div>
+        <div class="flex flex-col items-center text-center">
+          <div class="w-16 h-16 bg-fill-active rounded-md"></div>
+          <code class="type-helper font-mono text-secondary mt-1">rounded-md (6px)</code>
+          <span class="type-helper text-secondary">buttons, badges, swatches</span>
+        </div>
+        <div class="flex flex-col items-center text-center">
+          <div class="w-16 h-16 bg-fill-active rounded-lg"></div>
+          <code class="type-helper font-mono text-secondary mt-1">rounded-lg (8px)</code>
+          <span class="type-helper text-secondary">inputs, cards, modals, panels, log boxes</span>
+        </div>
+        <div class="flex flex-col items-center text-center">
+          <div class="w-16 h-16 bg-fill-active rounded-xl"></div>
+          <code class="type-helper font-mono text-secondary mt-1">rounded-xl (16px)</code>
+          <span class="type-helper text-secondary">reserved -- largest surfaces</span>
+        </div>
+        <div class="flex flex-col items-center text-center">
+          <div class="w-16 h-16 bg-fill-active rounded-full"></div>
+          <code class="type-helper font-mono text-secondary mt-1">rounded-full</code>
+          <span class="type-helper text-secondary">pills, dots, spinner outline</span>
+        </div>
+      </div>
+    </section>
+
+    {# Spacing scale. Standard Tailwind (--spacing stays the stock 0.25rem, so
+       p-1 = 4px, p-4 = 16px). Padding / margin / gap are constrained to a fixed
+       ten-step subset of the native steps; a ratchet holds it. Width / height /
+       inset stay free for layout. The demo bars use inline width (loop-built
+       w-<n> classes wouldn't be picked up by the static scanner). #}
+    <section id="spacing" class="scroll-mt-8 mb-12">
+      <h2 class="type-heading text-primary mb-1">Spacing scale</h2>
+      <p class="type-helper text-secondary mb-4">
+        Standard Tailwind steps (<code>--spacing</code> is the stock
+        <code>0.25rem</code>, so <code>p-1</code> = 4px, <code>p-4</code> = 16px).
+        Padding / margin / gap are limited to ten steps:
+        <code>0.5 / 1 / 1.5 / 2 / 3 / 4 / 6 / 8 / 12 / 16</code>
+        (= 2 / 4 / 6 / 8 / 12 / 16 / 24 / 32 / 48 / 64 px).
+      </p>
+      <div class="flex flex-col gap-2">
+        {% for _m in [0.5, 1, 1.5, 2, 3, 4, 6, 8, 12, 16] %}
+        <div class="flex items-center gap-3">
+          <code class="type-helper font-mono text-secondary w-12 shrink-0">p-{{ _m }}</code>
+          <code class="type-helper font-mono text-tertiary w-10 shrink-0">{{ (_m * 4) | int }}px</code>
+          <div class="h-2 rounded-sm bg-accent" style="width: {{ (_m * 4) | int }}px;"></div>
+        </div>
+        {% endfor %}
+      </div>
+      <div class="mt-2 type-helper text-secondary font-mono">Tailwind default spacing; padding / margin / gap held to this subset by a ratchet</div>
+    </section>
+
+    {# Elevation. Two box-shadow steps (app.css @theme), held by a ratchet.
+       shadow-raised is the interactive-card hover lift (the prior card shadow);
+       shadow-overlay is the soft floating shadow for surfaces above the page --
+       menus / modals / tooltips (Figma minds-elevation-1: two 8%-black drops). #}
+    <section id="elevation" class="scroll-mt-8 mb-12">
+      <h2 class="type-heading text-primary mb-1">Elevation</h2>
+      <p class="type-helper text-secondary mb-4">
+        Two steps. <code>shadow-raised</code> is the hover lift on interactive
+        cards; <code>shadow-overlay</code> is the soft floating shadow for
+        surfaces above the page -- menus, modals, tooltips.
+      </p>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
+        <div class="flex flex-col items-center gap-2">
+          <div class="w-full h-16 rounded-lg bg-surface-primary border border-default shadow-raised"></div>
+          <code class="type-helper font-mono text-secondary">shadow-raised</code>
+          <span class="type-helper text-tertiary">interactive card hover</span>
+        </div>
+        <div class="flex flex-col items-center gap-2">
+          <div class="w-full h-16 rounded-lg bg-surface-primary border border-default shadow-overlay"></div>
+          <code class="type-helper font-mono text-secondary">shadow-overlay</code>
+          <span class="type-helper text-tertiary">menus / modals / tooltips</span>
+        </div>
+      </div>
+      <div class="mt-2 type-helper text-secondary font-mono">app.css :: --shadow-raised / --shadow-overlay</div>
+    </section>
+
+    {# Icons -- 16x16 fill-based icons (Figma node 857-5091) + 12px chrome glyphs.
+       Brand marks (Google / GitHub) live in auth/OauthIcon.jinja
+       because they are multi-color and don't share the stroke shell.
+       The 20x20 filled icons (DialogCloseButton X, Latchkey check)
+       stay inline next to their use sites. Icons live in the design
+       system: though each is a JinjaX component, the set is a shared
+       primitive ramp like the color / type tokens above. #}
+    <section id="icons-16" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-1">Icons -- 16px (Icon16)</h2>
+      <div class="flex flex-wrap items-start gap-4 text-primary mt-4">
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="menu" />
+          <code class="type-helper font-mono text-secondary">menu</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="home" />
+          <code class="type-helper font-mono text-secondary">home</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="user" />
+          <code class="type-helper font-mono text-secondary">user</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="inbox" />
+          <code class="type-helper font-mono text-secondary">inbox</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="settings" />
+          <code class="type-helper font-mono text-secondary">settings</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="chevron-right" />
+          <code class="type-helper font-mono text-secondary">chevron-right</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="chevron-left" />
+          <code class="type-helper font-mono text-secondary">chevron-left</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="chevron-down" />
+          <code class="type-helper font-mono text-secondary">chevron-down</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="chevron-up" />
+          <code class="type-helper font-mono text-secondary">chevron-up</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="chevron-down-small" />
+          <code class="type-helper font-mono text-secondary">chevron-down-small</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="plus" />
+          <code class="type-helper font-mono text-secondary">plus</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="close" />
+          <code class="type-helper font-mono text-secondary">close</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="restart" />
+          <code class="type-helper font-mono text-secondary">restart</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="arrow-up-right" />
+          <code class="type-helper font-mono text-secondary">arrow-up-right</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="check" />
+          <code class="type-helper font-mono text-secondary">check</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="play" />
+          <code class="type-helper font-mono text-secondary">play</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="pause" />
+          <code class="type-helper font-mono text-secondary">pause</code>
+        </div>
+      </div>
+      <p class="mt-1 type-helper text-secondary">
+        Icons inherit color from the parent via ``currentColor`` (most are
+        filled outlines; ``play`` is stroked). Sizes: ``sm`` (w-3.5), ``md``
+        (w-4, default), ``lg`` (w-5).
+      </p>
+      <div class="mt-0.5 type-helper text-secondary font-mono">Icon16.jinja :: ICONS_16 in templates.py</div>
+    </section>
+
+    <section id="icons-12" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-1">Icons -- 12x12 chrome glyphs (Icon12)</h2>
+      <div class="dark bg-surface-primary border border-default rounded-lg p-4 flex items-start gap-4 text-secondary mt-4">
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon12 name="minimize" />
+          <code class="type-helper font-mono text-tertiary">minimize</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon12 name="maximize" />
+          <code class="type-helper font-mono text-tertiary">maximize</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon12 name="close" />
+          <code class="type-helper font-mono text-tertiary">close</code>
+        </div>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">Icon12.jinja :: ICONS_12 in templates.py (used only inside TitlebarButton variant="control")</div>
+    </section>
+
+      {# ===================================================================
+         Patterns & Components -- the composed UI primitives.
+         =================================================================== #}
+      <div id="patterns" class="scroll-mt-8 mt-16 pt-12 border-t border-default mb-8">
+        <h2 class="type-heading-lg text-primary">Patterns &amp; Components</h2>
+        <p class="type-helper text-secondary mt-1">
+          Common chrome and workspace UI patterns, composed from the tokens
+          above. Source files linked under each example.
+        </p>
+      </div>
+
+    {# ColorSwatch primitive: the circular radio buttons the workspace
+       color pickers (settings + create form) compose. aria-checked drives
+       the blue selection ring via app.css; the create page additionally
+       narrows the rim to 1px via its own picker-scoped override. #}
+    <section id="color-swatches" class="scroll-mt-8 mb-12">
+      <h2 class="type-heading text-primary mb-2">Color swatches</h2>
+      <div class="flex items-center gap-2" role="radiogroup" aria-label="Color swatch demo, settings size">
+        <ColorSwatch hex="#0b292b" name="confusion" selected size="md" />
+        <ColorSwatch hex="#9fbbd3" name="peace" size="md" />
+        <ColorSwatch hex="#cecd0c" name="energy" size="md" disabled />
+      </div>
+      <div class="flex items-center gap-2 mt-4" role="radiogroup" aria-label="Color swatch demo, create-form size">
+        <ColorSwatch hex="#0b292b" name="confusion" selected size="sm" />
+        <ColorSwatch hex="#9fbbd3" name="peace" size="sm" />
+        <ColorSwatch hex="#cecd0c" name="energy" size="sm" disabled />
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">ColorSwatch.jinja (size="md" settings / "sm" create; same three per row: first selected via aria-checked, third disabled) + app.css :: .color-swatch</div>
+    </section>
+
+    {# Titlebar buttons (self-theming). Each bar sets only --titlebar-bg (a
+       workspace color); the .titlebar-surface scope derives the black/white
+       foreground from it in pure CSS (lch relative color), so the same
+       TitlebarButton glyphs + page title read correctly on a dark workspace
+       color and a light one alike -- exactly as chrome.js paints them. The
+       three sections are sized 1 / 2 / 1 (nav | title | requests + window
+       controls) so the page title sits in the bar's exact center regardless
+       of how wide each side is -- matching Chrome.jinja. #}
+    <section id="titlebar-buttons" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Titlebar buttons (self-theming)</h2>
+      <div class="flex flex-col gap-2">
+        {% for _bg in ['#0b292b', '#cecd0c'] %}
+        <div class="titlebar-surface rounded-lg overflow-hidden border border-default h-[38px] flex items-center select-none px-1"
+             style="--titlebar-bg: {{ _bg }}; background-color: var(--titlebar-bg);">
+          <div class="flex-1 flex items-center gap-0.5 min-w-0">
+            <TitlebarButton title="Projects"><Icon16 name="menu" /></TitlebarButton>
+            <TitlebarButton title="Home"><Icon16 name="home" /></TitlebarButton>
+            <TitlebarButton title="Back"><Icon16 name="chevron-left" /></TitlebarButton>
+            <TitlebarButton title="Forward"><Icon16 name="chevron-right" /></TitlebarButton>
+          </div>
+          <div class="flex-[2] flex items-center justify-center px-2 min-w-0">
+            <span class="text-primary type-label whitespace-nowrap overflow-hidden text-ellipsis">my-workspace</span>
+          </div>
+          <div class="flex-1 flex items-center justify-end min-w-0">
+            <TitlebarButton title="Requests" extra="gap-[3px]"><Icon16 name="inbox" /></TitlebarButton>
+            <div class="flex">
+              <TitlebarButton variant="control" title="Minimize"><Icon12 name="minimize" /></TitlebarButton>
+              <TitlebarButton variant="control" title="Maximize"><Icon12 name="maximize" /></TitlebarButton>
+              <TitlebarButton variant="control" tone="danger" title="Close"><Icon12 name="close" /></TitlebarButton>
+            </div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">TitlebarButton.jinja + .titlebar-surface (app.css) -- 1/2/1 flex sections center the title; contrast derived from --titlebar-bg via lch</div>
+    </section>
+
+    {# Notification badge. One component (Badge.jinja), two shapes: the count
+       pill (a number, capped at 99+) and the bare dot (no count). The titlebar
+       requests button shows the count inline beside the messages icon; the dot
+       is the no-number variant. #}
+    <section id="notification-badge" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Notification badge</h2>
+      <div class="flex items-center gap-3">
+        <Badge :count="4" />
+        <Badge :count="12" />
+        <Badge :count="150" />
+        <Badge />
+      </div>
+      <p class="mt-2 type-helper text-secondary">
+        Count pill (``min-w-[16px]`` keeps a single digit circular; caps at
+        99+) and the bare dot. In the titlebar the count sits inline beside the
+        messages icon (the gap collapses when there are no requests):
+      </p>
+      <div class="mt-2 titlebar-surface rounded-lg overflow-hidden border border-default"
+           style="--titlebar-bg: #18181b; background-color: var(--titlebar-bg);">
+        <div class="h-[38px] flex items-center justify-end px-1">
+          <TitlebarButton title="Requests" extra="gap-[3px]">
+            <Icon16 name="inbox" />
+            <Badge :count="4" />
+          </TitlebarButton>
+        </div>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">templates/Badge.jinja (titlebar count: Chrome.jinja :: #requests-badge)</div>
+    </section>
+
+    {# Window controls (only rendered on non-mac in real chrome) #}
+    <section id="window-controls" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Window controls</h2>
+      <div class="titlebar-surface rounded-lg overflow-hidden border border-default"
+           style="--titlebar-bg: #18181b; background-color: var(--titlebar-bg);">
+        <div class="h-[38px] flex items-center justify-end">
+          <TitlebarButton variant="control" title="Minimize"><Icon12 name="minimize" /></TitlebarButton>
+          <TitlebarButton variant="control" title="Maximize"><Icon12 name="maximize" /></TitlebarButton>
+          <TitlebarButton variant="control" tone="danger" title="Close"><Icon12 name="close" /></TitlebarButton>
+        </div>
+      </div>
+      <p class="mt-1 type-helper text-secondary">
+        Only rendered on non-mac platforms in real chrome (macOS has native traffic lights).
+      </p>
+      <div class="mt-0.5 type-helper text-secondary font-mono">TitlebarButton.jinja (variant="control", tone="danger" for close)</div>
+    </section>
+
+    {# Sidebar items. The sidebar is a floating menu (shared modal
+       WebContentsView in Electron, inline overlay in browser). Each row
+       is built by the shared window.mindsSidebarRow.buildRow helper; the
+       styleguide renders its samples through that exact builder (see
+       dev_styleguide.js) so this catalog can't drift from the live menu.
+       The empty container below is filled in on load. #}
+    <section id="sidebar-items" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Sidebar items</h2>
+      <div id="styleguide-sidebar-rows"
+           class="dark w-[280px] flex flex-col gap-0.5 p-1 rounded-lg border border-subtle bg-surface-primary overflow-hidden"></div>
+      <div class="mt-1 type-helper text-secondary font-mono">window.mindsSidebarRow.buildRow (sidebar_workspace_row.js) -- the one row builder shared by static/sidebar.js + static/chrome.js; SidebarBottom.jinja supplies the "New workspace" / "Manage account(s)" rows below the workspace list.</div>
+    </section>
+
+    {# Accent spine. The left stripe is the only surface in the catalog that
+       renders the per-workspace accent (a user-picked #rrggbb stored as an
+       mngr color label); pick a hex and the stripe updates live. #}
+    <section id="accent-spine" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Accent spine</h2>
+      <div class="accent-spine relative flex items-center gap-3 bg-surface-primary border border-default rounded-lg px-4 py-3 overflow-hidden">
+        <div class="type-body text-primary">Card with workspace accent stripe on the left edge.</div>
+      </div>
+      <div class="mt-2 flex items-center gap-3">
+        <label for="styleguide-accent-color" class="type-helper text-secondary">accent hex</label>
+        <input id="styleguide-accent-color" type="color" value="#0b292b">
+        <code id="styleguide-accent-value" class="type-helper text-primary"></code>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">templates/pages/Landing.jinja, templates/pages/Destroying.jinja :: .accent-spine reads --workspace-accent from app.css</div>
+    </section>
+
+    {# Focus ring -- the accent ring shared by TextInput, Select, Textarea via INPUT_BASE #}
+    <section id="form-controls" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Form controls (TextInput / Select / Textarea)</h2>
+      <div class="flex flex-col gap-3">
+        <TextInput name="styleguide-accent-input" placeholder="TextInput -- click to focus" />
+        <div class="flex items-center gap-2">
+          <Select name="styleguide-select" width="w-48">
+            <option>Option A</option>
+            <option>Option B</option>
+            <option>Option C</option>
+          </Select>
+          <span class="type-helper text-secondary">Select width="w-48"</span>
+        </div>
+        <Textarea name="styleguide-textarea" rows="3" :value="'This is a sample of multi-line text in a textarea. It is long enough to wrap onto a second line, so the leading and padding are easy to judge.'" />
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">TextInput.jinja / Select.jinja / Textarea.jinja :: INPUT_BASE (p-2, border-strong -> border-stronger on hover, placeholder-tertiary; focus ring drawn outside via outline-offset, keeping the border). Single-line TextInput / Select add leading-tight; Textarea keeps type-body's 1.5.</div>
+    </section>
+
+
+    {# Spinner #}
+    <section id="spinner" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Spinner</h2>
+      <div class="flex items-center gap-6">
+        <div class="flex items-center gap-3">
+          <Spinner size="sm" />
+          <Spinner size="md" />
+          <Spinner size="lg" />
+        </div>
+        <div class="flex items-center gap-3 pl-6 border-l border-default">
+          <Spinner size="sm" tone="accent" />
+          <Spinner size="md" tone="accent" />
+          <Spinner size="lg" tone="accent" />
+        </div>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">app.css :: .spinner (+ .spinner-accent) + Spinner.jinja</div>
+    </section>
+
+    {# Buttons #}
+    <section id="buttons" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Buttons -- variants</h2>
+      <div class="flex flex-wrap items-center gap-2">
+        <Button variant="primary">Primary</Button>
+        <Button variant="secondary">Secondary</Button>
+        <Button variant="danger">Danger</Button>
+        <Button variant="success">Success</Button>
+        <Button variant="ghost">Ghost</Button>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">Button.jinja :: variant=...</div>
+    </section>
+
+    {# Button sizes #}
+    <section id="button-sizes" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Buttons -- sizes</h2>
+      <div class="flex flex-col gap-3">
+        <div class="flex flex-wrap items-center gap-2">
+          <Button variant="primary" size="md">Default (md)</Button>
+          <Button variant="primary" size="lg">Large (lg, prominent CTA)</Button>
+          <Button variant="ghost" size="icon" title="Settings" aria-label="Settings"><Icon16 name="settings" /></Button>
+        </div>
+        <Button variant="primary" size="lg" block>Block (w-full, used for auth CTAs)</Button>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">Button.jinja :: size=md|lg|icon, block=true</div>
+    </section>
+
+    {# Inline links. Use the Link component for real navigations -- it
+       picks up the ``text-accent hover:underline`` recipe with an
+       optional ``weight="medium"`` for prominent auth-flow affordances. #}
+    <section id="links" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Links</h2>
+      <div class="flex flex-wrap items-center gap-4">
+        <Link href="#">Back to projects</Link>
+        <Link href="#" weight="medium">Sign in</Link>
+        <Link href="#" extra="type-helper">Forgot password</Link>
+      </div>
+      <p class="mt-1 type-helper text-secondary">
+        ``weight="medium"`` is the auth-flow tab-switch / back-link
+        treatment. A smaller role (e.g. ``type-helper``) goes through ``extra``.
+      </p>
+      <div class="mt-0.5 type-helper text-secondary font-mono">Link.jinja</div>
+    </section>
+
+    {# Link-styled buttons -- the recurring pattern for inline
+       disclosure TOGGLES that look like links but aren't navigations
+       ("Configure...", "Show advanced", "Adjust"). Compose via Button
+       ghost + ``extra`` rather than adding a ``variant="link"`` so the
+       Button primitive's surface stays small. Prefer the Link component
+       over this pattern when the affordance is a real navigation --
+       keyboard focus and accessibility are cleaner on a plain anchor. #}
+    <section id="button-links" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Buttons -- link style (via extra=)</h2>
+      <div class="flex flex-wrap items-center gap-4">
+        <Button variant="ghost"
+                extra="!p-0 !bg-transparent !type-helper !text-accent hover:!bg-transparent hover:underline">
+          Configure&hellip;
+        </Button>
+        <Button variant="ghost"
+                extra="!p-0 !bg-transparent !type-helper !text-tertiary hover:!bg-transparent hover:!text-primary hover:underline">
+          Continue without an account
+        </Button>
+      </div>
+      <p class="mt-1 type-helper text-secondary">
+        For text-link toggles use a ghost Button with ``extra=&quot;!p-0 !bg-transparent !type-helper !text-accent hover:!bg-transparent hover:underline&quot;``. The ``!`` prefix is load-bearing -- without it the Button base's ``type-label`` role and the ghost variant's color win, and the toggle reads as a heavy button rather than a link.
+      </p>
+      <div class="mt-0.5 type-helper text-secondary font-mono">Button.jinja :: variant=&quot;ghost&quot; with extra= overrides</div>
+    </section>
+
+    {# Notices #}
+    <section id="notices" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Notices</h2>
+      <div>
+        <Notice variant="info">Heads up: informational message.</Notice>
+        <Notice variant="warn">Careful: something may need attention.</Notice>
+        <Notice variant="success">All set: action completed.</Notice>
+        <Notice variant="error">Failed: something went wrong.</Notice>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">Notice.jinja</div>
+    </section>
+
+    {# Cards #}
+    <section id="cards" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Cards</h2>
+      <div class="flex flex-col gap-2">
+        <Card>
+          <span class="type-body text-primary">Default block card -- caller arranges children.</span>
+        </Card>
+        <Card layout="row-spread">
+          <span class="font-semibold text-primary">my-service</span>
+          <Button variant="secondary">Manage</Button>
+        </Card>
+        <Card layout="row" padding="tight">
+          <span class="font-semibold text-primary">provider</span>
+          <span class="type-helper text-secondary">backend</span>
+          <span class="flex-1"></span>
+          <Button variant="secondary">Disable</Button>
+        </Card>
+        <Card tag="a" href="#" layout="row" interactive>
+          <span class="flex-1 font-semibold text-primary">Interactive card (tag=&quot;a&quot;)</span>
+          <span class="type-helper text-secondary">click anywhere</span>
+        </Card>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">Card.jinja :: .minds-card from app.css</div>
+    </section>
+
+    {# Page container #}
+    <section id="page-container" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Page container</h2>
+      <div class="bg-fill-subtle border border-default rounded-lg">
+        <PageContainer>
+          <div class="bg-surface-primary border border-default rounded-md p-3 type-body text-primary">
+            Centered, max-width body wrapper used by most page templates.
+          </div>
+        </PageContainer>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">PageContainer.jinja</div>
+    </section>
+
+    {# Opt (onboarding option card) #}
+    <section id="opt" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Opt (onboarding option)</h2>
+      <div class="flex flex-col gap-2">
+        <Opt val="example-a" title="Example option" desc="Non-editable selectable card." />
+        <Opt val="example-b" title="Selected" desc="Marker for the chosen option." selected />
+        <Opt val="example-c" title="Editable" desc="Expands a textarea when selected." editable preset="prefilled text" placeholder="placeholder text" />
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">Opt.jinja (.opt / .opt-selected from app.css)</div>
+    </section>
+
+    {# OAuth icons #}
+    <section id="oauth-icons" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">OAuth icons</h2>
+      <div class="flex items-center gap-6">
+        <span class="inline-flex items-center gap-2 type-body text-primary">
+          <auth.OauthIcon provider="google" /> Google
+        </span>
+        <span class="inline-flex items-center gap-2 type-body text-primary">
+          <auth.OauthIcon provider="github" /> GitHub
+        </span>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">auth/OauthIcon.jinja</div>
+    </section>
+
+    {# Status badges #}
+    <section id="status-badges" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Status badges</h2>
+      <div class="flex flex-wrap items-center gap-3">
+        <StatusBadge>Neutral</StatusBadge>
+        <StatusBadge variant="success">Done</StatusBadge>
+        <StatusBadge variant="error">Failed</StatusBadge>
+        <StatusBadge variant="warn">Warning</StatusBadge>
+        <StatusBadge variant="info">Info</StatusBadge>
+      </div>
+      <div class="flex flex-wrap items-center gap-3 mt-2">
+        <StatusBadge size="xs">Neutral</StatusBadge>
+        <StatusBadge variant="success" size="xs">Done</StatusBadge>
+        <StatusBadge variant="error" size="xs">Failed</StatusBadge>
+        <StatusBadge variant="warn" size="xs">Warning</StatusBadge>
+        <StatusBadge variant="info" size="xs">Info</StatusBadge>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">StatusBadge.jinja (sm slot badges / xs inline tags)</div>
+    </section>
+
+    {# Section header #}
+    <section id="section-header" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Section header</h2>
+      <div>
+        <SectionHeader>Plain</SectionHeader>
+        <p class="type-body text-primary mb-2">Content under the plain header.</p>
+        <SectionHeader divider>With divider</SectionHeader>
+        <p class="type-body text-primary">Content under the divider header.</p>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">SectionHeader.jinja</div>
+    </section>
+
+    {# Dialog close button #}
+    <section id="dialog-close" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Dialog close button</h2>
+      <div class="relative h-16">
+        <DialogCloseButton onclick="void(0)" />
+        <p class="type-body text-secondary">Top-right X used by overlay dialogs.</p>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">DialogCloseButton.jinja</div>
+    </section>
+
+    {# Modal -- styleguide only shows the *inside* of the modal because
+       the real wrapper occupies the whole viewport. #}
+    <section id="modal" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Modal (inner card preview)</h2>
+      <div class="bg-fill-subtle border border-default rounded-lg p-6 flex items-center justify-center">
+        <div class="bg-surface-primary rounded-lg shadow-overlay border border-default max-w-sm w-full p-6">
+          <h2 class="type-heading text-primary mb-3">Confirm action?</h2>
+          <p class="type-body text-primary mb-4">This is what the inner card of a Modal looks like.</p>
+          <div class="flex justify-end gap-3">
+            <Button variant="secondary">Cancel</Button>
+            <Button variant="danger">Confirm</Button>
+          </div>
+        </div>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">Modal.jinja (full overlay wraps a hidden flex container; preview shows the card only)</div>
+    </section>
+
+    </main>
   </div>
 </Base>

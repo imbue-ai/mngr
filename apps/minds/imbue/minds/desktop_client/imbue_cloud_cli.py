@@ -14,8 +14,10 @@ parses those into typed pydantic objects.
 
 import json as _json
 import os
+import time
 from collections.abc import Mapping
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -180,15 +182,37 @@ class ImbueCloudCli(MutableModel):
         # a baked-in default.
         env = dict(os.environ)
         env[_CONNECTOR_URL_SUBPROCESS_ENV] = str(self.connector_url).rstrip("/")
+        # Run from $HOME like every other laptop-side mngr invocation, so this
+        # does not resolve project config from minds' cwd (the monorepo root in
+        # a dev checkout). Otherwise `mngr imbue_cloud auth list` loads
+        # `<repo>/.mngr/settings.toml`, which under the e2e test trips mngr's
+        # pytest config guard and the account-discovery poll fails every cycle.
         cg = self.parent_concurrency_group.make_concurrency_group(name=cg_name)
+        # Debug timing so a slow/timed-out imbue_cloud command tells us which
+        # subcommand it was and how long it took before the timeout fired
+        # (these run as detached post-create callbacks, so a bare "exit -15" is
+        # otherwise hard to attribute). cg_name already uniquely identifies the
+        # subcommand; the raw args are deliberately not logged because some
+        # callsites (e.g. auth signin/signup) pass secrets like --password.
+        logger.debug("Running imbue_cloud command (cg={}, timeout={}s)", cg_name, timeout_seconds)
+        start_time = time.monotonic()
         with cg:
-            return cg.run_process_to_completion(
+            result = cg.run_process_to_completion(
                 command=full_command,
                 timeout=float(timeout_seconds),
                 is_checked_after=False,
                 on_output=on_output,
+                cwd=Path.home(),
                 env=env,
             )
+        logger.debug(
+            "Finished imbue_cloud command (cg={}) in {:.1f}s: returncode={} timed_out={}",
+            cg_name,
+            time.monotonic() - start_time,
+            result.returncode,
+            result.is_timed_out,
+        )
+        return result
 
     def _expect_success(
         self,

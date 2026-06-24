@@ -111,7 +111,11 @@ def test_prevent_namedtuple() -> None:
 
 
 def test_prevent_yaml_usage() -> None:
-    rc.check_yaml_usage(_DIR, snapshot(0))
+    # The slice path builds a Lima VM config, and Lima's native config format is
+    # YAML only -- so lima_slice.py / lima_slice_client.py reference mngr_lima's
+    # *_lima_yaml helpers. This is necessary lima usage, not a config-file
+    # anti-pattern (mngr_lima itself allows YAML for the same reason).
+    rc.check_yaml_usage(_DIR, snapshot(39))
 
 
 def test_prevent_functools_partial() -> None:

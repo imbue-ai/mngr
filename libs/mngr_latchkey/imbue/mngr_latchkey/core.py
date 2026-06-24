@@ -30,7 +30,6 @@ from enum import auto
 from importlib import resources
 from pathlib import Path
 from typing import Final
-from typing import IO
 
 from loguru import logger
 from packaging.version import InvalidVersion
@@ -54,7 +53,7 @@ from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import default_permissions_path
 from imbue.mngr_latchkey.store import ensure_admin_permissions_file
 from imbue.mngr_latchkey.store import ensure_browser_log_path
-from imbue.mngr_latchkey.store import gateway_log_path
+from imbue.mngr_latchkey.store import forward_events_log_path
 from imbue.mngr_latchkey.store import plugin_data_dir as _plugin_data_dir
 from imbue.mngr_latchkey.store import save_permissions
 
@@ -90,7 +89,7 @@ _VERSION_CHECK_TIMEOUT_SECONDS: Final[float] = 5.0
 # Minimum version of the upstream ``latchkey`` CLI this package will
 # operate against. 2.14.0 is the first release that supports GitHub git
 # operations over the gateway (including permissions) which is used for backups.
-LATCHKEY_MIN_VERSION: Final[str] = "2.16.0"
+LATCHKEY_MIN_VERSION: Final[str] = "2.17.1"
 
 # Fixed port that every containerized/VM/VPS agent sees on its own 127.0.0.1
 # when reaching the Latchkey gateway. A per-agent SSH reverse tunnel bridges
@@ -409,36 +408,22 @@ def _materialize_bundled_extensions(latchkey_directory: Path) -> Path:
     return extensions_dir
 
 
-class _GatewayLogWriter(MutableModel):
-    """Per-line callback that appends ``latchkey gateway`` output to a log file.
+def _log_gateway_output_line(line: str, is_stdout: bool) -> None:
+    """Forward one line of ``latchkey gateway`` output to the supervisor's structured log.
 
-    :class:`ConcurrencyGroup` always pipes a child's stdout/stderr through
-    a per-line callback; this writer plays that callback role and tees
-    each line into the same on-disk log file the previous detached-spawn
-    path used (``<plugin_data_dir>/latchkey_gateway.log``). The file is
-    opened lazily so a failed spawn never creates an empty log artefact.
+    :class:`ConcurrencyGroup` always pipes a child's stdout/stderr through a
+    per-line callback; this plays that callback role. The gateway is a
+    subprocess whose output is unstructured text we cannot emit as native JSONL
+    events ourselves, so instead of teeing it into a separate, unrotated file we
+    route each line through loguru at DEBUG. That folds it into the supervisor's
+    own rotating, timestamped JSONL log -- the same ``make_jsonl_file_sink``
+    every other mngr/minds log uses -- so gateway output is timestamped and
+    size-rotated like the rest of the logs. ``mngr latchkey forward`` points
+    that log at ``<plugin_data_dir>/forward_logs/events.jsonl`` so the gateway's
+    (potentially chatty) output stays in one dedicated, rotated file.
     """
-
-    log_path: Path = Field(frozen=True, description="On-disk log file the gateway's stdout/stderr is appended to")
-
-    _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-    _log_file: IO[bytes] | None = PrivateAttr(default=None)
-
-    def __call__(self, line: str, is_stdout: bool) -> None:
-        del is_stdout
-        with self._lock:
-            if self._log_file is None:
-                self.log_path.parent.mkdir(parents=True, exist_ok=True)
-                self._log_file = self.log_path.open("ab")
-            try:
-                self._log_file.write(line.encode("utf-8", errors="replace"))
-                if not line.endswith("\n"):
-                    self._log_file.write(b"\n")
-                self._log_file.flush()
-            except OSError as e:
-                # Best-effort log -- a write failure must not crash the
-                # gateway dispatch thread the CG calls us on.
-                logger.warning("Failed to write latchkey gateway log line to {}: {}", self.log_path, e)
+    del is_stdout
+    logger.debug("[latchkey gateway] {}", line.rstrip("\n"))
 
 
 class _RunningGateway(FrozenModel):
@@ -1088,7 +1073,6 @@ class Latchkey(MutableModel):
         _materialize_bundled_extensions(self.latchkey_directory)
 
         port = _allocate_free_port(self.listen_host)
-        log_path = gateway_log_path(plugin_dir)
         env = _build_gateway_env(
             listen_host=self.listen_host,
             listen_port=port,
@@ -1104,12 +1088,11 @@ class Latchkey(MutableModel):
             self.listen_host,
             port,
         ):
-            log_writer = _GatewayLogWriter(log_path=log_path)
             try:
                 process = concurrency_group.run_process_in_background(
                     command=[self.latchkey_binary, "gateway"],
                     env=env,
-                    on_output=log_writer,
+                    on_output=_log_gateway_output_line,
                 )
             except (ConcurrencyExceptionGroup, OSError) as e:
                 raise LatchkeyError(f"Failed to spawn shared Latchkey gateway: {e}") from e
@@ -1127,7 +1110,7 @@ class Latchkey(MutableModel):
                     logger.warning("Failed to terminate half-started latchkey gateway: {}", e)
                 raise LatchkeyError(
                     "Spawned latchkey gateway did not bind {}:{} within {:.1f}s; see {} for details".format(
-                        self.listen_host, port, _GATEWAY_BIND_TIMEOUT_SECONDS, log_path
+                        self.listen_host, port, _GATEWAY_BIND_TIMEOUT_SECONDS, forward_events_log_path(plugin_dir)
                     )
                 )
 

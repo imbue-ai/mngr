@@ -64,9 +64,13 @@ from imbue.mngr.primitives import HostId
 # upstream ``latchkey`` CLI writes under ``LATCHKEY_DIRECTORY``.
 PLUGIN_DATA_SUBDIR_NAME: Final[str] = "mngr_latchkey"
 
-_GATEWAY_LOG_FILENAME: Final[str] = "latchkey_gateway.log"
 _FORWARD_RECORD_FILENAME: Final[str] = "latchkey_forward.json"
 _FORWARD_LOG_FILENAME: Final[str] = "latchkey_forward.log"
+# The forward supervisor's structured log must be named exactly ``events.jsonl``
+# so the standard mngr JSONL sink prunes its rotated copies
+# (``events.jsonl.<rotation_timestamp>``), whose cleanup pattern is hard-coded to
+# that name. It lives directly in the plugin data dir (no extra subdirectory).
+_EVENTS_LOG_FILENAME: Final[str] = "events.jsonl"
 _DEFAULT_PERMISSIONS_FILENAME: Final[str] = "latchkey_default_permissions.json"
 _ADMIN_PERMISSIONS_FILENAME: Final[str] = "latchkey_admin_permissions.json"
 _PERMISSIONS_FILENAME: Final[str] = "latchkey_permissions.json"
@@ -81,14 +85,6 @@ def plugin_data_dir(latchkey_directory: Path) -> Path:
     :attr:`Latchkey.plugin_data_dir` for the in-class accessor.
     """
     return latchkey_directory / PLUGIN_DATA_SUBDIR_NAME
-
-
-# -- Gateway info --------------------------------------------------------------
-
-
-def gateway_log_path(data_dir: Path) -> Path:
-    """Return the log file path for the shared gateway subprocess."""
-    return data_dir / _GATEWAY_LOG_FILENAME
 
 
 # -- Forward supervisor info ---------------------------------------------------
@@ -182,8 +178,32 @@ def delete_forward_info(data_dir: Path) -> None:
 
 
 def forward_log_path(data_dir: Path) -> Path:
-    """Return the log file path for the detached ``mngr latchkey forward`` subprocess."""
+    """Return the raw stdout/stderr capture-log path for the detached ``mngr latchkey forward`` subprocess.
+
+    This file holds whatever the detached process writes to its real
+    stdout/stderr file descriptors (human-format console log lines, plus any
+    pre-logging tracebacks or Click error messages). Its fd is handed straight
+    to the subprocess, so it cannot be rotated mid-write and is intentionally
+    left unrotated. For the process's own structured, timestamped, in-run-rotated
+    log see :func:`forward_events_log_path`.
+    """
     return data_dir / _FORWARD_LOG_FILENAME
+
+
+def forward_events_log_path(data_dir: Path) -> Path:
+    """Return the structured JSONL log path for the detached ``mngr latchkey forward`` process.
+
+    Companion to :func:`forward_log_path`: where that file captures the raw
+    stdout/stderr of the detached process, this one receives the process's own
+    structured loguru events (nanosecond timestamps, level, message, ...) -- and
+    the shared ``latchkey gateway`` subprocess's output, which the supervisor
+    routes through loguru. It is the standard mngr JSONL log, size-rotated by
+    :func:`imbue.imbue_common.logging.make_jsonl_file_sink` (rotated copies
+    pruned), and the forward process is pointed at it via ``--log-file`` so its
+    structured log is co-located with the rest of the plugin's files instead of
+    mixed into the shared host-dir events stream.
+    """
+    return data_dir / _EVENTS_LOG_FILENAME
 
 
 def ensure_browser_log_path(data_dir: Path) -> Path:
@@ -378,19 +398,46 @@ def link_opaque_permissions_to_host(
             # First creation for this host_id: promote the baseline to
             # the canonical location.
             os.replace(opaque_path, host_path)
-        # Recreate ``opaque_path`` as a symlink. ``os.replace`` requires
-        # both paths to exist on the same filesystem, but that is
-        # guaranteed here: opaque_path and host_path both live under
-        # ``data_dir``.
+    except OSError as e:
+        raise LatchkeyStoreError(f"Failed to link opaque permissions handle {opaque_path} to {host_path}: {e}") from e
+    point_opaque_handle_at_host(data_dir, opaque_path, host_id)
+    logger.debug("Linked opaque latchkey permissions handle {} -> {}", opaque_path, host_path)
+
+
+def point_opaque_handle_at_host(
+    data_dir: Path,
+    opaque_path: Path,
+    host_id: HostId,
+) -> None:
+    """(Re)create ``opaque_path`` as a symlink to the host's canonical permissions file.
+
+    Unlike :func:`link_opaque_permissions_to_host`, this moves nothing: it
+    only ensures the opaque handle is a symlink pointing at
+    ``permissions_path_for_host``. Use it when the canonical file already
+    exists (or was materialized directly) and the handle needs to point at
+    it -- e.g. when recovering an agent whose opaque handle went missing.
+
+    Idempotent: an existing handle (regular file, wrong-target symlink, or
+    already-correct symlink) is atomically replaced by a fresh symlink. The
+    target is *absolute* so moving the symlink later doesn't break it.
+
+    Raises ``LatchkeyStoreError`` if the symlink cannot be (re)created.
+    """
+    host_path = permissions_path_for_host(data_dir, host_id)
+    try:
+        opaque_path.parent.mkdir(parents=True, exist_ok=True)
         absolute_target = host_path.resolve()
+        # ``os.replace`` requires both paths on the same filesystem, which is
+        # guaranteed here: the temp link and the handle both live under
+        # ``data_dir``.
         tmp_link = opaque_path.with_name(opaque_path.name + ".linktmp")
         if tmp_link.exists() or tmp_link.is_symlink():
             tmp_link.unlink()
         tmp_link.symlink_to(absolute_target)
         os.replace(tmp_link, opaque_path)
     except OSError as e:
-        raise LatchkeyStoreError(f"Failed to link opaque permissions handle {opaque_path} to {host_path}: {e}") from e
-    logger.debug("Linked opaque latchkey permissions handle {} -> {}", opaque_path, host_path)
+        raise LatchkeyStoreError(f"Failed to point opaque permissions handle {opaque_path} at {host_path}: {e}") from e
+    logger.debug("Pointed opaque latchkey permissions handle {} -> {}", opaque_path, host_path)
 
 
 def save_permissions(path: Path, config: LatchkeyPermissionsConfig) -> None:

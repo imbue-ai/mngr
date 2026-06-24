@@ -7,12 +7,10 @@ from pathlib import Path
 from typing import Final
 
 import httpx
-from fastapi import FastAPI
-from fastapi import Request
-from fastapi.responses import Response
+from flask.testing import FlaskClient
 from pydantic import Field
-from starlette.testclient import TestClient
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -23,8 +21,6 @@ from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.handlers.file_sharing import FileSharingGrantHandler
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
-from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
-from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import create_latchkey_file_sharing_permission_request_event
@@ -61,6 +57,9 @@ def _parse_input_attrs(html: str, element_id: str) -> dict[str, str]:
 class _RecordingMessageSender(MngrMessageSender):
     """Test double for ``MngrMessageSender`` that records calls instead of running mngr."""
 
+    # This double overrides ``send`` entirely and never dispatches to a
+    # concurrency group, so relax the base class's required field.
+    concurrency_group: ConcurrencyGroup | None = None
     sent_messages: list[tuple[str, str]] = Field(default_factory=list)
 
     def send(self, agent_id: AgentId, text: str) -> None:
@@ -86,6 +85,7 @@ def _make_file_sharing_handler(
     tmp_path: Path,
     gateway_handler: _HttpxHandler,
     share_roots: tuple[Path, ...] = _DEFAULT_TEST_SHARE_ROOTS,
+    home_dir: Path = Path("/home/example"),
 ) -> tuple[FileSharingGrantHandler, _RecordingMessageSender]:
     sender = _RecordingMessageSender(sent_messages=[])
     return (
@@ -94,6 +94,7 @@ def _make_file_sharing_handler(
             gateway_client=_build_gateway_client(gateway_handler),
             mngr_message_sender=sender,
             share_roots=share_roots,
+            home_dir=home_dir,
         ),
         sender,
     )
@@ -103,7 +104,7 @@ def _build_authenticated_client(
     tmp_path: Path,
     handler: FileSharingGrantHandler,
     inbox: RequestInbox,
-) -> TestClient:
+) -> FlaskClient:
     auth_dir = tmp_path / "auth"
     auth_store = FileAuthStore(data_directory=auth_dir)
     backend_resolver: BackendResolverInterface = StaticBackendResolver(url_by_agent_and_service={})
@@ -116,9 +117,9 @@ def _build_authenticated_client(
         request_inbox=inbox,
         request_event_handlers=(handler,),
     )
-    client = TestClient(app, base_url="http://localhost")
+    client = app.test_client()
     cookie_value = create_session_cookie(signing_key=auth_store.get_signing_key())
-    client.cookies.set(SESSION_COOKIE_NAME, cookie_value, path="/")
+    client.set_cookie(SESSION_COOKIE_NAME, cookie_value)
     return client
 
 
@@ -272,7 +273,7 @@ def test_grant_calls_gateway_approve_writes_response_notifies_agent(tmp_path: Pa
 
     response = client.post(f"/requests/{event.event_id}/grant")
     assert response.status_code == 200
-    body = response.json()
+    body = response.get_json()
     assert body["outcome"] == "GRANTED"
     assert "/home/user/data.txt" in body["message"]
     # Granted-message text reflects the access mode the agent asked for
@@ -316,7 +317,7 @@ def test_grant_with_edited_path_sends_override_and_uses_it(tmp_path: Path) -> No
     edited = "/Users/glenn/Documents/Shared"
     response = client.post(f"/requests/{event.event_id}/grant", data={"file_path": edited})
     assert response.status_code == 200
-    body = response.json()
+    body = response.get_json()
     assert body["outcome"] == "GRANTED"
     # The granted message names the edited path, not the requested one.
     assert edited in body["message"]
@@ -355,7 +356,7 @@ def test_grant_with_unchanged_path_sends_no_override_body(tmp_path: Path) -> Non
 
     response = client.post(f"/requests/{event.event_id}/grant", data={"file_path": "/home/user/data.txt"})
     assert response.status_code == 200
-    assert response.json()["outcome"] == "GRANTED"
+    assert response.get_json()["outcome"] == "GRANTED"
     assert captured["content"] == b""
 
 
@@ -381,7 +382,7 @@ def test_grant_rejects_relative_edited_path(tmp_path: Path) -> None:
 
     response = client.post(f"/requests/{event.event_id}/grant", data={"file_path": "relative/path"})
     assert response.status_code == 400
-    assert "absolute" in response.json()["error"].lower()
+    assert "absolute" in response.get_json()["error"].lower()
     assert gateway_called is False
     # The request stays pending: no response event, no agent notification.
     assert load_response_events(tmp_path) == []
@@ -410,7 +411,7 @@ def test_grant_rejects_traversal_in_edited_path(tmp_path: Path) -> None:
 
     response = client.post(f"/requests/{event.event_id}/grant", data={"file_path": "/home/user/../../etc/shadow"})
     assert response.status_code == 400
-    assert ".." in response.json()["error"]
+    assert ".." in response.get_json()["error"]
     assert gateway_called is False
 
 
@@ -437,7 +438,7 @@ def test_grant_rejects_edited_path_outside_share_roots(tmp_path: Path) -> None:
 
     response = client.post(f"/requests/{event.event_id}/grant", data={"file_path": "/etc/passwd"})
     assert response.status_code == 400
-    error = response.json()["error"]
+    error = response.get_json()["error"]
     assert "shared folder" in error
     # The error names the allowed root(s) so the user can self-correct.
     assert str(tmp_path) in error
@@ -467,7 +468,91 @@ def test_grant_accepts_edited_path_within_share_roots(tmp_path: Path) -> None:
     edited = str(tmp_path / "nested" / "file.txt")
     response = client.post(f"/requests/{event.event_id}/grant", data={"file_path": edited})
     assert response.status_code == 200
-    assert response.json()["outcome"] == "GRANTED"
+    assert response.get_json()["outcome"] == "GRANTED"
+
+
+def test_grant_with_tilde_edited_path_expands_to_home(tmp_path: Path) -> None:
+    """A ``~/...`` edited path expands to the home directory before reaching the gateway."""
+    captured: dict[str, object] = {}
+
+    def _gateway_handler(request: httpx.Request) -> httpx.Response:
+        captured["content"] = request.content
+        return httpx.Response(200, json={"request_id": "evt-abc", "applied": {}})
+
+    handler, _sender = _make_file_sharing_handler(
+        tmp_path, _gateway_handler, share_roots=(tmp_path,), home_dir=tmp_path
+    )
+    event = create_latchkey_file_sharing_permission_request_event(
+        agent_id=str(AgentId()),
+        path=str(tmp_path / "requested.txt"),
+        access="READ",
+        rationale="need data",
+    )
+    inbox = RequestInbox().add_request(event)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    response = client.post(f"/requests/{event.event_id}/grant", data={"file_path": "~/Documents/Shared"})
+    assert response.status_code == 200, response.text
+    body = response.get_json()
+    assert body["outcome"] == "GRANTED"
+    expanded = str(tmp_path / "Documents" / "Shared")
+    # The gateway received the expanded absolute path, not the ``~`` form.
+    sent_body = captured["content"]
+    assert isinstance(sent_body, bytes)
+    assert json.loads(sent_body) == {"path": expanded}
+    # The granted message and persisted response event name the expanded path.
+    assert expanded in body["message"]
+    response_events = load_response_events(tmp_path)
+    assert len(response_events) == 1
+    assert response_events[0].scope == expanded
+
+
+def test_grant_rejects_tilde_user_edited_path(tmp_path: Path) -> None:
+    """``~user`` (another user's home) is rejected with a 400 before the gateway is called."""
+    gateway_called = False
+
+    def _gateway_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal gateway_called
+        gateway_called = True
+        del request
+        return httpx.Response(200, json={"request_id": "evt-abc", "applied": {}})
+
+    handler, _sender = _make_file_sharing_handler(tmp_path, _gateway_handler)
+    event = create_latchkey_file_sharing_permission_request_event(
+        agent_id=str(AgentId()),
+        path="/home/example/data.txt",
+        access="READ",
+        rationale="need data",
+    )
+    inbox = RequestInbox().add_request(event)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    response = client.post(f"/requests/{event.event_id}/grant", data={"file_path": "~otheruser/secret.txt"})
+    assert response.status_code == 400
+    assert "~user" in response.get_json()["error"]
+    assert gateway_called is False
+
+
+def test_render_request_detail_fragment_embeds_home_dir(tmp_path: Path) -> None:
+    """The dialog embeds the home directory so the inbox shell can expand ``~`` client-side."""
+    handler, _sender = _make_file_sharing_handler(
+        tmp_path, lambda r: httpx.Response(200), home_dir=Path("/home/glenn")
+    )
+    event = create_latchkey_file_sharing_permission_request_event(
+        agent_id=str(AgentId()),
+        path="/home/glenn/notes.txt",
+        access="READ",
+        rationale="r",
+    )
+    body = str(
+        handler.render_request_detail_fragment(
+            req_event=event,
+            backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+            mngr_forward_origin="",
+        )
+    )
+    attrs = _parse_input_attrs(body, element_id="file-sharing-path-input")
+    assert attrs["data-home-dir"] == "/home/glenn"
 
 
 def test_render_request_detail_fragment_embeds_allowed_roots(tmp_path: Path) -> None:
@@ -509,7 +594,7 @@ def test_grant_returns_502_when_gateway_rejects(tmp_path: Path) -> None:
 
     response = client.post(f"/requests/{event.event_id}/grant")
     assert response.status_code == 502
-    assert "gateway" in response.json()["error"].lower()
+    assert "gateway" in response.get_json()["error"].lower()
     # No response event written; the request stays pending.
     assert load_response_events(tmp_path) == []
     assert sender.sent_messages == []
@@ -538,7 +623,7 @@ def test_deny_calls_gateway_delete_writes_response_notifies_agent(tmp_path: Path
 
     response = client.post(f"/requests/{event.event_id}/deny")
     assert response.status_code == 200
-    body = response.json()
+    body = response.get_json()
     assert body["outcome"] == "DENIED"
 
     # Gateway received DELETE (not POST).
@@ -580,12 +665,12 @@ def test_deny_still_writes_response_when_gateway_delete_fails(tmp_path: Path) ->
 
     response = client.post(f"/requests/{event.event_id}/deny")
     assert response.status_code == 200
-    assert response.json()["outcome"] == "DENIED"
+    assert response.get_json()["outcome"] == "DENIED"
     assert len(load_response_events(tmp_path)) == 1
     assert len(sender.sent_messages) == 1
 
 
-# -- Wiring through the FastAPI dispatcher --
+# -- Wiring through the Flask dispatcher --
 
 
 def test_inbox_detail_route_dispatches_to_handler(tmp_path: Path) -> None:
@@ -603,8 +688,3 @@ def test_inbox_detail_route_dispatches_to_handler(tmp_path: Path) -> None:
     response = client.get(f"/inbox/detail/{event.event_id}")
     assert response.status_code == 200
     assert "/home/user/x.txt" in response.text
-
-
-# Inputs used by the FastAPI route dispatcher tests above are unused
-# here; ruff-lint flags the imports if we don't reference them.
-_ = (FastAPI, Request, Response, RequestEvent, LatchkeyFileSharingPermissionRequestEvent)

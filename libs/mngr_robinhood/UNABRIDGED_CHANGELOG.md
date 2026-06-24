@@ -4,6 +4,75 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-17
+
+The streaming consumers now delegate their snapshot-diff bookkeeping to the agent's shared `LiveOutputReader` instead of each re-implementing it.
+
+`_StreamBufferConsumer` (CLI orchestrator) and `StreamEventSynthesizer` (Agent SDK driver) both obtain a reader via `agent.make_live_output_reader()` and the buffer path via `agent.get_live_output_path()`, then call `reader.feed()` / `reader.finalize()` rather than tracking `emitted_body` / `last_content` themselves. The `stream_buffer` module (the `compute_stream_delta` diff helpers) moved to `mngr_claude`, where the snapshot format lives; this package imports them from there. No user-visible behavior change.
+
+## 2026-06-16
+
+Best-effort agent teardown (`stop_agent` / `destroy_agent`) and the SDK
+restart-with-resume flow now also swallow the `CleanupFailedGroup` that `Host.stop_agents` /
+`Host.destroy_agent` raise when cleanup leaves a resource behind, matching the existing
+intent of logging and continuing rather than letting a teardown failure abort the run (or,
+for restart, abort the relaunch).
+
+## 2026-06-15
+
+Fixed the robinhood streaming release tests (`test_streaming.py`), which drive a real
+claude agent in tmux. They were missing `@pytest.mark.tmux`, so the resource-guard PATH
+wrapper blocked their tmux usage and the robinhood subprocess exited 2. Added the mark
+(plus a longer per-test timeout, since a real agent run far exceeds the default 30s).
+Test-only change; robinhood's streaming behavior is unchanged.
+
+## 2026-06-14
+
+# Stream-json producers use the shared typed envelope
+
+Both robinhood stream-json producers now build their events through the shared
+`imbue.mngr_claude.stream_json` typed boundary instead of hand-rolled dicts:
+
+- The CLI token stream (`output_modes.py`'s `emit_partial_text`) emits its
+  `content_block_delta` / `text_delta` via the shared builder. The wire output is byte-identical.
+- The Agent-SDK synthesizer (`_agent_sdk/stream_events.py`) builds its full framing sequence
+  (`message_start` ... `message_stop`) via the shared builders, and the `assistant` summary's inner
+  message is now constructed through `anthropic.types.Message`.
+
+Because the framing events and the assistant message are now dumped from the `anthropic` Python
+models, they carry that SDK's optional, null-valued fields (e.g. `content_block.citations: null`,
+`tool_use.caller: null`, the `usage` cache/detail nulls). The token stream itself is unchanged and
+stays byte-identical to the real `claude` binary. The other events are shape-compatible but not
+byte-identical: the Python and TypeScript SDKs carry different optional fields, so the real binary
+omits `citations` and emits a populated `caller`, among other differences. These departures are
+cosmetic (consumers validate leniently) and documented in the `imbue.mngr_claude.stream_json`
+module docstring.
+
+## 2026-06-11
+
+Strengthened the unit test suite after a bad-tests audit. No production behavior change; these
+changes close gaps where a real regression would have slipped past CI:
+
+- Removed the weak `test_build_pass_env_vars_is_populated` smoke test (it only asserted the result
+  was non-empty): `build_pass_env_vars`'s forward-and-drop behavior is already covered meaningfully
+  by the existing `..._drops_kitty_terminal_vars` / `..._drops_caller_tmux_session_vars` tests, and
+  the per-agent `MNGR_*` drop is trivial set membership not worth a dedicated test.
+- Added coverage for the `tool_result` stream-json conversion branch (including the `is_error`
+  true/false cases), assistant `tool_use` content blocks, and `_parse_input_preview`
+  (empty / valid-JSON / unparseable inputs).
+- The user-event stream-json test now asserts the full converted message, not just the envelope type.
+- Added raw-transcript coverage for tool-use input-preview rendering and truncation, usage
+  conversion (including the empty-usage -> None case), tool_result output truncation, list-form
+  tool_result content flattening, and mixed text + tool_result user messages.
+- Tightened `test_rejected_flags_raise` to assert the per-flag rejection reason, and added a test
+  for the inline `--flag=value` form of pass-through claude value flags.
+- Strengthened the `monotonic_ms_since` test to guard the milliseconds scaling, and documented the
+  deliberate timing margin in the polling-ticker test.
+- Added a lightweight integration test (`test_cli.py`) that drives the real `mngr robinhood`
+  command through the top-level CLI for the no-spawn failure paths: it asserts the command is
+  registered, that each rejected flag maps to exit code 2, and that a bad `--output-format` value
+  exits 2. This is the first end-to-end coverage of the click wiring and exit-code contract.
+
 ## 2026-06-10
 
 Raised the stale coverage floor from 65% to 70% to match the coverage CI already measures (~74%).

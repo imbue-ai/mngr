@@ -23,7 +23,6 @@ looks up the request event by id, and dispatches by request type. All
 the latchkey-specific work lives here.
 """
 
-import asyncio
 import html as html_module
 import json
 import shlex
@@ -31,8 +30,8 @@ from collections.abc import Sequence
 from enum import auto
 from pathlib import Path
 
-from fastapi import Request
-from fastapi.responses import Response
+from flask import Request
+from flask import Response
 from loguru import logger
 from pydantic import Field
 
@@ -53,6 +52,8 @@ from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import append_response_event
 from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
+from imbue.minds.desktop_client.responses import make_response
+from imbue.minds.desktop_client.state import get_state
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import CredentialStatus
@@ -107,12 +108,12 @@ def _format_granted_message(service_display_name: str, granted: Sequence[str]) -
     permissions = ", ".join(granted)
     return (
         f"Your permission request for {service_display_name} was granted with the following "
-        f"permissions: {permissions}. Please retry the call that was blocked."
+        f"permissions: {permissions}."
     )
 
 
 def _format_denied_message(service_display_name: str) -> str:
-    return f"Your permission request for {service_display_name} was denied. Do not retry the blocked call."
+    return f"Your permission request for {service_display_name} was denied."
 
 
 def _format_auth_failed_message(service_display_name: str, detail: str) -> str:
@@ -178,7 +179,7 @@ def _supports_browser_auth(latchkey_service_info: LatchkeyServiceInfo) -> bool:
 
 
 def _json_error(message: str, status_code: int) -> Response:
-    return Response(
+    return make_response(
         content=json.dumps({"error": message}),
         media_type="application/json",
         status_code=status_code,
@@ -523,7 +524,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             mngr_forward_origin=mngr_forward_origin,
         )
 
-    async def apply_grant_request(
+    def apply_grant_request(
         self,
         request: Request,
         req_event: RequestEvent,
@@ -538,7 +539,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 status_code=400,
             )
 
-        form = await request.form()
+        form = request.form
         granted_permissions = tuple(str(v) for v in form.getlist("permissions"))
         if not granted_permissions:
             return _json_error(
@@ -548,7 +549,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
 
         request_event_id = str(req_event.event_id)
         parsed_agent_id = AgentId(req_event.agent_id)
-        backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+        backend_resolver: BackendResolverInterface = get_state().backend_resolver
         host_id = _resolve_host_id(backend_resolver, parsed_agent_id)
         if host_id is None:
             return _json_error(
@@ -556,15 +557,12 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 status_code=503,
             )
         try:
-            grant_result = await asyncio.get_running_loop().run_in_executor(
-                None,
-                lambda: self.grant(
-                    request_event_id=request_event_id,
-                    agent_id=parsed_agent_id,
-                    host_id=host_id,
-                    service_info=service_info,
-                    granted_permissions=granted_permissions,
-                ),
+            grant_result = self.grant(
+                request_event_id=request_event_id,
+                agent_id=parsed_agent_id,
+                host_id=host_id,
+                service_info=service_info,
+                granted_permissions=granted_permissions,
             )
         except LatchkeyPermissionFlowError as e:
             return _json_error(str(e), status_code=400)
@@ -584,7 +582,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         # without needing a desktop-client restart. The manual-credentials
         # branch leaves the request pending, so there is nothing to mirror.
         if grant_result.response_event is not None:
-            self._mirror_response_into_inbox(request, grant_result.response_event)
+            self._mirror_response_into_inbox(grant_result.response_event)
 
         response_payload: dict[str, str] = {
             "outcome": str(grant_result.outcome),
@@ -592,12 +590,12 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         }
         if grant_result.set_credentials_example is not None:
             response_payload["set_credentials_example"] = grant_result.set_credentials_example
-        return Response(
+        return make_response(
             content=json.dumps(response_payload),
             media_type="application/json",
         )
 
-    async def apply_deny_request(
+    def apply_deny_request(
         self,
         request: Request,
         req_event: RequestEvent,
@@ -614,17 +612,14 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
 
         request_event_id = str(req_event.event_id)
         parsed_agent_id = AgentId(req_event.agent_id)
-        _, response_event = await asyncio.get_running_loop().run_in_executor(
-            None,
-            lambda: self.deny(
-                request_event_id=request_event_id,
-                agent_id=parsed_agent_id,
-                scope=req_event.scope,
-                display_name=display_name,
-            ),
+        _, response_event = self.deny(
+            request_event_id=request_event_id,
+            agent_id=parsed_agent_id,
+            scope=req_event.scope,
+            display_name=display_name,
         )
-        self._mirror_response_into_inbox(request, response_event)
-        return Response(
+        self._mirror_response_into_inbox(response_event)
+        return make_response(
             content=json.dumps({"outcome": "DENIED"}),
             media_type="application/json",
         )
@@ -746,7 +741,6 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
 
     def _mirror_response_into_inbox(
         self,
-        request: Request,
         response_event: RequestResponseEvent,
     ) -> None:
         """Mirror the on-disk response event into the in-memory inbox.
@@ -759,10 +753,10 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         right away -- otherwise the inbox would keep showing the resolved
         card for up to 30s while the SSE poll waits for its next tick.
         """
-        inbox: RequestInbox | None = request.app.state.request_inbox
+        inbox: RequestInbox | None = get_state().request_inbox
         if inbox is None:
             return
-        request.app.state.request_inbox = inbox.add_response(response_event)
-        backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+        get_state().request_inbox = inbox.add_response(response_event)
+        backend_resolver: BackendResolverInterface = get_state().backend_resolver
         if isinstance(backend_resolver, MngrCliBackendResolver):
             backend_resolver.notify_change()

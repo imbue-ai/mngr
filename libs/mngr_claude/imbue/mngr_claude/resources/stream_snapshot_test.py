@@ -335,3 +335,12 @@ def test_read_last_complete_assistant_id(tmp_path: Path) -> None:
 
 def test_read_last_complete_assistant_id_missing_file(tmp_path: Path) -> None:
     assert stream_snapshot._read_last_complete_assistant_id(tmp_path / "nope.jsonl") == ""
+
+
+def test_agent_pane_target_addresses_window_by_name() -> None:
+    """The pane is targeted by the primary window name (not the literal :0 index), with
+    the `=` exact-match prefix, so capture is correct regardless of the user's base-index."""
+    assert stream_snapshot._agent_pane_target("mngr-my-agent", "agent") == "=mngr-my-agent:agent"
+    target = stream_snapshot._agent_pane_target("mngr-my-agent", "primary")
+    assert target == "=mngr-my-agent:primary"
+    assert ":0" not in target

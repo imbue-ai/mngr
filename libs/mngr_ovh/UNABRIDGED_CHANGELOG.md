@@ -4,6 +4,37 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-16
+
+## OVH provider
+
+- `mngr ovh list` now reads its defaults from the user's `[providers.<name>]` settings.toml block (selected with `--provider`, default `ovh`), matching `mngr aws prepare` / `mngr gcp prepare` / `mngr azure prepare`. Previously it built `OvhProviderConfig()` with class defaults unconditionally, so it always talked to the default endpoint / subsidiary (`ovh-us` / `US`) regardless of what the user pinned -- a user who configured a non-default `endpoint` / `ovh_subsidiary` in their provider block (e.g. `ovh-eu`) and ran `mngr ovh list` would inspect a different account than the runtime `mngr create --provider <name>` path uses. Credentials still fall back to env / `~/.ovh.conf` when the block leaves them unset. A warning is logged if the named `--provider` block exists but is not an OVH backend.
+
+- `mngr ovh list` groups its OVH-specific options (`--provider`, `--all`) under a "Provider" option group, so `--help` and the generated docs list them ahead of the shared common options instead of below them.
+
+- The OVH release-test settings now also disable the `azure` provider (`[providers.azure] is_enabled = false`), mirroring the existing gcp/aws/vultr disables. Without it, `mngr list` inside the OVH lifecycle tests would enumerate the newly-added azure provider and exit non-zero when Azure credentials weren't resolvable in that subprocess, failing the OVH tests for a non-OVH reason.
+
+Removed the dead VPS client methods `create_snapshot`, `delete_snapshot`, `list_snapshots`, and `list_ssh_keys` (and the now-unused `_safe_get_snapshot` and `_snapshot_info_from_payload` helpers) from `OvhVpsClient`. These had no production callers and are being dropped from the shared `VpsClientInterface`. The corresponding unit and release tests were removed as well.
+
+## 2026-06-15
+
+## Internal: `_provision_vps` signature follows the shared base
+
+- `OvhProvider._provision_vps` now accepts the `vps_public_key` parameter that the shared `VpsDockerProvider.create_host` threads in (so it no longer re-reads the provider SSH keypair from disk inside the base implementation). OVH installs the SSH public key via its rebuild API rather than the base cloud-init path, so the parameter is accepted and ignored. No behavioral change for OVH.
+
+- The OVH release tests write a `settings.toml` that disables every other remote provider so the create-host preflight does not trip resolving their credentials. With the new `gcp` provider now registered as a remote backend, it is added to that disable-set. No behavioral change for OVH.
+
+## 2026-06-12
+
+## AWS provider support: shared VPS-Docker base changes
+
+- `is_for_host_creation` flag removed; replaced with the default-no-op `bootstrap_for_host_creation` hook on `ProviderBackendInterface`. The OVH backend's `del`-of-`is_for_host_creation` is removed; no behavior change.
+- `get_build_args_help()` no longer carries the stale "OS image is set via default_image_name..." block — that line described the removed `--vps-os=` shared build arg, not current OVH behavior.
+- `OvhVpsClient` picks up the shared `wait_for_instance_active` interface change (now a default method on `VpsClientInterface`).
+- **Per-host build args renamed**: `--vps-datacenter=` is now `--ovh-datacenter=` (`--ovh-region=` is accepted as an alias). `--vps-plan=` is now `--ovh-plan=`. The old `--vps-*` prefix raises a migration error. `--git-depth=` stays shared.
+- `vps_boot_timeout` config field renamed to `instance_boot_timeout` (matches the base-config rename).
+- **OVH release-test fix**: the two `TestOvhProviderLifecycle` `mngr create` invocations now pass `--type claude`, matching the Vultr and AWS release tests. Previously they relied on a configured default agent type, which is never present in the isolated test HOME, so the lifecycle tests failed immediately with "No agent type provided" and could not exercise a real OVH VPS create/exec/destroy cycle.
+
 ## 2026-06-10
 
 Raised the stale coverage floor from 60% to 75% to match the coverage CI already measures (~79%).

@@ -69,14 +69,15 @@ PERMISSIONS_PREFERENCES_REMOTE_PATH: Final[str] = "/mngr/code/runtime/memory/per
 EXPECTED_CREATION_DURATION_SECONDS_BY_LAUNCH_MODE: Final[dict[LaunchMode, float]] = {
     LaunchMode.DOCKER: 30.0,
     LaunchMode.LIMA: 600.0,
-    LaunchMode.CLOUD: 300.0,
+    LaunchMode.VULTR: 300.0,
+    LaunchMode.AWS: 300.0,
     LaunchMode.IMBUE_CLOUD: 30.0,
 }
 
 # Fallback when the launch mode is somehow not in the map above.
 DEFAULT_EXPECTED_CREATION_DURATION_SECONDS: Final[float] = 60.0
 
-_MNGR_EXEC_TIMEOUT_SECONDS: Final[float] = 30.0
+_MNGR_EXEC_TIMEOUT_SECONDS: Final[float] = 60.0
 _GIT_CONFIG_TIMEOUT_SECONDS: Final[float] = 10.0
 
 

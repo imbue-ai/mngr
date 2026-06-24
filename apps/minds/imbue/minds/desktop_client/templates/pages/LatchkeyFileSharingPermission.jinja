@@ -1,4 +1,4 @@
-{#def agent_id, request_id, ws_name, rationale, file_path, access, access_human_label, display_name, allowed_roots_json="[]", mngr_forward_origin #}
+{#def agent_id, request_id, ws_name, rationale, file_path, access, access_human_label, display_name, allowed_roots_json="[]", home_dir="", mngr_forward_origin #}
 {#
   Latchkey file-sharing permission request fragment. Rendered inside the
   inbox modal's right pane. Provides a single hidden checked
@@ -14,7 +14,7 @@
        naming the requesting workspace and the access level, followed by an
        editable path field (with an access badge beside its label) and a
        Browse button that opens the OS file picker. #}
-    <p class="text-sm text-zinc-700 mb-3">
+    <p class="type-body text-primary mb-3">
       {% if access == 'WRITE' %}
         Approving will grant {{ ws_name or agent_id }} and its sibling agents
         <strong>read and write</strong> access (including delete) to the file/directory below.
@@ -37,11 +37,11 @@
     <div class="flex items-center gap-2 mb-1.5">
       <FormLabel inline target="file-sharing-path-input">Path to share</FormLabel>
       {% if access == 'WRITE' %}
-        <span class="shrink-0 text-xs font-semibold uppercase tracking-wide px-2 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-200">
+        <span class="shrink-0 type-section px-2 py-0.5 rounded-full bg-warning/12 text-warning border border-warning/30">
           {{ access_human_label }}
         </span>
       {% else %}
-        <span class="shrink-0 text-xs font-semibold uppercase tracking-wide px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200">
+        <span class="shrink-0 type-section px-2 py-0.5 rounded-full bg-success/12 text-success border border-success/30">
           {{ access_human_label }}
         </span>
       {% endif %}
@@ -54,11 +54,12 @@
                name="file_path"
                :value="file_path"
                :data-allowed-roots="allowed_roots_json"
-               extra="font-mono text-sm"
+               :data-home-dir="home_dir"
+               extra="font-mono type-body"
                oninput="window.updateApproveState && window.updateApproveState()" />
     {# Shown by the inbox shell only when the field holds a non-empty path
        that is outside the shared roots. #}
-    <p id="file-sharing-path-hint" class="hidden mt-1.5 text-xs text-amber-700">
+    <p id="file-sharing-path-hint" class="hidden mt-1.5 type-helper text-warning">
       This path isn't inside a folder Minds can share (your home folder or the system
       temporary folder), so it can't be shared. Pick a path under one of those instead.
     </p>
@@ -92,7 +93,7 @@
 
   <div id="permissions-progress" class="hidden mt-4">
     <Notice variant="info">
-      <span class="font-medium">Granting permission...</span>
+      <span class="font-semibold">Granting permission...</span>
     </Notice>
   </div>
 

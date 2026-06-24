@@ -1,16 +1,33 @@
 # Releasing a new minds.app
 
-A release ships three pinned artifacts together:
+A release ships three pinned artifacts that must agree:
 
 | Artifact | Pinned where |
 |---|---|
-| mngr code | a SHA on the release branch (`main`, or a release/* branch if cutting from a divergent state) |
-| FCT template | the `v<version>` annotated tag on the `pilot` branch of `forever-claude-template` |
-| Built `.app` bundle | a ToDesktop build keyed by that mngr SHA |
+| mngr code | a `main` SHA, tagged `minds-v<version>` |
+| FCT template | the `minds-v<version>` tag on `forever-claude-template` `main` |
+| `.app` bundle | a ToDesktop build keyed by that mngr SHA |
 
-The binary clones the FCT tag at runtime via `FALLBACK_BRANCH` baked into `apps/minds/imbue/minds/desktop_client/templates.py`. Tag immutability is what makes a shipped binary always clone the snapshot it was verified against, even as `pilot` keeps moving.
+Both repos tag with the **`minds-v<version>`** prefix (e.g. `minds-v0.3.1`), namespacing minds releases from each repo's own `v<version>`. The shipped binary clones the FCT tag at runtime via `FALLBACK_BRANCH` in `apps/minds/imbue/minds/desktop_client/templates.py`; tag immutability pins a binary to the snapshot it was verified against.
 
-A release iterates on a single version (e.g. `v0.2.35`) by re-cutting the FCT tag at progressively newer pilot SHAs and rebuilding the binary. The version only bumps when you decide to call a build "shipped".
+Both repos release from **`main`** via **two PRs that both target `main`** (one per repo): prove the pair green, review, merge, tag each `main`, then re-prove green against the tags. **Green CI on the tags concludes the release**; clicking *Release* in ToDesktop is an optional follow-up.
+
+## The two PRs
+
+| Repo | Carries |
+|---|---|
+| `mngr` | version bump (`apps/minds/package.json`), `FALLBACK_BRANCH` (`templates.py`), any mngr/minds code |
+| `forever-claude-template` | `vendor/mngr/` archived from the green mngr SHA, plus any consumer (`system_interface`) changes that vendor requires |
+
+**Vendor-match invariant.** FCT `vendor/mngr` must be the `git archive` of the *exact* mngr SHA it's paired with — the `commit_sha` you verify and the mngr SHA you tag. The binary runs the mngr SHA; the in-VM agent imports `vendor/mngr`. If they diverge, the agent's mngr can mismatch the binary's API (how the `system_interface` → `send_message_to_agents` break slipped in). Re-archive whenever the mngr SHA changes.
+
+> The Apple-Silicon lima-VZ `cryptography` SIGILL is handled in the FCT template by `OPENSSL_armcap=0` (`.mngr/settings.toml` `host_env__extend` + `scripts/build_workspace.sh`), which skips OpenSSL's SVE CPU-cap probe. mngr does not pin `cryptography`.
+
+**Reviewing the FCT PR.** Two kinds of change land on the same branch: the mechanical `vendor/mngr` snapshot (hundreds of files) and reviewable code (e.g. a `system_interface` fix). CI needs the *full* branch — the binary clones the ref and imports the committed `vendor/mngr` — but reviewers should read only the code. Keep them separable:
+
+1. **Isolate the vendor refresh in its own commit** (`vendor/mngr: refresh from mngr <sha>`), distinct from the reviewable commits, so review can be done per-commit.
+2. **`vendor/mngr/**` is `linguist-generated` in FCT's `.gitattributes`**, so GitHub collapses it in the PR "Files changed" view by default — reviewers see only the real changes.
+3. **The snapshot is verified by reproduction, not review**: the step-6 vendor-match check (`git archive <sha> | tar -x -C tmp && diff -r tmp vendor/mngr`) proves it equals the tagged mngr SHA. A clean diff *is* the review.
 
 ## File reference
 
@@ -18,116 +35,120 @@ A release iterates on a single version (e.g. `v0.2.35`) by re-cutting the FCT ta
 |---|---|
 | Version string | `apps/minds/package.json` `version` |
 | Baked FCT tag | `apps/minds/imbue/minds/desktop_client/templates.py` `FALLBACK_BRANCH` |
-| Local FCT pilot worktree | `/Users/weishi/Developer/imbue/forever-claude-template` on `pilot` |
-| Build CI workflow | `.github/workflows/minds-launch-to-msg.yml` (`workflow_dispatch`) |
-| Cold-launch smoke | `.github/workflows/minds-macos-launch.yml` (auto on push) |
+| `forever-claude-template` checkout | `$FCT` — your local clone; `just sync-vendor-mngr` (step 3) reads its path from a gitignored `apps/minds/.env`. See Session setup. |
+| `mngr` monorepo checkout | `$MNGR` — wherever you cloned it; you run `just` / `git` from here. See Session setup. |
+| Build / e2e CI | `.github/workflows/minds-launch-to-msg.yml` (`workflow_dispatch`) |
 | Traditional CI | `.github/workflows/ci.yml` (auto on push) |
 
-`gh auth token --user weishi-imbue` is the imbue-org token; export it as `GH_TOKEN` for the whole release session so all `gh` calls hit the right account.
+## Session setup
+
+Set these once for the whole session — later steps assume them:
+
+- **`GH_TOKEN`** (derived, per session) — `export GH_TOKEN=$(gh auth token --user weishi-imbue)`. Pre-flight any push with `gh api user --jq .login` → must print `weishi-imbue` (the keychain "active" account drifts between parallel agents).
+- **`MNGR`** and **`FCT`** — absolute paths to your `mngr` and `forever-claude-template` clones, used by the shell commands in steps 4/6/7: `export MNGR=/your/mngr FCT=/your/forever-claude-template`.
+- **`FCT_DIR`** — the *same* `forever-claude-template` path, but consumed by `just sync-vendor-mngr` (step 3), which reads it from a gitignored `apps/minds/.env` (minds-scoped, never committed — only that recipe loads it, so no shell-rc edit and it reaches non-interactive agent shells; see `apps/minds/.env.example`):
+  ```bash
+  echo "FCT_DIR=$FCT" >> apps/minds/.env
+  ```
+  An agent: if `apps/minds/.env` doesn't already define `FCT_DIR`, ask the user for their checkout path — don't guess.
 
 ## Procedure
 
-### 1. Set version and the target FCT tag
+### 1. Bump version + FALLBACK_BRANCH (mngr PR)
 
-If shipping the current version unchanged (iteration), leave both alone. If bumping:
+For an iteration of the same version, skip. To bump: set `apps/minds/package.json` `version` (e.g. `0.3.1`) and `templates.py` `FALLBACK_BRANCH` to `"minds-v0.3.1"`. This bakes in a tag that doesn't exist until step 7 — fine, because step 4 overrides the FCT ref via `template_ref`, so the tag is only hit in step 8.
 
-- Edit `apps/minds/package.json` `version` to the new value, e.g. `0.2.36`.
-- Edit `apps/minds/imbue/minds/desktop_client/templates.py` `FALLBACK_BRANCH` to `"v0.2.36"`.
-- Commit both together; push.
+### 2. Traditional CI green on both PR branches
 
-### 2. Get traditional CI green on the release branch
+`ci.yml` must be all-green on each PR HEAD (mngr jobs: `test-offload`, `test-docker`, `test-docker-electron`, `test-offload-acceptance`).
 
-Wait for `ci.yml` on the release-branch HEAD to be all-green:
+### 3. Refresh FCT `vendor/mngr` from the green mngr SHA (FCT PR)
+
+On the FCT PR branch (cut from `origin/main`, clean tree), with the **mngr checkout positioned at the green SHA from step 2** (i.e. on the mngr release PR branch), run the sync recipe.
+
+`just sync-vendor-mngr` reads `FCT_DIR` from your `apps/minds/.env` (Session setup) — no path is baked into the justfile. It does `git archive HEAD` → FCT `vendor/mngr` (tracked files only; keep `apps/minds/`), commits `Sync vendor/mngr to <branch> (<short>)`, aborts if FCT is dirty, and **does not push** — it prints the exact `cd … && git push` line (with the resolved FCT path) for you to run. For why releases use `git archive` (vs the dev loop's `rsync`), see `apps/minds/docs/vendor-mngr-sync.md`.
 
 ```bash
-gh run list --workflow=ci.yml --branch=wz/minds_onboard --limit=1 \
-  --json databaseId,headSha,status,conclusion
+just sync-vendor-mngr                       # reads FCT_DIR from .env
+# (or pass the path explicitly: just sync-vendor-mngr /abs/path/to/forever-claude-template)
+# then copy the `To publish: (cd <fct> && git push origin <branch>)` line the recipe
+# printed (it already has the resolved absolute path) and run it verbatim
 ```
 
-Expected jobs: `test-offload`, `test-docker`, `test-docker-electron`, `test-offload-acceptance`. All must succeed.
+If the new vendor changes an mngr API a consumer calls (e.g. `system_interface`), fix that consumer in this same PR.
 
-### 3. Refresh FCT pilot's `vendor/mngr/` from the green mngr SHA
+### 4. Prove the pair green pre-merge
 
-```bash
-export MNGR=/Users/weishi/Developer/imbue/mngr
-export FCT=/Users/weishi/Developer/imbue/forever-claude-template
-
-cd "$FCT"
-git switch pilot
-git pull --ff-only origin pilot
-
-rm -rf vendor/mngr && mkdir -p vendor/mngr
-(cd "$MNGR" && git archive HEAD) | tar -x -C vendor/mngr
-
-git add -A
-git commit -m "vendor/mngr: refresh from wz/minds_onboard $(git -C "$MNGR" rev-parse --short HEAD)"
-```
-
-`git archive HEAD | tar -x` mirrors tracked files only — no `__pycache__`, `uv.lock`, `.venv`, or other working-tree cruft. Do not exclude `apps/minds/`; the pilot needs it.
-
-### 4. Push pilot and re-cut the tag
+The tag doesn't exist yet, so pass the FCT PR branch as `template_ref`. `commit_sha` and that branch's `vendor/mngr` must be the same mngr SHA.
 
 ```bash
-export GH_TOKEN=$(gh auth token --user weishi-imbue)
-git push https://x-access-token:$GH_TOKEN@github.com/imbue-ai/forever-claude-template.git pilot
-
-VERSION=v0.2.36   # whatever you're shipping
-git tag -d "$VERSION" 2>/dev/null || true
-git tag -a "$VERSION" HEAD -m "minds binary $VERSION: pilot $(git rev-parse --short HEAD) (vendor/mngr from wz/minds_onboard $(git -C "$MNGR" rev-parse --short HEAD))"
-git push --force https://x-access-token:$GH_TOKEN@github.com/imbue-ai/forever-claude-template.git refs/tags/"$VERSION"
-```
-
-The tag must be **annotated** (`-a`) — a lightweight tag won't carry the message and breaks downstream tooling that inspects tag objects.
-
-### 5. Trigger `minds-launch-to-msg.yml` on the mngr SHA × FCT tag
-
-```bash
+GREEN_MNGR_SHA=<the green mngr SHA from step 2>   # carried through to steps 6-8
 cd "$MNGR"
-MNGR_SHA=$(git rev-parse HEAD)
 gh workflow run minds-launch-to-msg.yml -R imbue-ai/mngr \
-  -r wz/minds_onboard \
-  -f commit_sha="$MNGR_SHA" \
-  -f template_ref="$VERSION"
+  -r <mngr-pr-branch> -f commit_sha="$GREEN_MNGR_SHA" -f template_ref=<fct-pr-branch>
 ```
 
-Run this from inside the mngr checkout — `gh workflow run` resolves the repo from `cwd`'s remote when `-R` is parsed inconsistently. From the FCT checkout, this call has hit a 404 while still creating the run, producing a duplicate.
+`build` packages/reuses (keyed by `commit_sha`) the bundle; `launch_to_msg` launches it, creates an agent from the FCT ref, sends a first message, asserts the round-trip. Invoke from the mngr cwd — from the FCT cwd it has 404'd mid-create and duplicated the run.
 
-The workflow has two jobs:
-- `build` packages a ToDesktop bundle for `$MNGR_SHA` (reuses an existing build if one already matches via `versionControlInfo.commitId`; otherwise fresh).
-- `verify` downloads the bundle on a fresh self-hosted Mac, launches it, creates an agent against FCT `$VERSION`, sends a first message, asserts the round-trip.
+### 5. Review and approve both PRs
 
-Wait for both green. Note the build ID printed in the `build` summary — it's the ToDesktop bundle to ship.
+Still branch refs; nothing tagged yet.
 
-### 6. Local dev-build verification (inner loop)
+### 6. Merge both PRs to `main`
 
-Drive the dev build with the latest mngr code against the same FCT tag. Operator clicks through Electron manually; the goal is to catch anything CI's headless Playwright path missed. See `apps/minds/.claude/skills/minds-dev-iterate/SKILL.md` for the dev-iteration loop.
+**Merge the mngr PR with a merge commit, not a squash.** `main` can advance past the SHA you built and verified in step 4 (`$GREEN_MNGR_SHA`) while you were verifying; a merge commit keeps that exact SHA reachable on `main` as a parent (a squash replaces it with a new commit whose tree also contains the drift — and the binary you verified was built from neither).
 
-### 7. Optionally drive the ToDesktop bundle locally
+The tag pins **`$GREEN_MNGR_SHA`** — the SHA the binary was built from and FCT's `vendor/mngr` was archived from — **not** `main`'s HEAD. Confirm the *commit you'll actually tag* (FCT `origin/main` post-merge, not your local working copy) still matches that SHA:
 
-Download the zip from the build URL printed in step 5:
-
+```bash
+GREEN_MNGR_SHA=<the SHA from step 4>
+git -C "$FCT" fetch origin --quiet
+A=$(mktemp -d); B=$(mktemp -d)
+(cd "$MNGR" && git archive "$GREEN_MNGR_SHA") | tar -x -C "$A"    # the mngr SHA you'll tag
+git -C "$FCT" archive origin/main:vendor/mngr | tar -x -C "$B"    # the FCT commit you'll tag
+diff -r "$A" "$B" && echo OK || echo "MISMATCH — FCT origin/main vendor != archive $GREEN_MNGR_SHA (re-run step 3 / re-merge FCT)"
 ```
-https://dl.todesktop.com/26032588hqdzk/builds/<build_id>/mac/zip/arm64
+
+`git archive main` (HEAD) failing to match while `git archive $GREEN_MNGR_SHA` matches is **expected drift** (unrelated PRs landed on `main`), not an error — tag `$GREEN_MNGR_SHA`, not HEAD.
+
+### 7. Tag the verified pair — *not* `main` HEAD
+
+Tag mngr at **`$GREEN_MNGR_SHA`** (the built+verified SHA; reachable on `main` as the merge parent) and FCT at the commit whose `vendor/mngr` is that SHA's archive (the FCT PR's merge into `main`):
+
+```bash
+# $GH_TOKEN, $MNGR, $FCT from Session setup
+VERSION=minds-v0.3.1
+GREEN_MNGR_SHA=<the SHA from step 4>
+git -C "$FCT" fetch origin --quiet; FCT_SHA=$(git -C "$FCT" rev-parse origin/main)   # vendor/mngr == archive $GREEN_MNGR_SHA (verified in step 6)
+
+git -C "$MNGR" tag -a "$VERSION" "$GREEN_MNGR_SHA" -m "minds $VERSION: mngr $(git -C "$MNGR" rev-parse --short $GREEN_MNGR_SHA) / FCT $(git -C "$FCT" rev-parse --short $FCT_SHA) (vendor/mngr from mngr $GREEN_MNGR_SHA)"
+git -C "$MNGR" push https://x-access-token:$GH_TOKEN@github.com/imbue-ai/mngr.git refs/tags/"$VERSION"
+
+git -C "$FCT" tag -a "$VERSION" "$FCT_SHA" -m "minds $VERSION: FCT $(git -C "$FCT" rev-parse --short $FCT_SHA) / mngr $(git -C "$MNGR" rev-parse --short $GREEN_MNGR_SHA) (vendor/mngr from mngr $GREEN_MNGR_SHA)"
+git -C "$FCT" push https://x-access-token:$GH_TOKEN@github.com/imbue-ai/forever-claude-template.git refs/tags/"$VERSION"
 ```
 
-Replace `/Applications/Minds.app` with it, quit any running minds first, then launch and run through create-agent → first message. This catches any release-vs-dev bundling drift before publishing.
+Tags must be annotated (`-a`). **Tag the verified SHA, never `main` HEAD** — between step 4 and the merge, `main` can pick up unrelated commits never built into the binary or run through launch-to-msg (e.g. `main` HEAD once sat +58 such files past the tagged SHA). To re-cut during iteration: `git tag -d "$VERSION"` then `git push --force ... refs/tags/"$VERSION"`.
 
-### 8. Ship
+### 8. Close the loop: CI on the two tags
 
-ToDesktop's `pnpm exec todesktop release` is blocked by server-side auth on this app, so the only working path is the web UI:
+Both refs = the tag, exercising the binary's baked `FALLBACK_BRANCH` end to end. Because the mngr tag is the step-4 SHA, `build` reuses the bundle you already verified:
 
-1. Open `https://app.todesktop.com/apps/26032588hqdzk/builds/<build_id>`.
-2. Click **Release**.
+```bash
+cd "$MNGR"; VERSION=minds-v0.3.1
+gh workflow run minds-launch-to-msg.yml -R imbue-ai/mngr \
+  -r main -f commit_sha="$VERSION" -f template_ref="$VERSION"
+```
 
-Auto-updater will pick up the new build on the next user launch.
+**Green here concludes the release.** Note the build ID in the `build` summary.
+
+### 9. Optional: dev verify + ship
+
+Drive the build's ToDesktop zip (`https://dl.todesktop.com/26032588hqdzk/builds/<build_id>/mac/zip/arm64`, replaces `/Applications/Minds.app`) or the dev build through create-agent → first message. To publish, click **Release** at `https://app.todesktop.com/apps/26032588hqdzk/builds/<build_id>` (the `todesktop release` CLI is auth-blocked); auto-updater picks it up on next launch.
 
 ## Failure modes worth knowing
 
-- **`test-docker-electron` aborts on `git checkout v<version>` with dirty `.mngr/settings.toml`.** The test fixture flips a pytest opt-in in the FCT shallow clone before the spawned `mngr create` does its in-place checkout. The runner now pre-checks-out the clone to `FALLBACK_BRANCH` after the tag fetch so the in-place checkout is a no-op even with the dirty file. If you bump `FALLBACK_BRANCH`, make sure the tag is reachable on FCT origin before this runs.
-- **`gh workflow run` creates a duplicate run.** See step 5 — always invoke from the mngr cwd.
-- **Old workflow's sidebar entry sticks after a rename.** GHA only unregisters the entry once all its runs are deleted. Disable via `PUT /repos/.../actions/workflows/{id}/disable` then `DELETE /repos/.../actions/runs/{run_id}` for each old run; the entry then disappears.
-- **`mngr create` fails with "Remote branch v<version> not found".** The shallow clone in CI doesn't fetch tags by default; the runner now runs `git fetch --depth 1 --tags origin` after clone. If you see this on a fresh runner, confirm the tag was actually pushed in step 4.
-
-## Pre-flight check before any push
-
-`gh api user --jq .login` with `GH_TOKEN` set must print `weishi-imbue` (or whichever org-authorized account is intended). Default keychain "active" account can drift between parallel agents — never rely on it.
+- **`test-docker-electron` aborts on `git checkout minds-v<version>` with dirty `.mngr/settings.toml`.** The runner pre-checks-out the FCT clone to `FALLBACK_BRANCH` after the tag fetch so the in-place checkout is a no-op. If you bump `FALLBACK_BRANCH`, the tag must be reachable on FCT origin (step 7) first.
+- **`gh workflow run` creates a duplicate run.** Always invoke from the mngr cwd (step 4).
+- **`mngr create` fails "Remote branch minds-v<version> not found".** The CI shallow clone runs `git fetch --depth 1 --tags origin`; if it still fails on a fresh runner, confirm the tag was pushed (step 7).
+- **Renamed workflow's sidebar entry sticks.** GHA unregisters only once all its runs are deleted: `PUT .../workflows/{id}/disable`, then `DELETE .../runs/{run_id}` for each.

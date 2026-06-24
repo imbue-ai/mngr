@@ -42,15 +42,16 @@ secrets/minds/<tier>/supertokens
 
 **Read only by `minds env deploy` on a developer's laptop** (never
 pushed to Modal -- the connector's runtime doesn't need
-create-project / VPS-management permissions):
+create-project / bare-metal-box-ordering permissions):
 
 ```
 secrets/minds/<tier>/neon-admin   # NEON_API_TOKEN (every tier);
                                   #   NEON_ORG_ID (dev only);
                                   #   NEON_PROJECT_ID (staging / production only)
-secrets/minds/<tier>/vultr        # VULTR_API_KEY (legacy; OVH-backed pools today)
 secrets/minds/<tier>/ovh          # OVH_APPLICATION_KEY, OVH_APPLICATION_SECRET,
-                                  #   OVH_CONSUMER_KEY (shared per-tier OVH AK/AS/CK)
+                                  #   OVH_CONSUMER_KEY (shared per-tier bare-metal box
+                                  #   supplier credentials; also used to tear down
+                                  #   legacy OVH VPS hosts)
 ```
 
 The dev-tier `neon-admin` token must have *project-create* scope on
@@ -71,18 +72,22 @@ rolled back. The actual runtime DSNs for these tiers live in
 `secrets/minds/<tier>/neon` and `.../litellm` (the source of truth
 for the connector + proxy at runtime).
 
-The `ovh` entry is read by `minds env destroy` (to enumerate +
-delete OVH VPSes tagged with the env's `minds_env=<name>` IAM tag) and
-by `mngr imbue_cloud admin pool create` (to provision new OVH-backed
-pool hosts). Generate the AK/AS/CK trio at
-<https://api.us.ovhcloud.com/createApp> for the endpoint the pool uses
-(`ovh-us` by default). The shared per-tier credential is intentionally
-account-wide so a single dev's destroy can clean up any OVH instance
-the connector or pool flows landed in the account on behalf of any
-dev. A missing or empty `ovh` Vault entry surfaces as a `WARNING`
-during deploy (no failure); per-env OVH-touching operations then fail
-later if/when invoked, with a message pointing the operator back at
-the Vault path.
+The `ovh` entry holds the bare-metal box supplier credentials
+(currently OVH). These order the bare-metal boxes that Imbue Cloud
+slices are carved on, and they also tear down legacy OVH VPS hosts.
+The entry is read by `minds env destroy` (to enumerate + delete
+bare-metal resources tagged with the env's `minds_env=<name>` IAM tag,
+including any legacy OVH VPSes) and by `mngr imbue_cloud admin server
+order` (to order the bare-metal boxes that slices are carved on).
+Generate the AK/AS/CK trio at
+<https://api.us.ovhcloud.com/createApp> for the supplier endpoint the
+pool uses (`ovh-us` by default). The shared per-tier credential is
+intentionally account-wide so a single dev's destroy can clean up any
+instance the connector or pool flows landed in the account on behalf of
+any dev. A missing or empty `ovh` Vault entry surfaces as a `WARNING`
+during deploy (no failure); per-env operations that touch the supplier
+then fail later if/when invoked, with a message pointing the operator
+back at the Vault path.
 
 The schema for each `<service>` is the corresponding file under
 `.minds/template/<service>.sh` at the repo root. `minds env deploy`
@@ -131,8 +136,8 @@ uv run minds env deploy
 
 `minds env deploy` reads `apps/minds/imbue/minds/config/envs/<tier>/deploy.toml`
 for the Modal workspace name + the list of services to push from
-Vault, then runs `modal deploy` for both `litellm-proxy-<tier>` and
-`remote-service-connector-<tier>`. Tier deploys write nothing to disk
+Vault, then runs `modal deploy` for both `llm-<tier>` and
+`rsc-<tier>`. Tier deploys write nothing to disk
 (the committed in-repo `client.toml` stays the source of truth); dev
 env deploys write the resulting URLs to `~/.minds-<name>/client.toml`
 and per-env secrets (Neon DSN, SuperTokens connection URI + API key)
@@ -147,7 +152,8 @@ this CLI.
 
 `minds env deploy` (when run with a dev env activated) reads a small
 set of dev-tier secrets from Vault (the dev-tier Neon API token, the
-dev-tier SuperTokens admin key, the dev-tier Vultr API key) to
+dev-tier SuperTokens admin key, the dev-tier bare-metal box supplier
+credentials -- the AK/AS/CK trio, currently OVH) to
 provision per-dev-env resources. The resulting per-dev-env state
 (Neon DSN, SuperTokens app id, etc.) is written **only** to
 `~/.minds-<name>/secrets.toml` on the developer's machine -- never

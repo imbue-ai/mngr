@@ -1,7 +1,6 @@
 import time
+from collections.abc import Mapping
 from collections.abc import Sequence
-from datetime import datetime
-from datetime import timezone
 from typing import Any
 from typing import Final
 
@@ -26,14 +25,11 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_ovh._tag_keys import MNGR_RECYCLING_LOCK_TAG_KEY
 from imbue.mngr_ovh.config import OvhProviderConfig
-from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.errors import VpsProvisioningError
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
-from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.primitives import VpsSnapshotId
-from imbue.mngr_vps_docker.vps_client import VpsClientInterface
-from imbue.mngr_vps_docker.vps_client import VpsSnapshotInfo
-from imbue.mngr_vps_docker.vps_client import VpsSshKeyInfo
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.errors import VpsProvisioningError
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsInstanceStatus
+from imbue.mngr_vps.vps_client import VpsClientInterface
 
 _DEFAULT_VPS_TASK_POLL_INTERVAL: Final[float] = 5.0
 
@@ -198,9 +194,11 @@ class OvhVpsClient(VpsClientInterface):
         default=False,
         description=(
             "True iff this client was constructed with placeholder credentials because no "
-            "OVH credentials were configured. Used by OvhProvider to short-circuit "
-            "discovery silently in environments (e.g. CI for unrelated tests) that "
-            "merely enumerate registered backends."
+            "OVH credentials were configured. OvhProviderBackend.build_provider_instance "
+            "detects this and raises ProviderNotAuthorizedError instead of constructing a "
+            "provider whose API calls would all fail; the placeholder keeps build_ovh_client "
+            "total so environments (e.g. CI for unrelated tests) that merely enumerate "
+            "registered backends still work."
         ),
     )
 
@@ -211,7 +209,7 @@ class OvhVpsClient(VpsClientInterface):
         """Record an in-flight ``RecycleHandle``.
 
         Used by ``recycle.try_recycle_cancelled_vps`` so that if the
-        base ``VpsDockerProvider.create_host`` cleanup calls
+        base ``VpsProvider.create_host`` cleanup calls
         ``destroy_instance`` on a VPS that's mid-recycle,
         ``destroy_instance`` releases the recycle lock instead of
         terminating an already-cancelled VPS.
@@ -272,10 +270,9 @@ class OvhVpsClient(VpsClientInterface):
         label: str,
         region: str,
         plan: str,
-        os_id: int | str,
         user_data: str,
         ssh_key_ids: Sequence[str],
-        tags: Sequence[str],
+        tags: Mapping[str, str],
     ) -> VpsInstanceId:
         raise NotImplementedError(
             "OVH VPS provisioning is multi-step (order + rebuild + TOFU); "
@@ -552,71 +549,6 @@ class OvhVpsClient(VpsClientInterface):
         return ids
 
     # =========================================================================
-    # Snapshot operations (VPS-level)
-    # =========================================================================
-
-    def create_snapshot(self, instance_id: VpsInstanceId, description: str) -> VpsSnapshotId:
-        """Create a VPS-level snapshot. OVH supports at most one snapshot per VPS.
-
-        Returns a ``VpsSnapshotId`` equal to the owning ``serviceName``. OVH's
-        single-snapshot-per-VPS model means the snapshot is identified solely
-        by which VPS owns it (``DELETE /vps/{s}/snapshot`` operates on the
-        only slot), so encoding the serviceName here keeps ``create_snapshot``
-        / ``list_snapshots`` / ``delete_snapshot`` round-trippable.
-        """
-        existing = self._safe_get_snapshot(instance_id)
-        if existing is not None:
-            raise MngrError(
-                f"OVH VPS {instance_id} already has a snapshot ({existing.get('id', '?')}); "
-                "delete it first -- OVH supports at most one snapshot per VPS."
-            )
-        result = self._call("POST", f"/vps/{instance_id}/createSnapshot", description=description)
-        task_id = int((result or {}).get("id", 0))
-        if not task_id:
-            raise VpsApiError(0, f"OVH createSnapshot on {instance_id} returned no task id")
-        self.wait_for_task(str(instance_id), task_id, timeout_seconds=900.0)
-        snap = self._safe_get_snapshot(instance_id)
-        if snap is None:
-            raise MngrError(f"OVH createSnapshot completed but no snapshot returned for {instance_id}")
-        return VpsSnapshotId(str(instance_id))
-
-    def delete_snapshot(self, snapshot_id: VpsSnapshotId) -> None:
-        """Delete the snapshot whose id (== owning ``serviceName`` for OVH) is given.
-
-        OVH's ``DELETE /vps/{s}/snapshot`` deletes the VPS's single snapshot
-        slot; the snapshot is identified solely by which VPS owns it. We
-        encode the owning serviceName into the ``VpsSnapshotId`` returned
-        from ``create_snapshot``.
-        """
-        self._call("DELETE", f"/vps/{snapshot_id}/snapshot")
-        logger.info("Deleted OVH snapshot for VPS {}", snapshot_id)
-
-    def list_snapshots(self) -> list[VpsSnapshotInfo]:
-        """Return all snapshots across every VPS this account owns.
-
-        OVH has no global snapshot index, so this iterates ``/vps`` and
-        queries each VPS's single snapshot slot.
-        """
-        snapshots: list[VpsSnapshotInfo] = []
-        for service_name in self.list_instances():
-            snap = self._safe_get_snapshot(VpsInstanceId(service_name))
-            if snap is None:
-                continue
-            snapshots.append(_snapshot_info_from_payload(service_name, snap))
-        return snapshots
-
-    def _safe_get_snapshot(self, instance_id: VpsInstanceId) -> dict[str, Any] | None:
-        try:
-            payload = self._call("GET", f"/vps/{instance_id}/snapshot")
-        except VpsApiError as e:
-            if e.status_code == 404:
-                return None
-            raise
-        if not payload:
-            return None
-        return dict(payload)
-
-    # =========================================================================
     # SSH key shim
     # =========================================================================
 
@@ -632,9 +564,6 @@ class OvhVpsClient(VpsClientInterface):
 
     def delete_ssh_key(self, key_id: str) -> None:
         self._ssh_key_cache.pop(key_id, None)
-
-    def list_ssh_keys(self) -> list[VpsSshKeyInfo]:
-        return [VpsSshKeyInfo(id=key, name=key) for key in self._ssh_key_cache]
 
 
 def _ovh_api_error_status_code(error: APIError) -> int:
@@ -658,32 +587,18 @@ def _ovh_api_error_status_code(error: APIError) -> int:
     return 0
 
 
-def _snapshot_info_from_payload(service_name: str, payload: dict[str, Any]) -> VpsSnapshotInfo:
-    created_raw = payload.get("creationDate", "")
-    try:
-        created_at = datetime.fromisoformat(str(created_raw))
-    except ValueError:
-        created_at = datetime.now(timezone.utc)
-    return VpsSnapshotInfo(
-        id=VpsSnapshotId(service_name),
-        description=str(payload.get("description", "")),
-        created_at=created_at,
-    )
-
-
 def build_ovh_client(config: OvhProviderConfig) -> "OvhVpsClient":
     """Construct an ``OvhVpsClient`` from config / env / ``~/.ovh.conf``.
 
     If no credentials are configured anywhere, ``python-ovh`` raises
     ``InvalidConfiguration`` at construction time. We catch that and
     substitute placeholder credentials so the client is still
-    constructible -- any actual API call will then fail with a clear
-    auth error rather than the provider blowing up at registration
-    time. This mirrors how ``mngr_vultr`` accepts an empty API key when
-    none is configured, and lets unrelated tests that merely enumerate
-    registered backends run without OVH credentials. The returned
-    client has ``is_unconfigured=True`` so ``OvhProvider`` can
-    short-circuit discovery without emitting log noise.
+    constructible -- this lets ``build_ovh_client`` itself stay total
+    (e.g. so unrelated tests that merely enumerate registered backends
+    run without OVH credentials). The returned client has
+    ``is_unconfigured=True``, which ``OvhProviderBackend.build_provider_instance``
+    detects and turns into a clear ``ProviderNotAuthorizedError`` rather than
+    constructing a provider whose every API call is doomed to fail.
     """
     kwargs = config.resolve_python_ovh_kwargs()
     try:

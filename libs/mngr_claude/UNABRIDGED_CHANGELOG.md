@@ -4,6 +4,142 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-17
+
+`ClaudeAgent` now declares the `HasStreamingSnapshotMixin` capability mixin (it already implemented `get_stream_buffer_path`), so the live in-progress response-streaming view is a code-detectable capability in the agent capability matrix rather than a hand-tracked fact.
+
+`ClaudeAgent` also declares the `HasUnattendedModeMixin` capability (`is_unattended_enabled` reports the `auto_allow_permissions` config).
+
+`ClaudeAgent` also declares `HasVersionManagementMixin` (version pin, else auto-update).
+
+The auto-allow permission apply-path now reads through the `is_unattended_enabled()` contract instead of the `auto_allow_permissions` config field directly, making that method the single source of truth for unattended mode. Behavior is unchanged.
+
+`ClaudeAgent` now declares `CliBackedAgentMixin` (marking it as wrapping a specific external CLI, which scopes the CLI-only capability-matrix rows) and `HasSessionAdoptionMixin`. Its session-adoption logic moved from `on_after_provisioning` into an `adopt_session` method (called by `on_after_provisioning`), so `--adopt-session` / `--from` session resumption is now a code-detectable `session_resume` capability. Behavior is unchanged.
+
+Split the Claude agent into a shared `ClaudeCoreAgent` base and the interactive `ClaudeAgent(ClaudeCoreAgent, InteractiveTuiAgent, ...)` subclass. The core holds everything not tied to the interactive TUI (config-dir setup, credentials, transcripts, session preservation, auto-install, version management, the provisioning flow); the TUI subclass holds the keystroke send/readiness pipeline, the streaming snapshot (`HasStreamingSnapshotMixin`), session adoption (`HasSessionAdoptionMixin`), and start-dialog dismissal + pre-provisioning validation. `HeadlessClaude` extends `ClaudeCoreAgent` directly, so the headless variant no longer structurally inherits those interactive-only capabilities -- in the capability matrix `headless_claude` is now `n/a` (not `Y`) for `session_resume`. One user-visible change: `--adopt-session` is now rejected for `headless_claude` with a clear error, instead of being silently accepted and never resumed (headless runs `claude --print`, not `--resume`).
+
+Post-split cleanup of now-redundant scaffolding: dropped the empty `NoPermissionsClaudeAgent` intermediate base (its no-op overrides became core defaults; `HeadlessClaude` extends `ClaudeCoreAgent` directly), the no-op `ClaudeCoreAgent.on_before_provisioning` (it just restated `BaseAgent`'s no-op default), and `HeadlessClaude`'s vestigial `_preflight_send_message` override (headless claude is not an interactive agent: the send-message flow, including `_preflight_send_message`, now lives only on the interactive `SendKeysAgent` side, and messaging a headless agent is refused at the call layer by `require_interactive_agent`). `HeadlessClaude` now carries one explicit `is_unattended_enabled` override that makes its `ClaudeCoreAgent` (config-driven) vs `BaseHeadlessAgent` (always-True) diamond choice deliberate (behavior unchanged: config-driven, as before the split).
+
+The entire start-dialog-dismissal concern is now TUI-only: the shared `ClaudeCoreAgent.provision()` calls a single `_dismiss_start_dialogs` seam that is a no-op on the core and carries the real block (auto-dismiss or interactive prompt) only on the interactive `ClaudeAgent`. Previously the interactive prompt was already skipped for headless, but the `auto_dismiss_dialogs=True` path still ran for headless; now a headless claude does no start-dialog handling at all (it has no TUI pane to protect from intercepted input).
+
+`ClaudeCoreAgent` now installs claude through the shared `ensure_cli_installed` helper (consent-gated locally, config-gated remotely; claude's `get_install_command` pins the version) instead of its own bespoke install block, then calls `reconcile_installed_version` to verify the present binary matches any pinned `version` (raising on mismatch). User-visible change: install / version-mismatch failures now raise `AgentInstallationError` (the shared installer's error type) rather than `PluginMngrError`.
+
+The session-adoption create option and its agent-agnostic validation moved out of the claude plugin into core, since session adoption is now a capability shared by every interactive agent. The option is now `--adopt` (with `--adopt-session` kept as an accepted alias). Claude's `register_cli_options` no longer declares the option, and its `on_before_create` retains only the claude-specific fail-fast pre-resolution of named session ids. Claude now reads the adopted session ids from the first-class `CreateAgentOptions.adopt_session` field instead of the old `plugin_data["adopt_session"]` namespaced key (in both `on_before_create` and the `adopt_session` method). Claude's session-store scanner now routes through the shared `iter_agent_session_paths` helper. No change to claude's user-facing adoption behavior other than the option rename.
+
+Claude now ships a release test (`test_claude_agent_e2e.py`) built on the shared agent release-test harness, so it is held to the same end-to-end lifecycle arc as the other agent types (create -> WAITING -> message -> RUNNING -> transcript -> stop/start resume -> destroy -> preserve -> adopt the preserved session into a fresh agent -> recall). The profile turns on the richer assertions (RUNNING marker, forced tool call, token usage), resolves adoption by the preserved session JSONL's path, and pins the agent to the `haiku` model tier (the seed/recall turns don't need a frontier model). Skipped unless `claude` is on PATH and `ANTHROPIC_API_KEY` is set.
+
+Removed the now-redundant `test_adopt_session_brings_context_from_mngr_claude_agent_session` release test (and its `_create_mngr_claude_session` helper): adopting an mngr-managed agent's own preserved session into a fresh worktree is now exercised by the shared harness arc above. `test_adopt_session.py` retains the vanilla-`claude`-CLI adoption case, which the harness does not cover.
+
+Fixed `--adopt A --from X` (combined explicit-adopt plus clone): the explicit session is copied into the destination's encoded project dir first, so the clone's rekey now merges the source-encoded subdir's files into that pre-existing dir instead of refusing on a whole-directory clobber. The merge is non-destructive and refuses (raising `AgentStartError`) only on a genuine per-file collision (the same session-id filename present in both), so distinct sessions coexist cleanly in one project dir while real data loss is still prevented.
+
+A `--from` clone whose source has no resumable session now warns and adopts nothing (rather than raising): `--from` is a workspace clone, so carrying the source's conversation forward is a bonus, not a requirement. The agent still starts (falling back to the last `--adopt` session, or a fresh start). Explicit `--adopt` failures and the per-file merge collision remain hard errors.
+
+`mngr create --yes` now dismisses claude's first-run *dialogs* (onboarding, effort callout, work-dir trust) in the per-agent config -- previously these were only auto-dismissed for a remote/unattended agent or the explicit `auto_dismiss_dialogs` config, so a local `--yes` create relied on the global `~/.claude.json`. `--yes` deliberately does *not* accept bypass-permissions mode (tool auto-allow stays governed by `auto_allow_permissions`/unattended): it auto-approves prompts, it does not silently widen tool permissions.
+
+The claude release test now gitignores `.claude/settings.local.json` in its own `.gitignore` in both the seed and adoption worktrees, which mngr's claude preflight requires (a repo-local rule, not a global one) before it will write per-agent hooks. Without it the test could not get past `create`.
+
+The claude release test no longer seeds a `~/.claude.json` to dismiss first-run dialogs and pre-approve the API key. It now relies entirely on the product behavior: `mngr create --yes` dismisses the dialogs and trusts the work dir, and the plugin's `approve_api_key_for_claude` pre-approves `ANTHROPIC_API_KEY`. The test builds its subprocess env with the plain shared `get_subprocess_test_env`, matching the sibling agent release tests.
+
+Fixed resuming a Claude agent and immediately sending it a message. The TUI-ready indicator is now the input-prompt glyph (`❯`) instead of the "Claude Code" welcome banner. The banner only renders on a fresh start, not when resuming a saved session, so resumes previously skipped the readiness wait and could drop the message into a still-replaying transcript.
+
+Adapted the Claude agents to the unified live-output contract.
+
+`ClaudeAgent` (TUI) now inherits `SupportsLiveOutputMixin` directly (instead of the removed `HasStreamingSnapshotMixin`), exposes its streaming snapshot via `get_live_output_path()`, and supplies a `SnapshotDeltaReader` from `make_live_output_reader()`. The stream_buffer snapshot parsing/diffing (`compute_stream_delta` and friends, previously in `mngr_robinhood`) moves into the new `imbue.mngr_claude.stream_buffer` module alongside that reader, since it is the Claude watcher's format.
+
+`HeadlessClaude` keeps streaming `claude --print` stream-json output via `stream_output()`, but the tail loop is now the shared one in mngr; the agent only supplies a `StreamJsonReader` plus its startup-grace "finished" check and stderr-augmented error reporting. No user-visible behavior change.
+
+The claude common-transcript converter now emits `finish_reason` (was `stop_reason`, aligning with the OpenTelemetry GenAI vocabulary) and an ordered `parts[]` array on assistant records that preserves the source interleaving of text and tool-use blocks (`parts_ordered` true, since Claude's native content blocks are ordered).
+
+## 2026-06-16
+
+The common-transcript converter's event-conversion logic moved out of an inline `python3` heredoc in `common_transcript.sh` into a standalone `common_transcript_convert.py` (provisioned alongside the shell script), so it is type-checked, linted, and unit-tested directly. Malformed raw-transcript lines, unreadable existing-output lines, and transcript lines whose `message` is `null` (rather than an object) are dropped silently rather than aborting the conversion run.
+
+The common-transcript watcher no longer echoes converter errors to the agent's pane: a genuine conversion error is recorded in the structured log only, instead of also being written to the watcher's stderr.
+
+Internal refactor (no behavior change): the claude plugin's session-preservation-on-destroy now uses the shared `preserve_agent_state` / `preserve_host_agents_on_destroy` helpers in mngr core instead of its own inline copy. The preserved file set, the `preserve_sessions_on_destroy` config option, and the online/offline behavior are unchanged. The offline host-destroy path now also filters discovered agents by agent type.
+
+Fixed: the synchronous transcript flush at turn end (which keeps a WAITING-signal consumer
+from outrunning the common-transcript converter) now runs on *every* turn-end path.
+Previously it lived in `wait_for_stop_hook.sh`'s `run_post_completion`, which is skipped on
+the no-`/proc` fast path (macOS / local agents, where the Claude-ancestor PID lookup fails)
+and on the SIGTERM/SIGINT handler -- so on those paths the marker was cleared without
+flushing and the converter race remained. The flush now lives in `mark_inactive`, which
+every path calls before clearing the `active` marker.
+
+The flush's lock-acquire wait -- its only potentially-slow step -- is now bounded by an
+explicit per-call timeout, so the SIGTERM/SIGINT handler can't block on it: interrupts cap
+the wait at 2s (`HOOK_FLUSH_LOCK_TIMEOUT_SIGNAL`) while normal turn-end paths use 30s
+(`HOOK_FLUSH_LOCK_TIMEOUT`). The bound is a portable `MNGR_CONVERT_LOCK_TIMEOUT` handed to
+each converter pass rather than a `timeout(1)` wrapper, which macOS lacks.
+
+## 2026-06-15
+
+Hardened the turn-end signal so consumers that read the common transcript on the WAITING
+transition (e.g. an orchestrator harvesting the agent's final message) can no longer
+outrun the converter. `wait_for_stop_hook.sh` now flushes the transcript pipeline (a
+synchronous `--single-pass` of the raw streamer and common-transcript converter, in
+pipeline order) before clearing the `active` marker -- so by the time the agent reports
+WAITING the common transcript already reflects the final assistant message.
+
+The flush and the converter's convert lock now come from the shared
+`mngr_common_transcript_lib.sh` (see the `mngr` changelog) rather than being duplicated
+per agent. The convert lock keeps the on-demand flush from racing the background 5s
+daemon into duplicate events; its timeout is tunable via `MNGR_CONVERT_LOCK_TIMEOUT`.
+
+The `waiting_reason` field in `mngr list` is now more robust against a stranded `permissions_waiting` marker. The `PERMISSIONS` reason is gated on the agent's `active` (in-turn) marker: a `permissions_waiting` file that outlived its turn (e.g. a denied/cancelled dialog whose cleanup hook was missed) now reports `END_OF_TURN` instead of wrongly showing `PERMISSIONS`. This matches the behavior of `ClaudeAgent.get_lifecycle_state`, which only consults the permission marker when the base state is RUNNING.
+
+## 2026-06-14
+
+`mngr create --adopt-session` now validates the session ID up front, before any host or worktree is created. Passing an unknown (or ambiguous) session ID fails fast with a clean `Error: ...` message instead of crashing mid-provisioning with a full "Unexpected error" traceback.
+
+The "session not found" message is also concise now: it no longer enumerates every searched directory (which included one per local mngr agent, often hundreds of paths).
+
+Internal: the existence/ambiguity check (`_resolve_adopt_session`) now also runs in the `on_before_create` hook, which executes outside `provision_agent`'s `ConcurrencyGroup`. Previously the only check happened in `on_after_provisioning` (inside that group), where the group's exit wrapped the `UserInputError` in a `ConcurrencyExceptionGroup` -- no longer a `ClickException` -- so it was reported as an unexpected error. The session source is always local, so the early result matches the provision-time resolution.
+
+# Shared, typed Claude stream-json envelope
+
+Added `imbue.mngr_claude.stream_json`, a single typed boundary for the Claude partial-message
+stream-json envelope (`message_start` / `content_block_start` / `content_block_delta` /
+`text_delta` / `content_block_stop` / `message_delta` / `message_stop`, plus the `assistant`
+summary's inner message). It is defined against the `anthropic` SDK's discriminated
+`RawMessageStreamEvent` union and `anthropic.types.Message`, so the protocol vocabulary is owned
+upstream instead of hand-rolled as bare string literals. The consume side validates into the union
+and dispatches with an exhaustive `assert_never` match, so a future `anthropic` release that adds an
+event variant fails the type check and names exactly what we must handle.
+
+- `mngr ask`'s headless reader (`headless_claude_agent.py`) now parses partial-message events and
+  the `assistant` summary through this boundary. Behavior is unchanged for well-formed `claude`
+  output; an event variant or content-block type newer than the installed `anthropic` package
+  degrades gracefully (it is skipped / falls back to a lenient text scan rather than dropping the
+  response).
+- Added `anthropic` as a dependency (kept unpinned; imported for its typed models only -- mngr
+  still drives the `claude` CLI and makes no API calls).
+
+## 2026-06-12
+
+`mngr create --adopt-session <session-id>` now resolves a bare session ID against more locations. In addition to the current and user-scope Claude config dirs (`$CLAUDE_CONFIG_DIR/projects/` and `~/.claude/projects/`), it now also searches every live local mngr agent's per-agent config dir and the preserved session files of destroyed agents (see `preserve_sessions_on_destroy`). Passing a full `.jsonl` path is unchanged. Only the local host dir is scanned for mngr agent and preserved sessions.
+
+Clarified the `--adopt-session` help text and behavior: the option is repeatable, but when multiple sessions are named, every named session is made available in the new agent while only the last one is resumed on startup (Claude can only resume one session at a time).
+
+Internal: routed the plugin's `host_dir / "agents"` path constructions through the shared `get_agents_root_dir` / `get_agent_state_dir_path` helpers (now defined in `imbue.mngr.hosts.common`). No behavior change.
+
+The `.claude/settings.local.json` gitignore preflight/provisioning check now delegates to the shared `check_path_gitignore_status` helper in `mngr.api.git` rather than implementing the git-check-ignore logic inline. No user-visible behavior change.
+
+Added a conformance test asserting that claude's real emitted common-transcript records
+validate against the new canonical envelope schema
+(`imbue.mngr.agents.common_transcript_records`), so the claude emitter and the shared
+contract cannot drift apart.
+
+## 2026-06-11
+
+### Fixed
+
+- Fixed: Provisioning a local Claude agent no longer creates self-referential symlink loops inside the user's shared `~/.claude/` (e.g. `~/.claude/skills/skills -> ~/.claude/skills`, `~/.claude/commands/commands`, `~/.claude/plugins/cache/cache`). `_sync_user_resources` used plain `ln -sf` as an idempotent command; on the second and later provisions the destination was already a symlink-to-directory, so `ln` dereferenced it and nested a new link inside the shared source. All sync symlinks (directory, child, and individual-file, including credentials and `keybindings.json`) now use `ln -sfn` (`--no-dereference`), which replaces the existing destination symlink instead of following it.
+
+### Changed
+
+- Changed: A skill-provisioned agent's primary skill (e.g. `code-guardian`, `fixme-fairy`) is now installed into that agent's own per-agent config dir (`$CLAUDE_CONFIG_DIR/skills/<name>/SKILL.md`) instead of the user's global `~/.claude/skills/`. Previously the local install wrote to global `~/.claude/skills/`, which `_sync_user_resources` then symlinked into every local agent's config dir, so a `code-guardian`/`fixme-fairy` skill leaked into the skill list of every local agent. To support this, `skills/` is now synced via child-level symlinks (one symlink per skill, mirroring how `plugins/` is already handled) so the agent's own skill can live as a real file alongside the symlinked user skills without leaking back into the shared source. The local install is now silent (no interactive install/update prompt), matching the always-silent remote install.
+
 ## 2026-06-10
 
 Test-quality hardening across the mngr_claude test suite (no user-visible behavior change). Replaced assertions that passed without verifying correctness with ones that check real effects:

@@ -6,6 +6,16 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.14] - 2026-06-18
+
+## [v0.1.13] - 2026-06-16
+
+## [v0.1.12] - 2026-06-16
+
+## [v0.1.11] - 2026-06-15
+
+## [v0.1.10] - 2026-06-13
+
 ### Added
 
 - Added: `mngr file list` now reports the full file type (file, directory, symlink, pipe, socket, block, character, other) and an opt-in `permissions` mode string when the source can report them — a host (online, or the local machine) classifies the real `stat`/`lstat` mode and shows a permissions string, while a bare volume-backed stopped host only distinguishes file vs. directory and leaves `permissions` as `-`. The default listing (name, type, size, modified) is unchanged.

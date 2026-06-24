@@ -15,6 +15,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr import hookimpl
 from imbue.mngr.api.discover import _all_identifiers_found
+from imbue.mngr.api.discover import _discover_provider_hosts_and_agents
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.discover import warn_on_duplicate_host_names
 from imbue.mngr.api.discovery_events import get_discovery_events_path
@@ -38,7 +39,10 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.provider_config_registry import _provider_config_registry
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderDiscoveryError
 from imbue.mngr.errors import ProviderEmptyError
+from imbue.mngr.errors import ProviderNotAuthorizedError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -234,6 +238,31 @@ def test_provider_error_info_build_for_provider() -> None:
     assert error.provider_name == provider_name
 
 
+def test_provider_error_info_from_not_authorized_carries_structured_fields() -> None:
+    """A ProviderNotAuthorizedError yields a provider-inaccessible ErrorInfo with concise fields and help text."""
+    provider_name = ProviderInstanceName("my-cloud")
+    exception = ProviderNotAuthorizedError(
+        provider_name,
+        reason="credentials not configured",
+        short_remediation="run `cloud login`",
+    )
+    error = ProviderErrorInfo.build_for_provider(exception, provider_name)
+    assert error.is_provider_inaccessible is True
+    assert error.short_reason == "credentials not configured"
+    assert error.short_remediation == "run `cloud login`"
+    assert error.help_text is not None
+    assert "is_enabled false" in error.help_text
+
+
+def test_provider_error_info_from_generic_exception_is_not_inaccessible() -> None:
+    """A non-provider-unavailable failure is not flagged inaccessible and carries no concise reason."""
+    error = ProviderErrorInfo.build_for_provider(RuntimeError("boom"), ProviderInstanceName("my-cloud"))
+    assert error.is_provider_inaccessible is False
+    assert error.short_reason is None
+    assert error.short_remediation is None
+    assert error.help_text is None
+
+
 # =============================================================================
 # HostErrorInfo Tests
 # =============================================================================
@@ -375,6 +404,33 @@ def test_agent_details_to_cel_context_computes_idle() -> None:
     # Idle should be approximately 300 seconds (5 minutes)
     assert context["idle"] > 280
     assert context["idle"] < 320
+
+
+def test_agent_details_to_cel_context_exposes_project_alias() -> None:
+    """agent_details_to_cel_context should expose labels.project as the bare `project` alias.
+
+    Mirrors the host.provider alias and the --project filter flag, so CEL filters
+    and sorts can reference `project` directly. The key is always present (None
+    when the label is unset), matching how optional scalar fields appear.
+    """
+    host_details = _make_host_details()
+    with_project = AgentDetails(
+        id=AgentId.generate(),
+        name=AgentName("proj-agent"),
+        type="claude",
+        command=CommandString("sleep 100"),
+        work_dir=Path("/work"),
+        initial_branch=None,
+        create_time=datetime.now(timezone.utc),
+        start_on_boot=False,
+        state=AgentLifecycleState.RUNNING,
+        labels={"project": "mngr"},
+        host=host_details,
+    )
+    assert agent_details_to_cel_context(with_project)["project"] == "mngr"
+
+    without_project = with_project.model_copy_update(to_update(with_project.field_ref().labels, {}))
+    assert agent_details_to_cel_context(without_project)["project"] is None
 
 
 def test_agent_details_to_cel_context_preserves_full_model_structure() -> None:
@@ -1303,6 +1359,126 @@ class _RaisingDiscoveryProviderInstance(MockProviderInstance):
         raise MngrError("simulated discovery failure from test")
 
 
+class _UnavailableDiscoveryProviderInstance(MockProviderInstance):
+    """Provider whose backend is unreachable -- raises ProviderUnavailableError."""
+
+    def discover_hosts_and_agents(
+        self,
+        cg: ConcurrencyGroup,
+        include_destroyed: bool = False,
+    ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
+        raise ProviderUnavailableError(self.name, "backend offline")
+
+
+class _NotAuthorizedDiscoveryProviderInstance(MockProviderInstance):
+    """Provider that is enabled but unauthenticated -- raises ProviderNotAuthorizedError."""
+
+    def discover_hosts_and_agents(
+        self,
+        cg: ConcurrencyGroup,
+        include_destroyed: bool = False,
+    ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
+        raise ProviderNotAuthorizedError(
+            self.name,
+            reason="credentials not configured",
+            short_remediation="run `cloud login`",
+        )
+
+
+def test_discover_provider_hosts_and_agents_propagates_unavailable_error(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """The per-provider worker propagates ProviderUnavailableError unwrapped.
+
+    Discovery does not swallow an unreachable provider, and the worker does NOT
+    wrap the error in ProviderDiscoveryError -- so it reaches the caller as a
+    clear "provider is not available" failure. The end-to-end propagation out of
+    discover_hosts_and_agents is covered by
+    test_discover_hosts_and_agents_propagates_unavailable_provider.
+    """
+    provider = _UnavailableDiscoveryProviderInstance(
+        name=ProviderInstanceName("offline-provider"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    with pytest.raises(ProviderUnavailableError):
+        _discover_provider_hosts_and_agents(
+            provider,
+            {},
+            include_destroyed=True,
+            results_lock=Lock(),
+            cg=temp_mngr_ctx.concurrency_group,
+        )
+
+
+def test_discover_provider_hosts_and_agents_wraps_non_availability_errors(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A non-availability discovery failure is wrapped in ProviderDiscoveryError.
+
+    ProviderUnavailableError propagates unwrapped (clear "unavailable" message);
+    any other failure is wrapped for per-provider attribution. Both propagate.
+    """
+    provider = _RaisingDiscoveryProviderInstance(
+        name=ProviderInstanceName("raising-provider"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    with pytest.raises(ProviderDiscoveryError):
+        _discover_provider_hosts_and_agents(
+            provider,
+            {},
+            include_destroyed=True,
+            results_lock=Lock(),
+            cg=temp_mngr_ctx.concurrency_group,
+        )
+
+
+def _make_unavailable_alongside_local_ctx(temp_mngr_ctx: MngrContext) -> MngrContext:
+    """Build a MngrContext with the default local provider plus one offline provider."""
+    provider_config = ProviderInstanceConfig(backend=_UNAVAILABLE_DISCOVERY_BACKEND_NAME)
+    merged_providers = {
+        **temp_mngr_ctx.config.providers,
+        ProviderInstanceName("offline-provider"): provider_config,
+    }
+    updated_config = temp_mngr_ctx.config.model_copy_update(
+        to_update(temp_mngr_ctx.config.field_ref().providers, merged_providers),
+    )
+    return temp_mngr_ctx.model_copy_update(
+        to_update(temp_mngr_ctx.field_ref().config, updated_config),
+    )
+
+
+def test_discover_hosts_and_agents_propagates_unavailable_provider(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """An unreachable provider fails a full (enumerate-all) discovery loudly.
+
+    For an enumerate-all call (provider_names=None), a down provider could hold a
+    target, so the error propagates and the command fails rather than silently
+    omitting that provider's agents. Targeted commands avoid this by scoping
+    discovery to the relevant provider(s).
+    """
+    _backend_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME] = _UnavailableDiscoveryProviderBackend
+    _provider_config_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME] = ProviderInstanceConfig
+    try:
+        mngr_ctx = _make_unavailable_alongside_local_ctx(temp_mngr_ctx)
+
+        with pytest.raises(ProviderUnavailableError):
+            discover_hosts_and_agents(
+                mngr_ctx,
+                provider_names=None,
+                agent_identifiers=None,
+                include_destroyed=True,
+                reset_caches=False,
+            )
+    finally:
+        del _backend_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME]
+        del _provider_config_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME]
+
+
 class _RaisingDetailProviderInstance(MockProviderInstance):
     """Provider that raises MngrError from get_host_and_agent_details.
 
@@ -1378,9 +1554,7 @@ class _MismatchedProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
-        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
-        del is_for_host_creation
         return _MismatchedProviderInstance(
             name=name,
             host_dir=mngr_ctx.config.default_host_dir,
@@ -1419,10 +1593,88 @@ class _RaisingDiscoveryProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
+    ) -> ProviderInstanceInterface:
+        return _RaisingDiscoveryProviderInstance(
+            name=name,
+            host_dir=mngr_ctx.config.default_host_dir,
+            mngr_ctx=mngr_ctx,
+        )
+
+
+_UNAVAILABLE_DISCOVERY_BACKEND_NAME = ProviderBackendName("test-unavailable-discovery-backend")
+
+
+class _UnavailableDiscoveryProviderBackend(ProviderBackendInterface):
+    """Backend that creates a _UnavailableDiscoveryProviderInstance."""
+
+    @staticmethod
+    def get_name() -> ProviderBackendName:
+        return _UNAVAILABLE_DISCOVERY_BACKEND_NAME
+
+    @staticmethod
+    def get_description() -> str:
+        return "Test backend whose provider is unreachable during discovery"
+
+    @staticmethod
+    def get_config_class() -> type[ProviderInstanceConfig]:
+        return ProviderInstanceConfig
+
+    @staticmethod
+    def get_build_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def get_start_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def build_provider_instance(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
         is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
         del is_for_host_creation
-        return _RaisingDiscoveryProviderInstance(
+        return _UnavailableDiscoveryProviderInstance(
+            name=name,
+            host_dir=mngr_ctx.config.default_host_dir,
+            mngr_ctx=mngr_ctx,
+        )
+
+
+_NOT_AUTHORIZED_DISCOVERY_BACKEND_NAME = ProviderBackendName("test-not-authorized-discovery-backend")
+
+
+class _NotAuthorizedDiscoveryProviderBackend(ProviderBackendInterface):
+    """Backend that creates a _NotAuthorizedDiscoveryProviderInstance."""
+
+    @staticmethod
+    def get_name() -> ProviderBackendName:
+        return _NOT_AUTHORIZED_DISCOVERY_BACKEND_NAME
+
+    @staticmethod
+    def get_description() -> str:
+        return "Test backend whose provider is enabled but unauthenticated"
+
+    @staticmethod
+    def get_config_class() -> type[ProviderInstanceConfig]:
+        return ProviderInstanceConfig
+
+    @staticmethod
+    def get_build_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def get_start_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def build_provider_instance(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
+    ) -> ProviderInstanceInterface:
+        return _NotAuthorizedDiscoveryProviderInstance(
             name=name,
             host_dir=mngr_ctx.config.default_host_dir,
             mngr_ctx=mngr_ctx,
@@ -1464,9 +1716,8 @@ class _EmptyProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
-        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
-        del config, mngr_ctx, is_for_host_creation
+        del config, mngr_ctx
         raise ProviderEmptyError(provider_name=name, reason="simulated empty backend from test")
 
 
@@ -1555,6 +1806,57 @@ def test_list_agents_batch_continue_mode_records_failing_provider_error(
 
     assert len(result.errors) == 1
     assert "nonexistent-backend-xyz" in result.errors[0].message
+
+
+def _make_not_authorized_alongside_local_ctx(temp_mngr_ctx: MngrContext) -> MngrContext:
+    """Build a MngrContext with the default local provider plus one unauthenticated provider."""
+    provider_config = ProviderInstanceConfig(backend=_NOT_AUTHORIZED_DISCOVERY_BACKEND_NAME)
+    merged_providers = {
+        **temp_mngr_ctx.config.providers,
+        ProviderInstanceName("unauth-provider"): provider_config,
+    }
+    updated_config = temp_mngr_ctx.config.model_copy_update(
+        to_update(temp_mngr_ctx.config.field_ref().providers, merged_providers),
+    )
+    return temp_mngr_ctx.model_copy_update(
+        to_update(temp_mngr_ctx.field_ref().config, updated_config),
+    )
+
+
+def test_list_agents_continue_mode_records_unauthenticated_provider_with_structured_fields(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """An enabled-but-unauthenticated provider is recorded as a provider-inaccessible error with concise fields.
+
+    The rest of the listing still runs (the local provider's results are unaffected), and the
+    error carries the structured short_reason/short_remediation/help_text the CLI renders.
+    """
+    _backend_registry[_NOT_AUTHORIZED_DISCOVERY_BACKEND_NAME] = _NotAuthorizedDiscoveryProviderBackend
+    _provider_config_registry[_NOT_AUTHORIZED_DISCOVERY_BACKEND_NAME] = ProviderInstanceConfig
+    try:
+        mngr_ctx = _make_not_authorized_alongside_local_ctx(temp_mngr_ctx)
+
+        result = list_agents(
+            mngr_ctx=mngr_ctx,
+            is_streaming=False,
+            error_behavior=ErrorBehavior.CONTINUE,
+        )
+
+        provider_errors = [e for e in result.errors if isinstance(e, ProviderErrorInfo)]
+        # Every recorded provider error is the unauthenticated backend (registering it
+        # also exposes a default instance named after the backend); all are inaccessible.
+        assert provider_errors
+        assert all(e.is_provider_inaccessible for e in provider_errors)
+        matching = [e for e in provider_errors if e.provider_name == ProviderInstanceName("unauth-provider")]
+        assert len(matching) == 1
+        error = matching[0]
+        assert error.exception_type == "ProviderNotAuthorizedError"
+        assert error.short_reason == "credentials not configured"
+        assert error.short_remediation == "run `cloud login`"
+        assert error.help_text is not None
+    finally:
+        del _backend_registry[_NOT_AUTHORIZED_DISCOVERY_BACKEND_NAME]
+        del _provider_config_registry[_NOT_AUTHORIZED_DISCOVERY_BACKEND_NAME]
 
 
 def test_list_agents_abort_mode_propagates_top_level_mngr_error(

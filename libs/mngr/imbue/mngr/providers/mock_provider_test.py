@@ -11,6 +11,7 @@ from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import HostResources
+from imbue.mngr.interfaces.data_types import ProviderResourceInfo
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
@@ -35,6 +36,7 @@ class MockProviderInstance(BaseProviderInstance):
     mock_supports_volumes: bool = Field(default=False)
     mock_snapshots: list[SnapshotInfo] = Field(default_factory=list)
     mock_volumes: list[VolumeInfo] = Field(default_factory=list)
+    mock_provider_resources: list[ProviderResourceInfo] = Field(default_factory=list)
     mock_tags: dict[str, str] = Field(default_factory=dict)
     mock_agent_data: list[dict[str, Any]] = Field(default_factory=list)
     mock_hosts: list[HostInterface] = Field(default_factory=list)
@@ -45,6 +47,7 @@ class MockProviderInstance(BaseProviderInstance):
     deleted_snapshots: list[tuple[HostId, SnapshotId]] = Field(default_factory=list)
     deleted_volumes: list[VolumeId] = Field(default_factory=list)
     connection_errors_cleared: list[HostId] = Field(default_factory=list)
+    gc_provider_resources_dry_runs: list[bool] = Field(default_factory=list)
 
     @property
     def supports_snapshots(self) -> bool:
@@ -64,6 +67,10 @@ class MockProviderInstance(BaseProviderInstance):
 
     def list_snapshots(self, host: HostInterface | HostId) -> list[SnapshotInfo]:
         return self.mock_snapshots
+
+    def gc_provider_resources(self, dry_run: bool) -> list[ProviderResourceInfo]:
+        self.gc_provider_resources_dry_runs.append(dry_run)
+        return self.mock_provider_resources
 
     def get_host_tags(self, host: HostInterface | HostId) -> dict[str, str]:
         return self.mock_tags
