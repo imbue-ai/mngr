@@ -2135,19 +2135,31 @@ async function promptMindShutdown() {
   return { proceed: true, stop: true, running };
 }
 
-function fetchInitialChromeState(timeoutMs = 10000) {
-  // Drives one round-trip to /_chrome/events (SSE) to learn both auth status
-  // and the current workspace list. Returns:
-  //   { authenticated: true, workspaces: [...] }  on authenticated success
-  //   { authenticated: false }                     when the backend says auth_required
-  //   null                                          on timeout / network error
+function fetchInitialChromeState(timeoutMs = 25000) {
+  // Drives one round-trip to /_chrome/events (SSE) to learn auth status and the
+  // workspace list, and -- crucially -- WAITS for discovery to complete its first
+  // full sweep before resolving. Returns:
+  //   { authenticated: true, workspaces: [...], hasAccounts, discoveryComplete: true }
+  //                                                 once a fresh discovery snapshot lands
+  //   { authenticated: true, ..., discoveryComplete: false }
+  //                                                 on timeout with a partial snapshot seen
+  //   { authenticated: false }                      when the backend says auth_required
+  //   null                                          on timeout with nothing seen / network error
+  //
+  // Why wait for ``discovery_complete``: the connect-time ``workspaces`` snapshot
+  // is the empty/partial cold-start state (discovery polls providers over a few
+  // seconds), so resolving on it would restore windows -- and paint the landing
+  // page -- against an incomplete list, dropping workspaces that simply hadn't
+  // been discovered yet. Holding the loading screen until the first fresh full
+  // snapshot makes both the restore list and the landing page complete.
   //
   // The timeout must comfortably exceed the connect-time snapshot's slowest
-  // blocking step: the backend computes ``has_accounts`` (a cold ``mngr
-  // imbue_cloud auth list`` subprocess, ~5s on first call) before emitting the
-  // first ``workspaces`` event. A timeout shorter than that returned ``null``,
-  // which the startup path treats as unauthenticated and routes to /welcome --
-  // bouncing an already-signed-in user to the onboarding page.
+  // blocking step (the backend computes ``has_accounts`` -- a cold ``mngr
+  // imbue_cloud auth list`` subprocess, ~5s on first call -- before the first
+  // ``workspaces`` event) PLUS one discovery poll for the first full snapshot.
+  // On timeout we resolve with whatever partial snapshot we saw (``discoveryComplete:
+  // false``), and the restore path then declines to drop windows on absence so a
+  // slow/stalled discovery never costs the user a window.
   return new Promise((resolve) => {
     if (!backendBaseUrl) {
       resolve(null);
@@ -2155,6 +2167,9 @@ function fetchInitialChromeState(timeoutMs = 10000) {
     }
     let done = false;
     let req;
+    // Most recent ``workspaces`` payload seen, used as the timeout fallback when
+    // ``discovery_complete`` never arrives.
+    let latestWorkspaces = null;
     const finish = (value) => {
       if (done) return;
       done = true;
@@ -2163,7 +2178,18 @@ function fetchInitialChromeState(timeoutMs = 10000) {
       }
       resolve(value);
     };
-    const timer = setTimeout(() => finish(null), timeoutMs);
+    const timer = setTimeout(() => {
+      if (latestWorkspaces) {
+        finish({
+          authenticated: true,
+          workspaces: latestWorkspaces.workspaces,
+          hasAccounts: latestWorkspaces.hasAccounts,
+          discoveryComplete: false,
+        });
+      } else {
+        finish(null);
+      }
+    }, timeoutMs);
     try {
       req = net.request({
         url: backendBaseUrl + '/_chrome/events',
@@ -2195,9 +2221,20 @@ function fetchInitialChromeState(timeoutMs = 10000) {
           try {
             const parsed = JSON.parse(payload);
             if (parsed.type === 'workspaces' && Array.isArray(parsed.workspaces)) {
-              clearTimeout(timer);
-              finish({ authenticated: true, workspaces: parsed.workspaces, hasAccounts: !!parsed.has_accounts });
-              return;
+              // Remember the latest snapshot for the timeout fallback, but only
+              // resolve once discovery reports a completed full sweep -- the first
+              // (cold-start) snapshot is typically empty/partial.
+              latestWorkspaces = { workspaces: parsed.workspaces, hasAccounts: !!parsed.has_accounts };
+              if (parsed.discovery_complete === true) {
+                clearTimeout(timer);
+                finish({
+                  authenticated: true,
+                  workspaces: parsed.workspaces,
+                  hasAccounts: !!parsed.has_accounts,
+                  discoveryComplete: true,
+                });
+                return;
+              }
             }
             if (parsed.type === 'auth_required') {
               clearTimeout(timer);
@@ -2578,6 +2615,10 @@ async function startBackendWithRetry() {
 
       const chromeState = await fetchInitialChromeState();
       const authenticated = chromeState && chromeState.authenticated;
+      // Whether the workspace list we got reflects a completed discovery sweep.
+      // On the timeout-fallback path it's false (we only saw a partial snapshot),
+      // which makes us decline to drop windows on absence below.
+      const discoveryComplete = !!(chromeState && chromeState.discoveryComplete);
 
       if (authenticated && chromeState.workspaces) {
         workspaceList = chromeState.workspaces.map((w) => ({
@@ -2587,16 +2628,22 @@ async function startBackendWithRetry() {
         }));
       }
 
-      const knownAgentIdsSet = authenticated
+      // Only filter restored windows against the workspace list when that list is
+      // trustworthy (discovery completed). Passing ``null`` when it isn't makes
+      // ``filterRestorableUrls`` keep every saved window -- absence from an
+      // incomplete snapshot is not evidence a workspace was destroyed (the live
+      // discovery flow navigates genuinely-destroyed workspaces away later, gated
+      // on positive destroy evidence).
+      const knownAgentIdsSet = (authenticated && discoveryComplete)
         ? new Set(workspaceList.map((w) => w.id))
         : null;
       const restorable = authenticated
         ? filterRestorableUrls(savedState.windows, knownAgentIdsSet)
         : [];
       // (A workspace that no longer exists needs no special accent handling
-      // here: ``filterRestorableUrls`` already drops windows whose saved URL
-      // points at a destroyed workspace, and the accent is re-derived from
-      // whatever URL each restored window actually reopens to.)
+      // here: ``filterRestorableUrls`` drops windows whose saved URL points at a
+      // destroyed workspace once discovery is complete, and the accent is
+      // re-derived from whatever URL each restored window actually reopens to.)
 
       initialBundle.isLoadingState = false;
       updateBundleBounds(initialBundle);

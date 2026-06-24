@@ -2205,6 +2205,11 @@ def _handle_chrome_events() -> Response:
             last_workspace_data = _build_workspace_list(backend_resolver, session_store)
             last_destroying_ids = _destroying_agent_ids(paths, backend_resolver)
             has_accounts = bool(session_store and session_store.list_accounts())
+            # ``discovery_complete`` tells the Electron shell whether this snapshot
+            # reflects a completed discovery sweep (vs the empty/partial cold-start
+            # state). The shell holds its loading screen -- and gates dead-workspace
+            # filtering on window restore -- until it sees this true.
+            last_discovery_complete = _is_discovery_complete(backend_resolver)
             yield "data: {}\n\n".format(
                 json.dumps(
                     {
@@ -2212,6 +2217,7 @@ def _handle_chrome_events() -> Response:
                         "workspaces": last_workspace_data,
                         "destroying_agent_ids": last_destroying_ids,
                         "has_accounts": has_accounts,
+                        "discovery_complete": last_discovery_complete,
                     }
                 )
             )
@@ -2370,15 +2376,27 @@ def _handle_chrome_events() -> Response:
                 # update below -- no separate liveness channel needed.
                 current_data = _build_workspace_list(backend_resolver, session_store)
                 current_destroying_ids = _destroying_agent_ids(paths, backend_resolver)
-                if current_data != last_workspace_data or current_destroying_ids != last_destroying_ids:
+                # Push when the workspace list changes OR when discovery flips to
+                # complete (the latter can happen with an unchanged list -- e.g. a
+                # fresh empty snapshot confirming the user simply has no minds --
+                # and the shell is waiting for that flip to leave its loading screen).
+                current_discovery_complete = _is_discovery_complete(backend_resolver)
+                if (
+                    current_data != last_workspace_data
+                    or current_destroying_ids != last_destroying_ids
+                    or current_discovery_complete != last_discovery_complete
+                ):
                     last_workspace_data = current_data
                     last_destroying_ids = current_destroying_ids
+                    last_discovery_complete = current_discovery_complete
                     yield "data: {}\n\n".format(
                         json.dumps(
                             {
                                 "type": "workspaces",
                                 "workspaces": current_data,
                                 "destroying_agent_ids": current_destroying_ids,
+                                "has_accounts": has_accounts,
+                                "discovery_complete": current_discovery_complete,
                             }
                         )
                     )
@@ -3356,6 +3374,24 @@ def _is_discovery_fresh(last_full_snapshot_at: datetime | None) -> bool:
         return False
     age_seconds = (datetime.now(timezone.utc) - last_full_snapshot_at).total_seconds()
     return age_seconds <= _DISCOVERY_FRESHNESS_THRESHOLD_SECONDS
+
+
+def _is_discovery_complete(backend_resolver: BackendResolverInterface) -> bool:
+    """Whether a fresh full discovery snapshot has landed this session.
+
+    The Electron shell holds the "MINDS" loading screen until this is true, so
+    the restored windows (and the landing page) see a complete workspace list
+    rather than the empty/partial cold-start snapshot. A fresh ``last_full_snapshot_at``
+    is the signal: a cached last-good snapshot replayed from disk carries its
+    original (old) producer timestamp, so it reads as not-fresh and we keep
+    waiting for the live poll to confirm. Non-mngr resolvers (tests, alternative
+    backends) have no async discovery pipeline -- their state is synchronous, so
+    they are always complete.
+    """
+    if not isinstance(backend_resolver, MngrCliBackendResolver):
+        return True
+    _, last_full_snapshot_at = backend_resolver.get_freshness_timestamps()
+    return _is_discovery_fresh(last_full_snapshot_at)
 
 
 def _run_host_health_probe(
