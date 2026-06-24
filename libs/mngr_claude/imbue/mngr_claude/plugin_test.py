@@ -220,6 +220,20 @@ def _write_claude_trust(source_path: Path) -> None:
     config_path.write_text(json.dumps(config))
 
 
+def _write_dialogs_dismissed_at(config_path: Path, trust_path: Path) -> None:
+    """Write a .claude.json at ``config_path`` with all dialogs dismissed and trust for ``trust_path``.
+
+    Used for shared-mode tests where mngr dismisses dialogs against the config file the
+    agent's claude reads ($CLAUDE_CONFIG_DIR/.claude.json), which is not ~/.claude.json.
+    """
+    config = {
+        **_ALL_DIALOGS_DISMISSED,
+        "projects": {str(trust_path.resolve()): {"hasTrustDialogAccepted": True}},
+    }
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(config))
+
+
 def _write_mngr_trust_entry(path: Path) -> None:
     """Write ~/.claude.json with a mngr-created trust entry for path and all dialogs dismissed."""
     config_path = Path.home() / ".claude.json"
@@ -554,6 +568,36 @@ def test_claude_agent_assemble_command_injects_mngr_settings_in_env_config_dir_m
     # ...and the user's own --settings also passes through (the collision).
     assert parsed.resume_args == ["--settings", '{"model": "opus"}']
     assert parsed.create_args == ["--settings", '{"model": "opus"}']
+
+
+def test_claude_agent_assemble_command_injects_mngr_settings_for_isolate_false_flag(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared mode set via the current isolate_local_config_dir=False flag (not the deprecated
+    use_env_config_dir alias) must still inject mngr's managed --settings.
+
+    The hooks-write gate and the hooks-load gate both key off the resolved predicate, so the
+    managed hooks file written at provision time is actually loaded by claude at launch.
+    """
+    shared_dir = tmp_path / "shared"
+    shared_dir.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(shared_dir))
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False),
+    )
+
+    command = agent.assemble_command(host=host, agent_args=(), command_override=None)
+
+    parsed = _ParsedAssembleCommand(str(command), mngr_injects_settings=True)
+    expected_settings = shlex.split(MANAGED_SETTINGS_LAUNCH_ARG)[1]
+    assert parsed.resume_settings == expected_settings
+    assert parsed.create_settings == expected_settings
 
 
 def test_claude_agent_assemble_command_with_command_override(
@@ -1685,6 +1729,9 @@ def test_provision_configures_readiness_hooks_in_env_config_dir_mode(
         agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
     )
     _init_git_with_gitignore(agent.work_dir)
+    # Shared mode dismisses dialogs against the shared config; pre-dismiss them so the
+    # non-interactive provision does not raise on the trust dialog.
+    _write_dialogs_dismissed_at(shared_dir / ".claude.json", agent.work_dir)
 
     options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
     agent.provision(host=host, options=options, mngr_ctx=temp_mngr_ctx)
@@ -1695,6 +1742,45 @@ def test_provision_configures_readiness_hooks_in_env_config_dir_mode(
     settings = json.loads(managed_path.read_text())
     assert "hooks" in settings
     assert "SessionStart" in settings["hooks"]
+
+
+def test_provision_shared_mode_dismisses_dialogs_in_global_config_but_not_permissions(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared mode mutates the user's global config to dismiss the cosmetic startup dialogs
+    (trust, onboarding, effort callout, cost threshold) -- but never the bypass-permissions
+    grant, which must not be silently accepted via the global config."""
+    shared_dir = tmp_path / "shared"
+    shared_dir.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(shared_dir))
+    # auto_dismiss_dialogs lets the non-interactive provision silently dismiss dialogs.
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(
+            check_installation=False, isolate_local_config_dir=False, auto_dismiss_dialogs=True
+        ),
+    )
+    _init_git_with_gitignore(agent.work_dir)
+
+    options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
+    agent.provision(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+
+    # The dismissals land in the shared config file (the one the agent's claude reads),
+    # NOT in ~/.claude.json.
+    shared_config = json.loads((shared_dir / ".claude.json").read_text())
+    assert shared_config["hasCompletedOnboarding"] is True
+    assert shared_config["effortCalloutDismissed"] is True
+    assert shared_config["hasAcknowledgedCostThreshold"] is True
+    assert shared_config["projects"][str(agent.work_dir.resolve())]["hasTrustDialogAccepted"] is True
+
+    # The bypass-permissions grant is never written to the global config.
+    assert "bypassPermissionsModeAccepted" not in shared_config
+    assert not (Path.home() / ".claude.json").exists()
 
 
 @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
@@ -1976,32 +2062,31 @@ def test_on_before_provisioning_skips_trust_check_when_git_common_dir_is_none(
     assert config_path.read_text() == config_before
 
 
-def test_on_before_provisioning_shared_mode_succeeds_without_dialog_checks(
+def test_on_before_provisioning_shared_mode_validates_dialogs_against_shared_config(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     temp_mngr_ctx: MngrContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """In shared mode, on_before_provisioning does NOT validate dialog dismissal in user config."""
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "shared"))
+    """In shared mode, on_before_provisioning validates dialog dismissal against the shared
+    config file (``$CLAUDE_CONFIG_DIR/.claude.json``), the file the agent's claude reads."""
+    shared_dir = tmp_path / "shared"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(shared_dir))
     agent, host = make_claude_agent(
         local_provider,
         tmp_path,
         temp_mngr_ctx,
         agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False),
     )
-    # Deliberately leave ~/.claude.json absent (no dialogs dismissed, no trust) --
-    # a non-shared agent would raise during the dialog-dismissal check here.
-    config_path = Path.home() / ".claude.json"
-    assert not config_path.exists()
-
     options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
 
-    agent.on_before_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+    # With no dialogs dismissed in the shared config, the non-interactive check raises.
+    with pytest.raises(ClaudeDirectoryNotTrustedError):
+        agent.on_before_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
 
-    # Shared mode skips the dialog check entirely and writes nothing to the user's
-    # config, so the file must still be absent.
-    assert not config_path.exists()
+    # Dismissing the dialogs in the shared config (not ~/.claude.json) makes it pass.
+    _write_dialogs_dismissed_at(shared_dir / ".claude.json", agent.work_dir)
+    agent.on_before_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
 
 
 def _make_remote_claude_agent(
@@ -2075,14 +2160,14 @@ def test_remote_agent_modify_env_vars_uses_isolated_dir_despite_shared_flag(
     assert "ORIGINAL_CLAUDE_CONFIG_DIR" in env_vars
 
 
-def test_on_before_provisioning_shared_mode_passes_when_env_unset(
+def test_on_before_provisioning_shared_mode_validates_default_config_when_env_unset(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     temp_mngr_ctx: MngrContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With isolate_local_config_dir=False and $CLAUDE_CONFIG_DIR unset, on_before_provisioning falls
-    back to ``~/.claude/`` and does not raise (it's the "don't touch the config" path)."""
+    """With isolate_local_config_dir=False and $CLAUDE_CONFIG_DIR unset, on_before_provisioning
+    validates dialogs against the default ``~/.claude.json`` (where claude reads them)."""
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     agent, host = make_claude_agent(
         local_provider,
@@ -2090,17 +2175,17 @@ def test_on_before_provisioning_shared_mode_passes_when_env_unset(
         temp_mngr_ctx,
         agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False),
     )
-
     options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
 
-    # Shared mode does not touch the user's config; with no ~/.claude.json present
-    # it must neither raise nor create one (the "don't touch the config" path).
+    # No ~/.claude.json present -> the non-interactive dialog check raises.
     config_path = Path.home() / ".claude.json"
     assert not config_path.exists()
+    with pytest.raises(ClaudeDirectoryNotTrustedError):
+        agent.on_before_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
 
+    # Dismissing the dialogs in ~/.claude.json (the default location) makes it pass.
+    _write_all_dialogs_dismissed(agent.work_dir)
     agent.on_before_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
-
-    assert not config_path.exists()
 
 
 def test_on_destroy_removes_trust(
@@ -2822,13 +2907,17 @@ def test_on_before_provisioning_warns_when_use_env_config_dir_is_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Setting the deprecated use_env_config_dir emits a deprecation warning at provisioning time."""
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "shared"))
+    shared_dir = tmp_path / "shared"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(shared_dir))
     agent, host = make_claude_agent(
         local_provider,
         tmp_path,
         temp_mngr_ctx,
         agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
     )
+    # Shared mode now validates dialogs against the shared config, so dismiss them
+    # there to reach the deprecation warning without raising.
+    _write_dialogs_dismissed_at(shared_dir / ".claude.json", agent.work_dir)
 
     options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
     with capture_loguru() as log_output:
