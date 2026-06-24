@@ -770,6 +770,9 @@ jobs:
               echo "=== system_interface supervisord stderr/stdout (tail) ==="
               "$LIMA" shell "$VM" -- sudo bash -c 'tail -120 /var/log/supervisor/system_interface-stderr.log 2>/dev/null; echo "--- stdout ---"; tail -40 /var/log/supervisor/system_interface-stdout.log 2>/dev/null' 2>&1 | tail -160
               echo
+              echo "=== SSE fan-out timeline ([diag-sse] register/unregister/broadcast, whole log) ==="
+              "$LIMA" shell "$VM" -- sudo bash -c 'grep -aE "\[diag-sse\]|GET /api/agents/[^ ]*/(events|stream)" /var/log/supervisor/system_interface-stderr.log 2>/dev/null' 2>&1 | tail -160
+              echo
               echo "=== ps aux in VM ==="
               "$LIMA" shell "$VM" -- sudo ps auxf 2>&1 | grep -iE "bootstrap|system|web-server|uv run|tmux" | head -30
               echo
