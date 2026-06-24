@@ -53,7 +53,7 @@
     var submitBtn = document.getElementById('create-submit');
     var regionRow = document.getElementById('region-row');
     var regionSelect = document.getElementById('region');
-    var presetCards = document.querySelectorAll('.preset-card');
+    var presetCards = document.querySelectorAll('[data-preset]');
     var REGION_OPTIONS = {{ region_options_by_launch_mode | tojson }};
     var REGION_SELECTED = {{ region_selected_by_launch_mode | tojson }};
 
@@ -79,15 +79,16 @@
     }
 
     function selectedPreset() {
-      var card = document.querySelector('.preset-card[aria-checked="true"]');
+      var card = document.querySelector('[data-preset][aria-checked="true"]');
       return card ? card.getAttribute('data-preset') : null;
     }
 
     function markPresetSelected(name) {
+      // Selection is driven purely by aria-checked; the PresetCard's
+      // aria-checked: Tailwind variants paint the selected accent border + tint.
       for (var i = 0; i < presetCards.length; i++) {
         var isOn = presetCards[i].getAttribute('data-preset') === name;
         presetCards[i].setAttribute('aria-checked', isOn ? 'true' : 'false');
-        presetCards[i].classList.toggle('preset-card-selected', isOn);
       }
     }
 
@@ -276,9 +277,7 @@
     {# ---- Simple view: two compute presets ---- #}
     <div id="simple-view" role="radiogroup" aria-label="Where to run your mind" class="mt-2">
       <div class="flex gap-6 items-stretch">
-        <button type="button" class="preset-card flex-1 p-4 flex flex-col gap-2{{ ' preset-card-selected' if selected_preset == 'remote' else '' }}"
-                data-preset="remote" role="radio"
-                aria-checked="{{ 'true' if selected_preset == 'remote' else 'false' }}">
+        <PresetCard preset="remote" :selected="selected_preset == 'remote'" extra="flex-1">
           <div class="flex items-center gap-2">
             <span class="type-heading text-primary">Imbue Cloud</span>
             <span class="inline-flex items-center px-2 py-0.5 rounded-md type-helper uppercase tracking-wide bg-accent/15 text-accent">Recommended</span>
@@ -289,18 +288,16 @@
             <li class="flex items-start gap-2 type-body text-secondary"><span class="text-accent shrink-0 mt-0.5"><Icon16 name="check" size="sm" /></span>Accessible from mobile</li>
             <li class="flex items-start gap-2 type-body text-secondary"><span class="text-accent shrink-0 mt-0.5"><Icon16 name="check" size="sm" /></span>Shareable with other people</li>
           </ul>
-        </button>
+        </PresetCard>
 
-        <button type="button" class="preset-card flex-1 p-4 flex flex-col gap-2{{ ' preset-card-selected' if selected_preset == 'local' else '' }}"
-                data-preset="local" role="radio"
-                aria-checked="{{ 'true' if selected_preset == 'local' else 'false' }}">
+        <PresetCard preset="local" :selected="selected_preset == 'local'" extra="flex-1">
           <span class="type-heading text-primary">Directly on your computer</span>
           <ul class="flex flex-col gap-1.5 mt-1">
             <li class="flex items-start gap-2 type-body text-secondary"><span class="text-tertiary shrink-0 mt-0.5"><Icon16 name="check" size="sm" /></span>5-10 minute setup</li>
             <li class="flex items-start gap-2 type-body text-secondary"><span class="text-tertiary shrink-0 mt-0.5"><Icon16 name="check" size="sm" /></span>Runs only when your computer is on</li>
             <li class="flex items-start gap-2 type-body text-secondary"><span class="text-tertiary shrink-0 mt-0.5"><Icon16 name="check" size="sm" /></span>Uses your computer's memory (may slow your device)</li>
           </ul>
-        </button>
+        </PresetCard>
       </div>
     </div>
 

@@ -303,20 +303,32 @@ def test_render_create_form_carries_provided_color_in_hidden_input() -> None:
     assert 'value="#cecd0c"' in html
 
 
+def _preset_card_tag(html: str, preset: str) -> str:
+    """Return the opening ``<button>`` tag for the given preset card.
+
+    Attribute order is whatever JinjaX's ``attrs.render`` emits, so callers
+    check attributes by membership within the tag rather than by position.
+    """
+    match = re.search(r'<button[^>]*data-preset="' + preset + r'"[^>]*>', html)
+    assert match is not None, f"no preset card for {preset!r}"
+    return match.group(0)
+
+
 def test_render_create_form_default_preset_is_local_without_account() -> None:
     # Without an account the selected preset card is local (remote requires one).
     html = render_create_form()
-    assert re.search(r'data-preset="local"[^>]*aria-checked="true"', html, re.DOTALL) is not None
-    assert re.search(r'data-preset="remote"[^>]*aria-checked="false"', html, re.DOTALL) is not None
+    assert 'aria-checked="true"' in _preset_card_tag(html, "local")
+    assert 'aria-checked="false"' in _preset_card_tag(html, "remote")
 
 
 def test_render_create_form_default_preset_is_remote_with_account() -> None:
     acct = SimpleNamespace(user_id="u-1", email="a@b.com")
     html = render_create_form(accounts=[acct], default_account_id="u-1")
-    assert re.search(r'data-preset="remote"[^>]*aria-checked="true"', html, re.DOTALL) is not None
-    assert re.search(r'data-preset="local"[^>]*aria-checked="false"', html, re.DOTALL) is not None
-    # The selected card also carries the accent styling class server-side.
-    assert "preset-card-selected" in html
+    assert 'aria-checked="true"' in _preset_card_tag(html, "remote")
+    assert 'aria-checked="false"' in _preset_card_tag(html, "local")
+    # Selection styling is driven by the aria-checked Tailwind variant on the
+    # PresetCard, not a server-toggled class.
+    assert "aria-checked:border-accent" in html
 
 
 def test_render_create_form_start_advanced_opens_advanced_view() -> None:

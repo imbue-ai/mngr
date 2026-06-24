@@ -1,0 +1,36 @@
+{#def preset, selected=False, extra="" #}
+{#
+  Selectable "where to run" card for the create page -- the two compute
+  presets (Imbue Cloud / local) compose from this. Renders a
+  ``<button type="button">`` with ``role="radio"``; selection is driven by
+  ``aria-checked`` (the create page's inline JS flips it), exactly like the
+  ColorSwatch picker. The visual state is pure Tailwind:
+
+    - default: a 2px dashed neutral border (``border-dashed border-strong``);
+    - selected: a solid accent border + a faint accent tint, via the
+      ``aria-checked:`` variants (so the JS only toggles the attribute, no
+      class bookkeeping);
+    - hover: lifts with ``shadow-raised`` -- the interactive-card hover from
+      the styleguide -- rather than a heavier border.
+
+  The border width is a constant 2px across states (only its style/color
+  changes) so selecting never shifts layout. The caller supplies the title /
+  badge / feature list as the component body.
+
+  Props:
+    preset    the ``data-preset`` value (``"remote"`` / ``"local"``); the
+              page JS reads it to apply that preset's provider defaults.
+    selected  initial ``aria-checked`` state (one card per radiogroup).
+    extra     parent-owned sizing (e.g. ``flex-1``); the component root
+              carries no outer positioning of its own.
+
+  Any other HTML attribute (id=, data-*, aria-label=) flows through via
+  JinjaX's ``attrs`` passthrough.
+#}
+{%- set _base = "flex flex-col gap-2 p-4 text-left cursor-pointer rounded-lg bg-surface-primary border-2 border-dashed border-strong hover:shadow-raised aria-checked:border-solid aria-checked:border-accent aria-checked:bg-accent/5" -%}
+<button {{ attrs.render(
+  type="button",
+  role="radio",
+  classes=_base ~ " " ~ extra,
+  **{"data-preset": preset, "aria-checked": "true" if selected else "false"},
+) }}>{{ content }}</button>
