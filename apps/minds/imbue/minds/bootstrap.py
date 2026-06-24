@@ -252,6 +252,7 @@ def _ensure_mngr_settings(root_name: str) -> None:
         recursive_plugin = plugins.get("recursive", {})
         default_imbue_cloud = providers.get(_IMBUE_CLOUD_BACKEND_NAME, {})
         default_aws = providers.get(_AWS_BACKEND_NAME, {})
+        modal_direct = providers.get(_MODAL_DIRECT_PROVIDER_NAME, {})
         if (
             recursive_plugin.get("enabled") is False
             and "ssh" not in providers
@@ -260,6 +261,11 @@ def _ensure_mngr_settings(root_name: str) -> None:
             and default_aws.get("backend") == _AWS_BACKEND_NAME
             and default_aws.get("is_enabled") is False
             and _existing_aws_provider_names(providers) == set(desired_aws_names)
+            # The Modal (Direct) block must already be present + enabled, else
+            # fall through and write it (otherwise existing installs whose
+            # settings predate Modal would never get the provider registered).
+            and modal_direct.get("mode") == _MODAL_MODE_DIRECT
+            and modal_direct.get("is_enabled") is True
         ):
             # Already in the desired shape -- recursive disabled, no stale
             # ssh provider section, default imbue_cloud + aws instances
@@ -573,27 +579,29 @@ _AWS_PROVIDER_NAME_PREFIX: Final[str] = "aws-"
 #   - ``[providers.modal_proxied]`` (PROXIED): keyless -- routes through the
 #     imbue_cloud connector. Written by the imbue_cloud reconcile, and only when
 #     the user has a gateway session, since it reuses that session to auth.
-# The ephemeral/testing knobs (no persistence, no host volume, no post-create
-# snapshot) keep the capability surface small; a generous sandbox timeout avoids
-# build-first turns being killed mid-provision.
+# Sizing (2 CPU / 4 GB) and the 24h sandbox timeout come from the
+# ModalProviderConfig defaults, NOT from these blocks. Crucially the blocks do
+# NOT set is_persistent=False: each `mngr create` is a one-shot subprocess, and a
+# non-persistent (ephemeral) Modal app would terminate the sandbox the instant
+# that subprocess exits. is_persistent therefore stays at its True default so the
+# sandbox outlives create. The only per-instance overrides are the gateway fields
+# and, for PROXIED, turning off the volume/snapshot ops it cannot proxy.
 _MODAL_BACKEND_NAME: Final[str] = "modal"
 _MODAL_DIRECT_PROVIDER_NAME: Final[str] = "modal"
 _MODAL_PROXIED_PROVIDER_NAME: Final[str] = "modal_proxied"
 _MODAL_MODE_DIRECT: Final[str] = "DIRECT"
 _MODAL_MODE_PROXIED: Final[str] = "PROXIED"
-_MODAL_DEFAULT_CPU: Final[float] = 2.0
-_MODAL_DEFAULT_MEMORY_GB: Final[float] = 4.0
-# 24h -- Modal's max sandbox lifetime ("1-day ephemeral"); long agents are only
-# reaped at that ceiling, not a short default.
-_MODAL_DEFAULT_SANDBOX_TIMEOUT_SECONDS: Final[int] = 86_400
 
 
 def _build_modal_provider_block(*, mode: str, connector_url: str | None) -> Table:
     """Build a ``[providers.modal*]`` tomlkit block for the given mode.
 
     Shared by the DIRECT block (written in ``_ensure_mngr_settings``) and the
-    PROXIED block (written in ``set_modal_proxied_provider``). ``connector_url``
-    is only set for PROXIED.
+    PROXIED block (written in ``set_modal_proxied_provider``). Sizing, sandbox
+    timeout, and ``is_persistent`` inherit the ModalProviderConfig defaults
+    (2 CPU / 4 GB, 24h, persistent) -- only the gateway-specific fields are set
+    here. ``connector_url`` is set only for PROXIED, and PROXIED additionally
+    disables the volume/snapshot operations it cannot proxy.
     """
     block = tomlkit.table()
     block["backend"] = _MODAL_BACKEND_NAME
@@ -601,13 +609,10 @@ def _build_modal_provider_block(*, mode: str, connector_url: str | None) -> Tabl
     if connector_url is not None:
         block["connector_url"] = connector_url
     block["is_enabled"] = True
-    # Ephemeral, testing-only -- keeps the capability surface small.
-    block["is_persistent"] = False
-    block["is_host_volume_created"] = False
-    block["is_snapshotted_after_create"] = False
-    block["default_cpu"] = _MODAL_DEFAULT_CPU
-    block["default_memory"] = _MODAL_DEFAULT_MEMORY_GB
-    block["default_sandbox_timeout"] = _MODAL_DEFAULT_SANDBOX_TIMEOUT_SECONDS
+    if mode == _MODAL_MODE_PROXIED:
+        # PROXIED cannot proxy Modal Volumes or filesystem snapshots.
+        block["is_host_volume_created"] = False
+        block["is_snapshotted_after_create"] = False
     return block
 # EC2 instance size for minds AWS workspaces. The mngr_aws default (t3.small,
 # 2 GB) is too small for the full forever-claude-template build (uv sync + npm
