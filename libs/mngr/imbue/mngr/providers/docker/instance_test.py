@@ -25,7 +25,6 @@ from imbue.mngr.interfaces.host import HostFileWriteInterface
 from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
-from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.docker.config import DockerProviderConfig
 from imbue.mngr.providers.docker.host_store import HostRecord
@@ -769,82 +768,6 @@ def test_discover_hosts_propagates_api_error_without_marking_unavailable(
     provider.__dict__["_docker_client"] = _FakeDockerClient(docker.errors.APIError("boom"))
     with pytest.raises(docker.errors.APIError):
         provider.discover_hosts(cg=temp_mngr_ctx.concurrency_group)
-
-
-# =========================================================================
-# Connection-Error Fallback State (running container, dead inner sshd)
-# =========================================================================
-
-
-class _FakeContainer:
-    """Minimal stand-in for a docker container with a settable status."""
-
-    def __init__(self, status: str) -> None:
-        self.status = status
-
-    def reload(self) -> None:
-        """No-op: the fake container's status does not change on reload."""
-
-
-class _ContainersReturning:
-    """Stand-in for ``client.containers`` whose ``list`` returns fixed containers."""
-
-    def __init__(self, containers: list[_FakeContainer]) -> None:
-        self._containers = containers
-
-    def list(self, **kwargs: object) -> list[_FakeContainer]:
-        return list(self._containers)
-
-
-class _FakeDockerClientReturningContainers:
-    """Already-constructed docker client whose container listing returns fixed containers.
-
-    Lets tests exercise the daemon-backed container-status check without a real
-    daemon (the daemon is ground truth for container lifecycle and is reachable
-    without inner SSH).
-    """
-
-    def __init__(self, containers: list[_FakeContainer]) -> None:
-        self.containers = _ContainersReturning(containers)
-
-
-def _docker_provider_with_containers(
-    temp_mngr_ctx: MngrContext, containers: list[_FakeContainer]
-) -> DockerProviderInstance:
-    provider = make_docker_provider(temp_mngr_ctx)
-    provider.__dict__["_docker_client"] = _FakeDockerClientReturningContainers(containers)
-    return provider
-
-
-def test_connection_error_fallback_state_running_container_is_unauthenticated(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """A running container whose inner sshd died reports UNAUTHENTICATED, not CRASHED.
-
-    When agent enumeration fails with a connection error but the docker daemon
-    still reports the container as running, the host is up -- we just can't get
-    inside it -- so the fallback must report a non-offline state (mirroring
-    mngr_imbue_cloud). Reporting CRASHED here makes minds' recovery flow skip
-    the stop step of a host restart and then fail to start the live container.
-    """
-    provider = _docker_provider_with_containers(temp_mngr_ctx, [_FakeContainer("running")])
-    assert provider.get_connection_error_fallback_state(HostId(HOST_ID_A)) == HostState.UNAUTHENTICATED
-
-
-def test_connection_error_fallback_state_stopped_container_returns_none(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """A genuinely stopped container yields None so the default offline-state derivation stands."""
-    provider = _docker_provider_with_containers(temp_mngr_ctx, [_FakeContainer("exited")])
-    assert provider.get_connection_error_fallback_state(HostId(HOST_ID_A)) is None
-
-
-def test_connection_error_fallback_state_no_container_returns_none(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """With no container for the host, None is returned so the default derivation stands."""
-    provider = _docker_provider_with_containers(temp_mngr_ctx, [])
-    assert provider.get_connection_error_fallback_state(HostId(HOST_ID_A)) is None
 
 
 # =========================================================================

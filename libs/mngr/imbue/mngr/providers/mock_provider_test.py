@@ -18,7 +18,6 @@ from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
-from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
@@ -49,7 +48,6 @@ class MockProviderInstance(BaseProviderInstance):
     deleted_volumes: list[VolumeId] = Field(default_factory=list)
     connection_errors_cleared: list[HostId] = Field(default_factory=list)
     gc_provider_resources_dry_runs: list[bool] = Field(default_factory=list)
-    mock_connection_error_fallback_state: HostState | None = Field(default=None)
 
     @property
     def supports_snapshots(self) -> bool:
@@ -117,9 +115,6 @@ class MockProviderInstance(BaseProviderInstance):
 
     def on_connection_error(self, host_id: HostId) -> None:
         self.connection_errors_cleared.append(host_id)
-
-    def get_connection_error_fallback_state(self, host_id: HostId) -> HostState | None:
-        return self.mock_connection_error_fallback_state
 
     def to_offline_host(self, host_id: HostId) -> OfflineHost:
         offline = self.mock_offline_hosts.get(str(host_id))
