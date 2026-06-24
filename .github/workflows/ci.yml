@@ -467,3 +467,28 @@ jobs:
         # `@pytest.mark.timeout(900)`, so the suite budget cannot kill
         # the pytest run before the per-test marker fires.
         run: xvfb-run -a env PYTEST_MAX_DURATION_SECONDS=900 uv run pytest -n 0 --timeout 900 --no-cov --cov-fail-under=0 -v --tb=short -m 'minds_electron and not release'
+
+      # DIAGNOSTIC (temporary): the local `latchkey gateway` never binds its
+      # port on this headless runner, so the detached `mngr latchkey forward`
+      # exits before stamping it and discovery produces no snapshot. The job
+      # doesn't capture the gateway's own stderr (unlike minds-launch-to-msg),
+      # so dump every latchkey log/record the e2e test left under its pytest
+      # tmp tree to surface the real gateway-startup error. Remove once the
+      # root cause is fixed.
+      - name: Dump latchkey logs (diagnostic)
+        if: always()
+        run: |
+          found=0
+          while IFS= read -r f; do
+            found=1
+            echo ""
+            echo "================================================================"
+            echo "FILE: $f"
+            echo "================================================================"
+            cat "$f" || echo "(could not read $f)"
+          done < <(find /tmp/pytest-of-runner -path '*latchkey*' -type f \
+            \( -name '*.log' -o -name '*.json' -o -name '*.jsonl' \) 2>/dev/null)
+          if [ "$found" -eq 0 ]; then
+            echo "No latchkey log files found under /tmp/pytest-of-runner; listing any latchkey paths:"
+            find /tmp/pytest-of-runner -path '*latchkey*' 2>/dev/null || true
+          fi

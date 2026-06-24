@@ -1,0 +1,3 @@
+Investigating the `test-docker-electron` CI failure introduced by the minds discovery-health watchdog (#2252): the local `latchkey gateway` never binds its port on the headless runner, so the detached `mngr latchkey forward` exits before stamping it, discovery produces no snapshot, and the new watchdog escalates to a fatal app-global BLOCKED takeover that closes the Electron page mid-test.
+
+Added a temporary diagnostic step to the `test-docker-electron` job that dumps the latchkey forward/gateway logs left under the e2e test's pytest tmp tree, so the gateway's real startup error is visible in the job log. To be removed once the root cause is fixed.
