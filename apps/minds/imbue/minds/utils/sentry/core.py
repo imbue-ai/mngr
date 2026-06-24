@@ -1,6 +1,7 @@
 import functools
 import gzip
 import os
+from contextvars import ContextVar
 import re
 import sys
 import threading
@@ -21,6 +22,7 @@ from typing import MutableMapping
 from typing import TypedDict
 from typing import cast
 
+import loguru
 import sentry_sdk
 import sentry_sdk.utils
 import traceback_with_variables
@@ -455,6 +457,25 @@ def get_traceback_with_vars(exception: BaseException | None = None) -> str:
 BaseBeforeSendType = Callable[[Event, Hint], Event | None]
 
 
+# Loguru ``extra`` key marking a log record that must NOT be turned into a Sentry event.
+# We set it when logging failures that happen *inside* Sentry event processing (e.g. the
+# before_send hook): the record still reaches the local app-log sinks, but the SentryEventHandler
+# skips it. Otherwise logging the failure would re-enter the same event pipeline and recurse.
+_SKIP_SENTRY_EVENT_EXTRA_KEY = "skip_sentry_event"
+
+
+def _should_record_sentry_event(record: "loguru.Record") -> bool:
+    """Loguru filter for the SentryEventHandler: drop records explicitly marked to skip Sentry."""
+    return not record["extra"].get(_SKIP_SENTRY_EVENT_EXTRA_KEY, False)
+
+
+# Reentrancy guard for the before_send failure path. ``log_error_inside_sentry`` captures a minimal
+# event, which re-runs the whole before_send chain. If a before_send callback fails deterministically,
+# reporting that failure would itself fail and recurse forever. While the flag is set we still log the
+# failure locally and re-raise (so Sentry drops the event), but we skip the second Sentry report.
+_IS_REPORTING_BEFORE_SEND_FAILURE: ContextVar[bool] = ContextVar("is_reporting_before_send_failure", default=False)
+
+
 # NOTE: if the actual event (without attachments) being too large is a problem, then it will be handled
 #       in our custom logic in ImbueSentryHttpTransport above.
 def _before_send_wrapper(
@@ -471,16 +492,26 @@ def _before_send_wrapper(
             result = maybe_event
         return result
     except Exception as e:
-        # It is critical that we catch errors here and print them, because this is called from sentry
-        # Failing to do so means that we will see NOTHING about the failure!
-        # See this PR for more: https://gitlab.com/generally-intelligent/generally_intelligent/-/merge_requests/5789
+        # It is critical that we catch errors here, because this runs inside Sentry's before_send hook.
+        # Failing to report the failure means we would see NOTHING about it.
+        # See this PR for the original motivation: https://gitlab.com/generally-intelligent/generally_intelligent/-/merge_requests/5789
         #
-        # Questions to the above:
-        # - why are we not relying on the Sentry's logger for this?
-        # - won't the call to `logger.exception` itself try to send something to Sentry causing recursion?
-        # - the following message will likely hit an error inside Loguru handler because it is not allowed
-        #   to call emit from inside emit (that's what we're in here).
-        logger.opt(exception=e).error("Failure when processing event in before_send hook: {}", e)
+        # We deliberately split reporting into two recursion-safe legs:
+        #   1. Record it in the local app log. We bind ``_SKIP_SENTRY_EVENT_EXTRA_KEY`` so this loguru line
+        #      reaches the file sinks but the SentryEventHandler filters it out (see
+        #      ``_should_record_sentry_event``); otherwise emitting it would re-enter this same hook.
+        #   2. Report it to Sentry via ``log_error_inside_sentry``, which builds a minimal event on a
+        #      cleared scope (no breadcrumbs/attachments) and captures it directly, so it cannot carry over
+        #      whatever made the original event fail.
+        logger.bind(**{_SKIP_SENTRY_EVENT_EXTRA_KEY: True}).opt(exception=e).error(
+            "Failure when processing event in before_send hook: {}", e
+        )
+        if not _IS_REPORTING_BEFORE_SEND_FAILURE.get():
+            token = _IS_REPORTING_BEFORE_SEND_FAILURE.set(True)
+            try:
+                log_error_inside_sentry(e, "Failure when processing event in before_send hook")
+            finally:
+                _IS_REPORTING_BEFORE_SEND_FAILURE.reset(token)
         # NOTE: this re-raise will get suppressed by Sentry and treated as if `before_send` returned `None`
         raise
 
@@ -596,6 +627,9 @@ def setup_sentry(
         level=min_sentry_level,
         diagnose=False,
         format=SENTRY_LOG_FORMAT,
+        # records explicitly marked via ``_SKIP_SENTRY_EVENT_EXTRA_KEY`` (e.g. failures logged from
+        # inside before_send) must reach the file sinks but never become Sentry events themselves.
+        filter=_should_record_sentry_event,
     )
     # capture lower level loguru messages to add as breadcrumbs on events
     # the extra info is not helpful here and makes the breadcrumbs larger; they're still available in the log file attachment
