@@ -5,6 +5,7 @@ const fs = require('fs');
 const paths = require('./paths');
 const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
+const { decideStartupRoute } = require('./startup-routing');
 
 // Only init the auto-updater in packaged builds: in dev, electron.autoUpdater
 // is undefined on macOS, so todesktop's constructor throws.
@@ -2536,23 +2537,32 @@ async function startBackendWithRetry() {
         initialBundle.chromeView.webContents.loadURL(backendBaseUrl + '/_chrome');
       }
 
-      if (!authenticated) {
-        // The one-time code was already consumed above but fetchInitialChromeState
-        // still returned unauthenticated (should not happen, but handle gracefully).
+      // Decide the cold-start landing screen. The precedence (welcome > create
+      // > restore) lives in the pure ``decideStartupRoute`` helper so it can be
+      // unit-tested (startup-routing.test.js). Key subtlety: a "functionally
+      // empty" app -- signed out of every account AND no workspaces -- routes
+      // to /welcome even when stale window-state lingers, so a leftover home
+      // (`/`) window can't silently suppress onboarding for a signed-out user.
+      const startupRoute = decideStartupRoute({
+        authenticated,
+        hasAccounts: !!(chromeState && chromeState.hasAccounts),
+        workspaceCount: workspaceList.length,
+        restorableCount: restorable.length,
+      });
+
+      const loadInitialContent = (relativePath) => {
         if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
-          initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/welcome');
+          initialBundle.contentView.webContents.loadURL(backendBaseUrl + relativePath);
         }
-      } else if (!chromeState.hasAccounts && restorable.length === 0) {
-        // Locally authenticated but user has never signed in with SuperTokens
-        // and has no saved windows -- show the welcome/onboarding page.
-        if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
-          initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/welcome');
-        }
-      } else if (restorable.length === 0) {
-        // Has accounts but nothing to restore -- land on the create page.
-        if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
-          initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/');
-        }
+      };
+
+      if (startupRoute === 'welcome') {
+        // Either unauthenticated (one-time code somehow not consumed -- handled
+        // gracefully) or functionally empty (signed out + no workspaces).
+        loadInitialContent('/welcome');
+      } else if (startupRoute === 'create') {
+        // Has accounts (or workspaces) but nothing to restore -- land on home.
+        loadInitialContent('/');
       } else {
         // Restore saved windows with their positions and sizes. Each window's
         // titlebar accent is re-derived from its restored content URL by

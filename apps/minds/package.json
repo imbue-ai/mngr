@@ -15,6 +15,7 @@
     "dist": "pnpm build && pnpm exec todesktop build",
     "todesktop:beforeInstall": "./scripts/download-binaries.js",
     "postinstall": "pnpm run build:css",
+    "test:unit": "node --test test/unit/*.test.js",
     "test:e2e": "playwright test --config=test/e2e/playwright.config.js"
   },
   "dependencies": {
