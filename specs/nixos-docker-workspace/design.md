@@ -13,123 +13,83 @@ The existing Docker workspace path is built from forever-claude-template's root 
 - package installation assumes `apt` and `dpkg`
 - system libraries are available through conventional FHS paths such as `/usr/lib` and `/lib64`
 - OpenSSH, SFTP, supervisor, Playwright, Node, uv, Claude Code, and Python packages are installed through a mix of system packages, shell scripts, language package managers, and downloaded installers
-- the Docker provider expects to boot a container, connect over SSH, copy workspace state with SFTP, and start the workspace services
+- the Docker provider boots a container, connects over SSH, copies workspace state with SFTP, and starts the workspace services
 
-For the Docker/NixOS path, the goal is not only to make the workspace start. The deeper goal is to move the workspace toward a more declarative and auditable runtime that can support confidential computing.
-
-Confidential computing changes the priority order. Compatibility still matters, but the environment must also become easier to measure, rebuild, reason about, and eventually attest before secrets are released to a workspace.
+The Docker/NixOS path preserves parity with the existing Debian-based workspace while moving the system toolchain toward a more declarative and auditable runtime. The goal is to make builds easier to reproduce, inspect, and reason about, creating a foundation that can later evolve into confidential-computing-capable workspace builds.
 
 ## Strategies Considered
 
 ### Strategy 1: Debian Base with Nix-Managed Tools
 
-This strategy keeps the existing Debian container as the operating system shape and installs the workspace toolchain through Nix where practical.
+This strategy keeps the existing Debian image and uses Nix to install or pin selected tools.
 
-In this model, Debian remains the compatibility layer:
+What it buys us:
 
-- `/usr/bin`, `/usr/lib`, `/lib`, `/lib64`, `apt`, and `dpkg` continue to exist
-- third-party binaries such as Claude Code and Playwright keep running in a familiar Linux userspace
-- the Docker provider SSH/SFTP assumptions remain close to the current implementation
-- Nix is used primarily to pin tools and reduce package drift
+- lowest migration risk
+- fewer changes to the Docker provider, SSH/SFTP setup, Playwright, Claude Code, and existing install scripts
+- some reduction in tool drift by pinning more of the toolchain through Nix
 
-This is the lowest-risk migration path. It would likely reduce the amount of compatibility work needed for the existing workspace.
+Why not choose it:
 
-The downside is that it preserves the old OS contract. Debian remains the foundation, and Nix becomes an additional package-management layer rather than the source of truth for the workspace environment. That makes this strategy less compelling for confidential computing because the final environment still includes a broad mutable distro base with non-Nix provisioning assumptions.
-
-This strategy is useful as a fallback or transitional experiment, but it is not the desired end state.
+- Debian remains the real base system
+- Nix becomes an extra package source rather than the source of truth
+- the final runtime still depends on broad Debian behavior and imperative setup
 
 ### Strategy 2: NixOS/Nix-Built Image with Explicit Compatibility Layer
 
-This strategy builds the workspace image from a NixOS or Nix-first base and declares the system toolchain through Nix. Compatibility with FHS-expecting software is added intentionally, only where required.
+This strategy builds the workspace image from a Nix-first base and declares the system toolchain through Nix. Compatibility with normal Linux paths and services is added only where the workspace needs it.
 
-In this model, the image is Nix-shaped first:
+What it buys us:
 
-- system packages come from a pinned Nix package set
-- workspace tools are declared rather than installed through ambient distro state
-- Debian-specific behavior is treated as compatibility surface, not as the foundation
-- FHS paths, dynamic linker paths, shared library paths, OpenSSH layout, SFTP layout, certificate paths, and fontconfig paths are provided deliberately where the workspace or third-party binaries require them
+- a real Nix-built system package layer pinned by `flake.lock`
+- clearer visibility into which Linux compatibility paths the workspace actually needs
+- a runtime that is easier to rebuild, inspect, and test than the Debian path
+- a practical migration path that keeps existing workspace behavior working
 
 This is the selected route for the Docker/NixOS workspace path.
 
-The main cost is that existing assumptions become visible. Tools such as Playwright/Chromium, Claude Code, OpenSSH, npm globals, uv-installed tools, and native Python dependencies expect normal Linux distribution paths. The Docker provider also expects SSH and SFTP behavior that a minimal Nix image does not provide automatically. Those assumptions must either be removed, wrapped, or made explicit in the image.
+What it costs:
 
-The benefit is that each compatibility bridge becomes part of the documented workspace contract. That is the right tradeoff for a future confidential sandbox: the environment becomes more declarative and easier to inspect, even if the first implementation requires more plumbing than the Debian path.
+- some Debian assumptions have to be recreated explicitly
+- Playwright/Chromium, Claude Code, OpenSSH, npm globals, uv tools, native Python packages, SSH, and SFTP all need compatibility checks
+- the first version has more setup plumbing than the Debian image
 
 ### Strategy 3: Fully Nix-Native Workspace with No FHS Compatibility Surface
 
-This strategy goes further than Strategy 2. The workspace would be packaged as fully Nix-native software, and third-party tools would either be packaged through Nix or replaced with Nix-compatible equivalents. The image would avoid Debian and avoid broad FHS compatibility.
+This strategy packages the workspace as fully Nix-native software and avoids broad compatibility shims.
 
-In this model:
+What it buys us:
 
-- workspace services are packaged as Nix derivations
-- Python, Node, browser, and CLI dependencies are built or wrapped by Nix
-- mutable installation scripts are removed from the boot path
-- downloaded binary installers are avoided or replaced with pinned derivations
-- the runtime image contains only the closure needed to run the workspace
+- the cleanest long-term runtime
+- fewer mutable install steps
+- a smaller and more auditable dependency closure
+- the strongest eventual fit for reproducible and attestable workspace builds
 
-This is the cleanest long-term model for auditability and minimization.
+Why not choose it now:
 
-It is not the right first implementation. The current workspace depends on external installers, subscription-authenticated tools, browser automation, npm/PyPI tools, and provider SSH/SFTP behavior. Forcing all of that to become fully Nix-native in one step would turn the prototype into a broad packaging migration and delay learning whether the NixOS workspace path is viable.
-
-This strategy remains a future direction. Strategy 2 should be designed so that compatibility shims can shrink over time as more of the workspace becomes Nix-native.
+- the current workspace still depends on external installers, authenticated tools, browser automation, npm/PyPI packages, and Docker provider SSH/SFTP behavior
+- solving all of that in one step would turn this work into a much larger packaging migration
+- it would delay proving whether the Docker/NixOS workspace path works end to end
 
 ## Decision
 
-Use Strategy 2: a NixOS/Nix-built Docker workspace image with an explicit compatibility layer.
+Use Strategy 2: a NixOS/Nix-built Docker workspace image with a small, explicit compatibility layer.
 
-This gives Minds a real NixOS/Nix-built path instead of a Debian image with Nix bolted on, while avoiding an all-at-once rewrite of the workspace packaging model.
+This gives Minds a real Nix-built workspace path while keeping the existing Docker workspace contract working. It avoids two weaker extremes: leaving Debian as the real base system, or forcing every tool and service to become fully Nix-native before we can validate the path.
 
 ## Why This Choice
 
-### Confidential Computing Needs a Clear Runtime Artifact
+This path gives us the most useful next step:
 
-A confidential computing sandbox eventually needs an environment that can be measured and attested. The useful question is not only "did the container start?" but "what exact software stack is running before secrets are released?"
+- the workspace still boots through the same Docker provider flow
+- system packages come from a pinned Nix package set
+- compatibility needs are visible instead of hidden inside the Debian base image
+- each compatibility bridge can be covered by an image or provider contract test
+- the result is easier to rebuild, inspect, and eventually measure for confidential-computing flows
 
-A NixOS/Nix-built image is a better fit for that question than a Debian image provisioned by shell scripts. It gives us a path toward a smaller, more declarative, and more reproducible runtime artifact.
+The main tradeoff is that some Linux distribution behavior has to be recreated deliberately. OpenSSH, SFTP, certificates, dynamic linker paths, shared libraries, fontconfig, Playwright, npm globals, uv tools, and native Python dependencies all expect normal Linux paths. Making those expectations explicit is extra work, but it turns them into a documented contract instead of ambient behavior.
 
-### The Existing Debian Contract Is Too Implicit
-
-The Debian image works partly because many assumptions are provided by the base distribution:
-
-- shared libraries are discoverable in conventional places
-- dynamic linker paths exist
-- OpenSSH service layout is conventional
-- system package names match script expectations
-- browser dependencies can be installed through apt
-
-Those assumptions are convenient, but they are not explicit. Moving to NixOS forces us to name them. That is uncomfortable during the first implementation, but useful for hardening.
-
-### Compatibility Shims Become Contract Tests
-
-The compatibility work should not live as unexplained Dockerfile trivia. Each shim should correspond to a workspace requirement:
-
-- Docker provider can authenticate over SSH
-- Docker provider can use SFTP
-- workspace services start under supervisor
-- Python imports needed by the workspace resolve
-- Playwright/Chromium can launch and render text-heavy pages
-- HTTPS, git, uv, Node, Claude Code, mngr, latchkey, modal, and supporting tools are available
-- the first-boot seed path can move the baked workspace onto the Docker volume
-
-The image contract and provider boot tests give us a place to encode those requirements. That makes the Docker/NixOS path safer to iterate on.
-
-### Debian Plus Nix Is a Compatibility Shortcut, Not the Desired Sandbox Model
-
-Debian plus Nix would probably be easier to ship quickly. It may still be useful if the NixOS path hits a blocking issue.
-
-However, it does not give the same benefits for a confidential sandbox. The runtime would still be fundamentally Debian-shaped, with Nix acting as a package source for some tools. That weakens the audit and attestation story because the full workspace behavior still depends on a broad general-purpose distribution and imperative provisioning scripts.
-
-### Fully Nix-Native Is Too Large for the First Step
-
-The fully Nix-native model is attractive, but it would require solving too many problems at once:
-
-- packaging or replacing all downloaded binary installers
-- moving workspace service setup out of shell scripts
-- making browser automation Nix-native
-- reworking provider assumptions around SSH/SFTP and service management
-- changing how local development syncs forever-claude-template and vendored mngr checkout
-
-Strategy 2 lets us keep learning while preserving a path toward Strategy 3.
+Strategy 2 keeps the migration practical now and still leaves room to shrink the compatibility layer over time.
 
 ## Current Implementation
 
@@ -157,8 +117,15 @@ Current state:
 
 - **Base image:** digest-pinned. `nix/Dockerfile` uses `nixos/nix:2.34.7@sha256:bf1d938835ab96312f098fa6c2e9cab367728e0aad0646ee3e02a787c80d8fb8`, so the build resolves the same multi-platform image index instead of trusting tag movement.
 - **Nix packages:** declared and lock-pinned. `flake.nix` defines the FCT workspace environment from stable `nixos-26.05`, and `flake.lock` pins the exact `nixpkgs` revision used to resolve packages such as OpenSSH, Python, Node 24, Git, supervisor, and browser runtime libraries.
-- **Nix closure manifest:** checked in and build-verified for generated platforms. The Dockerfile builds the Nix profile, writes `/etc/fct-workspace/nix-closure.txt`, and the `fct-nix-profile` stage diffs it against `nix/fct-workspace-closure.<system>.txt` from the source tree. The currently checked-in manifest covers `aarch64-linux`.
-- **Manifest regeneration:** explicit. `scripts/generate_nix_closure_manifest.sh` builds the `fct-nix-profile-generate` target and copies `/etc/fct-workspace/nix-closure.txt` back into `nix/fct-workspace-closure.<system>.txt` for intentional updates.
+- **Nix closure manifest:** checked in and build-verified for generated platforms. The Dockerfile builds the Nix profile, writes `/etc/fct-workspace/nix-closure.txt`, and the `fct-nix-profile` stage diffs it against `nix/fct-workspace-closure.<system>.txt` from the source tree. The currently checked-in manifest covers `aarch64-linux`; `x86_64-linux` should be added from a real x86 builder before x86 is treated as supported by the safe build path.
+- **Manifest regeneration:** explicit. `scripts/generate_nix_closure_manifest.sh` builds the `fct-nix-profile-generate` target and copies `/etc/fct-workspace/nix-closure.txt` back into `nix/fct-workspace-closure.<system>.txt` for intentional updates:
+
+  ```bash
+  cd .external_worktrees/forever-claude-template
+  scripts/generate_nix_closure_manifest.sh
+  ```
+
+  On a native x86 builder, the same command writes `nix/fct-workspace-closure.x86_64-linux.txt`. Use `FCT_DOCKER_PLATFORM=linux/amd64` only when the builder needs an explicit Docker platform override.
 - **Claude Code:** version-pinned, but not hash-pinned. The image downloads `https://claude.ai/install.sh` and runs it for `CLAUDE_CODE_VERSION`, so the build still trusts the remote installer and artifact at build time.
 - **uv:** version-pinned, but not hash-pinned. The image downloads the uv installer for `UV_VERSION`, but does not verify the installer or release artifact hash.
 - **npm and PyPI tools:** version-pinned, but registry-dependent. `latchkey` and `modal` versions are specified, but install still depends on registry resolution unless backed by lockfiles, hashes, or an internal artifact mirror.
@@ -178,7 +145,7 @@ workspace code:    copied from build context
 
 This is useful because a large part of the system package surface now resolves through a deterministic Nix input and is compared against a reviewed closure manifest. The remaining non-reproducible pieces are explicit trust boundaries.
 
-The x86_64-linux manifest is intentionally not checked in yet. The earlier attempt to generate it on Docker Desktop amd64 emulation failed with `unable to load seccomp BPF program: Invalid argument`. Treat x86_64-linux as unsupported by the safe build path until a manifest is generated from a suitable x86 builder and reviewed.
+Only `aarch64-linux` has been checked in so far. The attempted Docker Desktop amd64-emulated generation failed in the Nix build sandbox, so `x86_64-linux` remains unsupported until generated and reviewed from a suitable x86 builder.
 
 ## Safe Build Gate
 
@@ -205,6 +172,68 @@ The recipe performs two checks:
 5. Runs the heavyweight Docker/NixOS image contract test against the full workspace image with `FCT_DOCKER_IMAGE_CONTRACT=1`, `FCT_DOCKERFILE=nix/Dockerfile`, and `FCT_DOCKER_IMAGE_TAG` set to the recipe's `tag` argument.
 
 This is deliberately separate from normal `just minds-build`. The normal Minds build packages application code and FCT state for runtime workspace creation; it does not build and contract-test the FCT Docker/NixOS image. `just minds-build-fct-nixos` is the explicit safe-build gate for the Docker/NixOS path: it proves the closure manifest still matches and that the resulting image still satisfies the runtime contract.
+
+## Maintainer Workflow
+
+Common maintenance tasks should keep dependency changes explicit and reviewable.
+
+### Verify the Current Image
+
+Use the safe-build gate when changing the Docker/NixOS image, Nix package set, compatibility shims, or workspace boot contract:
+
+```bash
+just minds-build-fct-nixos
+```
+
+This verifies the checked-in closure manifest and runs the heavyweight image contract test. It should pass before merging Docker/NixOS image changes.
+
+### Update Nix-Managed System Packages
+
+Use this process when changing `flake.lock` or `nix/fct-workspace-env.nix`:
+
+1. Make the intended Nix package change in the FCT worktree.
+2. Regenerate the closure manifest:
+
+   ```bash
+   cd .external_worktrees/forever-claude-template
+   scripts/generate_nix_closure_manifest.sh
+   ```
+
+3. Review the `nix/fct-workspace-closure.<system>.txt` diff. The new or removed store paths should match the intended package change.
+4. Run the safe-build gate from the mngr repo:
+
+   ```bash
+   just minds-build-fct-nixos
+   ```
+
+5. Commit the package change, lockfile change, and manifest update together.
+
+### Add x86 Closure Support
+
+Generate `nix/fct-workspace-closure.x86_64-linux.txt` on a suitable x86 builder:
+
+```bash
+cd .external_worktrees/forever-claude-template
+scripts/generate_nix_closure_manifest.sh
+```
+
+Use `FCT_DOCKER_PLATFORM=linux/amd64` only when the builder needs an explicit Docker platform override. After generating the manifest, review it and run `just minds-build-fct-nixos` on x86 before treating x86 as supported.
+
+### Update Non-Nix Tool Versions
+
+Tools such as Claude Code, uv, latchkey, modal, npm packages, and PyPI packages are currently version-pinned but still depend on live installers or registries. When updating them:
+
+1. Change the pinned version in the relevant setup file.
+2. Run `just minds-build-fct-nixos`.
+3. Review any changed lockfiles, generated assets, or contract-test behavior.
+4. Treat the live installer or registry as an explicit trust boundary until that dependency is moved to a fixed-hash or mirrored source.
+
+### Debug a Closure Mismatch
+
+If `just minds-build-fct-nixos` fails during closure verification, do not update the manifest automatically. First decide whether the closure changed for an expected reason:
+
+- if the change is intentional, regenerate the manifest, review the diff, and commit it with the dependency change
+- if the change is unexpected, inspect `flake.lock`, `nix/fct-workspace-env.nix`, and any Dockerfile/setup-script changes before accepting it
 
 ## Design Principles
 
@@ -233,18 +262,22 @@ These are acceptable costs because they expose the true workspace contract.
 
 ## Future Direction
 
-The path toward stronger reproducibility is:
+Near-term work should keep the current safe-build path honest:
 
-1. Keep stable `nixpkgs` pinned through `flake.lock` and update it intentionally.
-2. Keep checked-in Nix closure manifests in sync with intentional `flake.lock` or package-list changes, and fail builds when the closure changes unexpectedly.
-3. Generate and check in closure manifests for each supported Linux architecture before treating that architecture as part of the safe build path.
-4. Replace curl installers with Nix derivations or fixed-hash downloads.
-5. Replace live npm/PyPI installs with lockfile-backed, hash-backed, or internally mirrored installs where practical.
-6. Produce a manifest or SBOM for the final image.
-7. Sign the built image.
-8. Require the signed image digest or expected measurement in the confidential sandbox attestation policy.
+1. Update `flake.lock` intentionally, not as a side effect of normal builds.
+2. Regenerate closure manifests only when `flake.lock` or `nix/fct-workspace-env.nix` changes intentionally, then review and commit the diff.
+3. Generate and check in `nix/fct-workspace-closure.x86_64-linux.txt` from a suitable x86 builder before treating x86 as supported.
+4. Keep `just minds-build-fct-nixos` as a verification gate, not a manifest generator.
 
-For external dependencies such as Claude Code, the ideal long-term state is a Nix package or fixed-output derivation for the exact approved artifact. If the build continues to use a live installer, the image can still be compatible, but it should not be treated as strongly reproducible.
+Hardening work can then reduce the remaining live dependencies:
+
+1. Replace curl-based installers with Nix derivations or fixed-hash downloads where practical.
+2. Move npm and PyPI installs toward lockfile-backed, hash-backed, or internally mirrored installs.
+3. Produce an SBOM or image manifest for the final workspace image.
+4. Sign the built image.
+5. Use the signed image digest or expected runtime measurement in the confidential sandbox attestation policy.
+
+For external tools such as Claude Code, the strongest end state is an approved artifact represented as a Nix package or fixed-output derivation. Until then, the image can be compatible and useful, but live installers remain explicit trust boundaries.
 
 ## Not Decided Here
 
