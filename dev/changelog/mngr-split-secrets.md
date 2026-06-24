@@ -1,0 +1,1 @@
+`scripts/push_vault_from_file.py` now writes each declared key as its own single-`value` leaf at `secrets/minds/<tier>/<service>/<KEY>` (the new "split" Vault secret layout) instead of a single flat KV entry with many fields.
