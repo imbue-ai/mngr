@@ -10,7 +10,6 @@ from collections import defaultdict
 from collections.abc import Callable
 from collections.abc import Collection
 from collections.abc import Hashable
-from contextvars import ContextVar
 from enum import StrEnum
 from functools import cache
 from functools import partial
@@ -469,13 +468,6 @@ def _should_record_sentry_event(record: "loguru.Record") -> bool:
     return not record["extra"].get(_SKIP_SENTRY_EVENT_EXTRA_KEY, False)
 
 
-# Reentrancy guard for the before_send failure path. ``log_error_inside_sentry`` captures a minimal
-# event, which re-runs the whole before_send chain. If a before_send callback fails deterministically,
-# reporting that failure would itself fail and recurse forever. While the flag is set we still log the
-# failure locally and re-raise (so Sentry drops the event), but we skip the second Sentry report.
-_IS_REPORTING_BEFORE_SEND_FAILURE: ContextVar[bool] = ContextVar("is_reporting_before_send_failure", default=False)
-
-
 # NOTE: if the actual event (without attachments) being too large is a problem, then it will be handled
 #       in our custom logic in ImbueSentryHttpTransport above.
 def _before_send_wrapper(
@@ -501,17 +493,13 @@ def _before_send_wrapper(
         #      reaches the file sinks but the SentryEventHandler filters it out (see
         #      ``_should_record_sentry_event``); otherwise emitting it would re-enter this same hook.
         #   2. Report it to Sentry via ``log_error_inside_sentry``, which builds a minimal event on a
-        #      cleared scope (no breadcrumbs/attachments) and captures it directly, so it cannot carry over
-        #      whatever made the original event fail.
+        #      cleared scope (no breadcrumbs/attachments) and captures it directly. That helper is
+        #      non-reentrant, so even though reporting re-runs this same before_send chain, a deterministic
+        #      before_send failure cannot recurse: the nested report is dropped.
         logger.bind(**{_SKIP_SENTRY_EVENT_EXTRA_KEY: True}).opt(exception=e).error(
             "Failure when processing event in before_send hook: {}", e
         )
-        if not _IS_REPORTING_BEFORE_SEND_FAILURE.get():
-            token = _IS_REPORTING_BEFORE_SEND_FAILURE.set(True)
-            try:
-                log_error_inside_sentry(e, "Failure when processing event in before_send hook")
-            finally:
-                _IS_REPORTING_BEFORE_SEND_FAILURE.reset(token)
+        log_error_inside_sentry(e, "Failure when processing event in before_send hook")
         # NOTE: this re-raise will get suppressed by Sentry and treated as if `before_send` returned `None`
         raise
 

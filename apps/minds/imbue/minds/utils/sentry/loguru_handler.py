@@ -15,6 +15,7 @@ import logging
 from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import wait
+from contextvars import ContextVar
 from datetime import datetime
 from datetime import timezone
 from fnmatch import fnmatch
@@ -323,6 +324,14 @@ class SentryBreadcrumbHandler(_BaseHandler):
         }
 
 
+# Reentrancy guard. Reporting goes through ``client.capture_event``, which re-runs the whole
+# before_send chain on the watchdog event. If the failure being reported originates in before_send
+# itself, that chain fails again and calls back into this function, recursing until the stack is
+# exhausted. While a report is in flight we drop nested calls so the loop is broken after a single
+# attempt (the nested before_send still fails and Sentry drops that event, but it does so once).
+_IS_REPORTING_INSIDE_SENTRY: ContextVar[bool] = ContextVar("is_reporting_inside_sentry", default=False)
+
+
 def log_error_inside_sentry(
     exception: Exception,
     message: str,
@@ -333,7 +342,25 @@ def log_error_inside_sentry(
 
     This needs to be done very carefully to ensure it won't fail - we don't want to have to have a fallback-fallback handler.
     The caller should ensure everything passed into this is small so there's no chance of size issues.
+
+    This is non-reentrant: if the act of reporting re-enters this function (because reporting re-runs
+    before_send and that is what failed), the nested call is dropped to avoid unbounded recursion.
     """
+    if _IS_REPORTING_INSIDE_SENTRY.get():
+        return
+    token = _IS_REPORTING_INSIDE_SENTRY.set(True)
+    try:
+        _capture_error_inside_sentry(exception, message, extra, additional_s3_uploads)
+    finally:
+        _IS_REPORTING_INSIDE_SENTRY.reset(token)
+
+
+def _capture_error_inside_sentry(
+    exception: Exception,
+    message: str,
+    extra: dict[str, str | int] | None,
+    additional_s3_uploads: Iterable[str] | None,
+) -> None:
     client = sentry_sdk.get_client()
     # we want to get rid of any breadcrumbs, attachments, and other stuff that might have caused the original request to fail.
     # this will obviously make it harder to debug; we may want to selectively add some of this back.
