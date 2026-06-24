@@ -12,6 +12,8 @@ Both repos tag with the **`minds-v<version>`** prefix (e.g. `minds-v0.3.1`), nam
 
 The mngr side releases from **`main`** via **one PR** (the reviewable change). The FCT `vendor/mngr` refresh is **not** a PR: it is a mechanical, reproduction-verified mirror of the mngr SHA, so it lands as a **direct commit pushed to FCT `main`** (no review). The arc: prove the pair green pre-merge (mngr PR branch × the pushed FCT vendor branch), review + merge the mngr PR, tag both `main`s at the verified SHA, then re-prove green against the tags. **Green CI on the tags concludes the release**; clicking *Release* in ToDesktop is an optional follow-up.
 
+Reuse the same mngr SHA / ToDesktop build across release iterations where you can — launch-to-msg reuses it by `commit_sha` and the ToDesktop build is the slow step — but don't force it: cut a fresh SHA whenever an `apps/minds` change actually needs to ship.
+
 ## The mngr PR + the FCT vendor sync
 
 | Repo | Carries | How it lands |
