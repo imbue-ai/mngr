@@ -10,7 +10,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Added: `mngr create --format json` now includes `outer_host_public_key` / `container_host_public_key` when the provider exposes them, so tooling can pin sshd keys for strict host-key checking.
 
-- Added: New `--post-host-create-outer-command` create option (and matching `post_host_create_outer_command` template / settings key) that runs shell on the host's outer VM/daemon after host creation; skipped with a warning where no outer host is exposed.
+- Added: New `--post-host-create-outer-command` create option (and matching `post_host_create_outer_command` template / settings key) that runs shell on the host's outer VM/daemon after host creation; fails fast with `MngrError` when configured for a provider that exposes no outer host.
 
 - Added: New `[tmux]` configuration section for customizing the tmux sessions mngr runs agents in: `tmux.attach_args` (extra client flags such as `["-CC"]` for iTerm2 control mode), `tmux.additional_config_path` (a user-owned tmux config file sourced into every mngr session), and `tmux.primary_window_name` (default `agent`, used to target the primary window by name instead of `:0`).
 
