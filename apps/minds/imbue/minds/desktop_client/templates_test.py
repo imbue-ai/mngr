@@ -432,12 +432,15 @@ def test_resolve_create_host_name_uses_submitted_value() -> None:
 
 
 def test_resolve_create_host_name_generates_coolname_when_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    # No submitted name and no operator override -> a generated 3-word coolname.
+    # No submitted name and no operator override -> a generated coolname slug.
+    # ``coolname.generate_slug(3)`` yields *at least* three words (some dictionary
+    # entries are compound, e.g. ``intelligent-quail-of-purring``), so assert a
+    # lower bound rather than an exact count to keep the test deterministic.
     monkeypatch.delenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", raising=False)
     monkeypatch.delenv("MINDS_WORKSPACE_NAME", raising=False)
     name = str(resolve_create_host_name(""))
     parts = name.split("-")
-    assert len(parts) == 3
+    assert len(parts) >= 3
     assert all(part.isalnum() and part.islower() for part in parts)
 
 
