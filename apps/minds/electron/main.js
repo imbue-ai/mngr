@@ -185,18 +185,6 @@ function toAbsoluteUrl(url) {
   return url;
 }
 
-// Whether ``url`` is the workspace-creation form (``/create``). Used to decide
-// when a window has *left* the create form so its freeform accent preview can
-// be dropped -- see ``hasFreeformAccentPreview`` in ``onContentNavigate``.
-function isCreateFormUrl(url) {
-  if (!url) return false;
-  try {
-    return new URL(url).pathname === '/create';
-  } catch {
-    return false;
-  }
-}
-
 // Classify a URL as "external" -- i.e. something that should open in the
 // user's default browser rather than inside the app. All in-app navigation
 // (the minds backend, the mngr_forward plugin, and every
@@ -605,11 +593,6 @@ function createBundle() {
     // even though they don't count as "displaying" the workspace. NOT persisted:
     // a restored window re-derives it from its saved content URL.
     currentAccentAgentId: null,
-    // The create form paints the titlebar directly (out of band of
-    // ``currentAccentAgentId``) to preview the picked workspace color; this
-    // flags that an override is live so leaving the form repaints the real
-    // accent. See ``preview-freeform-accent`` + ``onContentNavigate``.
-    hasFreeformAccentPreview: false,
     preErrorUrl: null,
     isErrorState: false,
     isLoadingState: true,
@@ -673,20 +656,6 @@ function wireContentViewEvents(bundle, contentView) {
     // on truthiness: the accent tracks the *current* screen, not the last
     // workspace opened in this window.
     updateBundleAccentAgentId(bundle, parseAccentSourceAgentId(url));
-    // Drop the create-form's freeform accent preview once we've navigated off
-    // ``/create`` (by submitting OR abandoning). That preview paints the
-    // titlebar CSS vars directly, out of band of ``currentAccentAgentId``, so
-    // the ``updateBundleAccentAgentId`` above can't clear it on its own: the
-    // abandon case (``/create`` -> a general screen) is null -> null, which its
-    // no-op guard swallows, so no ``accent-changed`` would fire and the preview
-    // would stay stranded on the bar. Force a repaint from the real accent
-    // here (neutral on abandon; the new workspace on submit).
-    if (bundle.hasFreeformAccentPreview && !isCreateFormUrl(url)) {
-      bundle.hasFreeformAccentPreview = false;
-      if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
-        bundle.chromeView.webContents.send('accent-changed', bundle.currentAccentAgentId);
-      }
-    }
     updateOsTitle(bundle);
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
       bundle.chromeView.webContents.send('content-url-changed', url);
@@ -2813,24 +2782,6 @@ ipcMain.on('preview-workspace-accent', (event, agentId, accent) => {
   bundle.chromeView.webContents.send('chrome-event', {
     type: 'workspace_accent_preview',
     agent_id: agentId,
-    accent,
-  });
-});
-
-// Create-form picker freeform preview: no workspace exists yet, so this
-// paints the chrome CSS variables directly. We flag the bundle so that
-// navigating off ``/create`` (submit OR abandon) repaints the bar through
-// the regular accent channel and drops the preview -- see the
-// ``hasFreeformAccentPreview`` handling in ``onContentNavigate``. (Without
-// that, abandoning to a general screen is a null -> null accent transition,
-// which ``updateBundleAccentAgentId`` no-ops, leaving the preview stranded.)
-ipcMain.on('preview-freeform-accent', (event, accent) => {
-  if (typeof accent !== 'string' || !/^#[0-9a-f]{6}$/.test(accent)) return;
-  const bundle = getBundleFromEvent(event);
-  if (!bundle || !bundle.chromeView || bundle.chromeView.webContents.isDestroyed()) return;
-  bundle.hasFreeformAccentPreview = true;
-  bundle.chromeView.webContents.send('chrome-event', {
-    type: 'freeform_accent_preview',
     accent,
   });
 });

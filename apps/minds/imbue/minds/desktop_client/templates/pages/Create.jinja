@@ -132,16 +132,6 @@
       submitBtn.textContent = 'Creating...';
     });
 
-    // The color is auto-chosen (first unused palette entry, carried in the
-    // hidden ``color`` input). Paint it as the chrome accent preview so the
-    // titlebar shows the new workspace's color before it exists. main.js
-    // drops this override when the window leaves ``/create``.
-    var colorInput = document.getElementById('create-color-input');
-    function previewCreateAccent(hex) {
-      if (typeof hex !== 'string') return;
-      window.postMessage({type: 'minds:preview-freeform-accent', accent: hex}, '*');
-    }
-
     function onAccountChange() {
       // Remote compute needs an account; dropping it to "No account" can't
       // stay on the remote preset, so fall back to local.
@@ -227,11 +217,6 @@
     if (initialPreset) markPresetSelected(initialPreset);
     showAdvanced({{ 'true' if start_advanced else 'false' }});
     update();
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', function () { previewCreateAccent(colorInput.value); });
-    } else {
-      previewCreateAccent(colorInput.value);
-    }
   })();
 </script>
 {% endset %}
