@@ -18,7 +18,6 @@ from typing import Any
 from typing import cast
 
 import pytest
-from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.event_envelope import EventId
@@ -27,8 +26,6 @@ from imbue.imbue_common.event_envelope import IsoTimestamp
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.forward_cli import _redact_secrets
-from imbue.minds.desktop_client.notification import NotificationDispatcher
-from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import DiscoveryError
@@ -656,44 +653,18 @@ def test_terminate_is_no_op_when_no_process_attached(consumer: EnvelopeStreamCon
     consumer.terminate()
 
 
-# --- intentional vs unintentional exit notification ---------------------------
+# --- intentional vs unintentional exit reporting ------------------------------
 
 
-class _RecordingNotificationDispatcher(NotificationDispatcher):
-    """Test-only NotificationDispatcher that records dispatch calls instead of dispatching.
-
-    Records into the ``recorded`` list passed at construction time. We cannot
-    use a Pydantic ``PrivateAttr`` because the parent class is a ``FrozenModel``
-    and we want to keep the test fixture self-contained; the list is held via
-    a closure on the subclass-defined ``dispatch`` override below.
-    """
-
-    _recorded: list[tuple[NotificationRequest, str]] = PrivateAttr(default_factory=list)
-
-    def dispatch(
-        self,
-        request: NotificationRequest,
-        agent_display_name: str,
-    ) -> None:
-        self._recorded.append((request, agent_display_name))
-
-    @property
-    def recorded(self) -> list[tuple[NotificationRequest, str]]:
-        return self._recorded
-
-
-def _make_recording_dispatcher() -> _RecordingNotificationDispatcher:
-    return _RecordingNotificationDispatcher(is_electron=False, is_macos=False)
-
-
-def test_intentional_terminate_suppresses_subprocess_died_notification() -> None:
-    """After consumer.terminate(), the lifecycle watcher must not surface the
-    resulting non-zero exit code as a CRITICAL "Forwarding subprocess died"
-    notification -- minds itself asked the subprocess to stop.
+def test_intentional_terminate_does_not_report_exit() -> None:
+    """After consumer.terminate(), the lifecycle watcher must not report the
+    resulting exit to the on_unexpected_exit callbacks -- minds itself asked
+    the subprocess to stop, so the pipeline is not unexpectedly down.
     """
     resolver = MngrCliBackendResolver()
-    dispatcher = _make_recording_dispatcher()
-    consumer = EnvelopeStreamConsumer(resolver=resolver, notification_dispatcher=dispatcher)
+    consumer = EnvelopeStreamConsumer(resolver=resolver)
+    reported: list[int] = []
+    consumer.add_on_unexpected_exit_callback(reported.append)
     fake = _FakeProcess(pid=4242)
     # Simulate SIGTERM -> exit code -15 after terminate() is called.
     fake.returncode = -15
@@ -702,33 +673,30 @@ def test_intentional_terminate_suppresses_subprocess_died_notification() -> None
     consumer.terminate()
     # Drive the lifecycle watcher synchronously; in production this runs on a
     # ConcurrencyGroup thread that calls process.wait().
-    consumer._wait_and_notify_on_exit()
+    consumer._wait_and_report_exit()
 
-    assert dispatcher.recorded == [], (
-        f"Intentional shutdown should not dispatch a notification, got: {dispatcher.recorded!r}"
-    )
+    assert reported == [], f"Intentional shutdown should not report an exit, got: {reported!r}"
 
 
-def test_unintentional_subprocess_crash_dispatches_notification() -> None:
-    """If the subprocess exits non-zero without minds calling terminate(),
-    the lifecycle watcher must still surface a CRITICAL notification so the
-    user knows agent traffic is no longer being forwarded.
+def test_unintentional_subprocess_exit_reports_to_callback() -> None:
+    """If the subprocess exits without minds calling terminate(), the lifecycle
+    watcher reports the exit code once to the on_unexpected_exit callbacks so
+    the watchdog can transition the app-global state to BLOCKED.
     """
     resolver = MngrCliBackendResolver()
-    dispatcher = _make_recording_dispatcher()
-    consumer = EnvelopeStreamConsumer(resolver=resolver, notification_dispatcher=dispatcher)
+    consumer = EnvelopeStreamConsumer(resolver=resolver)
+    reported: list[int] = []
+    consumer.add_on_unexpected_exit_callback(reported.append)
     fake = _FakeProcess(pid=4242)
     # Arbitrary non-zero crash exit code.
     fake.returncode = 17
     _attach_fake(consumer, fake)
 
-    consumer._wait_and_notify_on_exit()
+    consumer._wait_and_report_exit()
+    # A second drain must not re-fire (reported at most once per consumer).
+    consumer._wait_and_report_exit()
 
-    assert len(dispatcher.recorded) == 1
-    request, agent_display_name = dispatcher.recorded[0]
-    assert request.title is not None
-    assert "died" in request.title.lower()
-    assert agent_display_name == "Minds"
+    assert reported == [17]
 
 
 def test_attach_twice_raises(consumer: EnvelopeStreamConsumer) -> None:
