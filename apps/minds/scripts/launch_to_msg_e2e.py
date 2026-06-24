@@ -1265,6 +1265,13 @@ async def amain() -> int:
                     # along and only the LIVE event stream was broken (UI freeze) --
                     # proving a streaming bug, not an agent/backend bug.
                     chat = (await find_chat_window(ctx)) or win
+                    # Client-side SSE ground truth at the moment of freeze (before
+                    # the reload resets it): did live events get received but not
+                    # rendered (dropped), stuck in the in-flight buffer, or never
+                    # received at all (zombie connection)?
+                    with contextlib.suppress(Exception):
+                        sse_diag = await chat.evaluate("JSON.stringify(window.__sseDiag || {})")
+                        logger.error("[diag] window.__sseDiag at freeze: {}", sse_diag)
                     with contextlib.suppress(Exception):
                         full = await chat.evaluate("document.body.innerText")
                         logger.error("[diag] FULL chat body before reload ({} chars):\n{}", len(full), full[:4000])
