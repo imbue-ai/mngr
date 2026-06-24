@@ -1,3 +1,5 @@
 `ModalMode.PROXIED` is now implemented (it previously raised `NotImplementedError`). The modal provider can run agents in Modal sandboxes provisioned keyless through the imbue_cloud connector, with no local `~/.modal.toml` token required. Added a `connector_url` field to the modal provider config (falling back to the imbue_cloud connector env var, since it is the same gateway). In PROXIED mode the provider reports reduced capabilities (no volumes, no snapshots) because its sandboxes are ephemeral and testing-only.
 
 Bumped the modal provider's default sandbox size from 1 CPU / 1 GB to **2 CPU / 4 GB**, matching the lima/docker convention (`--cpus=2 --memory=4`) so a Modal sandbox is sized like the other compute providers rather than the old 1-core minimum.
+
+Raised the default sandbox + idle timeouts to **24h** (Modal's max "1-day ephemeral" lifetime) so a long-running agent is only reaped at that ceiling instead of the previous 900s/800s defaults. Also aligned the "not authorized" remediation message to `modal token new` (matching the create-form note) instead of `uvx modal token set`.

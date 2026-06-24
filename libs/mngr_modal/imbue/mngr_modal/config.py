@@ -78,8 +78,12 @@ class ModalProviderConfig(ProviderInstanceConfig):
         description="Base directory for mngr data on the sandbox (defaults to /mngr)",
     )
     default_sandbox_timeout: int = Field(
-        default=900,
-        description="Default sandbox timeout in seconds",
+        default=86_400,
+        description=(
+            "Default sandbox timeout in seconds. Set to 24h (Modal's max sandbox lifetime) so a "
+            "long-running agent is only reaped at the '1-day ephemeral' ceiling rather than a short "
+            "default. Lower it if you want sandboxes torn down sooner to save cost."
+        ),
     )
     shutdown_buffer_seconds: int = Field(
         default=90,
@@ -88,8 +92,12 @@ class ModalProviderConfig(ProviderInstanceConfig):
         ),
     )
     default_idle_timeout: int = Field(
-        default=800,
-        description="Default host idle timeout in seconds",
+        default=86_400,
+        description=(
+            "Default host idle timeout in seconds. Raised to 24h so an idle sandbox is not reaped "
+            "mid-session; the create template also sets idle_mode=disabled for Modal, so in practice "
+            "the sandbox runs until the 24h sandbox timeout."
+        ),
     )
     default_idle_mode: IdleMode = Field(
         default=IdleMode.IO,

@@ -631,10 +631,11 @@ Supported build arguments for the modal provider:
             raise ProviderNotAuthorizedError(
                 name,
                 reason="Modal token missing or invalid",
-                short_remediation="run `uvx modal token set`",
+                short_remediation="run `modal token new`",
                 user_help_text=(
-                    "Modal is not authorized: run `uvx modal token set` to authenticate, or disable this "
-                    f"provider with `mngr config set --scope local providers.{name}.is_enabled false`."
+                    "Modal is not authorized: run `modal token new` to authenticate (or set "
+                    "MODAL_TOKEN_ID / MODAL_TOKEN_SECRET), or disable this provider with "
+                    f"`mngr config set --scope local providers.{name}.is_enabled false`."
                 ),
             ) from e
         except ModalProxyNotFoundError as e:

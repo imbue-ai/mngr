@@ -583,7 +583,9 @@ _MODAL_MODE_DIRECT: Final[str] = "DIRECT"
 _MODAL_MODE_PROXIED: Final[str] = "PROXIED"
 _MODAL_DEFAULT_CPU: Final[float] = 2.0
 _MODAL_DEFAULT_MEMORY_GB: Final[float] = 4.0
-_MODAL_DEFAULT_SANDBOX_TIMEOUT_SECONDS: Final[int] = 3600
+# 24h -- Modal's max sandbox lifetime ("1-day ephemeral"); long agents are only
+# reaped at that ceiling, not a short default.
+_MODAL_DEFAULT_SANDBOX_TIMEOUT_SECONDS: Final[int] = 86_400
 
 
 def _build_modal_provider_block(*, mode: str, connector_url: str | None) -> Table:
