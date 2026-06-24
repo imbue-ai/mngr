@@ -192,14 +192,9 @@ MINDS_GOOGLE_OAUTH_SERVICES: Final[frozenset[str]] = frozenset(
 # Minds-provided Google OAuth client, registered for a ``google-*`` service via
 # ``latchkey auth prepare`` so the user signs in against the Minds consent
 # screen instead of self-provisioning their own Google Cloud project. A single
-# pair is reused for every google service (the underlying Google Cloud client --
-# project ``main-form-499821-t6`` -- has all needed scopes enabled). Only the
-# client id/secret are needed here; the other fields of the downloaded client
-# JSON (auth/token URIs, redirect URIs) are the standard Google endpoints that
-# latchkey already knows for its built-in Google services.
-#
-# This is an installed/desktop-app OAuth client, so the "secret" is not truly
-# confidential -- it ships inside the distributed client.
+# pair is reused for every google service. This is an installed/desktop-app
+# OAuth client, so the "secret" is not truly confidential -- it ships inside
+# the distributed client.
 MINDS_GOOGLE_OAUTH_CLIENT_ID: Final[str] = "510027399143-18er1onc0k79fqu9kgufi4plgrc6jsje.apps.googleusercontent.com"
 MINDS_GOOGLE_OAUTH_CLIENT_SECRET: Final[str] = "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"
 
