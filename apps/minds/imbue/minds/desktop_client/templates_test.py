@@ -1829,3 +1829,35 @@ def test_badge_class_and_id_pass_through() -> None:
     assert 'id="requests-badge"' in html
     assert "hidden" in html
     assert "absolute" in html
+
+
+def test_base_omits_sentry_bootstrap_when_frontend_reporting_is_off() -> None:
+    # Default shipped state (reporting disabled / placeholder DSNs): no page may
+    # pull in the Sentry browser bundle or its init.
+    html = render_login_page()
+    assert "sentry.browser.min.js" not in html
+    assert "sentry_init.js" not in html
+    assert "minds-sentry-config" not in html
+
+
+def test_base_emits_sentry_bootstrap_when_frontend_reporting_is_on() -> None:
+    # Rendered through a freshly built catalog whose Sentry global is overridden
+    # to return a payload. A fresh catalog is used (rather than mutating the
+    # shared CATALOG global) because reassigning a Jinja env global mid-process
+    # interacts with Jinja's template cache; in production the global never
+    # changes, so this is purely a test concern.
+    payload = {
+        "dsn": "https://key@o1.ingest.us.sentry.io/2",
+        "environment": "staging",
+        "release": "0.3.2",
+        "git_sha": "abc1234",
+    }
+    catalog = _templates_module._build_catalog()
+    catalog.jinja_env.globals["frontend_sentry_browser_payload"] = lambda: payload
+    html = catalog.render("pages.Login")
+    # Bundle + init load before the page's own scripts; config is passed as JSON.
+    assert '<script src="/_static/sentry.browser.min.js"></script>' in html
+    assert '<script src="/_static/sentry_init.js"></script>' in html
+    assert '<script type="application/json" id="minds-sentry-config">' in html
+    assert '"environment": "staging"' in html
+    assert '"dsn": "https://key@o1.ingest.us.sentry.io/2"' in html

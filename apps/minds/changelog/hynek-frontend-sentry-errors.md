@@ -1,0 +1,5 @@
+Report frontend (browser) JavaScript errors from the desktop client's web UI to Sentry, mirroring the existing Python backend error reporting. Every page rendered through the JinjaX `Base` layout now boots the vendored `@sentry/browser` SDK (`static/sentry.browser.min.js`, booted by `static/sentry_init.js`) so unhandled errors in the web UI are captured.
+
+Frontend reporting reuses the backend's single opt-in switch (`MINDS_SENTRY_ENABLED`, default off) and environment selection (activated minds env -> production / staging / development), so enabling Sentry lights up the backend and frontend together under the same environment, release, and `git_sha` tag.
+
+The frontend reports to its own Sentry projects (separate JavaScript DSNs per environment), distinct from the backend's Python projects: a single Sentry project is tied to one platform, so mixing a Python and a JavaScript SDK in one project is discouraged. The frontend DSNs currently ship as placeholders -- the page emits no Sentry bootstrap at all until real JavaScript-project DSNs are filled in (`imbue/minds/utils/sentry/frontend.py`), so a misconfigured DSN never breaks the page.
