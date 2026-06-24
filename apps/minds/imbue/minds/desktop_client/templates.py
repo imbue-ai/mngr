@@ -25,7 +25,6 @@ from jinjax import Catalog
 
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
-from imbue.minds.desktop_client.onboarding import expected_creation_duration_seconds
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.primitives import AIProvider
@@ -471,6 +470,34 @@ def status_text_for(
         return "Failed: {}".format(error or "unknown error")
     text_map = _STATUS_TEXT_IMBUE_CLOUD if launch_mode is LaunchMode.IMBUE_CLOUD else _STATUS_TEXT_DEFAULT
     return text_map.get(status, "Working...")
+
+
+# Expected wall-clock duration of ``mngr create`` per compute provider,
+# used only to drive the client-side progress-bar animation on the
+# creating page (the bar eases toward ~80% over this duration). These are
+# rough estimates, not guarantees.
+# LIMA now boots a VM *and* builds the project image inside it (the agent runs
+# in a Docker container in the VM), so a cold create is closer to a VPS build
+# than the old run-directly-in-the-VM path -- bump its progress-bar estimate
+# accordingly.
+EXPECTED_CREATION_DURATION_SECONDS_BY_LAUNCH_MODE: Final[dict[LaunchMode, float]] = {
+    LaunchMode.DOCKER: 30.0,
+    LaunchMode.LIMA: 600.0,
+    LaunchMode.VULTR: 300.0,
+    LaunchMode.AWS: 300.0,
+    LaunchMode.IMBUE_CLOUD: 30.0,
+}
+
+# Fallback when the launch mode is somehow not in the map above.
+DEFAULT_EXPECTED_CREATION_DURATION_SECONDS: Final[float] = 60.0
+
+
+@pure
+def expected_creation_duration_seconds(launch_mode: LaunchMode) -> float:
+    """Resolve the per-provider expected creation duration for the progress bar."""
+    return EXPECTED_CREATION_DURATION_SECONDS_BY_LAUNCH_MODE.get(
+        launch_mode, DEFAULT_EXPECTED_CREATION_DURATION_SECONDS
+    )
 
 
 @pure

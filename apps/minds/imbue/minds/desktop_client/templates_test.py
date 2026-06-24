@@ -8,6 +8,8 @@ import pytest
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.desktop_client import templates as _templates_module
 from imbue.minds.desktop_client.templates import CATALOG
+from imbue.minds.desktop_client.templates import DEFAULT_EXPECTED_CREATION_DURATION_SECONDS
+from imbue.minds.desktop_client.templates import expected_creation_duration_seconds
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
@@ -1913,3 +1915,18 @@ def test_badge_class_and_id_pass_through() -> None:
     assert 'id="requests-badge"' in html
     assert "hidden" in html
     assert "absolute" in html
+
+
+def test_expected_duration_per_launch_mode() -> None:
+    assert expected_creation_duration_seconds(LaunchMode.DOCKER) == 30.0
+    assert expected_creation_duration_seconds(LaunchMode.IMBUE_CLOUD) == 30.0
+    assert expected_creation_duration_seconds(LaunchMode.LIMA) == 600.0
+    assert expected_creation_duration_seconds(LaunchMode.VULTR) == 300.0
+
+
+def test_expected_duration_covers_every_launch_mode() -> None:
+    # Every launch mode must resolve to a positive duration so the progress
+    # bar never divides by zero; unmapped modes fall back to the default.
+    for launch_mode in LaunchMode:
+        assert expected_creation_duration_seconds(launch_mode) > 0
+    assert DEFAULT_EXPECTED_CREATION_DURATION_SECONDS == 60.0

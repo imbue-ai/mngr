@@ -33,7 +33,6 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
-from imbue.minds.desktop_client.onboarding import OnboardingApplier
 from imbue.minds.desktop_client.region_preference import GeoLocationCache
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
@@ -63,9 +62,6 @@ class DesktopClientState(MutableModel):
     )
     agent_creator: AgentCreator | None = Field(
         default=None, frozen=True, description="In-flight agent creation manager"
-    )
-    onboarding_applier: OnboardingApplier | None = Field(
-        default=None, frozen=True, description="Applies onboarding answers on a background thread"
     )
     imbue_cloud_cli: ImbueCloudCli | None = Field(
         default=None, frozen=True, description="imbue_cloud plugin CLI wrapper"

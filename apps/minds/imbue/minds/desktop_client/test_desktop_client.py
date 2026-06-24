@@ -754,67 +754,6 @@ def test_create_agent_api_rejects_empty_git_url(tmp_path: Path) -> None:
     assert response.status_code == 400
 
 
-def test_create_agent_api_accepts_onboarding_fields(tmp_path: Path) -> None:
-    """POST /api/create-agent accepts the optional onboarding fields without breaking.
-
-    Only ``user_data_preference`` is sent (a local-only side effect) so the
-    background apply thread doesn't spin on ``mngr message`` / ``mngr exec``.
-    """
-    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.post(
-        "/api/create-agent",
-        json={"git_url": "file:///nonexistent-repo", "user_data_preference": "PRIVACY"},
-    )
-    assert response.status_code == 200
-    assert "agent_id" in response.get_json()
-    agent_creator.wait_for_all()
-
-
-def test_onboarding_submit_returns_404_for_unknown_creation(tmp_path: Path) -> None:
-    """POST /api/create-agent/{id}/onboarding returns 404 for an untracked creation."""
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.post(
-        "/api/create-agent/{}/onboarding".format(CreationId()),
-        json={"user_data_preference": "PRIVACY"},
-    )
-    assert response.status_code == 404
-
-
-def test_onboarding_submit_accepts_answers_for_tracked_creation(tmp_path: Path) -> None:
-    """POST /api/create-agent/{id}/onboarding accepts answers for a tracked creation."""
-    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
-
-    create_response = client.post("/api/create-agent", json={"git_url": "file:///nonexistent-repo"})
-    creation_id = create_response.get_json()["agent_id"]
-
-    # Only the data preference is submitted so the apply thread stays local.
-    response = client.post(
-        "/api/create-agent/{}/onboarding".format(creation_id),
-        json={"user_data_preference": "PRIVACY"},
-    )
-    assert response.status_code == 200
-    assert response.get_json()["status"] == "ok"
-    agent_creator.wait_for_all()
-
-
-def test_onboarding_submit_requires_authentication(tmp_path: Path) -> None:
-    """POST /api/create-agent/{id}/onboarding returns 403 without authentication."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
-    client, _ = _create_test_desktop_client(
-        tmp_path=tmp_path,
-        backend_resolver=backend_resolver,
-        http_client=None,
-    )
-
-    response = client.post(
-        "/api/create-agent/{}/onboarding".format(CreationId()),
-        json={"user_data_preference": "PRIVACY"},
-    )
-    assert response.status_code == 403
-
-
 def test_create_form_submit_rejects_invalid_host_name(tmp_path: Path) -> None:
     """POST /create with a host_name that fails HostName validation re-renders the form with an error."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
@@ -856,7 +795,11 @@ def test_create_agent_api_rejects_invalid_json(tmp_path: Path) -> None:
 
 
 def test_creating_page_shows_status(tmp_path: Path) -> None:
-    """GET /creating/{agent_id} shows the creating progress page."""
+    """GET /creating/{agent_id} shows the loading/progress page directly.
+
+    The page no longer interposes any onboarding questions before the
+    setting-up screen, so it goes straight to the loading view.
+    """
     client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
 
     agent_id = agent_creator.start_creation("file:///nonexistent-repo")
@@ -864,6 +807,10 @@ def test_creating_page_shows_status(tmp_path: Path) -> None:
     response = client.get("/creating/{}".format(agent_id))
     assert response.status_code == 200
     assert "Creating your project" in response.text
+    assert "Setting up your workspace" in response.text
+    # The onboarding question UI was removed, so none of its markers render.
+    assert "data-question" not in response.text
+    assert 'class="opt' not in response.text
     agent_creator.wait_for_all()
 
 

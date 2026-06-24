@@ -53,7 +53,6 @@
   ("cards", "Cards"),
   ("preset-card", "Preset card"),
   ("page-container", "Page container"),
-  ("opt", "Onboarding option"),
   ("oauth-icons", "OAuth icons"),
   ("status-badges", "Status badges"),
   ("section-header", "Section header"),
@@ -1024,17 +1023,6 @@
         </PageContainer>
       </div>
       <div class="mt-1 type-helper text-secondary font-mono">PageContainer.jinja</div>
-    </section>
-
-    {# Opt (onboarding option card) #}
-    <section id="opt" class="scroll-mt-8 mb-6">
-      <h2 class="type-heading text-primary mb-2">Opt (onboarding option)</h2>
-      <div class="flex flex-col gap-2">
-        <Opt val="example-a" title="Example option" desc="Non-editable selectable card." />
-        <Opt val="example-b" title="Selected" desc="Marker for the chosen option." selected />
-        <Opt val="example-c" title="Editable" desc="Expands a textarea when selected." editable preset="prefilled text" placeholder="placeholder text" />
-      </div>
-      <div class="mt-1 type-helper text-secondary font-mono">Opt.jinja (.opt / .opt-selected from app.css)</div>
     </section>
 
     {# OAuth icons #}
