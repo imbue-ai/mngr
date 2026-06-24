@@ -540,6 +540,10 @@ def _pytest_sessionstart(session: pytest.Session) -> None:
 
     start_resource_guards(session)
 
+    if os.environ.get("PHASE_TIMING"):
+        setattr(session, "_phase_proc_create", _proc_create_time())  # noqa: B010
+        setattr(session, "_phase_sessionstart", time.time())  # noqa: B010
+
 
 @pytest.hookimpl(trylast=True)
 def _pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
@@ -549,6 +553,10 @@ def _pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     is always visible in CI output, even when the suite exceeds the limit.
     """
     stop_resource_guards()
+
+    # Emit phase timing (no-op unless PHASE_TIMING is set) before the
+    # duration check below, which may pytest.exit() and abort the session.
+    _emit_phase_timing(session)
 
     # Print test durations before checking the time limit, so they are
     # visible in the CI output even when pytest.exit() aborts the session.
@@ -593,6 +601,53 @@ def _ensure_test_outputs_dir() -> Path:
 def _generate_output_filename(prefix: str, extension: str) -> Path:
     """Generate a unique filename for test output."""
     return _ensure_test_outputs_dir() / f"{prefix}_{uuid4().hex}{extension}"
+
+
+def _proc_create_time() -> float | None:
+    """Wall-clock time the current process started, used for phase-1 (startup) timing.
+
+    Reads /proc (Linux sandboxes only); returns None elsewhere. Only consulted
+    when PHASE_TIMING is set, which in practice is the Linux offload sandbox.
+    """
+    try:
+        with open("/proc/self/stat") as fh:
+            starttime_ticks = float(fh.read().split()[21])
+        with open("/proc/uptime") as fh:
+            uptime = float(fh.read().split()[0])
+        return (time.time() - uptime) + starttime_ticks / os.sysconf("SC_CLK_TCK")
+    except Exception:
+        return None
+
+
+def _emit_phase_timing(session: pytest.Session) -> None:
+    """Write per-phase session wall times to .test_output when PHASE_TIMING is set.
+
+    Splits a pytest session into startup (process start -> sessionstart),
+    collection (-> collection_finish), and calls (-> sessionfinish). offload
+    downloads `.test_output/**` from every sandbox, so this surfaces the
+    per-batch overhead breakdown in CI without affecting normal runs (the
+    whole thing is a no-op unless PHASE_TIMING is set in the environment).
+    """
+    if not os.environ.get("PHASE_TIMING"):
+        return
+    proc_create = getattr(session, "_phase_proc_create", None)
+    sessionstart = getattr(session, "_phase_sessionstart", None)
+    collection_done = getattr(session, "_phase_collection_done", None)
+    now = time.time()
+    record = {
+        "n_collected": len(getattr(session, "items", []) or []),
+        "phase1_startup_s": round(sessionstart - proc_create, 3)
+        if (proc_create and sessionstart)
+        else None,
+        "phase2_collection_s": round(collection_done - sessionstart, 3)
+        if (sessionstart and collection_done)
+        else None,
+        "phase3_calls_s": round(now - collection_done, 3) if collection_done else None,
+    }
+    try:
+        _generate_output_filename("phase_timing", ".json").write_text(json.dumps(record))
+    except Exception:
+        pass
 
 
 @pytest.hookimpl(tryfirst=True)
@@ -736,6 +791,9 @@ def _pytest_collection_finish(session: pytest.Session) -> None:
         return
     _configure_shared_coverage_defaults(session.config)
     _write_flaky_manifest(session)
+
+    if os.environ.get("PHASE_TIMING"):
+        setattr(session, "_phase_collection_done", time.time())  # noqa: B010
 
 
 def _compute_junit_test_id(nodeid: str, fspath: str) -> str:
