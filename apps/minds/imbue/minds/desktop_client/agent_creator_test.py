@@ -275,19 +275,6 @@ def test_build_mngr_create_command_modal_direct_targets_modal_provider() -> None
     assert "--reuse" not in command
 
 
-def test_build_mngr_create_command_modal_proxied_targets_proxied_provider() -> None:
-    """Modal Proxied addresses the ``modal_proxied`` provider instance (keyless mode)."""
-    command = _build_mngr_create_command(
-        launch_mode=LaunchMode.MODAL_PROXIED,
-        host_name=HostName("hello"),
-    )
-    assert "system-services@hello.modal_proxied" in command
-    # Shares the same provisioning template as Direct.
-    assert command.count("--template") == 2
-    assert "modal" in command
-    assert "--reuse" not in command
-
-
 def test_build_mngr_create_command_forwards_region_for_vultr() -> None:
     command = _build_mngr_create_command(
         launch_mode=LaunchMode.VULTR,

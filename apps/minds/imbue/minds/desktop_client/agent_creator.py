@@ -593,13 +593,9 @@ def _build_mngr_create_command(
             slug = _slugify_account(imbue_cloud_account)
             address = f"{_DEFAULT_AGENT_NAME}@{host_name}.imbue_cloud_{slug}"
         case LaunchMode.MODAL_DIRECT:
-            # DIRECT: the ``modal`` provider instance talks to Modal with the
-            # local token (``modal token new``).
+            # The ``modal`` provider instance talks to Modal with the local token
+            # (``modal token new``).
             address = f"{_DEFAULT_AGENT_NAME}@{host_name}.modal"
-        case LaunchMode.MODAL_PROXIED:
-            # PROXIED: the ``modal_proxied`` provider instance routes sandbox
-            # creation through the imbue_cloud connector (keyless on this machine).
-            address = f"{_DEFAULT_AGENT_NAME}@{host_name}.modal_proxied"
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -728,12 +724,9 @@ def _build_mngr_create_command(
             # "no capacity in <region>" error if none is available there.
             if region:
                 mngr_command.extend(["-b", f"region={region}"])
-        case LaunchMode.MODAL_DIRECT | LaunchMode.MODAL_PROXIED:
-            # Both Modal modes share the same provisioning chain (the ``main`` +
-            # ``modal`` templates run setup over SSH). DIRECT vs PROXIED differs
-            # only in which provider instance the address selected above resolves
-            # (``modal`` vs ``modal_proxied``) and that instance's mode +
-            # connector_url, written into the mngr profile at startup.
+        case LaunchMode.MODAL_DIRECT:
+            # Same remote shape as vultr/aws: the ``main`` + ``modal`` templates
+            # run the provisioning chain over SSH on the freshly-created sandbox.
             mngr_command.extend(["--new-host", "--template", "main", "--template", "modal"])
             mngr_command.extend(_remote_host_env_flags())
         case _ as unreachable:

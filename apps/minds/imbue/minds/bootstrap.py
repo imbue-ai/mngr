@@ -261,11 +261,14 @@ def _ensure_mngr_settings(root_name: str) -> None:
             and default_aws.get("backend") == _AWS_BACKEND_NAME
             and default_aws.get("is_enabled") is False
             and _existing_aws_provider_names(providers) == set(desired_aws_names)
-            # The Modal (Direct) block must already be present + enabled, else
-            # fall through and write it (otherwise existing installs whose
-            # settings predate Modal would never get the provider registered).
+            # The Modal (Direct) block must already be present, enabled, AND
+            # persistent, else fall through and rewrite it. The is_persistent
+            # check matters: an older build wrote is_persistent=false, which makes
+            # Modal create an ephemeral app that nukes the sandbox the moment
+            # `mngr create` exits -- this catches + overwrites that stale value.
             and modal_direct.get("mode") == _MODAL_MODE_DIRECT
             and modal_direct.get("is_enabled") is True
+            and modal_direct.get("is_persistent") is True
         ):
             # Already in the desired shape -- recursive disabled, no stale
             # ssh provider section, default imbue_cloud + aws instances
@@ -315,11 +318,7 @@ def _ensure_mngr_settings(root_name: str) -> None:
 
     # ``[providers.modal]`` (DIRECT) for the "Modal (1-day ephemeral) - Direct"
     # compute option. Always written; uses the local Modal token at create time.
-    # The PROXIED sibling (``[providers.modal_proxied]``) is written by
-    # ``reconcile_imbue_cloud_providers_from_sessions`` when a gateway session exists.
-    providers_section[_MODAL_DIRECT_PROVIDER_NAME] = _build_modal_provider_block(
-        mode=_MODAL_MODE_DIRECT, connector_url=None
-    )
+    providers_section[_MODAL_DIRECT_PROVIDER_NAME] = _build_modal_direct_provider_block()
 
     plugins_section = doc.setdefault("plugins", tomlkit.table())
     recursive_block = tomlkit.table()
@@ -468,7 +467,6 @@ def reconcile_imbue_cloud_providers_from_sessions(connector_url: str, *, root_na
     entries = data.get("entries") if isinstance(data, dict) else None
     if not isinstance(entries, list):
         return
-    has_active_account = False
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -485,22 +483,11 @@ def reconcile_imbue_cloud_providers_from_sessions(connector_url: str, *, root_na
                 root_name=root_name,
                 force_enable=False,
             )
-            has_active_account = True
         except BootstrapError as e:
             # Bad email format (e.g. ``""``) -- log and keep going so a
             # single corrupt session entry doesn't block reconciliation
             # for the others.
             logger.warning("Skipping imbue_cloud provider registration for {!r}: {}", email, e)
-    # "Modal (1-day ephemeral) - Proxied" authenticates through the same
-    # connector session, so register ``[providers.modal_proxied]`` only when the
-    # user actually has a gateway account -- otherwise a keyless modal provider
-    # would just error on every ``mngr list`` discovery cycle. (The DIRECT
-    # sibling ``[providers.modal]`` is written unconditionally elsewhere.)
-    if has_active_account:
-        try:
-            set_modal_proxied_provider(connector_url, root_name=root_name)
-        except BootstrapError as e:
-            logger.warning("Skipping modal_proxied (PROXIED) provider registration: {}", e)
 
 
 def read_active_profile_dir(mngr_host_dir: Path) -> Path | None:
@@ -576,43 +563,32 @@ _AWS_PROVIDER_NAME_PREFIX: Final[str] = "aws-"
 #     own token (``modal token new``). Written unconditionally below so the
 #     "Direct" option works as soon as a token exists; if none is present the
 #     provider just reports unavailable during discovery.
-#   - ``[providers.modal_proxied]`` (PROXIED): keyless -- routes through the
-#     imbue_cloud connector. Written by the imbue_cloud reconcile, and only when
-#     the user has a gateway session, since it reuses that session to auth.
-# Sizing (2 CPU / 4 GB) and the 24h sandbox timeout come from the
-# ModalProviderConfig defaults, NOT from these blocks. Crucially the blocks do
-# NOT set is_persistent=False: each `mngr create` is a one-shot subprocess, and a
-# non-persistent (ephemeral) Modal app would terminate the sandbox the instant
-# that subprocess exits. is_persistent therefore stays at its True default so the
-# sandbox outlives create. The only per-instance overrides are the gateway fields
-# and, for PROXIED, turning off the volume/snapshot ops it cannot proxy.
+# The single ``[providers.modal]`` instance for "Modal (1-day ephemeral)" (DIRECT
+# mode): the local machine authenticates to Modal with its own token
+# (``modal token new``). Written unconditionally at startup so the option works
+# as soon as a token exists; if none is present the provider just reports
+# unavailable during discovery. Sizing (2 CPU / 4 GB) and the 24h sandbox timeout
+# come from the ModalProviderConfig defaults; only ``is_persistent`` is forced.
 _MODAL_BACKEND_NAME: Final[str] = "modal"
 _MODAL_DIRECT_PROVIDER_NAME: Final[str] = "modal"
-_MODAL_PROXIED_PROVIDER_NAME: Final[str] = "modal_proxied"
 _MODAL_MODE_DIRECT: Final[str] = "DIRECT"
-_MODAL_MODE_PROXIED: Final[str] = "PROXIED"
 
 
-def _build_modal_provider_block(*, mode: str, connector_url: str | None) -> Table:
-    """Build a ``[providers.modal*]`` tomlkit block for the given mode.
+def _build_modal_direct_provider_block() -> Table:
+    """Build the ``[providers.modal]`` block (DIRECT mode).
 
-    Shared by the DIRECT block (written in ``_ensure_mngr_settings``) and the
-    PROXIED block (written in ``set_modal_proxied_provider``). Sizing, sandbox
-    timeout, and ``is_persistent`` inherit the ModalProviderConfig defaults
-    (2 CPU / 4 GB, 24h, persistent) -- only the gateway-specific fields are set
-    here. ``connector_url`` is set only for PROXIED, and PROXIED additionally
-    disables the volume/snapshot operations it cannot proxy.
+    ``is_persistent=True`` is set EXPLICITLY (not inherited): each ``mngr create``
+    is a one-shot subprocess, and a non-persistent (ephemeral) Modal app would
+    terminate the sandbox the instant that subprocess exits. Setting it explicitly
+    also lets the idempotency check below detect (and overwrite) a stale
+    ``is_persistent = false`` left by an older build. Sizing + 24h sandbox timeout
+    come from the ModalProviderConfig defaults.
     """
     block = tomlkit.table()
     block["backend"] = _MODAL_BACKEND_NAME
-    block["mode"] = mode
-    if connector_url is not None:
-        block["connector_url"] = connector_url
+    block["mode"] = _MODAL_MODE_DIRECT
     block["is_enabled"] = True
-    if mode == _MODAL_MODE_PROXIED:
-        # PROXIED cannot proxy Modal Volumes or filesystem snapshots.
-        block["is_host_volume_created"] = False
-        block["is_snapshotted_after_create"] = False
+    block["is_persistent"] = True
     return block
 # EC2 instance size for minds AWS workspaces. The mngr_aws default (t3.small,
 # 2 GB) is too small for the full forever-claude-template build (uv sync + npm
@@ -753,42 +729,6 @@ def set_imbue_cloud_provider_for_account(
     providers[provider_name] = new_block
     _atomic_write_settings(settings_path, doc)
     logger.info("imbue_cloud provider {} registered in {}", provider_name, settings_path)
-    return True
-
-
-def set_modal_proxied_provider(connector_url: str, *, root_name: str | None = None) -> bool:
-    """Register the ``[providers.modal_proxied]`` block (PROXIED mode) in settings.toml.
-
-    "Modal (1-day ephemeral) - Proxied" (``LaunchMode.MODAL_PROXIED``) runs each
-    agent in a Modal sandbox provisioned keyless through the imbue_cloud
-    connector, so it reuses the same ``connector_url`` + SuperTokens session as
-    the imbue_cloud provider. Called from the imbue_cloud reconcile (only when a
-    gateway session exists), since keyless modal cannot authenticate without one.
-
-    The DIRECT sibling (``[providers.modal]``) is written unconditionally in
-    ``_ensure_mngr_settings`` and is not touched here.
-
-    Idempotent: a no-op when an equivalent block already exists. Returns ``True``
-    when the file was modified so callers know to bounce ``mngr observe``.
-    """
-    if root_name is None:
-        root_name = resolve_minds_root_name()
-    _ensure_mngr_settings(root_name)
-    settings_path = _resolve_active_settings_path(root_name)
-    if settings_path is None:
-        return False
-    if settings_path.exists():
-        doc = tomlkit.loads(settings_path.read_text())
-    else:
-        doc = tomlkit.document()
-    providers = doc.setdefault("providers", tomlkit.table())
-    block = _build_modal_provider_block(mode=_MODAL_MODE_PROXIED, connector_url=connector_url)
-    existing = providers.get(_MODAL_PROXIED_PROVIDER_NAME)
-    if isinstance(existing, dict) and all(existing.get(key) == value for key, value in block.items()):
-        return False
-    providers[_MODAL_PROXIED_PROVIDER_NAME] = block
-    _atomic_write_settings(settings_path, doc)
-    logger.info("modal_proxied provider (PROXIED) registered in {}", settings_path)
     return True
 
 

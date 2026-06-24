@@ -6,7 +6,6 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "imbue-mngr==0.2.17",
-    "imbue-mngr-imbue-cloud==0.1.6",
     "modal==1.4.3",
     "modal-proxy==0.1.18",
     "dockerfile-parse>=2.0.0",
@@ -25,7 +24,6 @@ exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py"]
 
 [tool.uv.sources]
 imbue-mngr = { workspace = true }
-imbue-mngr-imbue-cloud = { workspace = true }
 modal-proxy = { workspace = true }
 
 [tool.pytest.ini_options]

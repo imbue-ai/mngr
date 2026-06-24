@@ -97,7 +97,6 @@
     var launchModeError = document.getElementById('launch-mode-account-error');
     var awsCredentialsNote = document.getElementById('aws-credentials-note');
     var modalDirectNote = document.getElementById('modal-direct-note');
-    var modalProxiedNote = document.getElementById('modal-proxied-note');
     var aiProviderError = document.getElementById('ai-provider-account-error');
     var backupSelect = document.getElementById('backup_provider');
     var backupApiKeyRow = document.getElementById('backup-api-key-row');
@@ -113,7 +112,7 @@
     var REGION_OPTIONS = {{ region_options_by_launch_mode | tojson }};
     var REGION_SELECTED = {{ region_selected_by_launch_mode | tojson }};
 
-    var COMPUTE_LABELS = {IMBUE_CLOUD: 'Imbue Cloud', DOCKER: 'Docker', LIMA: 'Lima', VULTR: 'Vultr', AWS: 'AWS', MODAL_DIRECT: 'Modal (Direct)', MODAL_PROXIED: 'Modal (Proxied)'};
+    var COMPUTE_LABELS = {IMBUE_CLOUD: 'Imbue Cloud', DOCKER: 'Docker', LIMA: 'Lima', VULTR: 'Vultr', AWS: 'AWS', MODAL_DIRECT: 'Modal (1-day ephemeral)'};
     var AI_LABELS = {IMBUE_CLOUD: 'Imbue Cloud', API_KEY: 'your Anthropic API key', SUBSCRIPTION: 'your Claude subscription'};
     var BACKUP_LABELS = {IMBUE_CLOUD: 'Imbue Cloud', API_KEY: 'your own storage', CONFIGURE_LATER: 'off for now'};
 
@@ -232,7 +231,6 @@
       launchModeError.classList.toggle('hidden', !launchInvalid);
       if (awsCredentialsNote) awsCredentialsNote.classList.toggle('hidden', launchSelect.value !== 'AWS');
       if (modalDirectNote) modalDirectNote.classList.toggle('hidden', launchSelect.value !== 'MODAL_DIRECT');
-      if (modalProxiedNote) modalProxiedNote.classList.toggle('hidden', launchSelect.value !== 'MODAL_PROXIED');
       aiProviderError.classList.toggle('hidden', !aiInvalid);
       backupProviderError.classList.toggle('hidden', !backupInvalid);
       submitBtn.disabled = launchInvalid || aiInvalid || backupInvalid;
@@ -298,7 +296,7 @@
             <Select id="launch_mode" name="launch_mode" width="w-48">
               {% for mode in launch_modes %}
                 <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}
-                        {% if mode.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{% if mode.value == 'MODAL_DIRECT' %}Modal (1-day ephemeral) - Direct{% elif mode.value == 'MODAL_PROXIED' %}Modal (1-day ephemeral) - Proxied{% else %}{{ mode.value | lower }}{% endif %}</option>
+                        {% if mode.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{% if mode.value == 'MODAL_DIRECT' %}Modal (1-day ephemeral){% else %}{{ mode.value | lower }}{% endif %}</option>
               {% endfor %}
             </Select>
           </div>
@@ -310,16 +308,11 @@
             Pick a region under advanced settings.
           </p>
           <p id="modal-direct-note" class="hidden mt-1 type-helper text-tertiary">
-            Modal (Direct) creates sandboxes from this machine using your own Modal
-            token. If you haven't authenticated yet, install the CLI and log in:
+            Modal creates sandboxes from this machine using your own Modal token.
+            If you haven't authenticated yet, install the CLI and log in:
             <code>uv tool install modal</code>, then <code>modal token new</code>
             (or set <code>MODAL_TOKEN_ID</code> / <code>MODAL_TOKEN_SECRET</code>).
             Sandboxes are ephemeral (~1 day) -- testing only.
-          </p>
-          <p id="modal-proxied-note" class="hidden mt-1 type-helper text-warning">
-            Modal (Proxied) is keyless (no Modal token on this machine), but it is
-            not ready yet: it needs the imbue_cloud connector deployed with the
-            sandbox-broker routes. Use Modal (Direct) for now.
           </p>
         </div>
 

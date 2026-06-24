@@ -67,15 +67,13 @@ class LaunchMode(UpperCaseStrEnum):
     LIMA = auto()
     IMBUE_CLOUD = auto()
     AWS = auto()
-    # Modal sandboxes are ephemeral (~1 day max), so both are testing-only.
-    # MODAL_DIRECT: the local machine talks to Modal with its own token
-    #   (``modal token new``); resolves the ``modal`` provider instance (DIRECT).
-    # MODAL_PROXIED: keyless -- routes through the imbue_cloud connector, which
-    #   creates the sandbox on the caller's behalf; resolves the
-    #   ``modal_proxied`` provider instance (PROXIED). Requires the connector to
-    #   have the modal-broker routes deployed (not always available yet).
+    # Runs the agent in a Modal sandbox using the local machine's own Modal token
+    # (``modal token new``) -- resolves the ``modal`` provider instance (DIRECT).
+    # Modal sandboxes are ephemeral (~1 day max), so it is surfaced as "Modal
+    # (1-day ephemeral)" and is testing-only. (A keyless/connector-proxied variant
+    # is intentionally not offered: Modal is imbue-internal, so users authenticate
+    # to it directly.)
     MODAL_DIRECT = auto()
-    MODAL_PROXIED = auto()
 
 
 class AIProvider(UpperCaseStrEnum):
