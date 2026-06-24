@@ -28,7 +28,7 @@ root of `templates/`. Auth-flow components live under `templates/auth/`.
 | `PageContainer` | Centered `max-w-[720px]` body wrapper. Default for in-app settings-style pages (Landing, Accounts, WorkspaceSettings, Sharing, Destroying). |
 | `PageNarrowContainer` | Centered, narrow page layout for auth flow + form pages. Width/padding only -- no surface chrome. `padding="default"` (`p-8`, auth) or `"form"` (`p-6`, Create); `max_width` is a Tailwind utility. |
 | `Card` | Card surface with `layout`/`padding`/`interactive`/`tag`/`href` props. Pulls `.minds-card` from `app.css` for the shared shell. |
-| `Modal` | Overlay dialog with backdrop. Used for confirmation dialogs (Welcome's skip-account prompt, WorkspaceSettings' destroy modal). |
+| `Modal` | Overlay dialog with backdrop. Used for confirmation dialogs (e.g. WorkspaceSettings' destroy modal). |
 | `PermissionsHeader` / `PermissionsForm` / `PermissionsError` / `PermissionsManualCredentials` | Composable building blocks for the latchkey permission-request detail fragments (`pages.LatchkeyPredefinedPermission`, `pages.LatchkeyFileSharingPermission`). The surrounding modal chrome lives in the inbox shell (`pages.Inbox`), not in a separate dialog primitive. |
 
 ### Interactive
