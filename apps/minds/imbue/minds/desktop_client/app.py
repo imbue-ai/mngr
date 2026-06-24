@@ -1476,7 +1476,14 @@ def _handle_creating_page(
     creation_id = CreationId(agent_id)
     info = agent_creator.get_creation_info(creation_id)
     if info is None:
-        return make_response(status_code=404, content="Unknown agent creation")
+        # The creation registry is in-memory, so a ``/creating/<id>`` window that
+        # outlives its creation -- reopened after an app restart, or after a
+        # failed creation was cleaned up -- finds no info here. This is a
+        # full-page navigation, so fall back to the landing page rather than
+        # stranding the window on a bare 404. (The status/onboarding/logs
+        # endpoints below keep returning 404 -- they are XHR/SSE callers, not
+        # navigations, and their JS handles the not-found case itself.)
+        return make_redirect_response(url="/", status_code=303)
 
     html = render_creating_page(creation_id=creation_id, info=info)
     return make_html_response(content=html)

@@ -1289,6 +1289,17 @@ function readLastLogLines(lineCount) {
 // transparently on first read. The titlebar accent is NOT persisted: a
 // restored window re-derives it from its own saved ``url`` (the content URL
 // it reopens to), so there is nothing per-window to remember.
+//
+// A workspace window's live content URL is on the agent subdomain
+// (``agent-<id>.localhost:<mngr_forward_port>/...``), whose host AND port both
+// change between runs, so it can't be replayed verbatim. ``toPersistedContentUrl``
+// canonicalises such windows to the port-independent ``/goto/<agent>/``
+// auth-bridge path; ``toRestoredContentUrl`` rebuilds the live workspace URL
+// from it on launch. The mind itself persists its panel layout server-side and
+// restores it on a fresh load of its root, so reopening the root is enough to
+// land the user back where they were. Non-workspace screens (Home, Create,
+// ``/workspace/<id>/settings``, ...) live on the minds backend and round-trip
+// as plain backend-relative paths.
 
 function loadSessionState() {
   try {
@@ -1325,6 +1336,38 @@ function toRelativeBackendUrl(url) {
   }
 }
 
+// Canonicalise a window's live content URL into the form persisted in
+// ``window-state.json``. A workspace window's URL is on the agent subdomain
+// (``agent-<id>.localhost:<mngr_forward_port>/...``); stripping that to a bare
+// relative path loses the agent identity (the subdomain host) and would
+// reopen against the minds backend (the landing page) on restore. Persist the
+// port-independent ``/goto/<agent>/`` auth-bridge path instead -- it carries
+// the agent id, is recognised by ``parseWorkspaceId`` (so dead-workspace
+// filtering works), and ``toRestoredContentUrl`` rebuilds the live origin from
+// it. Everything else round-trips as a minds-backend-relative path.
+function toPersistedContentUrl(url) {
+  const agentId = parseWorkspaceId(url);
+  if (agentId) return `/goto/${encodeURIComponent(agentId)}/`;
+  return toRelativeBackendUrl(url);
+}
+
+// Inverse of ``toPersistedContentUrl``: turn a persisted entry's ``url`` back
+// into a loadable absolute URL. Workspace entries (``/goto/<agent>/``) are
+// rebuilt through ``workspaceUrlForAgent`` so the bridge targets the CURRENT
+// run's mngr_forward origin; other entries resolve against the minds backend.
+// Persisted urls are backend-relative, so resolve to absolute BEFORE parsing
+// the workspace id -- ``parseWorkspaceId`` runs ``new URL(url)``, which throws
+// (yielding null) on a bare relative path.
+function toRestoredContentUrl(entry) {
+  const absolute = toAbsoluteUrl(entry.url);
+  const agentId = parseWorkspaceId(absolute);
+  if (agentId) {
+    const workspaceUrl = workspaceUrlForAgent(agentId);
+    if (workspaceUrl) return workspaceUrl;
+  }
+  return absolute;
+}
+
 function saveSessionState() {
   try {
     const windows = [];
@@ -1335,12 +1378,12 @@ function saveSessionState() {
     for (const b of mruWindows) {
       if (b.window.isDestroyed()) continue;
       const url = b.preErrorUrl || b.currentContentUrl;
-      const relative = toRelativeBackendUrl(url);
-      if (!relative) continue;
+      const persisted = toPersistedContentUrl(url);
+      if (!persisted) continue;
       const bounds = b.window.getBounds();
       const display = screen.getDisplayMatching(bounds);
       windows.push({
-        url: relative,
+        url: persisted,
         x: bounds.x,
         y: bounds.y,
         width: bounds.width,
@@ -1378,7 +1421,10 @@ function filterRestorableUrls(state, knownAgentIdsSet) {
   if (!knownAgentIdsSet) return state.slice();
   const results = [];
   for (const entry of state) {
-    const agentId = parseWorkspaceId(entry.url);
+    // Persisted urls are backend-relative; resolve to absolute so
+    // ``parseWorkspaceId`` (``new URL``) can read the workspace id rather than
+    // throwing on the bare path.
+    const agentId = parseWorkspaceId(toAbsoluteUrl(entry.url));
     if (agentId && !knownAgentIdsSet.has(agentId)) {
       continue; // workspace no longer exists, skip silently
     }
@@ -2582,13 +2628,13 @@ async function startBackendWithRetry() {
         // so no separately-persisted accent is needed.
         const [first, ...rest] = restorable;
         restoreWindowBounds(initialBundle, first);
-        loadUrlIntoBundleContentView(initialBundle, toAbsoluteUrl(first.url));
+        loadUrlIntoBundleContentView(initialBundle, toRestoredContentUrl(first));
         // Open the lesser-MRU windows without stealing focus, so the
         // MRU-zero window (already focused as initialBundle) stays focused
         // after restore completes.
         const restoredBundles = [];
         for (const entry of rest) {
-          const bundle = openNewWindow(toAbsoluteUrl(entry.url), { showInactive: true });
+          const bundle = openNewWindow(toRestoredContentUrl(entry), { showInactive: true });
           restoreWindowBounds(bundle, entry);
           restoredBundles.push(bundle);
         }
