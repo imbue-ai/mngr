@@ -161,3 +161,68 @@ def test_consumer_dispatches_each_streamed_request_to_on_request() -> None:
     file_sharing = next(e for e in delivered if isinstance(e, LatchkeyFileSharingPermissionRequestEvent))
     assert predefined.scope == "slack-api"
     assert file_sharing.path == "/home/user/log.txt"
+
+
+def test_consumer_survives_an_on_request_error_and_keeps_processing() -> None:
+    """A callback that raises on one request must not kill the consumer thread.
+
+    The consumer thread is the inbox's source of truth: if one bad request
+    propagated out of the loop the thread would die and every *subsequent*
+    permission request would stop reaching the UI. The loop catches the error,
+    logs it, and moves on to the next streamed record.
+    """
+    payload = b"".join(
+        json.dumps(item).encode("utf-8") + b"\n"
+        for item in (
+            {
+                "request_id": "bad",
+                "agent_id": "a1",
+                "rationale": "x",
+                "request_type": "predefined",
+                "payload": {"scope": "slack-api", "permissions": ["slack-read-all"]},
+                "target": "/tmp/permissions.json",
+                "effect": {"rules": [{"slack-api": ["slack-read-all"]}]},
+            },
+            {
+                "request_id": "good",
+                "agent_id": "a2",
+                "rationale": "y",
+                "request_type": "file-sharing",
+                "payload": {"path": "/home/user/log.txt", "access": "READ"},
+                "target": "/tmp/permissions.json",
+                "effect": {"rules": [{"latchkey-self": ["minds-file-server-cafef00d"]}]},
+            },
+        )
+    )
+
+    delivered: list[str] = []
+    lock = threading.Lock()
+
+    def _on_request(event: RequestEvent) -> None:
+        with lock:
+            delivered.append(str(event.event_id))
+        # Simulate a per-request processing failure on the first record. The
+        # loop must catch it, log it, and still reach the second record.
+        if str(event.event_id) == "bad":
+            raise RuntimeError("boom")
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, content=payload, headers={"Content-Type": "application/x-ndjson"})
+
+    client = LatchkeyGatewayClient.from_credentials(
+        transport=httpx.MockTransport(_handler),
+        base_url="http://gateway.invalid:1989",
+        password="p",
+        admin_jwt="jwt",
+    )
+    consumer = PermissionRequestsConsumer(gateway_client=client, on_request=_on_request)
+    cg = ConcurrencyGroup(name="permission-requests-consumer-error-test")
+    with cg:
+        consumer.start(cg)
+        try:
+            # 'good' is only reached if the loop survived the raise on 'bad'.
+            assert _wait_until(lambda: "good" in delivered)
+        finally:
+            consumer.stop()
+    assert "bad" in delivered and "good" in delivered

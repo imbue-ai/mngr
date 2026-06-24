@@ -33,7 +33,6 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.bootstrap import env_name_from_root_name
 from imbue.minds.bootstrap import is_minds_root_name_set_to_active_env
 from imbue.minds.bootstrap import minds_data_dir_for
@@ -624,21 +623,7 @@ class _StreamedPermissionRequestHandler(FrozenModel):
         target = event.permissions_target_path
         if target is None:
             return
-        try:
-            agent_id = AgentId(event.agent_id)
-        except InvalidRandomIdError:
-            # A permission request whose agent_id isn't a valid 'agent-...' id (e.g. an
-            # agent that hand-crafted the request body and supplied a placeholder like
-            # 'ENV_AGENT') cannot be resolved to a host. Skip recovery for it rather than
-            # let the exception kill the whole permission-requests consumer thread, which
-            # would silently stop every subsequent request from ever reaching the UI.
-            logger.warning(
-                "Skipping host-permission recovery for permission request {}: malformed "
-                "agent_id {!r} (not a valid 'agent-...' id).",
-                event.event_id,
-                event.agent_id,
-            )
-            return
+        agent_id = AgentId(event.agent_id)
         host_id = self._resolve_host_id(agent_id)
         if host_id is None:
             return
