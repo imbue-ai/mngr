@@ -1259,8 +1259,30 @@ async def amain() -> int:
                         with contextlib.suppress(Exception):
                             preview = (await p.evaluate("document.body.innerText"))[:200].replace("\n", " ")
                             logger.error("  page url={} body=...{!r}", p.url, preview)
+                    # DIAG: dump the FULL chat body (what the agent actually posted)
+                    # and then RELOAD the chat and re-check. If the canned body
+                    # appears only after a reload, the data was in the backend all
+                    # along and only the LIVE event stream was broken (UI freeze) --
+                    # proving a streaming bug, not an agent/backend bug.
+                    chat = (await find_chat_window(ctx)) or win
+                    with contextlib.suppress(Exception):
+                        full = await chat.evaluate("document.body.innerText")
+                        logger.error("[diag] FULL chat body before reload ({} chars):\n{}", len(full), full[:4000])
+                    reload_found = None
+                    with contextlib.suppress(Exception):
+                        await chat.reload(wait_until="domcontentloaded")
+                        await asyncio.sleep(5)
+                        after = await chat.evaluate("document.body.innerText")
+                        reload_found = CANNED_BODY.lower() in after.lower()
+                        logger.error(
+                            "[diag] RELOAD-RECHECK: canned_body_after_reload={} (body {} chars)",
+                            reload_found,
+                            len(after),
+                        )
+                        await snap_page(chat, "99b-after-reload-recheck")
                     raise E2EFailure(
-                        f"canned body not in chat after {DRIVE_SLACK_TIMEOUT}s (approval_stage={approval_stage})"
+                        f"canned body not in chat after {DRIVE_SLACK_TIMEOUT}s "
+                        f"(approval_stage={approval_stage}, canned_body_after_reload={reload_found})"
                     )
             finally:
                 logger.info("=== slack teardown ===")
