@@ -98,6 +98,11 @@ importlib.metadata.entry_points = _cached_entry_points  # ty: ignore[invalid-ass
 # Relative to wherever pytest is invoked from.
 _TEST_OUTPUTS_DIR: Final[Path] = Path(".test_output")
 
+# Phase-timing scratch (see _emit_phase_timing). Each offload batch is its own
+# pytest process with a single session, so a module global is sufficient -- no
+# need to scope it to the session object.
+_PHASE_TIMING: dict[str, Any] = {}
+
 # The lock file path - a constant location in /tmp so all pytest processes can find it
 _GLOBAL_TEST_LOCK_PATH: Final[Path] = Path("/tmp/pytest_global_test_lock")
 
@@ -541,8 +546,8 @@ def _pytest_sessionstart(session: pytest.Session) -> None:
     start_resource_guards(session)
 
     if os.environ.get("PHASE_TIMING"):
-        setattr(session, "_phase_proc_create", _proc_create_time())  # noqa: B010
-        setattr(session, "_phase_sessionstart", time.time())  # noqa: B010
+        _PHASE_TIMING["proc_create"] = _proc_create_time()
+        _PHASE_TIMING["sessionstart"] = time.time()
 
 
 @pytest.hookimpl(trylast=True)
@@ -556,7 +561,7 @@ def _pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 
     # Emit phase timing (no-op unless PHASE_TIMING is set) before the
     # duration check below, which may pytest.exit() and abort the session.
-    _emit_phase_timing(session)
+    _emit_phase_timing()
 
     # Print test durations before checking the time limit, so they are
     # visible in the CI output even when pytest.exit() aborts the session.
@@ -619,23 +624,24 @@ def _proc_create_time() -> float | None:
         return None
 
 
-def _emit_phase_timing(session: pytest.Session) -> None:
+def _emit_phase_timing() -> None:
     """Write per-phase session wall times to .test_output when PHASE_TIMING is set.
 
     Splits a pytest session into startup (process start -> sessionstart),
-    collection (-> collection_finish), and calls (-> sessionfinish). offload
-    downloads `.test_output/**` from every sandbox, so this surfaces the
-    per-batch overhead breakdown in CI without affecting normal runs (the
-    whole thing is a no-op unless PHASE_TIMING is set in the environment).
+    collection (-> collection_finish), and calls (-> sessionfinish), reading the
+    timestamps recorded in the _PHASE_TIMING module global by the session hooks.
+    offload downloads `.test_output/**` from every sandbox, so this surfaces the
+    per-batch overhead breakdown in CI without affecting normal runs (the whole
+    thing is a no-op unless PHASE_TIMING is set in the environment).
     """
     if not os.environ.get("PHASE_TIMING"):
         return
-    proc_create = getattr(session, "_phase_proc_create", None)
-    sessionstart = getattr(session, "_phase_sessionstart", None)
-    collection_done = getattr(session, "_phase_collection_done", None)
+    proc_create = _PHASE_TIMING.get("proc_create")
+    sessionstart = _PHASE_TIMING.get("sessionstart")
+    collection_done = _PHASE_TIMING.get("collection_done")
     now = time.time()
     record = {
-        "n_collected": len(getattr(session, "items", []) or []),
+        "n_collected": _PHASE_TIMING.get("n_collected"),
         "phase1_startup_s": round(sessionstart - proc_create, 3)
         if (proc_create and sessionstart)
         else None,
@@ -793,7 +799,8 @@ def _pytest_collection_finish(session: pytest.Session) -> None:
     _write_flaky_manifest(session)
 
     if os.environ.get("PHASE_TIMING"):
-        setattr(session, "_phase_collection_done", time.time())  # noqa: B010
+        _PHASE_TIMING["collection_done"] = time.time()
+        _PHASE_TIMING["n_collected"] = len(session.items)
 
 
 def _compute_junit_test_id(nodeid: str, fspath: str) -> str:
