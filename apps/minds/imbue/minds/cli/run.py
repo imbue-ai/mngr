@@ -271,6 +271,15 @@ def run(
         mngr_binary=MNGR_BINARY,
         latchkey_binary=latchkey.latchkey_binary,
         latchkey_directory=latchkey.latchkey_directory,
+        # Spawn the detached supervisor (and its `mngr observe` discovery
+        # producer grandchild) from $HOME, like every other laptop-side mngr
+        # invocation -- notably the `mngr forward` consumer below. Without this
+        # it inherits minds' cwd, which in a dev checkout is the monorepo root:
+        # its mngr children then load `<repo>/.mngr/settings.toml`, and under
+        # the e2e test that trips mngr's pytest config guard so the supervisor
+        # never starts. A dead producer means no discovery snapshots, which the
+        # discovery-health watchdog escalates to a terminal BLOCKED takeover.
+        cwd=Path.home(),
         extra_env={
             MINDS_API_PROXY_URL_ENV_VAR: f"http://127.0.0.1:{port}",
             MINDS_API_PROXY_KEY_ENV_VAR: minds_api_key,

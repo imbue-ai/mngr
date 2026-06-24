@@ -110,6 +110,9 @@ def _make_fake_mngr_binary(tmp_path: Path) -> Path:
         "    sys.exit(98)\n"
         'record_path = latchkey_directory / "mngr_latchkey" / "latchkey_forward.json"\n'
         "record_path.parent.mkdir(parents=True, exist_ok=True)\n"
+        # Record the working directory the supervisor launched us in so a test
+        # can assert the `cwd` field is threaded through to the spawn.
+        '(record_path.parent / "observed_cwd.txt").write_text(os.getcwd())\n'
         "record_path.write_text(json.dumps({\n"
         '    "pid": os.getpid(),\n'
         '    "started_at": datetime.now(timezone.utc).isoformat(),\n'
@@ -198,6 +201,35 @@ def test_ensure_running_spawns_when_no_record_exists(tmp_path: Path) -> None:
         persisted = _wait_for_forward_record(supervisor.plugin_data_dir)
         assert persisted.pid == info.pid
         assert forward_log_path(supervisor.plugin_data_dir).is_file()
+    finally:
+        supervisor.stop()
+        assert _wait_for_process_exit(info.pid)
+
+
+def test_ensure_running_spawns_forward_in_configured_cwd(tmp_path: Path) -> None:
+    """The ``cwd`` field is threaded through to the detached forward process.
+
+    minds passes ``$HOME`` so the supervisor (a laptop-side mngr invocation)
+    does not resolve project config from a transient cwd. Here we point it at a
+    throwaway directory and assert the spawned child actually ran there.
+    """
+    fake_binary = _make_fake_mngr_binary(tmp_path)
+    spawn_cwd = tmp_path / "spawn-cwd"
+    spawn_cwd.mkdir()
+    supervisor = LatchkeyForwardSupervisor(
+        mngr_binary=str(fake_binary),
+        latchkey_binary="/usr/bin/latchkey-unused",
+        latchkey_directory=tmp_path / f"latchkey-{uuid4().hex}",
+        cwd=spawn_cwd,
+    )
+
+    info = supervisor.ensure_running()
+    try:
+        _wait_for_forward_record(supervisor.plugin_data_dir)
+        observed_cwd = (supervisor.plugin_data_dir / "observed_cwd.txt").read_text()
+        # Resolve both sides: macOS routes tmp through a /private symlink, so the
+        # child's getcwd() can differ textually from the path we passed.
+        assert Path(observed_cwd).resolve() == spawn_cwd.resolve()
     finally:
         supervisor.stop()
         assert _wait_for_process_exit(info.pid)
