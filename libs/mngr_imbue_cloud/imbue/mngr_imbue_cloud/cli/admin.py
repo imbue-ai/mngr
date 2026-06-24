@@ -721,6 +721,9 @@ def pool_create(
                     env_name=slice_env_name,
                     workspace_dir=bake_source.workspace_dir,
                     mngr_source=mngr_source,
+                    # A --from-tag bake must keep the tag's own vendored mngr (byte-for-byte
+                    # release content); only --workspace-dir / --mngr-source override it.
+                    is_from_tag=from_tag is not None,
                     database_url=resolved_database_url,
                     is_dry_run=is_dry_run,
                     is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
