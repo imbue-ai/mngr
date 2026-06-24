@@ -1,4 +1,7 @@
+import gzip
+import importlib.resources
 import shlex
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -15,6 +18,16 @@ TTYD_WINDOW_NAME = "terminal"
 TTYD_SERVICE_NAME = "terminal"
 TTYD_VERSION = "1.7.7"
 
+# Filename of the custom web client (a self-contained index.html) installed into
+# each agent's commands/ttyd/ dir and served to the stock ttyd binary via -I. The
+# stock 1.7.7 client has no OSC 52 handler, so a tmux copy inside the browser
+# terminal never reaches the system clipboard; this client does, while keeping
+# tmux `mouse on` (so wheel scroll and in-app mouse still work). The client is
+# vendored gzip-compressed (TTYD_INDEX_RESOURCE) and decompressed on install. See
+# scripts/build_patched_ttyd_client.sh for how the resource is produced.
+TTYD_INDEX_FILENAME = "index.html"
+TTYD_INDEX_RESOURCE = "ttyd_index.html.gz"
+
 
 def _build_ttyd_command() -> str:
     """Build the ttyd shell command with URL-arg dispatch and multi-service event registration.
@@ -28,9 +41,17 @@ def _build_ttyd_command() -> str:
     ServiceLogRecord events to events/services/events.jsonl:
     - One "terminal" event with the base URL
     - One event per .sh script found in commands/ttyd/ with ?arg=<KEY> appended
+
+    A custom OSC 52-capable web client is served via -I when present (installed by
+    on_after_provisioning before ttyd starts). The flag is added conditionally so a
+    missing client file cleanly falls back to ttyd's built-in client rather than
+    refusing to start.
     """
     ttyd_invocation = (
-        "ttyd -p 0 -a -t disableLeaveAlert=true -W bash -c '"
+        f'_TTYD_INDEX="$MNGR_AGENT_STATE_DIR/commands/ttyd/{TTYD_INDEX_FILENAME}"; '
+        "ttyd -p 0 -a -t disableLeaveAlert=true "
+        '$([ -f "$_TTYD_INDEX" ] && echo -I "$_TTYD_INDEX") '
+        "-W bash -c '"
         'KEY="${1:-}"; '
         'if [ -z "$KEY" ]; then exec bash; fi; '
         'SCRIPT="$MNGR_AGENT_STATE_DIR/commands/ttyd/$KEY.sh"; '
@@ -134,7 +155,11 @@ def on_after_provisioning(
 
     Ensures ttyd is installed on the host, then writes commands/ttyd/agent.sh
     so that the ttyd server can attach to the primary agent's tmux session
-    via URL-arg dispatch (?arg=agent).
+    via URL-arg dispatch (?arg=agent), and installs the custom OSC 52-capable
+    web client (commands/ttyd/index.html) that the ttyd command serves via -I.
+
+    This runs before the agent's tmux windows (including the ttyd window) start,
+    so the client file is present by the time ttyd reads it at startup.
     """
     _ensure_ttyd_installed(host)
 
@@ -146,3 +171,18 @@ def on_after_provisioning(
     script_path = ttyd_dir / "agent.sh"
     logger.debug("Writing ttyd/agent.sh to {}", script_path)
     install_packaged_script_on_host(host, module=ttyd_resources, filename="ttyd_agent.sh", dest=script_path)
+
+    # Install the custom web client served via `ttyd -I` (see TTYD_INDEX_FILENAME).
+    index_path = ttyd_dir / TTYD_INDEX_FILENAME
+    logger.debug("Writing ttyd/{} to {}", TTYD_INDEX_FILENAME, index_path)
+    _install_ttyd_web_client(host, index_path)
+
+
+def _install_ttyd_web_client(host: OnlineHostInterface, dest: Path) -> None:
+    """Decompress the vendored OSC 52-capable ttyd web client and write it onto the host.
+
+    The client is shipped gzip-compressed as a package resource; ttyd serves the
+    decompressed file as-is via -I, so it is written uncompressed (mode 0644).
+    """
+    compressed = importlib.resources.files(ttyd_resources).joinpath(TTYD_INDEX_RESOURCE).read_bytes()
+    host.write_file(dest, gzip.decompress(compressed), mode="0644")
