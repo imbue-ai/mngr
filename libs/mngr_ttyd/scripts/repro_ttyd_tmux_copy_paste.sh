@@ -119,5 +119,10 @@ done
 # The command mirrors libs/mngr_ttyd/imbue/mngr_ttyd/resources/ttyd_agent.sh:
 # clear any inherited $TMUX and attach to the dedicated socket+session. `=` is
 # tmux's exact-match prefix so we never land on a prefix-collision sibling.
-exec ttyd -W -p "$PORT" "${_ttyd_opt_flags[@]}" \
+#
+# ttyd runs in the foreground (no `exec`) on purpose: keeping this shell alive
+# means its EXIT/INT/TERM trap fires when ttyd exits (e.g. on Ctrl-C), tearing
+# down the tmux server and removing the temp config file. `exec`-ing ttyd would
+# replace this shell and the trap would never run, leaking both.
+ttyd -W -p "$PORT" "${_ttyd_opt_flags[@]}" \
     bash -c "unset TMUX; exec tmux -L $(printf %q "$SOCKET") attach -t $(printf %q "=$SESSION")"
