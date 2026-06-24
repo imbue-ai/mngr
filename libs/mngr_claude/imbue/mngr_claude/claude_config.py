@@ -132,6 +132,29 @@ def resolve_shared_claude_config_dir() -> Path:
     return get_claude_config_dir()
 
 
+def find_shared_claude_config() -> Path:
+    """Find the global ``.claude.json`` that claude reads in shared (non-isolated) mode.
+
+    In shared mode (``isolate_local_config_dir=False``) mngr does not provision a
+    per-agent config dir; the agent's claude reads the user's own global config.
+    That file is ``$CLAUDE_CONFIG_DIR/.claude.json`` when the user's shell exports
+    ``CLAUDE_CONFIG_DIR`` (the custom-dir convention) and ``~/.claude.json``
+    otherwise (claude's default, beside ``~/.claude/``). This mirrors the directory
+    resolution in ``resolve_shared_claude_config_dir`` and the ``CLAUDE_CONFIG_DIR``
+    propagation in ``ClaudeAgent.modify_env_vars`` so that dialog-dismissal writes
+    land in the same file the agent's claude will actually read.
+
+    This differs from ``find_user_claude_config``, which keys off
+    ``$ORIGINAL_CLAUDE_CONFIG_DIR`` (set only *inside* an agent) and is the right
+    resolver for the isolated path; it would ignore a shared user's
+    ``$CLAUDE_CONFIG_DIR`` and point at the wrong file.
+    """
+    env_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if env_dir:
+        return Path(env_dir) / ".claude.json"
+    return Path.home() / ".claude.json"
+
+
 def find_user_claude_config() -> Path:
     """Find the user-scope Claude config file (.claude.json).
 
