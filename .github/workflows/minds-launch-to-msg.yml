@@ -757,8 +757,18 @@ jobs:
                 fi
               ' 2>&1 | tail -25
               echo
-              echo "=== curl system_interface (port 1234) from VM ==="
-              "$LIMA" shell "$VM" -- curl -s -m 3 -o /dev/null -w 'http_code=%{http_code} time=%{time_total}\n' http://localhost:1234/health 2>&1 | head -5
+              echo "=== curl system_interface (real port 8000) from VM x3 ==="
+              for i in 1 2 3; do
+                "$LIMA" shell "$VM" -- curl -s -m 5 -o /dev/null -w "  try$i http_code=%{http_code} time=%{time_total}\n" http://localhost:8000/ 2>&1 | head -2
+              done
+              echo "=== curl web-server (port 8080) from VM ==="
+              "$LIMA" shell "$VM" -- curl -s -m 5 -o /dev/null -w 'http_code=%{http_code} time=%{time_total}\n' http://localhost:8080/ 2>&1 | head -2
+              echo
+              echo "=== HANG WATCHDOG thread dump (diag branch writes /tmp/system_interface_hang_dump.txt) ==="
+              "$LIMA" shell "$VM" -- sudo cat /tmp/system_interface_hang_dump.txt 2>&1 | tail -200
+              echo
+              echo "=== system_interface supervisord stderr/stdout (tail) ==="
+              "$LIMA" shell "$VM" -- sudo bash -c 'tail -120 /var/log/supervisor/system_interface-stderr.log 2>/dev/null; echo "--- stdout ---"; tail -40 /var/log/supervisor/system_interface-stdout.log 2>/dev/null' 2>&1 | tail -160
               echo
               echo "=== ps aux in VM ==="
               "$LIMA" shell "$VM" -- sudo ps auxf 2>&1 | grep -iE "bootstrap|system|web-server|uv run|tmux" | head -30
