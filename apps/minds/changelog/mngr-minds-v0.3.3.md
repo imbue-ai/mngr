@@ -1,0 +1,1 @@
+Released minds v0.3.3. Bumped the app version and pinned the baked `FALLBACK_BRANCH` to the `minds-v0.3.3` forever-claude-template tag. This release also carries the Tailwind v4 CSS migration fix: CSS is now compiled at its real consumption points (packaging, dev, e2e) instead of in a `postinstall` hook, so ToDesktop's `pnpm recursive install --prod` cloud build no longer fails.

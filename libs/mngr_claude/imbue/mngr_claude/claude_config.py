@@ -116,15 +116,18 @@ def get_user_claude_config_dir() -> Path:
 def resolve_shared_claude_config_dir() -> Path:
     """Return $CLAUDE_CONFIG_DIR, falling back to ``~/.claude/`` when unset.
 
-    Used by the ``use_env_config_dir`` mode of ``ClaudeAgentConfig`` where mngr
-    delegates the claude config dir to whatever the user has in their shell env
-    rather than provisioning a per-agent dir. The fallback to ``~/.claude/``
-    matches the directory claude itself picks when ``CLAUDE_CONFIG_DIR`` is
-    unset, so ``use_env_config_dir=True`` effectively means "don't touch the
-    config dir at all -- inherit whatever the parent shell would have used."
-    The fallback path is shared (not per-agent), which is the whole point of
-    the flag. Shared mode inherits the same ambient resolution as
-    ``get_claude_config_dir``.
+    Used by the shared (``isolate_local_config_dir=False``) mode of
+    ``ClaudeAgentConfig`` where mngr delegates the claude config dir to whatever
+    the user has in their shell env rather than provisioning a per-agent dir. The
+    fallback to ``~/.claude/`` matches the directory claude itself picks when
+    ``CLAUDE_CONFIG_DIR`` is unset. This resolves a *directory path* for mngr-side
+    bookkeeping (e.g. locating shared session files); it is NOT what mngr exports
+    into the agent's environment. Exporting ``CLAUDE_CONFIG_DIR=~/.claude`` is not
+    equivalent to leaving it unset -- claude reads its global ``.claude.json`` from
+    ``$CLAUDE_CONFIG_DIR/.claude.json`` when the var is set but from
+    ``~/.claude.json`` when it is unset -- so ``modify_env_vars`` only propagates
+    the var when the user's shell already had it set. The fallback path is shared
+    (not per-agent), which is the whole point of the flag.
     """
     return get_claude_config_dir()
 

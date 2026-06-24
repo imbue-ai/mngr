@@ -50,6 +50,7 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.region_preference import start_geo_detection
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
+from imbue.minds.utils.sentry.core import flush_sentry_on_shutdown
 
 # Hard timeout for the shared HTTP client used by the share-readiness probe
 # (mirrors the old FastAPI lifespan's httpx client timeout).
@@ -133,6 +134,10 @@ def _shutdown_desktop_client(state: DesktopClientState, is_externally_managed_cl
             # Strands reported failures or timed out during shutdown; log but
             # don't propagate so other cleanup can run.
             logger.warning("Root concurrency group exit reported errors: {}", exc)
+    # Last: flush Sentry and any pending S3 attachment uploads so errors captured
+    # during the session (including any logged above during teardown) are sent
+    # before the process exits. No-op when Sentry was never initialized.
+    flush_sentry_on_shutdown()
 
 
 def serve_desktop_client(app: Flask, state: DesktopClientState, host: str, port: int) -> None:

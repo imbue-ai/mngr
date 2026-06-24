@@ -250,6 +250,18 @@ def build_list_admin_args(*, database_url: str | None) -> list[str]:
     return args
 
 
+def build_backfill_host_keys_admin_args(*, database_url: str | None) -> list[str]:
+    """Compose the ``mngr imbue_cloud admin pool backfill-host-keys`` argv.
+
+    ``--database-url`` forwarded only when explicitly supplied; see
+    :func:`build_create_admin_args`.
+    """
+    args = ["backfill-host-keys"]
+    if database_url is not None:
+        args.extend(["--database-url", database_url])
+    return args
+
+
 def build_destroy_admin_args(
     *, pool_host_id: str, database_url: str | None, force: bool, skip_vps_cancel: bool
 ) -> list[str]:
@@ -909,6 +921,30 @@ def pool_list(database_url: str | None) -> None:
     env_name = require_activated_env_name()
     args = build_list_admin_args(database_url=resolve_host_pool_dsn(env_name, database_url))
     _raise_on_failure("list", _run_admin_command(args))
+
+
+@pool.command(name="backfill-host-keys")
+@click.option(
+    "--database-url",
+    required=False,
+    default=None,
+    type=str,
+    help=_DATABASE_URL_HELP,
+)
+def pool_backfill_host_keys(database_url: str | None) -> None:
+    """One-time: keyscan + record SSH host public keys for pre-existing pool rows and boxes.
+
+    Forwards to ``mngr imbue_cloud admin pool backfill-host-keys`` -- the single
+    sanctioned trust-on-first-use, used once after deploying the host-key-pinning
+    connector so rows baked before the host-key columns existed become leasable
+    again. Resolves the staging / production host_pool DSN from the tier's
+    ``<vault_prefix>/neon.DATABASE_URL`` Vault entry exactly like ``pool list`` /
+    ``pool destroy``, so the operator never hand-passes ``--database-url``.
+    Idempotent: rows that already have keys are skipped.
+    """
+    env_name = require_activated_env_name()
+    args = build_backfill_host_keys_admin_args(database_url=resolve_host_pool_dsn(env_name, database_url))
+    _raise_on_failure("backfill-host-keys", _run_admin_command(args))
 
 
 @pool.command(name="destroy")

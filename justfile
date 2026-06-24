@@ -243,16 +243,19 @@ minds-test-deployment-only *tests:
 # with `xvfb-run` so it works on headless Linux CI runners. macOS users with
 # a real display can run the underlying pytest directly without xvfb-run.
 # Requires apps/minds/node_modules/ to be installed (`cd apps/minds && pnpm install`).
-minds-test-electron *args:
+# Depends on `minds-css` because the test launches `electron main.js` directly
+# (not via `pnpm start`), so nothing else compiles the gitignored stylesheet.
+minds-test-electron *args: minds-css
   xvfb-run -a uv run pytest apps/minds/test_desktop_client_e2e.py::test_create_local_docker_workspace_via_electron -v --no-cov --cov-fail-under=0 {{args}}
 
-# Download the Tailwind Play CDN JS bundle for the minds desktop client.
-# Idempotent and SHA-pinned via apps/minds/scripts/fetch_tailwind.sh -- the
-# same script also runs automatically as a pnpm `postinstall` hook, so
-# normally you do not need to invoke this recipe. Use it when you want to
-# force-verify the file or after nuking the static/ dir.
-minds-tailwind:
-  bash apps/minds/scripts/fetch_tailwind.sh
+# Compile the minds desktop client's Tailwind v4 stylesheet
+# (static/app.css -> static/app.min.css, minified + tree-shaken) via the
+# pinned @tailwindcss/cli. `just minds-start` rebuilds + watches it live (its
+# `prestart` hook builds it once, then `watch:css` keeps it fresh), and
+# packaged builds compile it in scripts/build.js, so normally you do not need
+# to invoke this recipe -- use it after nuking static/ or to force a rebuild.
+minds-css:
+  bash -c '. apps/minds/scripts/select_node_version.sh && cd apps/minds && pnpm run build:css'
 
 # Sync vendor/mngr in forever-claude-template to this repo's HEAD and commit
 # in FCT. The FCT checkout path comes from the positional arg, else FCT_DIR read
@@ -363,12 +366,18 @@ minds-install:
     . apps/minds/scripts/select_node_version.sh || exit 2
     cd apps/minds && pnpm install
 
-# Override agent_name / branch via positional args:
-#   just minds-start agent_name=foo branch=some-branch
+# Override agent_name / branch / fct (FCT worktree path) via positional args
+# (just has no name=value form for recipe params -- pass them in order):
+#   just minds-start my-agent my-branch
+#   just minds-start mindtest "" .external_worktrees/my-fct-worktree   # 3rd arg = fct
+# `fct` defaults to .external_worktrees/forever-claude-template; an absolute
+# path is used as-is, a relative one is resolved against the mngr root. This
+# is what gets synced (vendor/mngr/) and exported as MINDS_WORKSPACE_GIT_URL,
+# so point it at whichever FCT worktree/branch you want to launch against.
 # Refuses to start if another minds-start is already running in this
 # worktree (PID file under /tmp keyed by worktree path). Use `just
 # minds-stop` to kill the running instance first.
-minds-start agent_name="mindtest" branch="":
+minds-start agent_name="mindtest" branch="" fct="":
     #!/bin/bash
     set -ueo pipefail
     if [ -z "${MINDS_ROOT_NAME:-}" ]; then
@@ -382,7 +391,14 @@ minds-start agent_name="mindtest" branch="":
         echo "       settings.toml than its bootstrap writes to." >&2
         exit 2
     fi
-    fct_wt="$(pwd)/.external_worktrees/forever-claude-template"
+    if [ -n "{{fct}}" ]; then
+        case "{{fct}}" in
+            /*) fct_wt="{{fct}}" ;;
+            *)  fct_wt="$(pwd)/{{fct}}" ;;
+        esac
+    else
+        fct_wt="$(pwd)/.external_worktrees/forever-claude-template"
+    fi
     if [ ! -e "$fct_wt/.git" ]; then
         echo "error: no FCT worktree at $fct_wt" >&2
         echo "       run \`git -C ~/project/forever-claude-template worktree add -b <branch> $fct_wt <base>\`" >&2
@@ -466,7 +482,71 @@ minds-start agent_name="mindtest" branch="":
     . apps/minds/scripts/select_node_version.sh || exit 2
     cd apps/minds && pnpm start
 
-# Stop the minds desktop client started in this worktree by `just minds-start`.
+# Launch the minds desktop client (electron) in dev mode against the
+# activated env for testing the IMBUE_CLOUD provider against pre-baked pool
+# slices. Unlike `just minds-start` (which targets LOCAL Lima/Docker dev),
+# this deliberately does NOT set MINDS_USE_LOCAL_WORKSPACE_DEFAULTS /
+# MINDS_WORKSPACE_*, so the create form keeps its shipped fallbacks: the
+# canonical forever-claude-template remote + FALLBACK_BRANCH (the
+# minds-v<version> release tag baked into production slices). Those shipped
+# defaults are exactly the identity stamped into a slice by
+# `just bake-slice-prod <region> minds-v<version>`, so an IMBUE_CLOUD create
+# gets a fast-path lease of that slice instead of falling back to the slow
+# rebuild path. (The local-worktree defaults that minds-start exports point
+# at a filesystem path + dev branch that no pool host can clone or match --
+# see _operator_workspace_default in desktop_client/templates.py.)
+#
+# It also skips the live-mngr -> vendor/mngr/ rsync that minds-start does on
+# every launch: a leased pool slice already carries the mngr snapshot baked
+# at its tag, so the local working tree is irrelevant to it.
+#
+# Requires an activated minds env in this shell (refuses without one, same as
+# minds-start). In the form's advanced settings, pick the SAME region the
+# slice was baked in -- region is a hard match and is never relaxed. Stop it
+# with `just minds-stop` (shared PID file, keyed by worktree path).
+minds-start-cloud:
+    #!/bin/bash
+    set -ueo pipefail
+    if [ -z "${MINDS_ROOT_NAME:-}" ]; then
+        echo "error: no minds env activated in this shell." >&2
+        echo "       Run \`eval \"\$(uv run minds env activate <name>)\"\` first," >&2
+        echo "       then re-run \`just minds-start-cloud\` from the same shell." >&2
+        exit 2
+    fi
+    pid_file="/tmp/minds-start-$(echo -n "$PWD" | sha1sum | cut -c1-12).pid"
+    if [ -f "$pid_file" ]; then
+        existing=$(cat "$pid_file" 2>/dev/null || echo "")
+        if [ -n "$existing" ] && kill -0 "$existing" 2>/dev/null; then
+            echo "error: a minds desktop client is already running in this worktree (pid=$existing)" >&2
+            echo "       run \`just minds-stop\` first." >&2
+            exit 2
+        fi
+        rm -f "$pid_file"
+    fi
+    if [ -f .env ]; then
+        set -a
+        . .env
+        set +a
+    fi
+    # Scrub ambient ANTHROPIC_* so the client doesn't forward a dev shell's
+    # keys into created agents, silently overriding the create form's auth
+    # mode. See minds-start for the full rationale.
+    unset ANTHROPIC_API_KEY ANTHROPIC_BASE_URL
+    echo "$$" > "$pid_file"
+    trap 'rm -f "$pid_file"' EXIT
+    if [ ! -x "apps/minds/node_modules/.bin/electron" ]; then
+        echo "" >&2
+        echo "error: minds desktop client isn't installed/built yet in this worktree." >&2
+        echo "       Run \`just minds-install\` first, then re-run \`just minds-start-cloud\`." >&2
+        exit 2
+    fi
+    # Put apps/minds's pinned Node (.nvmrc) first on PATH so pnpm's
+    # engine-strict check passes regardless of the shell's default node.
+    . apps/minds/scripts/select_node_version.sh || exit 2
+    cd apps/minds && pnpm start
+
+# Stop the minds desktop client started in this worktree by `just minds-start`
+# or `just minds-start-cloud` (both share this worktree-keyed PID file).
 #
 # Strategy: walk the recipe shell's process tree, find Electron's main
 # process, and SIGTERM that specifically. The Electron main process has a
@@ -870,6 +950,19 @@ add-paid-email email:
 # List pool_hosts rows for the activated minds env (read-only).
 list-pool-hosts:
     uv run minds pool list
+
+# One-time host-key backfill for the activated minds env. Keyscans every
+# pre-existing pool host + bare-metal box whose recorded sshd host key columns
+# are still null and records them, so rows baked before host-key pinning become
+# leasable / prep-able again. Run ONCE per tier right after deploying the
+# host-key-pinning connector (`just deploy`); after it runs, leasing and prep
+# fail closed on any row still missing a pinned key. Idempotent -- rows that
+# already have keys are skipped. Activate first (use-only is enough; this needs
+# Vault + the host_pool DB + ssh-keyscan, not Modal) and `vault login`.
+#
+#   eval "$(uv run minds env activate staging)" && just backfill-pool-host-keys
+backfill-pool-host-keys:
+    uv run minds pool backfill-host-keys
 
 # Destroy a single pool host: tear down its underlying machine, then drop its
 # pool_hosts row. The teardown mirrors the row's backend -- cancel the OVH VPS for
