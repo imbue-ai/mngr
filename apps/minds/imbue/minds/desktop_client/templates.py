@@ -14,6 +14,7 @@ Jinja2 macros + ``{% extends %}`` to JinjaX components.
 
 import html
 import os
+from collections.abc import Collection
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
@@ -35,8 +36,6 @@ from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostName
-from imbue.mngr.primitives import HostNameStyle
-from imbue.mngr.utils.name_generator import generate_host_name
 from imbue.mngr_forward.loading_page import render_loading_page
 
 TEMPLATE_DIR: Final[Path] = Path(__file__).resolve().parent / "templates"
@@ -290,7 +289,39 @@ def _operator_workspace_default(env_var: str, fallback: str) -> str:
     return os.environ.get(env_var, fallback)
 
 
-def resolve_create_host_name(submitted_host_name: str) -> HostName:
+# Prefix for auto-generated workspace host names: ``mind-1``, ``mind-2``, ...
+_AUTO_HOST_NAME_PREFIX: Final[str] = "mind-"
+
+
+@pure
+def pick_next_mind_host_name(existing_host_names: Collection[str]) -> HostName:
+    """Pick the next ``mind-N`` host name not already in ``existing_host_names``.
+
+    ``existing_host_names`` is the set of host names already in use across every
+    provider (the create handler gathers it from the discovery snapshot). This
+    scans it for names shaped ``mind-<positive int>`` and returns ``mind-N`` for
+    the smallest positive ``N`` that is free -- so a gap left by a destroyed
+    ``mind-2`` is reused before climbing to ``mind-4``.
+
+    Only canonical, non-zero-padded positive integers count as taken; a name
+    that merely starts with ``mind-`` but whose suffix is not such an integer
+    (e.g. ``mind-foo`` or ``mind-01``) does not participate, since the generator
+    never produces those forms.
+    """
+    used_numbers: set[int] = set()
+    for name in existing_host_names:
+        if not name.startswith(_AUTO_HOST_NAME_PREFIX):
+            continue
+        suffix = name[len(_AUTO_HOST_NAME_PREFIX) :]
+        if suffix.isdigit() and not suffix.startswith("0"):
+            used_numbers.add(int(suffix))
+    n = 1
+    while n in used_numbers:
+        n += 1
+    return HostName(f"{_AUTO_HOST_NAME_PREFIX}{n}")
+
+
+def resolve_create_host_name(submitted_host_name: str, existing_host_names: Collection[str] = ()) -> HostName:
     """Resolve the host name for a new workspace.
 
     The create form no longer asks for a name; it is chosen automatically.
@@ -300,8 +331,8 @@ def resolve_create_host_name(submitted_host_name: str) -> HostName:
     2. the operator override ``MINDS_WORKSPACE_NAME``, honored only under
        the explicit opt-in (see ``_operator_workspace_default``) -- this is
        how ``just minds-start`` / the e2e runner pin a known name;
-    3. a freshly generated coolname (the same generator the FCT
-       create-agent flow uses, e.g. ``brave-cool-otter``).
+    3. the next free ``mind-N`` name, where ``N`` is the smallest positive
+       integer whose ``mind-N`` is not already in ``existing_host_names``.
 
     Raises ``InvalidName`` if a non-empty submitted or operator name is not
     a valid host name; the generated fallback is always valid.
@@ -311,7 +342,7 @@ def resolve_create_host_name(submitted_host_name: str) -> HostName:
     operator_name = _operator_workspace_default("MINDS_WORKSPACE_NAME", "")
     if operator_name:
         return HostName(operator_name)
-    return generate_host_name(HostNameStyle.COOLNAME)
+    return pick_next_mind_host_name(existing_host_names)
 
 
 @pure

@@ -10,6 +10,7 @@ from imbue.minds.desktop_client import templates as _templates_module
 from imbue.minds.desktop_client.templates import CATALOG
 from imbue.minds.desktop_client.templates import DEFAULT_EXPECTED_CREATION_DURATION_SECONDS
 from imbue.minds.desktop_client.templates import expected_creation_duration_seconds
+from imbue.minds.desktop_client.templates import pick_next_mind_host_name
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
@@ -433,17 +434,19 @@ def test_resolve_create_host_name_uses_submitted_value() -> None:
     assert str(resolve_create_host_name("my-workspace")) == "my-workspace"
 
 
-def test_resolve_create_host_name_generates_coolname_when_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    # No submitted name and no operator override -> a generated coolname slug.
-    # ``coolname.generate_slug(3)`` yields *at least* three words (some dictionary
-    # entries are compound, e.g. ``intelligent-quail-of-purring``), so assert a
-    # lower bound rather than an exact count to keep the test deterministic.
+def test_resolve_create_host_name_generates_mind_name_when_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    # No submitted name, no operator override, and no existing workspaces ->
+    # the first ``mind-N`` name.
     monkeypatch.delenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", raising=False)
     monkeypatch.delenv("MINDS_WORKSPACE_NAME", raising=False)
-    name = str(resolve_create_host_name(""))
-    parts = name.split("-")
-    assert len(parts) >= 3
-    assert all(part.isalnum() and part.islower() for part in parts)
+    assert str(resolve_create_host_name("")) == "mind-1"
+
+
+def test_resolve_create_host_name_picks_next_free_mind_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The fallback skips names already in use across providers.
+    monkeypatch.delenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", raising=False)
+    monkeypatch.delenv("MINDS_WORKSPACE_NAME", raising=False)
+    assert str(resolve_create_host_name("", {"mind-1", "mind-2"})) == "mind-3"
 
 
 def test_resolve_create_host_name_honors_operator_override_when_opted_in(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -453,11 +456,32 @@ def test_resolve_create_host_name_honors_operator_override_when_opted_in(monkeyp
 
 
 def test_resolve_create_host_name_ignores_operator_override_without_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Without the opt-in, a stray MINDS_WORKSPACE_NAME is ignored and a coolname
-    # is generated instead.
+    # Without the opt-in, a stray MINDS_WORKSPACE_NAME is ignored and a
+    # ``mind-N`` name is generated instead.
     monkeypatch.delenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", raising=False)
     monkeypatch.setenv("MINDS_WORKSPACE_NAME", "mindtest")
-    assert str(resolve_create_host_name("")) != "mindtest"
+    assert str(resolve_create_host_name("")) == "mind-1"
+
+
+def test_pick_next_mind_host_name_empty_is_one() -> None:
+    assert str(pick_next_mind_host_name(set())) == "mind-1"
+
+
+def test_pick_next_mind_host_name_increments_past_used() -> None:
+    assert str(pick_next_mind_host_name({"mind-1", "mind-2", "mind-3"})) == "mind-4"
+
+
+def test_pick_next_mind_host_name_reuses_lowest_gap() -> None:
+    # A destroyed ``mind-2`` leaves a gap that is filled before climbing higher.
+    assert str(pick_next_mind_host_name({"mind-1", "mind-3"})) == "mind-2"
+
+
+def test_pick_next_mind_host_name_ignores_non_numeric_and_padded_suffixes() -> None:
+    # Names that merely start with ``mind-`` but are not a canonical positive
+    # integer (a coolname, a zero-padded number, ``mind-0``) do not count as
+    # taking a slot, and unrelated names are ignored entirely.
+    existing = {"mind-foo", "mind-01", "mind-0", "brave-cool-otter", "mindful"}
+    assert str(pick_next_mind_host_name(existing)) == "mind-1"
 
 
 def test_render_login_page_shows_prompt() -> None:

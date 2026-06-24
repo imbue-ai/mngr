@@ -446,6 +446,25 @@ def _suggested_create_color(backend_resolver: BackendResolverInterface) -> str:
     return pick_unused_create_color(used)
 
 
+def _existing_workspace_host_names(backend_resolver: BackendResolverInterface) -> set[str]:
+    """Gather the host names of every known workspace across all providers.
+
+    Reads the resolver's discovery snapshot (the aggregated view over all
+    providers) rather than shelling out per workspace, per the resolver-cache
+    read convention. Uses ``list_known_workspace_ids`` -- the *full* set,
+    including workspaces on destroyed-but-still-lingering hosts -- so an
+    auto-generated ``mind-N`` name does not collide with one that discovery has
+    not yet fully dropped. Feeds both the duplicate-name guard and the
+    ``mind-N`` auto-naming in ``resolve_create_host_name``.
+    """
+    names: set[str] = set()
+    for aid in backend_resolver.list_known_workspace_ids():
+        name = backend_resolver.get_workspace_name(aid)
+        if name is not None:
+            names.add(name)
+    return names
+
+
 def _handle_welcome_page() -> Response:
     """Render the welcome/splash page for first-time users."""
     if not _is_request_authenticated():
@@ -1052,11 +1071,14 @@ def _handle_create_form_submit() -> Response:
 
     # The workspace name is chosen automatically: a submitted value (none in
     # normal flow, since the form has no name field), else the operator
-    # ``MINDS_WORKSPACE_NAME`` override, else a generated coolname. Resolve it
-    # eagerly so an invalid operator override surfaces inline rather than as a
-    # deferred "FAILED" status on the creating page.
+    # ``MINDS_WORKSPACE_NAME`` override, else the next free ``mind-N`` name
+    # (computed from the host names already in use across every provider).
+    # Resolve it eagerly so an invalid operator override surfaces inline rather
+    # than as a deferred "FAILED" status on the creating page.
     try:
-        resolved_host_name = resolve_create_host_name(host_name)
+        resolved_host_name = resolve_create_host_name(
+            host_name, _existing_workspace_host_names(get_state().backend_resolver)
+        )
     except InvalidName as exc:
         return _re_render_with_error(str(exc))
 
@@ -1290,25 +1312,17 @@ def _handle_create_agent_api() -> Response:
         if session_store_inst is not None:
             account_email = session_store_inst.get_account_email(account_id) or ""
 
-    # FIXME: two duplicate-name footguns this 409 doesn't cover:
-    # (1) API + empty ``host_name``: a second POST with the same
-    #     ``git_url`` auto-derives the same name via
-    #     ``extract_repo_name`` and fails as a deferred ``FAILED``
-    #     status mid-creation. Fix: derive + uniquify here, or
-    #     reject the duplicate inline.
-    # (2) Form + default ``"assistant"``: the form pre-fills with
-    #     ``_FALLBACK_HOST_NAME``, but ``_handle_create_form_submit``
-    #     never runs this check, so a second Create with the
-    #     untouched default also fails as ``FAILED``. Fix: uniquify
-    #     the default at render time, or mirror this 409 on the form
-    #     path.
+    # The form path (``_handle_create_form_submit``) auto-generates a unique
+    # ``mind-N`` name via ``resolve_create_host_name``, so it cannot collide.
+    # This JSON API still lets a caller pass an explicit ``host_name``; reject a
+    # duplicate of an existing workspace inline with a 409. (A footgun this 409
+    # does not cover: an API caller passing an empty ``host_name`` gets a name
+    # auto-derived from the repo via ``extract_repo_name``, which a second POST
+    # with the same ``git_url`` would duplicate, failing as a deferred ``FAILED``
+    # status mid-creation rather than a 409 here.)
     if host_name:
         backend_resolver = get_state().backend_resolver
-        existing_names: set[str] = set()
-        for existing_id in backend_resolver.list_known_workspace_ids():
-            existing_name = backend_resolver.get_workspace_name(existing_id)
-            if existing_name is not None:
-                existing_names.add(existing_name)
+        existing_names = _existing_workspace_host_names(backend_resolver)
         if host_name in existing_names:
             return make_response(
                 status_code=409,
