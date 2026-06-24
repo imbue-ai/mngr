@@ -122,6 +122,7 @@ from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHe
 from imbue.minds.desktop_client.templates import render_accounts_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
+from imbue.minds.desktop_client.templates import render_consent_page
 from imbue.minds.desktop_client.templates import render_create_form
 from imbue.minds.desktop_client.templates import render_creating_page
 from imbue.minds.desktop_client.templates import render_destroying_page
@@ -456,6 +457,79 @@ def _suggested_create_color(backend_resolver: BackendResolverInterface) -> str:
     return pick_unused_create_color(used)
 
 
+def _maybe_consent_screen() -> Response | None:
+    """Return the error-reporting consent screen if it still needs answering, else None.
+
+    The screen is shown on first launch (and once after upgrading from a build that predates it),
+    ahead of welcome/login, until the user answers it via POST /consent. When config is unavailable
+    (e.g. minimal test apps) there is nothing to gate on, so this is a no-op.
+    """
+    minds_config: MindsConfig | None = get_state().minds_config
+    if minds_config is None or minds_config.get_error_reporting_consent_given():
+        return None
+    return make_html_response(
+        content=render_consent_page(
+            report_unexpected_errors=minds_config.get_report_unexpected_errors(),
+            include_logs=minds_config.get_include_error_logs(),
+        )
+    )
+
+
+def _handle_consent_page() -> Response:
+    """Render the first-launch error-reporting consent screen (GET /consent).
+
+    If consent was already answered, redirect home so the screen never reappears.
+    """
+    consent_response = _maybe_consent_screen()
+    if consent_response is not None:
+        return consent_response
+    return make_response(status_code=302, headers={"Location": "/"})
+
+
+def _handle_consent_submit() -> Response:
+    """Record the consent-screen choices and mark consent as answered (POST /consent).
+
+    Pre-auth (the consent screen precedes login), so this carries no authentication guard. "Include
+    logs" is only persisted as on when reporting is also on, matching the screen's coupling.
+    """
+    minds_config: MindsConfig | None = get_state().minds_config
+    if minds_config is not None:
+        try:
+            body = _read_json_body()
+            report = bool(body.get("report_unexpected_errors", False))
+            include_logs = bool(body.get("include_logs", False))
+        except (json.JSONDecodeError, ValueError):
+            report = False
+            include_logs = False
+        minds_config.set_report_unexpected_errors(report)
+        minds_config.set_include_error_logs(include_logs and report)
+        minds_config.set_error_reporting_consent_given(True)
+    return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
+
+
+def _handle_error_reporting_settings() -> Response:
+    """Persist the error-reporting toggles from the account settings page (POST /_chrome/error-reporting).
+
+    Accepts any subset of ``{report_unexpected_errors, include_logs}``; each present boolean is saved.
+    The settings UI clears "include logs" when reporting is turned off, so the stored pair stays
+    consistent without extra coercion here.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+    minds_config: MindsConfig | None = get_state().minds_config
+    if minds_config:
+        try:
+            body = _read_json_body()
+        except (json.JSONDecodeError, ValueError):
+            body = {}
+        if isinstance(body, dict):
+            if "report_unexpected_errors" in body:
+                minds_config.set_report_unexpected_errors(bool(body["report_unexpected_errors"]))
+            if "include_logs" in body:
+                minds_config.set_include_error_logs(bool(body["include_logs"]))
+    return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
+
+
 def _handle_welcome_page() -> Response:
     """Render the welcome/splash page for first-time users."""
     if not _is_request_authenticated():
@@ -466,6 +540,12 @@ def _handle_welcome_page() -> Response:
 
 
 def _handle_landing_page() -> Response:
+    # The first-launch error-reporting consent screen sits ahead of welcome/login: while the user
+    # has not answered it, show it here (the Electron content view and browser both load "/" first).
+    consent_response = _maybe_consent_screen()
+    if consent_response is not None:
+        return consent_response
+
     if not _is_request_authenticated():
         html = render_login_page()
         return make_html_response(content=html)
@@ -4365,6 +4445,9 @@ def create_desktop_client(
     app.add_url_rule("/_dev/styleguide", view_func=_handle_dev_styleguide)
 
     # Core routes
+    app.add_url_rule("/consent", view_func=_handle_consent_page)
+    app.add_url_rule("/consent", view_func=_handle_consent_submit, methods=["POST"])
+    app.add_url_rule("/_chrome/error-reporting", view_func=_handle_error_reporting_settings, methods=["POST"])
     app.add_url_rule("/welcome", view_func=_handle_welcome_page)
     app.add_url_rule("/login", view_func=_handle_login)
     app.add_url_rule("/authenticate", view_func=_handle_authenticate)

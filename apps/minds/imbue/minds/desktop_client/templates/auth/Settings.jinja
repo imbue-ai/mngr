@@ -1,10 +1,18 @@
-{#def email, display_name, provider, user_id_prefix #}
+{#def email, display_name, provider, user_id_prefix, report_unexpected_errors=false, include_error_logs=false #}
 {#
   Account settings page. Read-only view of the signed-in user's email,
   display name (if set), auth provider, and user-id prefix. Email-provider
   accounts get a "Change password" link to the forgot-password flow. Every
   variant has a Sign out button that POSTs to /auth/api/signout and
   redirects home.
+
+  It also hosts the per-machine error-reporting toggles (the same settings the
+  first-launch consent screen records). These are global to the machine, not
+  account-scoped.
+
+  FIXME: error reporting is per-machine app config, not account info -- it only
+  lives here because there is no general app-settings page yet. Move these
+  toggles to a dedicated app-settings page when one exists.
 #}
 {% set _scripts %}
 <script>
@@ -12,6 +20,47 @@
     await fetch('/auth/api/signout', { method: 'POST' });
     window.location.href = '/';
   });
+
+  (function () {
+    var reportToggle = document.getElementById('report-errors-toggle');
+    var logsRow = document.getElementById('include-logs-row');
+    var logsToggle = document.getElementById('include-logs-toggle');
+
+    // "Include logs" is only meaningful when reporting is on; reveal it with the
+    // report toggle and clear it (persisting the cleared state) when reporting goes off.
+    function syncLogsVisibility() {
+      if (reportToggle.checked) {
+        logsRow.classList.remove('hidden');
+      } else {
+        logsRow.classList.add('hidden');
+      }
+    }
+    syncLogsVisibility();
+
+    function saveErrorReporting(payload) {
+      return fetch('/_chrome/error-reporting', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    }
+
+    reportToggle.addEventListener('change', function () {
+      var enabled = reportToggle.checked;
+      var payload = { report_unexpected_errors: enabled };
+      if (!enabled) {
+        // Turning reporting off also clears log inclusion so the stored pair stays consistent.
+        logsToggle.checked = false;
+        payload.include_logs = false;
+      }
+      syncLogsVisibility();
+      saveErrorReporting(payload);
+    });
+
+    logsToggle.addEventListener('change', function () {
+      saveErrorReporting({ include_logs: logsToggle.checked });
+    });
+  })();
 </script>
 {% endset %}
 <PageNarrowContainer title="Account settings" max_width="max-w-[480px]" scripts={{ _scripts }}>
@@ -35,6 +84,27 @@
     <span class="type-body text-secondary">User ID prefix</span>
     <span class="text-primary font-mono type-label">{{ user_id_prefix }}</span>
   </div>
+
+  <h2 class="type-heading text-primary mt-8 mb-2">Error reporting</h2>
+  <p class="type-helper text-tertiary mb-3">Applies to this device, regardless of which account is signed in.</p>
+  <label class="flex items-start justify-between gap-3 py-3 border-b border-subtle cursor-pointer">
+    <span>
+      <span class="type-body text-primary font-semibold">Report unexpected errors</span>
+      <span class="block type-helper text-tertiary">Send a report to Imbue when something goes wrong.</span>
+    </span>
+    <input type="checkbox" id="report-errors-toggle" class="mt-1 shrink-0"
+           {% if report_unexpected_errors %}checked{% endif %}>
+  </label>
+  <label id="include-logs-row"
+         class="flex items-start justify-between gap-3 py-3 border-b border-subtle cursor-pointer {% if not report_unexpected_errors %}hidden{% endif %}">
+    <span>
+      <span class="type-body text-primary font-semibold">Include logs</span>
+      <span class="block type-helper text-tertiary">Attach recent log files to help diagnose the problem.</span>
+    </span>
+    <input type="checkbox" id="include-logs-toggle" class="mt-1 shrink-0"
+           {% if include_error_logs %}checked{% endif %}>
+  </label>
+
   <div class="mt-6 flex flex-col gap-2">
     {% if provider == 'email' %}
       <ButtonLink href="/auth/forgot-password" variant="secondary" size="lg" block>Change password</ButtonLink>

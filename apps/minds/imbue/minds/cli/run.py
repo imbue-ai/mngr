@@ -182,37 +182,28 @@ def run(
     # Initialize Sentry for the minds backend process. ``setup_logging`` already ran
     # in the CLI group callback, so the loguru sinks Sentry layers on top of exist.
     #
-    # Sentry is off by default and only initialized when MINDS_SENTRY_ENABLED is
-    # set: until we're ready to rely on it, the backend sends nothing to Sentry
-    # unless explicitly opted in.
+    # Sentry always initializes, but what it actually sends is gated live by per-machine user
+    # settings (stored in MindsConfig, surfaced via the first-launch consent screen and account
+    # settings): ``report_unexpected_errors`` gates automatic error sends, and ``include_error_logs``
+    # gates log/traceback attachments. Both are read live, so toggling a setting takes effect without
+    # restarting. Manual bug reports are always sent regardless of ``report_unexpected_errors``.
     #
-    # When enabled, the activated minds env (from `minds env activate`) selects the
-    # Sentry DSN and, for production/staging, which S3 attachment bucket: production
-    # and staging each get their own, while every other env (dev-*, ci-*, or no
-    # activated env) reports to the dev project. We treat "not activated" as dev so
-    # an un-activated `minds run` never accidentally reports to the production
-    # project. S3 attachment uploads are additionally opt-in via
-    # MINDS_SENTRY_S3_UPLOADS (default off, even in production/staging) since they
-    # can carry potentially-sensitive data; development never uploads regardless.
-    # The release id (desktop app version) and git sha come from the Electron
-    # launcher via env vars, falling back to the in-repo package.json / "unknown"
-    # for bare source runs (see imbue.minds.build_info).
-    if os.environ.get("MINDS_SENTRY_ENABLED", "").strip().lower() in ("1", "true", "yes"):
-        activated_env_name = env_name_from_root_name(root_name) if is_minds_root_name_set_to_active_env() else None
-        is_sentry_s3_upload_enabled = os.environ.get("MINDS_SENTRY_S3_UPLOADS", "").strip().lower() in (
-            "1",
-            "true",
-            "yes",
-        )
-        setup_sentry(
-            environment=SentryDeployEnvironment.from_minds_env_name(activated_env_name),
-            release_id=resolve_release_id(),
-            git_commit_sha=resolve_git_sha(),
-            log_folder=paths.log_dir,
-            is_s3_upload_enabled=is_sentry_s3_upload_enabled,
-        )
-    else:
-        logger.info("Sentry is disabled (set MINDS_SENTRY_ENABLED=1 to enable error reporting).")
+    # The activated minds env (from `minds env activate`) selects the Sentry DSN and, for
+    # production/staging, which S3 attachment bucket: production and staging each get their own, while
+    # every other env (dev-*, ci-*, or no activated env) reports to the dev project. We treat "not
+    # activated" as dev so an un-activated `minds run` never accidentally reports to the production
+    # project; development never uploads attachments regardless. The release id (desktop app version)
+    # and git sha come from the Electron launcher via env vars, falling back to the in-repo
+    # package.json / "unknown" for bare source runs (see imbue.minds.build_info).
+    activated_env_name = env_name_from_root_name(root_name) if is_minds_root_name_set_to_active_env() else None
+    setup_sentry(
+        environment=SentryDeployEnvironment.from_minds_env_name(activated_env_name),
+        release_id=resolve_release_id(),
+        git_commit_sha=resolve_git_sha(),
+        log_folder=paths.log_dir,
+        is_error_reporting_enabled=minds_config.get_report_unexpected_errors,
+        is_log_inclusion_enabled=minds_config.get_include_error_logs,
+    )
     client_config_path = config_file
     client_env_config = load_client_config(client_config_path)
     connector_url_str = str(client_env_config.connector_url).rstrip("/")

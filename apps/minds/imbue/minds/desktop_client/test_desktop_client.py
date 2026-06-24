@@ -2064,6 +2064,75 @@ def test_auto_open_toggle(tmp_path: Path) -> None:
     assert config.get_auto_open_requests_panel() is False
 
 
+# -- error-reporting consent + settings tests --
+
+
+def test_landing_shows_consent_screen_before_login_on_first_launch(tmp_path: Path) -> None:
+    """On first launch (consent not yet answered), "/" shows the consent screen ahead of login."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "Help improve Minds" in response.text
+    assert "Report unexpected errors" in response.text
+    # The login prompt must not be shown yet: consent precedes login.
+    assert "Login" not in response.text
+
+
+def test_consent_submit_records_choices_and_unblocks_landing(tmp_path: Path) -> None:
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.post("/consent", json={"report_unexpected_errors": True, "include_logs": True})
+    assert response.status_code == 200
+
+    config = MindsConfig(data_dir=tmp_path)
+    assert config.get_error_reporting_consent_given() is True
+    assert config.get_report_unexpected_errors() is True
+    assert config.get_include_error_logs() is True
+
+    # With consent answered, "/" no longer shows the consent screen (falls through to login).
+    landing = client.get("/")
+    assert "Help improve Minds" not in landing.text
+    assert "Login" in landing.text
+
+
+def test_consent_submit_does_not_persist_logs_without_reporting(tmp_path: Path) -> None:
+    """ "Include logs" is only meaningful with reporting on, so it is not persisted otherwise."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.post("/consent", json={"report_unexpected_errors": False, "include_logs": True})
+    assert response.status_code == 200
+
+    config = MindsConfig(data_dir=tmp_path)
+    assert config.get_error_reporting_consent_given() is True
+    assert config.get_report_unexpected_errors() is False
+    assert config.get_include_error_logs() is False
+
+
+def test_error_reporting_settings_requires_auth(tmp_path: Path) -> None:
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.post("/_chrome/error-reporting", json={"report_unexpected_errors": True})
+    assert response.status_code == 403
+    # Nothing was persisted.
+    config = MindsConfig(data_dir=tmp_path)
+    assert config.get_report_unexpected_errors() is False
+
+
+def test_error_reporting_settings_persist_each_toggle(tmp_path: Path) -> None:
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+
+    assert client.post("/_chrome/error-reporting", json={"report_unexpected_errors": True}).status_code == 200
+    assert client.post("/_chrome/error-reporting", json={"include_logs": True}).status_code == 200
+
+    config = MindsConfig(data_dir=tmp_path)
+    assert config.get_report_unexpected_errors() is True
+    assert config.get_include_error_logs() is True
+
+    # A partial update touches only the named key.
+    assert client.post("/_chrome/error-reporting", json={"report_unexpected_errors": False}).status_code == 200
+    config = MindsConfig(data_dir=tmp_path)
+    assert config.get_report_unexpected_errors() is False
+    assert config.get_include_error_logs() is True
+
+
 # -- system-interface restart + recovery tests --
 
 

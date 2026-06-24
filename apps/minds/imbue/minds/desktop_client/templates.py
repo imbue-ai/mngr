@@ -456,6 +456,20 @@ def render_creating_page(
 
 
 @pure
+def render_consent_page(report_unexpected_errors: bool, include_logs: bool) -> str:
+    """Render the first-launch error-reporting consent screen.
+
+    The two checkbox states seed the form; "Include logs" is only revealed once "Report unexpected
+    errors" is enabled (handled client-side).
+    """
+    return CATALOG.render(
+        "pages.Consent",
+        report_unexpected_errors=report_unexpected_errors,
+        include_logs=include_logs,
+    )
+
+
+@pure
 def render_welcome_page() -> str:
     """Render the welcome/splash page for first-time users."""
     return CATALOG.render("pages.Welcome")

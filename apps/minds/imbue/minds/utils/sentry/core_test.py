@@ -10,6 +10,7 @@ from sentry_sdk.transport import Transport
 from sentry_sdk.types import Event
 from sentry_sdk.types import Hint
 
+from imbue.minds.utils.sentry.core import MANUALLY_SUBMITTED_TAG
 from imbue.minds.utils.sentry.core import ErrorAttachmentsS3Uploader
 from imbue.minds.utils.sentry.core import SENTRY_DSN_DEV
 from imbue.minds.utils.sentry.core import SENTRY_DSN_PRODUCTION
@@ -17,6 +18,8 @@ from imbue.minds.utils.sentry.core import SENTRY_DSN_STAGING
 from imbue.minds.utils.sentry.core import SentryDeployEnvironment
 from imbue.minds.utils.sentry.core import _SENTRY_DSN_BY_ENVIRONMENT
 from imbue.minds.utils.sentry.core import _before_send_wrapper
+from imbue.minds.utils.sentry.core import _make_automatic_reporting_gate
+from imbue.minds.utils.sentry.core import add_extra_info_hook
 from imbue.minds.utils.sentry.loguru_handler import should_record_sentry_event
 
 
@@ -125,6 +128,43 @@ def test_before_send_failure_reporting_does_not_recurse() -> None:
         sentry_sdk.capture_event({"message": "trigger"})
 
     assert call_count == 2
+
+
+def test_automatic_reporting_gate_drops_automatic_events_when_disabled() -> None:
+    gate = _make_automatic_reporting_gate(lambda: False)
+    assert gate({"message": "boom"}, {}) is None
+
+
+def test_automatic_reporting_gate_passes_automatic_events_when_enabled() -> None:
+    gate = _make_automatic_reporting_gate(lambda: True)
+    event: Event = {"message": "boom"}
+    assert gate(event, {}) is event
+
+
+def test_automatic_reporting_gate_always_passes_manual_reports_even_when_disabled() -> None:
+    # A manual bug report is an explicit user action and must be sent regardless of the automatic
+    # reporting setting.
+    gate = _make_automatic_reporting_gate(lambda: False)
+    event: Event = {"message": "bug", "tags": {MANUALLY_SUBMITTED_TAG: "true"}}
+    assert gate(event, {}) is event
+
+
+def test_add_extra_info_hook_skips_attachments_when_log_inclusion_disabled() -> None:
+    # With log inclusion off, no upload callbacks are prepared and no uploaded-files extras are added,
+    # but the lightweight ``platform`` extra is still attached.
+    event: Event = {"extra": {}}
+    result_event, _hint, callbacks = add_extra_info_hook(event, {}, is_log_inclusion_enabled=lambda: False)
+    assert callbacks == ()
+    assert "platform" in result_event["extra"]
+    assert not any(key.startswith("uploaded_files") for key in result_event["extra"])
+
+
+def test_add_extra_info_hook_collects_traceback_when_log_inclusion_enabled() -> None:
+    # With log inclusion on and no scope-configured log folder, the only attachment prepared is the
+    # synthesized-traceback upload (one callback). Callbacks are partials, so nothing is uploaded here.
+    event: Event = {"extra": {}}
+    _result_event, _hint, callbacks = add_extra_info_hook(event, {}, is_log_inclusion_enabled=lambda: True)
+    assert len(callbacks) == 1
 
 
 def test_collect_external_attachments_without_logs_folder_only_uploads_traceback() -> None:
