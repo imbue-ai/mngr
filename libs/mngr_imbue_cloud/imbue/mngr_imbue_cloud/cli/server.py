@@ -1002,6 +1002,22 @@ def tear_down_unleased_slices(database_url: str) -> dict[str, Any]:
     return {"torn_down": torn_down_count, "failed": 0}
 
 
+def _resolve_vendored_mngr_source(*, mngr_source: str | None, repo_root: Path, is_from_tag: bool) -> Path | None:
+    """Return the mngr tree to vendor into the FCT clone's ``vendor/mngr``, or None to keep the clone's own.
+
+    An explicit ``--mngr-source`` always wins. Otherwise a ``--from-tag`` bake keeps
+    the mngr already vendored at the pinned tag (returns None -- byte-for-byte tag
+    content), while a ``--workspace-dir`` (dev) bake vendors the local checkout
+    (``repo_root``). Without this, ``--from-tag`` would silently bake the operator's
+    local mngr over the tag's, defeating the point of pinning a release tag.
+    """
+    if mngr_source is not None:
+        return Path(mngr_source)
+    if is_from_tag:
+        return None
+    return repo_root
+
+
 def allocate_slices(
     *,
     count: int,
@@ -1011,6 +1027,7 @@ def allocate_slices(
     env_name: str | None,
     workspace_dir: Path,
     mngr_source: str | None,
+    is_from_tag: bool,
     database_url: str,
     is_dry_run: bool,
     is_deferred_install_wait_skipped: bool,
@@ -1020,8 +1037,9 @@ def allocate_slices(
 
     The slice backend of ``admin pool create``. Bakes onto the operator-named
     ``server_id`` (one server per invocation: a server's per-slice vCPU/RAM/disk
-    are fixed by its registration, so a batch is homogeneous), vendors this branch's
-    mngr into the FCT workspace once, then bakes the slices concurrently -- at most
+    are fixed by its registration, so a batch is homogeneous), vendors the resolved
+    mngr source into the FCT workspace once (see ``_resolve_vendored_mngr_source``:
+    a ``--from-tag`` bake keeps the tag's own vendored mngr), then bakes the slices concurrently -- at most
     ``max_concurrency`` at a time (the rest queue) so the box isn't over-contended,
     which would push each ``mngr create`` past its timeout. Each ``mngr create``
     drives the slice provider to carve a lima VM over SSH on the box and bake the
@@ -1099,13 +1117,17 @@ def allocate_slices(
             )
             return
 
-        # Resolve the mngr source tree (default to this checkout). The workspace dir
-        # is already resolved + validated by the caller's bake-source context. Vendor
-        # this branch's mngr into the FCT workspace once (the baked container builds
-        # its mngr from vendor/mngr); the parallel bakes then share it.
+        # Resolve which mngr tree (if any) to vendor into the FCT workspace's
+        # vendor/mngr (the baked container builds its mngr from there). For a
+        # --from-tag bake we keep the mngr already vendored at the pinned tag so the
+        # slice is byte-for-byte tag content; only --workspace-dir (dev) or an
+        # explicit --mngr-source overrides it. See _resolve_vendored_mngr_source.
         repo_root = Path(__file__).resolve().parents[5]
-        resolved_mngr_source = Path(mngr_source) if mngr_source else repo_root
-        sync_mngr_into_template(resolved_mngr_source, workspace_dir)
+        mngr_source_to_vendor = _resolve_vendored_mngr_source(
+            mngr_source=mngr_source, repo_root=repo_root, is_from_tag=is_from_tag
+        )
+        if mngr_source_to_vendor is not None:
+            sync_mngr_into_template(mngr_source_to_vendor, workspace_dir)
 
         pool_public_key = _derive_public_key(private_key_path)
         # Spawn one thread per slice but cap how many bake at once with a semaphore
