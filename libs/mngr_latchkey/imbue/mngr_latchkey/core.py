@@ -195,8 +195,8 @@ MINDS_GOOGLE_OAUTH_SERVICES: Final[frozenset[str]] = frozenset(
 # pair is reused for every google service. This is an installed/desktop-app
 # OAuth client, so the "secret" is not truly confidential -- it ships inside
 # the distributed client.
-MINDS_GOOGLE_OAUTH_CLIENT_ID: Final[str] = "510027399143-18er1onc0k79fqu9kgufi4plgrc6jsje.apps.googleusercontent.com"
-MINDS_GOOGLE_OAUTH_CLIENT_SECRET: Final[str] = "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"
+MINDS_GOOGLE_OAUTH_CLIENT_ID: Final[str] = "991889009876-ms5ln5jnvqmsrgpmi2nipkv7atmoaks8.apps.googleusercontent.com"
+MINDS_GOOGLE_OAUTH_CLIENT_SECRET: Final[str] = "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"
 
 
 class LatchkeyServiceInfo(FrozenModel):
