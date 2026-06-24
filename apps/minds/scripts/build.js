@@ -83,7 +83,7 @@ const WORKSPACE_PACKAGES = {
  * `[tool.hatch.build] artifacts` in apps/minds/pyproject.toml, so it MUST
  * exist on disk before buildWorkspaceWheels() runs -- otherwise the packaged
  * app ships unstyled. Delegates to the pinned @tailwindcss/cli via the
- * `build:css` pnpm script (already used by postinstall / `just minds-css`).
+ * `build:css` pnpm script (also exposed as `just minds-css`).
  */
 function buildCss() {
   console.log('Compiling Tailwind CSS (static/app.css -> static/app.min.css)...');
