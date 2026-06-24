@@ -17,6 +17,7 @@ from pydantic import Field
 from pyinfra.api.host import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundOnHostError
@@ -428,6 +429,22 @@ class ProviderInstanceInterface(MutableModel, ABC):
         """
         return None
 
+    def get_connection_error_fallback_state(self, host_id: HostId) -> HostState | None:
+        """State to report for a host whose inner-SSH agent enumeration just failed.
+
+        Consulted from the ``HostConnectionError`` fallback in
+        ``get_host_and_agent_details``. Returns ``None`` to keep the default
+        offline-state derivation (``OfflineHost.get_state()``, which yields
+        ``CRASHED`` for a shutdown-capable provider with no recorded stop
+        reason). A provider that can confirm out-of-band -- without inner SSH --
+        that the host is actually still up returns a non-offline state (e.g.
+        ``HostState.UNAUTHENTICATED``) so a live host with a dead inner sshd is
+        not misreported as offline. Only consulted for non-authentication
+        connection failures, since an authentication failure already maps to
+        ``UNAUTHENTICATED``.
+        """
+        return None
+
     # returns (outer_host_public_key, container_host_public_key)
     def get_ssh_host_public_keys(self, host_id: HostId) -> tuple[str | None, str | None]:
         """The host's outer (VPS/VM-root) and container sshd host public keys, when known.
@@ -655,6 +672,19 @@ class ProviderInstanceInterface(MutableModel, ABC):
             host = self.to_offline_host(host_ref.host_id)
             is_authentication_failure = isinstance(e, HostAuthenticationError)
             host_details, _ssh_activity = _build_host_details_from_host(host, host_ref, is_authentication_failure)
+            # The offline derivation can only reason from persisted records, so a
+            # shutdown-capable provider reports CRASHED for a host that never
+            # recorded a clean stop. When the connection failure is not an auth
+            # failure, give the provider a chance to correct that from an
+            # out-of-band signal it has (e.g. docker's daemon reports the
+            # container is still running -> UNAUTHENTICATED), so a live host with
+            # a dead inner sshd is not misreported as offline.
+            if not is_authentication_failure:
+                fallback_state = self.get_connection_error_fallback_state(host_ref.host_id)
+                if fallback_state is not None:
+                    host_details = host_details.model_copy_update(
+                        to_update(host_details.field_ref().state, fallback_state)
+                    )
             agent_details_list = [
                 build_agent_details_from_offline_ref(agent_ref, host_details, resolved_offline_field_generators)
                 for agent_ref in agent_refs
