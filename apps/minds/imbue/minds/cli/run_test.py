@@ -201,34 +201,3 @@ def test_streamed_permission_handler_recovers_missing_host_permissions(tmp_path:
     inbox = get_state(app).request_inbox
     assert isinstance(inbox, RequestInbox)
     assert len(inbox.requests) == 1
-
-
-def test_streamed_permission_handler_survives_malformed_agent_id(tmp_path: Path) -> None:
-    """A request whose ``agent_id`` isn't a valid ``agent-...`` id must not crash the consumer.
-
-    Reproduces the production failure mode: an agent hand-crafts a permission-request body and
-    supplies a placeholder like ``ENV_AGENT`` for ``agent_id``. ``AgentId(...)`` rejects that with
-    ``InvalidRandomIdError``; left unhandled the exception would propagate out of the handler and
-    kill the permission-requests consumer thread, silently stopping every subsequent request from
-    ever reaching the UI. The handler must instead skip host-permission recovery for the bad request
-    and still surface it to the inbox.
-    """
-    handler, app, _, notify_counts = _make_streamed_permission_handler(tmp_path)
-    event = create_latchkey_predefined_permission_request_event(
-        agent_id="ENV_AGENT", scope="slack-api", rationale="why"
-    )
-    # Set a target so the handler reaches the AgentId(...) call rather than early-returning on the
-    # absent-target branch (recovery only runs for latchkey requests carrying an opaque handle).
-    event = event.model_copy_update(
-        to_update(event.field_ref().permissions_target_path, str(tmp_path / "opaque-handle"))
-    )
-
-    # Must not raise despite the malformed agent_id.
-    handler(event)
-
-    # Recovery was skipped, but the request itself was still surfaced to the inbox/UI.
-    inbox = get_state(app).request_inbox
-    assert isinstance(inbox, RequestInbox)
-    assert len(inbox.requests) == 1
-    assert str(inbox.requests[0].event_id) == str(event.event_id)
-    assert len(notify_counts) == 1

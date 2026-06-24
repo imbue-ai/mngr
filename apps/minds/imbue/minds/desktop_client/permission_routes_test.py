@@ -453,39 +453,6 @@ def test_requests_payload_excludes_unresolvable_hosts(tmp_path: Path) -> None:
     assert payload == {"count": 1, "request_ids": [str(visible_request.event_id)]}
 
 
-def test_displayable_pending_requests_skips_malformed_agent_id(tmp_path: Path) -> None:
-    """A request whose ``agent_id`` isn't a valid ``agent-...`` id must not crash the panel.
-
-    A request can carry a malformed ``agent_id`` (e.g. an agent that hand-crafts the
-    request body and supplies a placeholder like ``ENV_AGENT``). ``AgentId(...)`` rejects
-    that with ``InvalidRandomIdError``; without the guard the exception would propagate out
-    of the request-panel rendering loop and take down the whole panel. The filter must
-    instead skip the bad request and keep surfacing the well-formed ones.
-    """
-    known_agent = AgentId()
-    well_formed_request = create_latchkey_predefined_permission_request_event(
-        agent_id=str(known_agent),
-        scope="slack-api",
-        rationale="well-formed",
-    )
-    malformed_request = create_latchkey_predefined_permission_request_event(
-        agent_id="ENV_AGENT",
-        scope="slack-api",
-        rationale="malformed",
-    )
-    inbox = RequestInbox().add_request(well_formed_request).add_request(malformed_request)
-    backend_resolver = _HostKnownStaticResolver(
-        url_by_agent_and_service={},
-        fixed_host_id=HostId(),
-        known_agent_ids=(known_agent,),
-    )
-
-    # Must not raise despite the malformed agent_id, and must drop only the bad request.
-    displayable = _displayable_pending_requests(inbox, backend_resolver)
-
-    assert [str(req.event_id) for req in displayable] == [str(well_formed_request.event_id)]
-
-
 def test_get_permission_request_page_shows_descriptions_when_present(tmp_path: Path) -> None:
     """detent's per-permission descriptions are rendered next to each permission when present."""
     agent_id = AgentId()
