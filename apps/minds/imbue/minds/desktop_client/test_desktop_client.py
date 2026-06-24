@@ -2133,6 +2133,99 @@ def test_error_reporting_settings_persist_each_toggle(tmp_path: Path) -> None:
     assert config.get_include_error_logs() is True
 
 
+# -- get-help / report-a-bug tests --
+
+
+def test_help_page_renders_report_option(tmp_path: Path) -> None:
+    """The help page renders the report-a-bug flow; the agent-help option is present but disabled."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/help")
+    assert response.status_code == 200
+    assert "Report a bug to Imbue" in response.text
+    assert "Have an agent help fix the problem" in response.text
+    # The agent-help radio is disabled in this phase.
+    agent_radio = response.text.split('value="agent"')[1].split(">")[0]
+    assert "disabled" in agent_radio
+
+
+def test_help_page_hides_include_logs_checkbox_when_setting_on(tmp_path: Path) -> None:
+    """With the persistent include-logs setting on, logs are always attached and the checkbox is hidden."""
+    MindsConfig(data_dir=tmp_path).set_include_error_logs(True)
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/help")
+    assert 'id="help-include-logs"' not in response.text
+
+
+def test_help_page_shows_include_logs_checkbox_when_setting_off(tmp_path: Path) -> None:
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/help")
+    assert 'id="help-include-logs"' in response.text
+
+
+def test_help_report_requires_description(tmp_path: Path) -> None:
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.post("/help/report", json={"description": "  "})
+    assert response.status_code == 400
+
+
+def test_help_report_accepts_a_description(tmp_path: Path) -> None:
+    # Sentry is not initialized in tests, so the report is collected and the route returns ok with
+    # sent=False (nothing was actually transmitted). This exercises the full collect path end to end.
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.post(
+        "/help/report",
+        json={"description": "the app froze", "include_app_diagnostics": True, "remote_access": True},
+    )
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["ok"] is True
+    assert body["sent"] is False
+
+
+def _create_test_client_with_api_key(tmp_path: Path, api_key: str) -> FlaskClient:
+    """Build a client with the /api/v1 blueprint mounted and a known central API key."""
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    session_store = make_session_store_for_test(tmp_path)
+    minds_config = MindsConfig(data_dir=tmp_path)
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        http_client=None,
+        session_store=session_store,
+        minds_config=minds_config,
+        paths=WorkspacePaths(data_dir=tmp_path),
+        minds_api_key=api_key,
+    )
+    return app.test_client()
+
+
+def test_api_v1_bug_report_requires_bearer_token(tmp_path: Path) -> None:
+    client = _create_test_client_with_api_key(tmp_path, api_key="secret-key")
+    response = client.post(f"/api/v1/agents/{AgentId()}/report", json={"description": "boom"})
+    assert response.status_code == 401
+
+
+def test_api_v1_bug_report_accepts_authorized_request(tmp_path: Path) -> None:
+    client = _create_test_client_with_api_key(tmp_path, api_key="secret-key")
+    response = client.post(
+        f"/api/v1/agents/{AgentId()}/report",
+        json={"description": "agent saw an error"},
+        headers={"Authorization": "Bearer secret-key"},
+    )
+    assert response.status_code == 200
+    assert response.get_json()["ok"] is True
+
+
+def test_api_v1_bug_report_rejects_empty_description(tmp_path: Path) -> None:
+    client = _create_test_client_with_api_key(tmp_path, api_key="secret-key")
+    response = client.post(
+        f"/api/v1/agents/{AgentId()}/report",
+        json={"description": ""},
+        headers={"Authorization": "Bearer secret-key"},
+    )
+    assert response.status_code == 400
+
+
 # -- system-interface restart + recovery tests --
 
 

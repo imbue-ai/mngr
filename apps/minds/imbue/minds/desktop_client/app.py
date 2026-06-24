@@ -92,6 +92,7 @@ from imbue.minds.desktop_client.region_preference import VULTR_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import default_region_for_provider
 from imbue.minds.desktop_client.region_preference import known_regions_for_provider
 from imbue.minds.desktop_client.region_preference import resolve_default_region
+from imbue.minds.desktop_client.report_collector import submit_bug_report_from_body
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestType
@@ -127,6 +128,7 @@ from imbue.minds.desktop_client.templates import render_create_form
 from imbue.minds.desktop_client.templates import render_creating_page
 from imbue.minds.desktop_client.templates import render_destroying_page
 from imbue.minds.desktop_client.templates import render_dev_styleguide_page
+from imbue.minds.desktop_client.templates import render_help_page
 from imbue.minds.desktop_client.templates import render_inbox_list_fragment
 from imbue.minds.desktop_client.templates import render_inbox_page
 from imbue.minds.desktop_client.templates import render_inbox_unavailable_fragment
@@ -492,15 +494,13 @@ def _handle_consent_submit() -> Response:
     Pre-auth (the consent screen precedes login), so this carries no authentication guard. "Include
     logs" is only persisted as on when reporting is also on, matching the screen's coupling.
     """
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
     minds_config: MindsConfig | None = get_state().minds_config
     if minds_config is not None:
-        try:
-            body = _read_json_body()
-            report = bool(body.get("report_unexpected_errors", False))
-            include_logs = bool(body.get("include_logs", False))
-        except (json.JSONDecodeError, ValueError):
-            report = False
-            include_logs = False
+        report = bool(body.get("report_unexpected_errors", False))
+        include_logs = bool(body.get("include_logs", False))
         minds_config.set_report_unexpected_errors(report)
         minds_config.set_include_error_logs(include_logs and report)
         minds_config.set_error_reporting_consent_given(True)
@@ -516,18 +516,66 @@ def _handle_error_reporting_settings() -> Response:
     """
     if not _is_request_authenticated():
         return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
     minds_config: MindsConfig | None = get_state().minds_config
     if minds_config:
-        try:
-            body = _read_json_body()
-        except (json.JSONDecodeError, ValueError):
-            body = {}
-        if isinstance(body, dict):
-            if "report_unexpected_errors" in body:
-                minds_config.set_report_unexpected_errors(bool(body["report_unexpected_errors"]))
-            if "include_logs" in body:
-                minds_config.set_include_error_logs(bool(body["include_logs"]))
+        if "report_unexpected_errors" in body:
+            minds_config.set_report_unexpected_errors(bool(body["report_unexpected_errors"]))
+        if "include_logs" in body:
+            minds_config.set_include_error_logs(bool(body["include_logs"]))
     return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
+
+
+def _handle_help_page() -> Response:
+    """Render the get-help modal page (GET /help).
+
+    Intentionally unauthenticated: reporting a bug must work even when sign-in itself is broken. The
+    ``workspace`` query param (set by the titlebar button) scopes the optional workspace section.
+    """
+    minds_config: MindsConfig | None = get_state().minds_config
+    include_logs_setting = minds_config.get_include_error_logs() if minds_config else False
+    workspace_agent_id = request.args.get("workspace", "")
+    return make_html_response(
+        content=render_help_page(
+            include_logs_setting=include_logs_setting,
+            workspace_agent_id=workspace_agent_id,
+        )
+    )
+
+
+def _handle_help_report() -> Response:
+    """Collect and submit a user-submitted bug report from the help form (POST /help/report).
+
+    Unauthenticated for the same reason as the page: the user may be reporting a sign-in problem. The
+    shared collector also backs the ``/api/v1`` bug-report route, so both paths produce identical reports.
+    """
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return make_response(
+            status_code=400,
+            content='{"error": "Request body must be a JSON object"}',
+            media_type="application/json",
+        )
+    if not str(body.get("description", "")).strip():
+        return make_response(
+            status_code=400, content='{"error": "A description is required"}', media_type="application/json"
+        )
+
+    state = get_state()
+    sent = submit_bug_report_from_body(
+        body=body,
+        session_store=state.session_store,
+        backend_resolver=state.backend_resolver,
+        minds_config=state.minds_config,
+        paths=state.api_v1_paths,
+    )
+    return make_response(
+        status_code=200,
+        content=json.dumps({"ok": True, "sent": sent}),
+        media_type="application/json",
+    )
 
 
 def _handle_welcome_page() -> Response:
@@ -4448,6 +4496,8 @@ def create_desktop_client(
     app.add_url_rule("/consent", view_func=_handle_consent_page)
     app.add_url_rule("/consent", view_func=_handle_consent_submit, methods=["POST"])
     app.add_url_rule("/_chrome/error-reporting", view_func=_handle_error_reporting_settings, methods=["POST"])
+    app.add_url_rule("/help", view_func=_handle_help_page)
+    app.add_url_rule("/help/report", view_func=_handle_help_report, methods=["POST"])
     app.add_url_rule("/welcome", view_func=_handle_welcome_page)
     app.add_url_rule("/login", view_func=_handle_login)
     app.add_url_rule("/authenticate", view_func=_handle_authenticate)

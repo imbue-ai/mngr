@@ -1019,6 +1019,42 @@ function toggleInbox(bundle) {
   else openInbox(bundle, '');
 }
 
+// -- Get-help modal (per-bundle) --
+//
+// The help modal shares the same modalView overlay as the inbox and sidebar (see
+// openModal): it just loads the backend's /help page. ``agentId`` (the
+// currently-displayed workspace, or falsy on a general screen) is forwarded as a
+// ?workspace= query so the help page can scope its bug report to that workspace.
+
+function helpUrlFor(agentId) {
+  if (!backendBaseUrl) return null;
+  const query = agentId ? '?workspace=' + encodeURIComponent(agentId) : '';
+  return backendBaseUrl + '/help' + query;
+}
+
+function isHelpModalOpen(bundle) {
+  if (!bundle || !bundle.modalVisible || !bundle.modalUrl) return false;
+  // Compare path only; the ?workspace= query may differ between screens.
+  try {
+    return new URL(bundle.modalUrl).pathname === '/help';
+  } catch {
+    return false;
+  }
+}
+
+function openHelp(bundle, agentId) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  const url = helpUrlFor(agentId);
+  if (!url) return;
+  openModal(bundle, url);
+}
+
+function toggleHelp(bundle, agentId) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  if (isHelpModalOpen(bundle)) closeModal(bundle);
+  else openHelp(bundle, agentId);
+}
+
 // Coalesce rapid SSE-triggered chrome-event posts so the inbox shell
 // doesn't queue several /inbox/list fetches when a burst of requests
 // events arrives in quick succession.
@@ -2771,6 +2807,10 @@ ipcMain.on('toggle-sidebar', (event, anchor) => {
 
 ipcMain.on('toggle-inbox', (event) => {
   toggleInbox(getBundleFromEvent(event));
+});
+
+ipcMain.on('toggle-help', (event, agentId) => {
+  toggleHelp(getBundleFromEvent(event), agentId);
 });
 
 ipcMain.on('open-workspace-in-new-window', (event, agentId) => {

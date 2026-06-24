@@ -462,23 +462,29 @@ BaseBeforeSendType = Callable[[Event, Hint], Event | None]
 MANUALLY_SUBMITTED_TAG = "manually_submitted"
 
 
-def _make_automatic_reporting_gate(is_error_reporting_enabled: Callable[[], bool]) -> BaseBeforeSendType:
-    """Build a before_send hook that drops automatic events while error reporting is disabled.
+class _AutomaticReportingGate(MutableModel):
+    """before_send hook (a callable object, mirroring ``_SentryEventRateLimiter``) that drops automatic
+    events while error reporting is disabled.
 
-    The gate is evaluated live on every event (``is_error_reporting_enabled`` reads the current user
-    setting), so toggling the setting takes effect without restarting the app. Events tagged
-    ``MANUALLY_SUBMITTED_TAG`` always pass: a manual bug report is an explicit user action.
+    ``is_error_reporting_enabled`` is read live on every event, so toggling the user setting takes
+    effect without restarting. Events tagged ``MANUALLY_SUBMITTED_TAG`` always pass: a manual bug
+    report is an explicit user action.
     """
 
-    def _gate(event: Event, hint: Hint) -> Event | None:
+    is_error_reporting_enabled: Callable[[], bool]
+
+    def before_send(self, event: Event, hint: Hint) -> Event | None:
         tags = event.get("tags") or {}
         if isinstance(tags, dict) and tags.get(MANUALLY_SUBMITTED_TAG) == "true":
             return event
-        if is_error_reporting_enabled():
+        if self.is_error_reporting_enabled():
             return event
         return None
 
-    return _gate
+
+def _make_automatic_reporting_gate(is_error_reporting_enabled: Callable[[], bool]) -> BaseBeforeSendType:
+    """Build the automatic-reporting before_send gate bound to a live ``is_error_reporting_enabled``."""
+    return _AutomaticReportingGate(is_error_reporting_enabled=is_error_reporting_enabled).before_send
 
 
 # NOTE: if the actual event (without attachments) being too large is a problem, then it will be handled
@@ -883,3 +889,58 @@ def add_extra_info_hook(
 
     extra["platform"] = _get_platform_info()
     return event, hint, tuple(callbacks)
+
+
+def submit_manual_bug_report(
+    *,
+    title: str,
+    report: Mapping[str, Any],
+    include_logs: bool,
+    logs_folder: Path | None,
+) -> bool:
+    """Synthesize and send a user-submitted bug report as a Sentry event.
+
+    Unlike automatic error reporting, this is an explicit user action: the event is tagged
+    ``MANUALLY_SUBMITTED_TAG`` so the automatic-reporting gate always lets it through, even when
+    automatic error reporting is turned off. It is not tied to an exception -- ``title`` becomes the
+    event message and ``report`` is attached as structured context.
+
+    When ``include_logs`` is set and a ``logs_folder`` is given, recent log files are uploaded via the
+    same S3-attachment mechanism as automatic errors (a no-op in environments without an S3 bucket).
+    No traceback is collected (a manual report has no meaningful one).
+
+    Returns True if the event was handed to Sentry, False if Sentry is not active.
+    """
+    client = sentry_sdk.get_client()
+    if not client.is_active():
+        logger.info("Sentry is not active; manual bug report was not sent")
+        return False
+
+    # Build ``extra`` as a local dict (also referenced by the event) so log-attachment URLs can be
+    # added without re-subscripting the loosely-typed Event TypedDict.
+    extra: dict[str, Any] = {"bug_report": dict(report)}
+    event: Event = {
+        "message": title,
+        "level": "info",
+        "tags": {MANUALLY_SUBMITTED_TAG: "true"},
+        "extra": extra,
+    }
+
+    if include_logs and logs_folder is not None:
+        # exception=None -> only log files are prepared (no synthesized traceback).
+        s3_uri_groups, callbacks = _ATTACHMENTS_UPLOADER.collect_external_attachments(
+            exception=None, logs_folder=logs_folder
+        )
+        for group_name, s3_uris in s3_uri_groups.items():
+            extra[f"{EXTRAS_UPLOADED_FILES_KEY}_{group_name}"] = list(s3_uris)
+        handler = get_sentry_event_handler()
+        if handler is not None:
+            handler.schedule_callbacks(callbacks)
+        else:
+            # No loguru handler (e.g. Sentry initialized without the event handler): run the uploads
+            # inline so the referenced S3 URLs resolve.
+            for callback in callbacks:
+                callback()
+
+    sentry_sdk.capture_event(event)
+    return True

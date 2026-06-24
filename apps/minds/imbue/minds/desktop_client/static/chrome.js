@@ -397,6 +397,18 @@
     else navigateContent('/inbox');
   };
 
+  // Get-help opens the help modal (report a bug). Pass the currently-displayed
+  // workspace id along so the report can scope workspace context; in Electron the
+  // modal is the shared overlay view, in browser mode it loads into the content frame.
+  document.getElementById('help-toggle').onclick = function () {
+    var aid = currentTitleAgentId || '';
+    if (isElectron) {
+      window.minds.toggleHelp(aid);
+    } else {
+      navigateContent('/help' + (aid ? '?workspace=' + encodeURIComponent(aid) : ''));
+    }
+  };
+
   // -- Open a permission request from workspace content (browser mode) -------
   //
   // The workspace (the cross-origin content iframe) can ask the shell to show

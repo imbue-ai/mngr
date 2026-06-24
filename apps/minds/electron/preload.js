@@ -46,6 +46,11 @@ contextBridge.exposeInMainWorld('minds', {
   // Inbox modal (formerly the right-side requests panel)
   toggleInbox: () => ipcRenderer.send('toggle-inbox'),
 
+  // Get-help modal (report a bug). ``agentId`` is the currently-displayed
+  // workspace id (or '' on a general screen) so the help page can scope its
+  // report to that workspace; it is packed into the help page URL by main.
+  toggleHelp: (agentId) => ipcRenderer.send('toggle-help', agentId),
+
   // Modal overlay close (used by the inbox shell and any one-off dialogs)
   closeModal: () => ipcRenderer.send('close-modal'),
 

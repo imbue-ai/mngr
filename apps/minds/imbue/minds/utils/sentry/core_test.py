@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import cast
 
 import pytest
 import sentry_sdk
@@ -10,8 +11,8 @@ from sentry_sdk.transport import Transport
 from sentry_sdk.types import Event
 from sentry_sdk.types import Hint
 
-from imbue.minds.utils.sentry.core import MANUALLY_SUBMITTED_TAG
 from imbue.minds.utils.sentry.core import ErrorAttachmentsS3Uploader
+from imbue.minds.utils.sentry.core import MANUALLY_SUBMITTED_TAG
 from imbue.minds.utils.sentry.core import SENTRY_DSN_DEV
 from imbue.minds.utils.sentry.core import SENTRY_DSN_PRODUCTION
 from imbue.minds.utils.sentry.core import SENTRY_DSN_STAGING
@@ -20,6 +21,7 @@ from imbue.minds.utils.sentry.core import _SENTRY_DSN_BY_ENVIRONMENT
 from imbue.minds.utils.sentry.core import _before_send_wrapper
 from imbue.minds.utils.sentry.core import _make_automatic_reporting_gate
 from imbue.minds.utils.sentry.core import add_extra_info_hook
+from imbue.minds.utils.sentry.core import submit_manual_bug_report
 from imbue.minds.utils.sentry.loguru_handler import should_record_sentry_event
 
 
@@ -165,6 +167,57 @@ def test_add_extra_info_hook_collects_traceback_when_log_inclusion_enabled() -> 
     event: Event = {"extra": {}}
     _result_event, _hint, callbacks = add_extra_info_hook(event, {}, is_log_inclusion_enabled=lambda: True)
     assert len(callbacks) == 1
+
+
+def test_submit_manual_bug_report_sends_tagged_event_even_when_reporting_disabled() -> None:
+    # A manual bug report is an explicit user action: it must reach Sentry even when the automatic
+    # reporting gate is set to drop events, and it must carry the manual tag and the report payload.
+    captured_events: list[Event] = []
+
+    class _CapturingTransport(Transport):
+        def capture_envelope(self, envelope: Envelope) -> None:
+            event = envelope.get_event()
+            if event is not None:
+                captured_events.append(event)
+
+    gate = _make_automatic_reporting_gate(lambda: False)
+
+    def before_send(event: Event, hint: Hint) -> Event | None:
+        return _before_send_wrapper(event, hint, [gate])
+
+    client = Client(
+        dsn="https://public@example.com/1",
+        before_send=before_send,
+        transport=_CapturingTransport(),
+        default_integrations=False,
+        auto_enabling_integrations=False,
+    )
+    with isolation_scope() as scope:
+        scope.set_client(client)
+        sent = submit_manual_bug_report(
+            title="[bug report] boom",
+            report={"description": "boom", "remote_access_requested": False},
+            include_logs=False,
+            logs_folder=None,
+        )
+        client.flush()
+
+    assert sent is True
+    assert len(captured_events) == 1
+    event = captured_events[0]
+    # ``Event`` types tags/extra loosely (object), so narrow before subscripting.
+    tags = cast(dict, event["tags"])
+    assert tags["manually_submitted"] == "true"
+    extra = cast(dict, event["extra"])
+    assert extra["bug_report"]["description"] == "boom"
+
+
+def test_submit_manual_bug_report_returns_false_when_sentry_inactive() -> None:
+    # With no active Sentry client (the default in tests), the submit is a no-op that reports failure
+    # rather than raising.
+    assert (
+        submit_manual_bug_report(title="t", report={"description": "d"}, include_logs=False, logs_folder=None) is False
+    )
 
 
 def test_collect_external_attachments_without_logs_folder_only_uploads_traceback() -> None:
