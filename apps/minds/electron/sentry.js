@@ -15,14 +15,11 @@ const { getBuildMetadata } = require('./build-metadata');
 // need for a separate Electron project. The three DSNs below are therefore the
 // same values configured in imbue/minds/utils/sentry/frontend.py; the
 // Python/JS language boundary forces this second copy, so the two MUST be kept
-// in sync. They are PLACEHOLDERS until the real DSNs are pasted in (replacing
-// the __REPLACE_ME__ markers); until then init is skipped, so a misconfigured
-// DSN never points the SDK at a bogus endpoint.
-const SENTRY_FRONTEND_DSN_PRODUCTION = 'https://__REPLACE_ME__@o4504335315501056.ingest.us.sentry.io/__REPLACE_ME__';
-const SENTRY_FRONTEND_DSN_STAGING = 'https://__REPLACE_ME__@o4504335315501056.ingest.us.sentry.io/__REPLACE_ME__';
-const SENTRY_FRONTEND_DSN_DEV = 'https://__REPLACE_ME__@o4504335315501056.ingest.us.sentry.io/__REPLACE_ME__';
+// in sync.
+const SENTRY_FRONTEND_DSN_PRODUCTION = 'https://70356438f3a945b8e58cb0a6f8773d0a@o4504335315501056.ingest.us.sentry.io/4511620037804032';
+const SENTRY_FRONTEND_DSN_STAGING = 'https://b8ce0a0ea4d38de2bda94e5ff6168572@o4504335315501056.ingest.us.sentry.io/4511620045144064';
+const SENTRY_FRONTEND_DSN_DEV = 'https://ddc0f18beba95166b72eacd9d4b48bf0@o4504335315501056.ingest.us.sentry.io/4511620043243520';
 
-const PLACEHOLDER_DSN_MARKER = '__REPLACE_ME__';
 // Mirror imbue.minds.utils.sentry.core._SENTRY_ENABLED_TRUTHY_VALUES.
 const SENTRY_ENABLED_TRUTHY_VALUES = ['1', 'true', 'yes'];
 
@@ -85,10 +82,6 @@ function initSentry() {
   }
   const environment = resolveEnvironment();
   const dsn = dsnForEnvironment(environment);
-  if (dsn.includes(PLACEHOLDER_DSN_MARKER)) {
-    console.log(`[sentry] No DSN configured for environment "${environment}"; skipping init.`);
-    return;
-  }
   const { releaseId, gitSha } = getBuildMetadata();
   Sentry.init({
     dsn,
