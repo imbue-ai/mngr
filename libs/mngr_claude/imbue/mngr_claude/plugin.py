@@ -1582,16 +1582,24 @@ class ClaudeCoreAgent(
     def modify_env_vars(self, host: OnlineHostInterface, env_vars: dict[str, str]) -> None:
         """Add CLAUDE_CONFIG_DIR and ORIGINAL_CLAUDE_CONFIG_DIR.
 
-        CLAUDE_CONFIG_DIR is always set, even when ``isolate_local_config_dir=False``
-        (shared mode): the launch command in ``assemble_command`` references
-        ``$CLAUDE_CONFIG_DIR`` to locate session files, and the tmux session the
-        agent runs in does not reliably inherit the value from the shell that
-        invoked mngr. In shared mode it resolves to the user's shared config dir
-        (``$CLAUDE_CONFIG_DIR`` or ``~/.claude``) via ``get_claude_config_dir`` ->
-        ``resolve_shared_claude_config_dir``, so claude reads the user's real
-        config rather than an empty path.
+        In isolated mode CLAUDE_CONFIG_DIR points at the per-agent config dir.
 
-        In shared mode we do not set ORIGINAL_CLAUDE_CONFIG_DIR (there is no
+        In shared mode (``isolate_local_config_dir=False``) we export
+        CLAUDE_CONFIG_DIR *only* when the user's own shell already had it set.
+        Exporting it unconditionally is NOT a no-op even when the value equals the
+        ``~/.claude`` that claude defaults to: claude reads its global
+        ``.claude.json`` (onboarding state, theme, trust, history, ...) from
+        ``$CLAUDE_CONFIG_DIR/.claude.json`` when the var is set, but from
+        ``~/.claude.json`` (beside the dir) when it is unset. Forcing
+        ``CLAUDE_CONFIG_DIR=~/.claude`` therefore points claude at an inner stub
+        file that lacks the user's onboarding state, re-triggering the
+        theme/onboarding screen on every shared-mode agent. Leaving it unset
+        preserves claude's own default resolution. The launch command in
+        ``assemble_command`` no longer depends on the var being exported: its
+        session-file lookup falls back to ``$HOME/.claude`` via
+        ``${CLAUDE_CONFIG_DIR:-$HOME/.claude}``.
+
+        In shared mode we also do not set ORIGINAL_CLAUDE_CONFIG_DIR (there is no
         per-agent dir to distinguish from the user's) and do not force
         DISABLE_AUTOUPDATER, leaving the user's claude environment otherwise
         alone.
@@ -1606,11 +1614,20 @@ class ClaudeCoreAgent(
         user-provided value untouched.
         """
         config = self.agent_config
-        env_vars["CLAUDE_CONFIG_DIR"] = str(self.get_claude_config_dir())
         if self._is_isolated_config_dir():
+            env_vars["CLAUDE_CONFIG_DIR"] = str(self.get_claude_config_dir())
             env_vars["ORIGINAL_CLAUDE_CONFIG_DIR"] = str(get_user_claude_config_dir())
             if is_self_update_disabled(config.update_policy, is_unattended=not host.is_local):
                 env_vars.setdefault("DISABLE_AUTOUPDATER", "1")
+        else:
+            # Shared mode: only propagate CLAUDE_CONFIG_DIR when the user's own
+            # shell already exported it (in which case their .claude.json already
+            # lives inside that dir and sharing stays consistent). When unset,
+            # leave it unset so claude resolves its default ~/.claude.json rather
+            # than an empty inner stub. See the docstring for why this matters.
+            user_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+            if user_config_dir:
+                env_vars["CLAUDE_CONFIG_DIR"] = user_config_dir
 
     def get_lifecycle_state(self) -> AgentLifecycleState:
         """Get lifecycle state, accounting for Claude-specific permissions_waiting file.
@@ -2329,8 +2346,11 @@ class ClaudeAgent(
         )
 
         # Build both command variants using the dynamic session ID.
-        # Use $CLAUDE_CONFIG_DIR (set in the agent's env file) to find session files
-        # in the per-agent config dir rather than ~/.claude/. Session files on disk
+        # Use $CLAUDE_CONFIG_DIR to find session files in the per-agent config dir
+        # rather than ~/.claude/. In shared mode the var may be unset (so claude
+        # resolves its default ~/.claude.json -- see modify_env_vars), so the
+        # lookup falls back to $HOME/.claude where the shared session files live.
+        # Session files on disk
         # are named "<session_id>.jsonl"; matching without the extension would
         # always miss, the && would short-circuit, and the silent || fallback at
         # the end of assemble_command would spawn a fresh `claude --session-id
@@ -2340,7 +2360,7 @@ class ClaudeAgent(
         # hooks file). In normal mode the hooks are baked into the config-dir settings.json,
         # so mngr adds no --settings here.
         mngr_settings_arg = f" {MANAGED_SETTINGS_LAUNCH_ARG}" if self.agent_config.use_env_config_dir else ""
-        resume_cmd = f'( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && {base}{mngr_settings_arg} --resume "$MAIN_CLAUDE_SESSION_ID"'
+        resume_cmd = f'( find "${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && {base}{mngr_settings_arg} --resume "$MAIN_CLAUDE_SESSION_ID"'
         create_cmd = f"{base}{mngr_settings_arg} --session-id {agent_uuid}"
 
         # Append additional args to both commands if present
