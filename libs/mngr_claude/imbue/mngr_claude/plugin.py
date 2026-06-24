@@ -108,8 +108,8 @@ from imbue.mngr_claude.claude_config import complete_onboarding
 from imbue.mngr_claude.claude_config import dismiss_effort_callout
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.claude_config import find_project_config
-from imbue.mngr_claude.claude_config import find_shared_claude_config
-from imbue.mngr_claude.claude_config import find_user_claude_config
+from imbue.mngr_claude.claude_config import find_user_config_in_unisolated_mode
+from imbue.mngr_claude.claude_config import find_user_config_in_isolated_mode
 from imbue.mngr_claude.claude_config import fold_hook_configs
 from imbue.mngr_claude.claude_config import get_agent_claude_config_dir
 from imbue.mngr_claude.claude_config import get_agent_claude_plugin_dir
@@ -652,7 +652,7 @@ def _build_claude_json(
     """
     disable_auto_update = is_self_update_disabled(config.update_policy, is_unattended=ctx.is_unattended)
     if sync_local:
-        local_config = read_claude_config(find_user_claude_config())
+        local_config = read_claude_config(find_user_config_in_isolated_mode())
         data: dict[str, Any] = (
             local_config
             if local_config
@@ -897,7 +897,7 @@ def _prompt_user_for_onboarding_completion() -> bool:
 
 def _claude_json_has_primary_api_key() -> bool:
     """Check if ~/.claude.json contains a non-empty primaryApiKey."""
-    claude_json_path = find_user_claude_config()
+    claude_json_path = find_user_config_in_isolated_mode()
     try:
         config_data = read_claude_config(claude_json_path)
     except (json.JSONDecodeError, OSError) as e:
@@ -1588,14 +1588,14 @@ class ClaudeCoreAgent(
         never tool-permission grants (``bypassPermissionsModeAccepted`` is deliberately
         left untouched; see ``auto_dismiss_claude_dialogs``).
 
-        Isolated mode writes to ``find_user_claude_config`` (the per-agent config dir is
+        Isolated mode writes to ``find_user_config_in_isolated_mode`` (the per-agent config dir is
         built from it via ``sync_local``, so it inherits the dismissals). Shared mode
-        writes to ``find_shared_claude_config``, the file the agent's claude reads
+        writes to ``find_user_config_in_unisolated_mode``, the file the agent's claude reads
         directly, resolved the same way ``modify_env_vars`` resolves ``CLAUDE_CONFIG_DIR``.
         """
         if self._is_isolated_config_dir():
-            return find_user_claude_config()
-        return find_shared_claude_config()
+            return find_user_config_in_isolated_mode()
+        return find_user_config_in_unisolated_mode()
 
     def modify_env_vars(self, host: OnlineHostInterface, env_vars: dict[str, str]) -> None:
         """Add CLAUDE_CONFIG_DIR and ORIGINAL_CLAUDE_CONFIG_DIR.
@@ -2159,7 +2159,7 @@ class ClaudeCoreAgent(
                 logger.debug("Removed per-agent OAuth credentials keychain entry")
         elif not per_agent_config_exists:
             # Legacy agent without per-agent config dir -- clean up global file
-            removed = remove_claude_trust_for_path(find_user_claude_config(), self.work_dir)
+            removed = remove_claude_trust_for_path(find_user_config_in_isolated_mode(), self.work_dir)
             if removed:
                 logger.debug("Removed Claude trust entry for {} from global config", self.work_dir)
         else:
@@ -3084,7 +3084,7 @@ def approve_api_key_for_claude(
         if host_key:
             keys_to_approve.append(host_key)
 
-    user_config = read_claude_config(find_user_claude_config())
+    user_config = read_claude_config(find_user_config_in_isolated_mode())
     conf_key = user_config.get("primaryApiKey", "")
     if conf_key:
         keys_to_approve.append(conf_key)
