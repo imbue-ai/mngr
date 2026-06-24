@@ -11,11 +11,10 @@ from imbue.mngr_mapreduce.mngr_cli import _parse_list_json
 from imbue.mngr_mapreduce.mngr_cli import _run_mngr_raw
 
 
-# The subprocess gets a 25s budget (was 10s, which left no headroom for a cold
-# `mngr` start under heavy parallel load and intermittently raised CliError before
-# the work actually finished); the 30s pytest-timeout stays the hard backstop above
-# it. Still flaky-marked as a belt-and-suspenders retry. This asserts the wrapper
-# returns a finished process, not that `mngr config` completes within any tight bound.
+# A cold `mngr config` start can exceed 10s when offload sandboxes are contended
+# (the failure mode is the subprocess budget timing out, not pytest). Give the
+# subprocess a 25s budget and the test function 30s above it; the cold start
+# cannot be sped up here, and the flaky mark lets offload retry as a backstop.
 @pytest.mark.timeout(30)
 @pytest.mark.flaky
 def test_run_mngr_raw_returns_finished_process(cg: ConcurrencyGroup) -> None:

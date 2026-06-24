@@ -141,12 +141,19 @@ fi
 # `:- .gitignore` is rsync's dir-merge filter: it reads .gitignore at each
 # directory level under the source and applies its "-" (exclude) rules.
 # That covers __pycache__, .venv, node_modules, .test_output, .mypy_cache,
-# .ruff_cache, .pytest_cache, .external_worktrees, and anything else listed
-# in the source repo's gitignore. We layer two manual excludes on top for
-# things gitignore deliberately doesn't list:
+# .ruff_cache, .pytest_cache, and anything else listed in the source repo's
+# gitignore. We layer three manual excludes on top for things gitignore
+# deliberately doesn't list, or that macOS's rsync can't match from gitignore:
 #   - .git: gitignore never lists it (git's internal dir).
 #   - uv.lock: committed at the mngr root on purpose, but each install
 #     context regenerates its own.
+#   - .external_worktrees: IS gitignored, but only via a `**/`-prefixed rule
+#     (`**/.external_worktrees/`) that macOS's stock rsync (openrsync /
+#     "2.6.9 compatible") does not honor -- it has no `**` support. Step 1's
+#     destination (TEMPLATE_DIR/vendor/mngr/) lives *under* .external_worktrees,
+#     so failing to exclude it makes rsync copy the destination into itself and
+#     race its own --delete (exit 23). Exclude it explicitly so this works on
+#     macOS too.
 # Both rsync sources (mngr monorepo for step 1, FCT template for step 2/3)
 # carry their own .gitignore at the root, so the same filter applies cleanly
 # to all three rsync calls below.
@@ -156,6 +163,7 @@ RSYNC_EXCLUDES=(
     --filter=':- .gitignore'
     --exclude='.git'
     --exclude='uv.lock'
+    --exclude='.external_worktrees'
 )
 
 # ---------------------------------------------------------------------------

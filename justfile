@@ -416,14 +416,21 @@ minds-start agent_name="mindtest" branch="" fct="":
     # `--filter=:- .gitignore` reads .gitignore at each directory level under
     # the source and applies its exclude rules, so __pycache__, .venv,
     # node_modules, .test_output, .mypy_cache, .ruff_cache, .pytest_cache,
-    # .external_worktrees, etc. are all covered without listing them here.
+    # etc. are all covered without listing them here.
     # `.git` and `uv.lock` aren't in .gitignore (`.git` is git's internal
     # dir; `uv.lock` is intentionally committed but each install context
     # regenerates its own), so we exclude those manually.
+    # `.external_worktrees` IS in .gitignore, but only via a `**/`-prefixed
+    # rule (`**/.external_worktrees/`) that macOS's stock rsync (openrsync /
+    # "2.6.9 compatible") does not honor -- it has no `**` support. Since the
+    # destination ($vendor_mngr) lives *under* .external_worktrees, failing to
+    # exclude it makes rsync copy the destination into itself and race its own
+    # --delete (exit 23). Exclude it explicitly so this works on macOS too.
     rsync -a --delete \
         --filter=':- .gitignore' \
         --exclude=.git \
         --exclude=uv.lock \
+        --exclude=.external_worktrees \
         ./ "$vendor_mngr/"
     pid_file="/tmp/minds-start-$(echo -n "$PWD" | sha1sum | cut -c1-12).pid"
     if [ -f "$pid_file" ]; then

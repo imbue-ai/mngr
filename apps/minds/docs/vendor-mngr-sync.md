@@ -15,7 +15,7 @@ it. It is refreshed by copying mngr's files in, via one of two mechanisms.
 | Mechanism | Form | Carries | Commits in FCT? | Used for |
 |---|---|---|---|---|
 | **`git archive`** | `git archive HEAD` -> wipe `vendor/mngr/` -> untar | committed/tracked files at an exact SHA; permissions normalized; reproducible | yes | releases |
-| **`rsync`** | `rsync -a --delete --filter=':- .gitignore' --exclude=.git --exclude=uv.lock` | the working tree, including uncommitted edits, gitignore-filtered | no | dev iteration and pool bakes |
+| **`rsync`** | `rsync -a --delete --filter=':- .gitignore' --exclude=.git --exclude=uv.lock --exclude=.external_worktrees` | the working tree, including uncommitted edits, gitignore-filtered | no | dev iteration and pool bakes |
 
 Use **archive** for a reproducible, committed snapshot tied to an exact mngr SHA
 (the release flow). Use **rsync** to get your *uncommitted* local mngr changes
@@ -36,17 +36,26 @@ is tagged with) -- is in `apps/minds/docs/release.md`.
 Every rsync path uses one form:
 
 ```
-rsync -a --delete --filter=':- .gitignore' --exclude=.git --exclude=uv.lock SRC/ vendor/mngr/
+rsync -a --delete --filter=':- .gitignore' --exclude=.git --exclude=uv.lock --exclude=.external_worktrees SRC/ vendor/mngr/
 ```
 
 - `--filter=':- .gitignore'` is rsync's dir-merge filter: it reads `.gitignore`
   at each level under the source and applies its exclude rules, so
   `__pycache__`, `.venv`, `node_modules`, `.test_output`, `.mypy_cache`,
-  `.ruff_cache`, `.pytest_cache`, `.external_worktrees`, etc. are excluded
-  without being listed.
-- The two manual excludes cover what `.gitignore` deliberately omits: `.git`
-  (git's internal dir) and `uv.lock` (committed at the mngr root, but each
-  install context regenerates its own).
+  `.ruff_cache`, `.pytest_cache`, etc. are excluded without being listed.
+- The three manual excludes cover what `.gitignore` either deliberately omits
+  or expresses with a glob macOS's rsync can't match:
+  - `.git` -- git's internal dir; `.gitignore` never lists it.
+  - `uv.lock` -- committed at the mngr root, but each install context
+    regenerates its own.
+  - `.external_worktrees` -- IS gitignored, but only via a `**/`-prefixed rule
+    (`**/.external_worktrees/`) that macOS's stock rsync (openrsync /
+    "2.6.9 compatible") does not honor: it has no `**` support. Because the
+    rsync destination (`vendor/mngr/`) can live *under* `.external_worktrees`
+    (the `just minds-start` and `propagate_changes` dev paths put it there),
+    failing to exclude it makes rsync copy the destination into itself and
+    race its own `--delete` (exit 23). Excluding it explicitly works on both
+    old and new rsync.
 
 The exclude set is defined once in code, in
 `libs/mngr_imbue_cloud/.../bake/pool_bake.py`

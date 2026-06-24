@@ -1,0 +1,1 @@
+Gave `test_run_mngr_raw_returns_finished_process` a 25s subprocess budget (up from 10s) so that a cold `mngr config` start under heavy offload contention no longer trips its own internal timeout and fails spuriously. No product behavior change.

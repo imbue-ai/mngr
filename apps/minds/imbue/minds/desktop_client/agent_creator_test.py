@@ -1092,9 +1092,14 @@ def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_
     assert cli.create_calls[0]["metadata"] == {"host_name": "my-workspace"}
 
 
-# Deterministic sync test, but the setup spins up fresh ConcurrencyGroups and a
-# recording http-server fixture, which can exceed the default 10s pytest-timeout.
+# Flaky under heavy offload load: the setup spins up fresh ConcurrencyGroups and a
+# recording http-server fixture, which can be slow when offload sandboxes are
+# contended. @pytest.mark.timeout(30) raises the pytest kill-timer above the global
+# 10s default, _wait_until_finished uses its 30s default poll deadline (a true-hang
+# ceiling a passing test never waits for), and @pytest.mark.flaky lets offload retry
+# a contended sandbox.
 @pytest.mark.timeout(30)
+@pytest.mark.flaky
 def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> None:
     """The API_KEY branch uses the user-supplied key directly and must never call
     ``create_litellm_key``."""
@@ -1116,10 +1121,12 @@ def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> 
     assert cli.create_calls == []
 
 
-# Same timeout flake as its litellm-key siblings above: the creation work
-# occasionally exceeds the default 10s pytest-timeout (so these carry a 30s
-# timeout, matched by _wait_until_finished's poll deadline).
+# Same flake as its API_KEY twin above: the creation setup can be slow under heavy
+# offload contention. @pytest.mark.timeout(30) covers the pytest kill-timer above the
+# global 10s default, _wait_until_finished keeps its 30s default poll deadline, and the
+# flaky mark is a retry backstop.
 @pytest.mark.timeout(30)
+@pytest.mark.flaky
 def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path) -> None:
     """The SUBSCRIPTION branch injects no Anthropic creds and must never call
     ``create_litellm_key``."""
