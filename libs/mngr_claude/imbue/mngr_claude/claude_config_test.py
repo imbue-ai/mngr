@@ -17,8 +17,8 @@ from imbue.mngr_claude.claude_config import check_source_directory_trusted
 from imbue.mngr_claude.claude_config import dismiss_effort_callout
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.claude_config import find_project_config
-from imbue.mngr_claude.claude_config import find_user_config_in_unisolated_mode
 from imbue.mngr_claude.claude_config import find_user_config_in_isolated_mode
+from imbue.mngr_claude.claude_config import find_user_config_in_unisolated_mode
 from imbue.mngr_claude.claude_config import get_claude_config_dir
 from imbue.mngr_claude.claude_config import get_user_claude_config_dir
 from imbue.mngr_claude.claude_config import is_source_directory_trusted

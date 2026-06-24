@@ -108,8 +108,8 @@ from imbue.mngr_claude.claude_config import complete_onboarding
 from imbue.mngr_claude.claude_config import dismiss_effort_callout
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.claude_config import find_project_config
-from imbue.mngr_claude.claude_config import find_user_config_in_unisolated_mode
 from imbue.mngr_claude.claude_config import find_user_config_in_isolated_mode
+from imbue.mngr_claude.claude_config import find_user_config_in_unisolated_mode
 from imbue.mngr_claude.claude_config import fold_hook_configs
 from imbue.mngr_claude.claude_config import get_agent_claude_config_dir
 from imbue.mngr_claude.claude_config import get_agent_claude_plugin_dir
