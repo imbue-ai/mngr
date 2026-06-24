@@ -17,6 +17,7 @@ import os
 import time
 from collections.abc import Mapping
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -181,6 +182,11 @@ class ImbueCloudCli(MutableModel):
         # a baked-in default.
         env = dict(os.environ)
         env[_CONNECTOR_URL_SUBPROCESS_ENV] = str(self.connector_url).rstrip("/")
+        # Run from $HOME like every other laptop-side mngr invocation, so this
+        # does not resolve project config from minds' cwd (the monorepo root in
+        # a dev checkout). Otherwise `mngr imbue_cloud auth list` loads
+        # `<repo>/.mngr/settings.toml`, which under the e2e test trips mngr's
+        # pytest config guard and the account-discovery poll fails every cycle.
         cg = self.parent_concurrency_group.make_concurrency_group(name=cg_name)
         # Debug timing so a slow/timed-out imbue_cloud command tells us which
         # subcommand it was and how long it took before the timeout fired
@@ -196,6 +202,7 @@ class ImbueCloudCli(MutableModel):
                 timeout=float(timeout_seconds),
                 is_checked_after=False,
                 on_output=on_output,
+                cwd=Path.home(),
                 env=env,
             )
         logger.debug(
