@@ -76,9 +76,12 @@ flow specifically:
 
 The **pooled** Neon connection string:
 
+Each key is its own single-`value` leaf (see `vault-setup.md` for the split
+layout):
+
 ```bash
-vault kv put -mount=secrets minds/production/neon \
-    DATABASE_URL=postgresql://user:pass@host-pooler.neon.tech/db?sslmode=require
+vault kv put -mount=secrets minds/production/neon/DATABASE_URL \
+    value=postgresql://user:pass@host-pooler.neon.tech/db?sslmode=require
 ```
 
 ### secrets/minds/production/pool-ssh
@@ -86,8 +89,8 @@ vault kv put -mount=secrets minds/production/neon \
 The management private key:
 
 ```bash
-vault kv put -mount=secrets minds/production/pool-ssh \
-    POOL_SSH_PRIVATE_KEY=@.minds/production/pool_management_key/id_ed25519
+vault kv put -mount=secrets minds/production/pool-ssh/POOL_SSH_PRIVATE_KEY \
+    value=@.minds/production/pool_management_key/id_ed25519
 ```
 
 (`@<path>` tells `vault kv put` to read the value from the file -- the
@@ -171,11 +174,11 @@ The `just bake-slice-{dev,prod}` recipes wrap `minds pool create --backend slice
 activated tier:
 
 - reads the pool SSH private key from the tier's
-  `secrets/minds/<tier>/pool-ssh.POOL_SSH_PRIVATE_KEY` Vault entry -- the same
+  `secrets/minds/<tier>/pool-ssh/POOL_SSH_PRIVATE_KEY` Vault leaf -- the same
   key the connector loads at lease time, so bake-time and lease-time SSH always
   match (you never generate or pass a key by hand);
 - for staging / production, reads the host_pool DSN from
-  `secrets/minds/<tier>/neon.DATABASE_URL` (those tiers keep no local
+  `secrets/minds/<tier>/neon/DATABASE_URL` (those tiers keep no local
   secrets.toml); dev / ci envs auto-resolve it from their per-env secrets.toml.
 
 The `region` argument is the lease-region **label** stamped on each row (what the
