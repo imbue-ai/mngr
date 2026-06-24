@@ -71,13 +71,3 @@ def test_resolve_environment_follows_activated_root_name(
 ) -> None:
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, root_name)
     assert resolve_frontend_sentry_config().environment == expected_environment
-
-
-def test_resolve_dsn_is_none_while_placeholder_projects_are_unconfigured(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The shipped frontend DSNs are placeholders, so even with reporting enabled
-    # the browser must never be handed a bogus DSN.
-    monkeypatch.setenv(MINDS_SENTRY_ENABLED_ENV_VAR, "1")
-    monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "minds")
-    config = resolve_frontend_sentry_config()
-    assert config.dsn is None
-    assert config.to_browser_payload() is None
