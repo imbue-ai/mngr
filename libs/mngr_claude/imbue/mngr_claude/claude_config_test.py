@@ -796,7 +796,9 @@ def test_resolve_shared_claude_config_dir_falls_back_when_empty(monkeypatch: pyt
 # Tests for find_user_config_in_unisolated_mode
 
 
-def test_find_user_config_in_unisolated_mode_uses_env_dir_when_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_find_user_config_in_unisolated_mode_uses_env_dir_when_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """With CLAUDE_CONFIG_DIR set, the shared config file lives inside that dir."""
     target = tmp_path / "shared-claude"
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(target))
@@ -890,7 +892,9 @@ def test_find_user_config_in_isolated_mode_prefers_inside_dir_when_both_exist(
     assert result == inside_config
 
 
-def test_find_user_config_in_isolated_mode_ignores_claude_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_find_user_config_in_isolated_mode_ignores_claude_config_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Without ORIGINAL_CLAUDE_CONFIG_DIR, ignores CLAUDE_CONFIG_DIR (per-agent dir)."""
     custom_dir = tmp_path / "custom-claude"
     custom_dir.mkdir()
