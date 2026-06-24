@@ -587,12 +587,12 @@ def test_post_rejects_unknown_type(node_extension: tuple[str, Path, Path]) -> No
 @pytest.mark.parametrize(
     "malformed_agent_id",
     [
-        "ENV_AGENT",  # the placeholder from the original crash report
-        "agent-1",  # right prefix, wrong hex length (the old test value)
-        "agent-" + "g" * 32,  # right length, non-hex characters
-        "agent-" + "0" * 31,  # one hex char too short
-        "agent-" + "0" * 33,  # one hex char too long
-        "0" * 32,  # 32 hex chars but missing the ``agent-`` prefix
+        pytest.param("ENV_AGENT", id="placeholder-from-crash-report"),
+        pytest.param("agent-1", id="right-prefix-wrong-length"),
+        pytest.param("agent-" + "g" * 32, id="non-hex-characters"),
+        pytest.param("agent-" + "0" * 31, id="one-char-too-short"),
+        pytest.param("agent-" + "0" * 33, id="one-char-too-long"),
+        pytest.param("0" * 32, id="missing-agent-prefix"),
     ],
 )
 def test_post_rejects_malformed_agent_id(
