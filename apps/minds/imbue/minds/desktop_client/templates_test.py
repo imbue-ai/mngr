@@ -1853,7 +1853,10 @@ def test_base_emits_sentry_bootstrap_when_frontend_reporting_is_on() -> None:
         "git_sha": "abc1234",
     }
     catalog = _templates_module._build_catalog()
-    catalog.jinja_env.globals["frontend_sentry_browser_payload"] = lambda: payload
+    # ty narrows the Jinja globals dict to a union of the seeded value types,
+    # which excludes an arbitrary ``() -> dict`` test stub; the assignment is
+    # fine at runtime (Jinja globals are untyped string-keyed values).
+    catalog.jinja_env.globals["frontend_sentry_browser_payload"] = lambda: payload  # ty: ignore[invalid-assignment]
     html = catalog.render("pages.Login")
     # Bundle + init load before the page's own scripts; config is passed as JSON.
     assert '<script src="/_static/sentry.browser.min.js"></script>' in html
