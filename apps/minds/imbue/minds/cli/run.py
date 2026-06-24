@@ -49,9 +49,12 @@ from imbue.minds.config.loader import load_client_config
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.api_key_store import generate_api_key
 from imbue.minds.desktop_client.app import create_desktop_client
+from imbue.minds.desktop_client.app import start_discovery_health_watchdog_loop
 from imbue.minds.desktop_client.app import start_system_interface_health_probe_loop
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
+from imbue.minds.desktop_client.discovery_health import SupervisorProducerRemediator
 from imbue.minds.desktop_client.forward_cli import ForwardSubprocessConfig
 from imbue.minds.desktop_client.forward_cli import start_mngr_forward
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
@@ -347,8 +350,18 @@ def run(
     consumer, preauth_cookie = start_mngr_forward(
         config=forward_config,
         resolver=backend_resolver,
-        notification_dispatcher=notification_dispatcher,
     )
+
+    # App-global discovery-pipeline health watchdog. Detects a stalled pipeline
+    # (a producer stall via the resolver's snapshot-freshness age; a consumer
+    # death via the lifecycle watcher) and self-heals by re-kicking the producer
+    # (supervisor bounce -> restart) before surfacing a terminal app-global
+    # BLOCKED screen. The consumer-death callback is wired before
+    # ``consumer.start()`` so an early exit is caught.
+    discovery_health_watchdog = DiscoveryHealthWatchdog(
+        remediator=SupervisorProducerRemediator(supervisor=latchkey_forward_supervisor),
+    )
+    consumer.add_on_unexpected_exit_callback(lambda _exit_code: discovery_health_watchdog.record_consumer_death())
 
     # System-interface health tracker: feeds on backend failures observed by
     # the plugin (registered as a callback below) and on the readiness-probe
@@ -456,6 +469,17 @@ def run(
         mngr_host_dir=mngr_host_dir,
         minds_api_key=minds_api_key,
         latchkey_forward_supervisor=latchkey_forward_supervisor,
+        discovery_health_watchdog=discovery_health_watchdog,
+    )
+
+    # Background loop driving the discovery-pipeline watchdog: polls snapshot
+    # freshness, runs the producer bounce -> restart remediations on a stall, and
+    # transitions the app-global state. Started here (not inside
+    # create_desktop_client) so test factories can skip the background thread.
+    start_discovery_health_watchdog_loop(
+        watchdog=discovery_health_watchdog,
+        backend_resolver=backend_resolver,
+        root_concurrency_group=root_concurrency_group,
     )
 
     # Background probe loop: flips STUCK/RESTARTING agents back to HEALTHY
