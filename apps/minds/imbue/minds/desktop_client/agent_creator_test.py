@@ -8,7 +8,9 @@ file covers minds' command-building and helpers.
 """
 
 import queue
+import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Mapping
@@ -27,12 +29,14 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.agent_creator import ClonePathSerializer
 from imbue.minds.desktop_client.agent_creator import _CreateEventCapture
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _is_git_worktree
 from imbue.minds.desktop_client.agent_creator import _is_local_path
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_text
+from imbue.minds.desktop_client.agent_creator import _resolve_workspace_source
 from imbue.minds.desktop_client.agent_creator import _rsync_worktree_over_clone
 from imbue.minds.desktop_client.agent_creator import checkout_branch
 from imbue.minds.desktop_client.agent_creator import clone_git_repo
@@ -1038,7 +1042,7 @@ def _make_fake_repo(tmp_path: Path) -> Path:
     return repo_dir
 
 
-def _make_creator_with_cli(tmp_path: Path, cli: _RecordingImbueCloudCli) -> AgentCreator:
+def _make_creator_with_cli(tmp_path: Path, cli: FakeImbueCloudCli) -> AgentCreator:
     cg = ConcurrencyGroup(name="agent-creator-test")
     cg.__enter__()
     return AgentCreator(
@@ -1166,3 +1170,300 @@ def test_start_creation_api_key_ai_without_key_fails_with_clear_message(tmp_path
     assert info is not None
     assert info.status is AgentCreationStatus.FAILED
     assert info.error is not None and "API_KEY" in info.error
+
+
+# ---------------------------------------------------------------------------
+# Workspace-source resolution
+#
+# ``_resolve_workspace_source`` computes the shared ``minds-clone-<repo>`` temp
+# path that the clone lock is keyed on. The lock only protects same-repo
+# creations from colliding if this path is identical for two same-repo sources
+# and ``None`` for a plain local directory (which is used in place, no clone).
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_workspace_source_remote_url_uses_shared_clone_path() -> None:
+    source = _resolve_workspace_source("https://github.com/user/myrepo.git", branch="")
+    assert source.clone_target == Path(tempfile.gettempdir()) / "minds-clone-myrepo"
+    assert source.clone_url == GitUrl("https://github.com/user/myrepo.git")
+    assert source.clone_branch is None
+    assert source.worktree_overlay_source is None
+    assert source.in_place_dir is None
+
+
+def test_resolve_workspace_source_same_repo_name_collides_on_clone_path() -> None:
+    """Two sources with the same repo name resolve to the SAME clone_target.
+
+    This is the property that makes the per-path lock fire for the bug's
+    scenario: the temp clone dir is keyed only on the repo name, so two
+    concurrent same-repo creations contend on one lock.
+    """
+    first = _resolve_workspace_source("https://github.com/alice/myrepo", branch="")
+    second = _resolve_workspace_source("https://gitlab.com/bob/myrepo.git", branch="main")
+    assert first.clone_target == second.clone_target
+
+
+def test_resolve_workspace_source_plain_local_dir_uses_in_place_without_clone(tmp_path: Path) -> None:
+    repo_dir = tmp_path / "plain-repo"
+    repo_dir.mkdir()
+    source = _resolve_workspace_source(str(repo_dir), branch="")
+    # No shared clone path -> no lock, used in place.
+    assert source.clone_target is None
+    assert source.in_place_dir == repo_dir.resolve()
+
+
+def test_resolve_workspace_source_local_worktree_uses_shared_clone_path_with_overlay(tmp_path: Path) -> None:
+    worktree = tmp_path / "myrepo"
+    worktree.mkdir()
+    # A git worktree has ``.git`` as a FILE (gitdir pointer), which is what
+    # ``_is_git_worktree`` keys on.
+    (worktree / ".git").write_text("gitdir: /somewhere/.git/worktrees/myrepo\n")
+    source = _resolve_workspace_source(str(worktree), branch="testing")
+    assert source.clone_target == Path(tempfile.gettempdir()) / "minds-clone-myrepo"
+    assert source.clone_url == GitUrl("file://{}".format(worktree.resolve()))
+    assert source.clone_branch == GitBranch("testing")
+    assert source.worktree_overlay_source == worktree.resolve()
+
+
+def test_resolve_workspace_source_missing_local_path_raises() -> None:
+    with pytest.raises(MngrCommandError, match="Local path does not exist"):
+        _resolve_workspace_source("/no/such/path/here", branch="")
+
+
+# ---------------------------------------------------------------------------
+# ClonePathSerializer
+#
+# The lock primitive behind the same-repo serialization fix: one lock per clone
+# path, vended lazily, so same-path work runs sequentially while different paths
+# (and the ``None`` no-clone case) stay concurrent.
+# ---------------------------------------------------------------------------
+
+
+def test_clone_path_serializer_serializes_same_clone_path(tmp_path: Path) -> None:
+    """Two operations holding the same clone path never overlap; the second waits."""
+    serializer = ClonePathSerializer()
+    path = tmp_path / "minds-clone-same"
+    count_lock = threading.Lock()
+    concurrent = 0
+    max_concurrent = 0
+    first_inside = threading.Event()
+    release_first = threading.Event()
+    second_done = threading.Event()
+
+    def _enter() -> None:
+        nonlocal concurrent, max_concurrent
+        with count_lock:
+            concurrent += 1
+            max_concurrent = max(max_concurrent, concurrent)
+
+    def _exit() -> None:
+        nonlocal concurrent
+        with count_lock:
+            concurrent -= 1
+
+    def _first() -> None:
+        with serializer.hold(path):
+            _enter()
+            first_inside.set()
+            release_first.wait(5.0)
+            _exit()
+
+    def _second() -> None:
+        first_inside.wait(5.0)
+        with serializer.hold(path):
+            _enter()
+            _exit()
+        second_done.set()
+
+    t1 = threading.Thread(target=_first)
+    t2 = threading.Thread(target=_second)
+    t1.start()
+    assert first_inside.wait(5.0)
+    t2.start()
+    # The second operation cannot finish while the first holds the same-path
+    # lock; if it could, the lock would not be serializing.
+    assert not second_done.wait(0.3)
+    release_first.set()
+    t1.join(5.0)
+    t2.join(5.0)
+    assert second_done.is_set()
+    # The decisive proof: the two never sat inside the held region together.
+    assert max_concurrent == 1
+
+
+def test_clone_path_serializer_runs_distinct_clone_paths_concurrently(tmp_path: Path) -> None:
+    """Different clone paths get different locks, so they run concurrently."""
+    serializer = ClonePathSerializer()
+    barrier = threading.Barrier(2, timeout=5.0)
+    reached_lock = threading.Lock()
+    reached: list[bool] = []
+
+    def _worker(path: Path) -> None:
+        with serializer.hold(path):
+            try:
+                barrier.wait()
+                ok = True
+            except threading.BrokenBarrierError:
+                ok = False
+        with reached_lock:
+            reached.append(ok)
+
+    t1 = threading.Thread(target=_worker, args=(tmp_path / "minds-clone-a",))
+    t2 = threading.Thread(target=_worker, args=(tmp_path / "minds-clone-b",))
+    t1.start()
+    t2.start()
+    t1.join(10.0)
+    t2.join(10.0)
+    # Both held their (distinct) locks at the same time and met at the barrier;
+    # a single global lock would have deadlocked one of them into a timeout.
+    assert reached == [True, True]
+
+
+def test_clone_path_serializer_none_runs_without_serialization() -> None:
+    """``None`` (a creation that owns no shared clone dir) is never serialized."""
+    serializer = ClonePathSerializer()
+    barrier = threading.Barrier(2, timeout=5.0)
+    reached_lock = threading.Lock()
+    reached: list[bool] = []
+
+    def _worker() -> None:
+        with serializer.hold(None):
+            try:
+                barrier.wait()
+                ok = True
+            except threading.BrokenBarrierError:
+                ok = False
+        with reached_lock:
+            reached.append(ok)
+
+    t1 = threading.Thread(target=_worker)
+    t2 = threading.Thread(target=_worker)
+    t1.start()
+    t2.start()
+    t1.join(10.0)
+    t2.join(10.0)
+    assert reached == [True, True]
+
+
+class _BlockingImbueCloudCli(FakeImbueCloudCli):
+    """Fake CLI whose ``create_litellm_key`` blocks inside the clone+create region.
+
+    Each call records its account, tracks the maximum number of concurrent calls,
+    and blocks on a shared ``proceed`` event so a test can pin one creation inside
+    the per-clone-path lock while it checks that a second same-repo creation
+    cannot enter. ``max_concurrent`` stays 1 if and only if the serialization
+    holds.
+    """
+
+    create_calls: list[str] = Field(default_factory=list)
+    _cond: threading.Condition = PrivateAttr(default_factory=threading.Condition)
+    _proceed: threading.Event = PrivateAttr(default_factory=threading.Event)
+    _entered_count: int = PrivateAttr(default=0)
+    _concurrent: int = PrivateAttr(default=0)
+    _max_concurrent: int = PrivateAttr(default=0)
+
+    def create_litellm_key(
+        self,
+        *,
+        account: str,
+        alias: str | None = None,
+        max_budget: float | None = None,
+        budget_duration: str | None = None,
+        metadata: Mapping[str, str] | None = None,
+    ) -> LiteLLMKeyMaterial:
+        with self._cond:
+            self.create_calls.append(account)
+            self._entered_count += 1
+            self._concurrent += 1
+            self._max_concurrent = max(self._max_concurrent, self._concurrent)
+            self._cond.notify_all()
+        self._proceed.wait(20.0)
+        with self._cond:
+            self._concurrent -= 1
+        return LiteLLMKeyMaterial(
+            key=SecretStr("sk-fake-litellm-key"),
+            base_url=AnyUrl("https://litellm.example.com"),
+        )
+
+    def wait_for_entered_count(self, count: int, timeout: float) -> bool:
+        """Block until at least ``count`` calls have entered, or ``timeout`` elapses."""
+        deadline = time.monotonic() + timeout
+        with self._cond:
+            while self._entered_count < count:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._cond.wait(remaining)
+            return True
+
+    def allow_proceed(self) -> None:
+        self._proceed.set()
+
+    @property
+    def max_concurrent(self) -> int:
+        with self._cond:
+            return self._max_concurrent
+
+
+@pytest.mark.timeout(60)
+def test_concurrent_same_repo_creations_serialize_on_clone_path(tmp_path: Path) -> None:
+    """Two concurrent creations of the SAME repo serialize on the shared clone dir.
+
+    Regression for the intermittent ``rsync: [Receiver] getcwd(): No such file
+    or directory`` failure: the second creation must not rmtree / re-clone the
+    shared ``minds-clone-<repo>`` dir while the first still owns it (through its
+    ``mngr create``). We pin the first creation inside the locked region (a
+    blocking LiteLLM-key mint) and assert the second cannot enter that region
+    until the first releases the lock -- and that the two never overlap.
+    """
+    origin = tmp_path / "minds-serialize-regression"
+    _make_origin_repo_with_branch(origin, "testing")
+    repo_source = "file://{}".format(origin)
+    clone_target = Path(tempfile.gettempdir()) / "minds-clone-{}".format(extract_repo_name(repo_source))
+
+    cli = _BlockingImbueCloudCli(
+        parent_concurrency_group=ConcurrencyGroup(name="blocking-cli"),
+        connector_url=FAKE_CONNECTOR_URL,
+    )
+    creator = _make_creator_with_cli(tmp_path, cli)
+    try:
+        cid_a = creator.start_creation(
+            repo_source=repo_source,
+            host_name="ws-a",
+            launch_mode=LaunchMode.DOCKER,
+            ai_provider=AIProvider.IMBUE_CLOUD,
+            account_email="a@imbue.com",
+        )
+        # Wait until creation A is inside the locked region (it has cloned and is
+        # now minting its key while holding the per-clone-path lock).
+        assert cli.wait_for_entered_count(1, timeout=30.0), "first creation never reached the locked region"
+
+        cid_b = creator.start_creation(
+            repo_source=repo_source,
+            host_name="ws-b",
+            launch_mode=LaunchMode.DOCKER,
+            ai_provider=AIProvider.IMBUE_CLOUD,
+            account_email="b@imbue.com",
+        )
+        # B targets the same clone path, so it must block on the lock BEFORE its
+        # rmtree + clone and never reach the key-mint while A holds the lock. If
+        # the lock were missing, B would clone over A's dir and enter the region
+        # (entry count -> 2) well within this window.
+        assert not cli.wait_for_entered_count(2, timeout=2.0), (
+            "second same-repo creation entered the clone+create region while the first held the lock"
+        )
+
+        # Release both: serialized, B runs only after A finishes (and frees the
+        # lock). Both ultimately FAIL at the real ``mngr create`` subprocess,
+        # which is fine -- we are asserting on the ordering, not the outcome.
+        cli.allow_proceed()
+        _wait_until_finished(creator, cid_a)
+        _wait_until_finished(creator, cid_b)
+
+        assert cli.create_calls == ["a@imbue.com", "b@imbue.com"]
+        assert cli.max_concurrent == 1
+    finally:
+        cli.allow_proceed()
+        creator.wait_for_all(timeout=30.0)
+        if clone_target.exists():
+            shutil.rmtree(clone_target)

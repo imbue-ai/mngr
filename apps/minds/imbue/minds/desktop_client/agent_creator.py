@@ -18,7 +18,9 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable
+from collections.abc import Iterator
 from collections.abc import Mapping
+from contextlib import contextmanager
 from enum import auto
 from pathlib import Path
 from typing import Final
@@ -490,6 +492,187 @@ def _rsync_worktree_over_clone(
     cg = _make_child_cg("rsync-worktree", parent_cg)
     with cg:
         rsync_worktree_over_clone(worktree_dir, clone_dir, cg=cg, on_output=on_output)
+
+
+class _WorkspaceSource(FrozenModel):
+    """Resolved plan for the working directory ``mngr create`` runs in.
+
+    ``clone_target`` is the fixed, repo-name-keyed temp path
+    (``minds-clone-<repo>``) the creation ``rmtree``s and re-clones. The path is
+    deliberately *stable* so Docker layer caching hits across creations, which
+    also makes it *shared*: two concurrent creations of the same repo resolve to
+    the same ``clone_target``. It is therefore the resource the per-path clone
+    lock serializes. ``clone_target`` is ``None`` only for the plain
+    local-directory case, where ``in_place_dir`` is used as-is with no clone and
+    no lock.
+
+    When ``clone_target`` is set, ``clone_url`` (and optional ``clone_branch``)
+    drive the clone, and ``worktree_overlay_source`` -- set only for a local git
+    worktree -- names the working tree rsync'd over the fresh clone so
+    uncommitted edits reach the Docker build context.
+    """
+
+    clone_target: Path | None = Field(
+        description="Shared temp clone dir to rmtree+clone, or None to use ``in_place_dir`` directly"
+    )
+    clone_url: GitUrl | None = Field(
+        default=None,
+        description="URL cloned into ``clone_target`` (``file://`` for a worktree); None when no clone happens",
+    )
+    clone_branch: GitBranch | None = Field(
+        default=None,
+        description="Branch/tag/SHA to fetch when cloning, or None for the remote's default branch",
+    )
+    worktree_overlay_source: Path | None = Field(
+        default=None,
+        description="Local git worktree whose working tree is rsync'd over the clone; None otherwise",
+    )
+    in_place_dir: Path | None = Field(
+        default=None,
+        description="Plain local directory used as the workspace directly; set iff ``clone_target`` is None",
+    )
+
+
+def _resolve_workspace_source(repo_source: str, branch: str) -> _WorkspaceSource:
+    """Decide how ``repo_source`` becomes ``mngr create``'s working directory.
+
+    Mirrors the three production cases: a remote URL or a local git worktree is
+    cloned into the shared ``minds-clone-<repo>`` temp dir (returned as
+    ``clone_target``); a plain local directory is used in place
+    (``clone_target`` is None, ``in_place_dir`` set). Computing ``clone_target``
+    here once -- rather than at each clone site -- keeps the value the clone lock
+    is keyed on identical to the value actually rmtree'd and cloned.
+
+    Raises ``MngrCommandError`` if ``repo_source`` is a local path that does not
+    exist.
+    """
+    if _is_local_path(repo_source):
+        resolved_path = Path(os.path.expanduser(repo_source)).resolve()
+        if not resolved_path.is_dir():
+            raise MngrCommandError("Local path does not exist: {}".format(resolved_path))
+        if _is_git_worktree(resolved_path):
+            clone_target = Path(tempfile.gettempdir()) / "minds-clone-{}".format(extract_repo_name(repo_source))
+            return _WorkspaceSource(
+                clone_target=clone_target,
+                clone_url=GitUrl("file://{}".format(resolved_path)),
+                clone_branch=GitBranch(branch) if branch else None,
+                worktree_overlay_source=resolved_path,
+            )
+        return _WorkspaceSource(clone_target=None, in_place_dir=resolved_path)
+    clone_target = Path(tempfile.gettempdir()) / "minds-clone-{}".format(extract_repo_name(repo_source))
+    return _WorkspaceSource(
+        clone_target=clone_target,
+        clone_url=GitUrl(repo_source),
+        clone_branch=GitBranch(branch) if branch else None,
+    )
+
+
+def _materialize_workspace_dir(
+    source: _WorkspaceSource,
+    repo_source: str,
+    on_output: OutputCallback | None,
+    log_queue: queue.Queue[str],
+    *,
+    parent_cg: ConcurrencyGroup | None = None,
+) -> Path:
+    """Produce the working directory for ``mngr create`` from a resolved ``source``.
+
+    For the in-place case returns the directory unchanged. For a clone case,
+    ``rmtree``s any stale ``clone_target``, clones ``clone_url`` into it, and --
+    for a local git worktree -- rsyncs the worktree's working tree over the
+    clone so uncommitted edits land in the build context. The caller must hold
+    the clone-path lock for ``source.clone_target`` across this call (and through
+    ``mngr create``) so a concurrent same-repo creation cannot delete the
+    directory mid-clone.
+    """
+    if source.clone_target is None:
+        assert source.in_place_dir is not None, "in_place_dir must be set when clone_target is None"
+        log_queue.put("[minds] Using local directory: {}".format(source.in_place_dir))
+        return source.in_place_dir
+    clone_target = source.clone_target
+    assert source.clone_url is not None, "clone_url must be set when clone_target is set"
+    if source.worktree_overlay_source is not None:
+        # Worktrees have a .git file pointing to the parent repo's
+        # .git/worktrees/ dir, which breaks when copied into Docker, so we clone
+        # locally to get a standalone repo. Full clone (no --depth=1): a shallow
+        # clone only pulls the default branch and not the user's target branch,
+        # and mngr's downstream mirror push rejects shallow source packs with
+        # "shallow update not allowed". Local file:// clones are cheap.
+        log_queue.put("[minds] Cloning local worktree: {}".format(source.worktree_overlay_source))
+    else:
+        # Clone only the requested branch (non-shallow) when one is given:
+        # cheaper than a full clone, yet keeps the complete ancestry the
+        # downstream mirror-push into the agent container requires. Every launch
+        # mode reaches mngr create's git-mirror push, so a shallow clone is
+        # never safe here regardless of mode.
+        log_queue.put("[minds] Cloning {}...".format(_redact_url_credentials(repo_source)))
+    if clone_target.exists():
+        shutil.rmtree(clone_target)
+    clone_git_repo(
+        source.clone_url,
+        clone_target,
+        on_output=on_output,
+        branch=source.clone_branch,
+        parent_cg=parent_cg,
+    )
+    if source.worktree_overlay_source is not None:
+        # Rsync the worktree's working directory over so that uncommitted
+        # changes (e.g. a locally-rsynced vendor/mngr/) are included in the
+        # Docker build context.
+        _rsync_worktree_over_clone(
+            source.worktree_overlay_source,
+            clone_target,
+            on_output=on_output,
+            parent_cg=parent_cg,
+        )
+    return clone_target
+
+
+class ClonePathSerializer(MutableModel):
+    """Serializes creations that share a fixed clone directory.
+
+    minds clones each template repo into a stable, repo-name-keyed temp dir
+    (``minds-clone-<repo>``) so Docker layer caching hits across creations. The
+    cost of a *stable* path is that two concurrent creations of the same repo
+    target the *same* dir: the second's ``rmtree`` + re-clone yanks the directory
+    out from under the first's still-running ``mngr create`` (whose cwd and
+    git-mirror source it is), and Homebrew rsync 3.4.2 turns a deleted cwd into a
+    fatal ``getcwd()`` abort (rsync bug 6422), failing the create with
+    ``rsync: [Receiver] getcwd(): No such file or directory``.
+
+    ``hold`` vends one ``threading.Lock`` per clone path (created lazily under a
+    meta-lock) so same-path creations run sequentially while different-repo
+    creations stay concurrent. Creations that own no shared clone path (a plain
+    local directory used in place) pass ``None`` and run unserialized.
+
+    Creations run as daemon threads inside the single desktop-client process, so
+    an in-process lock is sufficient; there is no cross-process creation to guard
+    against.
+    """
+
+    _meta_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    _locks_by_path: dict[str, threading.Lock] = PrivateAttr(default_factory=dict)
+
+    @contextmanager
+    def hold(self, clone_path: Path | None) -> Iterator[None]:
+        """Hold the per-path clone lock for the duration of the ``with`` block.
+
+        For a real ``clone_path``, acquires that path's lock (created once, on
+        first use, under the meta-lock; the same lock object is reused for every
+        later equal path) and releases it on exit. For ``None`` -- a creation
+        that owns no shared clone dir -- runs the block with no lock held.
+        """
+        if clone_path is None:
+            yield
+            return
+        key = str(clone_path)
+        with self._meta_lock:
+            lock = self._locks_by_path.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._locks_by_path[key] = lock
+        with lock:
+            yield
 
 
 # Constant agent name for every minds-created agent. Minds runs one agent
@@ -1248,6 +1431,11 @@ class AgentCreator(MutableModel):
     _log_queues: dict[str, queue.Queue[str]] = PrivateAttr(default_factory=dict)
     _threads: list[threading.Thread] = PrivateAttr(default_factory=list)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    # Serializes concurrent creations that share a ``minds-clone-<repo>`` temp
+    # dir so the second's rmtree can't delete the dir out from under the first's
+    # still-running ``mngr create`` (the rsync 3.4.2 getcwd abort). Keyed per
+    # clone path, so different repos still create concurrently.
+    _clone_serializer: ClonePathSerializer = PrivateAttr(default_factory=ClonePathSerializer)
 
     def start_creation(
         self,
@@ -1414,7 +1602,6 @@ class AgentCreator(MutableModel):
         """
         cid_str = str(creation_id)
         emit_log = make_log_callback(log_queue)
-        workspace_dir: Path | None = None
         try:
             with log_span(
                 "Creating agent for creation {} from {} (mode: {})",
@@ -1440,193 +1627,27 @@ class AgentCreator(MutableModel):
                 with self._lock:
                     self._statuses[cid_str] = AgentCreationStatus.CLONING_REPO
 
-                if _is_local_path(repo_source):
-                    resolved_path = Path(os.path.expanduser(repo_source)).resolve()
-                    if not resolved_path.is_dir():
-                        raise MngrCommandError("Local path does not exist: {}".format(resolved_path))
-
-                    if _is_git_worktree(resolved_path):
-                        # Worktrees have a .git file pointing to the parent repo's
-                        # .git/worktrees/ dir, which breaks when copied into Docker.
-                        # Clone locally to get a standalone repo.
-                        #
-                        # Full clone (no --depth=1): a shallow clone only pulls
-                        # the default branch (e.g. main) and not the user's
-                        # target branch (e.g. pilot), so the subsequent
-                        # `git checkout <branch>` fails with `pathspec did not
-                        # match`. mngr's downstream mirror push into the agent
-                        # container's bare receiver also rejects shallow source
-                        # packs with "shallow update not allowed". Cloning
-                        # deeply avoids both. Local file:// clones are cheap.
-                        # Use a stable path based on repo name so Docker layer caching works.
-                        log_queue.put("[minds] Cloning local worktree: {}".format(resolved_path))
-                        repo_name = extract_repo_name(repo_source)
-                        clone_target = Path(tempfile.gettempdir()) / "minds-clone-{}".format(repo_name)
-                        if clone_target.exists():
-                            shutil.rmtree(clone_target)
-                        file_url = GitUrl("file://{}".format(resolved_path))
-                        # Pass the branch through (like the remote-URL case
-                        # below) so that when one is requested the clone takes
-                        # the fetch-into-FETCH_HEAD path that the subsequent
-                        # ``checkout_branch`` depends on. With no branch, the
-                        # plain ``git clone`` lands on the worktree's own branch
-                        # and ``checkout_branch`` is skipped.
-                        clone_git_repo(
-                            file_url,
-                            clone_target,
-                            on_output=emit_log,
-                            branch=GitBranch(branch) if branch else None,
-                            parent_cg=self.root_concurrency_group,
-                        )
-                        # Rsync the worktree's working directory over so that
-                        # uncommitted changes (e.g. a locally-rsynced
-                        # vendor/mngr/) are included in the Docker build context.
-                        _rsync_worktree_over_clone(
-                            resolved_path,
-                            clone_target,
-                            on_output=emit_log,
-                            parent_cg=self.root_concurrency_group,
-                        )
-                        workspace_dir = clone_target
-                    else:
-                        workspace_dir = resolved_path
-                        log_queue.put("[minds] Using local directory: {}".format(workspace_dir))
-                else:
-                    repo_name = extract_repo_name(repo_source)
-                    clone_target = Path(tempfile.gettempdir()) / "minds-clone-{}".format(repo_name)
-                    if clone_target.exists():
-                        shutil.rmtree(clone_target)
-                    log_queue.put("[minds] Cloning {}...".format(_redact_url_credentials(repo_source)))
-                    # Clone only the requested branch (non-shallow) when one is
-                    # given: cheaper than a full clone, yet keeps the complete
-                    # ancestry that the downstream mirror-push into the agent
-                    # container requires (a shallow clone would be rejected with
-                    # "shallow update not allowed"). Every launch mode reaches
-                    # mngr create's git-mirror push (a cloned-repo source + a
-                    # new host always resolves to TransferMode.GIT_MIRROR), so a
-                    # shallow clone is never safe here regardless of mode. The
-                    # checkout below is then a no-op for this path, but still
-                    # does the work when the source is a pre-existing local
-                    # directory.
-                    clone_git_repo(
-                        GitUrl(repo_source),
-                        clone_target,
-                        on_output=emit_log,
-                        branch=GitBranch(branch) if branch else None,
-                        parent_cg=self.root_concurrency_group,
-                    )
-                    workspace_dir = clone_target
-
-                if branch:
-                    with self._lock:
-                        self._statuses[cid_str] = AgentCreationStatus.CHECKING_OUT_BRANCH
-                    log_queue.put("[minds] Checking out branch '{}'...".format(branch))
-                    checkout_branch(
-                        workspace_dir,
-                        GitBranch(branch),
-                        on_output=emit_log,
-                        parent_cg=self.root_concurrency_group,
-                    )
-
-                # Resolve the Anthropic credentials according to the AI
-                # provider choice. IMBUE_CLOUD mints a fresh LiteLLM key;
-                # API_KEY uses the user-supplied key directly; SUBSCRIPTION
-                # injects nothing so the agent prompts the user to log in.
-                effective_anthropic_api_key: str | None = None
-                effective_anthropic_base_url: str | None = None
-                match ai_provider:
-                    case AIProvider.IMBUE_CLOUD:
-                        if self.imbue_cloud_cli is None:
-                            raise MngrCommandError("AI provider IMBUE_CLOUD requires imbue_cloud_cli to be configured")
-                        if not account_email:
-                            raise MngrCommandError("AI provider IMBUE_CLOUD requires an account_email to be supplied")
-                        with self._lock:
-                            self._statuses[cid_str] = AgentCreationStatus.PROVISIONING_AI
-                        log_queue.put(f"[minds] Minting LiteLLM virtual key for account {account_email}...")
-                        try:
-                            key_material: LiteLLMKeyMaterial = self.imbue_cloud_cli.create_litellm_key(
-                                account=account_email,
-                                alias=None,
-                                max_budget=100.0,
-                                budget_duration="1d",
-                                metadata={"host_name": host_name},
-                            )
-                        except ImbueCloudCliError as exc:
-                            raise MngrCommandError(f"Failed to create LiteLLM key: {exc}") from exc
-                        log_queue.put("[minds] LiteLLM key minted.")
-                        effective_anthropic_api_key = key_material.key.get_secret_value()
-                        effective_anthropic_base_url = str(key_material.base_url)
-                    case AIProvider.API_KEY:
-                        if not anthropic_api_key:
-                            raise MngrCommandError("AI provider API_KEY requires anthropic_api_key to be supplied")
-                        effective_anthropic_api_key = anthropic_api_key
-                    case AIProvider.SUBSCRIPTION:
-                        pass
-                    case _ as unreachable:
-                        assert_never(unreachable)
-
-                with self._lock:
-                    self._statuses[cid_str] = AgentCreationStatus.CREATING_WORKSPACE
-
-                # Pre-create the shared latchkey gateway password and a
-                # per-host permissions-override JWT before invoking
-                # ``mngr create``. The JWT references an *opaque*
-                # UUID-named permissions handle that we materialize
-                # here with a deny-all baseline; after ``mngr create``
-                # returns the canonical host id, ``finalize_host_permissions``
-                # replaces that handle with a symlink to the canonical
-                # ``permissions_path_for_host`` location. The env vars are
-                # injected into the ``mngr create`` env so they are present
-                # from the start, avoiding any post-create re-provisioning
-                # step. Every launch mode is ``is_tunneled=True`` since the
-                # only on-host launch mode (DEV) was removed -- all remaining
-                # modes reach the gateway via the reverse tunnel
-                # ``LatchkeyDiscoveryHandler`` sets up post-discovery.
-                #
-                # ``prepare_agent_latchkey`` raises on infrastructure
-                # failures (latchkey CLI broken, on-disk write failed,
-                # etc.). Minds tolerates those by falling back to an
-                # empty setup so the agent still comes up -- it just
-                # won't authenticate to a password-protected gateway and
-                # won't have its own permissions file. The user can
-                # recover by fixing the latchkey installation and
-                # re-creating the agent.
-                latchkey_setup = self._prepare_latchkey_or_warn(log_queue)
-
-                # AWS hosts need the region's security group to exist before
-                # ``mngr create`` (the provider looks it up read-only and
-                # refuses to launch without it). prepare is read-only-first, so
-                # this is a no-op describe when the region is already prepared.
-                if launch_mode is LaunchMode.AWS:
-                    log_queue.put(f"[minds] Ensuring AWS security group is ready in {region}...")
-                    run_mngr_aws_prepare(region, on_output=emit_log, parent_cg=self.root_concurrency_group)
-
-                parsed_host = HostName(host_name)
-                log_queue.put("[minds] Creating workspace '{}' (mode: {})...".format(host_name, launch_mode.value))
-
-                # ``fast_mode`` is the only knob that varies between the fast-
-                # path and slow-path attempts; bundle the rest of the per-
-                # creation inputs so each attempt takes just it.
-                attempt_params = _MngrCreateAttemptParams(
-                    launch_mode=launch_mode,
-                    workspace_dir=workspace_dir,
-                    host_name=parsed_host,
-                    on_output=emit_log,
-                    latchkey_env=latchkey_setup.env,
-                    account_email=account_email,
+                # Resolve where the working directory comes from, then run the
+                # whole clone + ``mngr create`` span under the per-clone-path
+                # lock (see ``_clone_and_create``). Resolution itself does not
+                # touch the clone dir, so it stays outside the lock.
+                source = _resolve_workspace_source(repo_source, branch)
+                canonical_id, canonical_host_id, latchkey_setup = self._clone_and_create(
+                    source=source,
                     repo_source=repo_source,
+                    branch=branch,
+                    cid_str=cid_str,
+                    host_name=host_name,
+                    log_queue=log_queue,
+                    emit_log=emit_log,
+                    launch_mode=launch_mode,
+                    ai_provider=ai_provider,
+                    account_email=account_email,
                     branch_or_tag=branch_or_tag,
                     region=region,
-                    anthropic_api_key=effective_anthropic_api_key,
-                    anthropic_base_url=effective_anthropic_base_url,
-                    parent_cg=self.root_concurrency_group,
+                    anthropic_api_key=anthropic_api_key,
                     color=color,
                 )
-
-                if launch_mode is LaunchMode.IMBUE_CLOUD:
-                    canonical_id, canonical_host_id = self._create_imbue_cloud_with_fallback(attempt_params, log_queue)
-                else:
-                    canonical_id, canonical_host_id = _attempt_mngr_create(None, attempt_params)
 
                 # Now that we know the canonical host id, point the
                 # opaque permissions handle (which the JWT references)
@@ -1733,6 +1754,159 @@ class AgentCreator(MutableModel):
                 self._errors[cid_str] = str(e)
         finally:
             log_queue.put(LOG_SENTINEL)
+
+    def _clone_and_create(
+        self,
+        *,
+        source: _WorkspaceSource,
+        repo_source: str,
+        branch: str,
+        cid_str: str,
+        host_name: str,
+        log_queue: queue.Queue[str],
+        emit_log: OutputCallback,
+        launch_mode: LaunchMode,
+        ai_provider: AIProvider,
+        account_email: str,
+        branch_or_tag: str,
+        region: str,
+        anthropic_api_key: str,
+        color: str | None,
+    ) -> tuple[AgentId, HostId, AgentLatchkeySetup]:
+        """Materialize the workspace dir and run ``mngr create``, serialized per clone path.
+
+        Holds the per-clone-path lock for the entire span this creation owns the
+        shared ``minds-clone-<repo>`` dir: the rmtree + clone (+ worktree
+        overlay) and branch checkout through the COMPLETION of ``mngr create``,
+        which uses the dir as its cwd and git-mirror source. A concurrent
+        same-repo creation waits on the lock, so its rmtree can never delete the
+        dir out from under this creation's still-running rsync/mngr -- the
+        deleted-cwd condition Homebrew rsync 3.4.2 turns into a fatal
+        ``getcwd()`` abort (rsync bug 6422). A plain local directory owns no
+        shared clone path (``source.clone_target`` is None) and runs unserialized
+        so unrelated repos stay concurrent.
+
+        Returns the canonical agent id, the canonical host id, and the latchkey
+        setup; the caller links the host permissions handle after the lock has
+        been released.
+        """
+        with self._clone_serializer.hold(source.clone_target):
+            workspace_dir = _materialize_workspace_dir(
+                source,
+                repo_source,
+                on_output=emit_log,
+                log_queue=log_queue,
+                parent_cg=self.root_concurrency_group,
+            )
+
+            if branch:
+                with self._lock:
+                    self._statuses[cid_str] = AgentCreationStatus.CHECKING_OUT_BRANCH
+                log_queue.put("[minds] Checking out branch '{}'...".format(branch))
+                checkout_branch(
+                    workspace_dir,
+                    GitBranch(branch),
+                    on_output=emit_log,
+                    parent_cg=self.root_concurrency_group,
+                )
+
+            # Resolve the Anthropic credentials according to the AI provider
+            # choice. IMBUE_CLOUD mints a fresh LiteLLM key; API_KEY uses the
+            # user-supplied key directly; SUBSCRIPTION injects nothing so the
+            # agent prompts the user to log in.
+            effective_anthropic_api_key: str | None = None
+            effective_anthropic_base_url: str | None = None
+            match ai_provider:
+                case AIProvider.IMBUE_CLOUD:
+                    if self.imbue_cloud_cli is None:
+                        raise MngrCommandError("AI provider IMBUE_CLOUD requires imbue_cloud_cli to be configured")
+                    if not account_email:
+                        raise MngrCommandError("AI provider IMBUE_CLOUD requires an account_email to be supplied")
+                    with self._lock:
+                        self._statuses[cid_str] = AgentCreationStatus.PROVISIONING_AI
+                    log_queue.put(f"[minds] Minting LiteLLM virtual key for account {account_email}...")
+                    try:
+                        key_material: LiteLLMKeyMaterial = self.imbue_cloud_cli.create_litellm_key(
+                            account=account_email,
+                            alias=None,
+                            max_budget=100.0,
+                            budget_duration="1d",
+                            metadata={"host_name": host_name},
+                        )
+                    except ImbueCloudCliError as exc:
+                        raise MngrCommandError(f"Failed to create LiteLLM key: {exc}") from exc
+                    log_queue.put("[minds] LiteLLM key minted.")
+                    effective_anthropic_api_key = key_material.key.get_secret_value()
+                    effective_anthropic_base_url = str(key_material.base_url)
+                case AIProvider.API_KEY:
+                    if not anthropic_api_key:
+                        raise MngrCommandError("AI provider API_KEY requires anthropic_api_key to be supplied")
+                    effective_anthropic_api_key = anthropic_api_key
+                case AIProvider.SUBSCRIPTION:
+                    pass
+                case _ as unreachable:
+                    assert_never(unreachable)
+
+            with self._lock:
+                self._statuses[cid_str] = AgentCreationStatus.CREATING_WORKSPACE
+
+            # Pre-create the shared latchkey gateway password and a per-host
+            # permissions-override JWT before invoking ``mngr create``. The JWT
+            # references an *opaque* UUID-named permissions handle that we
+            # materialize here with a deny-all baseline; after ``mngr create``
+            # returns the canonical host id, ``finalize_host_permissions``
+            # replaces that handle with a symlink to the canonical
+            # ``permissions_path_for_host`` location. The env vars are injected
+            # into the ``mngr create`` env so they are present from the start,
+            # avoiding any post-create re-provisioning step. Every launch mode is
+            # ``is_tunneled=True`` since the only on-host launch mode (DEV) was
+            # removed -- all remaining modes reach the gateway via the reverse
+            # tunnel ``LatchkeyDiscoveryHandler`` sets up post-discovery.
+            #
+            # ``prepare_agent_latchkey`` raises on infrastructure failures
+            # (latchkey CLI broken, on-disk write failed, etc.). Minds tolerates
+            # those by falling back to an empty setup so the agent still comes up
+            # -- it just won't authenticate to a password-protected gateway and
+            # won't have its own permissions file. The user can recover by fixing
+            # the latchkey installation and re-creating the agent.
+            latchkey_setup = self._prepare_latchkey_or_warn(log_queue)
+
+            # AWS hosts need the region's security group to exist before
+            # ``mngr create`` (the provider looks it up read-only and refuses to
+            # launch without it). prepare is read-only-first, so this is a no-op
+            # describe when the region is already prepared.
+            if launch_mode is LaunchMode.AWS:
+                log_queue.put(f"[minds] Ensuring AWS security group is ready in {region}...")
+                run_mngr_aws_prepare(region, on_output=emit_log, parent_cg=self.root_concurrency_group)
+
+            parsed_host = HostName(host_name)
+            log_queue.put("[minds] Creating workspace '{}' (mode: {})...".format(host_name, launch_mode.value))
+
+            # ``fast_mode`` is the only knob that varies between the fast-path
+            # and slow-path attempts; bundle the rest of the per-creation inputs
+            # so each attempt takes just it.
+            attempt_params = _MngrCreateAttemptParams(
+                launch_mode=launch_mode,
+                workspace_dir=workspace_dir,
+                host_name=parsed_host,
+                on_output=emit_log,
+                latchkey_env=latchkey_setup.env,
+                account_email=account_email,
+                repo_source=repo_source,
+                branch_or_tag=branch_or_tag,
+                region=region,
+                anthropic_api_key=effective_anthropic_api_key,
+                anthropic_base_url=effective_anthropic_base_url,
+                parent_cg=self.root_concurrency_group,
+                color=color,
+            )
+
+            if launch_mode is LaunchMode.IMBUE_CLOUD:
+                canonical_id, canonical_host_id = self._create_imbue_cloud_with_fallback(attempt_params, log_queue)
+            else:
+                canonical_id, canonical_host_id = _attempt_mngr_create(None, attempt_params)
+
+        return canonical_id, canonical_host_id, latchkey_setup
 
     def _create_imbue_cloud_with_fallback(
         self,
