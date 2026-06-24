@@ -1120,7 +1120,7 @@ function openHomeInNewWindow() {
 
 // -- Error / retry flow --
 
-function showErrorInAllWindows(message, details) {
+function showErrorInAllWindows(message, details, actionLabel) {
   for (const bundle of bundles) {
     if (bundle.window.isDestroyed()) continue;
     bundle.isErrorState = true;
@@ -1140,11 +1140,11 @@ function showErrorInAllWindows(message, details) {
         bundle.chromeView.webContents.loadFile(path.join(__dirname, 'shell.html'));
         bundle.chromeView.webContents.once('did-finish-load', () => {
           if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
-            bundle.chromeView.webContents.send('error-details', { message, details });
+            bundle.chromeView.webContents.send('error-details', { message, details, actionLabel });
           }
         });
       } else {
-        bundle.chromeView.webContents.send('error-details', { message, details });
+        bundle.chromeView.webContents.send('error-details', { message, details, actionLabel });
       }
     }
   }
@@ -1426,6 +1426,13 @@ function restoreWindowBounds(bundle, entry) {
 // creep from 50ms to 8+ seconds. Running one SSE connection in the main
 // process and broadcasting events via IPC avoids the exhaustion entirely.
 
+// Whether we have already taken over every window with the discovery-pipeline
+// "blocked" error screen. Guards against re-driving the takeover when the
+// backend re-emits the terminal `discovery_health` state (e.g. on an SSE
+// reconnect). Reset by the `retry` handler so a re-block after a restart
+// surfaces again.
+let discoveryBlockedShown = false;
+
 function handleChromeSSEEvent(evt) {
   if (evt.type === 'workspaces' && Array.isArray(evt.workspaces)) {
     const oldIds = new Set(workspaceList.map((w) => w.id));
@@ -1546,6 +1553,21 @@ function handleChromeSSEEvent(evt) {
           scheduleInboxListRefresh(b, evt);
         }
       }
+    }
+  } else if (evt.type === 'discovery_health') {
+    // App-global discovery-pipeline health. Only the terminal `blocked` state is
+    // ever sent (the reconnecting tier heals silently in the background). The
+    // watchdog has exhausted its self-healing -- or the consumer died -- so agent
+    // forwarding is down / the app is unusable. Take over every window with the
+    // error screen; its Retry button runs the existing restart path (shut down +
+    // restart the backend, respawning the discovery producer + consumer).
+    if (evt.state === 'blocked' && !discoveryBlockedShown) {
+      discoveryBlockedShown = true;
+      showErrorInAllWindows(
+        "Minds has disconnected from your workspaces and can't automatically reconnect. Restart the app to recover. Your data has not been lost.",
+        null,
+        'Restart Minds',
+      );
     }
   }
   broadcastChromeEvent(evt);
@@ -2931,6 +2953,9 @@ ipcMain.on('retry', async (event) => {
   // backend (if any), put all windows back in loading state, then restart.
   const senderBundle = getBundleFromEvent(event);
   if (senderBundle) focusBundle(senderBundle);
+  // Allow a fresh discovery-pipeline "blocked" takeover to surface again if the
+  // restarted backend ends up stalled too.
+  discoveryBlockedShown = false;
   await shutdown();
   prepareAllWindowsForRetry();
   await startBackendWithRetry();

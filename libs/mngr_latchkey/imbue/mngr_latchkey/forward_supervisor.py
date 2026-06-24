@@ -173,6 +173,16 @@ class LatchkeyForwardSupervisor(MutableModel):
             "Also used as the location of this supervisor's own on-disk record."
         ),
     )
+    cwd: Path | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Working directory for the spawned ``mngr latchkey forward`` process. The minds "
+            "desktop client passes ``$HOME`` so the supervisor (a laptop-side ``mngr`` "
+            "invocation) does not resolve project config from a transient cwd such as a dev "
+            "checkout's ``.mngr/settings.toml``. ``None`` inherits the caller's cwd."
+        ),
+    )
     extra_env: Mapping[str, str] = Field(
         default_factory=dict,
         frozen=True,
@@ -262,6 +272,7 @@ class LatchkeyForwardSupervisor(MutableModel):
                         latchkey_directory=self.latchkey_directory,
                         log_path=log_path,
                         extra_env=self.extra_env,
+                        cwd=self.cwd,
                     )
                 except OSError as e:
                     raise LatchkeyError(f"Failed to spawn 'mngr latchkey forward': {e}") from e
