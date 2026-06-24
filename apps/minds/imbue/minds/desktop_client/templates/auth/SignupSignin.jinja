@@ -1,14 +1,25 @@
-{#def title, message, default_to_signup #}
+{#def title, message, default_to_signup, return_to="" #}
 {#
   Two-tab signup/signin page. ``default_to_signup`` picks which tab is
   visible on first paint; the inline links flip between them client-side
   without a navigation. OAuth (Google / GitHub) sits in a "or" divider
   below the form on each tab.
+
+  ``return_to`` is an optional same-origin path the user came from (e.g.
+  ``/create`` when they chose the remote preset without an account). When
+  set, a back link returns them there without signing in, and ``auth.js``
+  (reading ``return_to`` from the page URL) forwards it to ``/post-login``
+  so a successful sign-in lands them back there too.
 #}
 {% set _scripts %}
 <script src="/_static/auth.js" defer></script>
 {% endset %}
 <PageNarrowContainer :title="title" scripts={{ _scripts }}>
+  {% if return_to %}
+    <div class="mb-4">
+      <Link :href="return_to" weight="medium" id="auth-back-link">&larr; Back to mind setup</Link>
+    </div>
+  {% endif %}
   {% if message %}
     <Notice variant="info">{{ message }}</Notice>
   {% endif %}

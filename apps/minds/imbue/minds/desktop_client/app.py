@@ -101,6 +101,7 @@ from imbue.minds.desktop_client.responses import make_html_response
 from imbue.minds.desktop_client.responses import make_redirect_response
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.responses import make_streaming_response
+from imbue.minds.desktop_client.responses import safe_local_redirect_path
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sharing_handler import SharingError
@@ -135,6 +136,7 @@ from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
+from imbue.minds.desktop_client.templates import resolve_create_host_name
 from imbue.minds.desktop_client.templates import status_text_for
 from imbue.minds.desktop_client.tunnel_token_injection import clear_tunnel_token_from_agent
 from imbue.minds.desktop_client.tunnel_token_injection import inject_tunnel_token_into_agent
@@ -535,6 +537,9 @@ def _handle_landing_page() -> Response:
         has_saved_backup_password=is_backup_password_saved,
         region_options_by_launch_mode=region_options,
         region_selected_by_launch_mode=region_selected,
+        # A deep-link that pre-fills a repo/branch wants those advanced fields
+        # visible; otherwise start on the simple preset cards.
+        start_advanced=bool(git_url or branch),
         color=_suggested_create_color(backend_resolver),
     )
     return make_html_response(content=html)
@@ -544,13 +549,18 @@ def _handle_post_login_redirect() -> Response:
     """Decide where a just-authenticated user lands (GET /post-login).
 
     All sign-in paths (email/password, OAuth, post-email-verification) funnel
-    here. A user who already has workspaces goes to the account-management page
-    (the prior behavior); a user with none goes to ``/`` -- which renders the
-    create form -- so first-time users land on the new-workspace screen instead
-    of the account page.
+    here. A ``?return_to=`` query param (a safe same-origin path, e.g.
+    ``/create`` when the user came from the create page to enable the remote
+    preset) wins when present. Otherwise a user who already has workspaces
+    goes to the account-management page (the prior behavior); a user with none
+    goes to ``/`` -- which renders the create form -- so first-time users land
+    on the new-workspace screen instead of the account page.
     """
     if not _is_request_authenticated():
         return make_response(status_code=302, headers={"Location": "/login"})
+    return_to = safe_local_redirect_path(request.args.get("return_to"))
+    if return_to is not None:
+        return make_response(status_code=302, headers={"Location": return_to})
     backend_resolver = get_state().backend_resolver
     has_any_workspace = bool(backend_resolver.list_active_workspace_ids())
     destination = "/accounts" if has_any_workspace else "/"
@@ -962,6 +972,15 @@ def _build_backup_request_or_error(
     )
 
 
+# Where the create page sends a user who chose the remote (Imbue Cloud)
+# preset without any signed-in account: into the sign-up/sign-in flow with a
+# link back to the picker. ``return_to=%2Fcreate`` is the URL-encoded
+# ``/create`` -- the client builds the same target via
+# ``encodeURIComponent('/create')`` in Create.jinja, and ``_handle_auth_page``
+# only honors a safe same-origin path.
+_REMOTE_SIGNIN_REDIRECT_URL: Final[str] = "/auth/signup?return_to=%2Fcreate"
+
+
 def _handle_create_form_submit() -> Response:
     """Handle form submission to create a new agent."""
     if not _is_request_authenticated():
@@ -1013,7 +1032,6 @@ def _handle_create_form_submit() -> Response:
         # so a validation error doesn't silently revert their choice.
         html_body = render_create_form(
             git_url=git_url,
-            host_name=host_name,
             branch=branch,
             launch_mode=launch_mode,
             ai_provider=ai_provider,
@@ -1027,6 +1045,9 @@ def _handle_create_form_submit() -> Response:
             backup_api_key_env=backup_api_key_env,
             has_saved_backup_password=has_saved_backup_password(agent_creator.paths),
             error_message=message,
+            # Errors are about advanced-view fields (repository, providers,
+            # backup), so open that view directly rather than the cards.
+            start_advanced=True,
             color=color,
         )
         return make_html_response(content=html_body, status_code=status)
@@ -1034,19 +1055,27 @@ def _handle_create_form_submit() -> Response:
     if not git_url:
         return _re_render_with_error("Repository URL is required.")
 
-    # Validate the host name eagerly so the user sees the error inline on
-    # the form rather than as a deferred "FAILED" status on the creating
-    # page. An empty value falls through; ``start_creation`` substitutes a
-    # repo-derived fallback for the API path.
-    if host_name:
-        try:
-            HostName(host_name)
-        except InvalidName as exc:
-            return _re_render_with_error(str(exc))
+    # The workspace name is chosen automatically: a submitted value (none in
+    # normal flow, since the form has no name field), else the operator
+    # ``MINDS_WORKSPACE_NAME`` override, else a generated coolname. Resolve it
+    # eagerly so an invalid operator override surfaces inline rather than as a
+    # deferred "FAILED" status on the creating page.
+    try:
+        resolved_host_name = resolve_create_host_name(host_name)
+    except InvalidName as exc:
+        return _re_render_with_error(str(exc))
 
     is_imbue_cloud_compute = launch_mode is LaunchMode.IMBUE_CLOUD
     is_imbue_cloud_ai = ai_provider is AIProvider.IMBUE_CLOUD
     if not account_id and (is_imbue_cloud_compute or is_imbue_cloud_ai):
+        # The remote (Imbue Cloud) presets require an account. With no account
+        # at all, the compute path is unusable, so route into the sign-in/up
+        # flow (the client does this on card-select; this is the no-JS
+        # backstop) with a link back to the picker. When accounts exist but
+        # none is selected, re-render asking the user to pick one.
+        has_any_account = bool(session_store_inst.list_accounts()) if session_store_inst is not None else False
+        if not has_any_account:
+            return make_response(status_code=303, headers={"Location": _REMOTE_SIGNIN_REDIRECT_URL})
         return _re_render_with_error(
             "imbue_cloud requires an account. Select an account or pick a different "
             "option for both the compute and AI providers."
@@ -1107,7 +1136,7 @@ def _handle_create_form_submit() -> Response:
     # the association is keyed under the right id.
     creation_id = agent_creator.start_creation(
         git_url,
-        host_name=host_name,
+        host_name=resolved_host_name,
         branch=branch,
         launch_mode=launch_mode,
         ai_provider=ai_provider,
@@ -1148,6 +1177,9 @@ def _handle_create_page() -> Response:
         has_saved_backup_password=is_backup_password_saved,
         region_options_by_launch_mode=region_options,
         region_selected_by_launch_mode=region_selected,
+        # A deep-link that pre-fills a repo/branch wants those advanced fields
+        # visible; otherwise start on the simple preset cards.
+        start_advanced=bool(git_url or branch),
         color=_suggested_create_color(backend_resolver),
     )
     return make_html_response(content=html)

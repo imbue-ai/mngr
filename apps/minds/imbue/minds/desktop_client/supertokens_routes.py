@@ -12,6 +12,7 @@ import json
 import secrets
 import threading
 import time
+from typing import Final
 from urllib.parse import urlencode
 
 from flask import Blueprint
@@ -32,6 +33,7 @@ from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.responses import make_html_response
 from imbue.minds.desktop_client.responses import make_redirect_response
 from imbue.minds.desktop_client.responses import make_response
+from imbue.minds.desktop_client.responses import safe_local_redirect_path
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.session_store import UserInfo
 from imbue.minds.desktop_client.state import get_state
@@ -272,6 +274,15 @@ def _auth_error_response(exc: AuthBackendError | ImbueCloudCliError) -> Response
     )
 
 
+# Default banner shown when the create page sends a signed-out user here to
+# enable the remote (Imbue Cloud) compute preset. Used when no explicit
+# ``?message=`` is supplied alongside a ``return_to``.
+_REMOTE_SIGNIN_EXPLAINER: Final[str] = (
+    "Sign in or create an Imbue account to run your mind on Imbue Cloud. "
+    "You can also go back and run it directly on your computer."
+)
+
+
 def _handle_auth_page() -> Response:
     """Render the sign-up or sign-in page.
 
@@ -282,12 +293,23 @@ def _handle_auth_page() -> Response:
     An optional ``?message=`` query parameter is rendered as a banner on
     the page (e.g. the Electron shell appends one explaining why the user
     was redirected here to sign in).
+
+    An optional ``?return_to=`` query parameter (a same-origin path, e.g.
+    ``/create``) adds a back link to the page and is forwarded to
+    ``/post-login`` so a successful sign-in returns there. When it is
+    present without an explicit message, a default explainer banner about
+    the remote compute path is shown.
     """
     default_to_signup = request.path.rstrip("/").endswith("/signup")
+    return_to = safe_local_redirect_path(request.args.get("return_to"))
+    message = request.args.get("message")
+    if message is None and return_to is not None:
+        message = _REMOTE_SIGNIN_EXPLAINER
     return make_html_response(
         render_auth_page(
             default_to_signup=default_to_signup,
-            message=request.args.get("message"),
+            message=message,
+            return_to=return_to,
         )
     )
 

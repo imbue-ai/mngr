@@ -1,6 +1,15 @@
 // Sign-up / sign-in tab handling + OAuth polling. Tab switches via
 // data-show-tab, OAuth via data-oauth. Keeps markup JS-free.
 (function () {
+  // Where to land after a successful sign-in. When the page carries a
+  // ``return_to`` query param (e.g. the create page sent a signed-out user
+  // here to enable the remote preset), forward it to /post-login so the
+  // server returns them there; /post-login re-validates it as a safe path.
+  function postLoginUrl() {
+    var returnTo = new URLSearchParams(window.location.search).get('return_to');
+    return returnTo ? '/post-login?return_to=' + encodeURIComponent(returnTo) : '/post-login';
+  }
+
   function showTab(tab) {
     document.getElementById('signup-tab').classList.toggle('hidden', tab !== 'signup');
     document.getElementById('signin-tab').classList.toggle('hidden', tab !== 'signin');
@@ -61,7 +70,7 @@
       var data = await res.json();
       if (data.status === 'OK') {
         if (data.needsEmailVerification) window.location.href = '/auth/check-email';
-        else window.location.href = '/post-login';
+        else window.location.href = postLoginUrl();
       } else if (data.status === 'WRONG_CREDENTIALS') {
         showError('signin', data.message);
       } else {
@@ -135,7 +144,7 @@
         if (s.state === 'done') {
           clearInterval(oauthPollInterval);
           oauthPollInterval = null;
-          window.location.href = '/post-login';
+          window.location.href = postLoginUrl();
           return;
         }
         if (s.state === 'error') {

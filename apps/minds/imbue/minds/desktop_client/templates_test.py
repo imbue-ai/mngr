@@ -1,5 +1,6 @@
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Final
 
 import pytest
@@ -18,6 +19,7 @@ from imbue.minds.desktop_client.templates import render_recovery_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
+from imbue.minds.desktop_client.templates import resolve_create_host_name
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR_NAME
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
@@ -218,16 +220,31 @@ def test_agent_id_accepts_valid_format() -> None:
 
 def test_render_create_form_has_default_values() -> None:
     html = render_create_form()
-    assert "assistant" in html
+    # The repository git URL still has a hardcoded fallback (in the advanced
+    # view); the compute provider select is present.
     assert "forever-claude-template" in html
-    assert "host_name" in html
     assert "launch_mode" in html
 
 
+def test_render_create_form_omits_name_field() -> None:
+    # The workspace name is auto-generated server-side, so the form no longer
+    # has a name input.
+    html = render_create_form()
+    assert 'name="host_name"' not in html
+
+
+def test_render_create_form_shows_preset_cards() -> None:
+    html = render_create_form()
+    assert 'data-preset="remote"' in html
+    assert 'data-preset="local"' in html
+    assert "Imbue Cloud" in html
+    assert "Directly on your computer" in html
+    assert "Advanced Configuration" in html
+
+
 def test_render_create_form_prefills_values() -> None:
-    html = render_create_form(git_url="https://custom/repo", host_name="my-workspace", branch="feature/test")
+    html = render_create_form(git_url="https://custom/repo", branch="feature/test")
     assert "https://custom/repo" in html
-    assert "my-workspace" in html
     assert "feature/test" in html
 
 
@@ -269,28 +286,43 @@ def test_render_create_form_omits_env_file_checkbox() -> None:
     assert "include_env_file" not in html
 
 
-def test_render_create_form_includes_color_picker_with_palette_swatches() -> None:
+def test_render_create_form_carries_color_in_hidden_input_without_swatches() -> None:
+    # The color is auto-chosen, so there is no visible palette picker; a hidden
+    # ``color`` input carries the selection through the POST.
     html = render_create_form()
-    # All palette swatches present.
-    for hex_value in WORKSPACE_PALETTE.values():
-        assert f'data-color="{hex_value}"' in html
-    # Hidden input named "color" carries the default selection.
     assert 'name="color"' in html
     assert f'value="{DEFAULT_WORKSPACE_COLOR}"' in html
+    # No visible swatches (the palette picker markup is gone).
+    assert "color-swatch" not in html
+    for hex_value in WORKSPACE_PALETTE.values():
+        assert f'data-color="{hex_value}"' not in html
 
 
-def test_render_create_form_marks_default_color_as_checked() -> None:
-    html = render_create_form()
-    # The default ``confusion`` swatch is the only one with aria-checked=true.
-    assert html.count('aria-checked="true"') == 1
-
-
-def test_render_create_form_pre_selects_provided_color() -> None:
+def test_render_create_form_carries_provided_color_in_hidden_input() -> None:
     html = render_create_form(color="#cecd0c")
-    # The hidden input + the matching swatch's aria-checked carry the
-    # picked color.
     assert 'value="#cecd0c"' in html
-    assert html.count('aria-checked="true"') == 1
+
+
+def test_render_create_form_default_preset_is_local_without_account() -> None:
+    # Without an account the selected preset card is local (remote requires one).
+    html = render_create_form()
+    assert re.search(r'data-preset="local"[^>]*aria-checked="true"', html, re.DOTALL) is not None
+    assert re.search(r'data-preset="remote"[^>]*aria-checked="false"', html, re.DOTALL) is not None
+
+
+def test_render_create_form_default_preset_is_remote_with_account() -> None:
+    acct = SimpleNamespace(user_id="u-1", email="a@b.com")
+    html = render_create_form(accounts=[acct], default_account_id="u-1")
+    assert re.search(r'data-preset="remote"[^>]*aria-checked="true"', html, re.DOTALL) is not None
+    assert re.search(r'data-preset="local"[^>]*aria-checked="false"', html, re.DOTALL) is not None
+    # The selected card also carries the accent styling class server-side.
+    assert "preset-card-selected" in html
+
+
+def test_render_create_form_start_advanced_opens_advanced_view() -> None:
+    # ``start_advanced`` drives the inline init so the advanced view shows first.
+    assert "showAdvanced(true)" in render_create_form(start_advanced=True)
+    assert "showAdvanced(false)" in render_create_form(start_advanced=False)
 
 
 def test_render_create_form_shows_error_message_when_supplied() -> None:
@@ -307,11 +339,9 @@ def test_render_create_form_honors_workspace_env_vars_when_opted_in(monkeypatch:
     """
     monkeypatch.setenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", "1")
     monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", "/local/fct/path")
-    monkeypatch.setenv("MINDS_WORKSPACE_NAME", "mindtest")
     monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
     html = render_create_form()
     assert "/local/fct/path" in html
-    assert "mindtest" in html
     assert "mngr/some-feature" in html
 
 
@@ -348,15 +378,12 @@ def test_render_create_form_ignores_workspace_env_vars_without_opt_in_on_shared_
     monkeypatch.delenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", raising=False)
     monkeypatch.setenv("MINDS_ROOT_NAME", "minds-staging")
     monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", "/local/fct/path")
-    monkeypatch.setenv("MINDS_WORKSPACE_NAME", "mindtest")
     monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
     html = render_create_form()
     assert "/local/fct/path" not in html
-    assert "mindtest" not in html
     assert "mngr/some-feature" not in html
-    # And the hardcoded fallbacks DO appear (form is still usable).
+    # And the hardcoded git-URL fallback DOES appear (form is still usable).
     assert "forever-claude-template" in html
-    assert "assistant" in html
 
 
 def test_render_create_form_ignores_workspace_env_vars_without_opt_in_on_dev_tier(
@@ -372,6 +399,34 @@ def test_render_create_form_ignores_workspace_env_vars_without_opt_in_on_dev_tie
     monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
     html = render_create_form()
     assert "mngr/some-feature" not in html
+
+
+def test_resolve_create_host_name_uses_submitted_value() -> None:
+    assert str(resolve_create_host_name("my-workspace")) == "my-workspace"
+
+
+def test_resolve_create_host_name_generates_coolname_when_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    # No submitted name and no operator override -> a generated 3-word coolname.
+    monkeypatch.delenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", raising=False)
+    monkeypatch.delenv("MINDS_WORKSPACE_NAME", raising=False)
+    name = str(resolve_create_host_name(""))
+    parts = name.split("-")
+    assert len(parts) == 3
+    assert all(part.isalnum() and part.islower() for part in parts)
+
+
+def test_resolve_create_host_name_honors_operator_override_when_opted_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", "1")
+    monkeypatch.setenv("MINDS_WORKSPACE_NAME", "mindtest")
+    assert str(resolve_create_host_name("")) == "mindtest"
+
+
+def test_resolve_create_host_name_ignores_operator_override_without_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Without the opt-in, a stray MINDS_WORKSPACE_NAME is ignored and a coolname
+    # is generated instead.
+    monkeypatch.delenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", raising=False)
+    monkeypatch.setenv("MINDS_WORKSPACE_NAME", "mindtest")
+    assert str(resolve_create_host_name("")) != "mindtest"
 
 
 def test_render_login_page_shows_prompt() -> None:

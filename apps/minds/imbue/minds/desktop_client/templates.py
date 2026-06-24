@@ -35,6 +35,9 @@ from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostNameStyle
+from imbue.mngr.utils.name_generator import generate_host_name
 from imbue.mngr_forward.loading_page import render_loading_page
 
 TEMPLATE_DIR: Final[Path] = Path(__file__).resolve().parent / "templates"
@@ -249,7 +252,6 @@ def render_landing_page(
 # MINDS_WORKSPACE_* env vars only when the operator explicitly opts in -- see
 # ``_operator_workspace_default`` for the gating rationale.
 _FALLBACK_GIT_URL: Final[str] = "https://github.com/imbue-ai/forever-claude-template.git"
-_FALLBACK_HOST_NAME: Final[str] = "assistant"
 # Pin to an annotated FCT tag so a shipped binary clones the exact FCT
 # snapshot it was verified against. Bump to a newer tag only after
 # re-verifying launch-to-msg CI against (this binary, the new tag).
@@ -289,10 +291,33 @@ def _operator_workspace_default(env_var: str, fallback: str) -> str:
     return os.environ.get(env_var, fallback)
 
 
+def resolve_create_host_name(submitted_host_name: str) -> HostName:
+    """Resolve the host name for a new workspace.
+
+    The create form no longer asks for a name; it is chosen automatically.
+    Resolution order:
+
+    1. the user-submitted name, if any (validated as a ``HostName``);
+    2. the operator override ``MINDS_WORKSPACE_NAME``, honored only under
+       the explicit opt-in (see ``_operator_workspace_default``) -- this is
+       how ``just minds-start`` / the e2e runner pin a known name;
+    3. a freshly generated coolname (the same generator the FCT
+       create-agent flow uses, e.g. ``brave-cool-otter``).
+
+    Raises ``InvalidName`` if a non-empty submitted or operator name is not
+    a valid host name; the generated fallback is always valid.
+    """
+    if submitted_host_name:
+        return HostName(submitted_host_name)
+    operator_name = _operator_workspace_default("MINDS_WORKSPACE_NAME", "")
+    if operator_name:
+        return HostName(operator_name)
+    return generate_host_name(HostNameStyle.COOLNAME)
+
+
 @pure
 def render_create_form(
     git_url: str = "",
-    host_name: str = "",
     branch: str = "",
     launch_mode: LaunchMode | None = None,
     ai_provider: AIProvider | None = None,
@@ -306,9 +331,18 @@ def render_create_form(
     error_message: str = "",
     region_options_by_launch_mode: Mapping[str, Sequence[str]] | None = None,
     region_selected_by_launch_mode: Mapping[str, str] | None = None,
+    selected_preset: str | None = None,
+    start_advanced: bool = False,
     color: str = DEFAULT_WORKSPACE_COLOR,
 ) -> str:
     """Render the agent creation form page.
+
+    The page has two views over one form. The simple view offers two compute
+    presets -- ``remote`` (Imbue Cloud) and ``local`` (directly on this
+    computer) -- as selectable cards; the advanced view exposes the compute /
+    AI / backup providers, region, and repository / branch inputs directly.
+    The advanced selects are always what gets POSTed; the preset cards just
+    pre-fill them.
 
     The compute provider (``launch_mode``), AI provider, and backup provider
     are independent. The compute / AI providers default to ``IMBUE_CLOUD``
@@ -317,25 +351,23 @@ def render_create_form(
     account and ``CONFIGURE_LATER`` without one. The backup encryption method
     defaults to ``NO_PASSWORD``.
 
+    ``selected_preset`` picks which preset card starts selected; when ``None``
+    it is derived from the effective launch mode (``remote`` for IMBUE_CLOUD,
+    else ``local``). ``start_advanced`` opens the advanced view on first paint
+    -- used when re-rendering a submit error, whose fields live there.
+
     ``has_saved_backup_password`` toggles the master-password input between a
     "enter a passphrase" field (no saved password yet) and a read-only
     "a saved password will be used" indicator.
 
-    ``host_name`` is the value of the form's "Name" field; it drives the
-    host name on the resulting workspace. (The agent itself is always
-    named ``system-services``.)
-
-    ``color`` is the ``#rrggbb`` hex preselected in the form's palette
-    picker: the matching swatch renders checked and the hidden ``color``
-    input the form POSTs carries it. Callers pass the
-    suggested-unused-palette pick; it defaults to
-    ``DEFAULT_WORKSPACE_COLOR`` so callers that don't care about color
-    (e.g. some tests) can omit it.
+    The workspace name and color are chosen automatically (the name
+    server-side via ``resolve_create_host_name``, the color from the first
+    unused palette entry), so neither is asked for on the form. ``color`` is
+    the ``#rrggbb`` hex carried in the hidden ``color`` input the form POSTs;
+    it defaults to ``DEFAULT_WORKSPACE_COLOR`` so callers that don't care
+    about color (e.g. some tests) can omit it.
     """
     effective_url = git_url if git_url else _operator_workspace_default("MINDS_WORKSPACE_GIT_URL", _FALLBACK_GIT_URL)
-    effective_name = (
-        host_name if host_name else _operator_workspace_default("MINDS_WORKSPACE_NAME", _FALLBACK_HOST_NAME)
-    )
     effective_branch = branch if branch else _operator_workspace_default("MINDS_WORKSPACE_BRANCH", FALLBACK_BRANCH)
     has_account = bool(default_account_id and accounts)
     effective_launch_mode = (
@@ -354,10 +386,14 @@ def render_create_form(
     effective_backup_encryption = (
         backup_encryption_method if backup_encryption_method is not None else BackupEncryptionMethod.NO_PASSWORD
     )
+    effective_preset = (
+        selected_preset
+        if selected_preset is not None
+        else ("remote" if effective_launch_mode is LaunchMode.IMBUE_CLOUD else "local")
+    )
     return CATALOG.render(
         "pages.Create",
         git_url=effective_url,
-        host_name=effective_name,
         branch=effective_branch,
         launch_modes=list(LaunchMode),
         selected_launch_mode=effective_launch_mode.value,
@@ -377,8 +413,9 @@ def render_create_form(
             key: list(value) for key, value in (region_options_by_launch_mode or {}).items()
         },
         region_selected_by_launch_mode=dict(region_selected_by_launch_mode or {}),
+        selected_preset=effective_preset,
+        start_advanced=start_advanced,
         color=color,
-        palette=WORKSPACE_PALETTE,
     )
 
 

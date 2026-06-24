@@ -448,6 +448,33 @@ html {
   display: block;
 }
 
+/*
+ * Create-page "where to run" preset cards (the simple-view Imbue Cloud /
+ * local compute choices). Two large selectable cards; selection state is
+ * driven by the `.preset-card-selected` class, toggled by the Create
+ * page's inline script. Mirrors the `.opt` recipe but sized for the
+ * two-column compute presets: a dashed neutral border by default, a solid
+ * accent border + faint tint when selected. The 2px border width is held
+ * constant across states (only its style/color changes) so selecting a
+ * card never shifts its layout. Padding/layout come from Tailwind
+ * utilities on the element.
+ */
+.preset-card {
+  border: 2px dashed var(--c-border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--c-surface-primary);
+  cursor: pointer;
+  text-align: left;
+}
+.preset-card:hover {
+  border-color: var(--c-border-stronger);
+}
+.preset-card-selected {
+  border-style: solid;
+  border-color: var(--c-accent);
+  background: rgb(from var(--c-accent) r g b / 0.05);
+}
+
 .spinner {
   border: 2px solid var(--c-border-subtle);
   border-top-color: var(--c-text-primary);

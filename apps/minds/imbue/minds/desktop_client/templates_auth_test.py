@@ -24,6 +24,17 @@ def test_render_auth_page_includes_message() -> None:
     assert "Please sign in to share" in html
 
 
+def test_render_auth_page_with_return_to_shows_back_link() -> None:
+    html = render_auth_page(return_to="/create")
+    assert "Back to mind setup" in html
+    assert 'href="/create"' in html
+
+
+def test_render_auth_page_without_return_to_has_no_back_link() -> None:
+    html = render_auth_page()
+    assert "Back to mind setup" not in html
+
+
 def test_render_auth_page_includes_oauth_buttons() -> None:
     html = render_auth_page()
     assert "Continue with Google" in html

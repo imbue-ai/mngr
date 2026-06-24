@@ -15,14 +15,22 @@ from imbue.minds.desktop_client.templates import CATALOG
 def render_auth_page(
     default_to_signup: bool = True,
     message: str | None = None,
+    return_to: str | None = None,
 ) -> str:
-    """Render the sign-up / sign-in page."""
+    """Render the sign-up / sign-in page.
+
+    ``return_to`` is an optional same-origin path the user came from (e.g.
+    ``/create`` when they chose the remote preset without an account). When
+    set, the page shows a back link to it; the page's JS also forwards it to
+    ``/post-login`` so a successful sign-in lands them back there.
+    """
     title = "Create account" if default_to_signup else "Sign in"
     return CATALOG.render(
         "auth.SignupSignin",
         title=title,
         default_to_signup=default_to_signup,
         message=message,
+        return_to=return_to or "",
     )
 
 
