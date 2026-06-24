@@ -254,12 +254,13 @@ def test_render_create_form_contains_all_launch_modes() -> None:
         assert mode.value.lower() in html
 
 
-def test_render_create_form_selects_lima_by_default_without_account() -> None:
-    # With no account selected the compute provider defaults to LIMA (the
-    # local self-served default); IMBUE_CLOUD is only the default when an
-    # account is present.
+def test_render_create_form_selects_imbue_cloud_compute_by_default() -> None:
+    # A fresh form defaults to the remote ("Imbue Cloud") preset regardless of
+    # whether an account is signed in, so the compute provider starts on
+    # IMBUE_CLOUD rather than the local LIMA default.
     html = render_create_form()
-    assert 'value="LIMA" selected' in html
+    assert 'value="IMBUE_CLOUD" selected' in html
+    assert 'value="LIMA" selected' not in html
 
 
 def test_render_create_form_selects_specified_launch_mode() -> None:
@@ -276,9 +277,20 @@ def test_render_create_form_contains_ai_provider_options() -> None:
         assert f'value="{provider.value}"' in html
 
 
-def test_render_create_form_defaults_ai_provider_to_subscription_without_account() -> None:
+def test_render_create_form_defaults_ai_provider_to_imbue_cloud() -> None:
+    # The remote preset is the default, so the AI provider starts on IMBUE_CLOUD
+    # rather than the local SUBSCRIPTION default.
     html = render_create_form()
+    assert 'value="SUBSCRIPTION" selected' not in html
+
+
+def test_render_create_form_local_preset_selects_lima_and_subscription() -> None:
+    # Selecting the local preset (e.g. a re-render of a LIMA submission) keeps
+    # the compute / AI providers on the local LIMA / SUBSCRIPTION defaults.
+    html = render_create_form(selected_preset="local")
+    assert 'value="LIMA" selected' in html
     assert 'value="SUBSCRIPTION" selected' in html
+    assert 'aria-checked="true"' in _preset_card_tag(html, "local")
 
 
 def test_render_create_form_omits_env_file_checkbox() -> None:
@@ -314,11 +326,13 @@ def _preset_card_tag(html: str, preset: str) -> str:
     return match.group(0)
 
 
-def test_render_create_form_default_preset_is_local_without_account() -> None:
-    # Without an account the selected preset card is local (remote requires one).
+def test_render_create_form_default_preset_is_remote_without_account() -> None:
+    # The remote ("Imbue Cloud") preset is the default even with no account
+    # signed in; a no-account user is nudged toward signing in via the card
+    # click, not by flipping the default to local.
     html = render_create_form()
-    assert 'aria-checked="true"' in _preset_card_tag(html, "local")
-    assert 'aria-checked="false"' in _preset_card_tag(html, "remote")
+    assert 'aria-checked="true"' in _preset_card_tag(html, "remote")
+    assert 'aria-checked="false"' in _preset_card_tag(html, "local")
 
 
 def test_render_create_form_default_preset_is_remote_with_account() -> None:

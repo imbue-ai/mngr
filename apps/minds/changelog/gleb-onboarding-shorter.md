@@ -11,3 +11,5 @@ Reworked the "create a mind" screen into a simpler two-step flow. Instead of a n
 The workspace name and color are now chosen automatically -- a generated name (the same coolname style used elsewhere) and the first unused palette color -- so neither is asked for on the create screen.
 
 Choosing the Imbue Cloud (remote) option without a signed-in account now takes you into the sign-in / sign-up flow, with an explainer about what running on Imbue Cloud needs and a one-click link back to the picker; after signing in you land back on the create screen.
+
+The "Imbue Cloud" (remote) card is now selected by default on the create screen for everyone, including users without an account -- previously a user without an account landed with the local "Directly on your computer" card preselected.

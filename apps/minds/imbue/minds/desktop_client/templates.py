@@ -345,16 +345,20 @@ def render_create_form(
     pre-fill them.
 
     The compute provider (``launch_mode``), AI provider, and backup provider
-    are independent. The compute / AI providers default to ``IMBUE_CLOUD``
-    when an account is selected; without an account they drop to ``LIMA`` /
-    ``SUBSCRIPTION``. The backup provider defaults to ``IMBUE_CLOUD`` with an
-    account and ``CONFIGURE_LATER`` without one. The backup encryption method
-    defaults to ``NO_PASSWORD``.
+    follow the selected preset so the highlighted card matches what a plain
+    submit would create: the ``remote`` preset maps to ``IMBUE_CLOUD`` for all
+    three, the ``local`` preset to ``LIMA`` / ``SUBSCRIPTION`` /
+    ``CONFIGURE_LATER``. The backup encryption method defaults to
+    ``NO_PASSWORD``.
 
-    ``selected_preset`` picks which preset card starts selected; when ``None``
-    it is derived from the effective launch mode (``remote`` for IMBUE_CLOUD,
-    else ``local``). ``start_advanced`` opens the advanced view on first paint
-    -- used when re-rendering a submit error, whose fields live there.
+    ``selected_preset`` picks which preset card starts selected. When ``None``
+    it defaults to ``remote`` on a fresh form (regardless of whether an account
+    is signed in -- a no-account user is nudged toward signing in via the card
+    click, not by changing the default), and is derived from the submitted
+    launch mode when re-rendering a submitted form (``remote`` for IMBUE_CLOUD,
+    else ``local``) so the user's choice survives a validation error.
+    ``start_advanced`` opens the advanced view on first paint -- used when
+    re-rendering a submit error, whose fields live there.
 
     ``has_saved_backup_password`` toggles the master-password input between a
     "enter a passphrase" field (no saved password yet) and a read-only
@@ -369,27 +373,34 @@ def render_create_form(
     """
     effective_url = git_url if git_url else _operator_workspace_default("MINDS_WORKSPACE_GIT_URL", _FALLBACK_GIT_URL)
     effective_branch = branch if branch else _operator_workspace_default("MINDS_WORKSPACE_BRANCH", FALLBACK_BRANCH)
-    has_account = bool(default_account_id and accounts)
+    # The selected preset card drives the provider defaults so the highlighted
+    # card always matches what a plain submit would create. A fresh form
+    # (no explicit selection, no submitted launch mode) defaults to the remote
+    # ("Imbue Cloud") preset regardless of whether an account is signed in; a
+    # re-render of a submitted form derives the preset from the submitted
+    # compute provider so the user's choice survives a validation error.
+    if selected_preset is not None:
+        effective_preset = selected_preset
+    elif launch_mode is not None:
+        effective_preset = "remote" if launch_mode is LaunchMode.IMBUE_CLOUD else "local"
+    else:
+        effective_preset = "remote"
+    is_remote_preset = effective_preset == "remote"
     effective_launch_mode = (
-        launch_mode if launch_mode is not None else (LaunchMode.IMBUE_CLOUD if has_account else LaunchMode.LIMA)
+        launch_mode if launch_mode is not None else (LaunchMode.IMBUE_CLOUD if is_remote_preset else LaunchMode.LIMA)
     )
     effective_ai_provider = (
         ai_provider
         if ai_provider is not None
-        else (AIProvider.IMBUE_CLOUD if has_account else AIProvider.SUBSCRIPTION)
+        else (AIProvider.IMBUE_CLOUD if is_remote_preset else AIProvider.SUBSCRIPTION)
     )
     effective_backup_provider = (
         backup_provider
         if backup_provider is not None
-        else (BackupProvider.IMBUE_CLOUD if has_account else BackupProvider.CONFIGURE_LATER)
+        else (BackupProvider.IMBUE_CLOUD if is_remote_preset else BackupProvider.CONFIGURE_LATER)
     )
     effective_backup_encryption = (
         backup_encryption_method if backup_encryption_method is not None else BackupEncryptionMethod.NO_PASSWORD
-    )
-    effective_preset = (
-        selected_preset
-        if selected_preset is not None
-        else ("remote" if effective_launch_mode is LaunchMode.IMBUE_CLOUD else "local")
     )
     return CATALOG.render(
         "pages.Create",
