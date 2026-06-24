@@ -841,12 +841,18 @@ def test_creating_page_shows_status(tmp_path: Path) -> None:
     agent_creator.wait_for_all()
 
 
-def test_creating_page_returns_404_for_unknown(tmp_path: Path) -> None:
-    """GET /creating/{agent_id} returns 404 for unknown agent creation."""
+def test_creating_page_redirects_to_landing_for_unknown(tmp_path: Path) -> None:
+    """GET /creating/{agent_id} falls back to the landing page for an unknown creation.
+
+    The creation registry is in-memory, so a ``/creating/<id>`` window that outlives
+    its creation -- reopened after an app restart, or after a failed creation was
+    cleaned up -- must redirect rather than dead-end on a bare 404 page.
+    """
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
-    response = client.get("/creating/{}".format(CreationId()))
-    assert response.status_code == 404
+    response = client.get("/creating/{}".format(CreationId()), follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/"
 
 
 def test_creation_status_api_returns_status_for_tracked_agent(tmp_path: Path) -> None:
