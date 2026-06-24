@@ -114,25 +114,27 @@ def main() -> int:
         print(f"error: nothing listed at secrets/{tier_path} (wrong tier, or not logged in?)", file=sys.stderr)
         return 2
 
-    # A flat secret shows up as a bare name; its split mirror shows up as a
-    # trailing-slash directory. Only services that have BOTH are deletion
-    # candidates -- a flat-only service has no migrated home and is left alone.
-    flat_services = sorted({entry for entry in listing if not entry.endswith("/")})
-    split_dirs = {entry[:-1] for entry in listing if entry.endswith("/")}
+    # Derive candidate service names from the whole listing. In Vault KV-v2 a
+    # path that holds a secret AND has children is listed only once, with a
+    # trailing slash, so the bare name never appears for a mirrored service.
+    # Normalize away the trailing slash and probe each candidate directly to
+    # decide whether it has a flat entry and/or a split mirror.
+    candidate_services = sorted({entry.rstrip("/") for entry in listing})
 
     to_delete: list[str] = []
     skipped: list[str] = []
-    for service in flat_services:
+    for service in candidate_services:
         service_path = f"{tier_path}/{service}"
         flat_contents = _get_data(service_path, env=env)
         if flat_contents is None:
-            # Listed as a bare name but no readable secret -- nothing to remove.
+            # No flat secret lives at this path (it is purely a split directory
+            # or has nothing readable) -- nothing to remove.
             continue
-        if service not in split_dirs:
+        split_contents = _read_split_contents(service_path, env=env)
+        if not split_contents:
             print(f"  SKIP  {service_path}: no split mirror exists (flat entry left in place)")
             skipped.append(service)
             continue
-        split_contents = _read_split_contents(service_path, env=env)
         if flat_contents != split_contents:
             only_flat = sorted(set(flat_contents) - set(split_contents))
             only_split = sorted(set(split_contents) - set(flat_contents))
