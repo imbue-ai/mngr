@@ -63,10 +63,14 @@ _MNGR_CREATE_TIMEOUT_SECONDS: Final[int] = 1800
 
 # Manual rsync excludes layered on top of ``--filter=:- .gitignore`` for the
 # monorepo -> FCT vendor/mngr sync. The filter handles ``__pycache__`` / ``.venv``
-# / etc.; these two are NOT in .gitignore: ``.git`` (git's internal dir) and
-# ``uv.lock`` (committed at the mngr root, but each install context regenerates
-# its own).
-_VENDOR_RSYNC_MANUAL_EXCLUDES: Final[tuple[str, ...]] = (".git", "uv.lock")
+# / etc.; these three are either NOT in .gitignore or expressed with a glob macOS's
+# rsync can't match: ``.git`` (git's internal dir), ``uv.lock`` (committed at the
+# mngr root, but each install context regenerates its own), and
+# ``.external_worktrees`` (gitignored only via a ``**/``-prefixed rule that macOS's
+# stock rsync -- openrsync / "2.6.9 compatible" -- does not honor, since it has no
+# ``**`` support; excluding it explicitly avoids copying a stale worktree tree into
+# the baked image and works on both old and new rsync).
+_VENDOR_RSYNC_MANUAL_EXCLUDES: Final[tuple[str, ...]] = (".git", "uv.lock", ".external_worktrees")
 _GITIGNORE_RSYNC_FILTER: Final[str] = ":- .gitignore"
 # How long to wait (inside the container) for the FCT bootstrap to write its
 # initial-chat sentinel before giving up on the chat-agent teardown. The
