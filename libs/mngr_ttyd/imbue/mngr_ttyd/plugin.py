@@ -25,6 +25,11 @@ TTYD_VERSION = "1.7.7"
 # tmux `mouse on` (so wheel scroll and in-app mouse still work). The client is
 # vendored gzip-compressed (TTYD_INDEX_RESOURCE) and decompressed on install. See
 # scripts/build_patched_ttyd_client.sh for how the resource is produced.
+#
+# The vendored bundle is a compiled build of ttyd (https://github.com/tsl0922/ttyd),
+# which is MIT-licensed; we redistribute it, so its license (and the licenses of the
+# JS libraries bundled into it) ships alongside it at
+# resources/ttyd_index.html.gz.LICENSE.
 TTYD_INDEX_FILENAME = "index.html"
 TTYD_INDEX_RESOURCE = "ttyd_index.html.gz"
 
