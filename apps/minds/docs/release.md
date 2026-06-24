@@ -10,24 +10,24 @@ A release ships three pinned artifacts that must agree:
 
 Both repos tag with the **`minds-v<version>`** prefix (e.g. `minds-v0.3.1`), namespacing minds releases from each repo's own `v<version>`. The shipped binary clones the FCT tag at runtime via `FALLBACK_BRANCH` in `apps/minds/imbue/minds/desktop_client/templates.py`; tag immutability pins a binary to the snapshot it was verified against.
 
-Both repos release from **`main`** via **two PRs that both target `main`** (one per repo): prove the pair green, review, merge, tag each `main`, then re-prove green against the tags. **Green CI on the tags concludes the release**; clicking *Release* in ToDesktop is an optional follow-up.
+The mngr side releases from **`main`** via **one PR** (the reviewable change). The FCT `vendor/mngr` refresh is **not** a PR: it is a mechanical, reproduction-verified mirror of the mngr SHA, so it lands as a **direct commit pushed to FCT `main`** (no review). The arc: prove the pair green pre-merge (mngr PR branch × the pushed FCT vendor branch), review + merge the mngr PR, tag both `main`s at the verified SHA, then re-prove green against the tags. **Green CI on the tags concludes the release**; clicking *Release* in ToDesktop is an optional follow-up.
 
-## The two PRs
+## The mngr PR + the FCT vendor sync
 
-| Repo | Carries |
-|---|---|
-| `mngr` | version bump (`apps/minds/package.json`), `FALLBACK_BRANCH` (`templates.py`), any mngr/minds code |
-| `forever-claude-template` | `vendor/mngr/` archived from the green mngr SHA, plus any consumer (`system_interface`) changes that vendor requires |
+| Repo | Carries | How it lands |
+|---|---|---|
+| `mngr` | version bump (`apps/minds/package.json`), `FALLBACK_BRANCH` (`templates.py`), any mngr/minds code | **PR** → `main` (merge commit) |
+| `forever-claude-template` | `vendor/mngr/` archived from the verified mngr SHA | **direct commit pushed to `main`** (no PR) |
+
+The vendor refresh carries no review value — it is a byte-for-byte `git archive` of the mngr SHA, verified by reproduction (the step-6 `diff -r` check), not by reading hundreds of generated files. So skip the PR ceremony and push it straight to `main`.
+
+**Reviewable consumer changes are the exception.** If the new vendor changes an mngr API a consumer (e.g. `system_interface`) calls and you must fix that consumer, that fix *is* reviewable — land it as its own normal FCT PR (reviewed + merged) **before** the vendor push, then direct-push the vendor sync on top. Keep reviewable code out of the vendor commit.
 
 **Vendor-match invariant.** FCT `vendor/mngr` must be the `git archive` of the *exact* mngr SHA it's paired with — the `commit_sha` you verify and the mngr SHA you tag. The binary runs the mngr SHA; the in-VM agent imports `vendor/mngr`. If they diverge, the agent's mngr can mismatch the binary's API (how the `system_interface` → `send_message_to_agents` break slipped in). Re-archive whenever the mngr SHA changes.
 
 > The Apple-Silicon lima-VZ `cryptography` SIGILL is handled in the FCT template by `OPENSSL_armcap=0` (`.mngr/settings.toml` `host_env__extend` + `scripts/build_workspace.sh`), which skips OpenSSL's SVE CPU-cap probe. mngr does not pin `cryptography`.
 
-**Reviewing the FCT PR.** Two kinds of change land on the same branch: the mechanical `vendor/mngr` snapshot (hundreds of files) and reviewable code (e.g. a `system_interface` fix). CI needs the *full* branch — the binary clones the ref and imports the committed `vendor/mngr` — but reviewers should read only the code. Keep them separable:
-
-1. **Isolate the vendor refresh in its own commit** (`vendor/mngr: refresh from mngr <sha>`), distinct from the reviewable commits, so review can be done per-commit.
-2. **`vendor/mngr/**` is `linguist-generated` in FCT's `.gitattributes`**, so GitHub collapses it in the PR "Files changed" view by default — reviewers see only the real changes.
-3. **The snapshot is verified by reproduction, not review**: the step-6 vendor-match check (`git archive <sha> | tar -x -C tmp && diff -r tmp vendor/mngr`) proves it equals the tagged mngr SHA. A clean diff *is* the review.
+**The vendor sync is verified by reproduction, not review.** It is a single mechanical commit (`Sync vendor/mngr to <branch> (<sha>)`) holding the `git archive` of the mngr SHA — nothing to read. The step-6 vendor-match check (`git archive <sha> | tar -x -C tmp && diff -r tmp vendor/mngr`) proves it equals the tagged mngr SHA; a clean diff *is* the review. So it skips PR review entirely and is pushed straight to FCT `main`. (`vendor/mngr/**` is also `linguist-generated` in FCT's `.gitattributes`, so it stays collapsed wherever it does surface.)
 
 ## File reference
 
@@ -58,13 +58,13 @@ Set these once for the whole session — later steps assume them:
 
 For an iteration of the same version, skip. To bump: set `apps/minds/package.json` `version` (e.g. `0.3.1`) and `templates.py` `FALLBACK_BRANCH` to `"minds-v0.3.1"`. This bakes in a tag that doesn't exist until step 7 — fine, because step 4 overrides the FCT ref via `template_ref`, so the tag is only hit in step 8.
 
-### 2. Traditional CI green on both PR branches
+### 2. Traditional CI green on the mngr PR branch
 
-`ci.yml` must be all-green on each PR HEAD (mngr jobs: `test-offload`, `test-docker`, `test-docker-electron`, `test-offload-acceptance`).
+`ci.yml` must be all-green on the mngr PR HEAD (jobs: `test-offload`, `test-docker`, `test-docker-electron`, `test-offload-acceptance`). The FCT vendor sync has no PR and no `ci.yml` of its own to gate here — it is verified by the step-4 launch-to-msg run and the step-6 reproduction check.
 
-### 3. Refresh FCT `vendor/mngr` from the green mngr SHA (FCT PR)
+### 3. Refresh FCT `vendor/mngr` from the green mngr SHA (no PR)
 
-On the FCT PR branch (cut from `origin/main`, clean tree), with the **mngr checkout positioned at the green SHA from step 2** (i.e. on the mngr release PR branch), run the sync recipe.
+On an FCT branch cut from `origin/main` (clean tree — this branch exists only to carry the vendor commit for step-4 verification; it is **not** opened as a PR), with the **mngr checkout positioned at the green SHA from step 2** (i.e. on the mngr release PR branch), run the sync recipe.
 
 `just sync-vendor-mngr` reads `FCT_DIR` from your `apps/minds/.env` (Session setup) — no path is baked into the justfile. It does `git archive HEAD` → FCT `vendor/mngr` (tracked files only; keep `apps/minds/`), commits `Sync vendor/mngr to <branch> (<short>)`, aborts if FCT is dirty, and **does not push** — it prints the exact `cd … && git push` line (with the resolved FCT path) for you to run. For why releases use `git archive` (vs the dev loop's `rsync`), see `apps/minds/docs/vendor-mngr-sync.md`.
 
@@ -75,30 +75,40 @@ just sync-vendor-mngr                       # reads FCT_DIR from .env
 # printed (it already has the resolved absolute path) and run it verbatim
 ```
 
-If the new vendor changes an mngr API a consumer calls (e.g. `system_interface`), fix that consumer in this same PR.
+If the new vendor changes an mngr API a consumer calls (e.g. `system_interface`), land that consumer fix as its own normal FCT PR (reviewed + merged) **before** the vendor push, and keep it out of the vendor commit.
 
 ### 4. Prove the pair green pre-merge
 
-The tag doesn't exist yet, so pass the FCT PR branch as `template_ref`. `commit_sha` and that branch's `vendor/mngr` must be the same mngr SHA.
+The tag doesn't exist yet, so pass the FCT vendor branch as `template_ref`. `commit_sha` and that branch's `vendor/mngr` must be the same mngr SHA.
 
 ```bash
 GREEN_MNGR_SHA=<the green mngr SHA from step 2>   # carried through to steps 6-8
 cd "$MNGR"
 gh workflow run minds-launch-to-msg.yml -R imbue-ai/mngr \
-  -r <mngr-pr-branch> -f commit_sha="$GREEN_MNGR_SHA" -f template_ref=<fct-pr-branch>
+  -r <mngr-pr-branch> -f commit_sha="$GREEN_MNGR_SHA" -f template_ref=<fct-vendor-branch>
 ```
 
 `build` packages/reuses (keyed by `commit_sha`) the bundle; `launch_to_msg` launches it, creates an agent from the FCT ref, sends a first message, asserts the round-trip. Invoke from the mngr cwd — from the FCT cwd it has 404'd mid-create and duplicated the run.
 
-### 5. Review and approve both PRs
+### 5. Review and approve the mngr PR
 
-Still branch refs; nothing tagged yet.
+Only the mngr PR needs review (still a branch ref; nothing tagged yet). The FCT vendor sync has no PR — it is verified by reproduction (see above). Any reviewable FCT consumer change is its own separate PR, already merged by this point.
 
-### 6. Merge both PRs to `main`
+### 6. Merge the mngr PR + push the FCT vendor to `main`
 
 **Merge the mngr PR with a merge commit, not a squash.** `main` can advance past the SHA you built and verified in step 4 (`$GREEN_MNGR_SHA`) while you were verifying; a merge commit keeps that exact SHA reachable on `main` as a parent (a squash replaces it with a new commit whose tree also contains the drift — and the binary you verified was built from neither).
 
-The tag pins **`$GREEN_MNGR_SHA`** — the SHA the binary was built from and FCT's `vendor/mngr` was archived from — **not** `main`'s HEAD. Confirm the *commit you'll actually tag* (FCT `origin/main` post-merge, not your local working copy) still matches that SHA:
+Then push the FCT vendor commit **directly to FCT `main`** (no PR) — fast-forward from the branch you verified in step 4:
+
+```bash
+GREEN_MNGR_SHA=<the SHA from step 4>
+git -C "$FCT" fetch origin --quiet
+git -C "$FCT" push https://x-access-token:$GH_TOKEN@github.com/imbue-ai/forever-claude-template.git <fct-vendor-branch>:main
+```
+
+If FCT `main` moved since step 3 the fast-forward is rejected — rebase the vendor branch onto `origin/main`, re-run the step-6 vendor-match check below, and re-verify (step 4) if anything material changed.
+
+The tag pins **`$GREEN_MNGR_SHA`** — the SHA the binary was built from and FCT's `vendor/mngr` was archived from — **not** `main`'s HEAD. Confirm the *commit you'll actually tag* (FCT `origin/main` post-push, not your local working copy) still matches that SHA:
 
 ```bash
 GREEN_MNGR_SHA=<the SHA from step 4>
@@ -113,7 +123,7 @@ diff -r "$A" "$B" && echo OK || echo "MISMATCH — FCT origin/main vendor != arc
 
 ### 7. Tag the verified pair — *not* `main` HEAD
 
-Tag mngr at **`$GREEN_MNGR_SHA`** (the built+verified SHA; reachable on `main` as the merge parent) and FCT at the commit whose `vendor/mngr` is that SHA's archive (the FCT PR's merge into `main`):
+Tag mngr at **`$GREEN_MNGR_SHA`** (the built+verified SHA; reachable on `main` as the merge parent) and FCT at the commit whose `vendor/mngr` is that SHA's archive (the vendor commit you pushed to `main` in step 6):
 
 ```bash
 # $GH_TOKEN, $MNGR, $FCT from Session setup
