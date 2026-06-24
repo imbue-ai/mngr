@@ -2,22 +2,25 @@ const Sentry = require('@sentry/electron/main');
 const paths = require('./paths');
 const { getBuildMetadata } = require('./build-metadata');
 
-// Error reporting for the Electron MAIN process (and any renderer that opts in
-// via @sentry/electron/renderer). This mirrors the Python backend's Sentry
-// setup (imbue/minds/utils/sentry/core.py) and the browser web-UI reporting
-// (imbue/minds/utils/sentry/frontend.py): same MINDS_SENTRY_ENABLED opt-in,
-// same environment selection, same release + git_sha tagging.
+// Error reporting for the Electron MAIN process. This mirrors the Python
+// backend's Sentry setup (imbue/minds/utils/sentry/core.py) and the browser
+// web-UI reporting (imbue/minds/utils/sentry/frontend.py): same
+// MINDS_SENTRY_ENABLED opt-in, same environment selection, same release +
+// git_sha tagging.
 //
-// The Electron main process is its own Sentry platform (Node/Electron),
-// distinct from both the Python backend projects and the browser web-UI
-// projects -- a single Sentry project is tied to one platform, so each gets its
-// own DSN set. The DSNs below are PLACEHOLDERS: create the three Electron
-// JavaScript projects in Sentry and paste their real DSNs here (replacing the
-// __REPLACE_ME__ markers). Until then init is skipped, so a misconfigured DSN
-// never points the SDK at a bogus endpoint.
-const SENTRY_ELECTRON_DSN_PRODUCTION = 'https://__REPLACE_ME__@o4504335315501056.ingest.us.sentry.io/__REPLACE_ME__';
-const SENTRY_ELECTRON_DSN_STAGING = 'https://__REPLACE_ME__@o4504335315501056.ingest.us.sentry.io/__REPLACE_ME__';
-const SENTRY_ELECTRON_DSN_DEV = 'https://__REPLACE_ME__@o4504335315501056.ingest.us.sentry.io/__REPLACE_ME__';
+// The Electron main process reports to the SAME JavaScript Sentry projects as
+// the browser web UI -- one JS project set (production / staging / dev) for all
+// of minds' JavaScript. A "vanilla JS" Sentry project ingests events from both
+// the @sentry/browser SDK and this @sentry/electron SDK fine, so there is no
+// need for a separate Electron project. The three DSNs below are therefore the
+// same values configured in imbue/minds/utils/sentry/frontend.py; the
+// Python/JS language boundary forces this second copy, so the two MUST be kept
+// in sync. They are PLACEHOLDERS until the real DSNs are pasted in (replacing
+// the __REPLACE_ME__ markers); until then init is skipped, so a misconfigured
+// DSN never points the SDK at a bogus endpoint.
+const SENTRY_FRONTEND_DSN_PRODUCTION = 'https://__REPLACE_ME__@o4504335315501056.ingest.us.sentry.io/__REPLACE_ME__';
+const SENTRY_FRONTEND_DSN_STAGING = 'https://__REPLACE_ME__@o4504335315501056.ingest.us.sentry.io/__REPLACE_ME__';
+const SENTRY_FRONTEND_DSN_DEV = 'https://__REPLACE_ME__@o4504335315501056.ingest.us.sentry.io/__REPLACE_ME__';
 
 const PLACEHOLDER_DSN_MARKER = '__REPLACE_ME__';
 // Mirror imbue.minds.utils.sentry.core._SENTRY_ENABLED_TRUTHY_VALUES.
@@ -53,11 +56,11 @@ function resolveEnvironment() {
 function dsnForEnvironment(environment) {
   switch (environment) {
     case 'production':
-      return SENTRY_ELECTRON_DSN_PRODUCTION;
+      return SENTRY_FRONTEND_DSN_PRODUCTION;
     case 'staging':
-      return SENTRY_ELECTRON_DSN_STAGING;
+      return SENTRY_FRONTEND_DSN_STAGING;
     default:
-      return SENTRY_ELECTRON_DSN_DEV;
+      return SENTRY_FRONTEND_DSN_DEV;
   }
 }
 

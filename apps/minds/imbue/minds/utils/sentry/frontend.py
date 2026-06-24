@@ -7,18 +7,22 @@ backend (the JinjaX pages under ``desktop_client/templates`` rendered through
 vendored ``@sentry/browser`` bundle (``static/sentry.browser.min.js``) booted
 by ``static/sentry_init.js``.
 
-Backend (Python) and frontend (JavaScript) report to **separate** Sentry
-projects, hence separate DSNs. A single Sentry project is tied to one platform
-(its issue grouping, source-map handling, and release-health UI are all
-platform-specific), so mixing a Python SDK and a JavaScript SDK into one project
-is discouraged by Sentry even though the ingest endpoint technically accepts
-both. We therefore keep one set of frontend DSNs (production / staging / dev)
-mirroring the backend's three environments.
+The Python backend reports to its own (Python) Sentry projects; all of minds'
+**JavaScript** -- both this browser web UI and the Electron main process
+(``electron/sentry.js``) -- reports to one shared set of **JavaScript** Sentry
+projects (production / staging / dev). Backend and frontend stay on separate
+projects because a single Sentry project is tied to one platform (its issue
+grouping, source-map handling, and release-health UI are all platform-specific),
+so mixing a Python SDK and a JavaScript SDK into one project is discouraged even
+though the ingest endpoint technically accepts both. The browser and Electron
+main process, however, are both JavaScript and happily share one project set.
 
 The DSN values below are PLACEHOLDERS -- create the three JavaScript Sentry
 projects and paste their real DSNs here (replacing the ``__REPLACE_ME__``
-markers). Until then, a misconfigured DSN simply means the browser SDK fails to
-initialize; it never breaks the page (see ``sentry_init.js``).
+markers). Because the Python/JavaScript language boundary forces a second copy
+of these same values in ``electron/sentry.js``, keep the two in sync. Until a
+real DSN is set, a misconfigured DSN simply means the SDK does not initialize;
+it never breaks the page (see ``sentry_init.js``).
 
 Both the opt-in switch (``MINDS_SENTRY_ENABLED``) and the environment selection
 (activated minds env -> production / staging / development) are shared with the
@@ -37,8 +41,11 @@ from imbue.minds.utils.sentry.core import is_sentry_enabled
 from imbue.minds.utils.sentry.core import resolve_sentry_environment
 
 # PLACEHOLDER frontend (JavaScript) Sentry DSNs -- one project per environment,
-# distinct from the backend Python projects. Replace each ``__REPLACE_ME__``
-# with the real DSN once the JavaScript projects exist in Sentry.
+# distinct from the backend Python projects but SHARED across all minds
+# JavaScript: both this browser web UI and the Electron main process
+# (``electron/sentry.js``, which holds a copy that must stay in sync). Replace
+# each ``__REPLACE_ME__`` with the real DSN once the JavaScript projects exist
+# in Sentry.
 SENTRY_FRONTEND_DSN_PRODUCTION = "https://__REPLACE_ME__@o4504335315501056.ingest.us.sentry.io/__REPLACE_ME__"
 SENTRY_FRONTEND_DSN_STAGING = "https://__REPLACE_ME__@o4504335315501056.ingest.us.sentry.io/__REPLACE_ME__"
 SENTRY_FRONTEND_DSN_DEV = "https://__REPLACE_ME__@o4504335315501056.ingest.us.sentry.io/__REPLACE_ME__"
