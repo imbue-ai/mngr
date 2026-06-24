@@ -4,21 +4,28 @@ Claude agent type plugin for [mngr](https://github.com/imbue-ai/mngr).
 
 Provides the `claude`, `code-guardian`, and `fixme-fairy` agent types.
 
-## Shared `CLAUDE_CONFIG_DIR` (local agents)
+## Config dir isolation (`isolate_local_config_dir`)
 
-By default, every Claude agent gets its own per-agent config directory (populated
-from `~/.claude/`). Set `use_env_config_dir = true` to have local Claude agents
-share the user's `$CLAUDE_CONFIG_DIR` instead:
+By default (`isolate_local_config_dir = true`), every Claude agent gets its own
+per-agent config directory under `$MNGR_AGENT_STATE_DIR/plugin/claude/anthropic/`
+(populated by copying/symlinking from `~/.claude/`), so mngr never has to touch
+your default Claude config. Set `isolate_local_config_dir = false` on the agent
+type config to have local Claude agents share the user's `$CLAUDE_CONFIG_DIR`
+instead:
 
 ```toml
 [agent_types.claude]
-use_env_config_dir = true
+isolate_local_config_dir = false
 ```
 
-When enabled:
+When isolation is disabled (shared mode):
 
-- `$CLAUDE_CONFIG_DIR` must be set in the parent shell; mngr errors out otherwise.
-- Only local hosts are supported.
+- Only affects local hosts. A non-local agent always uses an isolated config dir
+  (the user's config and keychain live on the local machine), so the flag is
+  ignored for remote agents rather than rejected.
+- `CLAUDE_CONFIG_DIR` resolves to the user's shared dir (`$CLAUDE_CONFIG_DIR`, or
+  `~/.claude` when unset) and is injected into the agent environment so claude
+  reads the user's real config.
 - mngr never writes to the user's Claude config (no trust additions, no dialog
   dismissal, no per-agent settings.json, no keychain provisioning). The user is
   responsible for one-time interactive `claude` setup (trust the work_dir,
@@ -38,7 +45,7 @@ When enabled:
   - a user-supplied `--settings` (in `cli_args`/`agent_args`) is **rejected** at
     provision: mngr already uses `--settings` here and can't reliably merge a second
     one (its value may be inline JSON, not a file). Put those settings in
-    `settings_overrides`, or set `use_env_config_dir=False`.
+    `settings_overrides`, or set `isolate_local_config_dir=True`.
 
 ## Merge intent in `settings_overrides` (`__mngr_merge`)
 
@@ -62,6 +69,19 @@ allow = ["Bash(npm *)"]
 "permissions.allow" = "extend"   # or "assign"
 ```
 
+**macOS subscription users:** keep isolation **off**. Claude Code hashes
+`CLAUDE_CONFIG_DIR` into its macOS keychain label, so an isolated agent gets a
+separate copy of your credentials that goes stale as claude.ai subscription
+tokens refresh, leading to auth failures. Sharing the config dir reuses the same
+keychain entry as your own claude. mngr warns about this at agent-creation time
+when it detects subscription credentials with isolation enabled.
+
+**Deprecated `use_env_config_dir`:** this is the old name for the inverse of
+`isolate_local_config_dir` (`use_env_config_dir = true` == `isolate_local_config_dir
+= false`). It is still accepted for backward compatibility but emits a deprecation
+warning; prefer `isolate_local_config_dir`. Setting both to contradictory
+(non-inverse) values is an error.
+
 ## Version pinning and auto-updates
 
 Pin the Claude Code version that gets installed, and control its background
@@ -81,8 +101,9 @@ update_policy = "NEVER" # disable claude's auto-updater so the pin sticks
   `AUTO` leaves the auto-updater enabled, and `ASK` behaves like `AUTO` (claude has no
   interactive update flow). When unset (the default), it resolves to `NEVER`
   (auto-update disabled) so a managed agent stays on its installed version — set
-  `AUTO` to opt back into Claude Code's auto-updater. Ignored in `use_env_config_dir`
-  (shared) mode, where mngr leaves your claude environment alone. (Note: before this,
+  `AUTO` to opt back into Claude Code's auto-updater. Ignored when
+  `isolate_local_config_dir = false` (shared) mode, where mngr leaves your claude
+  environment alone. (Note: before this,
   mngr did *not* disable claude's auto-updater on local agents — it inherited your
   `~/.claude.json` `autoUpdates` value, so local agents typically auto-updated.)
 

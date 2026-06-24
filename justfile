@@ -243,14 +243,17 @@ minds-test-deployment-only *tests:
 # with `xvfb-run` so it works on headless Linux CI runners. macOS users with
 # a real display can run the underlying pytest directly without xvfb-run.
 # Requires apps/minds/node_modules/ to be installed (`cd apps/minds && pnpm install`).
-minds-test-electron *args:
+# Depends on `minds-css` because the test launches `electron main.js` directly
+# (not via `pnpm start`), so nothing else compiles the gitignored stylesheet.
+minds-test-electron *args: minds-css
   xvfb-run -a uv run pytest apps/minds/test_desktop_client_e2e.py::test_create_local_docker_workspace_via_electron -v --no-cov --cov-fail-under=0 {{args}}
 
 # Compile the minds desktop client's Tailwind v4 stylesheet
 # (static/app.css -> static/app.min.css, minified + tree-shaken) via the
-# pinned @tailwindcss/cli. Runs automatically as a pnpm `postinstall` hook
-# and is watched live by `just minds-start`, so normally you do not need to
-# invoke this recipe -- use it after nuking static/ or to force a rebuild.
+# pinned @tailwindcss/cli. `just minds-start` rebuilds + watches it live (its
+# `prestart` hook builds it once, then `watch:css` keeps it fresh), and
+# packaged builds compile it in scripts/build.js, so normally you do not need
+# to invoke this recipe -- use it after nuking static/ or to force a rebuild.
 minds-css:
   bash -c '. apps/minds/scripts/select_node_version.sh && cd apps/minds && pnpm run build:css'
 
