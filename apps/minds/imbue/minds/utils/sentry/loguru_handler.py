@@ -25,6 +25,7 @@ from typing import Iterable
 from typing import Sequence
 from typing import cast
 
+import loguru
 import sentry_sdk
 from loguru import logger
 from sentry_sdk import new_scope
@@ -324,6 +325,18 @@ class SentryBreadcrumbHandler(_BaseHandler):
         }
 
 
+# Loguru ``extra`` key marking a log record that must NOT be turned into a Sentry event. It is set on
+# the local app-log line emitted by ``log_error_inside_sentry`` so that failures happening *inside*
+# Sentry event processing still reach the file sinks, but the SentryEventHandler skips them (otherwise
+# that log line would itself become another Sentry event / re-enter the event pipeline).
+_SKIP_SENTRY_EVENT_EXTRA_KEY = "skip_sentry_event"
+
+
+def should_record_sentry_event(record: "loguru.Record") -> bool:
+    """Loguru filter for the SentryEventHandler: drop records explicitly marked to skip Sentry."""
+    return not record["extra"].get(_SKIP_SENTRY_EVENT_EXTRA_KEY, False)
+
+
 # Reentrancy guard. Reporting goes through ``client.capture_event``, which re-runs the whole
 # before_send chain on the watchdog event. If the failure being reported originates in before_send
 # itself, that chain fails again and calls back into this function, recursing until the stack is
@@ -343,6 +356,10 @@ def log_error_inside_sentry(
     This needs to be done very carefully to ensure it won't fail - we don't want to have to have a fallback-fallback handler.
     The caller should ensure everything passed into this is small so there's no chance of size issues.
 
+    This always records the failure in the local app log (so it is never lost) and additionally
+    reports it to Sentry. The local log line is marked with ``_SKIP_SENTRY_EVENT_EXTRA_KEY`` so the
+    SentryEventHandler does not turn it into a *second*, separate Sentry event.
+
     This is non-reentrant: if the act of reporting re-enters this function (because reporting re-runs
     before_send and that is what failed), the nested call is dropped to avoid unbounded recursion.
     """
@@ -361,6 +378,9 @@ def _capture_error_inside_sentry(
     extra: dict[str, str | int] | None,
     additional_s3_uploads: Iterable[str] | None,
 ) -> None:
+    # Record it in the local app log first, so the failure is visible even if the Sentry report below
+    # gets dropped (e.g. when the failure originates in before_send, which re-runs during capture).
+    logger.bind(**{_SKIP_SENTRY_EVENT_EXTRA_KEY: True}).opt(exception=exception).error(message)
     client = sentry_sdk.get_client()
     # we want to get rid of any breadcrumbs, attachments, and other stuff that might have caused the original request to fail.
     # this will obviously make it harder to debug; we may want to selectively add some of this back.

@@ -17,7 +17,7 @@ from imbue.minds.utils.sentry.core import SENTRY_DSN_STAGING
 from imbue.minds.utils.sentry.core import SentryDeployEnvironment
 from imbue.minds.utils.sentry.core import _SENTRY_DSN_BY_ENVIRONMENT
 from imbue.minds.utils.sentry.core import _before_send_wrapper
-from imbue.minds.utils.sentry.core import _should_record_sentry_event
+from imbue.minds.utils.sentry.loguru_handler import should_record_sentry_event
 
 
 def test_from_minds_env_name_maps_production_and_staging() -> None:
@@ -76,7 +76,7 @@ def test_before_send_wrapper_logs_failure_locally_without_recursing_into_sentry(
     sentry_sink_id = logger.add(
         lambda message: sentry_messages.append(message.record["message"]),
         level=0,
-        filter=_should_record_sentry_event,
+        filter=should_record_sentry_event,
     )
     try:
         with pytest.raises(ValueError, match="before_send boom"):

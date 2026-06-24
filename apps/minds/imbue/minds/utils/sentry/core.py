@@ -21,7 +21,6 @@ from typing import MutableMapping
 from typing import TypedDict
 from typing import cast
 
-import loguru
 import sentry_sdk
 import sentry_sdk.utils
 import traceback_with_variables
@@ -46,6 +45,7 @@ from imbue.minds.utils.sentry.loguru_handler import SentryBreadcrumbHandler
 from imbue.minds.utils.sentry.loguru_handler import SentryEventHandler
 from imbue.minds.utils.sentry.loguru_handler import SentryLoguruLoggingLevels
 from imbue.minds.utils.sentry.loguru_handler import log_error_inside_sentry
+from imbue.minds.utils.sentry.loguru_handler import should_record_sentry_event
 from imbue.minds.utils.sentry.s3_uploader import EXTRAS_UPLOADED_FILES_KEY
 from imbue.minds.utils.sentry.s3_uploader import get_s3_upload_key
 from imbue.minds.utils.sentry.s3_uploader import get_s3_upload_url
@@ -456,18 +456,6 @@ def get_traceback_with_vars(exception: BaseException | None = None) -> str:
 BaseBeforeSendType = Callable[[Event, Hint], Event | None]
 
 
-# Loguru ``extra`` key marking a log record that must NOT be turned into a Sentry event.
-# We set it when logging failures that happen *inside* Sentry event processing (e.g. the
-# before_send hook): the record still reaches the local app-log sinks, but the SentryEventHandler
-# skips it. Otherwise logging the failure would re-enter the same event pipeline and recurse.
-_SKIP_SENTRY_EVENT_EXTRA_KEY = "skip_sentry_event"
-
-
-def _should_record_sentry_event(record: "loguru.Record") -> bool:
-    """Loguru filter for the SentryEventHandler: drop records explicitly marked to skip Sentry."""
-    return not record["extra"].get(_SKIP_SENTRY_EVENT_EXTRA_KEY, False)
-
-
 # NOTE: if the actual event (without attachments) being too large is a problem, then it will be handled
 #       in our custom logic in ImbueSentryHttpTransport above.
 def _before_send_wrapper(
@@ -488,17 +476,10 @@ def _before_send_wrapper(
         # Failing to report the failure means we would see NOTHING about it.
         # See this PR for the original motivation: https://gitlab.com/generally-intelligent/generally_intelligent/-/merge_requests/5789
         #
-        # We deliberately split reporting into two recursion-safe legs:
-        #   1. Record it in the local app log. We bind ``_SKIP_SENTRY_EVENT_EXTRA_KEY`` so this loguru line
-        #      reaches the file sinks but the SentryEventHandler filters it out (see
-        #      ``_should_record_sentry_event``); otherwise emitting it would re-enter this same hook.
-        #   2. Report it to Sentry via ``log_error_inside_sentry``, which builds a minimal event on a
-        #      cleared scope (no breadcrumbs/attachments) and captures it directly. That helper is
-        #      non-reentrant, so even though reporting re-runs this same before_send chain, a deterministic
-        #      before_send failure cannot recurse: the nested report is dropped.
-        logger.bind(**{_SKIP_SENTRY_EVENT_EXTRA_KEY: True}).opt(exception=e).error(
-            "Failure when processing event in before_send hook: {}", e
-        )
+        # ``log_error_inside_sentry`` both records the failure in the local app log (so it is never lost)
+        # and reports it to Sentry via a minimal event on a cleared scope. It is non-reentrant, so even
+        # though reporting re-runs this same before_send chain, a deterministic before_send failure cannot
+        # recurse: the nested report is dropped.
         log_error_inside_sentry(e, "Failure when processing event in before_send hook")
         # NOTE: this re-raise will get suppressed by Sentry and treated as if `before_send` returned `None`
         raise
@@ -615,9 +596,9 @@ def setup_sentry(
         level=min_sentry_level,
         diagnose=False,
         format=SENTRY_LOG_FORMAT,
-        # records explicitly marked via ``_SKIP_SENTRY_EVENT_EXTRA_KEY`` (e.g. failures logged from
-        # inside before_send) must reach the file sinks but never become Sentry events themselves.
-        filter=_should_record_sentry_event,
+        # records explicitly marked to skip Sentry (e.g. the local app-log line emitted by
+        # log_error_inside_sentry) must reach the file sinks but never become Sentry events themselves.
+        filter=should_record_sentry_event,
     )
     # capture lower level loguru messages to add as breadcrumbs on events
     # the extra info is not helpful here and makes the breadcrumbs larger; they're still available in the log file attachment
