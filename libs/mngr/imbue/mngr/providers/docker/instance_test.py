@@ -3,6 +3,7 @@ import json
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import cast
 
 import docker
 import docker.errors
@@ -43,9 +44,51 @@ from imbue.mngr.providers.docker.testing import make_docker_provider
 from imbue.mngr.providers.docker.testing import make_docker_provider_with_local_volume
 from imbue.mngr.providers.docker.testing import make_offline_docker_provider
 from imbue.mngr.providers.docker.testing import write_fake_docker_context
+from imbue.mngr.providers.docker.volume import STATE_CONTAINER_TYPE_LABEL
+from imbue.mngr.providers.docker.volume import STATE_CONTAINER_TYPE_VALUE
 
 HOST_ID_A = "host-00000000000000000000000000000001"
 HOST_ID_B = "host-00000000000000000000000000000002"
+
+
+class _FakeContainer:
+    """Minimal stand-in for a docker SDK container: just the attributes
+    ``_raise_if_state_container_stopped`` reads (``labels`` + ``status``)."""
+
+    def __init__(self, labels: dict[str, str], status: str) -> None:
+        self.labels = labels
+        self.status = status
+
+
+def _fake_containers(*containers: _FakeContainer) -> list[docker.models.containers.Container]:
+    # The helper only reads ``.labels`` / ``.status``, so the duck-typed fakes
+    # stand in for real SDK containers; cast to satisfy the static type.
+    return cast(list[docker.models.containers.Container], list(containers))
+
+
+def test_raise_if_state_container_stopped_raises_when_present_but_stopped(temp_mngr_ctx: MngrContext) -> None:
+    # A stopped state container means host records are unreachable. Discovery
+    # must treat this as ProviderUnavailableError (so the retain-on-error path
+    # keeps last-known hosts) rather than silently reporting zero hosts.
+    provider = make_docker_provider(temp_mngr_ctx)
+    containers = _fake_containers(_FakeContainer({STATE_CONTAINER_TYPE_LABEL: STATE_CONTAINER_TYPE_VALUE}, "exited"))
+    with pytest.raises(ProviderUnavailableError):
+        provider._raise_if_state_container_stopped(containers)
+
+
+def test_raise_if_state_container_stopped_ok_when_running(temp_mngr_ctx: MngrContext) -> None:
+    provider = make_docker_provider(temp_mngr_ctx)
+    containers = _fake_containers(_FakeContainer({STATE_CONTAINER_TYPE_LABEL: STATE_CONTAINER_TYPE_VALUE}, "running"))
+    # A running state container is the normal case -- must not raise.
+    provider._raise_if_state_container_stopped(containers)
+
+
+def test_raise_if_state_container_stopped_noop_when_absent(temp_mngr_ctx: MngrContext) -> None:
+    # No state container in the list (e.g. a never-created / removed env): leave
+    # the genuinely-empty case alone -- only present-but-stopped raises.
+    provider = make_docker_provider(temp_mngr_ctx)
+    provider._raise_if_state_container_stopped(_fake_containers(_FakeContainer({LABEL_HOST_ID: HOST_ID_A}, "running")))
+    provider._raise_if_state_container_stopped(_fake_containers())
 
 
 # =========================================================================

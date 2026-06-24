@@ -229,6 +229,81 @@ def stop_active_env_state_container(
     return True
 
 
+def start_state_container(
+    *,
+    container_name: str,
+    parent_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """Start the exact ``container_name`` state container if present and stopped.
+
+    The inverse of :func:`stop_state_container`: used at app launch to bring the
+    docker state container back up *before* discovery runs. ``stop_state_container``
+    stops it at quit; without restarting it here, read-only discovery would find
+    it stopped, fail every host-record read, and report zero hosts -- dropping
+    every workspace on the first snapshot. ``docker start`` of an already-running
+    container is a harmless success.
+
+    Best-effort about Docker's *presence*: a missing ``docker`` CLI or an
+    unreachable daemon is a silent no-op, and an absent container (never created)
+    is a success -- it is created lazily on the first ``mngr create``. A present
+    container that fails to start raises :class:`DockerCleanupError`.
+    """
+    cg = parent_concurrency_group.make_concurrency_group(name=f"docker-start-state-{container_name}")
+    with cg:
+        try:
+            start_result = cg.run_process_to_completion(
+                command=["docker", "start", container_name],
+                timeout=_DOCKER_CMD_TIMEOUT_SECONDS,
+                is_checked_after=False,
+                env=dict(os.environ),
+            )
+        except ProcessSetupError as e:
+            logger.info("Docker CLI unavailable; skipping state-container start for {} ({})", container_name, e)
+            return
+
+        if start_result.returncode == 0:
+            logger.info("Started Docker state container {}", container_name)
+            return
+
+        combined = start_result.stderr + start_result.stdout
+        if _is_docker_daemon_unavailable(combined):
+            logger.info("Docker daemon unavailable; skipping state-container start for {}", container_name)
+            return
+        lowered = combined.lower()
+        if "no such container" in lowered or "not found" in lowered:
+            logger.debug("No Docker state container {} to start (created lazily on first use)", container_name)
+            return
+        stderr = start_result.stderr.strip() or start_result.stdout.strip()
+        raise DockerCleanupError(f"`docker start {container_name}` failed (exit {start_result.returncode}): {stderr}")
+
+
+def start_active_env_state_container(
+    *,
+    mngr_host_dir: Path,
+    parent_concurrency_group: ConcurrencyGroup,
+) -> bool:
+    """Start the *running* env's mngr Docker state container if it is stopped.
+
+    Inverse of :func:`stop_active_env_state_container`. Resolves the active
+    ``MINDS_ROOT_NAME`` -> ``MNGR_PREFIX`` and the mngr profile's ``user_id`` to
+    target the one exact container by name. Returns True when a container name
+    was resolved and a start was attempted, False when ``user_id`` could not be
+    resolved (nothing targeted). Scoped to this env's prefix, so a
+    differently-prefixed state container is never touched.
+    """
+    root_name = resolve_minds_root_name()
+    mngr_prefix = mngr_prefix_for(root_name)
+    user_id = read_profile_user_id(mngr_host_dir)
+    if user_id is None:
+        logger.warning(
+            "Could not resolve mngr profile user_id under {}; skipping Docker state-container start.", mngr_host_dir
+        )
+        return False
+    container_name = state_container_name(mngr_prefix, user_id)
+    start_state_container(container_name=container_name, parent_concurrency_group=parent_concurrency_group)
+    return True
+
+
 def cleanup_env_state_container(
     name: DevEnvName,
     *,

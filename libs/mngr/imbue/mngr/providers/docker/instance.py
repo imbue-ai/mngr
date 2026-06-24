@@ -78,6 +78,8 @@ from imbue.mngr.providers.docker.host_store import HostRecord
 from imbue.mngr.providers.docker.volume import DockerVolume
 from imbue.mngr.providers.docker.volume import LABEL_PREFIX
 from imbue.mngr.providers.docker.volume import LABEL_PROVIDER
+from imbue.mngr.providers.docker.volume import STATE_CONTAINER_TYPE_LABEL
+from imbue.mngr.providers.docker.volume import STATE_CONTAINER_TYPE_VALUE
 from imbue.mngr.providers.docker.volume import STATE_VOLUME_MOUNT_PATH
 from imbue.mngr.providers.docker.volume import ensure_state_container
 from imbue.mngr.providers.docker.volume import state_container_name
@@ -1006,6 +1008,30 @@ kill -TERM 1
         container.reload()
         return container.status == "running"
 
+    def _raise_if_state_container_stopped(self, containers: list[docker.models.containers.Container]) -> None:
+        """Raise ProviderUnavailableError if the singleton state container is present but stopped.
+
+        ``containers`` comes from :meth:`_list_containers` (``all=True``), so the
+        state container (which carries ``LABEL_PROVIDER`` + the type label) is
+        included with a freshly-listed status -- reliable even for a long-lived
+        cached provider instance whose ``_state_volume`` handle predates an
+        external stop. A stopped state container makes every host-record read
+        fail, which ``list_all_host_records`` masks as an empty list; treating it
+        as unavailable keeps discovery from misreporting "zero hosts". An absent
+        state container is left alone (the read-only emptiness guard / lazy
+        create handles that); only the present-but-stopped case raises here.
+        """
+        for container in containers:
+            labels = container.labels or {}
+            if labels.get(STATE_CONTAINER_TYPE_LABEL) != STATE_CONTAINER_TYPE_VALUE:
+                continue
+            if container.status != "running":
+                raise ProviderUnavailableError(
+                    self.name,
+                    "Docker state container is stopped; host records are unreachable",
+                )
+            return
+
     def _create_host_from_container(
         self,
         container: docker.models.containers.Container,
@@ -1657,6 +1683,21 @@ kill -TERM 1
         # daemon answered with an error) is a real fault and propagates instead.
         try:
             containers = self._list_containers()
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            raise ProviderUnavailableError(self.name, f"Cannot list Docker hosts: {e}") from e
+
+        # A present-but-stopped state container means host records are
+        # unreachable: every read exec's into a stopped container, and
+        # ``list_all_host_records`` swallows that into an empty list -- which
+        # discovery would publish as "zero hosts", dropping every host (and, for
+        # a long-lived cached provider instance, the read never restarts it).
+        # Surface it as ProviderUnavailableError so an empty list still means
+        # "genuinely zero hosts" and the retain-on-error path keeps last-known
+        # hosts instead. Read-only discovery must not start it; the owning app
+        # restarts it on launch.
+        self._raise_if_state_container_stopped(containers)
+
+        try:
             all_host_records = self._host_store.list_all_host_records()
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
             raise ProviderUnavailableError(self.name, f"Cannot list Docker hosts: {e}") from e

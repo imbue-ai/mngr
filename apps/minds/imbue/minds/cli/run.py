@@ -78,6 +78,8 @@ from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.system_interface_health import should_enroll_suspect_for_backend_failure
+from imbue.minds.envs.docker_cleanup import DockerCleanupError
+from imbue.minds.envs.docker_cleanup import start_active_env_state_container
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
@@ -252,6 +254,27 @@ def run(
     root_concurrency_group = ConcurrencyGroup(name="minds-run")
     root_concurrency_group.__enter__()
 
+    # Resolved up front: needed both to restart the docker state container just
+    # below and by the ``mngr forward`` consumer further down.
+    mngr_host_dir_str = os.environ.get("MNGR_HOST_DIR")
+    mngr_host_dir = Path(mngr_host_dir_str).expanduser() if mngr_host_dir_str else (Path.home() / ".mngr")
+
+    # Restart this env's mngr docker *state* container before the discovery
+    # producer spawns. The quit flow stops it (``stop_active_env_state_container``)
+    # so no stray container is left running; but if it's still stopped when
+    # discovery polls, the docker provider can't read host records and reports
+    # zero hosts -- which blanks the restored windows and the landing page on the
+    # first snapshot. Bring it back up first. Best-effort: a no-op without docker,
+    # and a start failure must not block startup (discovery then degrades to
+    # ProviderUnavailable + retain-last-known rather than a misleading empty).
+    try:
+        start_active_env_state_container(
+            mngr_host_dir=mngr_host_dir,
+            parent_concurrency_group=root_concurrency_group,
+        )
+    except DockerCleanupError as exc:
+        logger.warning("Could not start the Docker state container at launch: {}", exc)
+
     # Spawn (or adopt) a detached ``mngr latchkey forward`` supervisor.
     # The supervisor owns the shared latchkey gateway + per-agent reverse
     # tunnels; running it as a detached subprocess (rather than the inline
@@ -343,8 +366,6 @@ def run(
     # Minds API: agents reach it through the latchkey gateway's bundled
     # ``minds-api-proxy`` extension instead, so no ``--reverse`` specs
     # are needed here.
-    mngr_host_dir_str = os.environ.get("MNGR_HOST_DIR")
-    mngr_host_dir = Path(mngr_host_dir_str).expanduser() if mngr_host_dir_str else (Path.home() / ".mngr")
     # `mngr forward` and every other laptop-side mngr invocation (including the
     # bundled mngr CLI when run from a Terminal under this MNGR_HOST_DIR) starts
     # with cwd=$HOME, so the FCT workspace's `[agent_types.main]` block in
