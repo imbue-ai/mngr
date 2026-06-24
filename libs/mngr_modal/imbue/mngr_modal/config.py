@@ -58,11 +58,12 @@ class ModalProviderConfig(ProviderInstanceConfig):
         description="Base directory for mngr data on the sandbox (defaults to /mngr)",
     )
     default_sandbox_timeout: int = Field(
-        default=86_400,
+        default=86_310,
         description=(
-            "Default sandbox timeout in seconds. Set to 24h (Modal's max sandbox lifetime) so a "
-            "long-running agent is only reaped at the '1-day ephemeral' ceiling rather than a short "
-            "default. Lower it if you want sandboxes torn down sooner to save cost."
+            "Default sandbox timeout (graceful max host age) in seconds. The Modal sandbox is "
+            "created with this PLUS shutdown_buffer_seconds, and Modal's hard cap is 86400s (24h); "
+            "86_310 + 90 = 86_400 lands exactly at that ceiling. Lower it to tear sandboxes down "
+            "sooner to save cost."
         ),
     )
     shutdown_buffer_seconds: int = Field(
