@@ -1608,12 +1608,14 @@ kill -TERM 1
         the host is up; we just cannot get inside it. Reporting
         ``HostState.UNAUTHENTICATED`` keeps consumers such as minds' recovery
         flow from misclassifying a live container as offline and skipping the
-        stop step of a host restart. This yields the same state
-        ``mngr_imbue_cloud`` reports for the identical condition, though by a
-        different route: imbue_cloud reads container state out-of-band on its
-        own listing path, whereas docker stays on the generic offline fallback
-        and corrects the state through this hook. Returns ``None`` (default
-        offline derivation) when no running container backs this host.
+        stop step of a host restart. This deliberately follows the convention
+        ``mngr_imbue_cloud`` established for the identical condition (a running
+        container whose inner SSH is unreachable; see
+        ``map_docker_status_to_host_state``), reached here by a different route:
+        imbue_cloud reads container state out-of-band on its own listing path,
+        whereas docker stays on the generic offline fallback and corrects the
+        state through this hook. Returns ``None`` (default offline derivation)
+        when no running container backs this host.
         """
         container = self._find_container_by_host_id(host_id)
         if container is not None and self._is_container_running(container):
