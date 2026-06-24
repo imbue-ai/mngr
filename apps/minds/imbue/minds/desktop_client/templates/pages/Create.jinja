@@ -58,9 +58,10 @@
     var REGION_SELECTED = {{ region_selected_by_launch_mode | tojson }};
 
     // Whether the user has any signed-in Imbue account to pick. When false,
-    // choosing the remote preset routes into the sign-in/up flow instead.
+    // the remote (Imbue Cloud) preset is still selectable; signing in is
+    // deferred to the "Create" button (which becomes a "Sign in & create"
+    // gate) instead of hijacking the card click.
     var HAS_ANY_ACCOUNT = {{ 'true' if accounts else 'false' }};
-    var SIGNIN_URL = '/auth/signup?return_to=' + encodeURIComponent('/create');
 
     // Each preset fills the advanced selects with its compute / AI / backup
     // defaults. These mirror the per-account defaults the server applies.
@@ -93,17 +94,14 @@
     }
 
     function onPresetClick(name) {
-      // Remote compute requires an account. If none is selected, either
-      // auto-pick the first signed-in account, or -- when there is no
-      // account at all -- send the user into the sign-in/up flow (with a
-      // link back here) rather than letting them reach a dead end.
-      if (name === 'remote' && accountSelect.value === '') {
-        if (HAS_ANY_ACCOUNT) {
-          accountSelect.selectedIndex = 0;
-        } else {
-          window.location.href = SIGNIN_URL;
-          return;
-        }
+      // Clicking a card only selects it -- never navigates. Remote compute
+      // needs an account: when the user has signed-in accounts but none is
+      // picked, auto-pick the first so the remote preset is immediately
+      // usable. When there is no account at all, just select the card; the
+      // "Create" button becomes a "Sign in & create" gate (see update()), so
+      // signing in happens on submit rather than on click.
+      if (name === 'remote' && accountSelect.value === '' && HAS_ANY_ACCOUNT) {
+        accountSelect.selectedIndex = 0;
       }
       markPresetSelected(name);
       applyPreset(name);
@@ -129,7 +127,9 @@
 
     form.addEventListener('submit', function () {
       submitBtn.disabled = true;
-      submitBtn.textContent = 'Creating...';
+      // The signed-out remote preset submits to a sign-in redirect, not a
+      // create, so reflect that in the button while it navigates.
+      submitBtn.textContent = submitBtn.dataset.signin === '1' ? 'Signing in...' : 'Creating...';
     });
 
     function onAccountChange() {
@@ -198,11 +198,21 @@
       var launchInvalid = !hasAccount && launchSelect.value === 'IMBUE_CLOUD';
       var aiInvalid = !hasAccount && aiProviderSelect.value === 'IMBUE_CLOUD';
       var backupInvalid = !hasAccount && backupValue === 'IMBUE_CLOUD';
-      launchModeError.classList.toggle('hidden', !launchInvalid);
+      var needsAccount = launchInvalid || aiInvalid || backupInvalid;
+      // A fully signed-out user who chose Imbue Cloud isn't in an error state:
+      // "Create" becomes a "Sign in & create" gate that submits to a sign-in
+      // redirect (the server stashes the selections and resumes after login).
+      // The per-field "requires a selected account" warnings only apply when
+      // accounts exist but none is picked, so suppress them when deferring to
+      // sign-in, and keep the gate clickable.
+      var deferToSignIn = needsAccount && !HAS_ANY_ACCOUNT;
+      launchModeError.classList.toggle('hidden', !launchInvalid || deferToSignIn);
       if (awsCredentialsNote) awsCredentialsNote.classList.toggle('hidden', launchSelect.value !== 'AWS');
-      aiProviderError.classList.toggle('hidden', !aiInvalid);
-      backupProviderError.classList.toggle('hidden', !backupInvalid);
-      submitBtn.disabled = launchInvalid || aiInvalid || backupInvalid;
+      aiProviderError.classList.toggle('hidden', !aiInvalid || deferToSignIn);
+      backupProviderError.classList.toggle('hidden', !backupInvalid || deferToSignIn);
+      submitBtn.disabled = needsAccount && !deferToSignIn;
+      submitBtn.textContent = deferToSignIn ? 'Sign in & create' : 'Create';
+      submitBtn.dataset.signin = deferToSignIn ? '1' : '';
 
       updateRegion();
     }
