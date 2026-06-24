@@ -19,20 +19,13 @@ wall clock per run, 4/4 successive runs green.
 
 A couple of vm_runtime sandboxes did fail intermittently with
 exit_code=137 + missing junit.xml during early testing on
-2026-05-27. We could not reproduce that on a retry under the same
-conditions, so the working hypothesis is a transient Modal-side
-vm_runtime flake (the runtime is preview-stage and the operator
-warned about capacity issues). If you hit it, just retry; if it
-turns into a pattern, capture the failing batch's verbose offload
-log and check the modal_sandbox.py exec path before assuming
-offload's at fault.
+2026-05-27, before vm_runtime went generally available. If you hit
+a transient failure like that, just retry; if it turns into a
+pattern, capture the failing batch's verbose offload log and check
+the modal_sandbox.py exec path before assuming offload's at fault.
 
-PREREQUISITE: ``experimental_options={"vm_runtime": True}`` requires the
-caller's active Modal profile to have the VM-runtime preview enabled. If
-``Sandbox.create`` fails with ``MODAL_FUNCTION_RUNTIME must be set to
-'gvisor'`` or ``experimental_options['vm_runtime']=True conflicts with
-runtime=...``, your profile lacks the preview -- switch to one that
-has it (``modal profile activate <name>`` / ``MODAL_PROFILE=<name>``).
+vm_runtime is now generally available on Modal, so no profile-level
+preview opt-in is required.
 
 This is a one-off demonstration script for the test-efficiency groundwork.
 The flow is:
@@ -56,8 +49,9 @@ The flow is:
    and print the Modal image ID so it can be plumbed into offload as
    ``offload run --override-image-id <ID>``.
 
-We do NOT switch the general mngr_modal provider to ``vm_runtime``: Modal
-has capacity issues with it, so it's opt-in for this snapshot workflow only.
+We do NOT switch the general mngr_modal provider to ``vm_runtime``: the
+rest of mngr does not need a true VM, so this remains scoped to the
+snapshot workflow only.
 
 Usage:
     uv run python scripts/snapshot_minds_e2e_state.py
@@ -91,8 +85,13 @@ _SANDBOX_TIMEOUT_SECONDS: Final[int] = 60 * 60
 _SNAPSHOT_TIMEOUT_SECONDS: Final[int] = 600
 _DOCKER_VERSION: Final[str] = "27.5.1"
 _RUNC_VERSION: Final[str] = "v1.3.0"
-_NODE_MAJOR: Final[str] = "20"
-_PNPM_VERSION: Final[str] = "10"
+# apps/minds pins an EXACT Node + pnpm version (engines in package.json with
+# engine-strict=true in its .npmrc), so the image must install those exact
+# versions or `pnpm install --frozen-lockfile` aborts with an engine error.
+# Keep these in sync with apps/minds/.nvmrc, apps/minds/package.json engines,
+# and the test-docker-electron job in .github/workflows/ci.yml.
+_NODE_VERSION: Final[str] = "24.15.0"
+_PNPM_VERSION: Final[str] = "10.33.4"
 _CLAUDE_CODE_VERSION: Final[str] = "2.1.141"
 
 # In-sandbox entrypoint that invokes the shared e2e workspace runner the
@@ -136,6 +135,14 @@ _IN_SANDBOX_RUNNER_PROGRAM: Final[str] = textwrap.dedent(
     # Snapshot builds are test infrastructure, not a real install, so they
     # must not count toward Latchkey's usage.
     _write_to_os_environ("LATCHKEY_DISABLE_COUNTING", "1")
+    # FCT's [providers.docker] block sets docker_runtime = "runsc" to harden
+    # the agent container with gVisor, but the dockerd inside this Modal
+    # vm_runtime sandbox only has the default runc registered, so
+    # `docker run --runtime runsc` fails with "unknown or invalid runtime
+    # name: runsc". Force runc here -- the Modal VM is already the isolation
+    # boundary for this throwaway snapshot. Mirrors the same override the
+    # pytest path applies in apps/minds/test_desktop_client_e2e.py.
+    _write_to_os_environ("MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME", "runc")
     with tempfile.TemporaryDirectory(prefix="snapshot-fct-") as scratch:
         fct_path = resolve_fct_path(Path(scratch))
         workspace_name = f"forever-{get_short_random_string()}"
@@ -315,10 +322,15 @@ def _build_snapshot_image(staged_repo: Path) -> modal.Image:
             "update-alternatives --set iptables /usr/sbin/iptables-legacy",
             "update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy",
         )
-        # Node 20 + pnpm -- for the apps/minds Electron app.
+        # Node + pnpm -- for the apps/minds Electron app. apps/minds pins an
+        # EXACT Node version with engine-strict=true, so install that exact
+        # version from the official tarball rather than NodeSource's
+        # setup_<major>.x (which tracks the latest minor and would trip the
+        # engine check). Use the .tar.gz build so plain `tar -xz` works
+        # without pulling in xz-utils.
         .run_commands(
-            f"curl -fsSL https://deb.nodesource.com/setup_{_NODE_MAJOR}.x | bash -",
-            "apt-get install -y nodejs",
+            f"curl -fsSL https://nodejs.org/dist/v{_NODE_VERSION}/node-v{_NODE_VERSION}-linux-x64.tar.gz "
+            "| tar -xz -C /usr/local --strip-components=1",
             f"npm install -g pnpm@{_PNPM_VERSION}",
         )
         # uv + claude code, matching the versions the mngr Dockerfile pins.
@@ -489,39 +501,62 @@ def _parse_args() -> argparse.Namespace:
             "workspace-creation cost."
         ),
     )
+    parser.add_argument(
+        "--image-id-output",
+        type=Path,
+        default=None,
+        help=(
+            "If set, write the resulting snapshot image id (bare, no trailing "
+            "newline) to this file once the snapshot succeeds. Used by CI to "
+            "hand the image id from the build job to the test job without "
+            "scraping it out of stdout."
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
 
-    # Stage the repo into a temp dir BEFORE building the image so the
-    # Modal upload reads from a frozen tree. The staging dir lives for
-    # the whole image-build phase; we clean it up after Sandbox.create
-    # returns (Modal has already materialized the image at that point,
-    # so the staged copy is no longer referenced).
-    with tempfile.TemporaryDirectory(prefix="mngr-snapshot-stage-") as staging_dir_str:
-        staging_dir = Path(staging_dir_str)
-        staged_repo = _stage_repo_to_temp_dir(staging_dir)
+    # Stream Modal's own output (image-build logs + sandbox logs) to this
+    # process. Without it, a failed image build surfaces only as an opaque
+    # `RemoteError: Image build ... failed` with no indication of which RUN
+    # step broke -- useless in CI. enable_output() is what turns that into
+    # the actual build transcript.
+    with modal.enable_output():
+        # Stage the repo into a temp dir BEFORE building the image so the
+        # Modal upload reads from a frozen tree. The staging dir lives for
+        # the whole image-build phase; we clean it up after Sandbox.create
+        # returns (Modal has already materialized the image at that point,
+        # so the staged copy is no longer referenced).
+        with tempfile.TemporaryDirectory(prefix="mngr-snapshot-stage-") as staging_dir_str:
+            staging_dir = Path(staging_dir_str)
+            staged_repo = _stage_repo_to_temp_dir(staging_dir)
 
-        image = _build_snapshot_image(staged_repo)
-        app = modal.App.lookup(args.app_name, create_if_missing=True)
+            image = _build_snapshot_image(staged_repo)
+            app = modal.App.lookup(args.app_name, create_if_missing=True)
 
-        print(f"Creating sandbox in app {args.app_name!r} with vm_runtime=True", flush=True)
-        sandbox = modal.Sandbox.create(
-            image=image,
-            app=app,
-            timeout=_SANDBOX_TIMEOUT_SECONDS,
-            cpu=4.0,
-            memory=8 * 1024,
-            # The whole point of this script: opt in to Modal's VM runtime so
-            # Docker-in-sandbox state survives snapshot_filesystem(). We are
-            # NOT enabling this in the general mngr_modal provider -- Modal
-            # has capacity issues with vm_runtime, so this is scoped to the
-            # snapshot workflow only.
-            experimental_options={"vm_runtime": True},
-        )
+            print(f"Creating sandbox in app {args.app_name!r} with vm_runtime=True", flush=True)
+            sandbox = modal.Sandbox.create(
+                image=image,
+                app=app,
+                timeout=_SANDBOX_TIMEOUT_SECONDS,
+                cpu=4.0,
+                memory=8 * 1024,
+                # The whole point of this script: opt in to Modal's VM runtime so
+                # Docker-in-sandbox state survives snapshot_filesystem(). vm_runtime
+                # is now generally available on Modal. We still scope it to this
+                # snapshot workflow rather than flipping the general mngr_modal
+                # provider over to it, since the rest of mngr does not need a true
+                # VM and we don't want to change that behavior as a side effect.
+                experimental_options={"vm_runtime": True},
+            )
 
+        _run_sandbox_workflow(sandbox, args)
+
+
+def _run_sandbox_workflow(sandbox: modal.Sandbox, args: argparse.Namespace) -> None:
+    """Bring up dockerd, optionally create the workspace, snapshot, clean up."""
     try:
         print(f"Sandbox {sandbox.object_id} created.", flush=True)
         _start_dockerd(sandbox)
@@ -533,6 +568,13 @@ def main() -> None:
         else:
             _create_workspace_in_sandbox(sandbox)
         snapshot_image_id = _snapshot_sandbox(sandbox)
+        # Write the bare image id for CI consumption before printing the
+        # human-facing hint, so a downstream job can read it from a known
+        # path. Done inside the try so the file only appears when the
+        # snapshot actually succeeded.
+        if args.image_id_output is not None:
+            args.image_id_output.write_text(snapshot_image_id)
+            print(f"Wrote snapshot image id to {args.image_id_output}", flush=True)
         # Printed inside the try so it only fires when the snapshot
         # actually succeeded. Any failure in the try block propagates
         # through the finally below as the real exception, which is
