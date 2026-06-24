@@ -1191,10 +1191,13 @@ def _prompt_claude_isolation_choice() -> bool | None:
         "No -- share your default Claude config "
         "(mngr may write to it, but this is needed for Claude subscriptions on macOS to keep credentials working)",
     ]
+    # Default the highlighted option to "No" (share) -- the safer choice that keeps
+    # Claude subscription credentials working on macOS.
     idx = run_single_select_picker(
         options=options,
         title="mngr config wizard",
         header_text="Enable config dir isolation for local Claude agents?",
+        initial_focus=1,
     )
     if idx is None:
         return None
