@@ -63,6 +63,7 @@ from imbue.mngr_imbue_cloud.cli.server import destroy_slice_vm
 from imbue.mngr_imbue_cloud.cli.server import tear_down_unleased_slices
 from imbue.mngr_imbue_cloud.errors import RepoIdentityError
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
+from imbue.mngr_imbue_cloud.primitives import KNOWN_OVH_US_REGIONS
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_server_by_id
 from imbue.mngr_ovh.client import build_ovh_client
 from imbue.mngr_ovh.config import OvhProviderConfig
@@ -642,6 +643,21 @@ def pool_create(
         fail_with_json(
             "Baking new OVH VPS pool hosts is deprecated -- use --backend slice (bare-metal slices). "
             "Existing OVH VPS pool hosts can still be listed and destroyed.",
+            error_class="UsageError",
+        )
+
+    # The region is the lease-region label the connector region-matches at lease
+    # time (e.g. US-EAST-VA), NOT a box's raw OVH datacenter code (e.g. 'vin',
+    # which `admin server list` prints). Stamping a datacenter code onto the row
+    # would make every baked host permanently unleasable: the create form only
+    # ever requests a lease label and the connector's region filter is an exact,
+    # never-relaxed string match. Reject anything outside the known lease regions
+    # up front, before any (clone-heavy) bake work.
+    if region not in KNOWN_OVH_US_REGIONS:
+        fail_with_json(
+            f"--region {region!r} is not a known lease region. Pass one of "
+            f"{sorted(KNOWN_OVH_US_REGIONS)} (the lease-region label, e.g. US-EAST-VA) -- "
+            "NOT the box's OVH datacenter code (e.g. 'vin' from `admin server list`).",
             error_class="UsageError",
         )
 
