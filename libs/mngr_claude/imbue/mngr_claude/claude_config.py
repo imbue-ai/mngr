@@ -116,12 +116,12 @@ def get_user_claude_config_dir() -> Path:
 def resolve_shared_claude_config_dir() -> Path:
     """Return $CLAUDE_CONFIG_DIR, falling back to ``~/.claude/`` when unset.
 
-    Used by the ``use_env_config_dir`` mode of ``ClaudeAgentConfig`` where mngr
-    delegates the claude config dir to whatever the user has in their shell env
-    rather than provisioning a per-agent dir. The fallback to ``~/.claude/``
-    matches the directory claude itself picks when ``CLAUDE_CONFIG_DIR`` is
-    unset, so ``use_env_config_dir=True`` effectively means "don't touch the
-    config dir at all -- inherit whatever the parent shell would have used."
+    Used by the shared (``isolate_local_config_dir=False``) mode of
+    ``ClaudeAgentConfig`` where mngr delegates the claude config dir to whatever
+    the user has in their shell env rather than provisioning a per-agent dir. The
+    fallback to ``~/.claude/`` matches the directory claude itself picks when
+    ``CLAUDE_CONFIG_DIR`` is unset, so shared mode effectively means "don't touch
+    the config dir at all -- inherit whatever the parent shell would have used."
     The fallback path is shared (not per-agent), which is the whole point of
     the flag. Shared mode inherits the same ambient resolution as
     ``get_claude_config_dir``.
