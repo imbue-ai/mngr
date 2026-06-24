@@ -1,12 +1,14 @@
 """`mngr imbue_cloud admin pool ...` -- operator-only pool provisioning.
 
-``pool create`` bakes pre-provisioned pool hosts on a chosen ``--backend``: an OVH
-classic VPS ordered on demand (``ovh_vps``, the default) or a lima-VM "slice" carved
-on one of our registered bare-metal boxes (``slice``; the shared implementation is
-``cli.server.allocate_slices``). Both bake the same FCT pool host and write the same
-kind of leasable row to the connector's Neon ``pool_hosts`` table -- only the
-machine-provisioning step differs (order-a-VPS vs. carve-a-VM). The OVH path also
-installs + configures ufw and a management SSH key on the VPS + container.
+``pool create`` bakes pre-provisioned pool hosts on a chosen ``--backend``: a lima-VM
+"slice" carved on one of our registered bare-metal boxes (``slice``, the default; the
+shared implementation is ``cli.server.allocate_slices``), or -- DEPRECATED -- an OVH
+classic VPS ordered on demand (``ovh_vps``; baking new OVH VPS pool hosts is no longer
+supported, though existing ones stay listable/destroyable). Both bake the same FCT
+pool host and write the same kind of leasable row to the connector's Neon
+``pool_hosts`` table -- only the machine-provisioning step differs (carve-a-VM vs.
+order-a-VPS). The OVH path also installs + configures ufw and a management SSH key on
+the VPS + container.
 
 Provider-generic by design: extra VPS-side tags (e.g. ``minds_env=<name>``
 threaded through by the ``minds pool`` env-aware wrapper) come from
@@ -23,9 +25,12 @@ is not involved in pool provisioning at all.
 import json as _json
 import os
 import shlex
+import tempfile
+from enum import auto
 from pathlib import Path
 from typing import Any
 from typing import Final
+from typing import assert_never
 from uuid import uuid4
 
 import click
@@ -34,6 +39,9 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
+from imbue.imbue_common.enums import UpperCaseStrEnum
+from imbue.imbue_common.pure import pure
+from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr_imbue_cloud.bake.bake_source import BakeSourceError
 from imbue.mngr_imbue_cloud.bake.bake_source import DEFAULT_FCT_REPO_URL
 from imbue.mngr_imbue_cloud.bake.bake_source import merge_bake_identity_attributes
@@ -51,7 +59,11 @@ from imbue.mngr_imbue_cloud.cli._common import fail_with_json
 from imbue.mngr_imbue_cloud.cli._common import resolve_pool_database_url
 from imbue.mngr_imbue_cloud.cli.server import DEFAULT_SLICE_BAKE_CONCURRENCY
 from imbue.mngr_imbue_cloud.cli.server import allocate_slices
+from imbue.mngr_imbue_cloud.cli.server import destroy_slice_vm
+from imbue.mngr_imbue_cloud.cli.server import tear_down_unleased_slices
 from imbue.mngr_imbue_cloud.errors import RepoIdentityError
+from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_server_by_id
 from imbue.mngr_ovh.client import build_ovh_client
 from imbue.mngr_ovh.config import OvhProviderConfig
 from imbue.mngr_ovh.iam_tags import MNGR_PROVIDER_TAG_KEY
@@ -59,7 +71,7 @@ from imbue.mngr_ovh.iam_tags import delete_tag
 from imbue.mngr_ovh.iam_tags import get_vps_resource
 from imbue.mngr_ovh.iam_tags import iam_region_code_for_endpoint
 from imbue.mngr_ovh.iam_tags import vps_urn_for
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsInstanceId
 
 _CONTAINER_SSH_PORT: Final[int] = 2222
 
@@ -82,8 +94,8 @@ _SSH_COMMAND_TIMEOUT_SECONDS: Final[int] = 60
 _INSERT_POOL_HOST_SQL: Final[str] = (
     "INSERT INTO pool_hosts "
     "(id, vps_address, vps_instance_id, agent_id, host_id, host_name, ssh_port, ssh_user, "
-    "container_ssh_port, status, attributes, region, created_at) "
-    "VALUES (%s, %s, %s, %s, %s, %s, 22, 'root', %s, 'available', %s::jsonb, %s, NOW())"
+    "container_ssh_port, status, attributes, region, outer_host_public_key, container_host_public_key, created_at) "
+    "VALUES (%s, %s, %s, %s, %s, %s, 22, 'root', %s, 'available', %s::jsonb, %s, %s, %s, NOW())"
 )
 
 
@@ -99,7 +111,11 @@ def build_pool_host_insert_values(
     # OVH datacenter code the VPS was ordered in; persisted so the connector can
     # apply region-aware lease filtering/ordering.
     region: str,
-) -> tuple[str, str, str, str, str, str, int, str, str]:
+    # Baked sshd host public keys (deterministic, from `mngr create --format json`),
+    # persisted so leasing/teardown pin them instead of scanning.
+    outer_host_public_key: str,
+    container_host_public_key: str,
+) -> tuple[str, str, str, str, str, str, int, str, str, str, str]:
     """Build the value tuple for :data:`_INSERT_POOL_HOST_SQL`.
 
     ``vps_instance_id`` MUST be the OVH service name -- it is what every
@@ -123,6 +139,8 @@ def build_pool_host_insert_values(
         container_ssh_port,
         attributes_json,
         region,
+        outer_host_public_key,
+        container_host_public_key,
     )
 
 
@@ -141,31 +159,42 @@ def _run_ssh_command(
     ssh_key_path: str,
     port: int,
     command: str,
+    host_public_key: str,
 ) -> bool:
-    """Run a command on a host via SSH. Returns True on success."""
-    ssh_command = [
-        "ssh",
-        "-o",
-        "StrictHostKeyChecking=no",
-        "-o",
-        "UserKnownHostsFile=/dev/null",
-        "-o",
-        "ConnectTimeout=15",
-        "-i",
-        ssh_key_path,
-        "-p",
-        str(port),
-        f"root@{vps_address}",
-        command,
-    ]
-    logger.info("  SSH {}:{}: {}", vps_address, port, command)
-    cg = ConcurrencyGroup(name="pool-ssh")
-    with cg:
-        result = cg.run_process_to_completion(
-            command=ssh_command,
-            timeout=float(_SSH_COMMAND_TIMEOUT_SECONDS),
-            is_checked_after=False,
-        )
+    """Run a command on a host via SSH, pinning ``host_public_key``. Returns True on success.
+
+    The host key is the one we baked into the VPS (deterministic), so we pin it
+    strictly (no trust-on-first-use) via a throwaway known_hosts file.
+    """
+    known_hosts_fd, known_hosts_path = tempfile.mkstemp(prefix="mngr_vps_known_hosts_")
+    os.close(known_hosts_fd)
+    try:
+        add_host_to_known_hosts(Path(known_hosts_path), vps_address, port, host_public_key)
+        ssh_command = [
+            "ssh",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            f"UserKnownHostsFile={known_hosts_path}",
+            "-o",
+            "ConnectTimeout=15",
+            "-i",
+            ssh_key_path,
+            "-p",
+            str(port),
+            f"root@{vps_address}",
+            command,
+        ]
+        logger.info("  SSH {}:{}: {}", vps_address, port, command)
+        cg = ConcurrencyGroup(name="pool-ssh")
+        with cg:
+            result = cg.run_process_to_completion(
+                command=ssh_command,
+                timeout=float(_SSH_COMMAND_TIMEOUT_SECONDS),
+                is_checked_after=False,
+            )
+    finally:
+        Path(known_hosts_path).unlink(missing_ok=True)
     if result.returncode != 0:
         logger.warning("SSH command failed: {}", result.stderr.strip())
         return False
@@ -178,7 +207,7 @@ def build_extra_tags_env_value(tags: tuple[str, ...]) -> str:
     Each entry must already be a ``KEY=VALUE`` string (validated client-side
     before we ever construct the env var so a typo'd ``--tag foo`` aborts the
     bake with a usage error instead of crashing inside mngr).
-    ``mngr_vps_docker.build_vps_tags`` and ``mngr_ovh.iam_tags.parse_extra_tags_env``
+    ``mngr_vps.build_vps_tags`` and ``mngr_ovh.iam_tags.parse_extra_tags_env``
     both consume the comma-separated form.
     """
     for entry in tags:
@@ -206,14 +235,16 @@ def _ufw_provision_commands(container_ssh_port: int) -> tuple[str, ...]:
     )
 
 
-def _checked_ssh_command(vps_address: str, ssh_key_path: str, port: int, command: str, *, label: str) -> None:
+def _checked_ssh_command(
+    vps_address: str, ssh_key_path: str, port: int, command: str, *, label: str, host_public_key: str
+) -> None:
     """Run an SSH command and raise on non-zero exit.
 
     Used for steps that MUST succeed (ufw install/configure, management key
     install). The bake aborts on failure rather than continuing with a
     half-configured host that would silently land in the pool.
     """
-    if not _run_ssh_command(vps_address, ssh_key_path, port, command):
+    if not _run_ssh_command(vps_address, ssh_key_path, port, command, host_public_key):
         raise PoolBakeError(f"{label} failed on VPS {vps_address}; aborting bake")
 
 
@@ -230,14 +261,24 @@ def _harden_ovh_vps(management_public_key: str, baked: BakedPoolHost, full_addre
     """
     if not baked.ssh_host or not baked.ssh_key_path:
         raise PoolBakeError("`mngr create --format json` did not expose the VPS ssh endpoint for hardening")
+    if not baked.outer_host_public_key:
+        raise PoolBakeError("`mngr create --format json` did not expose the VPS host key for strict SSH hardening")
     vps_address = baked.ssh_host
     vps_key_path = str(Path(baked.ssh_key_path).parent / "vps_ssh_key")
+    vps_host_public_key = baked.outer_host_public_key
     # Install + configure ufw on the VPS. Each step must succeed; we bail on the
     # whole bake if anything fails (otherwise the host would land in the pool with
     # no firewall and a half-applied policy).
     logger.info("  Installing + configuring ufw on VPS {}", vps_address)
     for ufw_command in _ufw_provision_commands(_CONTAINER_SSH_PORT):
-        _checked_ssh_command(vps_address, vps_key_path, 22, ufw_command, label=f"ufw step {ufw_command!r}")
+        _checked_ssh_command(
+            vps_address,
+            vps_key_path,
+            22,
+            ufw_command,
+            label=f"ufw step {ufw_command!r}",
+            host_public_key=vps_host_public_key,
+        )
 
     key_line = shlex.quote(management_public_key.strip())
     install_cmd = (
@@ -245,7 +286,14 @@ def _harden_ovh_vps(management_public_key: str, baked: BakedPoolHost, full_addre
         + key_line
         + " >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
     )
-    _checked_ssh_command(vps_address, vps_key_path, 22, install_cmd, label="install management key on VPS")
+    _checked_ssh_command(
+        vps_address,
+        vps_key_path,
+        22,
+        install_cmd,
+        label="install management key on VPS",
+        host_public_key=vps_host_public_key,
+    )
     logger.info("  Installing management key in container via mngr exec")
     container_install = run_mngr_command(["exec", full_address, install_cmd], timeout=60)
     if container_install.returncode != 0:
@@ -322,6 +370,11 @@ def _create_single_pool_host(
     )
     if not baked.ssh_host:
         raise PoolBakeError(f"baked OVH host {host_name} has no ssh_host; cannot insert pool row")
+    if not baked.outer_host_public_key or not baked.container_host_public_key:
+        raise PoolBakeError(
+            f"baked OVH host {host_name} did not surface its sshd host public keys "
+            "(needs a vps_docker provider that emits them in `mngr create --format json`); cannot insert pool row"
+        )
 
     full_address = f"{BAKED_SERVICES_AGENT_NAME}@{host_name}.ovh"
     # Let the FCT deferred-install (heavy apt + browser download, kicked off at boot)
@@ -371,6 +424,8 @@ def _create_single_pool_host(
                         container_ssh_port=_CONTAINER_SSH_PORT,
                         attributes_json=_json.dumps(attributes),
                         region=region,
+                        outer_host_public_key=baked.outer_host_public_key,
+                        container_host_public_key=baked.container_host_public_key,
                     ),
                 )
     finally:
@@ -385,13 +440,13 @@ def _create_single_pool_host(
 @click.option(
     "--backend",
     type=click.Choice(["ovh_vps", "slice"]),
-    default="ovh_vps",
+    default="slice",
     show_default=True,
     help=(
-        "Which machine backs each pool host. ``ovh_vps`` orders an OVH classic VPS on demand; "
-        "``slice`` carves a lima VM on one of our registered bare-metal boxes (run `admin server "
-        "register` + `prep` first). Both bake the same FCT pool host and insert the same kind of "
-        "leasable row -- only the machine-provisioning step differs."
+        "Which machine backs each pool host. ``slice`` (the default) carves a lima VM on one of our "
+        "registered bare-metal boxes (run `admin server register` + `prep` first). ``ovh_vps`` is "
+        "DEPRECATED: baking new OVH classic VPS pool hosts is no longer supported -- only ``slice`` "
+        "bakes are allowed. Existing OVH VPS pool hosts can still be listed and destroyed."
     ),
 )
 @click.option(
@@ -500,6 +555,27 @@ def _create_single_pool_host(
     ),
 )
 @click.option(
+    "--server-id",
+    "server_id",
+    default=None,
+    help=(
+        "[slice only, required] The bare_metal_servers row id to bake the slices onto (from "
+        "`admin server list`). Slice baking targets an explicitly-chosen, ready box -- it never "
+        "auto-selects one."
+    ),
+)
+@click.option(
+    "--slice-env-name",
+    "slice_env_name",
+    default=None,
+    help=(
+        "[slice only] Owning environment name stamped into each slice's lima instance + disk names "
+        "(mngr-slice-<env>-<host-hex>). Lets multiple dev envs share one bare-metal box: occupancy is read "
+        "from the box, and the post-bake reap only ever touches this env's own slices. Usually forwarded by "
+        "`minds pool create` from the activated env; omit only for legacy un-stamped baking."
+    ),
+)
+@click.option(
     "--dry-run",
     "is_dry_run",
     is_flag=True,
@@ -543,17 +619,32 @@ def pool_create(
     database_url: str | None,
     mngr_source: str | None,
     is_recycle_enabled: bool,
+    server_id: str | None,
+    slice_env_name: str | None,
     is_dry_run: bool,
     max_concurrency: int,
     is_deferred_install_wait_skipped: bool,
 ) -> None:
-    """Create pre-provisioned pool hosts on the chosen backend (OVH VPS or bare-metal slice).
+    """Create pre-provisioned bare-metal slice pool hosts (``--backend slice``, the default).
+
+    ``--backend ovh_vps`` is DEPRECATED and rejected: baking new OVH classic VPS pool
+    hosts is no longer supported (existing ones stay listable/destroyable).
 
     The bake source -- exactly one of ``--from-tag`` (production, clones a tag) or
     ``--workspace-dir`` (dev, a working tree) -- determines the content baked and
     the canonical ``repo_url`` / ``repo_branch_or_tag`` stamped into each row, so
     the advertised identity always describes what is actually baked.
     """
+    # Baking new OVH VPS pool hosts is deprecated: Imbue Cloud serves agents from
+    # bare-metal slices now. Existing OVH VPS pool hosts stay listable/destroyable,
+    # but no new ones may be baked. Reject before any (clone-heavy) work.
+    if backend == "ovh_vps":
+        fail_with_json(
+            "Baking new OVH VPS pool hosts is deprecated -- use --backend slice (bare-metal slices). "
+            "Existing OVH VPS pool hosts can still be listed and destroyed.",
+            error_class="UsageError",
+        )
+
     resolved_database_url = resolve_pool_database_url(database_url)
     parsed_attributes = _parse_optional_attributes_json(attributes_json)
 
@@ -569,9 +660,17 @@ def pool_create(
             )
         if not is_recycle_enabled:
             fail_with_json("--no-recycle is not applicable to --backend slice", error_class="UsageError")
+        if not server_id:
+            fail_with_json(
+                "--server-id is required for --backend slice (the bare-metal box to bake onto; "
+                "see `mngr imbue_cloud admin server list`)",
+                error_class="UsageError",
+            )
     elif backend == "ovh_vps":
         if is_dry_run:
             fail_with_json("--dry-run is only supported for --backend slice", error_class="UsageError")
+        if server_id is not None:
+            fail_with_json("--server-id is only supported for --backend slice", error_class="UsageError")
         if not management_public_key_file:
             fail_with_json("--management-public-key-file is required for --backend ovh_vps", error_class="UsageError")
         # Validate ``--tag`` shapes up front so we don't bake the first host and
@@ -596,10 +695,14 @@ def pool_create(
         ) as bake_source:
             attributes = merge_bake_identity_attributes(parsed_attributes, bake_source)
             if backend == "slice":
+                # ``server_id`` presence is enforced above for the slice backend.
+                assert server_id is not None
                 allocate_slices(
                     count=count,
+                    server_id=server_id,
                     lease_attributes=attributes,
                     region=region,
+                    env_name=slice_env_name,
                     workspace_dir=bake_source.workspace_dir,
                     mngr_source=mngr_source,
                     database_url=resolved_database_url,
@@ -705,6 +808,37 @@ def _create_ovh_vps_pool_hosts(
         raise SystemExit(1)
 
 
+# Every pool_hosts column, in a stable display order, used to build BOTH the
+# `pool list` SELECT and the keys of each emitted JSON row -- so the two can
+# never drift. Hand-maintaining a subset is what silently dropped region,
+# backend_kind, and the slice identifiers (bare_metal_server_id /
+# lima_instance_name / lima_disk_name) from the output, making every slice row
+# look like an OVH VPS with no region. emit_json serialises the UUID and
+# datetime values via its default=str, so no per-column coercion is needed.
+_POOL_HOST_LIST_COLUMNS: Final[tuple[str, ...]] = (
+    "id",
+    "host_name",
+    "status",
+    "region",
+    "backend_kind",
+    "attributes",
+    "vps_address",
+    "vps_instance_id",
+    "agent_id",
+    "host_id",
+    "ssh_user",
+    "ssh_port",
+    "container_ssh_port",
+    "bare_metal_server_id",
+    "lima_instance_name",
+    "lima_disk_name",
+    "leased_to_user",
+    "leased_at",
+    "released_at",
+    "created_at",
+)
+
+
 @pool.command(name="list")
 @click.option(
     "--database-url",
@@ -724,31 +858,41 @@ def pool_list(database_url: str | None) -> None:
     conn = psycopg2.connect(resolved_database_url)
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT id, vps_address, agent_id, host_id, status, attributes, "
-                "leased_to_user, leased_at, released_at, created_at "
-                "FROM pool_hosts ORDER BY created_at DESC"
-            )
+            cur.execute(f"SELECT {', '.join(_POOL_HOST_LIST_COLUMNS)} FROM pool_hosts ORDER BY created_at DESC")
             rows = cur.fetchall()
     finally:
         conn.close()
-    emit_json(
-        [
-            {
-                "id": str(row[0]),
-                "vps_address": row[1],
-                "agent_id": row[2],
-                "host_id": row[3],
-                "status": row[4],
-                "attributes": row[5],
-                "leased_to_user": row[6],
-                "leased_at": str(row[7]) if row[7] else None,
-                "released_at": str(row[8]) if row[8] else None,
-                "created_at": str(row[9]) if row[9] else None,
-            }
-            for row in rows
-        ]
-    )
+    emit_json([dict(zip(_POOL_HOST_LIST_COLUMNS, row, strict=True)) for row in rows])
+
+
+# ``pool_hosts.backend_kind`` value for bare-metal slices (lima VMs). OVH-VPS rows
+# carry the column's 'ovh_vps' default, so destroy treats anything that is not
+# 'slice' (including legacy/None rows written before the column existed) as the OVH
+# teardown path.
+_SLICE_BACKEND_KIND: Final[str] = "slice"
+
+
+class PoolHostUnderlyingTeardown(UpperCaseStrEnum):
+    """Which underlying machine a ``pool destroy`` tears down before dropping the row."""
+
+    OVH_VPS = auto()
+    SLICE_VM = auto()
+    NONE = auto()
+
+
+@pure
+def resolve_underlying_teardown(*, backend_kind: str | None, is_skip_requested: bool) -> PoolHostUnderlyingTeardown:
+    """Decide what underlying teardown a pool host destroy performs, from the row's backend.
+
+    ``--skip-vps-cancel`` always wins (drop the row only). Otherwise a slice tears down
+    its lima VM and an OVH-VPS row (including legacy/None backends) cancels its VPS --
+    mirroring the backend branch in ``pool create`` so a slice is never left stranded.
+    """
+    if is_skip_requested:
+        return PoolHostUnderlyingTeardown.NONE
+    if backend_kind == _SLICE_BACKEND_KIND:
+        return PoolHostUnderlyingTeardown.SLICE_VM
+    return PoolHostUnderlyingTeardown.OVH_VPS
 
 
 def _cancel_pool_host_vps(service_name: str) -> None:
@@ -773,6 +917,36 @@ def _cancel_pool_host_vps(service_name: str) -> None:
     client.destroy_instance(VpsInstanceId(service_name))
 
 
+def _destroy_slice_pool_host_vm(
+    *,
+    conn: Any,
+    pool_host_id: str,
+    bare_metal_server_id: str | None,
+    lima_instance_name: str | None,
+) -> None:
+    """Destroy a slice pool host's lima VM on its bare-metal box (the slice counterpart of VPS cancel).
+
+    Resolves the box from ``bare_metal_server_id`` and tears down the
+    ``lima_instance_name`` VM via the pool key (POOL_SSH_PRIVATE_KEY). Raises -- so
+    the caller keeps the row and the teardown stays retryable -- when the slice row
+    lacks its lima identifiers or the referenced box no longer exists.
+    """
+    if not bare_metal_server_id or not lima_instance_name:
+        fail_with_json(
+            f"Slice row {pool_host_id} is missing its bare_metal_server_id / lima_instance_name; "
+            "cannot locate the VM to destroy. Pass --skip-vps-cancel to drop the row only.",
+            error_class="UnsafeDelete",
+        )
+    server = fetch_server_by_id(conn, BareMetalServerDbId(bare_metal_server_id))
+    if server is None:
+        fail_with_json(
+            f"Slice row {pool_host_id} references bare_metal_server {bare_metal_server_id}, which no "
+            "longer exists; cannot reach the box. Pass --skip-vps-cancel to drop the row only.",
+            error_class="UnsafeDelete",
+        )
+    destroy_slice_vm(server=server, lima_instance_name=lima_instance_name)
+
+
 @pool.command(name="destroy")
 @click.argument("pool_host_id")
 @click.option(
@@ -793,48 +967,210 @@ def _cancel_pool_host_vps(service_name: str) -> None:
     is_flag=True,
     default=False,
     help=(
-        "Only drop the DB row; do NOT cancel the OVH VPS. Use exclusively when the "
-        "VPS is already gone/cancelled -- otherwise the default path cancels it so "
-        "no billing orphan is left behind."
+        "Only drop the DB row; do NOT tear down the underlying machine (cancel the "
+        "OVH VPS for an ovh_vps row, or destroy the lima VM for a slice row). Use "
+        "exclusively when the machine is already gone -- otherwise the default path "
+        "tears it down so no billing/slot orphan is left behind."
     ),
 )
 def pool_destroy(pool_host_id: str, database_url: str | None, force: bool, skip_vps_cancel: bool) -> None:
-    """Remove a pool_hosts row, cancelling its OVH VPS first (full teardown).
+    """Remove a pool_hosts row, tearing down its underlying machine first (full teardown).
 
-    By default this cancels the underlying OVH VPS (strip per-lease tags +
-    ``deleteAtExpiration=True``) *before* deleting the row, so it leaves the host
-    in the same blank/cancelled/recyclable state a proper release does -- never a
-    stranded, still-billing VPS. Pass ``--skip-vps-cancel`` only when the VPS is
-    already gone. Cancellation needs OVH credentials in the environment (the minds
-    ``pool destroy`` wrapper injects them from Vault).
+    The teardown mirrors the row's backend (just as ``pool create`` branches on
+    ``--backend``): an ``ovh_vps`` row cancels its OVH VPS (strip per-lease tags +
+    ``deleteAtExpiration=True``), while a ``slice`` row destroys its lima VM on the
+    bare-metal box (freeing the slot). Either runs *before* the row is deleted, so a
+    failure keeps the row and the teardown stays retryable -- never a stranded VPS or
+    slice VM. Pass ``--skip-vps-cancel`` only when the machine is already gone.
+    Teardown needs creds in the environment (the minds ``pool destroy`` wrapper
+    injects them from Vault: OVH AK/AS/CK for ovh_vps, POOL_SSH_PRIVATE_KEY for slice).
     """
     resolved_database_url = resolve_pool_database_url(database_url)
     conn = psycopg2.connect(resolved_database_url)
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT status, vps_address FROM pool_hosts WHERE id = %s", (pool_host_id,))
+            cur.execute(
+                "SELECT status, vps_address, backend_kind, bare_metal_server_id, lima_instance_name "
+                "FROM pool_hosts WHERE id = %s",
+                (pool_host_id,),
+            )
             row = cur.fetchone()
             if row is None:
                 fail_with_json(f"No pool_hosts row with id {pool_host_id}", error_class="NotFound")
-            status, vps_address = row
+            status, vps_address, backend_kind, bare_metal_server_id, lima_instance_name = row
             if status != "released" and not force:
                 fail_with_json(
                     f"Row {pool_host_id} is in status '{status}'; pass --force to delete anyway",
                     error_class="UnsafeDelete",
                 )
-        # Cancel the VPS BEFORE deleting the row: if the cancel fails we keep the
-        # row so the teardown stays retryable (no silent orphan).
-        if not skip_vps_cancel:
-            if not vps_address:
-                fail_with_json(
-                    f"Row {pool_host_id} has no vps_address; cannot cancel its VPS. "
-                    "Pass --skip-vps-cancel if the VPS is already gone.",
-                    error_class="UnsafeDelete",
+        # Tear the underlying machine down BEFORE deleting the row: if it fails we
+        # keep the row so the teardown stays retryable (no silent orphan). The
+        # backend dictates how -- mirroring pool create's backend branch.
+        teardown = resolve_underlying_teardown(backend_kind=backend_kind, is_skip_requested=skip_vps_cancel)
+        match teardown:
+            case PoolHostUnderlyingTeardown.SLICE_VM:
+                _destroy_slice_pool_host_vm(
+                    conn=conn,
+                    pool_host_id=pool_host_id,
+                    bare_metal_server_id=bare_metal_server_id,
+                    lima_instance_name=lima_instance_name,
                 )
-            _cancel_pool_host_vps(vps_address)
+            case PoolHostUnderlyingTeardown.OVH_VPS:
+                if not vps_address:
+                    fail_with_json(
+                        f"Row {pool_host_id} has no vps_address; cannot cancel its VPS. "
+                        "Pass --skip-vps-cancel if the VPS is already gone.",
+                        error_class="UnsafeDelete",
+                    )
+                _cancel_pool_host_vps(vps_address)
+            case PoolHostUnderlyingTeardown.NONE:
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
         with conn:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM pool_hosts WHERE id = %s", (pool_host_id,))
     finally:
         conn.close()
-    emit_json({"deleted": True, "pool_host_id": pool_host_id, "vps_cancelled": not skip_vps_cancel})
+    emit_json(
+        {
+            "deleted": True,
+            "pool_host_id": pool_host_id,
+            "backend_kind": backend_kind,
+            "vps_cancelled": teardown == PoolHostUnderlyingTeardown.OVH_VPS,
+            "slice_vm_destroyed": teardown == PoolHostUnderlyingTeardown.SLICE_VM,
+        }
+    )
+
+
+@pool.command(name="teardown-slices")
+@click.option(
+    "--database-url",
+    required=False,
+    default=None,
+    type=str,
+    help=(
+        "Neon PostgreSQL direct connection string for the pool DB. Defaults to "
+        "MINDS_HOST_POOL_DSN env var, or the activated minds env's secrets.toml "
+        "NEON_HOST_POOL_DSN field. Pass explicitly when operating outside an activated env."
+    ),
+)
+def pool_teardown_slices(database_url: str | None) -> None:
+    """Tear down every unleased slice VM in the pool DB and drop its row.
+
+    Used by ``minds env destroy`` (before the per-env DB is deleted) so the env's
+    baked-but-unleased pool slices don't leak their VMs on the shared bare-metal
+    boxes. Leased slices are excluded -- they are torn down via their agent's release
+    path. Needs POOL_SSH_PRIVATE_KEY in the environment to SSH the boxes (the minds
+    wrapper injects it from Vault). Idempotent per VM; fails (non-zero) if any box
+    could not be reached, so the caller can stop rather than silently leak.
+    """
+    resolved_database_url = resolve_pool_database_url(database_url)
+    result = tear_down_unleased_slices(resolved_database_url)
+    emit_json(result)
+
+
+_KEYSCAN_TIMEOUT_SECONDS: Final[int] = 15
+
+# SELECT pool rows still missing either pinned host key (pre-host-key-column bakes).
+_SELECT_POOL_HOSTS_MISSING_KEYS_SQL: Final[str] = (
+    "SELECT id, vps_address, ssh_port, container_ssh_port, outer_host_public_key, container_host_public_key "
+    "FROM pool_hosts WHERE outer_host_public_key IS NULL OR container_host_public_key IS NULL"
+)
+_SELECT_BOXES_MISSING_KEY_SQL: Final[str] = (
+    "SELECT id, public_address FROM bare_metal_servers "
+    "WHERE box_host_public_key IS NULL AND public_address IS NOT NULL"
+)
+
+
+def _keyscan_host_public_key(host: str, port: int) -> str | None:
+    """One-time TOFU scan of a host's ed25519 sshd key, for the migration backfill only.
+
+    Returns ``"ssh-ed25519 <base64>"`` or None on failure. This is the single
+    sanctioned trust-on-first-use in the system; all steady-state SSH pins a
+    recorded key.
+    """
+    cg = ConcurrencyGroup(name="keyscan")
+    with cg:
+        result = cg.run_process_to_completion(
+            command=["ssh-keyscan", "-t", "ed25519", "-T", str(_KEYSCAN_TIMEOUT_SECONDS), "-p", str(port), host],
+            timeout=float(_KEYSCAN_TIMEOUT_SECONDS + 5),
+            is_checked_after=False,
+        )
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = stripped.split()
+        # ssh-keyscan prints "<hostspec> ssh-ed25519 <base64>"; we want the key only.
+        if len(parts) >= 3 and parts[1] == "ssh-ed25519":
+            return f"{parts[1]} {parts[2]}"
+    return None
+
+
+@pool.command(name="backfill-host-keys")
+@click.option(
+    "--database-url",
+    required=False,
+    default=None,
+    type=str,
+    help=(
+        "Neon PostgreSQL direct connection string for the pool DB. Defaults to "
+        "MINDS_HOST_POOL_DSN env var, or the activated minds env's secrets.toml "
+        "NEON_HOST_POOL_DSN field. Pass explicitly when operating outside an activated env."
+    ),
+)
+def pool_backfill_host_keys(database_url: str | None) -> None:
+    """One-time: keyscan + record SSH host public keys for pre-existing pool rows and boxes.
+
+    The single sanctioned trust-on-first-use in the system, used ONLY to migrate
+    rows baked before the host-key columns existed. Run once after deploying the
+    host-key-pinning version of the connector; afterward leasing and teardown
+    enforce strict pinning with no scan fallback. Idempotent: rows that already have
+    keys are skipped, and a row whose host cannot be scanned is left null (logged)
+    for a later re-run.
+    """
+    resolved_database_url = resolve_pool_database_url(database_url)
+    conn = psycopg2.connect(resolved_database_url)
+    # Keyscans are slow network ops; autocommit each UPDATE rather than hold one
+    # long transaction open across them.
+    conn.autocommit = True
+    pool_updated = 0
+    box_updated = 0
+    skipped: list[str] = []
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_SELECT_POOL_HOSTS_MISSING_KEYS_SQL)
+            pool_rows = cur.fetchall()
+        for row_id, vps_address, ssh_port, container_ssh_port, outer_key, container_key in pool_rows:
+            new_outer = outer_key or _keyscan_host_public_key(vps_address, ssh_port)
+            new_container = container_key or _keyscan_host_public_key(vps_address, container_ssh_port)
+            if new_outer and new_container:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE pool_hosts SET outer_host_public_key = %s, container_host_public_key = %s WHERE id = %s",
+                        (new_outer, new_container, str(row_id)),
+                    )
+                pool_updated += 1
+            else:
+                skipped.append(f"pool host {row_id} ({vps_address})")
+                logger.warning("Could not keyscan host keys for pool host {} ({}); left null", row_id, vps_address)
+
+        with conn.cursor() as cur:
+            cur.execute(_SELECT_BOXES_MISSING_KEY_SQL)
+            box_rows = cur.fetchall()
+        for server_id, public_address in box_rows:
+            box_key = _keyscan_host_public_key(public_address, 22)
+            if box_key:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE bare_metal_servers SET box_host_public_key = %s, updated_at = NOW() WHERE id = %s",
+                        (box_key, str(server_id)),
+                    )
+                box_updated += 1
+            else:
+                skipped.append(f"box {server_id} ({public_address})")
+                logger.warning("Could not keyscan box key for server {} ({}); left null", server_id, public_address)
+    finally:
+        conn.close()
+    emit_json({"pool_hosts_backfilled": pool_updated, "boxes_backfilled": box_updated, "skipped": skipped})

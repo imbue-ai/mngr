@@ -708,14 +708,15 @@ def cleanup_tmux_session(session_name: str) -> None:
             pass
 
     # Kill any orphaned activity monitors for this session (started with nohup, detached).
-    # The monitor runs `tmux list-panes -t =<session>:0 ...` (see
+    # The monitor runs `tmux list-panes -t =<session>:agent ...` (see
     # _build_start_agent_shell_command, which routes the target through
-    # TmuxWindowTarget). Anchoring the pkill substring on the full `=<session>:0`
-    # form both keeps the match working (the bare `<session>` form is no longer
-    # in the command line) and avoids prefix-collision: a sibling session would
-    # appear as `=<session>-sibling:0`, which contains `<session>` but not
-    # `<session>:0`, so its monitor will not be killed by accident.
-    _run_with_timeout("pkill", "-9", "-f", f"list-panes -t ={session_name}:0")
+    # TmuxWindowTarget against the default primary window name "agent"). Anchoring
+    # the pkill substring on the full `=<session>:agent` form both keeps the match
+    # working (the bare `<session>` form is no longer in the command line) and
+    # avoids prefix-collision: a sibling session would appear as
+    # `=<session>-sibling:agent`, which contains `<session>` but not
+    # `<session>:agent`, so its monitor will not be killed by accident.
+    _run_with_timeout("pkill", "-9", "-f", f"list-panes -t ={session_name}:agent")
 
 
 @contextmanager
@@ -1248,7 +1249,10 @@ def delete_modal_apps_in_environment(environment_name: str) -> None:
             if app_id:
                 try:
                     stop_result = subprocess.run(
-                        ["uv", "run", "modal", "app", "stop", app_id],
+                        # --yes: skip the interactive confirmation, which otherwise aborts the
+                        # stop in non-interactive runs (CI / release tests) so the app is never
+                        # stopped and only the environment deletion reaps it.
+                        ["uv", "run", "modal", "app", "stop", app_id, "--yes"],
                         capture_output=True,
                         text=True,
                         timeout=30,

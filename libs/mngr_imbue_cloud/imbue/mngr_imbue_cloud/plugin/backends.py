@@ -119,6 +119,7 @@ class SliceVpsDockerProviderBackend(ProviderBackendInterface):
             box_ssh_user=config.box_ssh_user,
             private_key_path=config.pool_private_key_path,
             vm_image_url=base_image_url,
+            box_host_public_key=config.box_host_public_key,
         )
         return SliceVpsDockerProvider(
             name=name,

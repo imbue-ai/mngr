@@ -14,25 +14,25 @@ is reached via ``/api/v1/files/home/<user>/foo.txt``, a file at
 those two roots are not served.
 
 Authentication piggy-backs on the same central-key Bearer-token check
-that gates the rest of ``/api/v1/...`` (see :mod:`api_key_auth`): an
-ASGI wrapper extracts the ``Authorization: Bearer <key>`` header and
-401s unless it matches ``app.state.minds_api_key``. WsgiDAV itself
-runs with anonymous auth -- the ASGI gate is the only thing between
-the network and the filesystem.
+that gates the rest of ``/api/v1/...`` (see :mod:`api_key_auth`): a
+WSGI wrapper extracts the ``Authorization: Bearer <key>`` header and
+401s unless it matches ``get_state().minds_api_key``. WsgiDAV itself
+runs with anonymous auth -- the WSGI gate is the only thing between
+the network and the filesystem. WsgiDAV is already a WSGI app, so it is
+mounted directly via Werkzeug's ``DispatcherMiddleware`` (no ASGI bridge).
 """
 
 import tempfile
 from collections.abc import Callable
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 from typing import Final
+from wsgiref.types import StartResponse
+from wsgiref.types import WSGIApplication
+from wsgiref.types import WSGIEnvironment
 
-from a2wsgi import WSGIMiddleware
 from loguru import logger
-from starlette.types import ASGIApp
-from starlette.types import Receive
-from starlette.types import Scope
-from starlette.types import Send
 from wsgidav.fs_dav_provider import FilesystemProvider
 from wsgidav.wsgidav_app import WsgiDAVApp
 
@@ -40,61 +40,36 @@ from imbue.minds.desktop_client.api_key_auth import is_request_authenticated
 
 # Callable that resolves the current central minds API key. Wrapped so
 # the WebDAV gate can look it up fresh on every request via
-# ``app.state.minds_api_key`` instead of capturing a stale value at
+# ``get_state().minds_api_key`` instead of capturing a stale value at
 # gate-build time.
 ExpectedKeyProvider = Callable[[], str | None]
 
-_AUTHORIZATION_HEADER: Final[bytes] = b"authorization"
 _UNAUTHORIZED_BODY: Final[bytes] = b'{"error": "Unauthorized"}'
 
 
-def _extract_authorization_header(scope: Scope) -> str | None:
-    """Return the raw ``Authorization`` header value or ``None`` if absent."""
-    for name, value in scope.get("headers", ()):
-        if name == _AUTHORIZATION_HEADER:
-            try:
-                return value.decode("latin-1")
-            except UnicodeDecodeError:
-                return None
-    return None
+def _build_bearer_auth_gate(inner: WSGIApplication, expected_key_provider: ExpectedKeyProvider) -> WSGIApplication:
+    """Wrap ``inner`` so every request must carry the central minds API key.
 
-
-async def _send_unauthorized(send: Send) -> None:
-    """Emit a minimal 401 response with a ``WWW-Authenticate: Bearer`` challenge."""
-    await send(
-        {
-            "type": "http.response.start",
-            "status": 401,
-            "headers": [
-                (b"content-type", b"application/json"),
-                (b"www-authenticate", b"Bearer"),
-                (b"content-length", str(len(_UNAUTHORIZED_BODY)).encode("ascii")),
-            ],
-        }
-    )
-    await send({"type": "http.response.body", "body": _UNAUTHORIZED_BODY, "more_body": False})
-
-
-def _build_bearer_auth_gate(inner: ASGIApp, expected_key_provider: ExpectedKeyProvider) -> ASGIApp:
-    """Wrap ``inner`` so every HTTP request must carry the central minds API key.
-
-    ``expected_key_provider`` resolves the live ``app.state.minds_api_key``
+    ``expected_key_provider`` resolves the live ``get_state().minds_api_key``
     on each request rather than capturing the value at gate-build time;
     that way an empty / unset key fails closed and tests that construct
-    the app without populating ``app.state`` still see 401s rather than
-    AttributeError 500s.
+    the app without populating the state still see 401s rather than 500s.
     """
 
-    async def app(scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http":
-            await _send_unauthorized(send)
-            return
-        authorization = _extract_authorization_header(scope)
+    def app(environ: WSGIEnvironment, start_response: StartResponse) -> Iterable[bytes]:
+        authorization = environ.get("HTTP_AUTHORIZATION")
         expected_key = expected_key_provider()
         if expected_key is None or not is_request_authenticated(authorization, expected_key):
-            await _send_unauthorized(send)
-            return
-        await inner(scope, receive, send)
+            start_response(
+                "401 Unauthorized",
+                [
+                    ("Content-Type", "application/json"),
+                    ("WWW-Authenticate", "Bearer"),
+                    ("Content-Length", str(len(_UNAUTHORIZED_BODY))),
+                ],
+            )
+            return [_UNAUTHORIZED_BODY]
+        return inner(environ, start_response)
 
     return app
 
@@ -117,7 +92,7 @@ def _build_wsgidav_config(share_roots: tuple[Path, ...]) -> dict[str, Any]:
         provider_mapping[str(root).lower()] = FilesystemProvider(str(root), readonly=False)
     return {
         "provider_mapping": provider_mapping,
-        # Auth is enforced by the outer ASGI bearer-token gate; WsgiDAV
+        # Auth is enforced by the outer WSGI bearer-token gate; WsgiDAV
         # itself accepts any caller (the gate guarantees no anonymous
         # caller ever reaches it).
         "simple_dc": {"user_mapping": {"*": True}},
@@ -153,8 +128,8 @@ def get_file_sharing_roots() -> tuple[Path, ...]:
     return (Path.home(), Path(tempfile.gettempdir()))
 
 
-def create_webdav_app(expected_key_provider: ExpectedKeyProvider) -> ASGIApp:
-    """Build the ASGI app to mount under ``/api/v1/files``.
+def create_webdav_app(expected_key_provider: ExpectedKeyProvider) -> WSGIApplication:
+    """Build the WSGI app to mount under ``/api/v1/files``.
 
     The returned callable serves ``Path.home()`` and ``tempfile.gettempdir()`` (typically /tmp) via
     WebDAV, gated by the central minds-api Bearer token resolved through
@@ -162,15 +137,9 @@ def create_webdav_app(expected_key_provider: ExpectedKeyProvider) -> ASGIApp:
     """
     share_roots = get_file_sharing_roots()
     config = _build_wsgidav_config(share_roots)
-    wsgi_app = WsgiDAVApp(config)
-    # ``a2wsgi.WSGIMiddleware`` is structurally an ASGI app, but it is
-    # typed against its own ``a2wsgi.asgi_typing`` TypedDict aliases
-    # which are nominally distinct from Starlette's looser
-    # ``MutableMapping[str, Any]`` ASGI types. The ignore is the
-    # project-preferred way (per PREVENT_CAST_USAGE) to express that.
-    asgi_wsgi_app: ASGIApp = WSGIMiddleware(wsgi_app)  # ty: ignore[invalid-assignment]
+    wsgi_app: WSGIApplication = WsgiDAVApp(config)
     logger.debug(
         "Mounted WebDAV file server with shares: {}",
         ", ".join(str(root) for root in share_roots),
     )
-    return _build_bearer_auth_gate(asgi_wsgi_app, expected_key_provider)
+    return _build_bearer_auth_gate(wsgi_app, expected_key_provider)

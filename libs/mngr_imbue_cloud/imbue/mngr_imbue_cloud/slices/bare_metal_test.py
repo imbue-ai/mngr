@@ -16,27 +16,33 @@ from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_ORDERED
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_READY
 from imbue.mngr_imbue_cloud.slices.bare_metal import DISK_RESERVE_GB
 from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_BOOT_DISK_GIB
-from imbue.mngr_imbue_cloud.slices.bare_metal import allocate_slice_ports
 from imbue.mngr_imbue_cloud.slices.bare_metal import choose_raid_level
-from imbue.mngr_imbue_cloud.slices.bare_metal import choose_server_for_new_slice
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_capacity
+from imbue.mngr_imbue_cloud.slices.bare_metal import compute_orphan_slice_disk_names
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_orphan_slice_instance_names
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_disk_budget_gib
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_disk_gib
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_memory_mib
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_vcpus
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slot_count
+from imbue.mngr_imbue_cloud.slices.bare_metal import count_slice_resource_names
+from imbue.mngr_imbue_cloud.slices.bare_metal import find_server_capacity_by_id
+from imbue.mngr_imbue_cloud.slices.bare_metal import is_slice_owned_by_env
 from imbue.mngr_imbue_cloud.slices.bare_metal import is_valid_status_transition
 from imbue.mngr_imbue_cloud.slices.bare_metal import next_server_status
-from imbue.mngr_imbue_cloud.slices.bare_metal import partition_port_range
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_disk_name
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
+from imbue.mngr_imbue_cloud.slices.bare_metal import slice_name_env_owner
 
 
-def _server(status: str, slot_count: int = 8) -> BareMetalServer:
+def _server(
+    status: str,
+    slot_count: int = 8,
+    server_id: str = "11111111-1111-1111-1111-111111111111",
+) -> BareMetalServer:
     now = datetime.now(timezone.utc)
     return BareMetalServer(
-        id=BareMetalServerDbId("11111111-1111-1111-1111-111111111111"),
+        id=BareMetalServerDbId(server_id),
         plan_code="24rise02-v1-us",
         region="vin",
         slot_count=slot_count,
@@ -151,50 +157,52 @@ def test_slice_lima_names_are_deterministic_and_distinct() -> None:
     assert host_id.get_uuid().hex in slice_lima_instance_name(host_id)
 
 
-def test_allocate_slice_ports_returns_two_lowest_free_ports() -> None:
-    first, second = allocate_slice_ports(used_ports={22000, 22001}, port_range_start=22000, port_range_end=22010)
-    assert (first, second) == (22002, 22003)
-    assert first != second
+def test_slice_lima_names_stamp_the_env_and_keep_the_host_hex() -> None:
+    host_id = HostId.generate()
+    stamped = slice_lima_instance_name(host_id, "dev-josh-foo")
+    legacy = slice_lima_instance_name(host_id)
+    assert stamped == f"mngr-slice-dev-josh-foo-{host_id.get_uuid().hex}"
+    assert legacy == f"mngr-slice-{host_id.get_uuid().hex}"
+    # The disk name is the instance name plus the data suffix, for both forms.
+    assert slice_lima_disk_name(host_id, "dev-josh-foo") == f"{stamped}-data"
+    assert slice_lima_disk_name(host_id) == f"{legacy}-data"
 
 
-def test_allocate_slice_ports_raises_when_fewer_than_two_free() -> None:
-    with pytest.raises(SliceCapacityError):
-        allocate_slice_ports(used_ports={22000}, port_range_start=22000, port_range_end=22002)
+def test_slice_name_env_owner_distinguishes_stamped_legacy_and_non_slice() -> None:
+    host_id = HostId.generate()
+    assert slice_name_env_owner(slice_lima_instance_name(host_id, "dev-josh-foo")) == "dev-josh-foo"
+    # The env owner is recoverable from the disk name too (the data suffix is stripped).
+    assert slice_name_env_owner(slice_lima_disk_name(host_id, "dev-josh-foo")) == "dev-josh-foo"
+    # Legacy (un-stamped) and non-slice names have no env owner.
+    assert slice_name_env_owner(slice_lima_instance_name(host_id)) is None
+    assert slice_name_env_owner("default") is None
+    assert slice_name_env_owner("some-other-vm") is None
 
 
-def test_allocate_slice_ports_rejects_empty_range() -> None:
-    with pytest.raises(BareMetalConfigError):
-        allocate_slice_ports(used_ports=set(), port_range_start=22000, port_range_end=22000)
+def test_is_slice_owned_by_env_only_matches_exact_env_stamp() -> None:
+    host_id = HostId.generate()
+    mine = slice_lima_instance_name(host_id, "dev-josh-foo")
+    theirs = slice_lima_instance_name(host_id, "dev-alice-bar")
+    legacy = slice_lima_instance_name(host_id)
+    assert is_slice_owned_by_env(mine, "dev-josh-foo") is True
+    assert is_slice_owned_by_env(theirs, "dev-josh-foo") is False
+    assert is_slice_owned_by_env(legacy, "dev-josh-foo") is False
 
 
-def test_partition_port_range_gives_disjoint_covering_windows() -> None:
-    windows = [partition_port_range(22000, 32000, 4, idx) for idx in range(4)]
-    # Each window holds plenty of ports for a slice's two forwards.
-    for start, end in windows:
-        assert end - start >= 2
-    # Windows are disjoint and ordered (no two concurrent bakes share a port).
-    for (_, prev_end), (next_start, _) in zip(windows, windows[1:], strict=False):
-        assert next_start >= prev_end
-    # The last window absorbs the remainder so the whole range is covered.
-    assert windows[0][0] == 22000
-    assert windows[-1][1] == 32000
-
-
-def test_partition_port_range_single_partition_is_the_whole_range() -> None:
-    assert partition_port_range(22000, 32000, 1, 0) == (22000, 32000)
-
-
-def test_partition_port_range_rejects_window_too_small_for_a_slice() -> None:
-    # 3 ports across 2 partitions -> 1 port each, too few for a slice's two forwards.
-    with pytest.raises(SliceCapacityError):
-        partition_port_range(22000, 22003, 2, 0)
-
-
-def test_partition_port_range_rejects_bad_index_and_count() -> None:
-    with pytest.raises(BareMetalConfigError):
-        partition_port_range(22000, 32000, 0, 0)
-    with pytest.raises(BareMetalConfigError):
-        partition_port_range(22000, 32000, 4, 4)
+def test_count_slice_resource_names_counts_all_slices_regardless_of_stamp() -> None:
+    host_a = HostId.generate()
+    host_b = HostId.generate()
+    # A mix of this env's slice, another env's slice, a legacy un-stamped slice, and
+    # two non-slice disks.
+    names = {
+        slice_lima_disk_name(host_a, "dev-josh-foo"),
+        slice_lima_disk_name(host_b, "dev-alice-bar"),
+        slice_lima_disk_name(HostId.generate()),
+        "default",
+        "some-other-disk",
+    }
+    # True box occupancy is every slice (every env + legacy), excluding non-slice disks.
+    assert count_slice_resource_names(names) == 3
 
 
 def test_next_server_status_walks_the_forward_chain() -> None:
@@ -242,35 +250,62 @@ def test_compute_capacity_rejects_negative_used() -> None:
         compute_capacity(_server(SERVER_STATUS_READY), used_slots=-1)
 
 
-def test_choose_server_for_new_slice_picks_most_free_ready_server() -> None:
-    nearly_full = compute_capacity(_server(SERVER_STATUS_READY, slot_count=8), used_slots=7)
-    roomy = compute_capacity(_server(SERVER_STATUS_READY, slot_count=16), used_slots=2)
-    chosen = choose_server_for_new_slice([nearly_full, roomy])
+def test_find_server_capacity_by_id_returns_the_matching_server() -> None:
+    target_id = BareMetalServerDbId("22222222-2222-2222-2222-222222222222")
+    other = compute_capacity(_server(SERVER_STATUS_READY, slot_count=8), used_slots=1)
+    target = compute_capacity(_server(SERVER_STATUS_READY, slot_count=16, server_id=str(target_id)), used_slots=2)
+    chosen = find_server_capacity_by_id([other, target], target_id)
+    assert chosen.server.id == target_id
     assert chosen.free_slots == 14
 
 
-def test_choose_server_for_new_slice_ignores_non_ready_and_full_servers() -> None:
-    installing = compute_capacity(_server(SERVER_STATUS_INSTALLING, slot_count=16), used_slots=0)
-    full_ready = compute_capacity(_server(SERVER_STATUS_READY, slot_count=8), used_slots=8)
+def test_find_server_capacity_by_id_raises_when_absent() -> None:
+    only = compute_capacity(_server(SERVER_STATUS_READY, slot_count=8), used_slots=0)
     with pytest.raises(SliceCapacityError):
-        choose_server_for_new_slice([installing, full_ready])
+        find_server_capacity_by_id([only], BareMetalServerDbId("99999999-9999-9999-9999-999999999999"))
 
 
-def test_compute_orphan_slice_instance_names_returns_untracked_slice_vms() -> None:
-    # On-box VMs not present in the DB (and only slice-prefixed ones) are orphans.
-    box = {"mngr-slice-aaa", "mngr-slice-bbb", "mngr-slice-ccc"}
-    tracked = {"mngr-slice-aaa"}
-    assert compute_orphan_slice_instance_names(box, tracked) == {"mngr-slice-bbb", "mngr-slice-ccc"}
+def test_compute_orphan_slice_instance_names_returns_this_envs_untracked_slice_vms() -> None:
+    # This env's on-box VMs not present in the DB are orphans.
+    aaa = slice_lima_instance_name(HostId.generate(), "dev-josh")
+    bbb = slice_lima_instance_name(HostId.generate(), "dev-josh")
+    ccc = slice_lima_instance_name(HostId.generate(), "dev-josh")
+    box = {aaa, bbb, ccc}
+    tracked = {aaa}
+    assert compute_orphan_slice_instance_names(box, tracked, "dev-josh") == {bbb, ccc}
 
 
-def test_compute_orphan_slice_instance_names_ignores_non_slice_vms() -> None:
-    # A non-slice lima VM on the box must never be considered an orphan to reap.
-    box = {"some-other-vm", "default", "mngr-slice-bbb"}
+def test_compute_orphan_slice_instance_names_never_touches_other_envs_or_legacy() -> None:
+    # Another env's slice, a legacy un-stamped slice, and a non-slice VM must never
+    # be considered orphans of this env -- this is what makes box sharing safe.
+    mine = slice_lima_instance_name(HostId.generate(), "dev-josh")
+    theirs = slice_lima_instance_name(HostId.generate(), "dev-alice")
+    legacy = slice_lima_instance_name(HostId.generate())
+    box = {mine, theirs, legacy, "some-other-vm", "default"}
     tracked: set[str] = set()
-    assert compute_orphan_slice_instance_names(box, tracked) == {"mngr-slice-bbb"}
+    assert compute_orphan_slice_instance_names(box, tracked, "dev-josh") == {mine}
 
 
 def test_compute_orphan_slice_instance_names_empty_when_all_tracked() -> None:
-    box = {"mngr-slice-aaa", "mngr-slice-bbb"}
-    tracked = {"mngr-slice-aaa", "mngr-slice-bbb", "mngr-slice-ccc"}
-    assert compute_orphan_slice_instance_names(box, tracked) == set()
+    aaa = slice_lima_instance_name(HostId.generate(), "dev-josh")
+    bbb = slice_lima_instance_name(HostId.generate(), "dev-josh")
+    box = {aaa, bbb}
+    tracked = {aaa, bbb, slice_lima_instance_name(HostId.generate(), "dev-josh")}
+    assert compute_orphan_slice_instance_names(box, tracked, "dev-josh") == set()
+
+
+def test_compute_orphan_slice_disk_names_returns_this_envs_untracked_slice_disks() -> None:
+    aaa = slice_lima_disk_name(HostId.generate(), "dev-josh")
+    bbb = slice_lima_disk_name(HostId.generate(), "dev-josh")
+    box = {aaa, bbb}
+    tracked = {aaa}
+    assert compute_orphan_slice_disk_names(box, tracked, "dev-josh") == {bbb}
+
+
+def test_compute_orphan_slice_disk_names_never_touches_other_envs_or_legacy() -> None:
+    mine = slice_lima_disk_name(HostId.generate(), "dev-josh")
+    theirs = slice_lima_disk_name(HostId.generate(), "dev-alice")
+    legacy = slice_lima_disk_name(HostId.generate())
+    box = {mine, theirs, legacy, "some-other-disk"}
+    tracked: set[str] = set()
+    assert compute_orphan_slice_disk_names(box, tracked, "dev-josh") == {mine}

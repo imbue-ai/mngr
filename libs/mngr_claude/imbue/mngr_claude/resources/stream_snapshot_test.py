@@ -398,7 +398,7 @@ def test_run_one_poll_idle_from_idle_does_no_work(tmp_path: Path) -> None:
     transcript_path = tmp_path / "events.jsonl"
 
     is_active = stream_snapshot._run_one_poll(
-        "dummy-session", state, active_path, transcript_path, buffer_path, was_active=False
+        "dummy-session", "agent", state, active_path, transcript_path, buffer_path, was_active=False
     )
 
     assert is_active is False
@@ -425,10 +425,19 @@ def test_run_one_poll_active_to_idle_clears_buffer_once(tmp_path: Path) -> None:
     )
 
     is_active = stream_snapshot._run_one_poll(
-        "dummy-session", state, active_path, transcript_path, buffer_path, was_active=True
+        "dummy-session", "agent", state, active_path, transcript_path, buffer_path, was_active=True
     )
 
     assert is_active is False
     # Body cleared (accumulator reset), id line pinned to the final message.
     assert buffer_path.read_text(encoding="utf-8") == "a2"
     assert state.body_lines == []
+
+
+def test_agent_pane_target_addresses_window_by_name() -> None:
+    """The pane is targeted by the primary window name (not the literal :0 index), with
+    the `=` exact-match prefix, so capture is correct regardless of the user's base-index."""
+    assert stream_snapshot._agent_pane_target("mngr-my-agent", "agent") == "=mngr-my-agent:agent"
+    target = stream_snapshot._agent_pane_target("mngr-my-agent", "primary")
+    assert target == "=mngr-my-agent:primary"
+    assert ":0" not in target

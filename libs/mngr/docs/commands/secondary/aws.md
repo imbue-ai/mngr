@@ -61,6 +61,7 @@ mngr aws cleanup [OPTIONS]
 | `--region` | text | AWS region. Defaults to the resolved provider config's default_region. | None |
 | `--sg-name` | text | Security group name to delete. Defaults to the provider config's SG name. | None |
 | `--vpc-id` | text | VPC id to scope the SG lookup. Without this, multi-VPC name collisions raise. | None |
+| `--force` | boolean | Also delete the state bucket when it still holds offline host state left over from hosts that no longer exist as instances (otherwise cleanup refuses to delete a non-empty bucket). | `False` |
 
 ## Common
 

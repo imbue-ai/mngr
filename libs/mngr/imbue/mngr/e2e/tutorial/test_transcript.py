@@ -96,6 +96,8 @@ _SAMPLE_TRANSCRIPT_EVENTS: list[dict[str, Any]] = [
         "role": "assistant",
         "text": "ASSISTANT_MESSAGE_MARKER on it",
         "tool_calls": [],
+        "parts": [{"type": "text", "content": "ASSISTANT_MESSAGE_MARKER on it"}],
+        "parts_ordered": True,
         "model": "test-model",
     },
     {
@@ -179,10 +181,8 @@ def test_transcript_default(e2e: E2eSession) -> None:
     )
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
 def test_transcript_assistant_only(e2e: E2eSession, temp_host_dir: Path) -> None:
     e2e.write_tutorial_block("""
         # view only assistant messages

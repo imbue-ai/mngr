@@ -151,9 +151,9 @@ Providers already raise typed exceptions. Each `destroy_host` (and `destroy_agen
 | Docker `container.remove(force=True)` | `docker.errors.NotFound` / container `None` | `HOST_RESOURCE_REMAINS` |
 | Docker `images.remove(tag)` | image-tag-absent (list check empty) | `HOST_RESOURCE_REMAINS` |
 | Modal `volume_delete` | `ModalProxyNotFoundError` | `HOST_RESOURCE_REMAINS` |
-| VPS-Docker `remove_container` / `remove_volume` / `delete_btrfs_subvolume` | not-found (currently a swallowed `MngrError` warning -> needs a typed/inspected "absent" signal) | `HOST_RESOURCE_REMAINS` |
-| VPS-Docker `vps_client.destroy_instance` | instance-already-gone (provider 404) | `HOST_RESOURCE_REMAINS` (a leaked paid instance is the worst case) |
-| VPS-Docker `vps_client.delete_ssh_key` | key-already-deleted | `HOST_RESOURCE_REMAINS` (leaked credential) |
+| VPS `remove_container` / `remove_volume` / `delete_btrfs_subvolume` (container realizer only) | already-gone (helpers `tolerate_missing` / `-f` no-op on absent, so a raised `MngrError` means the resource is present but could not be removed) | `HOST_RESOURCE_REMAINS` |
+| VPS `vps_client.destroy_instance` | instance-already-gone (provider 404/410) | `HOST_RESOURCE_REMAINS` (a leaked paid instance is the worst case) |
+| VPS `vps_client.delete_ssh_key` | key-already-deleted | `HOST_RESOURCE_REMAINS` (leaked credential) |
 | Lima `limactl_delete` / `limactl_disk_delete` | VM/disk-already-gone (`LimaCommandError` with not-found text) | `HOST_RESOURCE_REMAINS` |
 | `remove_host_from_known_hosts` | `FileNotFoundError` | benign always (cosmetic local file) |
 | `_host_store.write_host_record` (mark DESTROYED) | -- | `OTHER` (record not updated; state inconsistency) |
@@ -162,7 +162,7 @@ Providers already raise typed exceptions. Each `destroy_host` (and `destroy_agen
 | `provider.get_host` / host record lookup | -- | `PROVIDER_INACCESSIBLE` (`HostNotFoundError`, `ProviderUnavailableError`) |
 | `on_before_agent_destroy` / `on_destroy` hooks | -- | `OTHER` (plugin failure) |
 
-**Provider "absent" signals that are currently only a swallowed warning** (e.g. VPS-Docker `remove_container`/`remove_volume` raising a generic `MngrError`) must be made distinguishable. Preferred: have the underlying helper raise a typed not-found (or return a "was-absent" boolean). Where that is impractical this pass, fall back to stderr/message matching consistent with the shell-command approach, and note it.
+**Provider "absent" signals.** For the VPS family the container-specific teardown steps (`remove_container`/`remove_volume`/`delete_btrfs_subvolume`) live behind the realizer in `DockerRealizer.teardown_placement` (`libs/mngr_vps/imbue/mngr_vps/docker_realizer.py`); a BARE (`isolation=NONE`) host has no container/volume/btrfs to tear down, so `BareRealizer.teardown_placement` (`libs/mngr_vps/imbue/mngr_vps/bare_realizer.py`) is a no-op and these rows apply to the container realizer only. The "absent" signal is made distinguishable by the underlying helper rather than by message matching: `remove_container(..., tolerate_missing=True)`, `delete_btrfs_subvolume_on_outer`, and `remove_volume` (`docker volume rm -f`) each no-op on an already-gone resource, so any `MngrError` they raise means the resource is present but could not be removed -> `HOST_RESOURCE_REMAINS`. The provider-level `destroy_instance`/`delete_ssh_key` steps in `VpsProvider.destroy_host` (`libs/mngr_vps/imbue/mngr_vps/instance.py`) distinguish a benign provider 404/410 from a real failure via the module-level `is_vps_resource_already_gone` (`libs/mngr_vps/imbue/mngr_vps/instance.py`), applied through `attempt_cloud_resource_teardown`. The container realizer's `CleanupFailedGroup` is absorbed into the provider's destroy aggregate via `collect_cleanup_failures`.
 
 ## Execution model
 
@@ -177,7 +177,7 @@ This replaces the current fail-fast `raise_on_timeout` propagation. `raise_on_ti
 ### Destroy path
 
 - `Host.destroy_agent`: runs `on_destroy` hook, `stop_agents`, `rm -rf <state_dir>`, `remove_persisted_agent_data`, each best-effort with classification, all inside `collecting_cleanup_failures()`. `stop_agents` now raises its own `CleanupFailedGroup`; `destroy_agent` catches it and merges its `.failures` in via `collect_cleanup_failures` so the remaining steps still run. Raises the combined `CleanupFailedGroup` (or returns normally if clean).
-- Each provider `destroy_host`: wrap the body in `collecting_cleanup_failures()`, classify each step (benign typed-exception -> drop; real -> append a `CleanupFailure`), continue through all steps; the context manager raises the collected group on exit. This is the largest part of the change (7 providers: local, docker, ssh, modal, vps_docker, lima; vultr/ovh inherit vps_docker).
+- Each provider `destroy_host`: wrap the body in `collecting_cleanup_failures()`, classify each step (benign typed-exception -> drop; real -> append a `CleanupFailure`), continue through all steps; the context manager raises the collected group on exit. This is the largest part of the change (6 providers: local, docker, ssh, modal, vps, lima; vultr/ovh inherit vps). For the `vps` family the container-specific teardown is split into `DockerRealizer.teardown_placement` (which raises its own `CleanupFailedGroup`, absorbed by the provider), while `destroy_instance`/`delete_ssh_key` stay in `VpsProvider.destroy_host`.
 
 ### Orchestration (`execute_cleanup` / `_execute_stop` / `_execute_destroy`)
 
@@ -212,7 +212,7 @@ This replaces the current fail-fast `raise_on_timeout` propagation. `raise_on_ti
 
 ## Open questions / risks
 
-- **VPS-Docker absent-signal:** several VPS-Docker destroy steps currently raise a generic `MngrError` for both "already gone" and real errors. Cleanly classifying them as benign may require threading a typed not-found through `remove_container`/`remove_volume`/`delete_btrfs_subvolume`. If that is out of scope for one pass, the fallback is message-matching, flagged in code.
+- **VPS absent-signal:** the VPS-family container destroy steps (`remove_container`/`remove_volume`/`delete_btrfs_subvolume`, now in `DockerRealizer.teardown_placement`) avoid the "is this `MngrError` already-gone or real?" ambiguity by relying on no-op-on-missing helper semantics (`tolerate_missing`, `docker volume rm -f`) so that any raised error means a present resource that could not be removed. Note also `ContainerSetupError` (`libs/mngr_vps/imbue/mngr_vps/errors.py`), an `MngrError` subtype wrapping outer-host docker/snapshot `ConcurrencyExceptionGroup`/`ProcessError` failures, which keeps those failures catchable by the typed-exception classification path.
 - **Severity order** is a judgment call (confirmed with the user: infra > processes > local-state > timeout > inaccessible > other). Encoded in one place (`exit_code_for_failures`) so it is easy to change.
-- **Scope size:** touching 7 providers' `destroy_host` is the bulk of the work and the main risk; each provider's "already gone" detection must be verified against its SDK's actual exception types.
+- **Scope size:** touching 6 providers' `destroy_host` is the bulk of the work and the main risk; each provider's "already gone" detection must be verified against its SDK's actual exception types.
 - **`stopped_agents` accounting** for partially-failed stops: an agent with a `PROCESSES_REMAIN` failure is still listed as `stopped` (we acted on it) but with a recorded failure. This is intentional; revisit if it proves confusing.

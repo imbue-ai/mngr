@@ -3,12 +3,12 @@ from typing import Final
 
 from imbue.mngr.primitives import HostId
 
-# Path on every mngr_vps_docker-baked outer where the per-host btrfs loop
-# filesystem is mounted (matches ``VpsDockerProviderConfig.btrfs_mount_path``
+# Path on every mngr_vps-baked outer where the per-host btrfs loop
+# filesystem is mounted (matches ``VpsProviderConfig.btrfs_mount_path``
 # default). The per-host subvolume is at ``<this>/<host_id_hex>``.
 _VPS_BTRFS_MOUNT_PATH: Final[str] = "/mngr-btrfs"
 
-# Container label that mngr_vps_docker tags the workspace container with;
+# Container label that mngr_vps tags the workspace container with;
 # also used as ``docker volume`` -name search prefix (the bind-options volume
 # is named ``mngr-host-vol-<host_id_hex>``).
 _LABEL_HOST_ID_KEY: Final[str] = "com.imbue.mngr.host-id"

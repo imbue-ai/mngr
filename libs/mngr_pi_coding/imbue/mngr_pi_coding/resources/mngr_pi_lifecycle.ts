@@ -213,6 +213,37 @@ function toolCallsFromContent(content: ContentBlock[] | undefined): Array<Record
   return calls;
 }
 
+// Ordered text/tool_call segments of an assistant turn, preserving the source
+// interleaving (unlike the flat text + tool_calls split). Unknown block types
+// (thinking, image, ...) carry no transcript-visible content and are skipped.
+function partsFromContent(content: ContentBlock[] | undefined): Array<Record<string, unknown>> {
+  if (!Array.isArray(content)) {
+    return [];
+  }
+  const parts: Array<Record<string, unknown>> = [];
+  for (const block of content) {
+    if (block == null) {
+      continue;
+    }
+    const blockType = (block as ContentBlock).type;
+    if (blockType === "text") {
+      const text = (block as TextBlock).text;
+      if (text) {
+        parts.push({ type: "text", content: text });
+      }
+    } else if (blockType === "toolCall") {
+      const call = block as ToolCallBlock;
+      parts.push({
+        type: "tool_call",
+        tool_call_id: call.id,
+        tool_name: call.name,
+        input_preview: truncate(JSON.stringify(call.arguments ?? {}), INPUT_PREVIEW_LIMIT),
+      });
+    }
+  }
+  return parts;
+}
+
 // --- Extension. -------------------------------------------------------------
 
 export default function mngrPiLifecycle(pi: PiApi): void {
@@ -479,7 +510,9 @@ export function toCommonRecord(
       model: assistant.model ?? "",
       text: textFromContent(assistant.content),
       tool_calls: toolCallsFromContent(assistant.content),
-      stop_reason: assistant.stopReason ?? "",
+      parts: partsFromContent(assistant.content),
+      parts_ordered: true,
+      finish_reason: assistant.stopReason ?? "",
       usage: {
         input_tokens: usage.input ?? null,
         output_tokens: usage.output ?? null,

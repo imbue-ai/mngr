@@ -1,6 +1,6 @@
 # imbue-mngr-modal
 
-Modal provider backend plugin for [mngr](../mngr/README.md).
+Modal provider backend plugin for [mngr](https://github.com/imbue-ai/mngr).
 
 This plugin enables mngr to create and manage agents running in [Modal](https://modal.com) cloud sandboxes. Each sandbox runs sshd and is accessed via SSH, just like any other mngr host.
 

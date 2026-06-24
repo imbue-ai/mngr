@@ -136,7 +136,7 @@ def get_vps_resource(client: OvhVpsClient, urn: str) -> IamResource | None:
 def parse_extra_tags_env(raw: str) -> dict[str, str]:
     """Parse the ``MNGR_VPS_EXTRA_TAGS`` env var into a tag dict.
 
-    Mirrors ``mngr_vps_docker.build_vps_tags``'s splitting contract
+    Mirrors ``mngr_vps.build_vps_tags``'s splitting contract
     (comma-separated, strip whitespace, drop blank entries) but enforces
     OVH IAM v2 semantics:
 

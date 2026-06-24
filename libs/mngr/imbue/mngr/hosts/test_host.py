@@ -484,65 +484,63 @@ def test_lock_timeout(host_with_temp_dir: tuple[Host, Path]) -> None:
 
 @pytest.mark.acceptance
 @pytest.mark.timeout(30)
-def test_remote_lock_cooperatively_removes_lock_file_on_error(
+def test_remote_lock_cooperatively_releases_lock_on_error(
     ssh_host_factory: Callable[[str], Host],
 ) -> None:
-    """Remote host lock_cooperatively should remove the lock file when an error occurs."""
+    """On error, the remote flock releases (so the host can idle-shut-down)."""
     host = ssh_host_factory("lock-err-cleanup")
     assert not host.is_local
-    lock_file_path = host.host_dir / "host_lock"
 
     with pytest.raises(RuntimeError):
         with host.lock_cooperatively(timeout_seconds=5.0):
-            # Verify the lock file was created
-            result = host.execute_idempotent_command(f"test -f '{lock_file_path}' && echo exists")
-            assert "exists" in result.stdout
+            # The lock is held while inside the block.
+            assert host.is_lock_held() is True
             raise RuntimeError("simulated failure")
 
-    # After the error, the lock file should have been removed
-    result = host.execute_idempotent_command(f"test -f '{lock_file_path}' && echo exists || echo missing")
-    assert "missing" in result.stdout
+    # After the error (without the debug flag), the lock is no longer held.
+    assert host.is_lock_held() is False
 
 
 @pytest.mark.acceptance
 @pytest.mark.timeout(30)
-def test_remote_lock_cooperatively_retains_lock_file_on_error_when_env_var_set(
+def test_remote_lock_cooperatively_retains_lock_on_error_when_env_var_set(
     ssh_host_factory: Callable[[str], Host],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Remote host lock_cooperatively should retain the lock file on error when MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1."""
+    """With the debug flag, a detached holder keeps the flock held after an error."""
     monkeypatch.setenv("MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE", "1")
     host = ssh_host_factory("lock-err-retain")
     assert not host.is_local
-    lock_file_path = host.host_dir / "host_lock"
 
     with pytest.raises(RuntimeError):
         with host.lock_cooperatively(timeout_seconds=5.0):
             raise RuntimeError("simulated failure")
 
-    # With the env var set, the lock file should still exist
-    result = host.execute_idempotent_command(f"test -f '{lock_file_path}' && echo exists || echo missing")
-    assert "exists" in result.stdout
+    # The detached holder re-acquires the flock after our channel releases it, so
+    # the lock remains held (the failed host will not idle-shut-down).
+    wait_for(
+        host.is_lock_held,
+        timeout=10.0,
+        poll_interval=0.2,
+        error_message="detached debug holder never re-acquired the lock",
+    )
 
 
 @pytest.mark.acceptance
 @pytest.mark.timeout(30)
-def test_remote_lock_cooperatively_removes_lock_file_on_success(
+def test_remote_lock_cooperatively_releases_lock_on_success(
     ssh_host_factory: Callable[[str], Host],
 ) -> None:
-    """Remote host lock_cooperatively should remove the lock file on successful exit."""
+    """On success, the remote flock releases when the block exits."""
     host = ssh_host_factory("lock-success")
     assert not host.is_local
-    lock_file_path = host.host_dir / "host_lock"
 
     with host.lock_cooperatively(timeout_seconds=5.0):
-        # Lock file should exist while locked
-        result = host.execute_idempotent_command(f"test -f '{lock_file_path}' && echo exists")
-        assert "exists" in result.stdout
+        # The lock is held while inside the block.
+        assert host.is_lock_held() is True
 
-    # After successful exit, the lock file should be removed
-    result = host.execute_idempotent_command(f"test -f '{lock_file_path}' && echo exists || echo missing")
-    assert "missing" in result.stdout
+    # After a clean exit, the lock is no longer held.
+    assert host.is_lock_held() is False
 
 
 # =============================================================================

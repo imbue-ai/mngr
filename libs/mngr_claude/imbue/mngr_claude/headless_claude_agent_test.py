@@ -26,7 +26,7 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_claude.headless_claude_agent import HeadlessClaude
 from imbue.mngr_claude.headless_claude_agent import HeadlessClaudeAgentConfig
-from imbue.mngr_claude.plugin import ClaudeAgent
+from imbue.mngr_claude.plugin import ClaudeCoreAgent
 
 # =============================================================================
 # MRO invariant test
@@ -34,14 +34,15 @@ from imbue.mngr_claude.plugin import ClaudeAgent
 
 
 def test_headless_claude_resolves_all_shared_method_conflicts() -> None:
-    """Ensure HeadlessClaude explicitly resolves any method defined on both ClaudeAgent and BaseHeadlessAgent.
+    """Ensure HeadlessClaude explicitly resolves any method defined on both ClaudeCoreAgent and BaseHeadlessAgent.
 
-    HeadlessClaude has diamond inheritance: it extends both
-    NoPermissionsClaudeAgent (-> ClaudeAgent -> BaseAgent) and
-    BaseHeadlessAgent (-> BaseAgent). When both ClaudeAgent and
-    BaseHeadlessAgent define the same method, the MRO silently picks
-    ClaudeAgent's version (which appears first). HeadlessClaude must
-    explicitly override any such method to select the correct behavior.
+    HeadlessClaude has diamond inheritance: ``HeadlessClaude(ClaudeCoreAgent,
+    BaseHeadlessAgent)``, both descending from BaseAgent. When both
+    ClaudeCoreAgent and BaseHeadlessAgent define the same method, the MRO
+    silently picks ClaudeCoreAgent's version (it appears first). HeadlessClaude
+    must explicitly override any such method so the choice is deliberate rather
+    than accidental. (The interactive TUI ClaudeAgent is not in HeadlessClaude's
+    MRO post-split, so its TUI-only methods are not part of this diamond.)
     """
 
     def _callable_method_names(cls: type) -> set[str]:
@@ -52,18 +53,18 @@ def test_headless_claude_resolves_all_shared_method_conflicts() -> None:
         }
 
     base_headless_methods = _callable_method_names(BaseHeadlessAgent)
-    claude_methods = _callable_method_names(ClaudeAgent)
+    core_methods = _callable_method_names(ClaudeCoreAgent)
     headless_claude_methods = _callable_method_names(HeadlessClaude)
 
     # Methods defined on both sides of the diamond
-    shared = base_headless_methods & claude_methods
+    shared = base_headless_methods & core_methods
 
     # HeadlessClaude must explicitly override every shared method
     unresolved = shared - headless_claude_methods
     assert not unresolved, (
-        f"BaseHeadlessAgent and ClaudeAgent both define these methods, but HeadlessClaude "
+        f"BaseHeadlessAgent and ClaudeCoreAgent both define these methods, but HeadlessClaude "
         f"does not explicitly override them: {unresolved}. Without an explicit override on "
-        f"HeadlessClaude, the MRO silently picks ClaudeAgent's version. Add overrides to "
+        f"HeadlessClaude, the MRO silently picks ClaudeCoreAgent's version. Add overrides to "
         f"HeadlessClaude that delegate to the correct base class."
     )
 
@@ -689,7 +690,8 @@ def test_stream_output_surfaces_pane_capture_when_files_missing(
 
     # Start a session that immediately prints error text and exits.
     # Using a command argument to new-session ensures the text is in the
-    # pane buffer without needing send-keys + sleep.
+    # pane buffer without needing send-keys + sleep. The primary window is named
+    # so it matches agent.tmux_target (which targets the window by name).
     subprocess.run(
         [
             "tmux",
@@ -697,6 +699,8 @@ def test_stream_output_surfaces_pane_capture_when_files_missing(
             "-d",
             "-s",
             session,
+            "-n",
+            agent.mngr_ctx.config.tmux.primary_window_name,
             "-x",
             "200",
             "-y",

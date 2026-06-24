@@ -2,7 +2,6 @@
 
 import pytest
 
-from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import UnknownBackendError
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.providers.docker.config import DockerProviderConfig
@@ -37,22 +36,6 @@ def test_local_provider_config_default_backend() -> None:
     assert config.backend == ProviderBackendName("local")
 
 
-def test_local_provider_config_merge_with_returns_override_backend() -> None:
-    """LocalProviderConfig.merge_with should return override's backend."""
-    base = LocalProviderConfig(backend=ProviderBackendName("local"))
-    override = LocalProviderConfig(backend=ProviderBackendName("local"))
-    merged = base.merge_with(override)
-    assert merged.backend == ProviderBackendName("local")
-
-
-def test_local_provider_config_merge_with_raises_for_different_type() -> None:
-    """LocalProviderConfig.merge_with should raise for different config type."""
-    base = LocalProviderConfig()
-    override = DockerProviderConfig(isolate_host_volumes=False)
-    with pytest.raises(ConfigParseError, match="Cannot merge LocalProviderConfig"):
-        base.merge_with(override)
-
-
 # =============================================================================
 # Tests for DockerProviderConfig
 # =============================================================================
@@ -63,20 +46,3 @@ def test_docker_provider_config_default_values() -> None:
     config = DockerProviderConfig(isolate_host_volumes=False)
     assert config.backend == ProviderBackendName("docker")
     assert config.host == ""
-
-
-def test_docker_provider_config_merge_with_overrides_host() -> None:
-    """DockerProviderConfig.merge_with should override host."""
-    base = DockerProviderConfig(host="ssh://base@server", isolate_host_volumes=False)
-    override = DockerProviderConfig(host="ssh://override@server", isolate_host_volumes=False)
-    merged = base.merge_with(override)
-    assert isinstance(merged, DockerProviderConfig)
-    assert merged.host == "ssh://override@server"
-
-
-def test_docker_provider_config_merge_with_raises_for_different_type() -> None:
-    """DockerProviderConfig.merge_with should raise for different config type."""
-    base = DockerProviderConfig(isolate_host_volumes=False)
-    override = LocalProviderConfig()
-    with pytest.raises(ConfigParseError, match="Cannot merge DockerProviderConfig"):
-        base.merge_with(override)

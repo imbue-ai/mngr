@@ -21,6 +21,19 @@ from imbue.mngr_imbue_cloud.primitives import R2BucketAccess
 from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
 
 
+class SliceTeardownTarget(FrozenModel):
+    """A slice pool host to tear down: its lima resources and the box that hosts them."""
+
+    pool_host_row_id: str = Field(description="The pool_hosts row id (deleted after the VM is torn down)")
+    lima_instance_name: str = Field(description="The slice's lima instance name on the box")
+    lima_disk_name: str | None = Field(default=None, description="The slice's lima data-disk name, if recorded")
+    box_public_address: str = Field(description="SSH-reachable address of the bare-metal box hosting the slice")
+    lima_service_user: str = Field(description="The box's non-root lima user that owns the VMs")
+    box_host_public_key: str | None = Field(
+        default=None, description="The box's sshd host public key, pinned for the teardown SSH"
+    )
+
+
 class PaidListEntry(FrozenModel):
     """One row of a connector paid-list table (a domain or an email).
 
@@ -185,6 +198,20 @@ class LeaseResult(FrozenModel):
     host_id: str = Field(description="Pre-baked mngr host id")
     host_name: str = Field(description="User-chosen friendly name for the leased host")
     attributes: dict[str, Any] = Field(default_factory=dict, description="Attributes the row was matched against")
+    outer_host_public_key: str | None = Field(
+        default=None,
+        description=(
+            "The VPS/VM-root sshd host public key (port ssh_port). Pinned for strict host-key "
+            "checking on the outer connection; None only against a connector too old to return it."
+        ),
+    )
+    container_host_public_key: str | None = Field(
+        default=None,
+        description=(
+            "The docker container sshd host public key (port container_ssh_port). Pinned for the "
+            "agent connection on the fast/adopt path; None only against a connector too old to return it."
+        ),
+    )
 
 
 class LeasedHostInfo(FrozenModel):
@@ -205,6 +232,12 @@ class LeasedHostInfo(FrozenModel):
     host_name: str = Field(description="User-chosen friendly name for the leased host")
     attributes: dict[str, Any] = Field(default_factory=dict)
     leased_at: str = Field(description="ISO-8601 timestamp")
+    outer_host_public_key: str | None = Field(
+        default=None, description="The VPS/VM-root sshd host public key, if known"
+    )
+    container_host_public_key: str | None = Field(
+        default=None, description="The docker container sshd host public key, if known"
+    )
 
 
 class AuthUser(FrozenModel):
@@ -335,6 +368,14 @@ class BareMetalServer(FrozenModel):
     slot_count: int = Field(description="Number of slices this box holds (floor(ram_gb / memory_per_slice_gb))")
     raid_level: str | None = Field(default=None, description="RAID level set at OS-install time (e.g. 'RAID1')")
     lima_service_user: str | None = Field(default=None, description="Non-root OS user that owns the box's lima VMs")
+    box_host_public_key: str | None = Field(
+        default=None,
+        description=(
+            "The box's sshd host public key (port 22), injected by us at OS reinstall so it is "
+            "deterministically known. Pinned by admin tooling, the lima slice client, and the connector's "
+            "slice teardown. None until set at provision (or by the one-time keyscan backfill)."
+        ),
+    )
     status: BareMetalServerStatus = Field(description="Lifecycle state: ordered/delivered/installing/ready/failed")
     created_at: datetime = Field(description="When the row was created")
     updated_at: datetime = Field(description="When the row was last updated")

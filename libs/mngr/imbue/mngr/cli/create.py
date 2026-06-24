@@ -66,6 +66,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
+from imbue.mngr.interfaces.agent import require_interactive_agent
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.host import AgentDataOptions
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
@@ -506,6 +507,19 @@ class _CreateCommand(click.Command):
     ),
 )
 @optgroup.option(
+    "--adopt",
+    "--adopt-session",
+    "adopt_session",
+    multiple=True,
+    help=(
+        "Adopt an existing session into this newly created agent so it resumes that conversation. "
+        "Accepts a session id or a path to the session file; a session id is searched across the "
+        "relevant user/config store, every live local mngr agent, and preserved sessions from "
+        "destroyed agents. Repeatable: every named session is copied in, and the last is resumed on "
+        "startup (unless combined with --from, in which case the source agent's session is resumed)."
+    ),
+)
+@optgroup.option(
     "--rsync/--no-rsync",
     default=None,
     help="Use rsync for file transfer [default: yes if rsync-args are present or if git is disabled]",
@@ -598,6 +612,14 @@ class _CreateCommand(click.Command):
     multiple=True,
     help="Shell command to run inside the new host after it is created, before any agent "
     "work_dir setup. Runs synchronously; non-zero exit aborts the create. [repeatable]",
+)
+@optgroup.option(
+    "--post-host-create-outer-command",
+    "post_host_create_outer_command",
+    multiple=True,
+    help="Shell command to run once on the host's outer machine (the underlying VM/daemon "
+    "host) after the host is created. Runs synchronously; non-zero exit aborts the create. "
+    "Skipped (with a warning) when the provider has no outer host. [repeatable]",
 )
 @optgroup.group("Host Lifecycle")
 @optgroup.option(
@@ -986,8 +1008,8 @@ def _create_agent(
                 with _editor_cleanup_scope(setup.editor_session):
                     if setup.editor_session is not None:
                         # Hold the host lock while waiting for the editor to prevent
-                        # idle shutdown during long editing sessions
-                        with host.lock_cooperatively():
+                        # idle shutdown during long editing sessions (block indefinitely)
+                        with host.lock_cooperatively(timeout_seconds=None):
                             _handle_editor_message(
                                 editor_session=setup.editor_session,
                                 agent=agent,
@@ -995,7 +1017,7 @@ def _create_agent(
                     elif setup.initial_message is not None:
                         # Send initial message directly (from --message or --message-file)
                         logger.info("Sending message to agent")
-                        agent.send_message(setup.initial_message)
+                        require_interactive_agent(agent).send_message(setup.initial_message)
                     else:
                         pass
 
@@ -1062,7 +1084,7 @@ def _create_agent(
         # rather than leaking it.
         if setup.editor_session is not None:
             with destroy_new_host_on_create_failure(create_result.host, new_host_provider):
-                with create_result.host.lock_cooperatively():
+                with create_result.host.lock_cooperatively(timeout_seconds=None):
                     _handle_editor_message(
                         editor_session=setup.editor_session,
                         agent=create_result.agent,
@@ -1106,7 +1128,7 @@ def _post_create(
     if opts.connect:
         resolved_connect_command = resolve_connect_command(opts.connect_command, mngr_ctx)
         if resolved_connect_command is not None:
-            session_name = f"{mngr_ctx.config.prefix}{create_result.agent.name}"
+            session_name = create_result.agent.session_name
             run_connect_command(
                 resolved_connect_command,
                 str(create_result.agent.name),
@@ -1230,7 +1252,7 @@ def _handle_editor_message(
             return
 
         logger.info("Sending edited message...")
-        agent.send_message(edited_message)
+        require_interactive_agent(agent).send_message(edited_message)
         logger.debug("Message sent successfully")
 
 
@@ -1692,6 +1714,7 @@ def _parse_agent_opts(
         label_options=label_options,
         provisioning=provisioning,
         tmux=tmux_options,
+        adopt_session=opts.adopt_session,
         source_agent_state_location=source_agent_state_location,
     )
     return agent_opts, has_explicit_base
@@ -1953,6 +1976,14 @@ def _build_create_result_data(result: CreateAgentResult) -> dict[str, Any]:
     outer_ssh_port = result.host.get_outer_ssh_port()
     if outer_ssh_port is not None:
         result_data["outer_ssh_port"] = outer_ssh_port
+    # Baked sshd host public keys (when the provider generates them at bake time),
+    # so pool-bake tooling can persist them for strict host-key pinning instead of
+    # scanning the host later.
+    outer_host_public_key, container_host_public_key = result.host.get_ssh_host_public_keys()
+    if outer_host_public_key is not None:
+        result_data["outer_host_public_key"] = outer_host_public_key
+    if container_host_public_key is not None:
+        result_data["container_host_public_key"] = container_host_public_key
     return result_data
 
 
@@ -1978,9 +2009,9 @@ _CREATE_HELP_METADATA = CommandHelpMetadata(
     key="create",
     one_line_description="Create and run an agent",
     synopsis="""mngr [create|c] [<ADDRESS>] [<AGENT_TYPE>] [-t <TEMPLATE>] [--new-host] [-w WINDOW_NAME=COMMAND]
-    [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--transfer <MODE>]
+    [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--adopt <SESSION>] [--transfer <MODE>]
     [--[no-]rsync] [--rsync-args <ARGS>] [--branch [BASE][:NEW]] [--[no-]ensure-clean]
-    [--snapshot <ID>] [-b <BUILD_ARG>] [-s <START_ARG>] [--post-host-create-command <COMMAND>]
+    [--snapshot <ID>] [-b <BUILD_ARG>] [-s <START_ARG>] [--post-host-create-command <COMMAND>] [--post-host-create-outer-command <COMMAND>]
     [--env <KEY=VALUE>] [--env-file <FILE>] [--pass-env <KEY>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
     [--idle-timeout <SECONDS>] [--idle-mode <MODE>] [--start-on-boot|--no-start-on-boot] [--reuse|--no-reuse]
     [--message <TEXT>] [--message-file <FILE>] [--edit-message]

@@ -7,17 +7,23 @@ The eco line (RISE/SYS/KS) is ordered through a different cart product than VPSe
 client-driven steps are exercised live against a real order.
 """
 
+import base64
 from collections import defaultdict
 from collections.abc import Mapping
 from collections.abc import Sequence
+from collections.abc import Set as AbstractSet
+from decimal import Decimal
 from typing import Any
 from typing import Final
 from urllib.parse import urlencode
 
 from loguru import logger
+from pydantic import Field
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
+from imbue.mngr.providers.ssh_utils import generate_ed25519_host_keypair
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_imbue_cloud.errors import BareMetalConfigError
 from imbue.mngr_imbue_cloud.errors import BareMetalProvisioningError
@@ -25,7 +31,7 @@ from imbue.mngr_imbue_cloud.slices.pricing import compute_storage_usable_gb
 from imbue.mngr_imbue_cloud.slices.pricing import describe_storage_raid_level
 from imbue.mngr_imbue_cloud.slices.pricing import parse_memory_gb
 from imbue.mngr_ovh.client import OvhVpsClient
-from imbue.mngr_vps_docker.errors import VpsApiError
+from imbue.mngr_vps.errors import VpsApiError
 
 # Month-to-month eco order: no commitment, monthly renewal, one server.
 ECO_PRICING_MODE: Final[str] = "default"
@@ -53,62 +59,123 @@ _TERMINAL_TASK_STATUSES: Final[frozenset[str]] = frozenset({"done", "ovhError", 
 
 
 @pure
+def _eco_option_monthly_price(option: Mapping[str, Any]) -> Decimal | None:
+    """Return an eco option's month-to-month recurring price (the cart's pricingMode + duration), or None.
+
+    The eco-options payload carries a ``prices`` list per offer; we read the price for the SAME
+    ``pricingMode`` / ``duration`` the cart is built with so "cheapest" compares like-for-like monthly
+    cost. Returns None when no matching priced entry is present (so the caller can treat it as
+    not-comparable rather than free).
+    """
+    for price_entry in option.get("prices") or []:
+        if price_entry.get("pricingMode") == ECO_PRICING_MODE and price_entry.get("duration") == ECO_DURATION:
+            value = (price_entry.get("price") or {}).get("value")
+            if value is not None:
+                return Decimal(str(value))
+    return None
+
+
+@pure
+def _format_eco_offers(family_options: Sequence[Mapping[str, Any]]) -> str:
+    """Render a family's offers as ``planCode ($X/mo)`` entries (cheapest first) for an error message."""
+    described: list[tuple[Decimal, str]] = []
+    for option in family_options:
+        price = _eco_option_monthly_price(option)
+        price_text = f"${price}/mo" if price is not None else "price n/a"
+        sort_key = price if price is not None else Decimal("Infinity")
+        described.append((sort_key, f"{option['planCode']} ({price_text})"))
+    return ", ".join(text for _sort_key, text in sorted(described, key=lambda item: item[0]))
+
+
+@pure
+def _resolve_explicit_option_for_family(
+    family: str,
+    family_options: Sequence[Mapping[str, Any]],
+    explicit_option_codes: AbstractSet[str],
+) -> str:
+    """Resolve the chosen planCode for one multi-offer mandatory family from the operator's explicit choices.
+
+    Requires exactly one of the family's offers to appear in ``explicit_option_codes`` -- we never pick
+    among real alternatives on the operator's behalf. Raises ``BareMetalConfigError`` (listing the offers
+    and their monthly prices) when none or more than one of the family's offers was selected.
+    """
+    family_codes = {str(option["planCode"]) for option in family_options}
+    selected = sorted(family_codes & explicit_option_codes)
+    if len(selected) == 1:
+        return selected[0]
+    if not selected:
+        raise BareMetalConfigError(
+            f"plan offers multiple {family} options; choose one with --option. "
+            f"Offered: {_format_eco_offers(family_options)}"
+        )
+    raise BareMetalConfigError(f"choose exactly one --option for the {family} family, got {selected}")
+
+
+@pure
 def select_eco_option_codes(
     eco_options: Sequence[Mapping[str, Any]],
     memory_gb: int,
     storage_short: str,
+    explicit_option_codes: Sequence[str],
 ) -> list[str]:
     """Choose the eco cart option planCodes: the requested memory + storage, plus every other mandatory family.
 
     ``eco_options`` is the ``GET /order/cart/{id}/eco/options`` payload (each item has ``family``,
-    ``planCode``, and ``mandatory``). Memory is matched by parsed GB; storage by the availability short
-    code (prefix). Every *other* family OVH flags mandatory (e.g. bandwidth, and vrack where offered) is
-    auto-picked and must have exactly one offer; optional families are skipped. Raises
-    ``BareMetalConfigError`` if a required choice can't be resolved.
+    ``planCode``, ``mandatory``, and ``prices``). Memory is matched by parsed GB; storage by the
+    availability short code (prefix). Every *other* mandatory family (e.g. bandwidth, vrack) is resolved
+    explicitly: a single-offer family takes its only offer, but a multi-offer family requires the operator
+    to name the chosen offer in ``explicit_option_codes`` (the ``--option`` flag) -- we never pick among
+    real alternatives automatically. Optional families are skipped. Raises ``BareMetalConfigError`` if a
+    required choice is missing/ambiguous or an explicit code is not an available mandatory option.
     """
-    codes_by_family: dict[str, list[str]] = defaultdict(list)
+    options_by_family: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     is_family_mandatory: dict[str, bool] = {}
     for option in eco_options:
         family = str(option["family"])
-        codes_by_family[family].append(str(option["planCode"]))
+        options_by_family[family].append(option)
         # A family counts as mandatory if any of its offers is flagged mandatory.
         is_family_mandatory[family] = is_family_mandatory.get(family, False) or bool(option.get("mandatory"))
 
-    memory_code = next(
-        (code for code in codes_by_family.get("memory", []) if parse_memory_gb(code) == memory_gb), None
-    )
+    memory_codes = [str(option["planCode"]) for option in options_by_family.get("memory", [])]
+    storage_codes = [str(option["planCode"]) for option in options_by_family.get("storage", [])]
+    memory_code = next((code for code in memory_codes if parse_memory_gb(code) == memory_gb), None)
     if memory_code is None:
-        raise BareMetalConfigError(
-            f"no {memory_gb}GB memory option for this plan; offered: {sorted(codes_by_family.get('memory', []))}"
-        )
+        raise BareMetalConfigError(f"no {memory_gb}GB memory option for this plan; offered: {sorted(memory_codes)}")
     storage_code = next(
-        (
-            code
-            for code in codes_by_family.get("storage", [])
-            if code == storage_short or code.startswith(storage_short + "-")
-        ),
+        (code for code in storage_codes if code == storage_short or code.startswith(storage_short + "-")),
         None,
     )
     if storage_code is None:
         raise BareMetalConfigError(
-            f"storage {storage_short!r} not offered for this plan; offered: {sorted(codes_by_family.get('storage', []))}"
+            f"storage {storage_short!r} not offered for this plan; offered: {sorted(storage_codes)}"
         )
 
-    # Auto-pick the single offer for every other mandatory family (e.g. bandwidth,
-    # and vrack on the plans that include it); optional families are skipped.
+    # Resolve every other mandatory family (e.g. bandwidth, and vrack on the plans that include it): the
+    # only offer when there is one, else the explicit --option the operator named. Optional families are
+    # skipped. Track which explicit codes we consume so stray/typo'd ones are rejected, not silently ignored.
+    explicit_set = set(explicit_option_codes)
+    consumed_explicit_codes: set[str] = set()
     chosen = [memory_code, storage_code]
-    auto_pick_families = sorted(
+    auto_resolve_families = sorted(
         family
         for family, is_mandatory in is_family_mandatory.items()
         if is_mandatory and family not in _USER_SELECTED_OPTION_FAMILIES
     )
-    for family in auto_pick_families:
-        family_codes = codes_by_family.get(family, [])
-        if len(family_codes) != 1:
-            raise BareMetalConfigError(
-                f"expected exactly one {family} option to auto-pick, got {sorted(family_codes)}"
-            )
-        chosen.append(family_codes[0])
+    for family in auto_resolve_families:
+        family_options = options_by_family.get(family, [])
+        if len(family_options) == 1:
+            chosen.append(str(family_options[0]["planCode"]))
+        else:
+            picked = _resolve_explicit_option_for_family(family, family_options, explicit_set)
+            chosen.append(picked)
+            consumed_explicit_codes.add(picked)
+
+    unknown_codes = sorted(explicit_set - consumed_explicit_codes - set(chosen))
+    if unknown_codes:
+        raise BareMetalConfigError(
+            f"--option value(s) {unknown_codes} are not a multi-offer mandatory option for this plan "
+            "(memory/storage use --memory-gb/--storage; single-offer families are auto-selected)"
+        )
     return chosen
 
 
@@ -180,12 +247,14 @@ def build_and_assign_eco_cart(
     datacenter: str,
     memory_gb: int,
     storage_short: str,
+    explicit_option_codes: Sequence[str],
 ) -> tuple[str, dict[str, Any], list[str]]:
     """Build a single-server eco cart, assign it, and return (cart_id, checkout_preview, option_codes).
 
     Assigning attaches the cart to the account but does NOT place the order (only ``POST checkout`` does),
     so the returned preview can be shown for confirmation. The caller must then either ``checkout_eco_cart``
-    or ``delete_cart_quietly``.
+    or ``delete_cart_quietly``. ``explicit_option_codes`` names the chosen offer for each multi-offer
+    mandatory option family (see :func:`select_eco_option_codes`).
     """
     with log_span("Building OVH eco cart for plan={} datacenter={}", plan_code, datacenter):
         cart_id = str(client.call_api("POST", "/order/cart", ovhSubsidiary=client.subsidiary).get("cartId", ""))
@@ -214,7 +283,7 @@ def build_and_assign_eco_cart(
         # call_api sends kwargs as the request body, so a GET's query params must go in the path.
         options_path = f"/order/cart/{cart_id}/eco/options?{urlencode({'planCode': plan_code})}"
         eco_options = client.call_api("GET", options_path)
-        option_codes = select_eco_option_codes(eco_options, memory_gb, storage_short)
+        option_codes = select_eco_option_codes(eco_options, memory_gb, storage_short, explicit_option_codes)
         for option_code in option_codes:
             client.call_api(
                 "POST",
@@ -314,27 +383,70 @@ def wait_for_dedicated_server_address(
     return address
 
 
+def build_box_host_key_postinstall_script(host_private_key_pem: str, host_public_key_openssh: str) -> str:
+    """Render the OVH post-install bash that installs our generated ed25519 host key.
+
+    Writes the private key + its ``.pub`` into ``/etc/ssh``, removes OVH's other
+    host key types so only our pinned ed25519 key is ever offered (ed25519-only),
+    and restarts sshd. Delivered inline (base64) in the authenticated reinstall
+    request body, so the private key never travels over a public URL.
+    """
+    return f"""\
+#!/bin/bash
+set -eu
+umask 077
+cat > /etc/ssh/ssh_host_ed25519_key <<'MNGR_BOX_HOSTKEY'
+{host_private_key_pem.strip()}
+MNGR_BOX_HOSTKEY
+chmod 600 /etc/ssh/ssh_host_ed25519_key
+cat > /etc/ssh/ssh_host_ed25519_key.pub <<'MNGR_BOX_HOSTPUB'
+{host_public_key_openssh.strip()}
+MNGR_BOX_HOSTPUB
+chmod 644 /etc/ssh/ssh_host_ed25519_key.pub
+chown root:root /etc/ssh/ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key.pub
+# ed25519-only: drop the other host key types so only our pinned key is offered.
+rm -f /etc/ssh/ssh_host_rsa_key* /etc/ssh/ssh_host_ecdsa_key* /etc/ssh/ssh_host_dsa_key*
+systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || service ssh restart 2>/dev/null || true
+"""
+
+
+class BoxReinstallStart(FrozenModel):
+    """The result of kicking off an OVH box OS reinstall: the install task + the injected host key."""
+
+    task_id: int = Field(description="OVH reinstall task id to poll for completion")
+    box_host_public_key: str = Field(description="The ed25519 host public key we injected; pin it (no scan)")
+
+
 def start_os_reinstall(
     client: OvhVpsClient,
     *,
     service_name: str,
     ssh_public_key: str,
     os_template: str = DEFAULT_REINSTALL_OS_TEMPLATE,
-) -> int:
-    """Reinstall the box's OS with our SSH key (default RAID1 partitioning) and return the install task id."""
+) -> BoxReinstallStart:
+    """Reinstall the box's OS with our SSH key, injecting a host key we generated.
+
+    Generates an ed25519 host keypair and ships the private half in an inline
+    base64 ``postInstallationScript`` (authenticated request body), so after
+    install the box serves a host key we already know -- pinned downstream with no
+    trust-on-first-use. Returns the install task id and the injected host PUBLIC key.
+    """
+    host_private_key_pem, host_public_key_openssh = generate_ed25519_host_keypair()
+    postinstall_script = build_box_host_key_postinstall_script(host_private_key_pem, host_public_key_openssh)
+    postinstall_b64 = base64.b64encode(postinstall_script.encode()).decode()
     with log_span("Reinstalling {} with OS {}", service_name, os_template):
         task = client.call_api(
             "POST",
             f"/dedicated/server/{service_name}/reinstall",
             operatingSystem=os_template,
-            customizations={"sshKey": ssh_public_key},
+            customizations={"sshKey": ssh_public_key, "postInstallationScript": postinstall_b64},
         )
     task_id = task.get("taskId") if isinstance(task, dict) else None
     if task_id is None and isinstance(task, dict):
         task_id = task.get("id")
     if task_id is None:
         raise BareMetalProvisioningError(f"OVH reinstall of {service_name} returned no task id: {task!r}")
-    return int(task_id)
+    return BoxReinstallStart(task_id=int(task_id), box_host_public_key=host_public_key_openssh)
 
 
 def _poll_reinstall_task_status(client: OvhVpsClient, service_name: str, task_id: int) -> str | None:

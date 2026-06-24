@@ -40,6 +40,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import HostId
+from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_imbue_cloud.bake.pool_bake import BAKED_SERVICES_AGENT_NAME
 from imbue.mngr_imbue_cloud.bake.pool_bake import BakedPoolHost
@@ -66,19 +67,23 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_MEMORY_PER_SLICE_GB
 from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_SLICE_CPU_OVERCOMMIT_RATIO
 from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_SLICE_PORT_RANGE_END
 from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_SLICE_PORT_RANGE_START
-from imbue.mngr_imbue_cloud.slices.bare_metal import choose_server_for_new_slice
+from imbue.mngr_imbue_cloud.slices.bare_metal import compute_orphan_slice_disk_names
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_orphan_slice_instance_names
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_disk_gib
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_memory_mib
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_vcpus
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slot_count
-from imbue.mngr_imbue_cloud.slices.bare_metal import partition_port_range
+from imbue.mngr_imbue_cloud.slices.bare_metal import count_slice_resource_names
+from imbue.mngr_imbue_cloud.slices.bare_metal import find_server_capacity_by_id
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_disk_name
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import build_slice_pool_host_insert_values
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import delete_pool_host_row
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_server_by_id
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_server_capacities
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_slice_disk_names_for_server
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_slice_instance_names_for_server
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_unleased_slice_teardown_targets
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import insert_bare_metal_server
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import insert_slice_pool_host
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import update_server
@@ -99,7 +104,7 @@ from imbue.mngr_imbue_cloud.slices.pricing import compute_slice_pricing_rows
 from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_X86_64
 from imbue.mngr_ovh.client import build_ovh_client
 from imbue.mngr_ovh.config import OvhProviderConfig
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsInstanceId
 
 
 def _format_capacity_table(capacities: list[BareMetalServerCapacity]) -> str:
@@ -171,28 +176,58 @@ def _derive_public_key(private_key_path: Path) -> str:
 _BOX_PREP_SSH_TIMEOUT_SECONDS: Final[float] = 1800.0
 
 
-def _run_root_script_over_ssh(server_address: str, ssh_user: str, private_key_path: Path, script: str) -> None:
+@contextmanager
+def _box_ssh_host_key_options(server_address: str, box_host_public_key: str) -> Iterator[list[str]]:
+    """Yield ssh ``-o`` options that strictly pin the box's recorded host key.
+
+    Every box SSH pins the box's sshd host key -- there is no trust-on-first-use
+    fallback. The key is injected by us at OS reinstall (``server setup``) and
+    recorded on the ``bare_metal_servers`` row, or captured once by the sanctioned
+    ``admin pool backfill-host-keys`` keyscan; callers fail closed when it is
+    absent rather than reaching this helper.
+    """
+    if not box_host_public_key:
+        raise BareMetalProvisioningError(
+            f"no recorded box host key to pin for {server_address}; refusing to SSH without strict host-key "
+            "checking (run `admin server setup` or the one-time `admin pool backfill-host-keys` first)"
+        )
+    known_hosts_fd, known_hosts_path = tempfile.mkstemp(prefix="mngr_box_known_hosts_")
+    os.close(known_hosts_fd)
+    try:
+        add_host_to_known_hosts(Path(known_hosts_path), server_address, 22, box_host_public_key)
+        yield ["-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={known_hosts_path}"]
+    finally:
+        Path(known_hosts_path).unlink(missing_ok=True)
+
+
+def _run_root_script_over_ssh(
+    server_address: str,
+    ssh_user: str,
+    private_key_path: Path,
+    script: str,
+    box_host_public_key: str,
+) -> None:
     """Pipe a bash script to ``sudo bash`` on the box over SSH (base64 to dodge quoting)."""
     encoded = base64.b64encode(script.encode()).decode()
     remote = f"echo {encoded} | base64 -d | sudo bash"
     cg = ConcurrencyGroup(name="box-prep-ssh")
-    with cg:
-        result = cg.run_process_to_completion(
-            command=[
-                "ssh",
-                "-i",
-                str(private_key_path),
-                "-o",
-                "StrictHostKeyChecking=accept-new",
-                "-o",
-                "ConnectTimeout=30",
-                f"{ssh_user}@{server_address}",
-                remote,
-            ],
-            timeout=_BOX_PREP_SSH_TIMEOUT_SECONDS,
-            is_checked_after=False,
-            on_output=lambda line, _is_stdout: logger.info("  [box] {}", line.rstrip()),
-        )
+    with _box_ssh_host_key_options(server_address, box_host_public_key) as host_key_opts:
+        with cg:
+            result = cg.run_process_to_completion(
+                command=[
+                    "ssh",
+                    "-i",
+                    str(private_key_path),
+                    *host_key_opts,
+                    "-o",
+                    "ConnectTimeout=30",
+                    f"{ssh_user}@{server_address}",
+                    remote,
+                ],
+                timeout=_BOX_PREP_SSH_TIMEOUT_SECONDS,
+                is_checked_after=False,
+                on_output=lambda line, _is_stdout: logger.info("  [box] {}", line.rstrip()),
+            )
     if result.returncode != 0:
         raise BareMetalProvisioningError(
             f"box prep on {server_address} failed (exit {result.returncode}): {result.stderr.strip()}"
@@ -200,7 +235,9 @@ def _run_root_script_over_ssh(server_address: str, ssh_user: str, private_key_pa
 
 
 @server.command(name="prep")
-@click.option("--server-address", required=True, help="SSH-reachable address of the freshly-installed box.")
+@click.option(
+    "--server-id", required=True, help="bare_metal_servers row id (from `register`/`order`) of the box to prep."
+)
 @click.option("--ssh-user", default="debian", help="Bootstrap SSH user (the OS image's default cloud user).")
 @click.option("--lima-service-user", default="limahost", help="Dedicated non-root user to create for the lima VMs.")
 @click.option("--lima-version", default=DEFAULT_LIMA_VERSION, help="Lima release to install on the box.")
@@ -210,8 +247,14 @@ def _run_root_script_over_ssh(server_address: str, ssh_user: str, private_key_pa
     show_default=True,
     help="Guest OS image to stage on the box once (slices boot from this via file://, never the mirror).",
 )
+@click.option("--database-url", default=None, help="Neon pool DB DSN (defaults to the activated env's secrets).")
 def prep_box(
-    server_address: str, ssh_user: str, lima_service_user: str, lima_version: str, slice_base_image_url: str
+    server_id: str,
+    ssh_user: str,
+    lima_service_user: str,
+    lima_version: str,
+    slice_base_image_url: str,
+    database_url: str | None,
 ) -> None:
     """Install QEMU + lima + tooling on a delivered box, create the lima user, stage the OS image.
 
@@ -219,7 +262,22 @@ def prep_box(
     service user so the admin CLI can bake slices and the connector can tear them
     down, and stages the slice guest OS image once so bakes never depend on the
     Debian mirror. Run after the OS install, before ``admin pool create --backend slice``.
+
+    The box SSH strictly pins the box's recorded sshd host key (no
+    trust-on-first-use); the key is injected by ``server setup`` (OS reinstall) or
+    captured once by ``admin pool backfill-host-keys``. Fails closed if the row has
+    no recorded host key.
     """
+    dsn = resolve_pool_database_url(database_url)
+    server = _fetch_server_or_raise(dsn, server_id)
+    if not server.public_address:
+        raise BareMetalProvisioningError(f"server {server_id} has no public_address; cannot reach the box to prep it")
+    if not server.box_host_public_key:
+        raise BareMetalProvisioningError(
+            f"server {server_id} has no recorded box host key to pin; run `admin server setup` (reinstalls the OS "
+            "with our injected key) or the one-time `admin pool backfill-host-keys` before prepping"
+        )
+    server_address = server.public_address
     with _pool_private_key_path() as private_key_path:
         pool_public_key = _derive_public_key(private_key_path)
         script = build_box_prep_script(
@@ -231,7 +289,7 @@ def prep_box(
         logger.info(
             "Prepping box {} as {} (lima user {}, lima {})", server_address, ssh_user, lima_service_user, lima_version
         )
-        _run_root_script_over_ssh(server_address, ssh_user, private_key_path, script)
+        _run_root_script_over_ssh(server_address, ssh_user, private_key_path, script, server.box_host_public_key)
     logger.info("Box {} prepped: qemu+lima installed, {} ready, OS image staged", server_address, lima_service_user)
 
 
@@ -416,6 +474,7 @@ def _build_slice_create_args(
     server: BareMetalServer,
     sizing: dict[str, int],
     region: str,
+    env_name: str | None,
     pool_public_key: str,
     private_key_path: Path,
     ssh_user: str,
@@ -426,16 +485,28 @@ def _build_slice_create_args(
 
     The carve knobs (vcpus / memory / disk) are computed per box so the leased
     host's actual size matches its advertised attributes; the box address + lima
-    user + pool key + this bake's disjoint port window are passed the same way.
-    Concurrent bakes get disjoint ``slice_port_range_*`` windows so their in-VM
-    port probes cannot pick the same box ports.
+    user + pool key + the owning env + the box's slot count + the full box port
+    range are passed the same way. The on-box reservation lock makes concurrent
+    bakes (this env's and other envs') pick distinct ports from the shared range, so
+    every bake is handed the full range rather than a disjoint window.
     """
+    # Fail closed: the slice carve SSHes the box with strict host-key pinning, so
+    # the box's host key must be known. It is set at provision (or by the one-time
+    # keyscan backfill); refuse to bake against an un-keyscanned box rather than
+    # fall back to trust-on-first-use.
+    if not server.box_host_public_key:
+        raise BareMetalProvisioningError(
+            f"bare-metal server {server.id} has no box_host_public_key; run the one-time "
+            "`mngr imbue_cloud admin` host-key backfill (or re-provision the box) before baking slices"
+        )
     prefix = f"providers.{_SLICE_PROVIDER_INSTANCE}"
     overrides = {
         "box_public_address": str(server.public_address),
         "box_ssh_user": ssh_user,
         "pool_private_key_path": str(private_key_path),
         "pool_authorized_public_key": pool_public_key,
+        # The box's pinned sshd host key (same -S-with-spaces pattern as the pool key).
+        "box_host_public_key": server.box_host_public_key,
         # Lease-region label (the app's region code, e.g. US-EAST-VA), NOT the
         # box's raw datacenter code -- so the connector's region-filtered lease
         # matches what the minds create form requests.
@@ -443,29 +514,40 @@ def _build_slice_create_args(
         "slice_vcpus": str(sizing["vcpus"]),
         "slice_memory_mib": str(sizing["memory_mib"]),
         "slice_disk_gib": str(sizing["disk_gib"]),
+        # The box's total slot count: the on-box reservation refuses to carve once
+        # the box already holds this many slices (the cross-env over-allocation guard).
+        "slice_slot_count": str(server.slot_count),
         "slice_port_range_start": str(port_range_start),
         "slice_port_range_end": str(port_range_end),
     }
+    # The owning env (stamped into the slice's lima names) is omitted entirely when
+    # absent, so the provider falls back to legacy un-stamped names.
+    if env_name is not None:
+        overrides["slice_env_name"] = env_name
     args: list[str] = []
     for key, value in overrides.items():
         args.extend(["-S", f"{prefix}.{key}={value}"])
     return args
 
 
-def _rollback_slice_vm(*, server: BareMetalServer, ssh_user: str, private_key_path: Path, host_id: str) -> None:
+def _rollback_slice_vm(
+    *, server: BareMetalServer, ssh_user: str, private_key_path: Path, host_id: str, env_name: str | None
+) -> None:
     """Best-effort: destroy a carved slice VM whose later bake/bookkeeping failed, so it does not leak.
 
     Drives ``limactl delete`` / ``disk delete`` over SSH on the box (via the same
     SSH-backed client the carve uses) for the deterministic instance/disk names
-    derived from ``host_id``. Swallows + logs any failure -- the caller is already
-    on a failure path -- so it never masks the original error.
+    derived from ``host_id`` and the owning ``env_name``. Swallows + logs any
+    failure -- the caller is already on a failure path -- so it never masks the
+    original error.
     """
     client = LimaSliceVpsClient(
         box_address=str(server.public_address),
         box_ssh_user=ssh_user,
         private_key_path=str(private_key_path),
+        box_host_public_key=server.box_host_public_key,
     )
-    instance_id = VpsInstanceId(slice_lima_instance_name(HostId(host_id)))
+    instance_id = VpsInstanceId(slice_lima_instance_name(HostId(host_id), env_name))
     try:
         client.destroy_instance(instance_id)
     except (MngrError, OSError) as exc:
@@ -486,32 +568,42 @@ def _slice_run_in_container(
     """
     if not baked.ssh_host or baked.ssh_port is None or not baked.ssh_key_path:
         return 1, "", f"baked slice {baked.host_name} missing container SSH connection info"
-    ssh_command = [
-        "ssh",
-        "-i",
-        baked.ssh_key_path,
-        # Bake-time op to a container we just created, reached at a box-forwarded
-        # port that earlier slices have reused with different host keys. Don't
-        # consult or write the operator's shared known_hosts (a stale entry for this
-        # box:port from a prior slice would fail strict checking and break the
-        # teardown). Mirrors the OVH admin bake's container SSH (`_run_ssh_command`).
-        "-o",
-        "StrictHostKeyChecking=no",
-        "-o",
-        "UserKnownHostsFile=/dev/null",
-        "-o",
-        "ConnectTimeout=20",
-        "-o",
-        "ServerAliveInterval=30",
-        "-p",
-        str(baked.ssh_port),
-        f"{baked.ssh_user}@{baked.ssh_host}",
-        f"bash -lc {shlex.quote(command)}",
-    ]
-    cg = ConcurrencyGroup(name=f"slice-container-{label}")
-    with cg:
-        result = cg.run_process_to_completion(command=ssh_command, timeout=timeout_seconds, is_checked_after=False)
-    return result.returncode, result.stdout, result.stderr
+    if not baked.container_host_public_key:
+        return 1, "", f"baked slice {baked.host_name} missing container host public key; cannot pin it"
+    # Bake-time op to a container we just created, reached at a box-forwarded port
+    # that earlier slices have reused with different host keys. Pin the container's
+    # known host key in a throwaway known_hosts file (NOT the operator's shared one,
+    # whose stale entry for this box:port from a prior slice would mismatch) -- so we
+    # still get strict host-key checking with no trust-on-first-use.
+    known_hosts_fd, known_hosts_path = tempfile.mkstemp(prefix="mngr_slice_known_hosts_")
+    os.close(known_hosts_fd)
+    try:
+        add_host_to_known_hosts(
+            Path(known_hosts_path), baked.ssh_host, baked.ssh_port, baked.container_host_public_key
+        )
+        ssh_command = [
+            "ssh",
+            "-i",
+            baked.ssh_key_path,
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            f"UserKnownHostsFile={known_hosts_path}",
+            "-o",
+            "ConnectTimeout=20",
+            "-o",
+            "ServerAliveInterval=30",
+            "-p",
+            str(baked.ssh_port),
+            f"{baked.ssh_user}@{baked.ssh_host}",
+            f"bash -lc {shlex.quote(command)}",
+        ]
+        cg = ConcurrencyGroup(name=f"slice-container-{label}")
+        with cg:
+            result = cg.run_process_to_completion(command=ssh_command, timeout=timeout_seconds, is_checked_after=False)
+        return result.returncode, result.stdout, result.stderr
+    finally:
+        Path(known_hosts_path).unlink(missing_ok=True)
 
 
 def _bake_one_slice(
@@ -520,6 +612,7 @@ def _bake_one_slice(
     sizing: dict[str, int],
     lease_attributes: dict[str, Any],
     region: str,
+    env_name: str | None,
     workspace_dir: Path,
     pool_public_key: str,
     private_key_path: Path,
@@ -554,6 +647,7 @@ def _bake_one_slice(
                 server=server,
                 sizing=sizing,
                 region=region,
+                env_name=env_name,
                 pool_public_key=pool_public_key,
                 private_key_path=private_key_path,
                 ssh_user=ssh_user,
@@ -601,6 +695,11 @@ def _bake_one_slice(
                     f"stopping the services agent on slice {host_name} failed (exit {stop_rc}): {stop_err.strip()}"
                 )
             host_id_obj = HostId(baked.host_id)
+            if not baked.outer_host_public_key or not baked.container_host_public_key:
+                raise BareMetalProvisioningError(
+                    f"baked slice {host_name} did not surface its sshd host public keys "
+                    "(needs a slice provider that emits them in `mngr create --format json`); cannot insert pool row"
+                )
             values = build_slice_pool_host_insert_values(
                 row_id=str(uuid4()),
                 box_public_address=str(server.public_address),
@@ -612,8 +711,10 @@ def _bake_one_slice(
                 attributes_json=attributes_json,
                 region=region,
                 bare_metal_server_id=str(server.id),
-                lima_instance_name=slice_lima_instance_name(host_id_obj),
-                lima_disk_name=slice_lima_disk_name(host_id_obj),
+                lima_instance_name=slice_lima_instance_name(host_id_obj, env_name),
+                lima_disk_name=slice_lima_disk_name(host_id_obj, env_name),
+                outer_host_public_key=baked.outer_host_public_key,
+                container_host_public_key=baked.container_host_public_key,
             )
             conn = psycopg2.connect(database_url)
             try:
@@ -622,7 +723,11 @@ def _bake_one_slice(
                 conn.close()
         except (PoolBakeError, BareMetalProvisioningError, MngrError, psycopg2.Error, OSError):
             _rollback_slice_vm(
-                server=server, ssh_user=ssh_user, private_key_path=private_key_path, host_id=baked.host_id
+                server=server,
+                ssh_user=ssh_user,
+                private_key_path=private_key_path,
+                host_id=baked.host_id,
+                env_name=env_name,
             )
             raise
         logger.info(
@@ -654,6 +759,7 @@ def _bake_into_outcomes(
     sizing: dict[str, int],
     lease_attributes: dict[str, Any],
     region: str,
+    env_name: str | None,
     workspace_dir: Path,
     pool_public_key: str,
     private_key_path: Path,
@@ -678,6 +784,7 @@ def _bake_into_outcomes(
             sizing=sizing,
             lease_attributes=lease_attributes,
             region=region,
+            env_name=env_name,
             workspace_dir=workspace_dir,
             pool_public_key=pool_public_key,
             private_key_path=private_key_path,
@@ -732,54 +839,176 @@ def _kill_bake_worker_processes(grace_seconds: float = 5.0) -> None:
             pass
 
 
-def _reap_orphan_slice_vms(*, server: BareMetalServer, private_key_path: Path, database_url: str) -> None:
-    """Delete slice VMs on the box that have no pool_hosts row (orphans from killed bakes).
+def _reap_orphan_slice_resources(
+    *, server: BareMetalServer, private_key_path: Path, database_url: str, env_name: str | None
+) -> None:
+    """Delete THIS env's slice VMs AND data disks on the box that have no pool_hosts row.
 
-    Reconciles the box's lima instances against the DB: any ``mngr-slice-`` VM with
-    no row (any status) is an orphan -- typically a ``mngr create`` killed by its own
-    timeout after carving the VM but before the row insert, so the provider's rollback
-    never ran. Best-effort: logs and continues on any error so it never fails the bake.
-    Assumes no other bake invocation is concurrently mid-carve against this box (an
-    in-flight VM not yet inserted would otherwise look orphaned).
+    Reconciles the box's lima instances and disks against the DB, scoped to slices
+    stamped for ``env_name``: any such resource with no row (any status) is an orphan
+    -- a ``mngr create`` killed by its own timeout after carving but before the row
+    insert (the provider's rollback never ran), or a disk left behind when a rollback
+    ``limactl delete`` could not unlock it (so the VM is gone but its disk leaked,
+    permanently holding the box slot). Other envs' slices and legacy un-stamped slices
+    are never touched, so envs can safely share a box. Disks are reconciled
+    independently of instances so a disk that outlived its VM is still reaped.
+    Best-effort: logs and continues on any error so it never fails the bake. Assumes no
+    other bake invocation OF THIS ENV is concurrently mid-carve against the box (an
+    in-flight resource not yet inserted would otherwise look orphaned).
+
+    A bake with no owning env (``env_name`` is None) produces only legacy un-stamped
+    names, which must be left untouched, so reaping is skipped entirely.
     """
+    if env_name is None:
+        logger.info("Orphan reap skipped on {}: no owning env to scope to", server.public_address)
+        return
     ssh_user = server.lima_service_user or "limahost"
     client = LimaSliceVpsClient(
         box_address=str(server.public_address),
         box_ssh_user=ssh_user,
         private_key_path=str(private_key_path),
+        box_host_public_key=server.box_host_public_key,
     )
+
+    # Reap orphan VM instances.
     try:
         box_instance_names = client.list_instance_names()
     except (MngrError, OSError) as exc:
         logger.warning("Orphan reap skipped: could not list slice VMs on {}: {}", server.public_address, exc)
+        box_instance_names = None
+    if box_instance_names is not None:
+        conn = psycopg2.connect(database_url)
+        try:
+            tracked_instance_names = fetch_slice_instance_names_for_server(conn, server.id)
+        finally:
+            conn.close()
+        instance_orphans = compute_orphan_slice_instance_names(box_instance_names, tracked_instance_names, env_name)
+        if not instance_orphans:
+            logger.info("Orphan reap: no untracked slice VMs on {}", server.public_address)
+        else:
+            logger.info(
+                "Orphan reap: deleting {} untracked slice VM(s) on {}: {}",
+                len(instance_orphans),
+                server.public_address,
+                sorted(instance_orphans),
+            )
+            for instance_name in sorted(instance_orphans):
+                try:
+                    client.destroy_instance(VpsInstanceId(instance_name))
+                except (MngrError, OSError) as exc:
+                    logger.warning(
+                        "Orphan reap: failed to delete VM {} on {}: {}", instance_name, server.public_address, exc
+                    )
+
+    # Reap orphan data disks (a disk can outlive its instance when the rollback delete
+    # could not unlock it). Done after the VM reap so a just-deleted VM's disk -- which
+    # destroy_instance already removes -- is no longer present to look orphaned.
+    try:
+        box_disk_names = client.list_disk_names()
+    except (MngrError, OSError) as exc:
+        logger.warning("Orphan disk reap skipped: could not list slice disks on {}: {}", server.public_address, exc)
         return
     conn = psycopg2.connect(database_url)
     try:
-        tracked_instance_names = fetch_slice_instance_names_for_server(conn, server.id)
+        tracked_disk_names = fetch_slice_disk_names_for_server(conn, server.id)
     finally:
         conn.close()
-    orphans = compute_orphan_slice_instance_names(box_instance_names, tracked_instance_names)
-    if not orphans:
-        logger.info("Orphan reap: no untracked slice VMs on {}", server.public_address)
+    disk_orphans = compute_orphan_slice_disk_names(box_disk_names, tracked_disk_names, env_name)
+    if not disk_orphans:
+        logger.info("Orphan reap: no untracked slice disks on {}", server.public_address)
         return
     logger.info(
-        "Orphan reap: deleting {} untracked slice VM(s) on {}: {}",
-        len(orphans),
+        "Orphan reap: deleting {} untracked slice disk(s) on {}: {}",
+        len(disk_orphans),
         server.public_address,
-        sorted(orphans),
+        sorted(disk_orphans),
     )
-    for instance_name in sorted(orphans):
+    for disk_name in sorted(disk_orphans):
         try:
-            client.destroy_instance(VpsInstanceId(instance_name))
+            client.destroy_disk(disk_name)
         except (MngrError, OSError) as exc:
-            logger.warning("Orphan reap: failed to delete {} on {}: {}", instance_name, server.public_address, exc)
+            logger.warning("Orphan reap: failed to delete disk {} on {}: {}", disk_name, server.public_address, exc)
+
+
+def destroy_slice_vm(*, server: BareMetalServer, lima_instance_name: str) -> None:
+    """Destroy one slice's lima VM (and its data disk) on its box, freeing the box slot.
+
+    The teardown counterpart of the carve: SSHes the bare-metal box with the pool
+    management key (POOL_SSH_PRIVATE_KEY) and runs ``limactl delete`` for the named
+    instance -- the same client + key path the orphan reaper uses, but targeted at a
+    single known instance so ``admin pool destroy`` can fully tear down a slice
+    before dropping its ``pool_hosts`` row (instead of stranding the VM on the box).
+    """
+    if not server.public_address:
+        raise BareMetalProvisioningError(
+            f"server {server.id} has no public_address; cannot reach the box to destroy {lima_instance_name}"
+        )
+    ssh_user = server.lima_service_user or "limahost"
+    with _pool_private_key_path() as private_key_path:
+        client = LimaSliceVpsClient(
+            box_address=str(server.public_address),
+            box_ssh_user=ssh_user,
+            private_key_path=str(private_key_path),
+            box_host_public_key=server.box_host_public_key,
+        )
+        client.destroy_instance(VpsInstanceId(lima_instance_name))
+
+
+def tear_down_unleased_slices(database_url: str) -> dict[str, Any]:
+    """Tear down every unleased slice VM recorded in ``database_url`` and drop its row.
+
+    The teardown an env destroy runs (before its per-env DB is deleted) so the env's
+    baked-but-unleased pool slices don't leak their VMs on the shared boxes. Leased
+    slices are excluded: they are torn down via their agent's release path. Each VM
+    teardown is idempotent (an already-absent VM counts as success); the row is
+    dropped only after its VM is gone. Must-succeed: raises
+    ``BareMetalProvisioningError`` listing every slice whose box could not be
+    reached, so the caller can stop the destroy rather than silently leak.
+    """
+    conn = psycopg2.connect(database_url)
+    try:
+        targets = fetch_unleased_slice_teardown_targets(conn)
+    finally:
+        conn.close()
+    if not targets:
+        return {"torn_down": 0, "failed": 0}
+    torn_down_count = 0
+    failures: list[str] = []
+    with _pool_private_key_path() as private_key_path:
+        for target in targets:
+            client = LimaSliceVpsClient(
+                box_address=target.box_public_address,
+                box_ssh_user=target.lima_service_user,
+                private_key_path=str(private_key_path),
+                box_host_public_key=target.box_host_public_key,
+            )
+            try:
+                client.destroy_instance(VpsInstanceId(target.lima_instance_name))
+            except (MngrError, OSError) as exc:
+                logger.warning("Failed to tear down slice {}: {}", target.lima_instance_name, exc)
+                failures.append(f"{target.lima_instance_name} on {target.box_public_address}: {exc}")
+                continue
+            conn = psycopg2.connect(database_url)
+            try:
+                delete_pool_host_row(conn, target.pool_host_row_id)
+            finally:
+                conn.close()
+            torn_down_count += 1
+            logger.info("Tore down unleased slice {} on {}", target.lima_instance_name, target.box_public_address)
+    if failures:
+        raise BareMetalProvisioningError(
+            f"failed to tear down {len(failures)} slice(s); their VMs may still be running: {'; '.join(failures)}"
+        )
+    return {"torn_down": torn_down_count, "failed": 0}
 
 
 def allocate_slices(
     *,
     count: int,
+    server_id: str,
     lease_attributes: dict[str, Any],
     region: str,
+    env_name: str | None,
     workspace_dir: Path,
     mngr_source: str | None,
     database_url: str,
@@ -787,10 +1016,10 @@ def allocate_slices(
     is_deferred_install_wait_skipped: bool,
     max_concurrency: int,
 ) -> None:
-    """Bake ``count`` slices onto a single ready bare-metal server and insert their pool rows.
+    """Bake ``count`` slices onto the explicitly chosen bare-metal server and insert their pool rows.
 
-    The slice backend of ``admin pool create``. Picks the ready server with the
-    most free slots (one server per invocation: a server's per-slice vCPU/RAM/disk
+    The slice backend of ``admin pool create``. Bakes onto the operator-named
+    ``server_id`` (one server per invocation: a server's per-slice vCPU/RAM/disk
     are fixed by its registration, so a batch is homogeneous), vendors this branch's
     mngr into the FCT workspace once, then bakes the slices concurrently -- at most
     ``max_concurrency`` at a time (the rest queue) so the box isn't over-contended,
@@ -801,7 +1030,12 @@ def allocate_slices(
     size stamped on top, and records ``region`` (the lease-region label, not the
     box's raw datacenter code) so the connector's region-filtered lease matches.
 
-    After the bakes finish, reconciles the box's slice VMs against the DB and reaps
+    ``env_name`` (the activated minds env) is stamped into every slice's lima names
+    so envs can share a box: free-slot capacity is read from the box's REAL
+    occupancy (all envs + legacy), each carve reserves its slot + ports under a box
+    lock, and the post-bake reap only ever touches this env's own stamped slices.
+
+    After the bakes finish, reconciles this env's slice VMs against the DB and reaps
     any orphan (a VM with no pool_hosts row -- e.g. a create killed by its own
     timeout after carving but before the insert). ``database_url`` is already
     resolved by the caller. ``is_dry_run`` only reports placement.
@@ -815,60 +1049,74 @@ def allocate_slices(
         capacities = fetch_server_capacities(conn)
     finally:
         conn.close()
-    # One server per batch (homogeneous sizing): pick the ready box with the most
-    # free slots and require it to hold the whole batch. Server selection is NOT
-    # filtered by ``region`` today (single-fleet assumption); multi-region fleet
-    # filtering is future work.
-    chosen = choose_server_for_new_slice(capacities)
+    # One explicitly-chosen server per batch (homogeneous sizing): the operator names the box via
+    # ``--server-id``; we never auto-select. Require it to be ready.
+    chosen = find_server_capacity_by_id(capacities, BareMetalServerDbId(server_id))
     server = chosen.server
-    if chosen.free_slots < count:
+    if str(server.status) != SERVER_STATUS_READY:
         raise click.UsageError(
-            f"server {server.id} has only {chosen.free_slots} free slot(s); cannot bake {count} "
-            "(allocate on one server per invocation -- run again to use another server)"
+            f"server {server.id} is '{server.status}', not '{SERVER_STATUS_READY}'; "
+            "finish `admin server await-delivery` + `setup` before baking slices on it"
         )
-    sizing = compute_server_slice_sizing(server)
-
-    if is_dry_run:
-        emit_json(
-            {
-                "dry_run": True,
-                "server_id": str(server.id),
-                "public_address": server.public_address,
-                "region": region,
-                "count": count,
-                "free_slots": chosen.free_slots,
-                "per_slice_sizing": sizing,
-                "attributes": {**lease_attributes, **slice_advertised_attributes(sizing)},
-            }
-        )
-        return
-
-    # Resolve the mngr source tree (default to this checkout). The workspace dir
-    # is already resolved + validated by the caller's bake-source context.
-    repo_root = Path(__file__).resolve().parents[5]
-    resolved_mngr_source = Path(mngr_source) if mngr_source else repo_root
     if not server.public_address:
         raise click.UsageError(f"server {server.id} has no public_address; cannot bake")
+    sizing = compute_server_slice_sizing(server)
 
-    # Vendor this branch's mngr into the FCT workspace once (the baked container
-    # builds its mngr from vendor/mngr); the parallel bakes then share it.
-    sync_mngr_into_template(resolved_mngr_source, workspace_dir)
-
+    ssh_user = server.lima_service_user or "limahost"
     with _pool_private_key_path() as private_key_path:
+        # Free slots come from the box's REAL occupancy (every env's slices plus any
+        # legacy un-stamped ones), NOT this env's DB row count -- so independent envs
+        # sharing the box cannot collectively over-subscribe it. This is a fast
+        # pre-check; the authoritative guard is the per-slice on-box reservation lock.
+        occupancy_client = LimaSliceVpsClient(
+            box_address=str(server.public_address),
+            box_ssh_user=ssh_user,
+            private_key_path=str(private_key_path),
+            box_host_public_key=server.box_host_public_key,
+        )
+        box_used_slots = count_slice_resource_names(occupancy_client.list_disk_names())
+        free_slots = max(0, server.slot_count - box_used_slots)
+        if free_slots < count:
+            raise click.UsageError(
+                f"server {server.id} has only {free_slots} of {server.slot_count} slot(s) free "
+                f"({box_used_slots} in use on the box across all envs); cannot bake {count}"
+            )
+
+        if is_dry_run:
+            emit_json(
+                {
+                    "dry_run": True,
+                    "server_id": str(server.id),
+                    "public_address": server.public_address,
+                    "region": region,
+                    "env_name": env_name,
+                    "count": count,
+                    "free_slots": free_slots,
+                    "box_used_slots": box_used_slots,
+                    "per_slice_sizing": sizing,
+                    "attributes": {**lease_attributes, **slice_advertised_attributes(sizing)},
+                }
+            )
+            return
+
+        # Resolve the mngr source tree (default to this checkout). The workspace dir
+        # is already resolved + validated by the caller's bake-source context. Vendor
+        # this branch's mngr into the FCT workspace once (the baked container builds
+        # its mngr from vendor/mngr); the parallel bakes then share it.
+        repo_root = Path(__file__).resolve().parents[5]
+        resolved_mngr_source = Path(mngr_source) if mngr_source else repo_root
+        sync_mngr_into_template(resolved_mngr_source, workspace_dir)
+
         pool_public_key = _derive_public_key(private_key_path)
         # Spawn one thread per slice but cap how many bake at once with a semaphore
         # (``max_concurrency``): each thread blocks on it before its ``mngr create``,
         # so the box is never contended by more than K simultaneous carves+builds
-        # (which would push each create past its timeout). Each bake gets a DISJOINT
-        # port sub-range -- partitioned across the FULL ``count`` (not K), since a
-        # finished slice's VM keeps its ports, so windows must never be reused.
+        # (which would push each create past its timeout). Every bake is handed the
+        # FULL box port range: the on-box reservation lock makes concurrent carves
+        # (this env's and other envs') pick distinct free ports from it.
         outcomes: list[dict[str, Any]] = []
         outcomes_lock = threading.Lock()
         bake_semaphore = threading.Semaphore(max_concurrency)
-        port_windows = [
-            partition_port_range(DEFAULT_SLICE_PORT_RANGE_START, DEFAULT_SLICE_PORT_RANGE_END, count, idx)
-            for idx in range(count)
-        ]
         threads = [
             ObservableThread(
                 target=_bake_into_outcomes,
@@ -877,12 +1125,13 @@ def allocate_slices(
                     sizing=sizing,
                     lease_attributes=lease_attributes,
                     region=region,
+                    env_name=env_name,
                     workspace_dir=workspace_dir,
                     pool_public_key=pool_public_key,
                     private_key_path=private_key_path,
                     database_url=database_url,
-                    port_range_start=port_windows[idx][0],
-                    port_range_end=port_windows[idx][1],
+                    port_range_start=DEFAULT_SLICE_PORT_RANGE_START,
+                    port_range_end=DEFAULT_SLICE_PORT_RANGE_END,
                     is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
                     semaphore=bake_semaphore,
                     total=count,
@@ -926,7 +1175,9 @@ def allocate_slices(
             # join -- an individual-create timeout (already a 'failed' outcome by now)
             # is cleaned here; the except above handles a top-level kill. Restore the
             # signal handlers last so the reap itself isn't interrupted.
-            _reap_orphan_slice_vms(server=server, private_key_path=private_key_path, database_url=database_url)
+            _reap_orphan_slice_resources(
+                server=server, private_key_path=private_key_path, database_url=database_url, env_name=env_name
+            )
             if is_main_thread:
                 signal.signal(signal.SIGTERM, previous_sigterm)
                 signal.signal(signal.SIGINT, previous_sigint)
@@ -1093,33 +1344,41 @@ def _require_ovh_config() -> OvhProviderConfig:
     return config
 
 
-def _probe_ssh_ready(server_address: str, ssh_user: str, private_key_path: Path) -> bool | None:
+def _probe_ssh_ready(
+    server_address: str, ssh_user: str, private_key_path: Path, box_host_public_key: str
+) -> bool | None:
     """One SSH-readiness probe: True once a login succeeds, else None (for poll_for_value)."""
     cg = ConcurrencyGroup(name="ssh-ready")
-    with cg:
-        result = cg.run_process_to_completion(
-            command=[
-                "ssh",
-                "-i",
-                str(private_key_path),
-                "-o",
-                "StrictHostKeyChecking=accept-new",
-                "-o",
-                "ConnectTimeout=15",
-                f"{ssh_user}@{server_address}",
-                "echo ok",
-            ],
-            timeout=30.0,
-            is_checked_after=False,
-        )
+    with _box_ssh_host_key_options(server_address, box_host_public_key) as host_key_opts:
+        with cg:
+            result = cg.run_process_to_completion(
+                command=[
+                    "ssh",
+                    "-i",
+                    str(private_key_path),
+                    *host_key_opts,
+                    "-o",
+                    "ConnectTimeout=15",
+                    f"{ssh_user}@{server_address}",
+                    "echo ok",
+                ],
+                timeout=30.0,
+                is_checked_after=False,
+            )
     return True if result.returncode == 0 else None
 
 
-def _wait_for_ssh_ready(server_address: str, ssh_user: str, private_key_path: Path, timeout_seconds: float) -> None:
+def _wait_for_ssh_ready(
+    server_address: str,
+    ssh_user: str,
+    private_key_path: Path,
+    timeout_seconds: float,
+    box_host_public_key: str,
+) -> None:
     """Poll until the box accepts an SSH login (it reboots into the freshly-installed OS). Raises on timeout."""
     with log_span("Waiting for SSH on {} as {}", server_address, ssh_user):
         is_ready, _polls, _elapsed = poll_for_value(
-            lambda: _probe_ssh_ready(server_address, ssh_user, private_key_path),
+            lambda: _probe_ssh_ready(server_address, ssh_user, private_key_path, box_host_public_key),
             timeout=timeout_seconds,
             poll_interval=10.0,
         )
@@ -1155,6 +1414,16 @@ def _wait_for_ssh_ready(server_address: str, ssh_user: str, private_key_path: Pa
     show_default=True,
     help="CPU overcommit factor recorded for slice sizing on this box.",
 )
+@click.option(
+    "--option",
+    "option_codes",
+    multiple=True,
+    help=(
+        "Explicit planCode for a mandatory option family that offers more than one choice (e.g. "
+        "bandwidth, vrack). Repeatable. Required when the plan offers a real choice -- run once without "
+        "it and the error lists each family's offers + monthly prices so you can re-run with --option."
+    ),
+)
 @click.option("--yes", is_flag=True, default=False, help="Skip the interactive confirmation and place the order.")
 @click.option("--database-url", default=None, help="Pool DSN (else resolved from env/activated minds env).")
 def order(
@@ -1164,6 +1433,7 @@ def order(
     storage: str,
     memory_per_slice_gb: int,
     cpu_overcommit: float,
+    option_codes: tuple[str, ...],
     yes: bool,
     database_url: str | None,
 ) -> None:
@@ -1171,7 +1441,8 @@ def order(
 
     Builds + assigns the eco cart, shows the real OVH price preview for confirmation, places the order, and
     inserts a bare_metal_servers row (specs derived from the catalog). Then run ``await-delivery`` + ``setup``.
-    Needs OVH_* credentials and the pool DSN.
+    Any mandatory option family with more than one offer (e.g. bandwidth, vrack) must be chosen explicitly
+    via ``--option``; needs OVH_* credentials and the pool DSN.
     """
     config = _require_ovh_config()
     client = build_ovh_client(config)
@@ -1185,7 +1456,12 @@ def order(
         )
 
     cart_id, preview, _option_codes = build_and_assign_eco_cart(
-        client, plan_code=plan_code, datacenter=region, memory_gb=memory_gb, storage_short=storage
+        client,
+        plan_code=plan_code,
+        datacenter=region,
+        memory_gb=memory_gb,
+        storage_short=storage,
+        explicit_option_codes=option_codes,
     )
     write_human_line(
         f"About to order {plan_code} in {region}: {memory_gb}GB RAM, {storage}, {cpu_cores}c/{cpu_threads}t, "
@@ -1336,16 +1612,33 @@ def setup(
         # Reinstall only from 'delivered'; re-running from 'installing' assumes the reinstall completed and
         # resumes at SSH-wait + prep. No DB connection is held across the (long) reinstall/prep waits.
         if str(server.status) == SERVER_STATUS_DELIVERED:
-            task_id = start_os_reinstall(
+            reinstall = start_os_reinstall(
                 client,
                 service_name=service_name,
                 ssh_public_key=pool_public_key,
                 os_template=os_template,
             )
-            _update_server_fields(dsn, server_id, status=SERVER_STATUS_INSTALLING)
-            wait_for_os_reinstall(client, service_name=service_name, task_id=task_id)
+            # Persist the injected box host key with the status flip so a resume from
+            # 'installing' still has it (we discard the private half after injection).
+            _update_server_fields(
+                dsn,
+                server_id,
+                status=SERVER_STATUS_INSTALLING,
+                box_host_public_key=reinstall.box_host_public_key,
+            )
+            wait_for_os_reinstall(client, service_name=service_name, task_id=reinstall.task_id)
 
-        _wait_for_ssh_ready(address, ssh_user, private_key_path, ssh_ready_timeout)
+        # Re-read so a resume-from-'installing' picks up the box key persisted above.
+        # The reinstall always records it alongside the status flip, so a missing key
+        # here means the row was tampered with -- fail closed rather than SSH without
+        # strict host-key checking.
+        box_host_public_key = _fetch_server_or_raise(dsn, server_id).box_host_public_key
+        if not box_host_public_key:
+            raise BareMetalProvisioningError(
+                f"server {server_id} reached '{SERVER_STATUS_INSTALLING}' without a recorded box host key; "
+                "cannot SSH the box with strict host-key checking"
+            )
+        _wait_for_ssh_ready(address, ssh_user, private_key_path, ssh_ready_timeout, box_host_public_key)
         script = build_box_prep_script(
             pool_public_key=pool_public_key,
             lima_service_user=lima_service_user,
@@ -1353,7 +1646,7 @@ def setup(
             slice_base_image_url=slice_base_image_url,
         )
         logger.info("Prepping delivered box {} ({})", server_id, address)
-        _run_root_script_over_ssh(address, ssh_user, private_key_path, script)
+        _run_root_script_over_ssh(address, ssh_user, private_key_path, script, box_host_public_key)
 
     _update_server_fields(dsn, server_id, lima_service_user=lima_service_user, status=SERVER_STATUS_READY)
     write_human_line(

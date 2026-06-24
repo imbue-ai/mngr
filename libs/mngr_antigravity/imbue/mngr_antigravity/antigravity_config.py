@@ -62,6 +62,7 @@ from pathlib import Path
 from typing import Any
 
 from imbue.imbue_common.pure import pure
+from imbue.mngr.config.external_settings import apply_settings_patch
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.host import OnlineHostInterface
 
@@ -217,6 +218,8 @@ def build_isolated_settings(
     base_settings: Mapping[str, Any],
     settings_overrides: Mapping[str, Any],
     trusted_workspaces: Sequence[str],
+    *,
+    allow_narrowing: bool = False,
 ) -> dict[str, Any]:
     """Build a per-agent ``settings.json`` body by layering (low -> high precedence).
 
@@ -233,7 +236,11 @@ def build_isolated_settings(
        isolated agy trusts its own cwd. Pass an empty sequence to leave the
        trust list exactly as the base had it.
     3. ``settings_overrides`` -- the per-agent-type blob (``permissions``,
-       ``toolPermission``, ``model``, ...), applied last so it wins.
+       ``toolPermission``, ``model``, ...), folded last (so it wins) via the
+       shared ``apply_settings_patch``: a bare key assigns with the narrowing
+       guard, and a ``__mngr_merge`` directive (desugared at config-load) merges
+       onto the base instead -- the same Claude-compatible operator surface
+       ``mngr_claude`` uses. Set ``allow_narrowing`` to opt into assign-by-default.
 
     A non-list ``trustedWorkspaces`` in ``base_settings`` is coerced to an empty
     list (matching ``merge_trusted_workspace``); callers that read the base from
@@ -248,8 +255,12 @@ def build_isolated_settings(
             existing.append(workspace_path)
     if existing or TRUSTED_WORKSPACES_KEY in settings:
         settings[TRUSTED_WORKSPACES_KEY] = existing
-    settings.update(settings_overrides)
-    return settings
+    return apply_settings_patch(
+        settings,
+        settings_overrides,
+        allow_narrowing=allow_narrowing,
+        base_description="the per-agent antigravity settings base (synced home settings + workspace trust)",
+    )
 
 
 @pure

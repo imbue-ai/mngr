@@ -1,13 +1,13 @@
 [project]
 name = "imbue-mngr-imbue-cloud"
-version = "0.1.5"
+version = "0.1.6"
 description = "Imbue Cloud provider backend plugin for mngr"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "imbue-mngr==0.2.16",
-    "imbue-mngr-vps-docker==0.1.9",
-    "imbue-mngr-lima==0.1.9",
+    "imbue-mngr==0.2.17",
+    "imbue-mngr-vps==0.1.10",
+    "imbue-mngr-lima==0.1.10",
     "imbue-common==0.1.20",
     "concurrency-group==0.1.20",
     "httpx>=0.27.0",
@@ -35,7 +35,7 @@ exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py"]
 
 [tool.uv.sources]
 imbue-mngr = { workspace = true }
-imbue-mngr-vps-docker = { workspace = true }
+imbue-mngr-vps = { workspace = true }
 imbue-mngr-lima = { workspace = true }
 imbue-common = { workspace = true }
 concurrency-group = { workspace = true }

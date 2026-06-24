@@ -1,0 +1,9 @@
+Reworked the in-app `mngr` CLI caller (`MngrCaller`) to stop relying on `multiprocessing`'s fork-without-exec (forkserver), which is unreliable on macOS.
+
+Instead of forking children from a preloaded forkserver, `MngrCaller` now keeps a single pre-warmed, single-use `mngr` process running ahead of time: a freshly execed Python interpreter that has already imported `imbue.mngr.main` and is blocked reading one request off an anonymous socket. Each `call` hands the argv to the waiting warm process over the socket, reads back stdout/stderr/exit-code, and the warm process then exits. As soon as a warm process is claimed for use, a replacement is spawned so the next call again finds one ready.
+
+The transport is an anonymous, connected `socketpair` (no rendezvous file on disk): the parent keeps one end and passes the other end's file descriptor to the child at spawn time. The connection is live from the moment the child is forked, so there is no listen/connect handshake and no readiness polling -- if the warm process is still importing `mngr`, the request simply buffers in the socket until it is ready. This makes the "no warm process ready yet" case correct by construction.
+
+Warm processes are cleaned up on every exit path: the idle one is terminated promptly during graceful shutdown (so it doesn't make the root concurrency group wait out its shutdown timeout and log a spurious "strand did not finish in time" warning), and an orphaned warm process whose parent was hard-killed self-exits when it sees its socket close, so none are ever left hanging around.
+
+This avoids paying mngr's multi-second interpreter+import startup cost on the request path while sidestepping fork-without-exec entirely. No user-visible behavior change to `mngr message` delivery; this is an internal robustness and portability improvement.

@@ -7,6 +7,8 @@ Each fake records the requests it received and returns canned responses, so the
 tests exercise request-building and response-handling without real API calls.
 """
 
+from datetime import datetime
+
 import pytest
 from google.api_core import exceptions as google_api_exceptions
 from google.auth.credentials import AnonymousCredentials
@@ -16,16 +18,18 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr_gcp.client import GceInstanceName
 from imbue.mngr_gcp.client import GceLabelValue
 from imbue.mngr_gcp.client import GcpVpsClient
+from imbue.mngr_gcp.client import HOST_NAME_METADATA_KEY
+from imbue.mngr_gcp.client import ISOLATION_METADATA_KEY
 from imbue.mngr_gcp.client import _make_instance_name
 from imbue.mngr_gcp.client import to_gce_label_value
 from imbue.mngr_gcp.errors import InvalidGceIdentifierError
 from imbue.mngr_gcp.testing import FakeFirewallsClient
 from imbue.mngr_gcp.testing import FakeInstancesClient
 from imbue.mngr_gcp.testing import _StubbedGcpVpsClient
-from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.errors import VpsProvisioningError
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
-from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.errors import VpsProvisioningError
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsInstanceStatus
 
 
 def _present_firewalls() -> FakeFirewallsClient:
@@ -152,11 +156,43 @@ def test_create_instance_builds_expected_resource() -> None:
     assert metadata["enable-oslogin"] == "FALSE"
     assert metadata["block-project-ssh-keys"] == "TRUE"
     assert metadata["ssh-keys"] == "ubuntu:ssh-ed25519 AAAA test"
-    # Labels round-trip the provider/host tags (sanitized) plus created-at.
+    # mngr host identity lives in metadata: host id verbatim and created-at as ISO-8601.
+    assert metadata["mngr-host-id"] == "host-abcdef0123456789abcdef0123456789"
+    assert datetime.fromisoformat(metadata["mngr-created-at"]).tzinfo is not None
+    assert metadata[HOST_NAME_METADATA_KEY] == "mngr-my-agent"
+    # The only mngr label is mngr-provider (sanitized), the server-side discovery filter.
     assert built.labels["mngr-provider"] == "gcp"
-    assert "mngr-created-at" in built.labels
+    assert "mngr-host-id" not in built.labels
+    assert "mngr-created-at" not in built.labels
+    # No mngr-isolation tag passed in -> no isolation metadata stamped.
+    assert ISOLATION_METADATA_KEY not in metadata
     # External IP requested by default.
     assert built.network_interfaces[0].access_configs[0].type_ == "ONE_TO_ONE_NAT"
+
+
+def test_create_instance_stamps_isolation_marker_into_metadata() -> None:
+    """The ``mngr-isolation`` placement marker rides in GCE metadata (not a label).
+
+    GCP stores mngr identity in metadata (labels are too restricted), so offline
+    discovery reads the placement back from metadata to pick the bare realizer for
+    a STOPPED instance without SSH.
+    """
+    instances = FakeInstancesClient()
+    client = _make_client(instances)
+    client.upload_ssh_key("key-1", "ssh-ed25519 AAAA test")
+    client.create_instance(
+        label="mngr-bare-agent",
+        region="us-west1-a",
+        plan="e2-medium",
+        user_data="#!/bin/bash\n",
+        ssh_key_ids=["key-1"],
+        tags={"mngr-provider": "gcp", "mngr-host-id": "host-1", ISOLATION_METADATA_KEY: "none"},
+    )
+    built = instances.inserted[0]
+    metadata = {item.key: item.value for item in built.metadata.items}
+    assert metadata[ISOLATION_METADATA_KEY] == "none"
+    # The marker stays out of labels (which are charset-restricted).
+    assert ISOLATION_METADATA_KEY not in built.labels
 
 
 def test_create_instance_resolves_firewall_without_creating() -> None:
@@ -549,7 +585,8 @@ def test_list_instances_filters_and_normalizes() -> None:
     listed = compute_v1.Instance(
         name="mngr-host-1",
         status="RUNNING",
-        labels={"mngr-provider": "gcp", "mngr-host-id": "host-1"},
+        labels={"mngr-provider": "gcp"},
+        metadata=compute_v1.Metadata(items=[compute_v1.Items(key="mngr-host-id", value="host-1")]),
         network_interfaces=[compute_v1.NetworkInterface(access_configs=[compute_v1.AccessConfig(nat_i_p="10.0.0.1")])],
     )
     instances.list_result = [listed]
@@ -561,6 +598,7 @@ def test_list_instances_filters_and_normalizes() -> None:
     assert result[0]["main_ip"] == "10.0.0.1"
     assert result[0]["state"] == "RUNNING"
     assert "mngr-provider=gcp" in result[0]["tags"]
+    assert result[0]["metadata"]["mngr-host-id"] == "host-1"
 
 
 def test_list_instances_translates_api_error() -> None:
@@ -610,6 +648,160 @@ def test_list_mngr_managed_instances_translates_api_error() -> None:
     client = _make_client(instances)
     with pytest.raises(VpsApiError, match="not authorized"):
         client.list_mngr_managed_instances()
+
+
+# =============================================================================
+# stop_instance / start_instance (GCP-only idle-pause + resume)
+# =============================================================================
+
+
+def test_stop_instance_calls_stop_and_polls_to_terminated() -> None:
+    """stop_instance issues instances.stop and waits for the terminal TERMINATED status."""
+    instances = FakeInstancesClient()
+    # The post-stop poll reads the instance status; TERMINATED is GCE's name for a
+    # stopped (not deleted) instance.
+    instances.get_result = compute_v1.Instance(name="mngr-host-1", status="TERMINATED")
+    client = _make_client(instances)
+    client.stop_instance(VpsInstanceId("mngr-host-1"))
+    assert instances.stopped == ["mngr-host-1"]
+
+
+def test_stop_instance_times_out_if_not_terminated() -> None:
+    """A zero timeout means the wait never observes TERMINATED and raises VpsProvisioningError."""
+    instances = FakeInstancesClient()
+    instances.get_result = compute_v1.Instance(name="mngr-host-1", status="STOPPING")
+    client = _make_client(instances)
+    with pytest.raises(VpsProvisioningError, match="did not reach status 'TERMINATED'"):
+        client.stop_instance(VpsInstanceId("mngr-host-1"), timeout_seconds=0.0)
+
+
+def test_start_instance_calls_start_and_returns_external_ip() -> None:
+    """start_instance issues instances.start, polls to RUNNING, and returns the fresh external IP."""
+    instances = FakeInstancesClient()
+    # Already RUNNING with a NAT IP: the status poll and the external-IP poll both
+    # read this same instance, so start returns the access config's address.
+    instances.get_result = _running_instance(nat_ip="5.6.7.8")
+    client = _make_client(instances)
+    assert client.start_instance(VpsInstanceId("mngr-host-1")) == "5.6.7.8"
+    assert instances.started == ["mngr-host-1"]
+
+
+def test_start_instance_times_out_if_not_running() -> None:
+    """A zero timeout means the RUNNING wait never succeeds and raises."""
+    instances = FakeInstancesClient()
+    instances.get_result = compute_v1.Instance(name="mngr-host-1", status="STAGING")
+    client = _make_client(instances)
+    with pytest.raises(VpsProvisioningError, match="did not reach status 'RUNNING'"):
+        client.start_instance(VpsInstanceId("mngr-host-1"), timeout_seconds=0.0)
+
+
+# =============================================================================
+# set_instance_metadata / get_instance_metadata (offline-discovery mirror)
+# =============================================================================
+
+
+def test_set_instance_metadata_upsert_merges_with_existing() -> None:
+    """An upsert preserves existing items (e.g. startup-script) and adds/overwrites the given keys."""
+    instances = FakeInstancesClient()
+    instances.get_result = compute_v1.Instance(
+        name="mngr-host-1",
+        metadata=compute_v1.Metadata(
+            fingerprint="fp-1",
+            items=[
+                compute_v1.Items(key="startup-script", value="#!/bin/bash\n"),
+                compute_v1.Items(key="mngr-agent-a-name", value="old"),
+            ],
+        ),
+    )
+    client = _make_client(instances)
+    client.set_instance_metadata(
+        VpsInstanceId("mngr-host-1"), {"mngr-agent-a-name": "new", "mngr-agent-a-type": "command"}
+    )
+    assert len(instances.set_metadata_calls) == 1
+    written = {item.key: item.value for item in instances.set_metadata_calls[0].items}
+    # Untouched key preserved, existing key overwritten, new key added.
+    assert written["startup-script"] == "#!/bin/bash\n"
+    assert written["mngr-agent-a-name"] == "new"
+    assert written["mngr-agent-a-type"] == "command"
+    # The current fingerprint is echoed back for optimistic concurrency.
+    assert instances.set_metadata_calls[0].fingerprint == "fp-1"
+
+
+def test_set_instance_metadata_delete_removes_key() -> None:
+    """A delete drops the named key while leaving the rest of the metadata intact."""
+    instances = FakeInstancesClient()
+    instances.get_result = compute_v1.Instance(
+        name="mngr-host-1",
+        metadata=compute_v1.Metadata(
+            fingerprint="fp-1",
+            items=[
+                compute_v1.Items(key="startup-script", value="#!/bin/bash\n"),
+                compute_v1.Items(key="mngr-agent-a-name", value="a1"),
+            ],
+        ),
+    )
+    client = _make_client(instances)
+    client.set_instance_metadata(VpsInstanceId("mngr-host-1"), {}, delete_keys=["mngr-agent-a-name"])
+    written = {item.key: item.value for item in instances.set_metadata_calls[0].items}
+    assert "mngr-agent-a-name" not in written
+    assert written["startup-script"] == "#!/bin/bash\n"
+
+
+def test_set_instance_metadata_retries_once_on_fingerprint_conflict() -> None:
+    """A 412 PRECONDITION_FAILED on the first setMetadata triggers exactly one retry that succeeds.
+
+    GCE setMetadata is a fingerprint-guarded whole-object write; a concurrent
+    metadata write between the GET and the setMetadata returns 412. The client
+    refetches and retries once, so the upsert still lands.
+    """
+    instances = FakeInstancesClient()
+    instances.get_result = compute_v1.Instance(
+        name="mngr-host-1",
+        metadata=compute_v1.Metadata(fingerprint="fp-1", items=[]),
+    )
+    # First setMetadata raises a 412; the second (the single retry) succeeds.
+    instances.set_metadata_errors = [google_api_exceptions.PreconditionFailed("fingerprint conflict")]
+    client = _make_client(instances)
+    client.set_instance_metadata(VpsInstanceId("mngr-host-1"), {"mngr-agent-a-name": "a1"})
+    # Two attempts total: the conflicting one and the successful retry.
+    assert len(instances.set_metadata_calls) == 2
+    written = {item.key: item.value for item in instances.set_metadata_calls[1].items}
+    assert written["mngr-agent-a-name"] == "a1"
+
+
+def test_set_instance_metadata_noop_when_nothing_to_change() -> None:
+    """No updates and no deletes means zero API calls (not even a GET)."""
+    instances = FakeInstancesClient()
+    client = _make_client(instances)
+    client.set_instance_metadata(VpsInstanceId("mngr-host-1"), {}, delete_keys=[])
+    assert instances.set_metadata_calls == []
+    # get_result was never set; a stray GET would have tripped its assertion.
+
+
+def test_get_instance_metadata_returns_items_dict() -> None:
+    instances = FakeInstancesClient()
+    instances.get_result = compute_v1.Instance(
+        name="mngr-host-1",
+        metadata=compute_v1.Metadata(
+            items=[
+                compute_v1.Items(key="mngr-host-name", value="mngr-myhost"),
+                compute_v1.Items(key="mngr-agent-a-name", value="a1"),
+            ]
+        ),
+    )
+    client = _make_client(instances)
+    assert client.get_instance_metadata(VpsInstanceId("mngr-host-1")) == {
+        "mngr-host-name": "mngr-myhost",
+        "mngr-agent-a-name": "a1",
+    }
+
+
+def test_get_instance_metadata_returns_empty_when_instance_gone() -> None:
+    """A 404 (instance deleted) yields {} rather than surfacing the error."""
+    instances = FakeInstancesClient()
+    instances.get_error = google_api_exceptions.NotFound("gone")
+    client = _make_client(instances)
+    assert client.get_instance_metadata(VpsInstanceId("mngr-host-1")) == {}
 
 
 # =============================================================================

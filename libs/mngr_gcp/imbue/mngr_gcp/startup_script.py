@@ -1,9 +1,9 @@
 import shlex
 
-from imbue.mngr_vps_docker.host_setup import HostSetupStep
-from imbue.mngr_vps_docker.host_setup import MNGR_READY_MARKER_PATH
-from imbue.mngr_vps_docker.host_setup import build_auto_shutdown_command
-from imbue.mngr_vps_docker.host_setup import build_host_setup_steps
+from imbue.mngr_vps.host_setup import HostSetupStep
+from imbue.mngr_vps.host_setup import MNGR_READY_MARKER_PATH
+from imbue.mngr_vps.host_setup import build_auto_shutdown_command
+from imbue.mngr_vps.host_setup import build_host_setup_steps
 
 
 def generate_gce_startup_script(
@@ -27,9 +27,9 @@ def generate_gce_startup_script(
       We install ours and restart sshd as the first action to shrink that window;
       the provisioner closes it by polling the live key until it matches
       (``GcpProvider._wait_for_expected_host_key``).
-    - Each host-setup step runs in its own subshell so a step's early ``exit`` (e.g.
-      the gVisor ``exit 0``) cannot skip the ``mngr-ready`` marker; the outer
-      ``set -e`` still aborts on any step failure.
+    - Each host-setup step runs in its own subshell so a step's early ``exit``
+      cannot skip the ``mngr-ready`` marker; the outer ``set -e`` still aborts on
+      any step failure.
 
     The guest agent re-runs this on every boot, so every step is idempotent.
     """

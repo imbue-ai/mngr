@@ -19,10 +19,10 @@ from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
-from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.errors import VpsProvisioningError
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
-from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.errors import VpsProvisioningError
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsInstanceStatus
 
 
 @pytest.fixture()
@@ -391,6 +391,25 @@ def test_destroy_instance(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
     client.destroy_instance(VpsInstanceId("i-abc"))
 
 
+def test_set_instance_tags_upserts_via_create_tags(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    """set_instance_tags issues CreateTags (an upsert) with the given Resources + Tags.
+
+    This backs the rename re-stamp of the EC2 ``Name`` identity tag offline
+    discovery reads.
+    """
+    client, stubber = stubbed_client
+    stubber.add_response(
+        "create_tags",
+        {},
+        expected_params={
+            "Resources": ["i-abc"],
+            "Tags": [{"Key": "Name", "Value": "mngr-renamed"}],
+        },
+    )
+    client.set_instance_tags(VpsInstanceId("i-abc"), {"Name": "mngr-renamed"})
+    stubber.assert_no_pending_responses()
+
+
 def test_stop_instance(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
     """stop_instance issues StopInstances and waits for the terminal 'stopped' state."""
     client, stubber = stubbed_client
@@ -528,40 +547,6 @@ def test_start_instance_waits_for_stopped_when_still_stopping(stubbed_client: tu
         expected_params={"InstanceIds": ["i-abc"]},
     )
     assert client.start_instance(VpsInstanceId("i-abc")) == "5.6.7.8"
-
-
-def test_add_tags(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
-    """add_tags upserts the given tags onto the instance via CreateTags."""
-    client, stubber = stubbed_client
-    stubber.add_response(
-        "create_tags",
-        {},
-        expected_params={"Resources": ["i-abc"], "Tags": [{"Key": "mngr-agent-x", "Value": "v"}]},
-    )
-    client.add_tags(VpsInstanceId("i-abc"), {"mngr-agent-x": "v"})
-
-
-def test_add_tags_empty_is_noop(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
-    """No tags means no CreateTags call (an unexpected call would make the Stubber raise)."""
-    client, _stubber = stubbed_client
-    client.add_tags(VpsInstanceId("i-abc"), {})
-
-
-def test_remove_tags(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
-    """remove_tags deletes tags by key via DeleteTags (Value omitted)."""
-    client, stubber = stubbed_client
-    stubber.add_response(
-        "delete_tags",
-        {},
-        expected_params={"Resources": ["i-abc"], "Tags": [{"Key": "mngr-agent-x"}]},
-    )
-    client.remove_tags(VpsInstanceId("i-abc"), ["mngr-agent-x"])
-
-
-def test_remove_tags_empty_is_noop(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
-    """No keys means no DeleteTags call."""
-    client, _stubber = stubbed_client
-    client.remove_tags(VpsInstanceId("i-abc"), [])
 
 
 def test_get_instance_status_running(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:

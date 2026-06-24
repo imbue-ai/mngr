@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import shlex
 import subprocess
 import time
 from io import BytesIO
@@ -156,10 +155,18 @@ class OutputGatherer:
         ), self.stderr_container.in_progress_line.decode("utf-8", errors="replace")
 
 
-def _shutdown_popen(process: subprocess.Popen[bytes], command: str, shutdown_timeout_sec: float) -> int | None:
+def _shutdown_popen(process: subprocess.Popen[bytes], shutdown_timeout_sec: float, reason: str) -> int | None:
+    # ``reason`` distinguishes the two ways this is reached -- a per-command
+    # timeout vs. an externally requested shutdown -- because the two look
+    # identical from here otherwise and the old "due to signal" wording led
+    # readers to assume a timeout even when the command was simply cancelled.
+    # The command/argv is deliberately *not* logged: this generic runner is
+    # used by callers that pass secrets in argv (e.g. ``--password``), so we
+    # log only the pid.
     with log_span(
-        "Aborting command (via sigterm to {}) due to signal...",
+        "Terminating subprocess (pid {}) with SIGTERM because {}",
         process.pid,
+        reason,
     ):
         process.terminate()
         try:
@@ -194,6 +201,8 @@ def run_local_command_modern_version(
     shutdown_timeout_sec: float = 30.0,
     poll_time: float = 0.01,
     env: Mapping[str, str] | None = None,
+    # Open file descriptors to keep open in (and inherit into) the spawned child, by their fd numbers.
+    pass_fds: Sequence[int] = (),
     on_initialization_complete: Callable[[BaseException | None], None] = lambda success: None,
 ) -> FinishedProcess:
     """
@@ -203,7 +212,6 @@ def run_local_command_modern_version(
     """
     try:
         shutdown_event = shutdown_event or Event()
-        command_as_string = " ".join(shlex.quote(arg) for arg in command)
 
         try:
             process = subprocess.Popen(
@@ -214,6 +222,7 @@ def run_local_command_modern_version(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env=env if env is not None else os.environ.copy(),
+                pass_fds=tuple(pass_fds),
             )
         except (OSError, ValueError) as e:
             raise ProcessSetupError(
@@ -258,7 +267,11 @@ def run_local_command_modern_version(
                 exit_code = maybe_exit_code
                 break
         else:
-            exit_code = _shutdown_popen(process, command_as_string, shutdown_timeout_sec)
+            if _is_timeout(timeout_time):
+                shutdown_reason = f"it exceeded its {timeout:.0f}s timeout"
+            else:
+                shutdown_reason = "a shutdown was requested (shutdown_event was set)"
+            exit_code = _shutdown_popen(process, shutdown_timeout_sec, shutdown_reason)
 
         stdout, stderr = gatherer.get_output()
 

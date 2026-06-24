@@ -130,7 +130,14 @@ def _gather_plugin_info(mngr_ctx: MngrContext) -> list[PluginInfo]:
             version = metadata.get("version")
             description = metadata.get("summary")
 
-        is_enabled = _is_plugin_enabled(name, mngr_ctx.config)
+        # pm is the ground truth for whether a plugin is active: a blocked plugin
+        # is never registered (pluggy still lists its name here with a None plugin
+        # object), so report it as disabled regardless of config. This catches
+        # blocks that config.disabled_plugins does not record -- e.g. command-default
+        # or create-template --disable-plugin, applied after load_config in
+        # setup_command_context -- without which such plugins would be mislabeled
+        # enabled.
+        is_enabled = _is_plugin_enabled(name, mngr_ctx.config) and not pm.is_blocked(name)
 
         plugin_info_by_name[name] = PluginInfo(
             name=name,

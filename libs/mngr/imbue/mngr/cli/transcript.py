@@ -16,7 +16,7 @@ from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
-from imbue.mngr.config.agent_class_registry import get_agent_class
+from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
@@ -53,8 +53,14 @@ def _assert_agent_type_supports_transcripts(address: AgentOrHostAddress, mngr_ct
     if agent_type is None:
         # Agent's data.json lacks 'type'; defer to downstream error rather than blocking.
         return
-    agent_class = get_agent_class(str(agent_type))
-    if issubclass(agent_class, HasCommonTranscriptMixin):
+    # Resolve through the parent_type chain (and aliases) so a config-defined
+    # subtype (a custom [agent_types.X] whose parent_type is e.g. 'claude') maps
+    # to its parent's class, rather than failing a flat class-registry lookup.
+    # A type we cannot resolve raises here (UnknownAgentTypeError, or MngrError if
+    # its plugin is disabled), which is correct: if we cannot resolve the type we
+    # do not know how to read it, so block rather than fall through to discovery.
+    resolved = resolve_agent_type(agent_type, mngr_ctx.config)
+    if issubclass(resolved.agent_class, HasCommonTranscriptMixin):
         return
     raise UserInputError(
         f"Agent '{agent_ref.agent_name}' has type '{agent_type}', which does not produce a common transcript."
@@ -147,16 +153,25 @@ def _format_event_human(event: dict[str, Any]) -> str:
             return f"[{timestamp}] user:\n{content}"
 
         case "assistant_message":
-            text = event.get("text", "")
-            tool_calls = event.get("tool_calls", [])
-            parts: list[str] = []
-            if text:
-                parts.append(text)
-            for tc in tool_calls:
-                tool_name = tc.get("tool_name", "unknown")
-                preview = tc.get("input_preview", "")
-                parts.append(f"  -> {tool_name}({preview})")
-            body = "\n".join(parts) if parts else "(no content)"
+            # Every emitter fills the ordered parts[]; render it directly (the flat
+            # text + tool_calls are kept on the record as a convenience baseline, but
+            # parts[] is the authoritative ordered view).
+            lines: list[str] = []
+            for part in event.get("parts", []):
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "text":
+                    content = part.get("content", "")
+                    if content:
+                        lines.append(content)
+                elif part.get("type") == "tool_call":
+                    tool_name = part.get("tool_name", "unknown")
+                    preview = part.get("input_preview", "")
+                    lines.append(f"  -> {tool_name}({preview})")
+                else:
+                    # Unknown part type (e.g. a future reasoning part): nothing to render here.
+                    continue
+            body = "\n".join(lines) if lines else "(no content)"
             return f"[{timestamp}] assistant:\n{body}"
 
         case "tool_result":

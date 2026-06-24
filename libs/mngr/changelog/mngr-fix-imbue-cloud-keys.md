@@ -1,0 +1,1 @@
+`mngr create --format json` now includes `outer_host_public_key` and `container_host_public_key` when the provider exposes them (a new `get_ssh_host_public_keys` host/provider method, defaulting to none), so tooling can pin a host's sshd key for strict host-key checking instead of trust-on-first-use.

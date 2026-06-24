@@ -22,11 +22,11 @@ from imbue.mngr.utils.polling import wait_for
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.config import SecurityGroupSpec
-from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.errors import VpsProvisioningError
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
-from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.vps_client import VpsClientInterface
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.errors import VpsProvisioningError
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsInstanceStatus
+from imbue.mngr_vps.vps_client import VpsClientInterface
 
 # Tag that ``create_instance`` adds to every EC2 instance launched while
 # ``PYTEST_CURRENT_TEST`` is set. The conftest session-end scanner uses
@@ -540,6 +540,20 @@ class AwsVpsClient(VpsClientInterface):
         )
         return VpsInstanceId(instance_id)
 
+    def set_instance_tags(self, instance_id: VpsInstanceId, tags: Mapping[str, str]) -> None:
+        """Upsert tags on an existing instance (EC2 ``create_tags`` is an upsert).
+
+        Used to re-stamp the cheap identity tags offline discovery reads (e.g.
+        the ``Name`` tag after a rename) without touching the rest of the
+        instance's tag set. AWS-only, like ``stop_instance`` -- reached via
+        ``self.aws_client``, not the shared ``VpsClientInterface``.
+        """
+        with self._translate_aws_errors():
+            self._ec2().create_tags(
+                Resources=[str(instance_id)],
+                Tags=[{"Key": key, "Value": value} for key, value in tags.items()],
+            )
+
     def destroy_instance(self, instance_id: VpsInstanceId) -> None:
         with self._translate_aws_errors():
             self._ec2().terminate_instances(InstanceIds=[str(instance_id)])
@@ -630,39 +644,6 @@ class AwsVpsClient(VpsClientInterface):
             )
         except TimeoutError as e:
             raise VpsProvisioningError(str(e)) from e
-
-    def add_tags(self, instance_id: VpsInstanceId, tags: Mapping[str, str]) -> None:
-        """Add or overwrite tags on an instance via ``CreateTags`` (idempotent upsert).
-
-        Used to persist offline-discoverable metadata (per-agent records) onto the
-        EC2 instance, so a stopped instance -- which has no public IP and is
-        unreachable over SSH -- still surfaces in ``mngr list`` and can be resumed
-        by name. AWS limits: 50 tags per resource, key <=128 chars, value <=256
-        chars. No-op when ``tags`` is empty. AWS-only (reached via
-        ``self.aws_client``), like ``stop_instance``/``start_instance``.
-        """
-        if not tags:
-            return
-        with self._translate_aws_errors():
-            self._ec2().create_tags(
-                Resources=[str(instance_id)],
-                Tags=[{"Key": k, "Value": v} for k, v in tags.items()],
-            )
-
-    def remove_tags(self, instance_id: VpsInstanceId, keys: Sequence[str]) -> None:
-        """Remove tags (by key) from an instance via ``DeleteTags``. No-op when ``keys`` is empty.
-
-        ``DeleteTags`` with only a ``Key`` (no ``Value``) deletes the tag
-        regardless of its current value -- what we want for removing a
-        persisted-agent tag when its agent is destroyed.
-        """
-        if not keys:
-            return
-        with self._translate_aws_errors():
-            self._ec2().delete_tags(
-                Resources=[str(instance_id)],
-                Tags=[{"Key": k} for k in keys],
-            )
 
     def _describe_instance(self, instance_id: VpsInstanceId) -> dict[str, Any] | None:
         with self._translate_aws_errors():

@@ -20,7 +20,12 @@ Standalone: no mngr imports, uses only the Python stdlib, so it runs on remote
 hosts where mngr is not installed. The pure reverse-mapping functions are imported
 directly by the unit tests.
 
-Usage: stream_snapshot.py <tmux_session_name>
+Usage: stream_snapshot.py <tmux_session_name> [primary_window_name]
+
+``primary_window_name`` is the name of the agent's primary tmux window (config
+``tmux.primary_window_name``, default ``agent``). The pane is captured by
+targeting that window by name rather than the literal ``:0`` index, so capture
+works regardless of the user's tmux ``base-index``.
 
 Requires environment variables:
   MNGR_AGENT_STATE_DIR                  - the agent's state directory
@@ -827,7 +832,18 @@ def _read_last_complete_assistant_id(transcript_path: Path) -> str:
         return ""
 
 
-def _capture_pane(session_name: str) -> str | None:
+def _agent_pane_target(session_name: str, window_name: str) -> str:
+    """Build the exact-match tmux target for the agent's primary window/pane.
+
+    ``=`` forces exact session-name matching; the window is addressed by name
+    (not the literal ``:0`` index) so the target is correct regardless of the
+    user's tmux ``base-index``, matching how mngr creates and targets the window
+    everywhere else.
+    """
+    return f"={session_name}:{window_name}"
+
+
+def _capture_pane(session_name: str, window_name: str) -> str | None:
     """Capture the agent's visible tmux pane with ANSI codes and rejoined wrapped lines.
 
     Only the visible pane is captured: Claude's TUI redraws within the viewport
@@ -835,7 +851,7 @@ def _capture_pane(session_name: str) -> str | None:
     yields no extra message content. Continuation past the point where the marker
     scrolls off is handled by overlap-stitching successive visible captures.
     """
-    target = f"={session_name}:0"
+    target = _agent_pane_target(session_name, window_name)
     try:
         result = subprocess.run(
             ["tmux", "capture-pane", "-e", "-J", "-p", "-t", target],
@@ -875,6 +891,7 @@ def _session_is_alive(session_name: str) -> bool:
 
 def _run_one_poll(
     session_name: str,
+    window_name: str,
     state: StreamBufferState,
     active_path: Path,
     transcript_path: Path,
@@ -905,7 +922,7 @@ def _run_one_poll(
         return False
 
     last_id = _read_last_complete_assistant_id(transcript_path)
-    pane = _capture_pane(session_name)
+    pane = _capture_pane(session_name, window_name)
     if pane is None:
         return True
 
@@ -925,9 +942,12 @@ def _run_one_poll(
 
 def main(argv: list[str]) -> int:
     if len(argv) < 2:
-        _log("usage: stream_snapshot.py <tmux_session_name>")
+        _log("usage: stream_snapshot.py <tmux_session_name> [primary_window_name]")
         return 1
     session_name = argv[1]
+    # The agent's primary window name (default "agent"); the pane is targeted by
+    # this name, not the literal :0 index, so capture is base-index agnostic.
+    window_name = argv[2] if len(argv) >= 3 and argv[2] else "agent"
 
     state_dir_str = os.environ.get("MNGR_AGENT_STATE_DIR")
     if not state_dir_str:
@@ -982,7 +1002,9 @@ def main(argv: list[str]) -> int:
     was_active = False
     try:
         while _session_is_alive(session_name):
-            was_active = _run_one_poll(session_name, state, active_path, transcript_path, buffer_path, was_active)
+            was_active = _run_one_poll(
+                session_name, window_name, state, active_path, transcript_path, buffer_path, was_active
+            )
             time.sleep(interval_seconds)
     finally:
         try:

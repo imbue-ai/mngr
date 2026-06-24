@@ -5,7 +5,7 @@
   to associate (if any are signed in) or links to sign-in/create-account.
 #}
 <Card extra="my-3">
-  <p class="font-medium mb-2">This workspace needs to be associated with an account before sharing can be configured.</p>
+  <p class="font-semibold mb-2">This workspace needs to be associated with an account before sharing can be configured.</p>
   {% if accounts %}
     <form method="POST" action="/workspace/{{ agent_id }}/associate" class="flex gap-2 items-center mt-2">
       <Select name="user_id" width="w-auto">

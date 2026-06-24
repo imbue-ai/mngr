@@ -12,6 +12,7 @@ from imbue.mngr.agents.agent_registry import list_selectable_agent_type_names
 from imbue.mngr.agents.agent_registry import load_agents_from_plugins
 from imbue.mngr.agents.agent_registry import reset_agent_registry
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.default_plugins.command_agent import CommandAgent
 from imbue.mngr.agents.default_plugins.headless_command_agent import HeadlessCommandConfig
 from imbue.mngr.config.agent_alias_registry import is_agent_alias
 from imbue.mngr.config.agent_alias_registry import normalize_agent_type_name
@@ -23,6 +24,7 @@ from imbue.mngr.config.agent_config_registry import register_agent_config
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
+from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -74,7 +76,7 @@ def test_agent_type_config_merge_preserves_command() -> None:
     base = AgentTypeConfig(command=CommandString("base-command"))
     override = AgentTypeConfig(command=CommandString("override-command"))
 
-    merged = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
 
     assert merged.command == CommandString("override-command")
 
@@ -84,7 +86,7 @@ def test_agent_type_config_merge_keeps_base_command_when_override_none() -> None
     base = AgentTypeConfig(command=CommandString("base-command"))
     override = AgentTypeConfig()
 
-    merged = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
 
     assert merged.command == CommandString("base-command")
 
@@ -94,7 +96,7 @@ def test_agent_type_config_merge_replaces_cli_args() -> None:
     base = AgentTypeConfig(cli_args=("--verbose",))
     override = AgentTypeConfig(cli_args=("--debug",))
 
-    merged = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
 
     assert merged.cli_args == ("--debug",)
 
@@ -104,7 +106,7 @@ def test_agent_type_config_merge_cli_args_with_empty_base() -> None:
     base = AgentTypeConfig()
     override = AgentTypeConfig(cli_args=("--debug",))
 
-    merged = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
 
     assert merged.cli_args == ("--debug",)
 
@@ -114,7 +116,7 @@ def test_agent_type_config_merge_cli_args_with_empty_override() -> None:
     base = AgentTypeConfig(cli_args=("--verbose",))
     override = AgentTypeConfig()
 
-    merged = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
 
     assert merged.cli_args == ("--verbose",)
 
@@ -268,7 +270,7 @@ def test_alias_is_skipped_when_name_collides_with_existing_type() -> None:
     _load_with_plugins(_BadAliasPlugin())
 
     # The built-in "command" type's class must be untouched by the colliding alias.
-    assert get_agent_class("command") is BaseAgent
+    assert get_agent_class("command") is CommandAgent
     assert not is_agent_alias("command")
 
 

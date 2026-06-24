@@ -21,8 +21,8 @@
 <Base title="Welcome to Minds" scripts={{ _scripts }}>
   <div class="min-h-screen flex items-center justify-center">
     <div class="max-w-sm w-full px-6 text-center">
-      <h1 class="text-3xl font-bold text-zinc-900 mb-2">Welcome to Minds</h1>
-      <p class="text-zinc-500 text-sm mb-8">Run persistent, autonomous AI agents</p>
+      <h1 class="type-heading-lg text-primary mb-2">Welcome to Minds</h1>
+      <p class="text-secondary type-body mb-8">Run persistent, autonomous AI agents</p>
 
       <div class="flex flex-col gap-3 mb-6">
         <ButtonLink href="/auth/signup" variant="primary" block>Sign Up</ButtonLink>
@@ -30,19 +30,19 @@
       </div>
 
       <Button variant="ghost" id="skip-account-btn"
-              extra="!p-0 !bg-transparent !text-xs !font-normal !text-zinc-400 hover:!bg-transparent hover:!text-zinc-700 hover:underline">
+              extra="!p-0 !bg-transparent !type-helper !text-tertiary hover:!bg-transparent hover:!text-primary hover:underline">
         Continue without an account
       </Button>
 
       <Modal id="skip-dialog" card_extra="text-left">
-        <h2 class="text-lg font-semibold text-zinc-900 mb-3">Continue without an account?</h2>
-        <p class="text-sm text-zinc-700 mb-2">An Imbue account enables:</p>
-        <ul class="text-sm text-zinc-700 list-disc pl-5 mb-4 space-y-1">
+        <h2 class="type-heading text-primary mb-3">Continue without an account?</h2>
+        <p class="type-body text-primary mb-2">An Imbue account enables:</p>
+        <ul class="type-body text-primary list-disc pl-4 mb-4 space-y-1">
           <li>Project sharing</li>
           <li>Imbue-hosted cloud projects</li>
           <li>No need to bring your own API keys</li>
         </ul>
-        <p class="text-xs text-zinc-400 mb-5">You can always create an account later by clicking "log in" in the upper right.</p>
+        <p class="type-helper text-tertiary mb-4">You can always create an account later by clicking "log in" in the upper right.</p>
         <div class="flex justify-end gap-3">
           <Button variant="secondary" id="skip-cancel-btn">Cancel</Button>
           <ButtonLink href="/create" variant="primary" id="skip-continue-btn">Continue</ButtonLink>

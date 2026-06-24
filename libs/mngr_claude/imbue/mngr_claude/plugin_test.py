@@ -22,6 +22,7 @@ from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.update_policy import AgentUpdatePolicy
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.preservation import preserve_agent_data
 from imbue.mngr.api.testing import FakeHost
@@ -29,8 +30,13 @@ from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import split_cli_args_string
+from imbue.mngr.config.overlay_merge import merge_models_via_overlay
+from imbue.mngr.errors import AgentInstallationError
+from imbue.mngr.errors import AgentStartError
+from imbue.mngr.errors import ConfigError
+from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import NoCommandDefinedError
-from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.host import Host
@@ -68,22 +74,26 @@ from imbue.mngr_claude.claude_config import ClaudeEffortCalloutNotDismissedError
 from imbue.mngr_claude.claude_config import build_credential_sync_hooks_config
 from imbue.mngr_claude.claude_config import build_readiness_hooks_config
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
+from imbue.mngr_claude.claude_config import get_managed_settings_path
 from imbue.mngr_claude.plugin import CLAUDE_INSTALL_PATH
 from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_claude.plugin import CostThresholdDialogIndicator
+from imbue.mngr_claude.plugin import MANAGED_SETTINGS_LAUNCH_ARG
 from imbue.mngr_claude.plugin import ProvisioningContext
+from imbue.mngr_claude.plugin import _build_claude_install_command
 from imbue.mngr_claude.plugin import _build_install_command_hint
 from imbue.mngr_claude.plugin import _build_settings_json
-from imbue.mngr_claude.plugin import _check_settings_local_gitignored
 from imbue.mngr_claude.plugin import _claude_json_has_primary_api_key
 from imbue.mngr_claude.plugin import _claude_preserved_items
 from imbue.mngr_claude.plugin import _compute_keychain_label_suffix
+from imbue.mngr_claude.plugin import _generate_claude_json
 from imbue.mngr_claude.plugin import _generate_installed_plugins_content
 from imbue.mngr_claude.plugin import _generate_known_marketplaces_content
 from imbue.mngr_claude.plugin import _get_claude_version
 from imbue.mngr_claude.plugin import _has_api_credentials_available
 from imbue.mngr_claude.plugin import _install_claude
+from imbue.mngr_claude.plugin import _is_using_claude_oauth_subscription
 from imbue.mngr_claude.plugin import _parse_claude_version_output
 from imbue.mngr_claude.plugin import _provision_local_credentials
 from imbue.mngr_claude.plugin import _read_macos_keychain_credential
@@ -94,10 +104,13 @@ from imbue.mngr_claude.plugin import _sync_user_resources
 from imbue.mngr_claude.plugin import _write_generated_files
 from imbue.mngr_claude.plugin import agent_field_generators
 from imbue.mngr_claude.plugin import approve_api_key_for_claude
+from imbue.mngr_claude.plugin import compute_claude_json_flags
+from imbue.mngr_claude.plugin import compute_settings_json_flags
 from imbue.mngr_claude.plugin import get_files_for_deploy
 from imbue.mngr_claude.plugin import on_before_create
 from imbue.mngr_claude.plugin import on_before_host_destroy
-from imbue.mngr_claude.plugin import register_cli_options
+from imbue.mngr_claude.plugin import should_trust_work_dir
+from imbue.overlay.markers import StaticList
 
 # =============================================================================
 # Test Helpers
@@ -306,7 +319,7 @@ def test_claude_agent_config_merge_overrides_command() -> None:
     base = ClaudeAgentConfig()
     override = ClaudeAgentConfig(command=CommandString("custom-claude"))
 
-    merged = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
 
     assert merged.command == CommandString("custom-claude")
 
@@ -316,7 +329,7 @@ def test_claude_agent_config_merge_replaces_cli_args() -> None:
     base = ClaudeAgentConfig(cli_args=("--verbose",))
     override = ClaudeAgentConfig(cli_args=("--model", "sonnet"))
 
-    merged = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
 
     assert merged.cli_args == ("--model", "sonnet")
 
@@ -326,7 +339,7 @@ def test_claude_agent_config_merge_uses_override_cli_args_when_base_empty() -> N
     base = ClaudeAgentConfig()
     override = ClaudeAgentConfig(cli_args=("--verbose",))
 
-    merged = base.merge_with(override)
+    merged, _ = merge_models_via_overlay(base, override)
 
     assert merged.cli_args == ("--verbose",)
 
@@ -339,21 +352,23 @@ def test_claude_agent_config_merge_uses_override_cli_args_when_base_empty() -> N
 class _ParsedAssembleCommand:
     """Structural view of an assembled claude command, parsed via shlex.
 
-    The assembled command has the shape::
+    The assembled command has the shape (normal mode, no mngr --settings)::
 
         <bg> <exports> && rm -rf .../session_started
             && ( ( find ... | grep . ) && <base> --resume "$SID" <args> )
             || <base> --session-id <uuid> <args>
 
+    In use_env_config_dir mode, mngr injects its own ``--settings <path>``
+    immediately after ``<base>`` in both branches.
+
     shlex.split tokenizes shell operators (``&&``, ``||``) as their own tokens,
     so we split on the single top-level ``||`` to separate the resume branch from
-    the create branch, then read the base command and trailing args from each.
-    This lets the assemble-command tests assert on meaningful tokens (which base
-    command, the resume/session-id flags, the trailing args) without pinning the
-    exact whitespace or ``&&`` chain layout.
+    the create branch, then read the base command, the (optional) managed-settings
+    path, and the trailing args from each. ``mngr_injects_settings`` selects the
+    layout; in normal mode ``resume_settings`` / ``create_settings`` are None.
     """
 
-    def __init__(self, command: str) -> None:
+    def __init__(self, command: str, mngr_injects_settings: bool = False) -> None:
         self.tokens = shlex.split(command)
         # The resume/create split is the LAST top-level `||`. (An earlier `||`
         # appears inside the SID export's `... 2>/dev/null || true` fallback, so
@@ -362,20 +377,34 @@ class _ParsedAssembleCommand:
         resume_tokens = self.tokens[:split_idx]
         create_tokens = self.tokens[split_idx + 1 :]
 
-        # Resume branch: <base> --resume $MAIN_CLAUDE_SESSION_ID <args...>.
-        # The resume command is wrapped in a `( ... )` subshell, so a trailing
-        # `)` group token follows the args; drop it before reading the args.
+        # Resume branch: <base> [--settings <path>] --resume $MAIN_CLAUDE_SESSION_ID <args...>.
+        # With mngr --settings, the launch arg sits immediately before --resume, so
+        # the base is two tokens ahead of it; without it, the base is the token right
+        # before --resume. The resume command is wrapped in a `( ... )` subshell, so a
+        # trailing `)` group token follows the args; drop it before reading the args.
         resume_idx = resume_tokens.index("--resume")
-        self.resume_base = resume_tokens[resume_idx - 1]
+        if mngr_injects_settings:
+            assert resume_tokens[resume_idx - 2] == "--settings"
+            self.resume_settings: str | None = resume_tokens[resume_idx - 1]
+            self.resume_base = resume_tokens[resume_idx - 3]
+        else:
+            self.resume_settings = None
+            self.resume_base = resume_tokens[resume_idx - 1]
         assert resume_tokens[resume_idx + 1] == "$MAIN_CLAUDE_SESSION_ID"
         resume_arg_tokens = resume_tokens[resume_idx + 2 :]
         if resume_arg_tokens and resume_arg_tokens[-1] == ")":
             resume_arg_tokens = resume_arg_tokens[:-1]
         self.resume_args = resume_arg_tokens
 
-        # Create branch: <base> --session-id <uuid> <args...>
+        # Create branch: <base> [--settings <path>] --session-id <uuid> <args...>
         session_idx = create_tokens.index("--session-id")
-        self.create_base = create_tokens[session_idx - 1]
+        if mngr_injects_settings:
+            assert create_tokens[session_idx - 2] == "--settings"
+            self.create_settings: str | None = create_tokens[session_idx - 1]
+            self.create_base = create_tokens[session_idx - 3]
+        else:
+            self.create_settings = None
+            self.create_base = create_tokens[session_idx - 1]
         self.create_session_id = create_tokens[session_idx + 1]
         self.create_args = create_tokens[session_idx + 2 :]
 
@@ -406,6 +435,9 @@ def test_claude_agent_assemble_command_with_no_args(
     assert parsed.create_args == []
     # Local hosts should NOT have IS_SANDBOX set
     assert not parsed.has_is_sandbox
+    # In normal mode mngr injects no --settings of its own (its hooks live in the
+    # config-dir settings.json), so no --settings token appears at all.
+    assert "--settings" not in parsed.tokens
 
 
 def test_claude_agent_assemble_command_with_agent_args(
@@ -445,6 +477,83 @@ def test_claude_agent_assemble_command_with_cli_args_and_agent_args(
     assert parsed.resume_args == ["--verbose", "--model", "opus"]
     assert parsed.create_session_id == str(uuid)
     assert parsed.create_args == ["--verbose", "--model", "opus"]
+
+
+def test_claude_agent_assemble_command_passes_user_settings_through(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """In normal mode a user ``--settings`` (cli_args or agent_args) passes through verbatim.
+
+    mngr injects no ``--settings`` of its own (its hooks live in the config-dir
+    settings.json, which Claude layers under the user's command-line ``--settings``),
+    so the user's flag reaches claude unmodified and there is nothing to collide.
+    """
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(
+            cli_args=split_cli_args_string('--settings \'{"model": "opus"}\' --verbose'), check_installation=False
+        ),
+    )
+
+    command = agent.assemble_command(
+        host=host, agent_args=("--settings", '{"hooks": {}}', "--model", "opus"), command_override=None
+    )
+
+    parsed = _ParsedAssembleCommand(str(command))
+    # mngr added no --settings of its own.
+    assert parsed.resume_settings is None
+    assert parsed.create_settings is None
+    # Both the cli_args and agent_args user --settings appear verbatim in the args.
+    assert parsed.resume_args == [
+        "--settings",
+        '{"model": "opus"}',
+        "--verbose",
+        "--settings",
+        '{"hooks": {}}',
+        "--model",
+        "opus",
+    ]
+    assert parsed.create_args == parsed.resume_args
+
+
+def test_claude_agent_assemble_command_injects_mngr_settings_in_env_config_dir_mode(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In use_env_config_dir mode, mngr injects its own --settings, alongside the user's.
+
+    There is no per-agent config dir, so mngr loads its hooks via --settings (the
+    managed file). The user's own --settings still passes through, so both appear
+    (the documented collision: claude is last-wins).
+    """
+    shared_dir = tmp_path / "shared"
+    shared_dir.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(shared_dir))
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(
+            cli_args=split_cli_args_string('--settings \'{"model": "opus"}\''),
+            check_installation=False,
+            use_env_config_dir=True,
+        ),
+    )
+
+    command = agent.assemble_command(host=host, agent_args=(), command_override=None)
+
+    parsed = _ParsedAssembleCommand(str(command), mngr_injects_settings=True)
+    # mngr's managed-settings launch arg is present...
+    expected_settings = shlex.split(MANAGED_SETTINGS_LAUNCH_ARG)[1]
+    assert parsed.resume_settings == expected_settings
+    assert parsed.create_settings == expected_settings
+    # ...and the user's own --settings also passes through (the collision).
+    assert parsed.resume_args == ["--settings", '{"model": "opus"}']
+    assert parsed.create_args == ["--settings", '{"model": "opus"}']
 
 
 def test_claude_agent_assemble_command_with_command_override(
@@ -501,11 +610,11 @@ def test_claude_agent_assemble_command_sets_is_sandbox_for_remote_host(
     uuid = agent.id.get_uuid()
     prefix = temp_mngr_ctx.config.prefix
     session_name = f"{prefix}test-agent"
-    background_cmd = agent._build_background_tasks_command(session_name)
+    background_cmd = agent._build_background_tasks_command(session_name, temp_mngr_ctx.config.tmux.primary_window_name)
     sid_export = _sid_export_for(uuid)
     # Remote hosts SHOULD have IS_SANDBOX set
     assert command == CommandString(
-        f'{background_cmd} export IS_SANDBOX=1 && {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" ) || claude --session-id {uuid}'
+        f'{background_cmd} export IS_SANDBOX=1 && {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" ) || claude --session-id {uuid}'
     )
 
 
@@ -535,7 +644,7 @@ def test_claude_agent_assemble_command_resume_branch_runs_when_session_jsonl_exi
     Files on disk are named ``<session_id>.jsonl``, so the guard returned no
     matches, the ``&&`` short-circuited, and the silent ``||`` fallback ran
     ``claude --session-id <fresh agent uuid>`` instead of ``claude --resume <adopted_id>``.
-    The end-user symptom was that ``--adopt-session`` appeared to do nothing
+    The end-user symptom was that ``--adopt`` appeared to do nothing
     and a brand-new session opened with no error.
 
     This test executes the assembled shell pipeline against a stub ``claude``
@@ -622,7 +731,7 @@ def test_build_background_tasks_command(
 
     prefix = temp_mngr_ctx.config.prefix
     session_name = f"{prefix}test-agent"
-    cmd = agent._build_background_tasks_command(session_name)
+    cmd = agent._build_background_tasks_command(session_name, "agent")
 
     # Should be a background subshell
     assert cmd.startswith("(")
@@ -631,8 +740,20 @@ def test_build_background_tasks_command(
     # Should reference the provisioned script
     assert "claude_background_tasks.sh" in cmd
 
-    # Should pass the session name as argument
-    assert session_name in cmd
+    # Should pass the session name and the primary window name as arguments so the
+    # response-streaming watcher captures the agent pane by window name (not :0).
+    assert f"claude_background_tasks.sh {session_name} agent " in cmd
+
+
+def test_build_background_tasks_command_passes_custom_primary_window_name(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A custom primary window name is forwarded to claude_background_tasks.sh."""
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    cmd = agent._build_background_tasks_command("mngr-test-agent", "primary")
+
+    assert "claude_background_tasks.sh mngr-test-agent primary " in cmd
 
 
 # =============================================================================
@@ -660,6 +781,44 @@ def test_on_before_provisioning_skips_check_when_disabled(
     agent.on_before_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
 
     assert config_path.read_text() == config_before
+
+
+def test_on_before_provisioning_rejects_user_settings_flag_in_cli_args_for_env_config_dir(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """In use_env_config_dir mode a user `--settings` in cli_args is rejected (mngr passes
+    its own `--settings` and can't reliably merge a second one)."""
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(
+            check_installation=False,
+            use_env_config_dir=True,
+            cli_args=("--settings", "/tmp/custom.json"),
+        ),
+    )
+    options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
+
+    with pytest.raises(UserInputError, match="settings_overrides"):
+        agent.on_before_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+
+
+def test_on_before_provisioning_rejects_user_settings_flag_in_agent_args_for_env_config_dir(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """The same rejection covers a `-- --settings=...` passed on the create command line
+    (carried as agent_args)."""
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
+    )
+    options = CreateAgentOptions(agent_type=AgentTypeName("claude"), agent_args=("--settings=/tmp/custom.json",))
+
+    with pytest.raises(UserInputError, match="isolate_local_config_dir"):
+        agent.on_before_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
 
 
 def test_get_provision_file_transfers_returns_empty_when_no_local_settings(
@@ -1113,312 +1272,192 @@ def test_build_accept_marker_command_emits_empty_token_when_no_enqueue_event(
     assert result.stdout.strip() == ""
 
 
-def test_preflight_check_raises_when_not_gitignored(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """preflight_check should raise when .claude/settings.local.json is not gitignored in source."""
-    host = local_provider.create_host(HostName("localhost"))
-    source_dir = tmp_path / "source"
-    source_dir.mkdir()
-    init_git_repo(source_dir, initial_commit=False)
-
-    options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
-    config = ClaudeAgentConfig(check_installation=False)
-
-    with pytest.raises(PluginMngrError, match="not gitignored"):
-        ClaudeAgent.preflight_check(
-            source_host=host,
-            source_path=source_dir,
-            agent_options=options,
-            agent_config=config,
-            mngr_ctx=temp_mngr_ctx,
-        )
-
-
-def test_preflight_check_passes_when_gitignored(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """preflight_check should pass when .claude/settings.local.json is gitignored."""
-    host = local_provider.create_host(HostName("localhost"))
-    source_dir = tmp_path / "source"
-    source_dir.mkdir()
-    _init_git_with_gitignore(source_dir)
-
-    options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
-    config = ClaudeAgentConfig(check_installation=False)
-
-    # Should not raise
-    ClaudeAgent.preflight_check(
-        source_host=host,
-        source_path=source_dir,
-        agent_options=options,
-        agent_config=config,
+def _make_hooks_test_agent(
+    host: OnlineHostInterface, temp_mngr_ctx: MngrContext, work_dir: Path, agent_config: ClaudeAgentConfig
+) -> ClaudeAgent:
+    """Build a minimal ClaudeAgent for exercising _configure_agent_hooks."""
+    return ClaudeAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("test-agent"),
+        agent_type=AgentTypeName("claude"),
+        work_dir=work_dir,
+        create_time=datetime.now(timezone.utc),
+        host_id=host.id,
         mngr_ctx=temp_mngr_ctx,
+        agent_config=agent_config,
+        host=host,
     )
 
 
-def test_preflight_check_skips_when_not_git_repo(
+def test_configure_agent_hooks_writes_managed_file_not_settings_local(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """preflight_check should skip gitignore check when source is not a git repo."""
-    host = local_provider.create_host(HostName("localhost"))
-    source_dir = tmp_path / "source"
-    source_dir.mkdir()
+    """Hooks go to the per-agent managed file, never the project settings.local.json.
 
-    options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
-    config = ClaudeAgentConfig(check_installation=False)
-
-    # Should not raise (no git repo, no gitignore check)
-    ClaudeAgent.preflight_check(
-        source_host=host,
-        source_path=source_dir,
-        agent_options=options,
-        agent_config=config,
-        mngr_ctx=temp_mngr_ctx,
-    )
-
-
-def test_preflight_check_raises_when_only_global_gitignore(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """preflight_check should raise when .claude/settings.local.json is only in global gitignore.
-
-    Remote hosts don't have the user's global gitignore, so a rule that only
-    lives in the global config would cause provisioning to fail after expensive
-    host creation.
+    The managed file is loaded via ``claude --settings`` and is private to the
+    agent, so mngr no longer needs settings.local.json to be gitignored: even a
+    plain (un-gitignored) git repo is left untouched.
     """
-    host = local_provider.create_host(HostName("localhost"))
-    source_dir = tmp_path / "source"
-    source_dir.mkdir()
-    init_git_repo(source_dir, initial_commit=False)
-
-    # Set up a "global" gitignore that covers the file, but no repo .gitignore
-    global_gitignore = tmp_path / "global_gitignore"
-    global_gitignore.write_text(".claude/settings.local.json\n")
-    subprocess.run(
-        ["git", "config", "core.excludesFile", str(global_gitignore)],
-        cwd=source_dir,
-        check=True,
-        capture_output=True,
-    )
-
-    # Verify the file IS ignored (via global)
-    check = subprocess.run(
-        ["git", "check-ignore", "-q", ".claude/settings.local.json"],
-        cwd=source_dir,
-        capture_output=True,
-    )
-    assert check.returncode == 0, "File should be ignored via global gitignore"
-
-    options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
-    config = ClaudeAgentConfig(check_installation=False)
-
-    with pytest.raises(PluginMngrError, match="only gitignored via your global gitignore"):
-        ClaudeAgent.preflight_check(
-            source_host=host,
-            source_path=source_dir,
-            agent_options=options,
-            agent_config=config,
-            mngr_ctx=temp_mngr_ctx,
-        )
-
-
-def test_gitignore_check_passes_when_claude_is_symlink_and_resolved_path_gitignored(
-    local_provider: LocalProviderInstance, tmp_path: Path
-) -> None:
-    """gitignore check should pass when .claude is a symlink and the resolved path is gitignored."""
-    host = local_provider.create_host(HostName("localhost"))
-    repo_dir = tmp_path / "repo"
-    repo_dir.mkdir()
-    init_git_repo(repo_dir, initial_commit=False)
-
-    # Create .agents directory and symlink .claude -> .agents
-    (repo_dir / ".agents").mkdir()
-    (repo_dir / ".claude").symlink_to(".agents")
-
-    # Gitignore the resolved path (what git actually sees)
-    (repo_dir / ".gitignore").write_text(".agents/settings.local.json\n")
-
-    # Should not raise
-    _check_settings_local_gitignored(host, repo_dir, require_repo_rule=False)
-
-
-def test_gitignore_check_raises_when_claude_is_symlink_and_resolved_path_not_gitignored(
-    local_provider: LocalProviderInstance, tmp_path: Path
-) -> None:
-    """gitignore check should raise when .claude is a symlink and the resolved path is not gitignored."""
-    host = local_provider.create_host(HostName("localhost"))
-    repo_dir = tmp_path / "repo"
-    repo_dir.mkdir()
-    init_git_repo(repo_dir, initial_commit=False)
-
-    # Create .agents directory and symlink .claude -> .agents
-    (repo_dir / ".agents").mkdir()
-    (repo_dir / ".claude").symlink_to(".agents")
-
-    # Gitignore the symlink path (wrong -- git won't match this)
-    (repo_dir / ".gitignore").write_text(".claude/settings.local.json\n")
-
-    with pytest.raises(PluginMngrError, match="not gitignored") as exc_info:
-        _check_settings_local_gitignored(host, repo_dir, require_repo_rule=False)
-
-    # Error message should tell the user to add the resolved path, not the symlink path
-    assert ".agents/settings.local.json" in str(exc_info.value)
-
-
-def test_gitignore_check_skips_when_claude_symlink_points_outside_repo(
-    local_provider: LocalProviderInstance, tmp_path: Path
-) -> None:
-    """gitignore check should silently return when .claude symlink target is outside the repo."""
-    host = local_provider.create_host(HostName("localhost"))
-    repo_dir = tmp_path / "repo"
-    repo_dir.mkdir()
-    init_git_repo(repo_dir, initial_commit=False)
-
-    # Create a directory outside the repo and symlink .claude to it
-    outside_dir = tmp_path / "outside_agents"
-    outside_dir.mkdir()
-    (repo_dir / ".claude").symlink_to(outside_dir)
-
-    # Should not raise -- target is outside the repo, git won't track it
-    _check_settings_local_gitignored(host, repo_dir, require_repo_rule=False)
-
-
-def test_configure_agent_hooks_raises_when_not_gitignored(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """_configure_agent_hooks should raise when .claude/settings.local.json is not gitignored."""
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
-
-    # Init git but do NOT add .gitignore entry
+    # Init git but do NOT add a .gitignore entry: this used to raise.
     init_git_repo(work_dir, initial_commit=False)
 
-    agent = ClaudeAgent.model_construct(
-        id=AgentId.generate(),
-        name=AgentName("test-agent"),
-        agent_type=AgentTypeName("claude"),
-        work_dir=work_dir,
-        create_time=datetime.now(timezone.utc),
-        host_id=host.id,
-        mngr_ctx=temp_mngr_ctx,
-        agent_config=ClaudeAgentConfig(check_installation=False),
-        host=host,
+    agent = _make_hooks_test_agent(
+        host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False, use_env_config_dir=True)
     )
 
-    with pytest.raises(PluginMngrError, match="not gitignored"):
-        agent._configure_agent_hooks(host)
+    agent._configure_agent_hooks(host, temp_mngr_ctx)
+
+    # The managed settings file holds the hooks.
+    managed_path = get_managed_settings_path(agent._get_agent_dir())
+    assert managed_path.exists()
+    settings = json.loads(managed_path.read_text())
+    assert "SessionStart" in settings["hooks"]
+
+    # The project settings.local.json is never written.
+    assert not (work_dir / ".claude" / "settings.local.json").exists()
 
 
-def test_configure_agent_hooks_skips_gitignore_check_when_not_a_git_repo(
+def test_configure_agent_hooks_works_without_a_git_repo(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """_configure_agent_hooks should skip gitignore check when the work_dir is not a git repo."""
+    """_configure_agent_hooks works in a plain (non-git) work_dir."""
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
 
-    # Do NOT init a git repo -- work_dir is just a plain directory
-    agent = ClaudeAgent.model_construct(
-        id=AgentId.generate(),
-        name=AgentName("test-agent"),
-        agent_type=AgentTypeName("claude"),
-        work_dir=work_dir,
-        create_time=datetime.now(timezone.utc),
-        host_id=host.id,
-        mngr_ctx=temp_mngr_ctx,
-        agent_config=ClaudeAgentConfig(check_installation=False),
-        host=host,
+    agent = _make_hooks_test_agent(
+        host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False, use_env_config_dir=True)
     )
 
-    # Should succeed without raising (no gitignore check needed for non-git dirs)
-    agent._configure_agent_hooks(host)
+    agent._configure_agent_hooks(host, temp_mngr_ctx)
 
-    # Verify the hooks file was still created
-    settings_path = work_dir / ".claude" / "settings.local.json"
-    assert settings_path.exists()
-    settings = json.loads(settings_path.read_text())
+    managed_path = get_managed_settings_path(agent._get_agent_dir())
+    assert managed_path.exists()
+    settings = json.loads(managed_path.read_text())
     assert "hooks" in settings
     assert "SessionStart" in settings["hooks"]
 
 
-def test_configure_agent_hooks_creates_settings_file(
+def test_configure_agent_hooks_creates_managed_settings_file(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """_configure_agent_hooks should create .claude/settings.local.json."""
+    """_configure_agent_hooks should create the managed settings file with the readiness hooks."""
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
-    _init_git_with_gitignore(work_dir)
 
-    agent = ClaudeAgent.model_construct(
-        id=AgentId.generate(),
-        name=AgentName("test-agent"),
-        agent_type=AgentTypeName("claude"),
-        work_dir=work_dir,
-        create_time=datetime.now(timezone.utc),
-        host_id=host.id,
-        mngr_ctx=temp_mngr_ctx,
-        agent_config=ClaudeAgentConfig(check_installation=False),
-        host=host,
+    agent = _make_hooks_test_agent(
+        host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False, use_env_config_dir=True)
     )
 
-    agent._configure_agent_hooks(host)
+    agent._configure_agent_hooks(host, temp_mngr_ctx)
 
-    # Verify the file was actually created
-    settings_path = work_dir / ".claude" / "settings.local.json"
-    assert settings_path.exists()
-
-    # Verify the content has the expected hooks
-    settings = json.loads(settings_path.read_text())
+    managed_path = get_managed_settings_path(agent._get_agent_dir())
+    assert managed_path.exists()
+    settings = json.loads(managed_path.read_text())
     assert "hooks" in settings
     assert "SessionStart" in settings["hooks"]
     assert "UserPromptSubmit" in settings["hooks"]
     assert "Notification" in settings["hooks"]
 
 
-def test_configure_agent_hooks_merges_with_existing_settings(
+def test_configure_agent_hooks_applies_settings_overrides_in_managed_file(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """_configure_agent_hooks should merge with existing settings."""
+    """In use_env_config_dir mode the settings_overrides patch is folded into the managed
+    --settings file alongside mngr's hooks (resolved against the hooks base, markers gone)."""
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
-    _init_git_with_gitignore(work_dir)
 
-    # Create existing settings file
+    agent = _make_hooks_test_agent(
+        host,
+        temp_mngr_ctx,
+        work_dir,
+        ClaudeAgentConfig(
+            check_installation=False,
+            use_env_config_dir=True,
+            settings_overrides={"model": "opus[1m]", "permissions__extend": {"allow__extend": ["Bash(npm *)"]}},
+        ),
+    )
+
+    agent._configure_agent_hooks(host, temp_mngr_ctx)
+
+    content = get_managed_settings_path(agent._get_agent_dir()).read_text()
+    settings = json.loads(content)
+    assert settings["model"] == "opus[1m]"
+    assert settings["permissions"]["allow"] == ["Bash(npm *)"]
+    assert "SessionStart" in settings["hooks"]
+    assert "__extend" not in content
+
+
+def test_configure_agent_hooks_does_not_touch_existing_settings_local(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A pre-existing project settings.local.json is left completely untouched.
+
+    mngr owns its managed file and writes it fresh; it neither reads nor
+    rewrites the user's settings.local.json (which plain claude also reads).
+    """
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+
     claude_dir = work_dir / ".claude"
     claude_dir.mkdir()
-    existing_settings = {"model": "opus", "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": []}]}}
-    (claude_dir / "settings.local.json").write_text(json.dumps(existing_settings))
+    user_settings = {"model": "opus", "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": []}]}}
+    settings_local = claude_dir / "settings.local.json"
+    original_text = json.dumps(user_settings)
+    settings_local.write_text(original_text)
 
-    agent = ClaudeAgent.model_construct(
-        id=AgentId.generate(),
-        name=AgentName("test-agent"),
-        agent_type=AgentTypeName("claude"),
-        work_dir=work_dir,
-        create_time=datetime.now(timezone.utc),
-        host_id=host.id,
-        mngr_ctx=temp_mngr_ctx,
-        agent_config=ClaudeAgentConfig(check_installation=False),
-        host=host,
+    agent = _make_hooks_test_agent(
+        host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False, use_env_config_dir=True)
     )
 
-    agent._configure_agent_hooks(host)
+    agent._configure_agent_hooks(host, temp_mngr_ctx)
 
-    # Read the file and verify it was merged
-    settings_path = work_dir / ".claude" / "settings.local.json"
-    settings = json.loads(settings_path.read_text())
+    # settings.local.json is byte-for-byte unchanged.
+    assert settings_local.read_text() == original_text
 
-    # Should preserve existing settings
-    assert settings["model"] == "opus"
-    assert "PreToolUse" in settings["hooks"]
+    # The mngr hooks live in the managed file instead.
+    managed_path = get_managed_settings_path(agent._get_agent_dir())
+    managed = json.loads(managed_path.read_text())
+    assert "SessionStart" in managed["hooks"]
+    # And mngr's hooks did not leak into the user's file.
+    assert "SessionStart" not in user_settings["hooks"]
 
-    # Should add new hooks
-    assert "SessionStart" in settings["hooks"]
-    assert "UserPromptSubmit" in settings["hooks"]
-    assert "Notification" in settings["hooks"]
+
+def test_configure_agent_hooks_overwrites_managed_file_fresh(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """Re-running overwrites the managed file fresh -- no cross-generation accumulation.
+
+    A stale hook left in the managed file from a prior (different) mngr version
+    must not survive: mngr owns the whole file and rewrites its deterministic
+    build each time.
+    """
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+
+    agent = _make_hooks_test_agent(
+        host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False, use_env_config_dir=True)
+    )
+
+    managed_path = get_managed_settings_path(agent._get_agent_dir())
+    managed_path.parent.mkdir(parents=True, exist_ok=True)
+    stale = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "mkdir -p /events/stale"}]}]}}
+    managed_path.write_text(json.dumps(stale))
+
+    agent._configure_agent_hooks(host, temp_mngr_ctx)
+
+    settings = json.loads(managed_path.read_text())
+    stop_hooks = settings["hooks"].get("Stop", [])
+    commands = [c["command"] for entry in stop_hooks for c in entry.get("hooks", [])]
+    assert not any("/events/stale" in cmd for cmd in commands)
 
 
 def test_configure_agent_hooks_adds_credential_sync_on_macos(
@@ -1428,25 +1467,18 @@ def test_configure_agent_hooks_adds_credential_sync_on_macos(
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
-    _init_git_with_gitignore(work_dir)
 
-    agent = ClaudeAgent.model_construct(
-        id=AgentId.generate(),
-        name=AgentName("test-agent"),
-        agent_type=AgentTypeName("claude"),
-        work_dir=work_dir,
-        create_time=datetime.now(timezone.utc),
-        host_id=host.id,
-        mngr_ctx=temp_mngr_ctx,
-        agent_config=ClaudeAgentConfig(check_installation=False, sync_credentials_on_login=True),
-        host=host,
+    agent = _make_hooks_test_agent(
+        host,
+        temp_mngr_ctx,
+        work_dir,
+        ClaudeAgentConfig(check_installation=False, sync_credentials_on_login=True, use_env_config_dir=True),
     )
 
     with patch(f"{_CLAUDE_AGENT_MODULE}.is_macos", return_value=True):
-        agent._configure_agent_hooks(host)
+        agent._configure_agent_hooks(host, temp_mngr_ctx)
 
-    settings_path = work_dir / ".claude" / "settings.local.json"
-    settings = json.loads(settings_path.read_text())
+    settings = json.loads(get_managed_settings_path(agent._get_agent_dir()).read_text())
 
     # Should have readiness hooks
     assert "SessionStart" in settings["hooks"]
@@ -1465,25 +1497,18 @@ def test_configure_agent_hooks_skips_credential_sync_when_disabled(
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
-    _init_git_with_gitignore(work_dir)
 
-    agent = ClaudeAgent.model_construct(
-        id=AgentId.generate(),
-        name=AgentName("test-agent"),
-        agent_type=AgentTypeName("claude"),
-        work_dir=work_dir,
-        create_time=datetime.now(timezone.utc),
-        host_id=host.id,
-        mngr_ctx=temp_mngr_ctx,
-        agent_config=ClaudeAgentConfig(check_installation=False, sync_credentials_on_login=False),
-        host=host,
+    agent = _make_hooks_test_agent(
+        host,
+        temp_mngr_ctx,
+        work_dir,
+        ClaudeAgentConfig(check_installation=False, sync_credentials_on_login=False, use_env_config_dir=True),
     )
 
     with patch(f"{_CLAUDE_AGENT_MODULE}.is_macos", return_value=True):
-        agent._configure_agent_hooks(host)
+        agent._configure_agent_hooks(host, temp_mngr_ctx)
 
-    settings_path = work_dir / ".claude" / "settings.local.json"
-    settings = json.loads(settings_path.read_text())
+    settings = json.loads(get_managed_settings_path(agent._get_agent_dir()).read_text())
 
     # Should have readiness hooks
     assert "SessionStart" in settings["hooks"]
@@ -1557,23 +1582,18 @@ def test_configure_agent_hooks_adds_permission_auto_allow_when_enabled(
     work_dir.mkdir()
     _init_git_with_gitignore(work_dir)
 
-    agent = ClaudeAgent.model_construct(
-        id=AgentId.generate(),
-        name=AgentName("test-agent"),
-        agent_type=AgentTypeName("claude"),
-        work_dir=work_dir,
-        create_time=datetime.now(timezone.utc),
-        host_id=host.id,
-        mngr_ctx=temp_mngr_ctx,
-        agent_config=ClaudeAgentConfig(check_installation=False, auto_allow_permissions=True),
-        host=host,
+    agent = _make_hooks_test_agent(
+        host,
+        temp_mngr_ctx,
+        work_dir,
+        ClaudeAgentConfig(check_installation=False, auto_allow_permissions=True, use_env_config_dir=True),
     )
 
-    agent._configure_agent_hooks(host)
+    agent._configure_agent_hooks(host, temp_mngr_ctx)
 
-    settings_path = work_dir / ".claude" / "settings.local.json"
-    assert settings_path.exists()
-    settings = json.loads(settings_path.read_text())
+    managed_path = get_managed_settings_path(agent._get_agent_dir())
+    assert managed_path.exists()
+    settings = json.loads(managed_path.read_text())
 
     # Should have readiness hooks
     assert "SessionStart" in settings["hooks"]
@@ -1595,24 +1615,14 @@ def test_configure_agent_hooks_does_not_add_permission_auto_allow_by_default(
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     work_dir = tmp_path / "work"
     work_dir.mkdir()
-    _init_git_with_gitignore(work_dir)
 
-    agent = ClaudeAgent.model_construct(
-        id=AgentId.generate(),
-        name=AgentName("test-agent"),
-        agent_type=AgentTypeName("claude"),
-        work_dir=work_dir,
-        create_time=datetime.now(timezone.utc),
-        host_id=host.id,
-        mngr_ctx=temp_mngr_ctx,
-        agent_config=ClaudeAgentConfig(check_installation=False),
-        host=host,
+    agent = _make_hooks_test_agent(
+        host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False, use_env_config_dir=True)
     )
 
-    agent._configure_agent_hooks(host)
+    agent._configure_agent_hooks(host, temp_mngr_ctx)
 
-    settings_path = work_dir / ".claude" / "settings.local.json"
-    settings = json.loads(settings_path.read_text())
+    settings = json.loads(get_managed_settings_path(agent._get_agent_dir()).read_text())
 
     # The readiness PermissionRequest hook (no matcher) should exist
     permission_hooks = settings["hooks"]["PermissionRequest"]
@@ -1624,7 +1634,10 @@ def test_configure_agent_hooks_does_not_add_permission_auto_allow_by_default(
 def test_provision_configures_readiness_hooks(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """provision should configure agent hooks."""
+    """Normal mode bakes mngr's hooks into the per-agent config-dir settings.json.
+
+    No managed --settings file and no project settings.local.json are written.
+    """
     # check_installation=False avoids running `claude --version` which would fail in test env
     agent, host = make_claude_agent(
         local_provider,
@@ -1638,10 +1651,48 @@ def test_provision_configures_readiness_hooks(
     options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
     agent.provision(host=host, options=options, mngr_ctx=temp_mngr_ctx)
 
-    # Verify the hooks file was actually created
-    settings_path = agent.work_dir / ".claude" / "settings.local.json"
+    # The hooks live in the per-agent config-dir settings.json.
+    settings_path = agent.get_claude_config_dir() / "settings.json"
     assert settings_path.exists()
     settings = json.loads(settings_path.read_text())
+    assert "hooks" in settings
+    assert "SessionStart" in settings["hooks"]
+
+    # The managed --settings file is NOT written in normal mode, and neither is
+    # the project settings.local.json.
+    assert not get_managed_settings_path(agent._get_agent_dir()).exists()
+    assert not (agent.work_dir / ".claude" / "settings.local.json").exists()
+
+
+def test_provision_configures_readiness_hooks_in_env_config_dir_mode(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In use_env_config_dir mode, provision writes the managed --settings file.
+
+    There is no per-agent config dir to bake hooks into, so the managed file is
+    the only channel.
+    """
+    shared_dir = tmp_path / "shared"
+    shared_dir.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(shared_dir))
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
+    )
+    _init_git_with_gitignore(agent.work_dir)
+
+    options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
+    agent.provision(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+
+    # The managed --settings file holds the hooks in this mode.
+    managed_path = get_managed_settings_path(agent._get_agent_dir())
+    assert managed_path.exists()
+    settings = json.loads(managed_path.read_text())
     assert "hooks" in settings
     assert "SessionStart" in settings["hooks"]
 
@@ -1685,7 +1736,7 @@ def test_provision_raises_when_remote_installation_disabled(
 
         with pytest.raises(ConcurrencyExceptionGroup) as exc_info:
             agent.provision(host=non_local_host, options=options, mngr_ctx=ctx)
-        assert isinstance(exc_info.value.main_exception, PluginMngrError)
+        assert isinstance(exc_info.value.main_exception, AgentInstallationError)
         assert "automatic remote installation is disabled" in str(exc_info.value.main_exception)
 
 
@@ -1937,7 +1988,7 @@ def test_on_before_provisioning_shared_mode_succeeds_without_dialog_checks(
         local_provider,
         tmp_path,
         temp_mngr_ctx,
-        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
+        agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False),
     )
     # Deliberately leave ~/.claude.json absent (no dialogs dismissed, no trust) --
     # a non-shared agent would raise during the dialog-dismissal check here.
@@ -1953,29 +2004,75 @@ def test_on_before_provisioning_shared_mode_succeeds_without_dialog_checks(
     assert not config_path.exists()
 
 
-def test_on_before_provisioning_shared_mode_raises_for_remote_host(
-    local_provider: LocalProviderInstance,
+def _make_remote_claude_agent(
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    agent_config: ClaudeAgentConfig,
+) -> tuple[ClaudeAgent, OnlineHostInterface]:
+    """Construct a ClaudeAgent bound to a (fake) remote host."""
+    remote_host = cast(OnlineHostInterface, FakeHost(is_local=False, host_dir=tmp_path / "remote_host_dir"))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir(exist_ok=True)
+    agent = ClaudeAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("test-remote-agent"),
+        agent_type=AgentTypeName("claude"),
+        work_dir=work_dir,
+        create_time=datetime.now(timezone.utc),
+        host_id=HostId("host-0000000000000000000000000000beef"),
+        mngr_ctx=temp_mngr_ctx,
+        agent_config=agent_config,
+        host=remote_host,
+    )
+    return agent, remote_host
+
+
+def test_on_before_provisioning_remote_ignores_shared_flag(
     tmp_path: Path,
     temp_mngr_ctx: MngrContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """use_env_config_dir is local-only; remote host raises UserInputError."""
+    """isolate_local_config_dir is local-only: a remote agent with the flag set to False
+    must NOT raise (remote agents always use an isolated per-agent config dir)."""
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "shared"))
-    agent, _ = make_claude_agent(
-        local_provider,
+    agent, remote_host = _make_remote_claude_agent(
         tmp_path,
         temp_mngr_ctx,
-        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
-    )
-    remote_host = cast(
-        OnlineHostInterface,
-        FakeHost(is_local=False, host_dir=tmp_path / "remote_host_dir"),
+        agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False),
     )
 
     options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
 
-    with pytest.raises(UserInputError, match="local hosts"):
-        agent.on_before_provisioning(host=remote_host, options=options, mngr_ctx=temp_mngr_ctx)
+    # Must not raise -- the flag is simply ignored for remote hosts.
+    agent.on_before_provisioning(host=remote_host, options=options, mngr_ctx=temp_mngr_ctx)
+
+    # ...and the agent uses an isolated per-agent config dir, not the local shared dir.
+    assert agent._is_isolated_config_dir() is True
+    assert agent.get_claude_config_dir() == agent._get_agent_dir() / "plugin" / "claude" / "anthropic"
+
+
+def test_remote_agent_modify_env_vars_uses_isolated_dir_despite_shared_flag(
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A remote agent with isolate_local_config_dir=False still gets CLAUDE_CONFIG_DIR and
+    ORIGINAL_CLAUDE_CONFIG_DIR pointing at its isolated per-agent config dir."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "shared"))
+    agent, remote_host = _make_remote_claude_agent(
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False),
+    )
+    env_vars: dict[str, str] = {}
+
+    agent.modify_env_vars(remote_host, env_vars)
+
+    per_agent_dir = agent._get_agent_dir() / "plugin" / "claude" / "anthropic"
+    assert env_vars["CLAUDE_CONFIG_DIR"] == str(per_agent_dir)
+    # Remote agents are isolated, so ORIGINAL_CLAUDE_CONFIG_DIR is set (unlike local shared mode).
+    assert "ORIGINAL_CLAUDE_CONFIG_DIR" in env_vars
 
 
 def test_on_before_provisioning_shared_mode_passes_when_env_unset(
@@ -1984,14 +2081,14 @@ def test_on_before_provisioning_shared_mode_passes_when_env_unset(
     temp_mngr_ctx: MngrContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With use_env_config_dir=True and $CLAUDE_CONFIG_DIR unset, on_before_provisioning falls
+    """With isolate_local_config_dir=False and $CLAUDE_CONFIG_DIR unset, on_before_provisioning falls
     back to ``~/.claude/`` and does not raise (it's the "don't touch the config" path)."""
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     agent, host = make_claude_agent(
         local_provider,
         tmp_path,
         temp_mngr_ctx,
-        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
+        agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False),
     )
 
     options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
@@ -2163,7 +2260,7 @@ def test_on_destroy_skips_keychain_cleanup_in_shared_mode(
         local_provider,
         tmp_path,
         temp_mngr_ctx,
-        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
+        agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False),
     )
 
     delete_calls: list[str] = []
@@ -2248,7 +2345,7 @@ def test_preserve_session_files_skips_projects_in_shared_mode(
     temp_mngr_ctx: MngrContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """In use_env_config_dir mode, preservation must NOT copy the per-agent
+    """In shared mode (isolate_local_config_dir=False), preservation must NOT copy the per-agent
     plugin/claude/anthropic/projects directory -- in shared mode the projects
     live in the user's persistent $CLAUDE_CONFIG_DIR (not under the agent state
     dir) and hold the user's full cross-project session history. Transcripts and
@@ -2262,7 +2359,7 @@ def test_preserve_session_files_skips_projects_in_shared_mode(
         tmp_path,
         temp_mngr_ctx,
         agent_config=ClaudeAgentConfig(
-            check_installation=False, use_env_config_dir=True, preserve_sessions_on_destroy=True
+            check_installation=False, isolate_local_config_dir=False, preserve_sessions_on_destroy=True
         ),
     )
     agent_dir = agent._get_agent_dir()
@@ -2678,6 +2775,180 @@ def test_on_before_provisioning_succeeds_with_credentials(
 
 
 # =============================================================================
+# Deprecated use_env_config_dir alias reconciliation Tests
+# =============================================================================
+
+
+def test_resolve_isolate_defaults_to_true_without_either_key() -> None:
+    """With neither key set, the default isolate_local_config_dir=True is used."""
+    assert ClaudeAgentConfig(check_installation=False).resolve_isolate_local_config_dir() is True
+
+
+def test_resolve_isolate_uses_new_key_when_only_it_is_set() -> None:
+    assert (
+        ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False).resolve_isolate_local_config_dir()
+        is False
+    )
+
+
+def test_resolve_isolate_inverts_deprecated_use_env_true() -> None:
+    """The deprecated use_env_config_dir=true means isolate_local_config_dir=false (its inverse)."""
+    config = ClaudeAgentConfig(check_installation=False, use_env_config_dir=True)
+    assert config.resolve_isolate_local_config_dir() is False
+
+
+def test_resolve_isolate_inverts_deprecated_use_env_false() -> None:
+    config = ClaudeAgentConfig(check_installation=False, use_env_config_dir=False)
+    assert config.resolve_isolate_local_config_dir() is True
+
+
+def test_resolve_isolate_allows_consistent_inverse_dual_spec() -> None:
+    """Setting both keys to consistent inverses (isolate=false, use_env=true) is allowed."""
+    config = ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False, use_env_config_dir=True)
+    assert config.resolve_isolate_local_config_dir() is False
+
+
+def test_resolve_isolate_raises_on_contradictory_dual_spec() -> None:
+    """Setting both keys to the same value (they are inverses) is contradictory and raises."""
+    config = ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=True, use_env_config_dir=True)
+    with pytest.raises(ConfigError, match="Contradictory"):
+        config.resolve_isolate_local_config_dir()
+
+
+def test_on_before_provisioning_warns_when_use_env_config_dir_is_set(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Setting the deprecated use_env_config_dir emits a deprecation warning at provisioning time."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "shared"))
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
+    )
+
+    options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
+    with capture_loguru() as log_output:
+        agent.on_before_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+
+    assert "use_env_config_dir" in log_output.getvalue()
+    assert "deprecated" in log_output.getvalue()
+
+
+# =============================================================================
+# Subscription-credential isolation warning Tests
+# =============================================================================
+
+# The actionable part of the warning: the exact command to disable isolation.
+_SUBSCRIPTION_ISOLATION_WARNING_SUBSTRING = "isolate_local_config_dir false"
+
+
+def test_is_using_claude_oauth_subscription_detects_credentials_file(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A .credentials.json containing the claudeAiOauth key signals subscription usage."""
+    config_dir = tmp_path / "claude"
+    config_dir.mkdir()
+    (config_dir / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {"accessToken": "tok"}}))
+
+    # Patch the keychain read so the file branch is what determines the result
+    # (and so the test never touches the real macOS login keychain).
+    with patch(f"{_CLAUDE_AGENT_MODULE}._read_macos_keychain_credential", return_value=None):
+        assert _is_using_claude_oauth_subscription(config_dir, temp_mngr_ctx.concurrency_group) is True
+
+
+def test_is_using_claude_oauth_subscription_false_without_oauth(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    """No OAuth credentials file and no OAuth keychain entry means no subscription detected."""
+    config_dir = tmp_path / "claude"
+    config_dir.mkdir()
+
+    with patch(f"{_CLAUDE_AGENT_MODULE}._read_macos_keychain_credential", return_value=None):
+        assert _is_using_claude_oauth_subscription(config_dir, temp_mngr_ctx.concurrency_group) is False
+
+
+def test_warns_about_subscription_credentials_with_isolation_on_macos(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """macOS + subscription OAuth credentials + config-dir isolation enabled (the default)
+    must warn, printing the command to disable isolation."""
+    user_claude = tmp_path / "user-claude"
+    user_claude.mkdir()
+    (user_claude / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {"accessToken": "tok"}}))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(user_claude))
+    monkeypatch.delenv("ORIGINAL_CLAUDE_CONFIG_DIR", raising=False)
+    # Default config isolates the local config dir (isolate_local_config_dir=True).
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    with (
+        patch(f"{_CLAUDE_AGENT_MODULE}.is_macos", return_value=True),
+        patch(f"{_CLAUDE_AGENT_MODULE}._read_macos_keychain_credential", return_value=None),
+        capture_loguru() as log_output,
+    ):
+        agent._maybe_warn_subscription_credentials(host, temp_mngr_ctx)
+
+    assert _SUBSCRIPTION_ISOLATION_WARNING_SUBSTRING in log_output.getvalue()
+
+
+def test_no_subscription_warning_in_shared_mode(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared mode (isolate_local_config_dir=False) reuses the user's keychain entry, so
+    even with subscription credentials on macOS there is no stale-credential problem to warn about."""
+    user_claude = tmp_path / "user-claude"
+    user_claude.mkdir()
+    (user_claude / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {"accessToken": "tok"}}))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(user_claude))
+    monkeypatch.delenv("ORIGINAL_CLAUDE_CONFIG_DIR", raising=False)
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False),
+    )
+
+    with (
+        patch(f"{_CLAUDE_AGENT_MODULE}.is_macos", return_value=True),
+        patch(f"{_CLAUDE_AGENT_MODULE}._read_macos_keychain_credential", return_value=None),
+        capture_loguru() as log_output,
+    ):
+        agent._maybe_warn_subscription_credentials(host, temp_mngr_ctx)
+
+    assert _SUBSCRIPTION_ISOLATION_WARNING_SUBSTRING not in log_output.getvalue()
+
+
+def test_no_subscription_warning_without_oauth_credentials(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Isolation on macOS but no OAuth credentials (e.g. API-key auth) must not warn."""
+    user_claude = tmp_path / "user-claude"
+    user_claude.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(user_claude))
+    monkeypatch.delenv("ORIGINAL_CLAUDE_CONFIG_DIR", raising=False)
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    with (
+        patch(f"{_CLAUDE_AGENT_MODULE}.is_macos", return_value=True),
+        patch(f"{_CLAUDE_AGENT_MODULE}._read_macos_keychain_credential", return_value=None),
+        capture_loguru() as log_output,
+    ):
+        agent._maybe_warn_subscription_credentials(host, temp_mngr_ctx)
+
+    assert _SUBSCRIPTION_ISOLATION_WARNING_SUBSTRING not in log_output.getvalue()
+
+
+# =============================================================================
 # CostThresholdDialogIndicator Tests
 # =============================================================================
 
@@ -2860,6 +3131,10 @@ def test_provision_raises_when_non_interactive_and_dialogs_not_dismissed(
 # =============================================================================
 
 
+# provision() runs the local `claude --version` check via a real subprocess
+# (_get_local_claude_version), which can exceed the default 10s pytest-timeout under
+# CI load, so this test gets a longer timeout.
+@pytest.mark.timeout(30)
 def test_provision_adds_trust_for_remote_work_dir(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
@@ -3407,7 +3682,7 @@ def test_provision_raises_on_version_mismatch(
 
         with pytest.raises(ConcurrencyExceptionGroup) as exc_info:
             agent.provision(host=host_with_wrong_version, options=options, mngr_ctx=ctx)
-        assert isinstance(exc_info.value.main_exception, PluginMngrError)
+        assert isinstance(exc_info.value.main_exception, AgentInstallationError)
         assert "Claude version mismatch" in str(exc_info.value.main_exception)
 
 
@@ -3464,33 +3739,83 @@ def test_install_claude_verifies_binary_exists() -> None:
 
 
 # =============================================================================
+# Capability-mixin contract methods (install / unattended / version)
+# =============================================================================
+
+
+def test_get_install_binary_name_is_claude() -> None:
+    agent = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig())
+    assert agent.get_install_binary_name() == "claude"
+
+
+def test_get_install_command_installs_claude() -> None:
+    agent = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig())
+    assert agent.get_install_command() == _build_claude_install_command(None)
+
+
+def test_get_install_command_pins_configured_version() -> None:
+    agent = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig(version="2.1.50"))
+    assert agent.get_install_command() == _build_claude_install_command("2.1.50")
+
+
+def test_is_unattended_enabled_reflects_auto_allow_permissions() -> None:
+    unattended = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig(auto_allow_permissions=True))
+    attended = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig())
+    assert unattended.is_unattended_enabled() is True
+    assert attended.is_unattended_enabled() is False
+
+
+def _version_stub_host(version_output: str) -> OnlineHostInterface:
+    """A host whose `claude --version` returns ``version_output`` (for reconcile tests)."""
+    return cast(
+        OnlineHostInterface,
+        SimpleNamespace(
+            execute_idempotent_command=lambda *args, **kwargs: SimpleNamespace(
+                success=True, stdout=version_output, stderr=""
+            )
+        ),
+    )
+
+
+def test_reconcile_installed_version_unpinned_is_noop() -> None:
+    # Unpinned: claude follows its own auto-update, so there is nothing to enforce and
+    # reconcile returns without touching the host.
+    agent = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig())
+    agent.reconcile_installed_version(
+        cast(OnlineHostInterface, SimpleNamespace()), cast(MngrContext, SimpleNamespace())
+    )
+
+
+def test_reconcile_installed_version_pinned_match_is_noop() -> None:
+    agent = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig(version="2.1.50"))
+    agent.reconcile_installed_version(_version_stub_host("2.1.50 (Claude Code)"), cast(MngrContext, SimpleNamespace()))
+
+
+def test_reconcile_installed_version_raises_on_mismatch() -> None:
+    agent = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig(version="2.1.50"))
+    with pytest.raises(AgentInstallationError, match="version mismatch"):
+        agent.reconcile_installed_version(
+            _version_stub_host("9.9.9 (Claude Code)"), cast(MngrContext, SimpleNamespace())
+        )
+
+
+# =============================================================================
 # register_cli_options Tests
 # =============================================================================
 
 
-def test_register_cli_options_returns_adopt_session_for_create() -> None:
-    """register_cli_options should return --adopt-session for the create command."""
-    result = register_cli_options(command_name="create")
-    assert result is not None
-    assert "Behavior" in result
-    options = result["Behavior"]
-    assert len(options) == 1
-    assert "--adopt-session" in options[0].param_decls
-
-
-def test_register_cli_options_returns_none_for_other_commands() -> None:
-    """register_cli_options should return None for non-create commands."""
-    assert register_cli_options(command_name="connect") is None
-    assert register_cli_options(command_name="list") is None
+# The --adopt option declaration + the agent-agnostic gate (type must support
+# session adoption; mutual exclusion with --from) now live in core, tested
+# there; claude only retains its claude-specific fail-fast pre-resolution below.
 
 
 # =============================================================================
-# on_before_create Tests
+# on_before_create Tests (claude-specific fail-fast pre-resolution)
 # =============================================================================
 
 
 def test_on_before_create_skips_when_no_adopt_session(temp_mngr_ctx: MngrContext) -> None:
-    """on_before_create should return None when adopt_session is not in plugin_data."""
+    """on_before_create should return None when adopt_session is empty."""
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(agent_type=AgentTypeName("claude")),
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
@@ -3500,13 +3825,13 @@ def test_on_before_create_skips_when_no_adopt_session(temp_mngr_ctx: MngrContext
 
 
 def test_on_before_create_passes_with_adopt_session(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
-    """on_before_create should pass when --adopt-session names a resolvable session with a claude agent."""
+    """on_before_create should pass when --adopt names a resolvable session with a claude agent."""
     session_file = tmp_path / "abc123.jsonl"
     session_file.write_text('{"type":"message"}\n')
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(
             agent_type=AgentTypeName("claude"),
-            plugin_data={"adopt_session": (str(session_file),)},
+            adopt_session=(str(session_file),),
         ),
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
@@ -3515,27 +3840,13 @@ def test_on_before_create_passes_with_adopt_session(tmp_path: Path, temp_mngr_ct
     assert result is None
 
 
-def test_on_before_create_rejects_non_claude_agent_type(temp_mngr_ctx: MngrContext) -> None:
-    """on_before_create should raise UserInputError for non-claude agent types."""
-    args = OnBeforeCreateArgs(
-        agent_options=CreateAgentOptions(
-            agent_type=AgentTypeName("generic"),
-            plugin_data={"adopt_session": ("some-id",)},
-        ),
-        target_host=NewHostOptions(provider=ProviderInstanceName("local")),
-        create_work_dir=True,
-    )
-    with pytest.raises(UserInputError, match="--adopt-session can only be used with a Claude agent type"):
-        on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
-
-
 def test_on_before_create_passes_with_claude_subtype(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
     """on_before_create should accept a config-defined subtype whose parent_type
-    chain reaches claude (e.g. a ``write-plus`` template), not just the literal
+    chain reaches claude (e.g. a custom ``coder`` template), not just the literal
     ``claude`` type name. This is the centralized "is a claude agent" check via
     resolve_agent_type, rather than a string comparison against "claude".
     """
-    subtype = AgentTypeName("write-plus")
+    subtype = AgentTypeName("coder")
     config_with_subtype = temp_mngr_ctx.config.model_copy_update(
         to_update(
             temp_mngr_ctx.config.field_ref().agent_types,
@@ -3550,7 +3861,7 @@ def test_on_before_create_passes_with_claude_subtype(tmp_path: Path, temp_mngr_c
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(
             agent_type=subtype,
-            plugin_data={"adopt_session": (str(session_file),)},
+            adopt_session=(str(session_file),),
         ),
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
@@ -3558,31 +3869,8 @@ def test_on_before_create_passes_with_claude_subtype(tmp_path: Path, temp_mngr_c
     assert on_before_create(args=args, mngr_ctx=mngr_ctx) is None
 
 
-def test_on_before_create_rejects_adopt_session_with_clone_source(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """on_before_create should raise UserInputError when both --adopt-session
-    and a clone source (source_agent_state_location) are passed: each is its
-    own session-adoption directive and on_after_provisioning would silently
-    pick one and drop the other otherwise.
-    """
-    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
-    assert isinstance(host, Host)
-    args = OnBeforeCreateArgs(
-        agent_options=CreateAgentOptions(
-            agent_type=AgentTypeName("claude"),
-            plugin_data={"adopt_session": ("some-id",)},
-            source_agent_state_location=HostLocation(host=host, path=tmp_path / "src"),
-        ),
-        target_host=NewHostOptions(provider=ProviderInstanceName("local")),
-        create_work_dir=True,
-    )
-    with pytest.raises(UserInputError, match="incompatible with cloning via --from"):
-        on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
-
-
 def test_on_before_create_rejects_unknown_adopt_session(temp_mngr_ctx: MngrContext) -> None:
-    """on_before_create should raise UserInputError when an --adopt-session ID does not resolve.
+    """on_before_create should raise UserInputError when an --adopt ID does not resolve.
 
     Validating here -- before any host or worktree is created, and outside the provisioning
     ConcurrencyGroup -- means a bad session ID surfaces as a clean, fail-fast user error
@@ -3592,7 +3880,7 @@ def test_on_before_create_rejects_unknown_adopt_session(temp_mngr_ctx: MngrConte
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(
             agent_type=AgentTypeName("claude"),
-            plugin_data={"adopt_session": ("nonexistent-session",)},
+            adopt_session=("nonexistent-session",),
         ),
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
@@ -3639,7 +3927,7 @@ def test_on_after_provisioning_adopts_session_by_id(
 
     options = CreateAgentOptions(
         agent_type=AgentTypeName("claude"),
-        plugin_data={"adopt_session": (target_session_id,)},
+        adopt_session=(target_session_id,),
     )
 
     with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
@@ -3660,7 +3948,7 @@ def test_on_after_provisioning_adopts_session_by_id(
     assert dest_memory_file.read_text() == "# Memory\n"
 
     # Regression: verify the session file is discoverable the same way Claude Code
-    # finds it at runtime: `find "$CLAUDE_CONFIG_DIR" -name "$SESSION_ID.jsonl"`.
+    # finds it at runtime: `find "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" -name "$SESSION_ID.jsonl"`.
     claude_config_dir = agent.get_claude_config_dir()
     matches = list(claude_config_dir.rglob(target_session_id + ".jsonl"))
     assert len(matches) == 1, (
@@ -3681,7 +3969,7 @@ def test_on_after_provisioning_raises_when_session_not_found(
 
     options = CreateAgentOptions(
         agent_type=AgentTypeName("claude"),
-        plugin_data={"adopt_session": ("nonexistent-session",)},
+        adopt_session=("nonexistent-session",),
     )
 
     with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
@@ -3711,7 +3999,7 @@ def test_on_after_provisioning_finds_session_despite_claude_config_dir(
 
     options = CreateAgentOptions(
         agent_type=AgentTypeName("claude"),
-        plugin_data={"adopt_session": (target_session_id,)},
+        adopt_session=(target_session_id,),
     )
 
     home_claude = str(Path.home() / ".claude")
@@ -3746,7 +4034,7 @@ def test_on_after_provisioning_adopts_session_from_jsonl_path(
 
     options = CreateAgentOptions(
         agent_type=AgentTypeName("claude"),
-        plugin_data={"adopt_session": (str(session_file),)},
+        adopt_session=(str(session_file),),
     )
 
     agent.on_after_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
@@ -3789,7 +4077,7 @@ def test_on_after_provisioning_adopts_session_from_preserved_agent(
 
     options = CreateAgentOptions(
         agent_type=AgentTypeName("claude"),
-        plugin_data={"adopt_session": (target_session_id,)},
+        adopt_session=(target_session_id,),
     )
 
     with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
@@ -3832,7 +4120,7 @@ def test_on_after_provisioning_adopts_session_from_live_mngr_agent(
 
     options = CreateAgentOptions(
         agent_type=AgentTypeName("claude"),
-        plugin_data={"adopt_session": (target_session_id,)},
+        adopt_session=(target_session_id,),
     )
 
     with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
@@ -3844,6 +4132,49 @@ def test_on_after_provisioning_adopts_session_from_live_mngr_agent(
         agent.get_claude_config_dir() / "projects" / expected_project_name / f"{target_session_id}.jsonl"
     )
     assert dest_session_file.exists()
+
+
+@pytest.mark.rsync
+def test_on_after_provisioning_multi_adopt_resumes_last(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """``--adopt A B`` copies both sessions in but resumes the *last* (B).
+
+    Claude can only resume one session at a time, so every named session is
+    made available under the destination's encoded project dir while
+    ``claude_session_id`` is set to the last named session.
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    # Two sessions in distinct source project dirs (so both dirs are copied).
+    first_project = Path.home() / ".claude" / "projects" / "first-project"
+    second_project = Path.home() / ".claude" / "projects" / "second-project"
+    first_project.mkdir(parents=True)
+    second_project.mkdir(parents=True)
+    first_session_id = "first-session-id"
+    second_session_id = "second-session-id"
+    (first_project / f"{first_session_id}.jsonl").write_text('{"type":"first"}\n')
+    (second_project / f"{second_session_id}.jsonl").write_text('{"type":"second"}\n')
+
+    agent_state_dir = agent._get_agent_dir()
+    agent_state_dir.mkdir(parents=True, exist_ok=True)
+
+    options = CreateAgentOptions(
+        agent_type=AgentTypeName("claude"),
+        adopt_session=(first_session_id, second_session_id),
+    )
+
+    with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
+        agent.on_after_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+
+    # The last named session is the one resumed.
+    assert (agent_state_dir / "claude_session_id").read_text() == second_session_id
+
+    # Both sessions are available under the destination's encoded project dir.
+    expected_project_name = encode_claude_project_dir_name(agent.work_dir)
+    dest_project_dir = agent.get_claude_config_dir() / "projects" / expected_project_name
+    assert (dest_project_dir / f"{first_session_id}.jsonl").exists()
+    assert (dest_project_dir / f"{second_session_id}.jsonl").exists()
 
 
 # =============================================================================
@@ -3858,10 +4189,17 @@ def test_on_after_provisioning_adopts_session_from_live_mngr_agent(
 
 
 def _run_clone_adoption(agent: ClaudeAgent, host: OnlineHostInterface, source_dir: Path) -> None:
-    """Drive both clone steps in order against the test agent/host."""
+    """Drive the clone flow end-to-end against the test agent/host.
+
+    Mirrors production: rsync the source plugin/, then run ``adopt_session`` with the
+    clone location so ``_adopt_cloned_session`` rekeys the subdir and the resume step
+    finalizes (writes ``claude_session_id``). Warns and adopts nothing when the clone
+    has no resumable session.
+    """
     location = HostLocation(host=host, path=source_dir)
     agent._transfer_source_plugin_data(location)
-    agent._adopt_cloned_session(host, location)
+    options = CreateAgentOptions(agent_type=AgentTypeName("claude"), source_agent_state_location=location)
+    agent.adopt_session(host, options, agent.mngr_ctx)
 
 
 @pytest.mark.rsync
@@ -3904,11 +4242,16 @@ def test_clone_adoption_copies_plugin_dir(
     assert not (dest_dir / "plugin" / "claude" / "anthropic" / "projects" / source_project_subdir).exists()
 
 
-def test_clone_adoption_skips_when_no_plugin_dir(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+def test_clone_adoption_warns_when_no_plugin_dir(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    log_warnings: list[str],
 ) -> None:
-    """The rsync step is a no-op when the source has no plugin/ dir, and the
-    subsequent adopt step bails (logs a warning) without raising.
+    """The rsync step is a no-op when the source has no plugin/ dir, so the
+    subsequent adopt step finds no session JSONL. A ``--from`` clone is a
+    workspace clone (carrying the session forward is a bonus), so that warns
+    and adopts nothing rather than raising -- no ``claude_session_id`` is written.
     """
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
 
@@ -3918,8 +4261,10 @@ def test_clone_adoption_skips_when_no_plugin_dir(
     source_dir = tmp_path / "source_agent_state"
     source_dir.mkdir()
 
-    # Should not raise
     _run_clone_adoption(agent, host, source_dir)
+
+    assert any("no session JSONL found at source" in message for message in log_warnings), log_warnings
+    assert not (dest_dir / "claude_session_id").exists()
 
 
 @pytest.mark.rsync
@@ -4002,17 +4347,62 @@ def test_clone_adoption_uses_jsonl_filename_not_source_session_id_file(
 
 
 @pytest.mark.rsync
-def test_clone_adoption_refuses_to_clobber_existing_target(
+def test_adopt_and_from_resumes_clone(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """``--adopt A --from X`` copies both A and the clone, then resumes the *clone*.
+
+    The explicit ``--adopt`` session is made available alongside the clone, but
+    the resumed session (``claude_session_id``) is the clone's, since a ``--from``
+    clone is the session the new agent is meant to continue.
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    dest_dir = agent._get_agent_dir()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    # Explicit ``--adopt`` session lives under ~/.claude/.
+    adopt_project = Path.home() / ".claude" / "projects" / "adopt-project"
+    adopt_project.mkdir(parents=True)
+    adopt_session_id = "explicit-adopt-session-id"
+    (adopt_project / f"{adopt_session_id}.jsonl").write_text('{"type":"adopt"}\n')
+
+    # ``--from`` clone source: a separate agent state dir whose plugin/ holds
+    # the session to clone.
+    source_dir = tmp_path / "source_agent_state"
+    src_project = source_dir / "plugin" / "claude" / "anthropic" / "projects" / "-Users-ev-some-source-workdir"
+    src_project.mkdir(parents=True)
+    clone_session_id = "11111111-2222-3333-4444-555555555555"
+    (src_project / f"{clone_session_id}.jsonl").write_text('{"type":"clone"}\n')
+
+    location = HostLocation(host=host, path=source_dir)
+    agent._transfer_source_plugin_data(location)
+    options = CreateAgentOptions(
+        agent_type=AgentTypeName("claude"),
+        adopt_session=(adopt_session_id,),
+        source_agent_state_location=location,
+    )
+
+    with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
+        agent.adopt_session(host, options, agent.mngr_ctx)
+
+    expected_project_name = encode_claude_project_dir_name(agent.work_dir)
+    dest_project_dir = agent.get_claude_config_dir() / "projects" / expected_project_name
+    # Both sessions are available; the clone is the one resumed.
+    assert (dest_project_dir / f"{adopt_session_id}.jsonl").exists()
+    assert (dest_project_dir / f"{clone_session_id}.jsonl").exists()
+    assert (dest_dir / "claude_session_id").read_text().strip() == clone_session_id
+
+
+@pytest.mark.rsync
+def test_clone_adoption_merges_into_existing_target(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """When the source has a project subdir whose name coincidentally matches
     the destination's encoded work_dir AND a separate, more-recently-active
-    source-encoded subdir, the rsync brings both over and the rekey ``mv``
-    would clobber the pre-existing target. _adopt_cloned_session refuses
-    the clobber and returns without writing claude_session_id, leaving
-    both subdirs intact for manual inspection. This guards a defensive
-    branch designed to prevent silent data loss when source has visited
-    multiple cwds.
+    source-encoded subdir, the rsync brings both over. With *distinct* session-id
+    filenames, the rekey merges the source-encoded subdir's files into the
+    pre-existing target rather than clobbering it: both sessions coexist under
+    the destination's encoded work_dir, and the latest is resumed.
     """
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
     dest_dir = agent._get_agent_dir()
@@ -4031,7 +4421,8 @@ def test_clone_adoption_refuses_to_clobber_existing_target(
     older_jsonl.write_text('{"type":"older"}\n')
 
     # (b) A separate source-encoded subdir holding the most-recently-active
-    # session JSONL so ``ls -t`` picks it as latest_on_source.
+    # session JSONL so ``ls -t`` picks it as latest_on_source. Its filename
+    # differs from the target's, so the merge is non-destructive.
     src_project = plugin_dir / "projects" / "-Users-ev-some-source-workdir"
     src_project.mkdir(parents=True)
     newer_session_id = "11111111-2222-3333-4444-555555555555"
@@ -4046,10 +4437,58 @@ def test_clone_adoption_refuses_to_clobber_existing_target(
     _run_clone_adoption(agent, host, source_dir)
 
     dest_projects = dest_dir / "plugin" / "claude" / "anthropic" / "projects"
-    # Both subdirs survive: the rekey was refused, no clobber happened.
+    # Both sessions now coexist under the destination's encoded work_dir.
     assert (dest_projects / dest_project_name / f"{older_session_id}.jsonl").exists()
-    assert (dest_projects / "-Users-ev-some-source-workdir" / f"{newer_session_id}.jsonl").exists()
-    # claude_session_id was NOT written: the function bailed before finalize.
+    assert (dest_projects / dest_project_name / f"{newer_session_id}.jsonl").exists()
+    # The source-encoded subdir was emptied and removed by the merge.
+    assert not (dest_projects / "-Users-ev-some-source-workdir").exists()
+    # The most-recently-active session is the one resumed.
+    assert (dest_dir / "claude_session_id").read_text().strip() == newer_session_id
+
+
+@pytest.mark.rsync
+def test_clone_adoption_refuses_per_file_collision(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A genuine per-file collision -- the same session-id filename present in
+    both the source-encoded subdir and the pre-existing target -- would lose
+    data on merge. _adopt_cloned_session refuses and raises ``AgentStartError``
+    without writing claude_session_id, leaving both subdirs intact.
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    dest_dir = agent._get_agent_dir()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    source_dir = tmp_path / "source_agent_state"
+    plugin_dir = source_dir / "plugin" / "claude" / "anthropic"
+
+    # Same session-id filename in both the target-named subdir and the
+    # source-encoded subdir -- merging would overwrite the target's copy.
+    colliding_session_id = "11111111-2222-3333-4444-555555555555"
+
+    dest_project_name = encode_claude_project_dir_name(agent.work_dir)
+    coincident_subdir = plugin_dir / "projects" / dest_project_name
+    coincident_subdir.mkdir(parents=True)
+    target_jsonl = coincident_subdir / f"{colliding_session_id}.jsonl"
+    target_jsonl.write_text('{"type":"target"}\n')
+
+    src_project = plugin_dir / "projects" / "-Users-ev-some-source-workdir"
+    src_project.mkdir(parents=True)
+    source_jsonl = src_project / f"{colliding_session_id}.jsonl"
+    source_jsonl.write_text('{"type":"source"}\n')
+
+    # Make the source copy the most-recently-active so ``ls -t`` selects it.
+    os.utime(target_jsonl, (1_000_000_000, 1_000_000_000))
+    os.utime(source_jsonl, (2_000_000_000, 2_000_000_000))
+
+    with pytest.raises(AgentStartError, match="already exist in the target"):
+        _run_clone_adoption(agent, host, source_dir)
+
+    dest_projects = dest_dir / "plugin" / "claude" / "anthropic" / "projects"
+    # Both subdirs survive: the merge was refused, no clobber happened.
+    assert (dest_projects / dest_project_name / f"{colliding_session_id}.jsonl").exists()
+    assert (dest_projects / "-Users-ev-some-source-workdir" / f"{colliding_session_id}.jsonl").exists()
+    # claude_session_id was NOT written: the clone raised before finalize.
     assert not (dest_dir / "claude_session_id").exists()
 
 
@@ -4558,6 +4997,347 @@ def test_build_settings_json_local_context_no_flags() -> None:
     assert "fastMode" not in data
 
 
+def test_build_settings_json_includes_readiness_hooks() -> None:
+    """_build_settings_json folds mngr's always-on readiness hooks into settings.json."""
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(check_installation=False)
+    content = _build_settings_json(Path.home() / ".claude", config, ctx, sync_local=False)
+    data = json.loads(content)
+    assert "SessionStart" in data["hooks"]
+
+
+def test_build_settings_json_extend_override_preserves_siblings() -> None:
+    """A deferred ``__extend`` settings_override merges onto the home base so a
+    nested override preserves sibling keys (#1647).
+
+    A base settings.json with ``permissions.defaultMode`` plus a settings_overrides
+    patch ``permissions__extend = {allow__extend: [...]}`` must end up with BOTH
+    keys -- the extend merges rather than replacing, so the home ``defaultMode``
+    survives alongside the new ``allow``.
+    """
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "settings.json").write_text(json.dumps({"permissions": {"defaultMode": "acceptEdits"}}))
+
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(
+        check_installation=False,
+        settings_overrides={"permissions__extend": {"allow__extend": ["Bash(npm *)"]}},
+    )
+    content = _build_settings_json(claude_dir, config, ctx, sync_local=True)
+    data = json.loads(content)
+    assert data["permissions"]["defaultMode"] == "acceptEdits"
+    assert data["permissions"]["allow"] == ["Bash(npm *)"]
+
+
+def test_build_settings_json_bare_override_narrows_raises() -> None:
+    """A *bare* settings_override that drops a non-empty sibling aggregate from the
+    home base raises the narrowing error (bare = assign + narrowing guard).
+
+    Base ``permissions = {defaultMode, allow:[X]}``; a bare override
+    ``permissions = {allow:[Y]}`` drops ``defaultMode`` and ``allow:[X]`` -> error.
+    """
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "settings.json").write_text(
+        json.dumps({"permissions": {"defaultMode": "acceptEdits", "allow": ["Bash(git *)"]}})
+    )
+
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(
+        check_installation=False,
+        settings_overrides={"permissions": {"allow": ["Bash(npm *)"]}},
+    )
+    with pytest.raises(ConfigParseError, match="narrow") as exc_info:
+        _build_settings_json(claude_dir, config, ctx, sync_local=True)
+    # The error attributes both sides: the settings_overrides assigning, and the home
+    # settings.json whose value would be dropped (named by path).
+    message = str(exc_info.value)
+    assert "settings_overrides" in message
+    assert str(claude_dir / "settings.json") in message
+
+
+def test_build_settings_json_narrowing_error_emits_mngr_merge_remediation() -> None:
+    """The narrowing error surfaces through the full provision path as a Claude-compatible
+    ``__mngr_merge`` remediation, never the internal suffix form. (The exact recursive patch
+    is pinned in external_settings_test.)
+    """
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "settings.json").write_text(
+        json.dumps({"permissions": {"allow": ["Bash(git *)"], "deny": ["Bash(rm *)"]}})
+    )
+
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(
+        check_installation=False,
+        settings_overrides={"permissions": {"allow": ["Bash(npm *)"]}},
+    )
+    with pytest.raises(ConfigParseError) as exc_info:
+        _build_settings_json(claude_dir, config, ctx, sync_local=True)
+    message = str(exc_info.value)
+    assert "__mngr_merge" in message
+    assert "allow__extend" not in message
+
+
+def test_build_settings_json_bare_override_narrows_allowed_with_escape_hatch() -> None:
+    """The narrowing escape hatch lets a bare override replace the sibling aggregate."""
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "settings.json").write_text(
+        json.dumps({"permissions": {"defaultMode": "acceptEdits", "allow": ["Bash(git *)"]}})
+    )
+
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(
+        check_installation=False,
+        settings_overrides={"permissions": {"allow": ["Bash(npm *)"]}},
+    )
+    content = _build_settings_json(claude_dir, config, ctx, sync_local=True, allow_narrowing=True)
+    data = json.loads(content)
+    assert data["permissions"] == {"allow": ["Bash(npm *)"]}
+
+
+def test_build_settings_json_normalizes_extend_marker_in_home_base() -> None:
+    """A literal ``__extend`` key in the home settings.json is stripped (normalized
+    to a bare key) by folding ``B`` against an empty base before the patch fold.
+
+    Home ``permissions__extend = {allow: [X]}`` -> base ``permissions = {allow:[X]}``;
+    output has no ``__extend`` key.
+    """
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "settings.json").write_text(json.dumps({"permissions__extend": {"allow": ["Bash(git *)"]}}))
+
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(check_installation=False)
+    content = _build_settings_json(claude_dir, config, ctx, sync_local=True)
+    data = json.loads(content)
+    assert "permissions__extend" not in data
+    assert data["permissions"] == {"allow": ["Bash(git *)"]}
+    assert "__extend" not in content
+
+
+def test_build_settings_json_strips_mngr_merge_key_from_home_base() -> None:
+    """A ``__mngr_merge`` key a user placed in their home settings.json is dropped: it is a
+    no-op on the base (the floor merges onto nothing), and vanilla Claude ignores it, so it
+    must not leak into the generated settings.json.
+    """
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "settings.json").write_text(
+        json.dumps({"permissions": {"allow": ["Bash(git *)"]}, "__mngr_merge": {"permissions.allow": "extend"}})
+    )
+
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(check_installation=False)
+    content = _build_settings_json(claude_dir, config, ctx, sync_local=True)
+    data = json.loads(content)
+    assert "__mngr_merge" not in data
+    assert data["permissions"] == {"allow": ["Bash(git *)"]}
+
+
+def test_build_settings_json_stacked_suffix_override_does_not_raise() -> None:
+    """A malformed stacked-suffix override key is handled gracefully: the node lift
+    strips only the outermost suffix, so ``foo__extend__extend`` becomes a literal
+    ``foo__extend`` field and is finalized into a plain key, with no spurious internal
+    error. (The node ``finalize`` is total -- no marker can survive the fold -- so
+    there is no leaked-marker assertion to false-fire on the literal key.)
+    """
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(
+        check_installation=False,
+        settings_overrides={"foo__extend__extend": ["x"]},
+    )
+    content = _build_settings_json(Path.home() / ".claude", config, ctx, sync_local=False)
+    data = json.loads(content)
+    assert data["foo__extend"] == ["x"]
+
+
+def test_build_settings_json_extend_hooks_concatenates_session_start() -> None:
+    """A ``hooks__extend.SessionStart__extend`` override concatenates onto mngr's
+    own readiness ``SessionStart`` group instead of replacing it -- both groups
+    present -- while preserving the other hook events mngr installed.
+
+    Writing the intermediate ``hooks`` key as ``hooks__extend`` is what merges
+    onto the base hooks dict; a bare ``hooks`` would assign-and-narrow (dropping
+    mngr's other hook events).
+    """
+    ctx = ProvisioningContext(is_unattended=False)
+    user_group = {"matcher": "*", "hooks": [{"type": "command", "command": "echo user"}]}
+    config = ClaudeAgentConfig(
+        check_installation=False,
+        settings_overrides={"hooks__extend": {"SessionStart__extend": [user_group]}},
+    )
+    content = _build_settings_json(Path.home() / ".claude", config, ctx, sync_local=False)
+    data = json.loads(content)
+    session_start = data["hooks"]["SessionStart"]
+    # mngr's readiness group plus the user's appended group.
+    assert len(session_start) >= 2
+    assert user_group in session_start
+    # Other hook events mngr installed (e.g. Notification) survive the extend.
+    assert len(data["hooks"]) >= 2
+
+
+def test_build_settings_json_output_has_no_extend_markers() -> None:
+    """After the provision fold the built settings.json contains no ``__extend``
+    key anywhere (every deferred marker is consumed against the concrete base)."""
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "settings.json").write_text(json.dumps({"permissions": {"defaultMode": "acceptEdits"}}))
+
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(
+        check_installation=False,
+        settings_overrides={"permissions__extend": {"allow__extend": ["Bash(npm *)"]}},
+    )
+    content = _build_settings_json(claude_dir, config, ctx, sync_local=True)
+    assert "__extend" not in content
+
+
+def test_build_settings_json_nested_bare_inside_extend_narrows_raises() -> None:
+    """The known-gap fix: a *bare* key nested inside an ``__extend`` value that
+    drops a non-empty aggregate from the base raises the narrowing error.
+
+    Base ``permissions = {defaultMode, allow:[X]}``; override
+    ``permissions__extend = {allow: [Y]}`` -- the outer ``permissions__extend``
+    merges (preserving ``defaultMode``), but the *nested bare* ``allow`` replaces
+    the non-empty base ``allow:[X]``, dropping ``X``. The recursive fold now
+    catches this nested bare drop (the old top-level-only check missed it).
+    """
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "settings.json").write_text(
+        json.dumps({"permissions": {"defaultMode": "acceptEdits", "allow": ["Bash(git *)"]}})
+    )
+
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(
+        check_installation=False,
+        settings_overrides={"permissions__extend": {"allow": ["Bash(npm *)"]}},
+    )
+    with pytest.raises(ConfigParseError, match="permissions.allow"):
+        _build_settings_json(claude_dir, config, ctx, sync_local=True)
+
+
+def test_build_settings_json_nested_bare_inside_extend_allowed_with_escape_hatch() -> None:
+    """With the escape hatch, the nested-bare drop is permitted: ``defaultMode``
+    (untouched by the nested patch) survives the outer extend while ``allow`` is
+    replaced wholesale."""
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "settings.json").write_text(
+        json.dumps({"permissions": {"defaultMode": "acceptEdits", "allow": ["Bash(git *)"]}})
+    )
+
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(
+        check_installation=False,
+        settings_overrides={"permissions__extend": {"allow": ["Bash(npm *)"]}},
+    )
+    content = _build_settings_json(claude_dir, config, ctx, sync_local=True, allow_narrowing=True)
+    data = json.loads(content)
+    assert data["permissions"]["defaultMode"] == "acceptEdits"
+    assert data["permissions"]["allow"] == ["Bash(npm *)"]
+
+
+def test_build_settings_json_assign_override_suppresses_narrowing() -> None:
+    """A ``key__assign`` settings_override assigns like a bare key but suppresses the
+    narrowing guard, so a drop that a bare key would reject is permitted without the
+    global escape hatch."""
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "settings.json").write_text(
+        json.dumps({"permissions": {"defaultMode": "acceptEdits", "allow": ["Bash(git *)"]}})
+    )
+
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(
+        check_installation=False,
+        settings_overrides={"permissions__assign": {"allow": ["Bash(npm *)"]}},
+    )
+    content = _build_settings_json(claude_dir, config, ctx, sync_local=True)
+    data = json.loads(content)
+    assert data["permissions"] == {"allow": ["Bash(npm *)"]}
+    assert "__assign" not in content
+
+
+def test_build_settings_json_nested_assign_inside_extend_suppresses_narrowing() -> None:
+    """A nested ``allow__assign`` inside a ``permissions__extend`` suppresses the
+    nested narrowing that a nested bare ``allow`` would raise, while ``defaultMode``
+    still survives the outer extend."""
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "settings.json").write_text(
+        json.dumps({"permissions": {"defaultMode": "acceptEdits", "allow": ["Bash(git *)"]}})
+    )
+
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(
+        check_installation=False,
+        settings_overrides={"permissions__extend": {"allow__assign": ["Bash(npm *)"]}},
+    )
+    content = _build_settings_json(claude_dir, config, ctx, sync_local=True)
+    data = json.loads(content)
+    assert data["permissions"]["defaultMode"] == "acceptEdits"
+    assert data["permissions"]["allow"] == ["Bash(npm *)"]
+
+
+def test_build_settings_json_static_override_suppresses_narrowing() -> None:
+    """A ``Static*`` settings_override value replaces a non-empty base aggregate as a
+    value-set, suppressing the narrowing guard -- here via a *bare* nested ``allow``
+    whose value is a ``StaticList``, so only the ``Static*`` exemption (not
+    ``__assign``) keeps it from raising."""
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "settings.json").write_text(json.dumps({"permissions": {"allow": ["Bash(git *)", "Bash(ls)"]}}))
+
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(
+        check_installation=False,
+        settings_overrides={"permissions__extend": {"allow": StaticList(["Bash(npm *)"])}},
+    )
+    content = _build_settings_json(claude_dir, config, ctx, sync_local=True)
+    data = json.loads(content)
+    assert data["permissions"]["allow"] == ["Bash(npm *)"]
+
+
+def test_compute_claude_json_flags_auto_approve_dismisses_dialogs_but_not_permission_mode() -> None:
+    """--yes (is_auto_approve) on a local agent dismisses the cosmetic first-run dialogs, but does
+    NOT accept bypass-permissions mode (that stays an unattended/auto_allow_permissions concern)."""
+    flags = compute_claude_json_flags(ProvisioningContext(is_unattended=False, is_auto_approve=True))
+    assert flags["effortCalloutDismissed"] is True
+    assert flags["hasCompletedOnboarding"] is True
+    assert flags["hasAcknowledgedCostThreshold"] is True
+    assert "bypassPermissionsModeAccepted" not in flags
+
+
+def test_compute_claude_json_flags_unattended_also_accepts_permission_mode() -> None:
+    flags = compute_claude_json_flags(ProvisioningContext(is_unattended=True))
+    assert flags["bypassPermissionsModeAccepted"] is True
+    assert flags["hasCompletedOnboarding"] is True
+
+
+def test_compute_claude_json_flags_attended_no_auto_approve_only_cost() -> None:
+    flags = compute_claude_json_flags(ProvisioningContext(is_unattended=False, is_auto_approve=False))
+    assert flags == {"hasAcknowledgedCostThreshold": True}
+
+
+def test_compute_settings_json_flags_auto_approve_does_not_change_permissions() -> None:
+    """--yes must not silently flip tool-permission settings; only a genuinely unattended agent does."""
+    assert compute_settings_json_flags(ProvisioningContext(is_unattended=False, is_auto_approve=True)) == {}
+    assert (
+        compute_settings_json_flags(ProvisioningContext(is_unattended=True))["skipDangerousModePermissionPrompt"]
+        is True
+    )
+
+
+def test_should_trust_work_dir_auto_approve() -> None:
+    config = ClaudeAgentConfig(check_installation=False)
+    assert should_trust_work_dir(config, ProvisioningContext(is_unattended=False, is_auto_approve=True)) is True
+    assert should_trust_work_dir(config, ProvisioningContext(is_unattended=False, is_auto_approve=False)) is False
+
+
 # =============================================================================
 # Volume-based session preservation tests
 # =============================================================================
@@ -4731,7 +5511,7 @@ def _write_docker_agent_record(
     agent_id: AgentId,
     agent_name: AgentName,
     *,
-    use_env_config_dir: bool,
+    isolate_local_config_dir: bool,
 ) -> None:
     """Persist a Claude agent record so the offline host's discover_agents() returns it.
 
@@ -4748,7 +5528,7 @@ def _write_docker_agent_record(
                 "type": "claude",
                 "agent_config": {
                     "preserve_sessions_on_destroy": True,
-                    "use_env_config_dir": use_env_config_dir,
+                    "isolate_local_config_dir": isolate_local_config_dir,
                 },
             }
         )
@@ -4767,12 +5547,12 @@ def test_on_before_host_destroy_offline_skips_projects_in_shared_config_mode(
     temp_mngr_ctx: MngrContext,
     tmp_path: Path,
 ) -> None:
-    """The offline destroy hook honors use_env_config_dir: the per-agent ``projects``
-    dir is skipped (it lives in the shared $CLAUDE_CONFIG_DIR) while the transcripts
-    and history are still preserved.
+    """The offline destroy hook honors isolate_local_config_dir: in shared mode the
+    per-agent ``projects`` dir is skipped (it lives in the shared $CLAUDE_CONFIG_DIR)
+    while the transcripts and history are still preserved.
 
     Exercises ``on_before_host_destroy`` end-to-end -- the HostFileReadInterface
-    guard, discover_agents, the use_env_config_dir extraction from raw certified
+    guard, discover_agents, the isolate_local_config_dir extraction from raw certified
     data, and the preserve call -- rather than calling ``preserve_agent_data``
     directly as the other offline tests do.
     """
@@ -4780,7 +5560,7 @@ def test_on_before_host_destroy_offline_skips_projects_in_shared_config_mode(
     agent_id = AgentId.generate()
     agent_name = AgentName("test-offline-hook")
     provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
-    _write_docker_agent_record(host_id, tmp_path, agent_id, agent_name, use_env_config_dir=True)
+    _write_docker_agent_record(host_id, tmp_path, agent_id, agent_name, isolate_local_config_dir=False)
 
     record = HostRecord(
         certified_host_data=CertifiedHostData(
@@ -4804,7 +5584,7 @@ def test_on_before_host_destroy_offline_skips_projects_in_shared_config_mode(
     assert (dest_dir / "logs" / "claude_transcript" / "events.jsonl").exists()
     assert (dest_dir / "events" / "claude" / "common_transcript" / "events.jsonl").exists()
     assert (dest_dir / "claude_session_id_history").exists()
-    # ...but the per-agent projects dir is skipped in use_env_config_dir mode.
+    # ...but the per-agent projects dir is skipped in shared mode.
     assert not (dest_dir / "plugin" / "claude" / "anthropic" / "projects").exists()
 
 
@@ -4975,31 +5755,132 @@ def test_modify_env_vars_sets_claude_config_dirs(
     # $CLAUDE_CONFIG_DIR / $ORIGINAL_CLAUDE_CONFIG_DIR, so the resolved value is
     # known: it must be exactly ~/.claude (not, e.g., the per-agent config dir).
     assert env_vars["ORIGINAL_CLAUDE_CONFIG_DIR"] == str(Path.home() / ".claude")
+    # The default policy disables claude's auto-updater even on an attended local host.
+    assert env_vars["DISABLE_AUTOUPDATER"] == "1"
 
 
-def test_modify_env_vars_omits_claude_config_dir_in_shared_mode(
+def test_modify_env_vars_sets_shared_claude_config_dir_in_shared_mode(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     temp_mngr_ctx: MngrContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """In shared mode, modify_env_vars leaves CLAUDE_CONFIG_DIR / ORIGINAL_CLAUDE_CONFIG_DIR
-    untouched so the agent inherits the parent shell's values, and adds no other env vars."""
+    """In shared mode, when the user's own shell already exported CLAUDE_CONFIG_DIR,
+    modify_env_vars propagates that value (their .claude.json already lives inside it,
+    so sharing stays consistent) but does NOT set ORIGINAL_CLAUDE_CONFIG_DIR or force
+    DISABLE_AUTOUPDATER (it leaves the user's claude environment otherwise alone)."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "shared"))
+    shared = tmp_path / "shared"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(shared))
     agent, host = make_claude_agent(
         local_provider,
         tmp_path,
         temp_mngr_ctx,
-        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
+        agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False),
     )
     env_vars: dict[str, str] = {}
 
     agent.modify_env_vars(host, env_vars)
 
-    # In shared mode there's nothing to add: the transcript opt-out is
-    # gated at provisioning time (on-disk script presence), not via env var.
-    assert env_vars == {}
+    # CLAUDE_CONFIG_DIR points at the shared dir so claude reads the user's real config.
+    assert env_vars == {"CLAUDE_CONFIG_DIR": str(shared)}
+
+
+def test_modify_env_vars_does_not_set_config_dir_in_shared_mode_when_env_unset(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In shared mode with $CLAUDE_CONFIG_DIR unset in the user's shell, modify_env_vars
+    must NOT export CLAUDE_CONFIG_DIR. Exporting it -- even to claude's own ~/.claude
+    default -- would relocate claude's global .claude.json lookup from ~/.claude.json
+    to ~/.claude/.claude.json (an inner stub lacking the user's onboarding state),
+    re-triggering the theme/onboarding screen on every shared-mode agent. The launch
+    command's session-file lookup falls back to $HOME/.claude on its own."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False),
+    )
+    env_vars: dict[str, str] = {}
+
+    agent.modify_env_vars(host, env_vars)
+
+    assert "CLAUDE_CONFIG_DIR" not in env_vars
+    assert "ORIGINAL_CLAUDE_CONFIG_DIR" not in env_vars
+
+
+def test_modify_env_vars_disables_autoupdater_when_policy_never(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """update_policy=NEVER sets DISABLE_AUTOUPDATER=1 even on an attended local host."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, update_policy=AgentUpdatePolicy.NEVER),
+    )
+    env_vars: dict[str, str] = {}
+
+    agent.modify_env_vars(host, env_vars)
+
+    assert env_vars["DISABLE_AUTOUPDATER"] == "1"
+
+
+def test_modify_env_vars_leaves_autoupdater_alone_when_policy_auto(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """update_policy=AUTO leaves claude's auto-updater enabled (no DISABLE_AUTOUPDATER)."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, update_policy=AgentUpdatePolicy.AUTO),
+    )
+    env_vars: dict[str, str] = {}
+
+    agent.modify_env_vars(host, env_vars)
+
+    assert "DISABLE_AUTOUPDATER" not in env_vars
+
+
+def test_modify_env_vars_respects_explicit_disable_autoupdater(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit user-provided DISABLE_AUTOUPDATER value is not overwritten."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, update_policy=AgentUpdatePolicy.NEVER),
+    )
+    env_vars: dict[str, str] = {"DISABLE_AUTOUPDATER": "0"}
+
+    agent.modify_env_vars(host, env_vars)
+
+    assert env_vars["DISABLE_AUTOUPDATER"] == "0"
+
+
+def test_generate_claude_json_autoupdates_follows_disable_flag() -> None:
+    """The generated .claude.json autoUpdates flag mirrors the disable_auto_update arg."""
+    assert _generate_claude_json(None, disable_auto_update=True)["autoUpdates"] is False
+    assert _generate_claude_json(None, disable_auto_update=False)["autoUpdates"] is True
 
 
 # =============================================================================
@@ -5010,7 +5891,7 @@ def test_modify_env_vars_omits_claude_config_dir_in_shared_mode(
 def test_get_claude_config_dir_returns_per_agent_dir_by_default(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """Without use_env_config_dir, get_claude_config_dir returns the per-agent path."""
+    """With isolate_local_config_dir=True (default), get_claude_config_dir returns the per-agent path."""
     agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
 
     config_dir = agent.get_claude_config_dir()
@@ -5031,7 +5912,7 @@ def test_get_claude_config_dir_returns_shared_env_value_in_shared_mode(
         local_provider,
         tmp_path,
         temp_mngr_ctx,
-        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
+        agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False),
     )
 
     assert agent.get_claude_config_dir() == shared
@@ -5044,7 +5925,7 @@ def test_get_claude_config_dir_falls_back_to_home_in_shared_mode_when_env_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """In shared mode with $CLAUDE_CONFIG_DIR unset, get_claude_config_dir falls back
-    to ``~/.claude/`` (claude's own default), so ``use_env_config_dir=True`` effectively
+    to ``~/.claude/`` (claude's own default), so shared mode effectively
     means "don't touch the config dir at all -- inherit whatever the parent shell would
     have used."
     """
@@ -5053,7 +5934,7 @@ def test_get_claude_config_dir_falls_back_to_home_in_shared_mode_when_env_unset(
         local_provider,
         tmp_path,
         temp_mngr_ctx,
-        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
+        agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False),
     )
 
     assert agent.get_claude_config_dir() == Path.home() / ".claude"

@@ -25,11 +25,11 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_ovh._tag_keys import MNGR_RECYCLING_LOCK_TAG_KEY
 from imbue.mngr_ovh.config import OvhProviderConfig
-from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.errors import VpsProvisioningError
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
-from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.vps_client import VpsClientInterface
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.errors import VpsProvisioningError
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsInstanceStatus
+from imbue.mngr_vps.vps_client import VpsClientInterface
 
 _DEFAULT_VPS_TASK_POLL_INTERVAL: Final[float] = 5.0
 
@@ -194,9 +194,11 @@ class OvhVpsClient(VpsClientInterface):
         default=False,
         description=(
             "True iff this client was constructed with placeholder credentials because no "
-            "OVH credentials were configured. Used by OvhProvider to short-circuit "
-            "discovery silently in environments (e.g. CI for unrelated tests) that "
-            "merely enumerate registered backends."
+            "OVH credentials were configured. OvhProviderBackend.build_provider_instance "
+            "detects this and raises ProviderNotAuthorizedError instead of constructing a "
+            "provider whose API calls would all fail; the placeholder keeps build_ovh_client "
+            "total so environments (e.g. CI for unrelated tests) that merely enumerate "
+            "registered backends still work."
         ),
     )
 
@@ -207,7 +209,7 @@ class OvhVpsClient(VpsClientInterface):
         """Record an in-flight ``RecycleHandle``.
 
         Used by ``recycle.try_recycle_cancelled_vps`` so that if the
-        base ``VpsDockerProvider.create_host`` cleanup calls
+        base ``VpsProvider.create_host`` cleanup calls
         ``destroy_instance`` on a VPS that's mid-recycle,
         ``destroy_instance`` releases the recycle lock instead of
         terminating an already-cancelled VPS.
@@ -591,13 +593,12 @@ def build_ovh_client(config: OvhProviderConfig) -> "OvhVpsClient":
     If no credentials are configured anywhere, ``python-ovh`` raises
     ``InvalidConfiguration`` at construction time. We catch that and
     substitute placeholder credentials so the client is still
-    constructible -- any actual API call will then fail with a clear
-    auth error rather than the provider blowing up at registration
-    time. This mirrors how ``mngr_vultr`` accepts an empty API key when
-    none is configured, and lets unrelated tests that merely enumerate
-    registered backends run without OVH credentials. The returned
-    client has ``is_unconfigured=True`` so ``OvhProvider`` can
-    short-circuit discovery without emitting log noise.
+    constructible -- this lets ``build_ovh_client`` itself stay total
+    (e.g. so unrelated tests that merely enumerate registered backends
+    run without OVH credentials). The returned client has
+    ``is_unconfigured=True``, which ``OvhProviderBackend.build_provider_instance``
+    detects and turns into a clear ``ProviderNotAuthorizedError`` rather than
+    constructing a provider whose every API call is doomed to fail.
     """
     kwargs = config.resolve_python_ovh_kwargs()
     try:

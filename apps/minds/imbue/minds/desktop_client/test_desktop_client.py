@@ -3,31 +3,30 @@ import os
 import queue
 import subprocess
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI
-from fastapi import Request as FastAPIRequest
-from fastapi.responses import HTMLResponse
-from fastapi.responses import JSONResponse
-from fastapi.responses import Response
-from starlette.testclient import TestClient
+from flask import Request
+from flask import Response
+from flask.testing import FlaskClient
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
-from imbue.minds.desktop_client import recovery_probe as _recovery_probe
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
-from imbue.minds.desktop_client.app import _build_mngr_host_state_argv
 from imbue.minds.desktop_client.app import _build_mngr_start_argv
 from imbue.minds.desktop_client.app import _build_mngr_stop_argv
 from imbue.minds.desktop_client.app import _build_requests_payload
 from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import _destroying_agent_ids
+from imbue.minds.desktop_client.app import _is_discovery_fresh
+from imbue.minds.desktop_client.app import _provider_error_message_for_workspace
 from imbue.minds.desktop_client.app import _resolve_destroying_for_landing
 from imbue.minds.desktop_client.app import _run_restart_sequence
+from imbue.minds.desktop_client.app import _should_emit_system_interface_status
 from imbue.minds.desktop_client.app import _ssh_command_for_agent
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -44,6 +43,8 @@ from imbue.minds.desktop_client.conftest import make_service_log
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
+from imbue.minds.desktop_client.discovery_health import ProducerRemediator
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
@@ -55,6 +56,8 @@ from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import create_latchkey_predefined_permission_request_event
 from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
+from imbue.minds.desktop_client.responses import make_response
+from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.primitives import CreationId
@@ -70,56 +73,12 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 
-def _create_multi_backend_http_client(
-    web_app: FastAPI,
-    api_app: FastAPI,
-) -> httpx.AsyncClient:
-    """Create an httpx client that routes to different ASGI apps based on URL prefix.
-
-    Requests to http://web-backend/... go to web_app, and
-    requests to http://api-backend/... go to api_app.
-    """
-    web_transport = httpx.ASGITransport(app=web_app)
-    api_transport = httpx.ASGITransport(app=api_app)
-
-    class _RoutingTransport(httpx.AsyncBaseTransport):
-        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-            if str(request.url).startswith("http://web-backend"):
-                return await web_transport.handle_async_request(request)
-            elif str(request.url).startswith("http://api-backend"):
-                return await api_transport.handle_async_request(request)
-            else:
-                raise httpx.ConnectError(f"Unknown backend: {request.url}")
-
-    return httpx.AsyncClient(transport=_RoutingTransport())
-
-
-def _create_test_backend() -> FastAPI:
-    """Create a simple backend app for proxy testing."""
-    backend = FastAPI()
-
-    @backend.get("/")
-    def backend_root() -> HTMLResponse:
-        return HTMLResponse("<html><head><title>Backend</title></head><body>Hello from backend</body></html>")
-
-    @backend.get("/api/status")
-    def backend_status() -> JSONResponse:
-        return JSONResponse({"status": "ok"})
-
-    @backend.post("/api/echo")
-    async def backend_echo(request: FastAPIRequest) -> JSONResponse:
-        body = await request.body()
-        return JSONResponse({"echo": body.decode()})
-
-    return backend
-
-
 def _create_test_desktop_client(
     tmp_path: Path,
     backend_resolver: BackendResolverInterface,
-    http_client: httpx.AsyncClient | None,
+    http_client: httpx.Client | None,
     agent_creator: AgentCreator | None = None,
-) -> tuple[TestClient, FileAuthStore]:
+) -> tuple[FlaskClient, FileAuthStore]:
     """Create a desktop client with the given backend resolver."""
     auth_dir = tmp_path / "auth"
     auth_store = FileAuthStore(data_directory=auth_dir)
@@ -130,7 +89,7 @@ def _create_test_desktop_client(
         http_client=http_client,
         agent_creator=agent_creator,
     )
-    client = TestClient(app, base_url="http://localhost")
+    client = app.test_client()
 
     return client, auth_store
 
@@ -138,15 +97,9 @@ def _create_test_desktop_client(
 def _setup_test_server(
     tmp_path: Path,
     service_name: ServiceName = DEFAULT_SERVICE_NAME,
-) -> tuple[TestClient, FileAuthStore, AgentId]:
+) -> tuple[FlaskClient, FileAuthStore, AgentId]:
     """Set up a desktop client with a test backend for proxy testing."""
     agent_id = AgentId()
-
-    backend_app = _create_test_backend()
-    test_http_client = httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=backend_app),
-        base_url="http://test-backend",
-    )
 
     backend_resolver = StaticBackendResolver(
         url_by_agent_and_service={str(agent_id): {str(service_name): "http://test-backend"}},
@@ -154,21 +107,21 @@ def _setup_test_server(
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
         backend_resolver=backend_resolver,
-        http_client=test_http_client,
+        http_client=None,
     )
 
     return client, auth_store, agent_id
 
 
 def _authenticate_client(
-    client: TestClient,
+    client: FlaskClient,
     auth_store: FileAuthStore,
 ) -> None:
     """Authenticate a test client by minting a signed session cookie and adding it to the jar.
 
     The production path (GET /authenticate?one_time_code=...) returns a
     ``Set-Cookie`` with ``Domain=localhost`` so the cookie is valid on both
-    ``localhost`` and ``<agent-id>.localhost`` subdomains. httpx's TestClient
+    ``localhost`` and ``<agent-id>.localhost`` subdomains. The test client's
     cookie jar is stricter than real browsers about Domain=localhost and
     silently drops that cookie on subsequent requests, so we set the cookie
     directly on the jar here instead of round-tripping through /authenticate.
@@ -177,9 +130,9 @@ def _authenticate_client(
     what ``_is_authenticated`` checks.
     """
     cookie_value = create_session_cookie(signing_key=auth_store.get_signing_key())
-    # Intentionally no Domain=: httpx's cookie jar silently drops Domain=localhost
-    # cookies on subsequent requests even with base_url=http://localhost.
-    client.cookies.set(SESSION_COOKIE_NAME, cookie_value, path="/")
+    # Intentionally no Domain=: the test client cookie jar is strict about
+    # Domain=localhost cookies on subsequent requests.
+    client.set_cookie(SESSION_COOKIE_NAME, cookie_value)
 
 
 def test_landing_page_shows_login_when_unauthenticated(tmp_path: Path) -> None:
@@ -198,13 +151,28 @@ def test_login_redirects_to_authenticate_via_js(tmp_path: Path) -> None:
 
     response = client.get(
         "/login",
-        params={"one_time_code": str(code)},
+        query_string={"one_time_code": str(code)},
         follow_redirects=False,
     )
 
     assert response.status_code == 200
     assert "window.location.href" in response.text
     assert "/authenticate" in response.text
+
+
+def test_login_without_one_time_code_returns_422(tmp_path: Path) -> None:
+    """A missing one_time_code is a 422 (matching FastAPI's required-query-param
+    rejection), not a 500."""
+    client, _, _ = _setup_test_server(tmp_path)
+    response = client.get("/login", follow_redirects=False)
+    assert response.status_code == 422
+
+
+def test_authenticate_without_one_time_code_returns_422(tmp_path: Path) -> None:
+    """A missing one_time_code is a 422, not a 500."""
+    client, _, _ = _setup_test_server(tmp_path)
+    response = client.get("/authenticate", follow_redirects=False)
+    assert response.status_code == 422
 
 
 def test_authenticate_with_valid_code_sets_cookie_and_redirects(tmp_path: Path) -> None:
@@ -214,12 +182,12 @@ def test_authenticate_with_valid_code_sets_cookie_and_redirects(tmp_path: Path) 
 
     response = client.get(
         "/authenticate",
-        params={"one_time_code": str(code)},
+        query_string={"one_time_code": str(code)},
         follow_redirects=False,
     )
 
     assert response.status_code == 307
-    assert SESSION_COOKIE_NAME in response.cookies
+    assert any(SESSION_COOKIE_NAME in header for header in response.headers.getlist("Set-Cookie"))
 
 
 def test_authenticate_redirects_to_landing_page(tmp_path: Path) -> None:
@@ -229,7 +197,7 @@ def test_authenticate_redirects_to_landing_page(tmp_path: Path) -> None:
 
     response = client.get(
         "/authenticate",
-        params={"one_time_code": str(code)},
+        query_string={"one_time_code": str(code)},
         follow_redirects=False,
     )
 
@@ -242,7 +210,7 @@ def test_authenticate_with_invalid_code_returns_403(tmp_path: Path) -> None:
 
     response = client.get(
         "/authenticate",
-        params={"one_time_code": "bogus-code-82734"},
+        query_string={"one_time_code": "bogus-code-82734"},
         follow_redirects=False,
     )
 
@@ -257,14 +225,14 @@ def test_authenticate_code_cannot_be_reused(tmp_path: Path) -> None:
 
     first_response = client.get(
         "/authenticate",
-        params={"one_time_code": str(code)},
+        query_string={"one_time_code": str(code)},
         follow_redirects=False,
     )
     assert first_response.status_code == 307
 
     second_response = client.get(
         "/authenticate",
-        params={"one_time_code": str(code)},
+        query_string={"one_time_code": str(code)},
         follow_redirects=False,
     )
     assert second_response.status_code == 403
@@ -339,7 +307,7 @@ class _LeasedImbueCloudResolver(StaticBackendResolver):
         return None
 
 
-def _make_leased_host_client(tmp_path: Path) -> tuple[TestClient, FileAuthStore, AgentId]:
+def _make_leased_host_client(tmp_path: Path) -> tuple[FlaskClient, FileAuthStore, AgentId]:
     agent_id = AgentId()
     backend_resolver = _LeasedImbueCloudResolver(
         url_by_agent_and_service={str(agent_id): {"web": "http://backend"}},
@@ -391,7 +359,7 @@ def test_settings_page_disables_disassociate_for_leased_host(tmp_path: Path) -> 
 
 def _setup_test_server_without_backend(
     tmp_path: Path,
-) -> tuple[TestClient, FileAuthStore, AgentId]:
+) -> tuple[FlaskClient, FileAuthStore, AgentId]:
     """Set up a desktop client with no backends for testing error paths."""
     agent_id = AgentId()
 
@@ -416,7 +384,7 @@ def test_login_redirects_if_already_authenticated(tmp_path: Path) -> None:
 
     response = client.get(
         "/login",
-        params={"one_time_code": str(new_code)},
+        query_string={"one_time_code": str(new_code)},
         follow_redirects=False,
     )
     assert response.status_code == 307
@@ -493,7 +461,7 @@ def test_landing_page_prefills_git_url_from_query_param(tmp_path: Path) -> None:
     )
     _authenticate_client(client=client, auth_store=auth_store)
 
-    response = client.get("/", params={"git_url": "file:///nonexistent-repo"})
+    response = client.get("/", query_string={"git_url": "file:///nonexistent-repo"})
     assert response.status_code == 200
     assert "file:///nonexistent-repo" in response.text
 
@@ -594,7 +562,7 @@ def test_creating_page_returns_501_without_agent_creator(tmp_path: Path) -> None
 def _create_test_server_with_agent_creator(
     tmp_path: Path,
     backend_resolver: BackendResolverInterface | None = None,
-) -> tuple[TestClient, FileAuthStore, AgentCreator]:
+) -> tuple[FlaskClient, FileAuthStore, AgentCreator]:
     """Create a desktop client with an agent creator for testing.
 
     The returned client is already authenticated with a global session.
@@ -673,7 +641,7 @@ def test_create_agent_api_passes_host_name(tmp_path: Path) -> None:
         json={"git_url": "file:///nonexistent-repo", "host_name": "my-agent"},
     )
     assert response.status_code == 200
-    data = response.json()
+    data = response.get_json()
     assert "agent_id" in data
     agent_creator.wait_for_all()
 
@@ -698,7 +666,7 @@ def test_create_agent_api_rejects_duplicate_host_name(tmp_path: Path) -> None:
     )
 
     assert response.status_code == 409
-    assert "existing-agent" in response.json()["error"]
+    assert "existing-agent" in response.get_json()["error"]
 
 
 def test_create_agent_api_allows_unique_host_name_when_others_exist(tmp_path: Path) -> None:
@@ -715,7 +683,7 @@ def test_create_agent_api_allows_unique_host_name_when_others_exist(tmp_path: Pa
     )
 
     assert response.status_code == 200
-    assert "agent_id" in response.json()
+    assert "agent_id" in response.get_json()
     agent_creator.wait_for_all()
 
 
@@ -725,9 +693,30 @@ def test_create_agent_api_returns_agent_id(tmp_path: Path) -> None:
 
     response = client.post("/api/create-agent", json={"git_url": "file:///nonexistent-repo"})
     assert response.status_code == 200
-    data = response.json()
+    data = response.get_json()
     assert "agent_id" in data
     assert data["status"] == "INITIALIZING"
+    agent_creator.wait_for_all()
+
+
+def test_create_agent_api_accepts_json_body_without_content_type_header(tmp_path: Path) -> None:
+    """A JSON body posted without an ``application/json`` Content-Type is still parsed.
+
+    The FastAPI version parsed the request body regardless of its Content-Type
+    (``await request.json()`` ignores the header). The Flask port preserves that
+    via ``get_json(force=True)``; without it, Flask returns None for a missing
+    header and the endpoint would 400 a valid JSON payload. Regression guard for
+    that parity fix.
+    """
+    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/api/create-agent",
+        data=json.dumps({"git_url": "file:///nonexistent-repo"}),
+        headers={"content-type": "text/plain"},
+    )
+    assert response.status_code == 200
+    assert "agent_id" in response.get_json()
     agent_creator.wait_for_all()
 
 
@@ -752,7 +741,7 @@ def test_create_agent_api_accepts_onboarding_fields(tmp_path: Path) -> None:
         json={"git_url": "file:///nonexistent-repo", "user_data_preference": "PRIVACY"},
     )
     assert response.status_code == 200
-    assert "agent_id" in response.json()
+    assert "agent_id" in response.get_json()
     agent_creator.wait_for_all()
 
 
@@ -772,7 +761,7 @@ def test_onboarding_submit_accepts_answers_for_tracked_creation(tmp_path: Path) 
     client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
 
     create_response = client.post("/api/create-agent", json={"git_url": "file:///nonexistent-repo"})
-    creation_id = create_response.json()["agent_id"]
+    creation_id = create_response.get_json()["agent_id"]
 
     # Only the data preference is submitted so the apply thread stays local.
     response = client.post(
@@ -780,7 +769,7 @@ def test_onboarding_submit_accepts_answers_for_tracked_creation(tmp_path: Path) 
         json={"user_data_preference": "PRIVACY"},
     )
     assert response.status_code == 200
-    assert response.json()["status"] == "ok"
+    assert response.get_json()["status"] == "ok"
     agent_creator.wait_for_all()
 
 
@@ -823,7 +812,7 @@ def test_create_agent_api_rejects_invalid_host_name(tmp_path: Path) -> None:
         json={"git_url": "file:///nonexistent-repo", "host_name": "bad.name"},
     )
     assert response.status_code == 400
-    body = response.json()
+    body = response.get_json()
     assert "alphanumeric" in body["error"]
 
 
@@ -833,7 +822,7 @@ def test_create_agent_api_rejects_invalid_json(tmp_path: Path) -> None:
 
     response = client.post(
         "/api/create-agent",
-        content=b"not json",
+        data=b"not json",
         headers={"content-type": "application/json"},
     )
     assert response.status_code == 400
@@ -868,7 +857,7 @@ def test_creation_status_api_returns_status_for_tracked_agent(tmp_path: Path) ->
 
     response = client.get("/api/create-agent/{}/status".format(creation_id))
     assert response.status_code == 200
-    data = response.json()
+    data = response.get_json()
     # The status response now reports both ``creation_id`` (always present)
     # and ``agent_id`` (only once mngr create returns a canonical id). For
     # this test the create runs against a nonexistent repo so it may never
@@ -891,7 +880,7 @@ def test_create_page_prefills_git_url_from_query(tmp_path: Path) -> None:
     """GET /create?git_url=... pre-fills the form."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
-    response = client.get("/create", params={"git_url": "file:///nonexistent-repo"})
+    response = client.get("/create", query_string={"git_url": "file:///nonexistent-repo"})
     assert response.status_code == 200
     assert "file:///nonexistent-repo" in response.text
 
@@ -1011,9 +1000,10 @@ def test_creation_logs_sse_streams_events(tmp_path: Path) -> None:
 
     agent_id = agent_creator.start_creation("file:///nonexistent-repo")
 
-    with client.stream("GET", "/api/create-agent/{}/logs".format(agent_id)) as response:
-        assert response.status_code == 200
-        assert "text/event-stream" in response.headers.get("content-type", "")
+    response = client.get("/api/create-agent/{}/logs".format(agent_id))
+    assert response.status_code == 200
+    assert "text/event-stream" in response.headers.get("content-type", "")
+    response.close()
     agent_creator.wait_for_all()
 
 
@@ -1039,14 +1029,12 @@ def test_creation_logs_sse_emits_status_events(tmp_path: Path) -> None:
     log_queue.put(LOG_SENTINEL)
 
     payloads: list[dict[str, object]] = []
-    with client.stream("GET", "/api/create-agent/{}/logs".format(creation_id)) as response:
-        assert response.status_code == 200
-        for line in response.iter_lines():
-            if not line.startswith("data: "):
-                continue
+    response = client.get("/api/create-agent/{}/logs".format(creation_id))
+    assert response.status_code == 200
+    # The seeded LOG_SENTINEL makes this stream finite, so the full body can be read.
+    for line in response.get_data(as_text=True).splitlines():
+        if line.startswith("data: "):
             payloads.append(json.loads(line[len("data: ") :]))
-            if payloads[-1].get("_type") == "done":
-                break
 
     status_events = [p for p in payloads if p.get("_type") == "status"]
     log_events = [p for p in payloads if "log" in p]
@@ -1070,14 +1058,12 @@ def test_creation_logs_sse_emits_status_text_for_imbue_cloud(tmp_path: Path) -> 
     log_queue.put(LOG_SENTINEL)
 
     payloads: list[dict[str, object]] = []
-    with client.stream("GET", "/api/create-agent/{}/logs".format(creation_id)) as response:
-        assert response.status_code == 200
-        for line in response.iter_lines():
-            if not line.startswith("data: "):
-                continue
+    response = client.get("/api/create-agent/{}/logs".format(creation_id))
+    assert response.status_code == 200
+    # The seeded LOG_SENTINEL makes this stream finite, so the full body can be read.
+    for line in response.get_data(as_text=True).splitlines():
+        if line.startswith("data: "):
             payloads.append(json.loads(line[len("data: ") :]))
-            if payloads[-1].get("_type") == "done":
-                break
 
     status_events = [p for p in payloads if p.get("_type") == "status"]
     assert status_events
@@ -1128,7 +1114,7 @@ def test_create_agent_api_passes_launch_mode(tmp_path: Path) -> None:
         },
     )
     assert response.status_code == 200
-    data = response.json()
+    data = response.get_json()
     assert "agent_id" in data
     agent_creator.wait_for_all()
 
@@ -1146,7 +1132,7 @@ def test_create_agent_api_rejects_invalid_launch_mode(tmp_path: Path) -> None:
         },
     )
     assert response.status_code == 400
-    assert "Invalid launch_mode" in response.json()["error"]
+    assert "Invalid launch_mode" in response.get_json()["error"]
 
 
 def test_create_form_shows_launch_mode_dropdown(tmp_path: Path) -> None:
@@ -1272,7 +1258,7 @@ def test_create_agent_api_rejects_api_key_provider_without_key(tmp_path: Path) -
         },
     )
     assert response.status_code == 400
-    assert "anthropic_api_key is required" in response.json()["error"]
+    assert "anthropic_api_key is required" in response.get_json()["error"]
 
 
 def test_create_agent_api_rejects_invalid_ai_provider(tmp_path: Path) -> None:
@@ -1287,7 +1273,7 @@ def test_create_agent_api_rejects_invalid_ai_provider(tmp_path: Path) -> None:
         },
     )
     assert response.status_code == 400
-    assert "Invalid ai_provider" in response.json()["error"]
+    assert "Invalid ai_provider" in response.get_json()["error"]
 
 
 def test_create_agent_api_rejects_imbue_cloud_compute_without_account(tmp_path: Path) -> None:
@@ -1303,7 +1289,7 @@ def test_create_agent_api_rejects_imbue_cloud_compute_without_account(tmp_path: 
         },
     )
     assert response.status_code == 400
-    assert "account_id is required" in response.json()["error"]
+    assert "account_id is required" in response.get_json()["error"]
 
 
 def test_create_agent_api_rejects_imbue_cloud_ai_without_account(tmp_path: Path) -> None:
@@ -1319,7 +1305,7 @@ def test_create_agent_api_rejects_imbue_cloud_ai_without_account(tmp_path: Path)
         },
     )
     assert response.status_code == 400
-    assert "account_id is required" in response.json()["error"]
+    assert "account_id is required" in response.get_json()["error"]
 
 
 def test_create_form_submit_preserves_account_id_on_validation_error(tmp_path: Path) -> None:
@@ -1360,10 +1346,10 @@ def test_unhandled_exception_returns_500_with_message(tmp_path: Path) -> None:
     )
 
     @app.get("/explode")
-    def explode() -> None:
+    def explode() -> Response:
         raise RuntimeError("test boom")
 
-    client = TestClient(app, base_url="http://localhost", raise_server_exceptions=False)
+    client = app.test_client()
     response = client.get("/explode")
     assert response.status_code == 500
     assert "test boom" in response.text
@@ -1415,7 +1401,7 @@ def test_chrome_events_sse_returns_workspaces_when_authenticated(tmp_path: Path)
     """The /_chrome/events SSE endpoint returns workspace list for authenticated users.
 
     We test the underlying _build_workspace_list helper since the SSE endpoint
-    is an infinite stream that the TestClient cannot consume without blocking.
+    is an infinite stream that the test client cannot consume without blocking.
     """
     agent_id = AgentId()
     backend_resolver = StaticBackendResolver(
@@ -1425,6 +1411,65 @@ def test_chrome_events_sse_returns_workspaces_when_authenticated(tmp_path: Path)
     workspaces = _build_workspace_list(backend_resolver)
     assert len(workspaces) == 1
     assert workspaces[0]["id"] == str(agent_id)
+
+
+class _NoopRemediator(ProducerRemediator):
+    """A producer remediator whose remediations do nothing (the BLOCKED path never calls them)."""
+
+    def bounce(self) -> None:
+        pass
+
+    def restart(self) -> None:
+        pass
+
+
+def test_chrome_events_sse_emits_discovery_health_blocked_on_connect(tmp_path: Path) -> None:
+    """A BLOCKED watchdog makes the chrome SSE emit a discovery_health payload on connect.
+
+    The connect-time batch is emitted before the generator's wait loop, so
+    pre-setting the shutdown event lets the (otherwise infinite) stream finish
+    after that batch and keeps the test client from blocking.
+    """
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    watchdog = DiscoveryHealthWatchdog(remediator=_NoopRemediator())
+    # Force the terminal BLOCKED tier so the connect-time batch surfaces it.
+    watchdog.record_consumer_death()
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        http_client=None,
+        discovery_health_watchdog=watchdog,
+    )
+    # End the stream right after its connect-time batch so the client doesn't block.
+    get_state(app).shutdown_event.set()
+    client = app.test_client()
+    _authenticate_client(client, auth_store)
+
+    response = client.get("/_chrome/events")
+
+    assert response.status_code == 200
+    assert '"type": "discovery_health"' in response.text
+    assert '"state": "blocked"' in response.text
+
+
+def test_chrome_events_sse_omits_discovery_health_when_healthy(tmp_path: Path) -> None:
+    """A HEALTHY watchdog surfaces nothing -- the RECONNECTING/healthy tiers are silent."""
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    watchdog = DiscoveryHealthWatchdog(remediator=_NoopRemediator())
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        http_client=None,
+        discovery_health_watchdog=watchdog,
+    )
+    get_state(app).shutdown_event.set()
+    client = app.test_client()
+    _authenticate_client(client, auth_store)
+
+    response = client.get("/_chrome/events")
+
+    assert response.status_code == 200
+    assert "discovery_health" not in response.text
 
 
 def test_destroying_agent_ids_returns_ids_with_live_destroy(tmp_path: Path) -> None:
@@ -1590,7 +1635,7 @@ def test_build_requests_payload_distinguishes_equal_count_different_contents() -
 def _create_test_client_with_stores(
     tmp_path: Path,
     cli: ImbueCloudCli | None = None,
-) -> tuple[TestClient, FileAuthStore]:
+) -> tuple[FlaskClient, FileAuthStore]:
     """Create a desktop client with session store and config for testing new routes.
 
     ``cli`` is forwarded to :func:`make_session_store_for_test` so callers
@@ -1613,8 +1658,44 @@ def _create_test_client_with_stores(
         request_inbox=request_inbox,
         paths=WorkspacePaths(data_dir=tmp_path),
     )
-    client = TestClient(app, base_url="http://localhost")
+    client = app.test_client()
     return client, auth_store
+
+
+def _create_test_client_with_auth_routes(tmp_path: Path) -> FlaskClient:
+    """Create a desktop client with the /auth blueprint mounted.
+
+    The auth blueprint is only registered when both a session store and an
+    imbue_cloud CLI are wired, so this passes both.
+    """
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    cli = make_fake_imbue_cloud_cli()
+    session_store = make_session_store_for_test(tmp_path, cli=cli)
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        http_client=None,
+        imbue_cloud_cli=cli,
+        session_store=session_store,
+    )
+    return app.test_client()
+
+
+def test_auth_login_page_renders_message_query_param(tmp_path: Path) -> None:
+    """GET /auth/login?message=... renders the banner (e.g. the Electron shell's
+    'You need to sign in...' prompt on the auth_required event)."""
+    client = _create_test_client_with_auth_routes(tmp_path)
+    response = client.get("/auth/login", query_string={"message": "You need to sign in to Imbue"})
+    assert response.status_code == 200
+    assert "You need to sign in to Imbue" in response.text
+
+
+def test_auth_login_page_without_message_query_param(tmp_path: Path) -> None:
+    """GET /auth/login with no message renders without injecting one."""
+    client = _create_test_client_with_auth_routes(tmp_path)
+    response = client.get("/auth/login")
+    assert response.status_code == 200
+    assert "You need to sign in to Imbue" not in response.text
 
 
 def test_accounts_page_requires_auth(tmp_path: Path) -> None:
@@ -1721,17 +1802,17 @@ class _InboxStubLatchkeyHandler(RequestEventHandler):
             return ""
         return f'<div class="permissions-detail">{req_event.rationale}</div>'
 
-    async def apply_grant_request(self, request: FastAPIRequest, req_event: RequestEvent) -> Response:
-        return Response(content='{"outcome": "GRANTED"}', media_type="application/json")
+    def apply_grant_request(self, request: Request, req_event: RequestEvent) -> Response:
+        return make_response(content='{"outcome": "GRANTED"}', media_type="application/json")
 
-    async def apply_deny_request(self, request: FastAPIRequest, req_event: RequestEvent) -> Response:
-        return Response(content='{"outcome": "DENIED"}', media_type="application/json")
+    def apply_deny_request(self, request: Request, req_event: RequestEvent) -> Response:
+        return make_response(content='{"outcome": "DENIED"}', media_type="application/json")
 
 
 def _build_inbox_test_app(
     tmp_path: Path,
     request_inbox: RequestInbox,
-) -> tuple[TestClient, FileAuthStore]:
+) -> tuple[FlaskClient, FileAuthStore]:
     """Build an authenticated test client wired with a stub latchkey handler.
 
     The stub returns a fragment that echoes the rationale so the master/
@@ -1755,7 +1836,7 @@ def _build_inbox_test_app(
         paths=WorkspacePaths(data_dir=tmp_path),
         request_event_handlers=(_InboxStubLatchkeyHandler(),),
     )
-    client = TestClient(app, base_url="http://localhost")
+    client = app.test_client()
     _authenticate_client(client, auth_store)
     return client, auth_store
 
@@ -2005,103 +2086,137 @@ def test_build_mngr_start_argv_targets_the_agent() -> None:
     assert argv[:3] == ["/usr/local/bin/mngr", "start", str(aid)]
 
 
-def test_build_mngr_host_state_argv_scopes_to_workspace_and_continues_on_error() -> None:
-    """The host-state probe filters to just this workspace's agents and
-    tolerates per-host failures so a broken sibling host doesn't blank
-    out the diagnostic."""
-    agent = AgentId.generate()
-    services = AgentId.generate()
-    argv = _build_mngr_host_state_argv("/usr/local/bin/mngr", agent, services, None)
-    assert argv[:5] == ["/usr/local/bin/mngr", "list", "--format", "json", "--quiet"]
-    # CEL include matches both the chat agent and the system-services agent.
-    assert "--include" in argv
-    include_value = argv[argv.index("--include") + 1]
-    assert f'id == "{agent}"' in include_value
-    assert f'id == "{services}"' in include_value
-    # --on-error continue is required so one broken host does not abort the
-    # listing for the rest.
-    assert argv[argv.index("--on-error") + 1] == "continue"
-    # No provider known -> discovery is not scoped to a provider.
-    assert "--provider" not in argv
+def test_provider_error_message_for_workspace_keys_on_this_workspaces_provider() -> None:
+    """The provider error message is attributed by exact provider name.
 
-
-def test_build_mngr_host_state_argv_omits_services_id_when_unresolved() -> None:
-    """When the services-agent id is unknown, the filter degenerates to just
-    the chat agent's id -- the listing is still scoped, just with one term."""
-    agent = AgentId.generate()
-    argv = _build_mngr_host_state_argv("/usr/local/bin/mngr", agent, None, None)
-    include_value = argv[argv.index("--include") + 1]
-    assert include_value == f'id == "{agent}"'
-
-
-def test_build_mngr_host_state_argv_scopes_discovery_to_provider_when_known() -> None:
-    """When the workspace's provider is known, the probe passes ``--provider`` so
-    discovery only queries that provider.
-
-    ``--provider`` is a discovery fan-out control (unlike the post-discovery CEL
-    ``--include``), so an unrelated provider being unreachable can no longer make
-    this listing exit nonzero and blank out the workspace's own host state.
+    This is the per-provider keying that keeps a docker mind's recovery from
+    being misclassified during a simultaneous imbue_cloud outage: only an error
+    whose provider name matches this workspace's is used.
     """
-    agent = AgentId.generate()
-    services = AgentId.generate()
-    argv = _build_mngr_host_state_argv("/usr/local/bin/mngr", agent, services, "docker")
-    assert argv[argv.index("--provider") + 1] == "docker"
+    errors = {
+        ProviderInstanceName("imbue_cloud_acme"): DiscoveryError(
+            type_name="ProviderUnavailableError",
+            message="could not reach Imbue Cloud",
+            provider_name=ProviderInstanceName("imbue_cloud_acme"),
+        ),
+    }
+    matched = _provider_error_message_for_workspace(errors, "imbue_cloud_acme")
+    assert matched == "could not reach Imbue Cloud"
 
 
-def _classify_host_health_compat(list_json: str | None, agent_id: AgentId) -> dict[str, bool]:
-    """Legacy-shape wrapper around the probe-list response.
+def test_provider_error_message_for_workspace_ignores_other_providers() -> None:
+    """An error for a different provider is never blamed on this workspace."""
+    errors = {
+        ProviderInstanceName("imbue_cloud_acme"): DiscoveryError(
+            type_name="ProviderUnavailableError",
+            message="down",
+            provider_name=ProviderInstanceName("imbue_cloud_acme"),
+        ),
+    }
+    assert _provider_error_message_for_workspace(errors, "docker") is None
 
-    Projects the new "container running?" probe + dispatch_tier classification
-    back onto the prior ``{"reachable": ..., "host_offline": ...}`` contract
-    so the existing host-state classification cases stay covered.
+
+def test_provider_error_message_for_workspace_is_none_when_provider_unknown() -> None:
+    """Pre-discovery (provider unknown), we cannot attribute any error to this workspace."""
+    errors = {
+        ProviderInstanceName("imbue_cloud_acme"): DiscoveryError(
+            type_name="ProviderUnavailableError",
+            message="down",
+            provider_name=ProviderInstanceName("imbue_cloud_acme"),
+        ),
+    }
+    assert _provider_error_message_for_workspace(errors, None) is None
+
+
+def test_is_discovery_fresh_distinguishes_recent_from_stale_and_missing() -> None:
+    """Freshness gates the recovery redirect: only a recent snapshot is trustworthy."""
+    now = datetime.now(timezone.utc)
+    assert _is_discovery_fresh(now) is True
+    # A snapshot well past the freshness window (a stalled pipeline) is stale.
+    assert _is_discovery_fresh(now - timedelta(minutes=5)) is False
+    # No snapshot at all (e.g. before initial discovery) cannot be trusted.
+    assert _is_discovery_fresh(None) is False
+
+
+def _drive_to_stuck_with_onset(tracker: SystemInterfaceHealthTracker, agent_id: AgentId) -> datetime:
+    """Drive ``agent_id`` to STUCK via the real probe path and return its onset.
+
+    A zero stuck-threshold makes the first probe failure stick immediately, so the
+    outage onset is recorded deterministically without sleeping.
     """
-    response = _recovery_probe.build_host_health_response(
-        list_json=list_json,
-        agent_id=agent_id,
-        services_agent_id=None,
-        in_container_stdout=None,
-        plugin_resolver_services={},
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+    assert tracker.get_health(agent_id) == AgentHealth.STUCK
+    onset = tracker.get_failure_run_started_wall_at(agent_id)
+    assert onset is not None
+    return onset
+
+
+def test_should_emit_system_interface_status_gates_stuck_on_post_onset_snapshot() -> None:
+    """The recovery redirect waits for a discovery snapshot taken *after* the outage began.
+
+    STUCK is the only status the chrome redirects on. A snapshot that predates the
+    outage still carries the pre-outage host state (a just-stopped container still
+    reads RUNNING), so it must not promote the redirect -- only a snapshot at or
+    after the outage onset does. Other statuses never gate the redirect.
+    """
+    resolver = MngrCliBackendResolver()
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    agent_id = AgentId.generate()
+
+    # Non-STUCK statuses do not drive the redirect, so they are never gated --
+    # even with no discovery snapshot and no recorded onset.
+    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.RESTARTING) is True
+    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.RESTART_FAILED) is True
+    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.HEALTHY) is True
+
+    onset = _drive_to_stuck_with_onset(tracker, agent_id)
+
+    # A recent snapshot that nonetheless predates the outage is the exact bug case:
+    # it is well within the absolute freshness window but still shows the pre-outage
+    # host state, so it must stay suppressed.
+    resolver.update_providers(
+        providers=(), error_by_provider_name={}, last_full_snapshot_at=onset - timedelta(seconds=1)
     )
-    for probe in response.probes:
-        if "container running" in probe.question:
-            return {
-                "reachable": probe.answer == _recovery_probe.ProbeAnswer.YES,
-                "host_offline": probe.answer == _recovery_probe.ProbeAnswer.NO,
-            }
-    return {"reachable": False, "host_offline": False}
+    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.STUCK) is False
+
+    # A snapshot taken after the outage began reflects it; promote the redirect.
+    resolver.update_providers(
+        providers=(), error_by_provider_name={}, last_full_snapshot_at=onset + timedelta(seconds=1)
+    )
+    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.STUCK) is True
 
 
-def test_classify_host_health_running_host_is_reachable() -> None:
-    """A RUNNING host classifies as reachable -- the surgical restart applies."""
-    aid = AgentId.generate()
-    list_json = json.dumps({"agents": [{"id": str(aid), "host": {"state": "RUNNING"}}]})
-    assert _classify_host_health_compat(list_json, aid) == {"reachable": True, "host_offline": False}
+def test_should_emit_system_interface_status_without_onset_falls_back_to_age() -> None:
+    """Without a recorded onset, STUCK gating falls back to the absolute-age freshness check.
 
-
-def test_classify_host_health_stopped_host_is_offline() -> None:
-    """A STOPPED (or crashed) host classifies as offline -- safe to auto host-restart."""
-    aid = AgentId.generate()
-    for state in ("STOPPED", "CRASHED", "FAILED", "STOPPING"):
-        list_json = json.dumps({"agents": [{"id": str(aid), "host": {"state": state}}]})
-        assert _classify_host_health_compat(list_json, aid) == {"reachable": False, "host_offline": True}, state
-
-
-def test_classify_host_health_ambiguous_state_is_neither() -> None:
-    """An ambiguous host state (or a missing agent / bad output) is neither.
-
-    The recovery page then falls back to a confirmed manual restart rather
-    than auto-dispatching a potentially destructive host restart.
+    Only the force-``mark_stuck`` path (used in tests) reaches STUCK without a
+    probe-failure run, so there is no onset to compare against; the gate then
+    behaves as before -- cold start suppresses, a recent snapshot promotes. A
+    missing tracker entirely is treated the same way.
     """
-    aid = AgentId.generate()
-    # An ambiguous lifecycle state (host may still be running agents).
-    starting = json.dumps({"agents": [{"id": str(aid), "host": {"state": "STARTING"}}]})
-    assert _classify_host_health_compat(starting, aid) == {"reachable": False, "host_offline": False}
-    # The probed agent is absent from the listing.
-    other = json.dumps({"agents": [{"id": "agent-other", "host": {"state": "STOPPED"}}]})
-    assert _classify_host_health_compat(other, aid) == {"reachable": False, "host_offline": False}
-    # mngr produced no usable output at all.
-    assert _classify_host_health_compat(None, aid) == {"reachable": False, "host_offline": False}
-    assert _classify_host_health_compat("not json", aid) == {"reachable": False, "host_offline": False}
+    resolver = MngrCliBackendResolver()
+    tracker = SystemInterfaceHealthTracker()
+    agent_id = AgentId.generate()
+    tracker.mark_stuck(agent_id)
+    assert tracker.get_failure_run_started_wall_at(agent_id) is None
+
+    # Cold start, no snapshot yet: suppressed.
+    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.STUCK) is False
+    # A recent snapshot promotes via the age fallback.
+    resolver.update_providers(
+        providers=(), error_by_provider_name={}, last_full_snapshot_at=datetime.now(timezone.utc)
+    )
+    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.STUCK) is True
+    # A stale snapshot (a stalled pipeline) suppresses it again.
+    resolver.update_providers(
+        providers=(),
+        error_by_provider_name={},
+        last_full_snapshot_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+    )
+    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.STUCK) is False
+    # No tracker at all behaves identically to a missing onset.
+    assert _should_emit_system_interface_status(resolver, None, agent_id, AgentHealth.STUCK) is False
 
 
 def test_recovery_page_requires_authentication(tmp_path: Path) -> None:
@@ -2222,7 +2337,7 @@ def test_recovery_page_renders_copy_ssh_button_from_resolver(tmp_path: Path) -> 
         http_client=None,
         system_interface_health_tracker=tracker,
     )
-    client = TestClient(app, base_url="http://localhost")
+    client = app.test_client()
     _authenticate_client(client=client, auth_store=auth_store)
     tracker.mark_stuck(agent_id)
 
@@ -2239,7 +2354,7 @@ def test_restart_api_requires_authentication(tmp_path: Path) -> None:
 
 
 def test_create_desktop_client_stashes_system_interface_health_tracker(tmp_path: Path) -> None:
-    """create_desktop_client should expose the tracker on app.state for handlers."""
+    """create_desktop_client should expose the tracker on the app state for handlers."""
     auth_dir = tmp_path / "auth"
     auth_store = FileAuthStore(data_directory=auth_dir)
     tracker = SystemInterfaceHealthTracker()
@@ -2252,13 +2367,13 @@ def test_create_desktop_client_stashes_system_interface_health_tracker(tmp_path:
         system_interface_health_tracker=tracker,
     )
 
-    assert app.state.system_interface_health_tracker is tracker
+    assert get_state(app).system_interface_health_tracker is tracker
 
 
 def _setup_test_server_with_tracker(
     tmp_path: Path,
     tracker: SystemInterfaceHealthTracker,
-) -> tuple[TestClient, FileAuthStore, AgentId]:
+) -> tuple[FlaskClient, FileAuthStore, AgentId]:
     """Build a test client wired to a real SystemInterfaceHealthTracker.
 
     The default ``_setup_test_server`` helper doesn't accept a tracker, and
@@ -2276,7 +2391,7 @@ def _setup_test_server_with_tracker(
         http_client=None,
         system_interface_health_tracker=tracker,
     )
-    client = TestClient(app, base_url="http://localhost")
+    client = app.test_client()
     _authenticate_client(client=client, auth_store=auth_store)
     return client, auth_store, agent_id
 
@@ -2400,18 +2515,18 @@ def test_recovery_page_does_not_redirect_when_stuck_even_with_return_to(tmp_path
 def _create_readiness_test_client(
     tmp_path: Path,
     edge_response: httpx.Response,
-) -> tuple[TestClient, FileAuthStore, list[httpx.Request]]:
+) -> tuple[FlaskClient, FileAuthStore, list[httpx.Request]]:
     """Build a desktop client whose http_client returns ``edge_response`` for any probe.
 
     Captures every probe request so tests can assert which URL was fetched.
     """
     probed: list[httpx.Request] = []
 
-    async def _handle(request: httpx.Request) -> httpx.Response:
+    def _handle(request: httpx.Request) -> httpx.Response:
         probed.append(request)
         return edge_response
 
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(_handle), follow_redirects=False)
+    http_client = httpx.Client(transport=httpx.MockTransport(_handle), follow_redirects=False)
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
         backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
@@ -2432,11 +2547,11 @@ def test_sharing_readiness_returns_ready_when_edge_returns_access_redirect(tmp_p
     share_url = "https://web-abc123.tunnels.example.com"
     response = client.get(
         f"/api/sharing-readiness/{agent_id}/web",
-        params={"url": share_url},
+        query_string={"url": share_url},
     )
 
     assert response.status_code == 200
-    assert response.json() == {"ready": True}
+    assert response.get_json() == {"ready": True}
     assert len(probed) == 1
     assert str(probed[0].url) == share_url
 
@@ -2450,11 +2565,11 @@ def test_sharing_readiness_returns_not_ready_when_edge_not_live(tmp_path: Path) 
 
     response = client.get(
         f"/api/sharing-readiness/{agent_id}/web",
-        params={"url": "https://web-abc123.tunnels.example.com"},
+        query_string={"url": "https://web-abc123.tunnels.example.com"},
     )
 
     assert response.status_code == 200
-    assert response.json() == {"ready": False}
+    assert response.get_json() == {"ready": False}
     assert len(probed) == 1
 
 
@@ -2467,11 +2582,11 @@ def test_sharing_readiness_does_not_probe_non_https_url(tmp_path: Path) -> None:
 
     response = client.get(
         f"/api/sharing-readiness/{agent_id}/web",
-        params={"url": "http://web-abc123.tunnels.example.com"},
+        query_string={"url": "http://web-abc123.tunnels.example.com"},
     )
 
     assert response.status_code == 200
-    assert response.json() == {"ready": False}
+    assert response.get_json() == {"ready": False}
     assert len(probed) == 0
 
 
@@ -2483,7 +2598,7 @@ def test_sharing_readiness_requires_authentication(tmp_path: Path) -> None:
 
     response = client.get(
         f"/api/sharing-readiness/{agent_id}/web",
-        params={"url": "https://web-abc123.tunnels.example.com"},
+        query_string={"url": "https://web-abc123.tunnels.example.com"},
     )
 
     assert response.status_code == 403
@@ -2762,7 +2877,7 @@ def _create_test_desktop_client_with_color_runtime(
     backend_resolver: BackendResolverInterface,
     mngr_binary: str,
     concurrency_group: ConcurrencyGroup | None,
-) -> tuple[TestClient, FileAuthStore]:
+) -> tuple[FlaskClient, FileAuthStore]:
     """Like ``_create_test_desktop_client`` but wires mngr_binary + concurrency
     group so the workspace-color route can shell out to a fake ``mngr label``."""
     auth_store = FileAuthStore(data_directory=tmp_path / "auth")
@@ -2774,7 +2889,7 @@ def _create_test_desktop_client_with_color_runtime(
         root_concurrency_group=concurrency_group,
         mngr_host_dir=tmp_path / "mngr",
     )
-    return TestClient(app, base_url="http://localhost"), auth_store
+    return app.test_client(), auth_store
 
 
 def test_set_workspace_color_requires_authentication(tmp_path: Path) -> None:
@@ -2797,7 +2912,7 @@ def test_set_workspace_color_rejects_invalid_hex(tmp_path: Path) -> None:
 
     response = client.post(f"/api/workspaces/{agent_id}/color", json={"hex": "not-a-hex"})
     assert response.status_code == 400
-    assert response.json()["error"] == "invalid_hex"
+    assert response.get_json()["error"] == "invalid_hex"
 
 
 def test_set_workspace_color_rejects_non_primary_agent(tmp_path: Path) -> None:
@@ -2836,7 +2951,7 @@ def test_set_workspace_color_rejects_non_primary_agent(tmp_path: Path) -> None:
 
     response = client.post(f"/api/workspaces/{services_id}/color", json={"hex": "#0b292b"})
     assert response.status_code == 404
-    assert response.json()["error"] == "not_primary"
+    assert response.get_json()["error"] == "not_primary"
 
 
 def test_set_workspace_color_rejects_stale_provider(tmp_path: Path) -> None:
@@ -2861,7 +2976,7 @@ def test_set_workspace_color_rejects_stale_provider(tmp_path: Path) -> None:
 
     response = client.post(f"/api/workspaces/{agent_id}/color", json={"hex": "#0b292b"})
     assert response.status_code == 409
-    assert response.json()["error"] == "stale_provider"
+    assert response.get_json()["error"] == "stale_provider"
 
 
 def test_set_workspace_color_returns_502_when_mngr_label_fails(tmp_path: Path) -> None:
@@ -2886,7 +3001,7 @@ def test_set_workspace_color_returns_502_when_mngr_label_fails(tmp_path: Path) -
         response = client.post(f"/api/workspaces/{agent_id}/color", json={"hex": "#0b292b"})
 
     assert response.status_code == 502
-    assert response.json()["error"] == "host_unreachable"
+    assert response.get_json()["error"] == "host_unreachable"
 
 
 def test_set_workspace_color_writes_label_and_updates_resolver(tmp_path: Path) -> None:
@@ -2911,7 +3026,7 @@ def test_set_workspace_color_writes_label_and_updates_resolver(tmp_path: Path) -
         response = client.post(f"/api/workspaces/{agent_id}/color", json={"hex": "FFF"})
 
     assert response.status_code == 200
-    body = response.json()
+    body = response.get_json()
     assert body["agent_id"] == str(agent_id)
     assert body["color"] == "#ffffff"
 
@@ -2939,4 +3054,4 @@ def test_set_workspace_color_returns_502_when_concurrency_group_missing(tmp_path
 
     response = client.post(f"/api/workspaces/{agent_id}/color", json={"hex": "#0b292b"})
     assert response.status_code == 502
-    assert response.json()["error"] == "host_unreachable"
+    assert response.get_json()["error"] == "host_unreachable"

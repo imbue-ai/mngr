@@ -11,10 +11,9 @@ opaque permissions handles, the gateway record, etc.) lives below
 The CLI reads these values through :func:`resolve_latchkey_settings`,
 which applies the documented precedence chain (CLI flag > env var >
 settings.toml > built-in default). Both fields are modelled as
-``... | None`` because, on the override side of ``merge_with``, a
-``None`` value means "user did not set this field in their TOML", not
-"clear it" -- preserving the standard ``mngr`` merge semantics where
-later configs only override fields that were explicitly set.
+``... | None`` because a ``None`` value means "user did not set this
+field in their TOML", not "clear it" -- when an override config is
+assigned over a base, only fields that were explicitly set take effect.
 """
 
 from pathlib import Path
@@ -42,19 +41,3 @@ class LatchkeyPluginConfig(PluginConfig):
             "Path to the upstream ``latchkey`` CLI. When unset, the CLI falls back to ``latchkey`` on ``PATH``."
         ),
     )
-
-    def merge_with(self, override: "PluginConfig") -> "LatchkeyPluginConfig":
-        merged_enabled = override.enabled if override.enabled is not None else self.enabled
-        if not isinstance(override, LatchkeyPluginConfig):
-            return self.__class__(
-                enabled=merged_enabled,
-                directory=self.directory,
-                latchkey_binary=self.latchkey_binary,
-            )
-        return self.__class__(
-            enabled=merged_enabled,
-            directory=override.directory if override.directory is not None else self.directory,
-            latchkey_binary=(
-                override.latchkey_binary if override.latchkey_binary is not None else self.latchkey_binary
-            ),
-        )

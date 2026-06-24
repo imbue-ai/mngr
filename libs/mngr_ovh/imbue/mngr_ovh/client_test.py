@@ -13,10 +13,10 @@ from ovh.exceptions import ResourceNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr_ovh.client import OvhVpsClient
 from imbue.mngr_ovh.client import RecycleHandle
-from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.errors import VpsProvisioningError
-from imbue.mngr_vps_docker.primitives import VpsInstanceId
-from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
+from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.errors import VpsProvisioningError
+from imbue.mngr_vps.primitives import VpsInstanceId
+from imbue.mngr_vps.primitives import VpsInstanceStatus
 
 
 def _client_with_call(call_side_effect: Any) -> OvhVpsClient:
@@ -100,7 +100,7 @@ class TestOvhVpsClientLifecycle:
     def test_destroy_instance_short_circuits_when_mid_recycle(self) -> None:
         """A pending recycle handle skips cancellation and releases the IAM lock instead.
 
-        The base ``VpsDockerProvider.create_host`` cleanup path calls
+        The base ``VpsProvider.create_host`` cleanup path calls
         ``vps_client.destroy_instance`` on failure. For a mid-recycle VPS
         (un-cancel not yet applied because we defer it to finalize), the
         VPS is already cancelled, so re-cancelling would be wasted work.
