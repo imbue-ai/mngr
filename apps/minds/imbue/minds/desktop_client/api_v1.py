@@ -421,11 +421,14 @@ def _handle_operation_status(operation_id: str) -> Response:
         return _json_error(f"Unknown operation {operation_id}", 404)
     parsed_id = AgentId(operation_id)
     backend_resolver = get_state().backend_resolver
-    # The destroy is "still active" while the workspace remains in the active
-    # set (its host is not yet DESTROYED); that gates how the record's terminal
-    # status is derived (a still-present host means the destroy hasn't finished).
-    is_host_still_active = parsed_id in backend_resolver.list_active_workspace_ids()
-    record = destroying.read_destroying(parsed_id, paths, is_host_still_active)
+    # A destroy is only DONE once the workspace's *host* is gone (not merely the
+    # workspace agent): a destroy that tore down only the agent while the host's
+    # ``system-services`` kept it alive must read as FAILED, not a false DONE.
+    # ``destroying.is_host_still_active`` answers that (active-set membership OR a
+    # host not yet in ``DESTROYED``); see :func:`destroying.read_destroying`.
+    record = destroying.read_destroying(
+        parsed_id, paths, destroying.is_host_still_active(backend_resolver, paths, parsed_id)
+    )
     if record is None:
         return _json_error(f"Unknown operation {operation_id}", 404)
     return _json_response(
