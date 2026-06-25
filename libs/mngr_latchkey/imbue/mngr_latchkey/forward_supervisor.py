@@ -52,35 +52,38 @@ MNGR_BINARY: Final[str] = "mngr"
 _TERMINATE_GRACE_SECONDS: Final[float] = 10.0
 
 
+def _mngr_argv_remainder(cmdline: list[str]) -> list[str] | None:
+    """Return the literal tokens that follow the ``mngr`` argv, or ``None``.
+
+    ``" ".join(cmdline).split()`` normalises both the one-clean-token-per-arg
+    shape and the ``setproctitle``-style argv[0] overwrite that ``uv tool``'s
+    entry-point wrappers do (which puts the entire joined cmdline in argv[0] and
+    zeros out argv[1:], surfacing as ``["mngr latchkey forward ...", "", "", ...]``
+    via :meth:`psutil.Process.cmdline`) to the same list of literal tokens. This
+    also tolerates shebang rewrites (``/usr/bin/env python mngr``) and
+    absolute-path invocations (``/usr/local/bin/mngr``).
+
+    ``mngr`` is a short token, so it is matched as a whole path component
+    (``mngr`` or ``*/mngr``) -- never as a substring like ``manager`` or
+    ``mngr-foo``. Returns ``None`` when no ``mngr``-like token is present.
+    """
+    tokens = " ".join(cmdline).split()
+    for idx, arg in enumerate(tokens):
+        if arg == "mngr" or arg.endswith("/mngr"):
+            return tokens[idx + 1 :]
+    return None
+
+
 def _cmdline_looks_like_mngr_latchkey_forward(cmdline: list[str]) -> bool:
     """Check whether a process's ``cmdline`` looks like our ``mngr latchkey forward``.
 
     Guards against PID reuse: requires the literal tokens ``latchkey`` and
-    ``forward`` to appear after a ``mngr``-like argument anywhere in the
-    argv. This tolerates shebang rewrites (``/usr/bin/env python mngr``),
-    absolute-path invocations (``/usr/local/bin/mngr``), and the
-    ``setproctitle``-style argv[0] overwrite that ``uv tool``'s entry-point
-    wrappers do (which puts the entire joined cmdline in argv[0] and zeros
-    out argv[1:], surfacing as ``["mngr latchkey forward ...", "", "",
-    ...]`` via :meth:`psutil.Process.cmdline`).
+    ``forward`` to appear after a ``mngr``-like argument anywhere in the argv.
+    See :func:`_mngr_argv_remainder` for the cmdline-shape normalization.
     """
-    # ``" ".join(cmdline).split()`` normalises both the
-    # one-clean-token-per-arg shape and the proctitle-overwrite shape
-    # (where everything lives in argv[0] separated by spaces) to the
-    # same list of literal tokens.
-    tokens = " ".join(cmdline).split()
-    if not tokens:
+    remainder = _mngr_argv_remainder(cmdline)
+    if remainder is None:
         return False
-    mngr_idx: int | None = None
-    for idx, arg in enumerate(tokens):
-        # ``mngr`` is a short token; match it as a path component so we
-        # don't fire on substrings like ``manager`` or ``mngr-foo``.
-        if arg == "mngr" or arg.endswith("/mngr"):
-            mngr_idx = idx
-            break
-    if mngr_idx is None:
-        return False
-    remainder = tokens[mngr_idx + 1 :]
     return "latchkey" in remainder and "forward" in remainder
 
 
@@ -89,22 +92,13 @@ def _cmdline_looks_like_mngr_observe(cmdline: list[str]) -> bool:
 
     ``mngr latchkey forward`` spawns its discovery producer as
     ``mngr observe --discovery-only --quiet`` (see
-    :class:`DiscoveryStreamConsumer`). Token normalization mirrors
-    :func:`_cmdline_looks_like_mngr_latchkey_forward` so the proctitle-overwrite
-    shape is recognized too. ``--discovery-only`` is required so we never match
-    an unrelated ``mngr observe`` a user runs by hand.
+    :class:`DiscoveryStreamConsumer`). ``--discovery-only`` is required so we
+    never match an unrelated ``mngr observe`` a user runs by hand. See
+    :func:`_mngr_argv_remainder` for the cmdline-shape normalization.
     """
-    tokens = " ".join(cmdline).split()
-    if not tokens:
+    remainder = _mngr_argv_remainder(cmdline)
+    if remainder is None:
         return False
-    mngr_idx: int | None = None
-    for idx, arg in enumerate(tokens):
-        if arg == "mngr" or arg.endswith("/mngr"):
-            mngr_idx = idx
-            break
-    if mngr_idx is None:
-        return False
-    remainder = tokens[mngr_idx + 1 :]
     return "observe" in remainder and "--discovery-only" in remainder
 
 
