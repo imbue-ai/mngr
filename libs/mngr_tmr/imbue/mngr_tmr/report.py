@@ -117,6 +117,19 @@ class TestResult(FrozenModel):
     test_runs: tuple[TestRunInfo, ...] = Field(default=(), description="List of test runs performed, in order")
 
 
+class Normalization(FrozenModel):
+    """A suite-wide cleanup the integrator applied during the normalize stage."""
+
+    summary_markdown: str = Field(description="Markdown description of the cleanup that was applied and verified")
+
+
+class Escalation(FrozenModel):
+    """A cross-cutting blocker the integrator could not resolve, surfaced to the user."""
+
+    title: str = Field(description="Short title of the blocker")
+    detail_markdown: str = Field(description="Markdown detail of what is needed to resolve it")
+
+
 class IntegratorResult(FrozenModel):
     """Result from the integrator agent that cherry-picks fix branches."""
 
@@ -129,6 +142,12 @@ class IntegratorResult(FrozenModel):
     )
     failed: tuple[str, ...] = Field(default=(), description="Branch names that could not be integrated")
     branch_name: str | None = Field(default=None, description="Integrated branch name, if any merges succeeded")
+    normalizations: tuple[Normalization, ...] = Field(
+        default=(), description="Suite-wide cleanups applied and verified during the normalize stage"
+    )
+    escalations: tuple[Escalation, ...] = Field(
+        default=(), description="Cross-cutting blockers the integrator could not resolve, surfaced to the user"
+    )
 
 
 class TestMapReduceResult(FrozenModel):
@@ -294,6 +313,14 @@ def _load_integrator_outcome(meta: AgentMetadata, output_dir: Path) -> Integrato
         impl_commit_hashes=data.get("impl_commit_hashes", {}),
         failed=tuple(data.get("failed", ())),
         branch_name=meta.branch_name,
+        normalizations=tuple(
+            Normalization(summary_markdown=entry.get("summary_markdown", ""))
+            for entry in data.get("normalizations", ())
+        ),
+        escalations=tuple(
+            Escalation(title=entry.get("title", ""), detail_markdown=entry.get("detail_markdown", ""))
+            for entry in data.get("escalations", ())
+        ),
     )
     _INTEGRATOR_OUTCOME_CACHE[meta.agent_name] = result
     return result
@@ -569,6 +596,19 @@ def generate_html_report(
     toc_links = _build_toc_links(sections)
     artifact_panels = _build_artifact_panels(agent_artifact_runs)
 
+    # Title is autoescaped by the template; detail/summary are markdown rendered
+    # to HTML here and passed through with |safe, like the per-row summary cells.
+    escalation_views = (
+        [{"title": e.title, "detail_html": _render_markdown(e.detail_markdown)} for e in integrator.escalations]
+        if integrator is not None
+        else []
+    )
+    normalization_views = (
+        [{"summary_html": _render_markdown(n.summary_markdown)} for n in integrator.normalizations]
+        if integrator is not None
+        else []
+    )
+
     reintegrate_cmd = ""
     if run_commands:
         for cmd_label, cmd_text in run_commands:
@@ -584,6 +624,8 @@ def generate_html_report(
         has_artifacts=has_artifacts,
         artifact_panels=artifact_panels,
         integrator=integrator,
+        escalation_views=escalation_views,
+        normalization_views=normalization_views,
         run_commands=run_commands or [],
         reintegrate_cmd=reintegrate_cmd,
         asciinema_css_url=ASCIINEMA_PLAYER_CSS,

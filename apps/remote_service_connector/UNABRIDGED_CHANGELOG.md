@@ -4,6 +4,22 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-24
+
+Updated the `cleanup_released_hosts.py` operator docstring for the new "split" Vault secret layout: OVH credentials are now sourced per key from `secrets/minds/<tier>/ovh/<KEY>` (value at `.data.data.value`) and the host-pool DSN from `secrets/minds/<tier>/neon/DATABASE_URL`, instead of the old flat single-entry layout.
+
+## 2026-06-23
+
+The host-lease and slice-teardown paths now pin SSH host keys instead of trust-on-first-use.
+
+Added nullable `outer_host_public_key` / `container_host_public_key` columns to `pool_hosts` and `box_host_public_key` to `bare_metal_servers` (migration 011). `POST /hosts/lease` returns both pool-host keys and injects the user's key over SSH while strictly verifying each sshd against its recorded host key; a row missing its keys is not leasable (503, pointing at the one-time backfill). `GET /hosts` also returns the keys. Slice teardown and the reconcile sweep verify the bare-metal box against its recorded host key. The management SSH client no longer uses `AutoAddPolicy`.
+
+## 2026-06-21
+
+The hourly pool-host cleanup cron now also audits each bare-metal box's lima slices against the pool database, scoped to this deployment's own environment (via `MINDS_ENV_NAME`).
+
+It logs two kinds of divergence: a slice stamped for this env that is present on a box but has no database row, and a database row whose VM has vanished from its box. The audit is alert-only -- it never auto-deletes (a row-less stamped slice is usually a bake mid-flight, and this cron runs independently of bakes, so deleting here could race a live bake). Actual orphan reaping stays with the bake-time reaper. Other environments' slices and legacy un-stamped slices are never inspected, so the audit is safe on a box shared by multiple dev environments.
+
 ## 2026-06-15
 
 OVH bare-metal slices support:

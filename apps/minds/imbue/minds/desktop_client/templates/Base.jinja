@@ -35,6 +35,17 @@
     // formal light/dark UX lands in a later stage. Absent flag => light.
     try { if (localStorage.getItem('minds-theme') === 'dark') document.documentElement.classList.add('dark'); } catch (e) {}
   </script>
+  {# Frontend (browser) Sentry error reporting. Emitted only when reporting is
+     enabled and a real DSN is configured for the environment; the payload is
+     resolved by the backend (imbue/minds/utils/sentry/frontend.py). Loaded
+     synchronously here in <head>, before page scripts, so early errors are
+     captured. The config is passed as a JSON blob (not inline JS). #}
+  {% set sentry_config = frontend_sentry_browser_payload() %}
+  {% if sentry_config %}
+  <script type="application/json" id="minds-sentry-config">{{ sentry_config | tojson }}</script>
+  <script src="/_static/sentry.browser.min.js"></script>
+  <script src="/_static/sentry_init.js"></script>
+  {% endif %}
   <link rel="stylesheet" href="/_static/app.min.css">
   {{ head }}
 </head>

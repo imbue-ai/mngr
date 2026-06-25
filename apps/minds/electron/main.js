@@ -3,9 +3,16 @@ const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
 const paths = require('./paths');
+const { initSentry } = require('./sentry');
 const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 const { decideStartupRoute } = require('./startup-routing');
+
+// Initialize Sentry as early as possible so errors thrown during main-process
+// startup (window creation, env setup, backend spawn) are captured. No-op
+// unless MINDS_SENTRY_ENABLED is set and a real DSN is configured -- see
+// electron/sentry.js.
+initSentry();
 
 // Only init the auto-updater in packaged builds: in dev, electron.autoUpdater
 // is undefined on macOS, so todesktop's constructor throws.
