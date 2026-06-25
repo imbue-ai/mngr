@@ -404,7 +404,7 @@ class LatchkeyGatewayClient(MutableModel):
                             continue
                         try:
                             yield StreamedPermissionRequest.model_validate(data)
-                        except ValueError as e:
+                        except ValidationError as e:
                             logger.warning(
                                 "permission-requests JSONL line had unexpected shape {!r}: {}",
                                 line,
@@ -510,6 +510,14 @@ class LatchkeyGatewayClient(MutableModel):
             raise LatchkeyGatewayClientError(f"GET {url} returned non-JSON body: {e}") from e
         if not isinstance(payload, dict):
             raise LatchkeyGatewayClientError(f"GET {url} returned non-object JSON: {payload!r}")
+        # The gateway extension owns every write to this file, so a 2xx body
+        # whose ``rules`` is absent or not a list (or whose entries are
+        # malformed) indicates gateway-side corruption that should not occur.
+        # We deliberately fail closed -- treat it as "no grants" so the dialog's
+        # pre-check is simply empty -- rather than crash the dialog render; a
+        # missing pre-check is recoverable (the user can still tick boxes),
+        # whereas a crash would block the grant entirely. The same fail-closed
+        # rationale covers the non-dict / non-list skips in the loop below.
         rules = payload.get("rules")
         if not isinstance(rules, list):
             return frozenset()

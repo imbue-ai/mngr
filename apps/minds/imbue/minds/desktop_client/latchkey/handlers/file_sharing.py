@@ -33,6 +33,7 @@ import json
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
+from typing import assert_never
 
 from flask import Request
 from flask import Response
@@ -141,15 +142,24 @@ def _normalize_share_path(raw_path: str, allowed_roots: Sequence[Path], home_dir
 
 
 def _access_human_label(access: str) -> str:
-    """Lower-case human phrase for the access mode ("read-only" / "read & write")."""
-    if access == str(FileSharingAccess.READ):
-        return "read-only"
-    if access == str(FileSharingAccess.WRITE):
-        return "read & write"
-    # Unknown access values are unexpected but possible if the gateway
-    # ever grows a new mode -- surface the raw value rather than
-    # crashing so the dialog still renders.
-    return access
+    """Lower-case human phrase for the access mode ("read-only" / "read & write").
+
+    ``access`` is carried verbatim from a ``FileSharingAccess`` enum on the
+    request payload (it originates as ``str(payload.access)`` in
+    ``streamed_request_to_event``, and ``FileSharingRequestPayload.access`` is a
+    ``FileSharingAccess`` field), so it is always a valid member here -- a
+    gateway that emitted a new mode would fail ``StreamedPermissionRequest``
+    validation and be dropped upstream. We parse + ``match`` so the type checker
+    proves both modes are handled and any unexpected value crashes loudly rather
+    than silently splicing a raw token into the agent-facing grant/deny message.
+    """
+    match FileSharingAccess(access):
+        case FileSharingAccess.READ:
+            return "read-only"
+        case FileSharingAccess.WRITE:
+            return "read & write"
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _format_granted_message(file_path: str, access: str) -> str:
@@ -231,6 +241,13 @@ class FileSharingGrantHandler(RequestEventHandler):
         return _KIND_LABEL
 
     def display_name_for_event(self, req_event: RequestEvent) -> str:
+        # The route layer guarantees ``req_event.request_type`` matches
+        # ``handles_request_type()`` before dispatching here (see
+        # ``RequestEventHandler``), and the request_type<->class mapping is fixed
+        # in ``streamed_request_to_event``, so this branch is unreachable. The
+        # isinstance check exists only to narrow the type for ``.path``; the
+        # empty-string fallback mirrors the no-handler card in ``app.py`` rather
+        # than crashing the whole requests panel for a state that cannot occur.
         if not isinstance(req_event, LatchkeyFileSharingPermissionRequestEvent):
             return ""
         return req_event.path
