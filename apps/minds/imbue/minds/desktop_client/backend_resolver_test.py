@@ -659,6 +659,68 @@ def test_last_good_topology_falls_back_when_discovery_loses_the_host(tmp_path: P
     assert resolver.get_system_services_agent_id(workspace_agent) == services_agent
 
 
+def _primary_system_services_agent(host_id: HostId, agent_id: AgentId) -> DiscoveredAgent:
+    """A minds primary workspace agent: the system-services agent, which carries the workspace labels.
+
+    In minds the user-facing workspace agent IS the host's system-services
+    agent -- it has both the ``workspace`` + ``is_primary`` labels (the live
+    filter) and the constant system-services name (the last-good filter).
+    """
+    return DiscoveredAgent(
+        host_id=host_id,
+        agent_id=agent_id,
+        agent_name=AgentName("system-services"),
+        provider_name=ProviderInstanceName("docker"),
+        certified_data={"labels": {"workspace": "true", "is_primary": "true"}},
+    )
+
+
+def test_list_restorable_workspace_ids_keeps_workspace_after_discovery_loss(tmp_path: Path) -> None:
+    """A workspace absent from the live snapshot is still restorable via the last-good topology.
+
+    The cold-start race: a slow provider hasn't re-listed the workspace yet, so
+    the live list is empty -- but the restore view must still recognize it so its
+    window is not dropped.
+    """
+    topology_path = tmp_path / "last_good_agent_topology.json"
+    host = HostId.generate()
+    agent = AgentId.generate()
+    resolver = MngrCliBackendResolver(last_good_agents_path=topology_path)
+    resolver.update_agents(
+        ParsedAgentsResult(agent_ids=(agent,), discovered_agents=(_primary_system_services_agent(host, agent),))
+    )
+    assert resolver.list_active_workspace_ids() == (agent,)
+    assert resolver.list_restorable_workspace_ids() == (agent,)
+
+    # Discovery loses the host (empty snapshot); live drops it, last-good keeps it.
+    resolver.update_agents(ParsedAgentsResult())
+    assert resolver.list_active_workspace_ids() == ()
+    assert resolver.list_restorable_workspace_ids() == (agent,)
+
+
+def test_list_restorable_workspace_ids_unions_live_and_last_good(tmp_path: Path) -> None:
+    """The restorable set is the union of last-good and a freshly-discovered (not-yet-remembered) workspace."""
+    topology_path = tmp_path / "last_good_agent_topology.json"
+    remembered_host, remembered_agent = HostId.generate(), AgentId.generate()
+    fresh_host, fresh_agent = HostId.generate(), AgentId.generate()
+    resolver = MngrCliBackendResolver(last_good_agents_path=topology_path)
+    # A complete enumeration of the remembered workspace lands in last-good.
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(remembered_agent,),
+            discovered_agents=(_primary_system_services_agent(remembered_host, remembered_agent),),
+        )
+    )
+    # A later snapshot lists only a different, fresh workspace (remembered one absent live).
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(fresh_agent,),
+            discovered_agents=(_primary_system_services_agent(fresh_host, fresh_agent),),
+        )
+    )
+    assert set(resolver.list_restorable_workspace_ids()) == {remembered_agent, fresh_agent}
+
+
 def test_last_good_topology_preserves_other_host_on_partial_discovery_loss() -> None:
     """A snapshot missing one host must not erase that host's remembered pairing.
 

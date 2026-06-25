@@ -2192,6 +2192,7 @@ function fetchInitialChromeState(timeoutMs = 25000) {
           workspaces: latestWorkspaces.workspaces,
           hasAccounts: latestWorkspaces.hasAccounts,
           discoveryComplete: false,
+          restorableWorkspaceIds: latestWorkspaces.restorableWorkspaceIds,
         });
       } else {
         finish(null);
@@ -2231,7 +2232,14 @@ function fetchInitialChromeState(timeoutMs = 25000) {
               // Remember the latest snapshot for the timeout fallback, but only
               // resolve once discovery reports a completed full sweep -- the first
               // (cold-start) snapshot is typically empty/partial.
-              latestWorkspaces = { workspaces: parsed.workspaces, hasAccounts: !!parsed.has_accounts };
+              const restorableWorkspaceIds = Array.isArray(parsed.restorable_workspace_ids)
+                ? parsed.restorable_workspace_ids.map(String)
+                : [];
+              latestWorkspaces = {
+                workspaces: parsed.workspaces,
+                hasAccounts: !!parsed.has_accounts,
+                restorableWorkspaceIds,
+              };
               if (parsed.discovery_complete === true) {
                 clearTimeout(timer);
                 finish({
@@ -2239,6 +2247,7 @@ function fetchInitialChromeState(timeoutMs = 25000) {
                   workspaces: parsed.workspaces,
                   hasAccounts: !!parsed.has_accounts,
                   discoveryComplete: true,
+                  restorableWorkspaceIds,
                 });
                 return;
               }
@@ -2635,14 +2644,17 @@ async function startBackendWithRetry() {
         }));
       }
 
-      // Only filter restored windows against the workspace list when that list is
-      // trustworthy (discovery completed). Passing ``null`` when it isn't makes
-      // ``filterRestorableUrls`` keep every saved window -- absence from an
-      // incomplete snapshot is not evidence a workspace was destroyed (the live
-      // discovery flow navigates genuinely-destroyed workspaces away later, gated
-      // on positive destroy evidence).
+      // Only filter restored windows once discovery has completed (else ``null``
+      // keeps every saved window). The filter set is the backend's *restorable*
+      // workspace ids -- live workspaces UNION the persisted last-good topology --
+      // not just the live list. The last-good entries keep a window whose
+      // workspace exists but a slow provider hasn't re-listed yet this session
+      // (e.g. local docker lagging the cloud provider on cold start). Absence from
+      // an incomplete live snapshot is not evidence a workspace was destroyed; the
+      // live discovery flow navigates genuinely-destroyed workspaces away later.
+      const restorableWorkspaceIds = (authenticated && chromeState.restorableWorkspaceIds) || [];
       const knownAgentIdsSet = (authenticated && discoveryComplete)
-        ? new Set(workspaceList.map((w) => w.id))
+        ? new Set(restorableWorkspaceIds.map(String))
         : null;
       const restorable = authenticated
         ? filterRestorableUrls(savedState.windows, knownAgentIdsSet)
@@ -2665,6 +2677,7 @@ async function startBackendWithRetry() {
           workspaceCount: workspaceList.length,
         }));
         console.log('[restore-debug] workspaceIds=', JSON.stringify(workspaceList.map((w) => w.id)));
+        console.log('[restore-debug] restorableWorkspaceIds=', JSON.stringify(restorableWorkspaceIds));
         console.log('[restore-debug] savedWindowUrls=', JSON.stringify(savedUrls));
         console.log('[restore-debug] knownAgentIdsSet=',
           knownAgentIdsSet === null ? 'null (no filtering)' : JSON.stringify([...knownAgentIdsSet]));

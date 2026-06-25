@@ -2211,6 +2211,11 @@ def _handle_chrome_events() -> Response:
             # state). The shell holds its loading screen -- and gates dead-workspace
             # filtering on window restore -- until it sees this true.
             last_discovery_complete = _is_discovery_complete(backend_resolver)
+            # The agent ids the shell may restore windows to: live workspaces plus
+            # any from the persisted last-good topology not yet re-discovered this
+            # session. Lets restore decline to drop a window whose workspace is
+            # merely absent from a slow/partial cold-start snapshot.
+            last_restorable_ids = [str(aid) for aid in backend_resolver.list_restorable_workspace_ids()]
             yield "data: {}\n\n".format(
                 json.dumps(
                     {
@@ -2219,6 +2224,7 @@ def _handle_chrome_events() -> Response:
                         "destroying_agent_ids": last_destroying_ids,
                         "has_accounts": has_accounts,
                         "discovery_complete": last_discovery_complete,
+                        "restorable_workspace_ids": last_restorable_ids,
                     }
                 )
             )
@@ -2398,6 +2404,9 @@ def _handle_chrome_events() -> Response:
                                 "destroying_agent_ids": current_destroying_ids,
                                 "has_accounts": has_accounts,
                                 "discovery_complete": current_discovery_complete,
+                                "restorable_workspace_ids": [
+                                    str(aid) for aid in backend_resolver.list_restorable_workspace_ids()
+                                ],
                             }
                         )
                     )
