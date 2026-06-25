@@ -89,6 +89,21 @@ def test_orchestrator_agent_has_telegram_returns_true_when_credentials_exist(tmp
     assert orchestrator.agent_has_telegram(agent_id)
 
 
+def test_orchestrator_agent_has_telegram_returns_false_when_credentials_file_corrupt(tmp_path: Path) -> None:
+    # A present-but-corrupt bot-credentials file must not be reported as set up:
+    # agent_has_telegram branches on a successful load, not mere file existence,
+    # so a file that fails to parse is treated as not-yet-configured.
+    paths = WorkspacePaths(data_dir=tmp_path)
+    orchestrator = TelegramSetupOrchestrator(paths=paths)
+    agent_id = AgentId()
+
+    creds_path = tmp_path / "telegram" / "bots" / f"{agent_id}.json"
+    creds_path.parent.mkdir(parents=True, exist_ok=True)
+    creds_path.write_text("not valid json {{{")
+
+    assert not orchestrator.agent_has_telegram(agent_id)
+
+
 def test_orchestrator_get_setup_info_returns_none_for_unknown_agent(tmp_path: Path) -> None:
     paths = WorkspacePaths(data_dir=tmp_path)
     orchestrator = TelegramSetupOrchestrator(paths=paths)

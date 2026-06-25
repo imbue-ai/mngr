@@ -28,7 +28,6 @@ from imbue.minds.errors import TelegramCredentialError
 from imbue.minds.errors import TelegramCredentialExtractionError
 from imbue.minds.telegram.bot_creator import create_telegram_bot
 from imbue.minds.telegram.credential_extractor import extract_telegram_credentials_from_browser
-from imbue.minds.telegram.credential_store import has_agent_bot_credentials
 from imbue.minds.telegram.credential_store import load_agent_bot_credentials
 from imbue.minds.telegram.credential_store import load_telegram_user_credentials
 from imbue.minds.telegram.credential_store import save_agent_bot_credentials
@@ -119,13 +118,15 @@ class TelegramSetupOrchestrator(MutableModel):
         """
         aid = str(agent_id)
 
-        # Check if already has credentials
-        if has_agent_bot_credentials(self.paths.data_dir, agent_id):
-            existing = load_agent_bot_credentials(self.paths.data_dir, agent_id)
+        # If the agent already has loadable bot credentials, setup is already done.
+        # Branch on the loaded value rather than mere file existence: a present-but-
+        # corrupt file loads as None and must fall through to a fresh setup that
+        # rebuilds it, instead of being reported as DONE with no usable bot.
+        existing_bot_credentials = load_agent_bot_credentials(self.paths.data_dir, agent_id)
+        if existing_bot_credentials is not None:
             with self._lock:
                 self._statuses[aid] = TelegramSetupStatus.DONE
-                if existing is not None:
-                    self._bot_usernames[aid] = existing.bot_username
+                self._bot_usernames[aid] = existing_bot_credentials.bot_username
             return
 
         with self._lock:
@@ -162,8 +163,11 @@ class TelegramSetupOrchestrator(MutableModel):
             )
 
     def agent_has_telegram(self, agent_id: AgentId) -> bool:
-        """Check whether the given agent has Telegram bot credentials."""
-        return has_agent_bot_credentials(self.paths.data_dir, agent_id)
+        """Check whether the given agent has usable Telegram bot credentials."""
+        # Branch on a successful load, not mere file existence, so this matches
+        # start_setup's notion of "set up": a present-but-corrupt file is not
+        # usable and must not report the agent as having Telegram.
+        return load_agent_bot_credentials(self.paths.data_dir, agent_id) is not None
 
     def wait_for_all(self, timeout: float = 10.0) -> None:
         """Wait for all background setup threads to finish."""
@@ -240,3 +244,16 @@ class TelegramSetupOrchestrator(MutableModel):
             with self._lock:
                 self._statuses[aid] = TelegramSetupStatus.FAILED
                 self._errors[aid] = str(exc)
+        finally:
+            # Guarantee the status reaches a terminal value on every path. The
+            # flow drives telethon and Playwright, which can raise error types
+            # outside the handled set above; without this guard such an escape
+            # would kill this daemon thread with the status stuck mid-flow,
+            # leaving UI pollers waiting forever. We record FAILED here but do
+            # not swallow the exception -- it still propagates to the installed
+            # threading excepthook (which logs it through loguru at error level),
+            # so the underlying bug stays visible.
+            with self._lock:
+                if self._statuses.get(aid) not in (TelegramSetupStatus.DONE, TelegramSetupStatus.FAILED):
+                    self._statuses[aid] = TelegramSetupStatus.FAILED
+                    self._errors[aid] = "Telegram setup failed unexpectedly; see logs for details."
