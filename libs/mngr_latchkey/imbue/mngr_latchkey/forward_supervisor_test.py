@@ -21,7 +21,7 @@ import psutil
 
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 from imbue.mngr_latchkey.forward_supervisor import _cmdline_looks_like_mngr_latchkey_forward
-from imbue.mngr_latchkey.forward_supervisor import _descendant_pids
+from imbue.mngr_latchkey.forward_supervisor import _descendant_processes
 from imbue.mngr_latchkey.forward_supervisor import _forward_latchkey_directory
 from imbue.mngr_latchkey.forward_supervisor import _is_forward_pid_for_directory
 from imbue.mngr_latchkey.forward_supervisor import is_forward_info_alive
@@ -701,8 +701,8 @@ def _make_idle_binary(tmp_path: Path) -> Path:
     return script
 
 
-def test_descendant_pids_returns_all_children_not_just_observe(tmp_path: Path) -> None:
-    """``_descendant_pids`` returns every descendant, so the reaper kills the orphan's
+def test_descendant_processes_returns_all_children_not_just_observe(tmp_path: Path) -> None:
+    """``_descendant_processes`` returns every descendant, so the reaper kills the orphan's
     ``latchkey gateway`` and reverse ``ssh`` tunnels too -- not only its ``mngr observe``
     child -- when a wedged forward had to be SIGKILLed (and so never ran its teardown).
 
@@ -714,9 +714,9 @@ def test_descendant_pids_returns_all_children_not_just_observe(tmp_path: Path) -
     try:
         deadline = time.monotonic() + 5.0
         waiter = threading.Event()
-        while time.monotonic() < deadline and child.pid not in _descendant_pids(os.getpid()):
+        while time.monotonic() < deadline and child.pid not in {p.pid for p in _descendant_processes(os.getpid())}:
             waiter.wait(timeout=_POLL_INTERVAL_SECONDS)
-        assert child.pid in _descendant_pids(os.getpid())
+        assert child.pid in {p.pid for p in _descendant_processes(os.getpid())}
     finally:
         child.terminate()
         child.wait(timeout=5.0)

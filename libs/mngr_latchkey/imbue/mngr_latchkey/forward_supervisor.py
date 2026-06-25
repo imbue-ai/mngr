@@ -151,25 +151,32 @@ def _iter_matching_forward_pids(latchkey_directory: Path) -> list[int]:
     return [proc.pid for proc in psutil.process_iter() if _is_forward_pid_for_directory(proc.pid, target)]
 
 
-def _descendant_pids(forward_pid: int) -> list[int]:
-    """Return PIDs of every descendant process under ``forward_pid``.
+def _descendant_processes(forward_pid: int) -> list[psutil.Process]:
+    """Return a :class:`psutil.Process` for every descendant under ``forward_pid``.
 
     A ``mngr latchkey forward`` owns several subprocesses -- its ``mngr observe``
     discovery producer, the shared ``latchkey gateway``, and per-agent reverse
     ``ssh`` tunnels. All of them are meant to die with the forward (a healthy
-    forward tears them down in its SIGTERM handler). These PIDs are captured
+    forward tears them down in its SIGTERM handler). These handles are captured
     *before* the forward is terminated so a wedged forward that has to be
     SIGKILLed -- and therefore never runs that handler -- does not leave any of
     them orphaned (the discovery child would keep polluting the shared events
     file; the gateway would keep holding its port; tunnels would linger).
     Everything returned is a descendant of *this* forward, so reaping the whole
     set never reaches an unrelated process.
+
+    Live :class:`psutil.Process` handles are returned (not bare PIDs) so each one
+    snapshots its ``(pid, create_time)`` identity here, while the descendant is
+    still alive. :func:`_terminate_process` then signals that handle, so psutil's
+    PID-reuse guard rejects a PID that was recycled in the (up to
+    ``_TERMINATE_GRACE_SECONDS``) window between this capture and the kill -- the
+    common case, since a healthy forward tears its own descendants down first.
     """
     try:
         children = psutil.Process(forward_pid).children(recursive=True)
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
         return []
-    return [child.pid for child in children]
+    return children
 
 
 def is_forward_info_alive(info: LatchkeyForwardInfo) -> bool:
@@ -198,18 +205,17 @@ def is_forward_info_alive(info: LatchkeyForwardInfo) -> bool:
     return True
 
 
-def _terminate_pid(pid: int) -> None:
-    """SIGTERM a PID, falling back to SIGKILL after a grace period.
+def _terminate_process(process: psutil.Process) -> None:
+    """SIGTERM a :class:`psutil.Process`, falling back to SIGKILL after a grace period.
 
-    Silently tolerates already-dead / inaccessible / not-ours processes.
-    Mirrors :func:`imbue.mngr_latchkey.core._terminate_pid` -- duplicated
-    here so this module does not have to import a private helper from
-    ``core.py``.
+    Silently tolerates already-dead / inaccessible / not-ours processes. Because
+    ``process`` carries the ``(pid, create_time)`` identity captured when it was
+    constructed, psutil's PID-reuse guard raises :class:`psutil.NoSuchProcess`
+    (tolerated here) rather than signalling an unrelated process that recycled the
+    PID after construction -- so callers may safely retain a handle captured while
+    the target was alive and terminate it later.
     """
-    try:
-        process = psutil.Process(pid)
-    except psutil.NoSuchProcess:
-        return
+    pid = process.pid
     try:
         process.terminate()
         process.wait(timeout=_TERMINATE_GRACE_SECONDS)
@@ -224,6 +230,24 @@ def _terminate_pid(pid: int) -> None:
             return
     except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
         logger.debug("Could not terminate pid {}: {}", pid, e)
+
+
+def _terminate_pid(pid: int) -> None:
+    """SIGTERM a PID, falling back to SIGKILL after a grace period.
+
+    Silently tolerates already-dead / inaccessible / not-ours processes.
+    Mirrors :func:`imbue.mngr_latchkey.core._terminate_pid` -- duplicated
+    here so this module does not have to import a private helper from
+    ``core.py``. Constructs the :class:`psutil.Process` at call time, so callers
+    must only pass a PID they have just verified is still the intended process
+    (otherwise a recycled PID is signalled); to terminate a handle captured
+    earlier, use :func:`_terminate_process`.
+    """
+    try:
+        process = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return
+    _terminate_process(process)
 
 
 class LatchkeyForwardSupervisor(MutableModel):
@@ -413,15 +437,15 @@ class LatchkeyForwardSupervisor(MutableModel):
             # recycled since the scan is never terminated (mirrors stop()).
             if not _is_forward_pid_for_directory(pid, target):
                 continue
-            descendant_pids = _descendant_pids(pid)
+            descendant_processes = _descendant_processes(pid)
             logger.info(
                 "Reaping duplicate mngr latchkey forward (pid={}) bound to {}",
                 pid,
                 self.latchkey_directory,
             )
             _terminate_pid(pid)
-            for descendant_pid in descendant_pids:
-                _terminate_pid(descendant_pid)
+            for descendant_process in descendant_processes:
+                _terminate_process(descendant_process)
 
     def stop(self) -> None:
         """Terminate the supervisor and delete its record.
