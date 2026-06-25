@@ -1,12 +1,15 @@
+const fs = require('fs');
+const path = require('path');
 const Sentry = require('@sentry/electron/main');
+const { parse: parseToml } = require('smol-toml');
 const paths = require('./paths');
 const { getBuildMetadata } = require('./build-metadata');
 
 // Error reporting for the Electron MAIN process. This mirrors the Python
 // backend's Sentry setup (imbue/minds/utils/sentry/core.py) and the browser
-// web-UI reporting (imbue/minds/utils/sentry/frontend.py): same
-// MINDS_SENTRY_ENABLED opt-in, same environment selection, same release +
-// git_sha tagging.
+// web-UI reporting (imbue/minds/utils/sentry/frontend.py): gated by the same
+// per-machine `report_unexpected_errors` user setting, same environment
+// selection, same release + git_sha tagging.
 //
 // The Electron main process reports to the SAME JavaScript Sentry projects as
 // the browser web UI -- one JS project set (production / staging / dev) for all
@@ -20,17 +23,27 @@ const SENTRY_FRONTEND_DSN_PRODUCTION = 'https://70356438f3a945b8e58cb0a6f8773d0a
 const SENTRY_FRONTEND_DSN_STAGING = 'https://b8ce0a0ea4d38de2bda94e5ff6168572@o4504335315501056.ingest.us.sentry.io/4511620045144064';
 const SENTRY_FRONTEND_DSN_DEV = 'https://ddc0f18beba95166b72eacd9d4b48bf0@o4504335315501056.ingest.us.sentry.io/4511620043243520';
 
-// Mirror imbue.minds.utils.sentry.core._SENTRY_ENABLED_TRUTHY_VALUES.
-const SENTRY_ENABLED_TRUTHY_VALUES = ['1', 'true', 'yes'];
-
 /**
- * Whether error reporting is opted in via MINDS_SENTRY_ENABLED (default off).
- * Mirrors imbue.minds.utils.sentry.core.is_sentry_enabled so the Electron shell
- * and the Python backend honor the same single switch.
+ * Whether the user has enabled automatic error reporting (default off).
+ *
+ * The browser web UI and this Electron main process both report automatic
+ * errors only, so both honor the same per-machine `report_unexpected_errors`
+ * user setting that gates the Python backend's automatic sends. The setting
+ * lives in `<dataDir>/config.toml` (written by the backend's MindsConfig when
+ * the user answers the consent screen or toggles account settings); the Electron
+ * shell reads it directly so it stays in sync without any IPC. Read live on
+ * every event so toggling the setting takes effect without an app restart.
+ * Defaults to false when the file or key is absent or unreadable, so we never
+ * report without a confirmed opt-in.
  */
-function isSentryEnabled() {
-  const raw = (process.env.MINDS_SENTRY_ENABLED || '').trim().toLowerCase();
-  return SENTRY_ENABLED_TRUTHY_VALUES.includes(raw);
+function isErrorReportingEnabled() {
+  try {
+    const configPath = path.join(paths.getDataDir(), 'config.toml');
+    const parsed = parseToml(fs.readFileSync(configPath, 'utf8'));
+    return parsed.report_unexpected_errors === true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -71,15 +84,15 @@ function fixupReleaseId(releaseId) {
 }
 
 /**
- * Initialize Sentry for the Electron main process. No-op unless reporting is
- * enabled and a real (non-placeholder) DSN is configured for the environment.
- * Call this as early as possible in main.js so startup errors are captured.
+ * Initialize Sentry for the Electron main process. The SDK is always
+ * initialized so it is ready to capture startup errors, but a `beforeSend` hook
+ * reads `report_unexpected_errors` live on every event and drops the event while
+ * reporting is disabled -- mirroring the backend's automatic-reporting gate.
+ * Reading the setting per event means toggling it (via the consent screen or
+ * account settings) takes effect without restarting the app. Call this as early
+ * as possible in main.js so startup errors are captured once reporting is on.
  */
 function initSentry() {
-  if (!isSentryEnabled()) {
-    console.log('[sentry] Disabled (set MINDS_SENTRY_ENABLED=1 to enable error reporting).');
-    return;
-  }
   const environment = resolveEnvironment();
   const dsn = dsnForEnvironment(environment);
   const { releaseId, gitSha } = getBuildMetadata();
@@ -91,9 +104,15 @@ function initSentry() {
     tracesSampleRate: 0,
     // Keep PII out of reports, matching the backend's send_default_pii=False.
     sendDefaultPii: false,
+    // Gate automatic sends on the user's live setting: drop every event while
+    // reporting is disabled (matches the backend's _AutomaticReportingGate).
+    beforeSend: (event) => (isErrorReportingEnabled() ? event : null),
   });
   Sentry.setTag('git_sha', gitSha);
-  console.log(`[sentry] Initialized (environment=${environment}, release=${fixupReleaseId(releaseId)}).`);
+  console.log(
+    `[sentry] Initialized (environment=${environment}, release=${fixupReleaseId(releaseId)}); ` +
+      'automatic reporting gated live by the report_unexpected_errors user setting.'
+  );
 }
 
-module.exports = { initSentry, isSentryEnabled, resolveEnvironment, fixupReleaseId };
+module.exports = { initSentry, isErrorReportingEnabled, resolveEnvironment, fixupReleaseId };

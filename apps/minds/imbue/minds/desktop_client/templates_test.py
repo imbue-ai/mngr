@@ -1801,8 +1801,8 @@ def test_badge_class_and_id_pass_through() -> None:
 
 
 def test_base_omits_sentry_bootstrap_when_frontend_reporting_is_off() -> None:
-    # Default shipped state (reporting disabled / placeholder DSNs): no page may
-    # pull in the Sentry browser bundle or its init.
+    # Rendered outside any Flask app context, so the catalog global resolves no MindsConfig and
+    # defaults to reporting disabled: no page may pull in the Sentry browser bundle or its init.
     html = render_login_page()
     assert "sentry.browser.min.js" not in html
     assert "sentry_init.js" not in html

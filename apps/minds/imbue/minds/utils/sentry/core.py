@@ -117,22 +117,6 @@ _SENTRY_DSN_BY_ENVIRONMENT: Mapping["SentryDeployEnvironment", str] = {
 }
 
 
-# Sentry (backend *and* frontend) is off by default and only turned on when this
-# env var is truthy. The Electron launcher / operator opts in explicitly; until
-# then nothing is sent to Sentry from either the Python backend or the web UI.
-MINDS_SENTRY_ENABLED_ENV_VAR = "MINDS_SENTRY_ENABLED"
-_SENTRY_ENABLED_TRUTHY_VALUES = ("1", "true", "yes")
-
-
-def is_sentry_enabled() -> bool:
-    """Whether error reporting is opted in via ``MINDS_SENTRY_ENABLED``.
-
-    Shared by the Python backend (``minds run``) and the web-UI frontend config
-    so both honor the same single opt-in switch.
-    """
-    return os.environ.get(MINDS_SENTRY_ENABLED_ENV_VAR, "").strip().lower() in _SENTRY_ENABLED_TRUTHY_VALUES
-
-
 def resolve_sentry_environment() -> "SentryDeployEnvironment":
     """Select the Sentry environment from the activated minds env in the process env.
 

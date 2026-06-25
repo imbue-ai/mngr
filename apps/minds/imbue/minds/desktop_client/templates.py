@@ -19,6 +19,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
 
+from flask import has_app_context
 from jinja2 import Environment
 from jinja2 import select_autoescape
 from jinjax import Catalog
@@ -26,6 +27,7 @@ from jinjax import Catalog
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.desktop_client.onboarding import expected_creation_duration_seconds
+from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.primitives import AIProvider
@@ -145,6 +147,23 @@ _ICONS_12: Final[Mapping[str, str]] = {
 }
 
 
+def _frontend_sentry_browser_payload() -> dict[str, str] | None:
+    """Catalog-global wrapper that gates the browser Sentry payload on the live user setting.
+
+    The browser web UI reports automatic JS errors, so it is gated by the same per-machine
+    ``report_unexpected_errors`` setting as the backend's automatic error reporting. The setting is
+    read here on every page render, so toggling it via the consent screen or account settings takes
+    effect on the next navigation without an app restart.
+
+    Pages also render outside any Flask app (e.g. template unit tests); with no app-global
+    ``MindsConfig`` to consult, default to reporting disabled so a page never boots Sentry without a
+    confirmed opt-in.
+    """
+    minds_config = get_state().minds_config if has_app_context() else None
+    is_error_reporting_enabled = minds_config.get_report_unexpected_errors() if minds_config is not None else False
+    return frontend_sentry_browser_payload(is_error_reporting_enabled)
+
+
 def _build_catalog() -> Catalog:
     """Build the JinjaX Catalog used to render every desktop-client template.
 
@@ -170,9 +189,10 @@ def _build_catalog() -> Catalog:
             "ICONS_16": _ICONS_16,
             "ICONS_12": _ICONS_12,
             # Resolved per render so the page only boots the frontend Sentry SDK
-            # when reporting is enabled (returns None otherwise). See
-            # imbue/minds/utils/sentry/frontend.py and Base.jinja.
-            "frontend_sentry_browser_payload": frontend_sentry_browser_payload,
+            # when the user has enabled error reporting (returns None otherwise).
+            # See _frontend_sentry_browser_payload, imbue/minds/utils/sentry/frontend.py,
+            # and Base.jinja.
+            "frontend_sentry_browser_payload": _frontend_sentry_browser_payload,
         },
     )
     catalog.add_folder(str(TEMPLATE_DIR))

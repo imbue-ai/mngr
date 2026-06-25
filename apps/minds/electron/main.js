@@ -8,8 +8,9 @@ const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 
 // Initialize Sentry as early as possible so errors thrown during main-process
-// startup (window creation, env setup, backend spawn) are captured. No-op
-// unless MINDS_SENTRY_ENABLED is set and a real DSN is configured -- see
+// startup (window creation, env setup, backend spawn) are captured. The SDK is
+// always initialized but only sends when the user has enabled error reporting
+// (the report_unexpected_errors setting, read live per event) -- see
 // electron/sentry.js.
 initSentry();
 

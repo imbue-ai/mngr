@@ -2182,6 +2182,29 @@ def test_help_report_accepts_a_description(tmp_path: Path) -> None:
     assert body["sent"] is False
 
 
+def test_served_page_omits_frontend_sentry_when_reporting_off(tmp_path: Path) -> None:
+    # Default shipped state: report_unexpected_errors is off, so a page served by the backend must
+    # not boot the frontend Sentry SDK. This is the unified gate -- the browser honors the same user
+    # setting as the backend rather than the old MINDS_SENTRY_ENABLED env var.
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/help")
+    assert response.status_code == 200
+    assert "minds-sentry-config" not in response.text
+    assert "sentry.browser.min.js" not in response.text
+
+
+def test_served_page_emits_frontend_sentry_when_reporting_on(tmp_path: Path) -> None:
+    # With the user's report_unexpected_errors setting on, a served page boots the frontend Sentry
+    # SDK. The setting is read live per render, so flipping it (as the consent screen / settings do)
+    # takes effect on the next page load without restarting the backend.
+    MindsConfig(data_dir=tmp_path).set_report_unexpected_errors(True)
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/help")
+    assert response.status_code == 200
+    assert '<script type="application/json" id="minds-sentry-config">' in response.text
+    assert "sentry.browser.min.js" in response.text
+
+
 def _create_test_client_with_api_key(tmp_path: Path, api_key: str) -> FlaskClient:
     """Build a client with the /api/v1 blueprint mounted and a known central API key."""
     auth_store = FileAuthStore(data_directory=tmp_path / "auth")

@@ -14,7 +14,6 @@ from sentry_sdk.types import Hint
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.utils.sentry.core import ErrorAttachmentsS3Uploader
 from imbue.minds.utils.sentry.core import MANUALLY_SUBMITTED_TAG
-from imbue.minds.utils.sentry.core import MINDS_SENTRY_ENABLED_ENV_VAR
 from imbue.minds.utils.sentry.core import SENTRY_DSN_DEV
 from imbue.minds.utils.sentry.core import SENTRY_DSN_PRODUCTION
 from imbue.minds.utils.sentry.core import SENTRY_DSN_STAGING
@@ -23,7 +22,6 @@ from imbue.minds.utils.sentry.core import _SENTRY_DSN_BY_ENVIRONMENT
 from imbue.minds.utils.sentry.core import _before_send_wrapper
 from imbue.minds.utils.sentry.core import _make_automatic_reporting_gate
 from imbue.minds.utils.sentry.core import add_extra_info_hook
-from imbue.minds.utils.sentry.core import is_sentry_enabled
 from imbue.minds.utils.sentry.core import resolve_sentry_environment
 from imbue.minds.utils.sentry.core import submit_manual_bug_report
 from imbue.minds.utils.sentry.loguru_handler import should_record_sentry_event
@@ -37,23 +35,6 @@ def test_from_minds_env_name_maps_production_and_staging() -> None:
 @pytest.mark.parametrize("env_name", ["dev-josh-1", "ci-ephemeral", "", "Production", "STAGING", None])
 def test_from_minds_env_name_defaults_to_development(env_name: str | None) -> None:
     assert SentryDeployEnvironment.from_minds_env_name(env_name) is SentryDeployEnvironment.DEVELOPMENT
-
-
-@pytest.mark.parametrize("raw_value", ["1", "true", "TRUE", "yes", " Yes "])
-def test_is_sentry_enabled_accepts_truthy_values(monkeypatch: pytest.MonkeyPatch, raw_value: str) -> None:
-    monkeypatch.setenv(MINDS_SENTRY_ENABLED_ENV_VAR, raw_value)
-    assert is_sentry_enabled() is True
-
-
-@pytest.mark.parametrize("raw_value", ["0", "false", "no", ""])
-def test_is_sentry_enabled_rejects_other_values(monkeypatch: pytest.MonkeyPatch, raw_value: str) -> None:
-    monkeypatch.setenv(MINDS_SENTRY_ENABLED_ENV_VAR, raw_value)
-    assert is_sentry_enabled() is False
-
-
-def test_is_sentry_enabled_defaults_to_false_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(MINDS_SENTRY_ENABLED_ENV_VAR, raising=False)
-    assert is_sentry_enabled() is False
 
 
 @pytest.mark.parametrize(
