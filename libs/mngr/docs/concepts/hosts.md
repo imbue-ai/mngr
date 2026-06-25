@@ -81,6 +81,7 @@ building  →  starting      →       running     →    stopping    →    sto
 | **crashed**   | Host shut down unexpectedly without a controlled shutdown                            |
 | **failed**    | Something went wrong before the host could be created                                |
 | **destroyed** | Host gone, resources freed                                                           |
+| **unauthenticated** | Host requires re-authentication before it can continue (e.g., provider credentials expired) |
 
 Transitional states have configurable timeouts. If exceeded, hosts auto-transition to `failed`, `stopped`, or `destroyed` (as appropriate).
 

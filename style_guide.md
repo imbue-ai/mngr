@@ -1951,6 +1951,14 @@ Planned features should raise `NotImplementedError`, and docs referring to them 
 
 Cleanup tasks are marked with TODO or FIXME.
 
+# Programmatic enforcement of doc-vs-code invariants
+
+When prose documentation enumerates code constructs (enum members, command flags, supported event types, etc.), keep that enumeration in sync with the code via an automated check rather than reviewer discipline. Docs of this shape rot silently: the underlying code changes, the reviewer doesn't notice the docs page lower in the stack, and the documentation gradually drifts out of date.
+
+The canonical example lives in `libs/mngr/imbue/mngr/utils/test_doc_invariants.py` as `test_enum_matches_docs_table`. It is parameterized over `(enum_class, docs_path)` pairs, parses the markdown table in the docs page, and fails CI if any enum member is missing from the table (or any extra row is present that does not correspond to an enum member).
+
+When you add a new enum-shaped invariant to the docs (or notice an existing one), extend the parameter list rather than rebuilding the mechanism. When you introduce a new *shape* of doc-vs-code invariant (e.g., CLI flags ↔ argparse spec), prefer adding a new ratchet of the same flavor over relying on reviewers to spot drift.
+
 # Misc
 
 Never use `async` or `asyncio`

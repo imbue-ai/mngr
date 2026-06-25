@@ -71,11 +71,14 @@ If you want to allow agents to create remote/untrusted child agents, see the [re
 
 Assuming the agent's [host](./hosts.md) is in the "running" state, an agent can be in one of the following states:
 
-- **stopped**: the agent folder exists (but there is no tmux session)
-- **running**: tmux session exists and the expected process exists in pane 0
-- **waiting**: the agent is waiting (e.g., for user input or an external event)
-- **replaced**: tmux session exists and a different process in pane 0
-- **done**: the tmux session exists and there is no process under the shell for that pane
+| State                            | Description                                                                                                                                                 |
+|----------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **stopped**                      | the agent folder exists (but there is no tmux session)                                                                                                      |
+| **running**                      | tmux session exists and the expected process exists in pane 0                                                                                               |
+| **waiting**                      | the agent is waiting (e.g., for user input or an external event)                                                                                            |
+| **replaced**                     | tmux session exists and a different process in pane 0                                                                                                       |
+| **running_unknown_agent_type**   | tmux session exists but the agent's type is not in our configuration (e.g., launched remotely or by someone else), so we cannot confirm its expected process |
+| **done**                         | the tmux session exists and there is no process under the shell for that pane                                                                               |
 
 If the host's state is not "running", then the agent inherits it state from the host (ex: paused, crashed, etc, see [host lifecycle](./hosts.md#Lifecycle) for more details)
 
