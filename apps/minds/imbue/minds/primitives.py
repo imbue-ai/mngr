@@ -114,25 +114,6 @@ class BackupProvider(UpperCaseStrEnum):
     CONFIGURE_LATER = auto()
 
 
-class UserDataPreference(UpperCaseStrEnum):
-    """How much the workspace agent may learn about the user during onboarding.
-
-    Captured by the first onboarding question shown while a workspace is
-    being created. For now the only behavior gated on this is a minimal
-    local scan of the user's machine (see
-    ``imbue.minds.desktop_client.onboarding``); we will extend what each
-    level does in the future.
-
-    - ``CONVENIENCE`` -- import as much local context as possible.
-    - ``PRIVACY`` -- gather minimal data, kept on the user's machine.
-    - ``CONTROL`` -- gather nothing (the onboarding scan is skipped).
-    """
-
-    CONVENIENCE = auto()
-    PRIVACY = auto()
-    CONTROL = auto()
-
-
 class BackupEncryptionMethod(UpperCaseStrEnum):
     """Which master/recovery key the workspace's restic repo is initialized with.
 

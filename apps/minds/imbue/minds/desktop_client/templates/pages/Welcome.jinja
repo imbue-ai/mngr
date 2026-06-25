@@ -1,24 +1,14 @@
 {#def #}
 {#
   Welcome/splash page for first-time users. Offers Sign Up / Log In and a
-  "continue without an account" affordance that explains what's gated
-  behind an account before proceeding.
+  "continue without an account" link.
+
+  That link goes to "/" rather than straight to "/create": the landing handler
+  shows the "Help improve Minds" error-reporting consent screen first (when still
+  unanswered), so reporting is offered to account-less users too, then lands on
+  the create form. Reporting is therefore not gated behind having an account.
 #}
-{% set _scripts %}
-<script>
-  (function() {
-    var btn = document.getElementById('skip-account-btn');
-    var dialog = document.getElementById('skip-dialog');
-    var cancel = document.getElementById('skip-cancel-btn');
-    btn.addEventListener('click', function() { dialog.classList.remove('hidden'); });
-    cancel.addEventListener('click', function() { dialog.classList.add('hidden'); });
-    dialog.addEventListener('click', function(e) {
-      if (e.target === dialog) dialog.classList.add('hidden');
-    });
-  })();
-</script>
-{% endset %}
-<Base title="Welcome to Minds" scripts={{ _scripts }}>
+<Base title="Welcome to Minds">
   <div class="min-h-screen flex items-center justify-center">
     <div class="max-w-sm w-full px-6 text-center">
       <h1 class="type-heading-lg text-primary mb-2">Welcome to Minds</h1>
@@ -29,28 +19,10 @@
         <ButtonLink href="/auth/login" variant="secondary" block>Log In</ButtonLink>
       </div>
 
-      <Button variant="ghost" id="skip-account-btn"
+      <ButtonLink href="/" variant="ghost" id="skip-account-btn"
               extra="!p-0 !bg-transparent !type-helper !text-tertiary hover:!bg-transparent hover:!text-primary hover:underline">
         Continue without an account
-      </Button>
-
-      <Modal id="skip-dialog" card_extra="text-left">
-        <h2 class="type-heading text-primary mb-3">Continue without an account?</h2>
-        <p class="type-body text-primary mb-2">An Imbue account enables:</p>
-        <ul class="type-body text-primary list-disc pl-4 mb-4 space-y-1">
-          <li>Project sharing</li>
-          <li>Imbue-hosted cloud projects</li>
-          <li>No need to bring your own API keys</li>
-        </ul>
-        <p class="type-helper text-tertiary mb-4">You can always create an account later by clicking "log in" in the upper right.</p>
-        {# Route through "/" rather than straight to "/create": the landing handler shows the
-           "Help improve Minds" error-reporting consent screen first (when still unanswered),
-           so reporting is offered to account-less users too, then lands on the create form. #}
-        <div class="flex justify-end gap-3">
-          <Button variant="secondary" id="skip-cancel-btn">Cancel</Button>
-          <ButtonLink href="/" variant="primary" id="skip-continue-btn">Continue</ButtonLink>
-        </div>
-      </Modal>
+      </ButtonLink>
     </div>
   </div>
 </Base>
