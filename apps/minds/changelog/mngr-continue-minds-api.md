@@ -13,3 +13,5 @@ Wire the agent-facing `/api/v1/workspaces` create route up to full backup + tunn
 - Extracted the host start/stop logic into a shared `workspace_lifecycle.py` (`perform_mind_host_action`) so the agent-facing `POST /api/v1/workspaces/<id>/start|stop` now does the same system-services resolution and optimistic host-state override the browser/Electron controls do. The legacy `/api/agents/<id>/start-host` and `/stop-host` routes are removed (the landing buttons and the Electron shell call the v1 routes); `restart-host` and the batch `/api/minds/stop-hosts` stay (no v1 equivalent yet).
 
 - A malformed workspace/operation id in any `/api/v1/workspaces/...` path now returns 400 (via a blueprint error handler for `InvalidRandomIdError`) instead of a logged 500.
+
+- The Electron full-flow harness now also round-trips the v1 stop/start lifecycle (a STEP 4 between terminal and home) so `perform_mind_host_action` is exercised against real Docker end-to-end.

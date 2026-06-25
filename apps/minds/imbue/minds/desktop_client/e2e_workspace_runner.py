@@ -1178,6 +1178,34 @@ def _open_terminal(page: Page) -> None:
     _flow_screenshot(page, "05-terminal-open")
 
 
+def _verify_v1_lifecycle(content_page: Page, backend_origin: str, agent_id: str) -> None:
+    """Round-trip the v1 stop/start lifecycle, exercising ``perform_mind_host_action``.
+
+    POSTs ``/api/v1/workspaces/<id>/stop`` then ``/start`` (same-origin fetch so
+    the session cookie authenticates), asserting each returns 200 with the
+    expected optimistic ``host_state`` and leaving the host RUNNING for the
+    subsequent home + destroy steps.
+    """
+    # Be on the backend origin so the relative fetch is same-origin (cookie auth).
+    content_page.goto(backend_origin + "/", wait_until="domcontentloaded")
+    for verb, expected_state in (("stop", "STOPPED"), ("start", "RUNNING")):
+        logger.info("v1 lifecycle: POST /api/v1/workspaces/<id>/{}", verb)
+        result = content_page.evaluate(
+            """async (args) => {
+                const r = await fetch(args.origin + '/api/v1/workspaces/' + args.aid + '/' + args.verb,
+                                      {method: 'POST'});
+                return {status: r.status, body: await r.text()};
+            }""",
+            {"origin": backend_origin, "aid": agent_id, "verb": verb},
+        )
+        if result["status"] != 200:
+            raise WorkspaceFlowError(f"v1 {verb} returned HTTP {result['status']}: {result['body']}")
+        if expected_state not in result["body"]:
+            raise WorkspaceFlowError(f"v1 {verb} did not report {expected_state}: {result['body']}")
+        logger.info("v1 {} -> {}", verb, result["body"])
+    _flow_screenshot(content_page, "05b-lifecycle")
+
+
 def _navigate_home(browser: Browser, content_page: Page, backend_origin: str, workspace_name: str) -> None:
     """Click the chrome Home button (re-picking the chrome view + retrying) and confirm the content view lands home.
 
@@ -1321,7 +1349,13 @@ def run_full_workspace_flow(
                 _run_flow_step(results, "STEP 3 terminal", content_page, lambda: _open_terminal(content_page))
                 _run_flow_step(
                     results,
-                    "STEP 4 home",
+                    "STEP 4 lifecycle",
+                    content_page,
+                    lambda: _verify_v1_lifecycle(content_page, backend_origin, agent_id),
+                )
+                _run_flow_step(
+                    results,
+                    "STEP 5 home",
                     content_page,
                     lambda: _navigate_home(browser, content_page, backend_origin, workspace_name),
                 )
@@ -1337,7 +1371,7 @@ def run_full_workspace_flow(
                 resolved_agent_id = agent_id
                 _run_flow_step(
                     results,
-                    "STEP 5 destroy",
+                    "STEP 6 destroy",
                     content_page,
                     lambda: _destroy_via_settings(content_page, backend_origin, resolved_agent_id, workspace_name),
                 )
