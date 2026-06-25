@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 
 import pytest
+from pydantic import SecretStr
 
 from imbue.mngr_latchkey._spawn import spawn_detached_latchkey_ensure_browser
 from imbue.mngr_latchkey._spawn import spawn_detached_mngr_latchkey_forward
@@ -87,6 +88,61 @@ def test_spawn_detached_latchkey_ensure_browser_sets_latchkey_directory(
     assert _wait_for_file(report_path)
     assert latchkey_directory.is_dir()
     assert report_path.read_text() == f"{latchkey_directory}\n"
+
+
+def _make_encryption_key_reporter_binary(tmp_path: Path) -> Path:
+    """Build a fake ``latchkey`` that records ``LATCHKEY_ENCRYPTION_KEY`` and exits."""
+    script = tmp_path / "latchkey"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, sys\n"
+        'assert sys.argv[1] == "ensure-browser"\n'
+        "report_path = os.environ['FAKE_LATCHKEY_REPORT']\n"
+        "key = os.environ.get('LATCHKEY_ENCRYPTION_KEY', '')\n"
+        "open(report_path, 'a').write(key + '\\n')\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def test_spawn_detached_latchkey_ensure_browser_injects_encryption_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_binary = _make_encryption_key_reporter_binary(tmp_path)
+    report_path = tmp_path / "report"
+    monkeypatch.setenv("FAKE_LATCHKEY_REPORT", str(report_path))
+    monkeypatch.delenv("LATCHKEY_ENCRYPTION_KEY", raising=False)
+
+    pid = spawn_detached_latchkey_ensure_browser(
+        latchkey_binary=str(fake_binary),
+        log_path=tmp_path / "log",
+        encryption_key=SecretStr("per-directory-key"),
+    )
+    assert pid > 0
+    assert _wait_for_file(report_path)
+    # The child sees the per-directory key, so Latchkey never falls through to
+    # the system keychain (which on macOS would pop an access dialog).
+    assert report_path.read_text() == "per-directory-key\n"
+
+
+def test_spawn_detached_latchkey_ensure_browser_operator_key_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_binary = _make_encryption_key_reporter_binary(tmp_path)
+    report_path = tmp_path / "report"
+    monkeypatch.setenv("FAKE_LATCHKEY_REPORT", str(report_path))
+    # An operator-set value already in the environment must win over the
+    # per-directory key passed by the caller.
+    monkeypatch.setenv("LATCHKEY_ENCRYPTION_KEY", "operator-key")
+
+    pid = spawn_detached_latchkey_ensure_browser(
+        latchkey_binary=str(fake_binary),
+        log_path=tmp_path / "log",
+        encryption_key=SecretStr("per-directory-key"),
+    )
+    assert pid > 0
+    assert _wait_for_file(report_path)
+    assert report_path.read_text() == "operator-key\n"
 
 
 def test_spawn_detached_latchkey_ensure_browser_raises_when_binary_missing(tmp_path: Path) -> None:

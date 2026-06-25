@@ -34,6 +34,7 @@ from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
+from imbue.minds.utils.sentry.frontend import frontend_sentry_browser_payload
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_forward.loading_page import render_loading_page
 
@@ -167,6 +168,10 @@ def _build_catalog() -> Catalog:
             "INPUT_BASE": _INPUT_BASE,
             "ICONS_16": _ICONS_16,
             "ICONS_12": _ICONS_12,
+            # Resolved per render so the page only boots the frontend Sentry SDK
+            # when reporting is enabled (returns None otherwise). See
+            # imbue/minds/utils/sentry/frontend.py and Base.jinja.
+            "frontend_sentry_browser_payload": frontend_sentry_browser_payload,
         },
     )
     catalog.add_folder(str(TEMPLATE_DIR))
@@ -886,22 +891,6 @@ _RECOVERY_SCRIPT: Final[str] = """\
           hostBtn.classList.remove('secondary');
           show(hostBtn, true);
         }
-        // New tier: the system_interface service is not registered in
-        // runtime/applications.toml. A restart cannot recover this; the user has
-        // to fix the workspace configuration. Provide a secondary "Try restart
-        // anyway" affordance for completeness.
-        function renderMisconfigured() {
-          titleEl.textContent = 'Workspace misconfigured';
-          messageEl.textContent =
-            "This workspace's system interface is not registered in runtime/applications.toml, "
-            + 'so the system interface cannot be started. A restart is unlikely to help -- '
-            + 'fix the workspace configuration first. See the diagnostics below for details.';
-          show(spinnerEl, false);
-          show(errorEl, false);
-          hostBtn.textContent = 'Try restart anyway';
-          hostBtn.classList.add('secondary');
-          show(hostBtn, true);
-        }
         function renderDispatchError() {
           titleEl.textContent = 'Workspace unresponsive';
           messageEl.textContent = 'Could not start the restart. Check your connection and try again.';
@@ -970,18 +959,6 @@ _RECOVERY_SCRIPT: Final[str] = """\
           latestHealth = data || null;
           renderDebugMenu(latestHealth);
           var tier = data && data.dispatch_tier;
-          // A missing system_interface registration means no restart can
-          // recover the workspace, so honor this tier on every entry path --
-          // including restart_failed, which is exactly the state a misconfigured
-          // workspace lands in once its undeclared interface fails to come back
-          // up. This must precede the no-auto-dispatch short-circuit below;
-          // renderMisconfigured() dispatches nothing (it only renders, with a
-          // "Try restart anyway" affordance), so it is safe regardless of
-          // autoDispatch.
-          if (tier === 'workspace_misconfigured') {
-            renderMisconfigured();
-            return;
-          }
           // A backend-unreachable outcome short-circuits before any restart
           // dispatch on EVERY entry path: no restart can or should fire while the
           // backend is unreachable or rejecting us. Render-only, and arm the

@@ -1,14 +1,12 @@
+import configparser
 import json
+import re
 import socket
 import subprocess
-from urllib.parse import urlparse
 
 result = {
-    "tmux_ls": None,
-    "tmux_error": None,
-    "applications_toml_declares_system_interface": None,
-    "applications_toml_path": "/code/runtime/applications.toml",
-    "applications_toml_error": None,
+    "system_interface_status": None,
+    "supervisorctl_error": None,
     "inner_port": None,
     "port_listener": None,
     "port_listener_error": None,
@@ -16,35 +14,42 @@ result = {
     "curl_error": None,
 }
 
+# Authoritative liveness check: ask supervisord -- which owns every background
+# service since the services.toml/bootstrap-service-manager migration -- whether
+# the system_interface program is RUNNING. supervisorctl must be pointed at the
+# repo-root config (-c /code/supervisord.conf) so it finds the unix socket
+# declared there; the default config search path does not include
+# /code/supervisord.conf. The exec runs as root, so the 0700 socket is
+# reachable. The raw status line is captured here; recovery_probe parses the
+# state word (RUNNING/STOPPED/...) into the yes/no/unknown answer.
 try:
     proc = subprocess.run(
-        ["tmux", "ls"], capture_output=True, text=True, timeout=1,
+        ["supervisorctl", "-c", "/code/supervisord.conf", "status", "system_interface"],
+        capture_output=True, text=True, timeout=1,
     )
-    result["tmux_ls"] = proc.stdout + (proc.stderr if proc.returncode != 0 else "")
+    result["system_interface_status"] = (proc.stdout + proc.stderr).strip()
 except Exception as e:
-    result["tmux_error"] = repr(e)
+    result["supervisorctl_error"] = repr(e)
 
+# Source the system-interface inner port from the [program:system_interface]
+# command in supervisord.conf, extracting it from that command's
+# `--url <scheme>://<host>:<port>` flag. Mirrors
+# recovery_probe.parse_inner_port_from_command (kept in sync by hand because
+# this script can't import that module). interpolation=None keeps configparser
+# from choking on any `%` in a command value; a missing section/file leaves
+# inner_port None, which the port + curl probes surface as a parse failure.
 try:
-    import tomllib
-    with open("/code/runtime/applications.toml", "rb") as fh:
-        data = tomllib.load(fh)
-    applications = data.get("applications", [])
-    si = None
-    for entry in applications:
-        if isinstance(entry, dict) and entry.get("name") == "system_interface":
-            si = entry
-            break
-    result["applications_toml_declares_system_interface"] = si is not None
-    if si is not None:
-        url = si.get("url", "") or ""
+    parser = configparser.ConfigParser(interpolation=None, strict=False)
+    parser.read("/code/supervisord.conf")
+    command = parser.get("program:system_interface", "command", fallback="") or ""
+    m = re.search(r"--url\s+\S+://[^:]+:(\d+)", command)
+    if m:
         try:
-            port = urlparse(url).port
+            result["inner_port"] = int(m.group(1))
         except ValueError:
-            port = None
-        if port is not None:
-            result["inner_port"] = int(port)
-except Exception as e:
-    result["applications_toml_error"] = repr(e)
+            pass
+except Exception:
+    pass
 
 # The agent container image ships no iproute2, so "ss" is absent and a
 # subprocess.run(["ss", ...]) raises FileNotFoundError. Scan /proc/net/tcp{,6}

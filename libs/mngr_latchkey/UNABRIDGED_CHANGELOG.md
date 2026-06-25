@@ -4,6 +4,26 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-23
+
+`LatchkeyForwardSupervisor` (and the underlying `spawn_detached_mngr_latchkey_forward`) now accept a `cwd` argument, so embedders can launch the detached `mngr latchkey forward` supervisor from a chosen working directory (e.g. `$HOME`) instead of inheriting the caller's cwd. This keeps the supervisor's `mngr` children from resolving project config out of a transient working directory.
+
+## 2026-06-22
+
+Bump the pinned latchkey CLI version installed on remote VPS environments (the secondary gateway) to 2.17.2.
+
+## 2026-06-19
+
+Removed the now-vestigial `LatchkeyPluginConfig.merge_with` override; the config merge is routed through the overlay pipeline, which reproduces the same assign-by-default semantics. No user-visible behavior change.
+
+Reorganized the README: high-level user info (CLI, wiring an agent, settings, logs, permissions overview) is up top, and the deeper detail (the full gateway HTTP-extension reference and the Python embedding API) now lives in a clearly-marked Reference section below.
+
+Bump the latchkey CLI to 2.17.1:
+
+- The pinned version installed on remote VPS environments (the secondary gateway used by agents when the user's computer is down) is now 2.17.1.
+
+- The minimum latchkey CLI version the wrapper will operate against is now 2.17.1, so initializing the gateway rejects any installed CLI older than 2.17.1.
+
 ## 2026-06-17
 
 - Avoid `logger.warning()`.

@@ -67,12 +67,19 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    # The catches beyond the prior baseline are all in the ported Sentry module
+    # Most catches beyond the prior baseline are in the ported Sentry module
     # (``utils/sentry/``): the before_send wrapper, the traceback formatter, the
     # custom HTTP transport, the loguru callback runner, and the S3 uploader all
     # deliberately catch ``Exception`` so a failure inside error reporting can
     # never crash the app or lose the original event.
-    rc.check_broad_exception_catch(_DIR, snapshot(16))
+    #
+    # The remaining one is in ``PermissionRequestsConsumer._run``: the consumer
+    # thread is the request inbox's source of truth, so a single unprocessable
+    # request must be logged (with traceback) and skipped rather than allowed to
+    # kill the thread, which would silently stop every future permission request
+    # from reaching the UI. The gateway validates requests up front, so this is a
+    # defense-in-depth backstop, not the primary guard.
+    rc.check_broad_exception_catch(_DIR, snapshot(17))
 
 
 def test_prevent_base_exception_catch() -> None:

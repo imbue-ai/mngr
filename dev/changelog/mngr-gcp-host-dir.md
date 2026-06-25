@@ -1,1 +1,0 @@
-Added a new runtime dependency at the repo root (recorded in ``uv.lock``): ``google-cloud-storage>=2.18``, used by the GCP provider's new offline ``host_dir`` GCS state bucket. No top-level config or build tooling changes; the dependency is declared in ``libs/mngr_gcp/pyproject.toml`` and propagates to the lockfile.

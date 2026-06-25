@@ -4,6 +4,81 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-24
+
+**Bug fix:** in shared mode (`isolate_local_config_dir = false`), mngr no longer forces `CLAUDE_CONFIG_DIR=~/.claude` into the agent environment when your shell did not already have it set. A previous fix injected `CLAUDE_CONFIG_DIR` unconditionally, but exporting it -- even to claude's own `~/.claude` default -- is not equivalent to leaving it unset: claude reads its global `.claude.json` (onboarding state, theme, trust, history) from `$CLAUDE_CONFIG_DIR/.claude.json` when the variable is set, but from `~/.claude.json` (beside the dir) when it is unset. The forced value pointed claude at an inner stub file lacking your onboarding state, so every new shared-mode agent re-showed the theme/onboarding screen.
+
+mngr now propagates `CLAUDE_CONFIG_DIR` in shared mode only when your own shell already exported it (in which case your config already lives inside that dir and sharing stays consistent). When unset, it stays unset so claude resolves its real `~/.claude.json`. The launch command's session-file lookup no longer depends on the variable being exported; it falls back to `$HOME/.claude` via `${CLAUDE_CONFIG_DIR:-$HOME/.claude}`.
+
+Renamed the claude agent type's `use_env_config_dir` option to `isolate_local_config_dir` and flipped its meaning: it now defaults to `true` (each local agent gets its own per-agent Claude config dir, so mngr never touches your default config). Set `isolate_local_config_dir = false` to share the user's `$CLAUDE_CONFIG_DIR` instead (the old `use_env_config_dir = true` behavior). The flag only affects local agents; remote agents always use an isolated config dir and ignore it.
+
+The old `use_env_config_dir` key is still accepted as a deprecated option (it is the inverse of `isolate_local_config_dir`), so existing config files keep working -- mngr emits a deprecation warning when it is set. Setting both keys to contradictory (non-inverse) values is an error.
+
+**Bug fix:** in shared mode (`isolate_local_config_dir = false`), mngr now injects `CLAUDE_CONFIG_DIR` into the agent environment, pointing at the user's shared config dir (`$CLAUDE_CONFIG_DIR`, or `~/.claude` when unset). Previously it was left unset, so the launch command's session-file lookup saw an empty `$CLAUDE_CONFIG_DIR` and claude could not find the user's config or sessions.
+
+**New warning:** when creating a local claude agent on macOS, if mngr detects that you authenticate Claude Code with a claude.ai subscription (OAuth credentials) and config-dir isolation is enabled, it now warns that the isolated agent's copy of your credentials will go stale as the subscription refreshes them, and prints the exact command to disable isolation (`mngr config set agent_types.claude.isolate_local_config_dir false --scope user`).
+
+Shared Claude config mode (`isolate_local_config_dir = false`) now dismisses the
+cosmetic startup dialogs (trust, onboarding, effort callout, cost threshold)
+directly in your default Claude config so they no longer intercept automated
+input. Previously shared mode left the config untouched, so a fresh `~/.claude.json`
+re-triggered the trust/onboarding screens on every agent.
+
+mngr writes these dismissals into the file claude actually reads
+(`$CLAUDE_CONFIG_DIR/.claude.json`, or `~/.claude.json` when the var is unset), and
+honors `auto_dismiss_dialogs` in this mode. It never accepts bypass-permissions
+mode via the global config -- that remains governed by `settings.json` -- and still
+does no per-agent settings.json or keychain provisioning.
+
+Also fixed: in shared mode, mngr's hooks are now installed when shared mode is set
+via the current `isolate_local_config_dir = false` flag (previously they were only
+installed when set via the deprecated `use_env_config_dir = true` alias).
+
+## 2026-06-19
+
+Fixed mngr's Claude hooks leaking into "normal" (non-mngr) Claude config. mngr previously wrote its readiness/credential/permission hooks into the project's `.claude/settings.local.json`, which plain `claude` runs in that directory also read -- so the hooks (e.g. an activity-event `mkdir`) fired outside mngr where `$MNGR_AGENT_STATE_DIR`/`$MNGR_HOST_DIR` are unset, producing errors like `mkdir: cannot create directory '/events': Permission denied`.
+
+mngr now bakes all of its own hooks into the per-agent config-dir `settings.json` (`$MNGR_AGENT_STATE_DIR/plugin/claude/anthropic/settings.json`) -- the "user" settings layer Claude reads from `$CLAUDE_CONFIG_DIR`, which a plain `claude` run in the work dir never reads (it reads `~/.claude`). The hooks are built fresh on every provision, so there is no cross-version accumulation and nothing lands in a file plain `claude` reads.
+
+`settings_overrides` is now applied as a **config-consistent patch** folded onto that `settings.json` (replacing the previous deep-merge-by-default). A bare key assigns (and the narrowing guard hard-errors if it would silently drop a non-empty sibling aggregate from the home base, unless `allow_settings_key_assignment_narrowing` is set); a `key__extend` merges onto the home value (lists concatenate, sets union, dicts merge), and nesting `__extend` merges deeper. So a `permissions__extend = {allow__extend = [...]}` override merges its `allow` while preserving a `permissions.defaultMode` from the home settings (#1647), whereas a bare `permissions = {allow = [...]}` that would drop `defaultMode` now warns instead of silently dropping it. The narrowing guard is recursive: even a bare key nested inside an `__extend` value (e.g. `permissions__extend = {allow = [...]}` over a non-empty home `permissions.allow`) is now caught, not just top-level bare keys. A stray `__extend` in your own home `settings.json` is normalized away (it has nothing below it to extend), and because the fold's `finalize` collapses every node into a plain value, no `__extend` marker can survive into the final file by construction.
+
+`settings_overrides` now **accumulates across config scopes and `parent_type` inheritance** rather than a higher/child scope replacing the entire lower/parent value: per-key, non-overlapping keys from every scope survive and same-key `__extend`s combine (a higher bare key still wins over a lower marker for the same key). For example, a user scope setting `permissions__extend.allow__extend` and a project scope setting `model` now both apply, instead of the project scope wiping out the user scope's permissions.
+
+A `settings_overrides` key can now use `key__assign` to assign a value **without** triggering the narrowing guard -- the per-key opt-out (e.g. `permissions__assign = {allow = [...]}` deliberately replaces the home `permissions`, dropping `defaultMode`, with no warning and without the global `allow_settings_key_assignment_narrowing` flag). It also works nested inside an `__extend` (`permissions__extend = {allow__assign = [...]}`). A bare `key` and `key__assign` for the same field in one layer raises a clear error. A `Static*`-wrapped override value (`StaticList` / `StaticDict` / `StaticTuple`) is likewise treated as a whole-value replacement and exempt from the narrowing guard.
+
+A user-supplied `--settings` (in an agent type's `cli_args` or passed through on the `mngr create` command line) now passes through to `claude` verbatim. mngr injects no `--settings` of its own, and Claude natively layers the user's `--settings` over the config-dir `settings.json` (deep-merging dicts, concatenating same-event hooks), so the user's hooks and mngr's both fire with no mngr merge code and nothing to collide.
+
+Reduced-support limitation in `use_env_config_dir` mode: there is no per-agent config dir to bake hooks into, so mngr loads its hooks (and the resolved `settings_overrides` patch) from the private managed `--settings` file (`$MNGR_AGENT_STATE_DIR/plugin/claude/mngr_managed_settings.json`), which Claude layers (highest precedence) over the user's shared config. `settings_overrides` is applied here too (folded onto mngr's hooks as the base, so its narrowing guard only catches an override dropping mngr's own hooks, not the shared-config values Claude layers itself). Because mngr already passes its own `--settings` in this mode, a user-supplied `--settings` (in `cli_args`/`agent_args`) is now rejected at provision with a `UserInputError` (mngr can't reliably merge a second `--settings` -- its value may be inline JSON, not a file); put those settings in `settings_overrides` or set `use_env_config_dir=False`. This mode is not yet used in production.
+
+Note: this stops *new* leaks; it does not remove hooks already written into existing `settings.local.json` files by a prior mngr -- clean those up manually if present.
+
+`mngr create` no longer requires the project's `.claude/settings.local.json` to be gitignored across the board. mngr writes its own hooks to the per-agent config dir, so that requirement now applies only when the `claude_subagent_proxy` plugin (PROXY mode) actually needs to rewrite user-defined Stop hooks in `settings.local.json` -- enforced by that plugin, at the point it writes.
+
+Internal: the `settings_overrides` fold now imports the config-merge primitives from the new standalone `overlay` library rather than from `imbue.mngr.config`, and the fold itself now runs on `overlay`'s typed-node algebra (`lift`/`merge_narrowing_allowed`/`finalize`) instead of the string-suffix engine. The user-visible behavior is unchanged with one intentional fix: a deferred `key__assign` inside `settings_overrides` now reliably suppresses the narrowing guard at provision (previously the no-warn intent could be silently dropped during config-load, leaving it narrowing-checked).
+
+Cross-scope `settings_overrides` narrowing is now caught at config-load. A claude agent type's `settings_overrides` accumulates across config scopes (user < project < local) and env-var layers, so previously a higher scope whose `settings_overrides` *bare* key replaced a non-empty aggregate set by a lower scope dropped the lower scope's entries silently (the provision-time guard only caught drops of the *home* `settings.json` base, not of a lower config scope). The config loader now surfaces these cross-scope drops through the same flag-gated narrowing error used for every other field: e.g. a local-scope `[agent_types.my_claude.settings_overrides.permissions] allow = ["B"]` that drops a project-scope `allow = ["A"]` raises, escapable via `allow_settings_key_assignment_narrowing = true` or by using `allow__extend` (accumulate) / `allow__assign` (replace without warning). Purely additive cross-scope `settings_overrides` (adding new keys) loads unchanged.
+
+Internal (no user-facing behavior change): deduped `resolve_shared_claude_config_dir` to delegate to `get_claude_config_dir` (identical resolution), and `_claude_json_has_primary_api_key` now reads via the shared `read_claude_config` helper instead of hand-rolling the JSON read (corrupt-config tolerance unchanged). The managed-settings write in `_configure_agent_hooks` now routes through `write_json_dict_via_host`.
+
+Trimmed the README to user-relevant content (removed internal implementation details and roadmap notes) and tightened it for concision.
+
+`settings_overrides` now expresses merge intent with a Claude-compatible `__mngr_merge` map instead of the `__extend` / `__assign` key suffixes, so the same overrides behave consistently whether mngr or vanilla Claude Code reads them.
+
+The suffixes leaked into the generated `settings.json` as keys Claude does not recognise; they are now rejected in `settings_overrides`. Declare merge intent in a top-level `__mngr_merge` map (`__mngr_merge = {"permissions.allow" = "extend"}` -- or `"assign"`) that vanilla Claude ignores. A bare key assigns with the narrowing guard, and the narrowing error prints the exact `__mngr_merge` patch to add -- the full nested patch in one error (a dict that would drop a sibling key is suggested as `extend`, a replaced list/value as `assign`). A `__mngr_merge` key found in your home `settings.json` is stripped (it is a no-op there).
+
+## 2026-06-18
+
+Added an `update_policy` field to the claude agent type that governs Claude Code's background auto-updater. `NEVER` sets `DISABLE_AUTOUPDATER=1` in the agent environment so the installed (optionally `version`-pinned) binary stays put; `AUTO` leaves the auto-updater enabled; `ASK` behaves like `AUTO` (claude has no interactive update flow). When unset, it defaults to `NEVER`.
+
+**Behavior change:** claude agents now disable Claude Code's auto-updater by default (local and remote). Previously mngr did not disable it on local agents -- the per-agent config inherited your `~/.claude.json` `autoUpdates` value, so local agents typically auto-updated. Set `update_policy = "AUTO"` to opt back into the auto-updater. The policy is ignored in `use_env_config_dir` (shared) mode, where mngr leaves your claude environment alone.
+
+Pin a specific version with `version` to control exactly what gets installed.
+
+- The Claude response-streaming snapshot watcher now captures the agent's tmux pane by the configured primary window name (`tmux.primary_window_name`, default `agent`) instead of the literal `:0` index, so response streaming works regardless of the user's tmux `base-index`.
+- Internal refactor: the Claude agent now builds its tmux session name via the shared `AgentInterface.session_name` helper instead of hand-rolling the `prefix + name` string, keeping it consistent with mngr's centralized session-name construction.
+
+Internal: renamed the example custom agent type in an `on_before_create` test from a personal-config name to a neutral `coder`. No behavior change.
+
 ## 2026-06-17
 
 `ClaudeAgent` now declares the `HasStreamingSnapshotMixin` capability mixin (it already implemented `get_stream_buffer_path`), so the live in-progress response-streaming view is a code-detectable capability in the agent capability matrix rather than a hand-tracked fact.

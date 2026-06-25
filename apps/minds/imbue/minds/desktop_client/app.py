@@ -32,6 +32,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.bootstrap import is_imbue_cloud_provider_enabled_for_account
 from imbue.minds.bootstrap import list_disabled_provider_names
@@ -2586,7 +2587,18 @@ def _displayable_pending_requests(
     request's host is discovered).
     """
     pending = inbox.get_pending_requests() if inbox else []
-    return [req for req in pending if backend_resolver.get_agent_display_info(AgentId(req.agent_id)) is not None]
+    displayable: list[RequestEvent] = []
+    for req in pending:
+        try:
+            agent_id = AgentId(req.agent_id)
+        except InvalidRandomIdError:
+            # A request with a malformed agent_id (not a valid 'agent-...' id) can't
+            # resolve to a real agent, so it isn't displayable. Skip it rather than let
+            # the AgentId() validation raise and take down the whole request panel.
+            continue
+        if backend_resolver.get_agent_display_info(agent_id) is not None:
+            displayable.append(req)
+    return displayable
 
 
 def _build_requests_payload(
@@ -2622,7 +2634,7 @@ def _build_requests_payload(
 #   - a ``claude``-type agent with the user-chosen name -- runs the user's
 #     Claude conversation.
 #   - a ``main``-type agent always named ``system-services`` -- runs the
-#     bootstrap service manager, which spawns the system interface.
+#     bootstrap, which execs supervisord, which supervises the system interface.
 # The restart endpoints are invoked with the user agent's id; the recovery
 # flow restarts the *system-services* agent (which shares the user agent's
 # host), so it resolves that agent through the backend resolver.
@@ -2667,8 +2679,8 @@ _DISCOVERY_FRESHNESS_THRESHOLD_SECONDS: Final[float] = 3 * DISCOVERY_STREAM_POLL
 # How long we wait for the system interface to answer again after a restart,
 # split by tier. A surgical (in-place) restart leaves the container running, so
 # the interface should answer again quickly. A host restart cold-boots the
-# container (restore-from-snapshot + the bootstrap service manager spawning the
-# system interface), which legitimately takes longer. Initial agent-creation
+# container (restore-from-snapshot + the bootstrap execing supervisord, which
+# spawns the system interface), which legitimately takes longer. Initial agent-creation
 # readiness waiting keeps its own, much longer, timeout.
 _SURGICAL_STARTUP_WAIT_SECONDS: Final[float] = 15.0
 _HOST_RESTART_STARTUP_WAIT_SECONDS: Final[float] = 30.0
