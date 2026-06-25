@@ -291,6 +291,32 @@ def test_post_login_redirects_to_login_when_unauthenticated(tmp_path: Path) -> N
     assert response.headers["location"] == "/login"
 
 
+def test_post_login_honors_safe_return_to(tmp_path: Path) -> None:
+    """A ``return_to`` (e.g. /create, from the remote-preset sign-in flow) wins."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path, backend_resolver=backend_resolver, http_client=None
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/post-login", query_string={"return_to": "/create"}, follow_redirects=False)
+    assert response.status_code == 302
+    assert response.headers["location"] == "/create"
+
+
+def test_post_login_ignores_unsafe_return_to(tmp_path: Path) -> None:
+    """An off-origin ``return_to`` is ignored and the default destination is used."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path, backend_resolver=backend_resolver, http_client=None
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/post-login", query_string={"return_to": "https://evil.com"}, follow_redirects=False)
+    assert response.status_code == 302
+    assert response.headers["location"] == "/"
+
+
 # -- Leased imbue_cloud host account-binding tests --
 
 
@@ -447,7 +473,7 @@ def test_landing_page_shows_create_form_after_discovery_finds_no_agents(tmp_path
 
     response = client.get("/")
     assert response.status_code == 200
-    assert "Create workspace" in response.text
+    assert "Where do you want to run your mind?" in response.text
     assert "git_url" in response.text
 
 
@@ -478,7 +504,9 @@ def test_create_page_shows_form(tmp_path: Path) -> None:
 
     response = client.get("/create")
     assert response.status_code == 200
-    assert "Create workspace" in response.text
+    assert "Where do you want to run your mind?" in response.text
+    assert 'data-preset="remote"' in response.text
+    assert 'data-preset="local"' in response.text
 
 
 def test_creation_status_returns_404_for_unknown_agent(tmp_path: Path) -> None:
@@ -632,6 +660,32 @@ def test_create_form_submit_passes_host_name(tmp_path: Path) -> None:
     agent_creator.wait_for_all()
 
 
+def test_create_form_submit_auto_names_next_mind(tmp_path: Path) -> None:
+    """POST /create with no host_name auto-generates the next free ``mind-N``.
+
+    The form no longer asks for a name. With ``mind-1`` already a known
+    workspace in the resolver, the create handler must gather existing names
+    across providers and resolve the new workspace to ``mind-2``.
+    """
+    existing_id = AgentId()
+    resolver = make_resolver_with_data(
+        make_agents_json(existing_id, labels={"workspace": "mind-1", "is_primary": "true"}),
+    )
+    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path, backend_resolver=resolver)
+
+    response = client.post(
+        "/create",
+        data={"git_url": "file:///nonexistent-repo"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    creation_id = CreationId(response.headers["Location"].rsplit("/", 1)[-1])
+    info = agent_creator.get_creation_info(creation_id)
+    assert info is not None
+    assert info.host_name == "mind-2"
+    agent_creator.wait_for_all()
+
+
 def test_create_agent_api_passes_host_name(tmp_path: Path) -> None:
     """POST /api/create-agent passes host_name to the creator."""
     client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
@@ -728,67 +782,6 @@ def test_create_agent_api_rejects_empty_git_url(tmp_path: Path) -> None:
     assert response.status_code == 400
 
 
-def test_create_agent_api_accepts_onboarding_fields(tmp_path: Path) -> None:
-    """POST /api/create-agent accepts the optional onboarding fields without breaking.
-
-    Only ``user_data_preference`` is sent (a local-only side effect) so the
-    background apply thread doesn't spin on ``mngr message`` / ``mngr exec``.
-    """
-    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.post(
-        "/api/create-agent",
-        json={"git_url": "file:///nonexistent-repo", "user_data_preference": "PRIVACY"},
-    )
-    assert response.status_code == 200
-    assert "agent_id" in response.get_json()
-    agent_creator.wait_for_all()
-
-
-def test_onboarding_submit_returns_404_for_unknown_creation(tmp_path: Path) -> None:
-    """POST /api/create-agent/{id}/onboarding returns 404 for an untracked creation."""
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.post(
-        "/api/create-agent/{}/onboarding".format(CreationId()),
-        json={"user_data_preference": "PRIVACY"},
-    )
-    assert response.status_code == 404
-
-
-def test_onboarding_submit_accepts_answers_for_tracked_creation(tmp_path: Path) -> None:
-    """POST /api/create-agent/{id}/onboarding accepts answers for a tracked creation."""
-    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
-
-    create_response = client.post("/api/create-agent", json={"git_url": "file:///nonexistent-repo"})
-    creation_id = create_response.get_json()["agent_id"]
-
-    # Only the data preference is submitted so the apply thread stays local.
-    response = client.post(
-        "/api/create-agent/{}/onboarding".format(creation_id),
-        json={"user_data_preference": "PRIVACY"},
-    )
-    assert response.status_code == 200
-    assert response.get_json()["status"] == "ok"
-    agent_creator.wait_for_all()
-
-
-def test_onboarding_submit_requires_authentication(tmp_path: Path) -> None:
-    """POST /api/create-agent/{id}/onboarding returns 403 without authentication."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
-    client, _ = _create_test_desktop_client(
-        tmp_path=tmp_path,
-        backend_resolver=backend_resolver,
-        http_client=None,
-    )
-
-    response = client.post(
-        "/api/create-agent/{}/onboarding".format(CreationId()),
-        json={"user_data_preference": "PRIVACY"},
-    )
-    assert response.status_code == 403
-
-
 def test_create_form_submit_rejects_invalid_host_name(tmp_path: Path) -> None:
     """POST /create with a host_name that fails HostName validation re-renders the form with an error."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
@@ -830,7 +823,11 @@ def test_create_agent_api_rejects_invalid_json(tmp_path: Path) -> None:
 
 
 def test_creating_page_shows_status(tmp_path: Path) -> None:
-    """GET /creating/{agent_id} shows the creating progress page."""
+    """GET /creating/{agent_id} shows the loading/progress page directly.
+
+    The page no longer interposes any onboarding questions before the
+    setting-up screen, so it goes straight to the loading view.
+    """
     client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
 
     agent_id = agent_creator.start_creation("file:///nonexistent-repo")
@@ -838,6 +835,10 @@ def test_creating_page_shows_status(tmp_path: Path) -> None:
     response = client.get("/creating/{}".format(agent_id))
     assert response.status_code == 200
     assert "Creating your project" in response.text
+    assert "Setting up your workspace" in response.text
+    # The onboarding question UI was removed, so none of its markers render.
+    assert "data-question" not in response.text
+    assert 'class="opt' not in response.text
     agent_creator.wait_for_all()
 
 
@@ -1169,42 +1170,45 @@ def test_create_form_does_not_show_env_file_checkbox(tmp_path: Path) -> None:
     assert "include_env_file" not in response.text
 
 
-def test_create_form_submit_rejects_imbue_cloud_compute_without_account(tmp_path: Path) -> None:
-    """Selecting IMBUE_CLOUD compute without an account is rejected with a clear message."""
+def test_create_form_submit_redirects_imbue_cloud_compute_without_account_to_signin(tmp_path: Path) -> None:
+    """IMBUE_CLOUD compute without any account routes into the sign-in/up flow.
+
+    With no signed-in account at all, the remote compute path is unusable, so
+    rather than re-rendering an error the server sends the user to sign up (with
+    a link back to the picker).
+    """
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
     response = client.post(
         "/create",
         data={
             "git_url": "file:///nonexistent-repo",
-            "host_name": "my-agent",
             "launch_mode": "IMBUE_CLOUD",
             "ai_provider": "SUBSCRIPTION",
             "account_id": "",
         },
         follow_redirects=False,
     )
-    assert response.status_code == 400
-    assert "imbue_cloud requires an account" in response.text
+    assert response.status_code == 303
+    assert response.headers["location"] == "/auth/signup?return_to=%2Fcreate"
 
 
-def test_create_form_submit_rejects_imbue_cloud_ai_without_account(tmp_path: Path) -> None:
-    """Selecting IMBUE_CLOUD AI provider without an account is rejected."""
+def test_create_form_submit_redirects_imbue_cloud_ai_without_account_to_signin(tmp_path: Path) -> None:
+    """IMBUE_CLOUD AI provider without any account routes into the sign-in/up flow."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
     response = client.post(
         "/create",
         data={
             "git_url": "file:///nonexistent-repo",
-            "host_name": "my-agent",
             "launch_mode": "DOCKER",
             "ai_provider": "IMBUE_CLOUD",
             "account_id": "",
         },
         follow_redirects=False,
     )
-    assert response.status_code == 400
-    assert "imbue_cloud requires an account" in response.text
+    assert response.status_code == 303
+    assert response.headers["location"] == "/auth/signup?return_to=%2Fcreate"
 
 
 def test_create_form_submit_rejects_api_key_provider_without_key(tmp_path: Path) -> None:
@@ -1315,14 +1319,16 @@ def test_create_form_submit_preserves_account_id_on_validation_error(tmp_path: P
     option as ``selected`` and must NOT show any other account as selected."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
-    # Trigger a validation error (IMBUE_CLOUD AI without an account).
+    # Trigger a re-rendering validation error: AI provider API_KEY with no key.
+    # (imbue_cloud-without-account now redirects to sign-in instead of
+    # re-rendering, so it no longer exercises this re-render path.)
     response = client.post(
         "/create",
         data={
             "git_url": "file:///nonexistent-repo",
-            "host_name": "my-agent",
             "launch_mode": "DOCKER",
-            "ai_provider": "IMBUE_CLOUD",
+            "ai_provider": "API_KEY",
+            "anthropic_api_key": "",
             "account_id": "",
         },
         follow_redirects=False,
@@ -1330,8 +1336,8 @@ def test_create_form_submit_preserves_account_id_on_validation_error(tmp_path: P
     assert response.status_code == 400
     # The "No account (private project)" option is selected when default_account_id is empty.
     assert 'value=""' in response.text and "No account" in response.text
-    # And the IMBUE_CLOUD warning should be present.
-    assert "imbue_cloud requires an account" in response.text
+    # And the API-key validation error should be present.
+    assert "Anthropic API key is required" in response.text
 
 
 def test_unhandled_exception_returns_500_with_message(tmp_path: Path) -> None:
@@ -1699,6 +1705,39 @@ def test_auth_login_page_without_message_query_param(tmp_path: Path) -> None:
     response = client.get("/auth/login")
     assert response.status_code == 200
     assert "You need to sign in to Imbue" not in response.text
+
+
+def test_auth_page_with_return_to_shows_back_link_and_explainer(tmp_path: Path) -> None:
+    """GET /auth/signup?return_to=/create shows a back link + the remote explainer."""
+    client = _create_test_client_with_auth_routes(tmp_path)
+    response = client.get("/auth/signup", query_string={"return_to": "/create"})
+    assert response.status_code == 200
+    # Back link to the picker.
+    assert "Back to mind setup" in response.text
+    assert 'href="/create"' in response.text
+    # Default explainer banner (no explicit message supplied).
+    assert "run your mind on Imbue Cloud" in response.text
+
+
+def test_auth_signin_modal_page_renders_overlay_with_auth_form(tmp_path: Path) -> None:
+    """GET /auth/signin-modal serves the overlay sign-in page (transparent
+    backdrop + the shared auth form) loaded into the shared modal view."""
+    client = _create_test_client_with_auth_routes(tmp_path)
+    response = client.get("/auth/signin-modal")
+    assert response.status_code == 200
+    assert 'id="signin-modal-backdrop"' in response.text
+    assert 'id="signin-form"' in response.text
+    assert "run your mind on Imbue Cloud" in response.text
+
+
+def test_auth_page_ignores_unsafe_return_to(tmp_path: Path) -> None:
+    """An off-origin return_to is dropped: no back link to it, no explainer."""
+    client = _create_test_client_with_auth_routes(tmp_path)
+    response = client.get("/auth/signup", query_string={"return_to": "https://evil.com"})
+    assert response.status_code == 200
+    assert "Back to mind setup" not in response.text
+    assert "evil.com" not in response.text
+    assert "run your mind on Imbue Cloud" not in response.text
 
 
 def test_accounts_page_requires_auth(tmp_path: Path) -> None:
