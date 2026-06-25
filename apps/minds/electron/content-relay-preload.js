@@ -50,6 +50,12 @@ window.addEventListener('message', (event) => {
     ipcRenderer.send('open-help', typeof agentId === 'string' ? agentId : '');
     return;
   }
+  // [DEBUG-ONLY -- remove before merging] Forward the manual "trigger an Electron main error" request
+  // from the debug buttons on the accounts page so we can test the main-process automatic-reporting gate.
+  if (data.type === 'minds:debug-electron-error') {
+    ipcRenderer.send('debug-electron-error', typeof data.message === 'string' ? data.message : '');
+    return;
+  }
   // Landing-page Stop button: ask the main process to show a native
   // confirmation dialog and (on confirm) issue the host stop itself.
   if (data.type === 'minds:confirm-stop-mind') {

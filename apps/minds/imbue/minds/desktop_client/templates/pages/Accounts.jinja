@@ -57,6 +57,51 @@
     });
   })();
 </script>
+{# [DEBUG-ONLY -- remove before merging] Wiring for the manual error triggers. #}
+<script>
+  (function () {
+    var status = document.getElementById('debug-error-status');
+    function setStatus(msg) { if (status) status.textContent = msg; }
+
+    // Backend: hit the temporary /_debug/boom route, which raises -> the Flask catch-all logs it
+    // at ERROR -> Sentry captures it (Python project), gated by "Report unexpected errors".
+    document.getElementById('debug-backend-error').addEventListener('click', function () {
+      setStatus('Triggering backend error...');
+      fetch('/_debug/boom', { credentials: 'same-origin' }).then(function (resp) {
+        setStatus('Backend error triggered (HTTP ' + resp.status + ' -- 500 is expected). Check the Python Sentry project.');
+      }).catch(function (e) {
+        setStatus('Backend request failed: ' + (e && e.message));
+      });
+    });
+
+    // Frontend uncaught: throw on the event loop so the browser SDK's global onerror handler captures
+    // it (JS project), exactly like a real uncaught error. window.Sentry only exists when reporting is on.
+    document.getElementById('debug-frontend-uncaught').addEventListener('click', function () {
+      setStatus(window.Sentry
+        ? 'Throwing an uncaught frontend error -- check the JS Sentry project.'
+        : 'window.Sentry is absent (reporting off) -- nothing will be sent. Turn reporting on and reload.');
+      setTimeout(function () { throw new Error('[debug] frontend uncaught ' + Date.now()); }, 0);
+    });
+
+    // Frontend explicit capture: returns the event id inline so you can search for it.
+    document.getElementById('debug-frontend-capture').addEventListener('click', function () {
+      if (!window.Sentry) {
+        setStatus('window.Sentry is absent (reporting off). Turn reporting on and reload this page.');
+        return;
+      }
+      var id = window.Sentry.captureException(new Error('[debug] frontend capture ' + Date.now()));
+      setStatus('Captured frontend event id: ' + id);
+    });
+
+    // Electron main: ask the (restricted) content-relay preload to forward to the main process, which
+    // calls captureException on its own always-initialized Sentry (JS project), gated by the same setting.
+    // No-op in browser mode (there is no Electron main process there).
+    document.getElementById('debug-electron-error').addEventListener('click', function () {
+      window.parent.postMessage({ type: 'minds:debug-electron-error', message: '[debug] electron main ' + Date.now() }, '*');
+      setStatus('Asked the Electron main process to capture an error -- check the terminal log + JS Sentry project. (No effect in browser mode.)');
+    });
+  })();
+</script>
 {% endset %}
 <Base title="Manage Accounts" scripts={{ _scripts }}>
   <PageContainer>
@@ -125,6 +170,21 @@
       <input type="checkbox" id="include-logs-toggle" class="mt-1 shrink-0"
              {% if include_error_logs %}checked{% endif %}>
     </label>
+
+    {# [DEBUG-ONLY -- remove before merging] Manual triggers for the three automatic-error reporting
+       paths, so you can flip the toggle above and confirm each layer honors it. #}
+    <h2 class="type-heading text-primary mt-8 mb-2">Debug: trigger errors</h2>
+    <p class="type-helper text-tertiary mb-3">
+      Temporary. Each fires an <em>automatic</em> error on one layer (gated by "Report unexpected errors" above).
+      Manual bug reports always send regardless; these test the gate.
+    </p>
+    <div class="flex flex-wrap gap-2">
+      <Button variant="secondary" id="debug-backend-error">Backend error</Button>
+      <Button variant="secondary" id="debug-frontend-uncaught">Frontend uncaught</Button>
+      <Button variant="secondary" id="debug-frontend-capture">Frontend captureException</Button>
+      <Button variant="secondary" id="debug-electron-error">Electron main error</Button>
+    </div>
+    <p id="debug-error-status" class="type-helper text-tertiary mt-2"></p>
 
     <div class="mt-4"><Link href="/" extra="type-helper">&larr; Back to projects</Link></div>
   </PageContainer>
