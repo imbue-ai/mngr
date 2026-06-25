@@ -382,22 +382,24 @@ def test_render_create_form_default_preset_is_remote_with_account() -> None:
 def test_render_create_form_preset_cards_use_badge_check_icons() -> None:
     # The feature checklists use the badge-check glyphs rather than a plain
     # check: the remote (Imbue Cloud) card shows the *filled* badge
-    # (``badge-check-filled`` -- the lone evenodd-knockout glyph) in the primary
-    # text color, and the local card the *unfilled* outline badge
-    # (``badge-check``) in the muted secondary color. Both render at the native
-    # 16px (``w-4``), each nudged down 2px (``mt-0.5``) to sit on the text line.
-    # Icons render to raw path data, so scope each card's region and assert on
-    # the icon-span signature plus the glyph fingerprints.
+    # (``badge-check-filled`` -- the lone evenodd-knockout glyph) in the accent
+    # (blue) color, and the local card the *unfilled* outline badge
+    # (``badge-check``) with no color class of its own, so it inherits the
+    # adjacent feature text's color. Both render at the native 16px (``w-4``),
+    # each nudged down 2px (``mt-0.5``) to sit on the text line. Icons render to
+    # raw path data, so scope each card's region and assert on the icon-span
+    # signature plus the glyph fingerprints.
     html = render_create_form()
     remote_region = html[html.index('data-preset="remote"') : html.index('data-preset="local"')]
     local_region = html[html.index('data-preset="local"') : html.index('id="advanced-view"')]
-    # Remote: primary-colored filled badge -- the only glyph with an evenodd
-    # knockout. ``shrink-0 mt-0.5`` pins the assertion to the icon span (the
-    # card heading / feature text are also text-primary).
-    assert "text-primary shrink-0 mt-0.5" in remote_region
+    # Remote: accent (blue) filled badge -- the only glyph with an evenodd
+    # knockout. ``shrink-0 mt-0.5`` pins the assertion to the icon span.
+    assert "text-accent shrink-0 mt-0.5" in remote_region
     assert 'fill-rule="evenodd"' in remote_region
-    # Local: muted (text-secondary) outline badge, with no filled-badge knockout.
-    assert "text-secondary shrink-0 mt-0.5" in local_region
+    # Local: outline badge whose span carries only layout classes (no text-*),
+    # so it inherits the feature line's color. No filled-badge knockout.
+    assert 'class="shrink-0 mt-0.5"' in local_region
+    assert "text-secondary shrink-0 mt-0.5" not in local_region
     assert "M14.0635 7.99966" in local_region
     assert 'fill-rule="evenodd"' not in local_region
     # Both badges render at the native 16px (md = w-4), not the small 14px (sm).
