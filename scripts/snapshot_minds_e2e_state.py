@@ -105,11 +105,13 @@ _DEFAULT_DEPOT_PROJECT_ID: Final[str] = "fsjzltqvxq"
 # docker provider's `depot build` resolves the binary without a runtime install.
 _DEPOT_BIN_DIR: Final[str] = "/root/.depot/bin"
 
-# Greppable marker the build job asserts on to confirm the in-sandbox FCT build
-# was wired to depot (CLI present + the docker-provider builder override set).
-# The actual proof that depot's cache is used lives in the stage-2 cache-hit
-# test (test_fct_image_rebuild_hits_depot_cache); this marker only guards
-# against the override silently not taking effect in the build job.
+# Greppable marker the build job asserts on to confirm the depot CLI verified
+# inside the sandbox before the FCT build. Emitted from this script (not from the
+# in-sandbox command) only after `depot --version` actually succeeds, so the CI
+# grep is a real signal rather than matching a command preview. The actual proof
+# that depot's cache is used lives in the stage-2 cache-hit test
+# (test_fct_image_rebuild_hits_depot_cache); this marker only guards against the
+# depot CLI silently being absent in the build job.
 _DEPOT_ENABLED_MARKER: Final[str] = "DEPOT_BUILDER_ENABLED_FOR_FCT_BUILD"
 
 # In-sandbox entrypoint that invokes the shared e2e workspace runner the
@@ -475,12 +477,13 @@ def _verify_depot_cli_in_sandbox(sandbox: modal.Sandbox) -> None:
     """Confirm the depot CLI resolves on PATH inside the sandbox before building.
 
     Fails loudly (rather than silently falling back to a local docker build)
-    if the depot binary baked into the image is missing or unrunnable, and
-    prints the greppable enabled-marker the build job asserts on.
+    if the depot binary baked into the image is missing or unrunnable. Emits the
+    greppable enabled-marker the build job asserts on -- but only after the CLI
+    has actually verified, so the marker cannot leak from a command preview.
     """
     verify_rc = _exec_in_sandbox(
         sandbox,
-        f"depot --version && echo {shlex.quote(_DEPOT_ENABLED_MARKER)}",
+        "depot --version",
         description="verify depot CLI is available",
         timeout_seconds=60,
     )
@@ -490,6 +493,9 @@ def _verify_depot_cli_in_sandbox(sandbox: modal.Sandbox) -> None:
             "so the FCT build would silently fall back to a local docker build. "
             f"Expected the binary baked into the image at {_DEPOT_BIN_DIR}."
         )
+    # Emit the marker from the script (not the in-sandbox command) so it lands in
+    # the CI build log if and only if the verification above succeeded.
+    print(_DEPOT_ENABLED_MARKER, flush=True)
 
 
 def _create_workspace_in_sandbox(sandbox: modal.Sandbox) -> None:
