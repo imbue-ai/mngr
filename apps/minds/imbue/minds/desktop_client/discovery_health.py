@@ -28,7 +28,7 @@ fed from a background loop and the consumer's lifecycle watcher respectively:
   supervisor restart -- fixes a wedged supervisor) on a capped exponential
   backoff. It **never gives up**: a stall keeps the app in ``RECONNECTING`` and
   keeps retrying forever (a failed ``restart`` is just another "did not help").
-  Backoff-with-liveness-gating is deliberate: ``restart`` re-provisions every
+  The backoff is deliberate: ``restart`` re-provisions every
   managed host, so blindly hammering a merely-slow producer would make things
   worse.
 - *Consumer death* -- the consumer subprocess exited. Producer remediation
@@ -168,7 +168,7 @@ class DiscoveryHealthWatchdog(MutableModel):
     surfaces the ``BLOCKED`` transition.
     """
 
-    remediator: ProducerRemediator = Field(description="Producer-side bounce/restart remediations + liveness probe.")
+    remediator: ProducerRemediator = Field(description="Producer-side bounce/restart remediations.")
     stall_threshold_seconds: float = Field(
         default=_DEFAULT_STALL_THRESHOLD_SECONDS,
         description="Seconds since the last discovery event before the producer is treated as stalled.",

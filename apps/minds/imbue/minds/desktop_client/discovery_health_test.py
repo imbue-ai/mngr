@@ -2,7 +2,7 @@
 
 The watchdog is driven with a fake clock (so the backoff waits and the stall
 threshold are deterministic) and a fake producer remediator (so the
-bounce/restart remediations and the liveness probe can be asserted without a
+bounce/restart remediations can be asserted without a
 real supervisor). The background loop that calls ``evaluate`` in production is
 exercised separately; here we call ``evaluate`` / ``record_consumer_death``
 directly.
