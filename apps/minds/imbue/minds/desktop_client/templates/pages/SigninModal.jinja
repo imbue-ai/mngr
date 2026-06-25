@@ -55,7 +55,7 @@
       body_style="-webkit-app-region: no-drag;"
       scripts={{ _scripts }}>
   <div id="signin-modal-backdrop" class="fixed inset-0 flex items-center justify-center bg-surface-overlay p-4">
-    <div class="relative bg-surface-primary rounded-lg shadow-overlay border border-default max-w-sm w-full p-6 text-left">
+    <div class="relative bg-surface-primary rounded-lg shadow-overlay max-w-md w-full p-8 text-left">
       <DialogCloseButton onclick="dismissSigninModal()" />
       <auth.AuthForm :default_to_signup="True" :intro="intro" />
     </div>
