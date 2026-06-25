@@ -40,11 +40,15 @@ from traceback_with_variables import Format
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.bootstrap import env_name_from_root_name
+from imbue.minds.bootstrap import is_minds_root_name_set_to_active_env
+from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.utils.sentry.loguru_handler import SENTRY_LOG_FORMAT
 from imbue.minds.utils.sentry.loguru_handler import SentryBreadcrumbHandler
 from imbue.minds.utils.sentry.loguru_handler import SentryEventHandler
 from imbue.minds.utils.sentry.loguru_handler import SentryLoguruLoggingLevels
 from imbue.minds.utils.sentry.loguru_handler import log_error_inside_sentry
+from imbue.minds.utils.sentry.loguru_handler import should_record_sentry_event
 from imbue.minds.utils.sentry.s3_uploader import EXTRAS_UPLOADED_FILES_KEY
 from imbue.minds.utils.sentry.s3_uploader import get_s3_upload_key
 from imbue.minds.utils.sentry.s3_uploader import get_s3_upload_url
@@ -111,6 +115,35 @@ _SENTRY_DSN_BY_ENVIRONMENT: Mapping["SentryDeployEnvironment", str] = {
     SentryDeployEnvironment.STAGING: SENTRY_DSN_STAGING,
     SentryDeployEnvironment.DEVELOPMENT: SENTRY_DSN_DEV,
 }
+
+
+# Sentry (backend *and* frontend) is off by default and only turned on when this
+# env var is truthy. The Electron launcher / operator opts in explicitly; until
+# then nothing is sent to Sentry from either the Python backend or the web UI.
+MINDS_SENTRY_ENABLED_ENV_VAR = "MINDS_SENTRY_ENABLED"
+_SENTRY_ENABLED_TRUTHY_VALUES = ("1", "true", "yes")
+
+
+def is_sentry_enabled() -> bool:
+    """Whether error reporting is opted in via ``MINDS_SENTRY_ENABLED``.
+
+    Shared by the Python backend (``minds run``) and the web-UI frontend config
+    so both honor the same single opt-in switch.
+    """
+    return os.environ.get(MINDS_SENTRY_ENABLED_ENV_VAR, "").strip().lower() in _SENTRY_ENABLED_TRUTHY_VALUES
+
+
+def resolve_sentry_environment() -> "SentryDeployEnvironment":
+    """Select the Sentry environment from the activated minds env in the process env.
+
+    ``production``/``staging`` map to their own targets; everything else (dev-*,
+    ci-*, or no activated env) falls back to ``development``. Shared by the
+    backend and the frontend so both report under the same environment.
+    """
+    activated_env_name = (
+        env_name_from_root_name(resolve_minds_root_name()) if is_minds_root_name_set_to_active_env() else None
+    )
+    return SentryDeployEnvironment.from_minds_env_name(activated_env_name)
 
 
 class SentryEventRejected(Exception):
@@ -471,21 +504,20 @@ def _before_send_wrapper(
             result = maybe_event
         return result
     except Exception as e:
-        # It is critical that we catch errors here and print them, because this is called from sentry
-        # Failing to do so means that we will see NOTHING about the failure!
-        # See this PR for more: https://gitlab.com/generally-intelligent/generally_intelligent/-/merge_requests/5789
+        # It is critical that we catch errors here, because this runs inside Sentry's before_send hook.
+        # Failing to report the failure means we would see NOTHING about it.
+        # See this PR for the original motivation: https://gitlab.com/generally-intelligent/generally_intelligent/-/merge_requests/5789
         #
-        # Questions to the above:
-        # - why are we not relying on the Sentry's logger for this?
-        # - won't the call to `logger.exception` itself try to send something to Sentry causing recursion?
-        # - the following message will likely hit an error inside Loguru handler because it is not allowed
-        #   to call emit from inside emit (that's what we're in here).
-        logger.opt(exception=e).error("Failure when processing event in before_send hook: {}", e)
+        # ``log_error_inside_sentry`` both records the failure in the local app log (so it is never lost)
+        # and reports it to Sentry via a minimal event on a cleared scope. It is non-reentrant, so even
+        # though reporting re-runs this same before_send chain, a deterministic before_send failure cannot
+        # recurse: the nested report is dropped.
+        log_error_inside_sentry(e, "Failure when processing event in before_send hook")
         # NOTE: this re-raise will get suppressed by Sentry and treated as if `before_send` returned `None`
         raise
 
 
-def _fixup_release_id(release_id: str) -> str:
+def fixup_release_id(release_id: str) -> str:
     """
     For pre-release release candidate versions, Sentry requires the release ID to be in the semver format.
 
@@ -556,7 +588,7 @@ def setup_sentry(
         max_value_length=10_000,
         add_full_stack=True,
         before_send=before_send,
-        release=_fixup_release_id(release_id),
+        release=fixup_release_id(release_id),
         # default is 100; can't make it too large because total event size must be <1MB
         max_breadcrumbs=100,
         # if the locals is very large, sentry gets to be quite slow to log errors if this is enabled.
@@ -596,6 +628,9 @@ def setup_sentry(
         level=min_sentry_level,
         diagnose=False,
         format=SENTRY_LOG_FORMAT,
+        # records explicitly marked to skip Sentry (e.g. the local app-log line emitted by
+        # log_error_inside_sentry) must reach the file sinks but never become Sentry events themselves.
+        filter=should_record_sentry_event,
     )
     # capture lower level loguru messages to add as breadcrumbs on events
     # the extra info is not helpful here and makes the breadcrumbs larger; they're still available in the log file attachment

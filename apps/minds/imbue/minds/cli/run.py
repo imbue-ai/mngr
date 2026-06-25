@@ -33,8 +33,6 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.minds.bootstrap import env_name_from_root_name
-from imbue.minds.bootstrap import is_minds_root_name_set_to_active_env
 from imbue.minds.bootstrap import minds_data_dir_for
 from imbue.minds.bootstrap import reconcile_imbue_cloud_providers_from_sessions
 from imbue.minds.bootstrap import resolve_minds_root_name
@@ -48,9 +46,12 @@ from imbue.minds.config.loader import load_client_config
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.api_key_store import generate_api_key
 from imbue.minds.desktop_client.app import create_desktop_client
+from imbue.minds.desktop_client.app import start_discovery_health_watchdog_loop
 from imbue.minds.desktop_client.app import start_system_interface_health_probe_loop
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
+from imbue.minds.desktop_client.discovery_health import SupervisorProducerRemediator
 from imbue.minds.desktop_client.forward_cli import ForwardSubprocessConfig
 from imbue.minds.desktop_client.forward_cli import start_mngr_forward
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
@@ -80,7 +81,8 @@ from imbue.minds.primitives import OutputFormat
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.output import emit_event
-from imbue.minds.utils.sentry.core import SentryDeployEnvironment
+from imbue.minds.utils.sentry.core import is_sentry_enabled
+from imbue.minds.utils.sentry.core import resolve_sentry_environment
 from imbue.minds.utils.sentry.core import setup_sentry
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -194,15 +196,14 @@ def run(
     # The release id (desktop app version) and git sha come from the Electron
     # launcher via env vars, falling back to the in-repo package.json / "unknown"
     # for bare source runs (see imbue.minds.build_info).
-    if os.environ.get("MINDS_SENTRY_ENABLED", "").strip().lower() in ("1", "true", "yes"):
-        activated_env_name = env_name_from_root_name(root_name) if is_minds_root_name_set_to_active_env() else None
+    if is_sentry_enabled():
         is_sentry_s3_upload_enabled = os.environ.get("MINDS_SENTRY_S3_UPLOADS", "").strip().lower() in (
             "1",
             "true",
             "yes",
         )
         setup_sentry(
-            environment=SentryDeployEnvironment.from_minds_env_name(activated_env_name),
+            environment=resolve_sentry_environment(),
             release_id=resolve_release_id(),
             git_commit_sha=resolve_git_sha(),
             log_folder=paths.log_dir,
@@ -268,6 +269,15 @@ def run(
         mngr_binary=MNGR_BINARY,
         latchkey_binary=latchkey.latchkey_binary,
         latchkey_directory=latchkey.latchkey_directory,
+        # Spawn the detached supervisor (and its `mngr observe` discovery
+        # producer grandchild) from $HOME, like every other laptop-side mngr
+        # invocation -- notably the `mngr forward` consumer below. Without this
+        # it inherits minds' cwd, which in a dev checkout is the monorepo root:
+        # its mngr children then load `<repo>/.mngr/settings.toml`, and under
+        # the e2e test that trips mngr's pytest config guard so the supervisor
+        # never starts. A dead producer means no discovery snapshots, which the
+        # discovery-health watchdog escalates to a terminal BLOCKED takeover.
+        cwd=Path.home(),
         extra_env={
             MINDS_API_PROXY_URL_ENV_VAR: f"http://127.0.0.1:{port}",
             MINDS_API_PROXY_KEY_ENV_VAR: minds_api_key,
@@ -346,8 +356,18 @@ def run(
     consumer, preauth_cookie = start_mngr_forward(
         config=forward_config,
         resolver=backend_resolver,
-        notification_dispatcher=notification_dispatcher,
     )
+
+    # App-global discovery-pipeline health watchdog. Detects a stalled pipeline
+    # (a producer stall via the resolver's snapshot-freshness age; a consumer
+    # death via the lifecycle watcher) and self-heals by re-kicking the producer
+    # (supervisor bounce -> restart) before surfacing a terminal app-global
+    # BLOCKED screen. The consumer-death callback is wired before
+    # ``consumer.start()`` so an early exit is caught.
+    discovery_health_watchdog = DiscoveryHealthWatchdog(
+        remediator=SupervisorProducerRemediator(supervisor=latchkey_forward_supervisor),
+    )
+    consumer.add_on_unexpected_exit_callback(lambda _exit_code: discovery_health_watchdog.record_consumer_death())
 
     # System-interface health tracker: feeds on backend failures observed by
     # the plugin (registered as a callback below) and on the readiness-probe
@@ -455,6 +475,17 @@ def run(
         mngr_host_dir=mngr_host_dir,
         minds_api_key=minds_api_key,
         latchkey_forward_supervisor=latchkey_forward_supervisor,
+        discovery_health_watchdog=discovery_health_watchdog,
+    )
+
+    # Background loop driving the discovery-pipeline watchdog: polls snapshot
+    # freshness, runs the producer bounce -> restart remediations on a stall, and
+    # transitions the app-global state. Started here (not inside
+    # create_desktop_client) so test factories can skip the background thread.
+    start_discovery_health_watchdog_loop(
+        watchdog=discovery_health_watchdog,
+        backend_resolver=backend_resolver,
+        root_concurrency_group=root_concurrency_group,
     )
 
     # Background probe loop: flips STUCK/RESTARTING agents back to HEALTHY

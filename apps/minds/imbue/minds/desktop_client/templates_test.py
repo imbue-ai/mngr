@@ -691,27 +691,21 @@ def test_render_recovery_page_script_branches_on_dispatch_tier() -> None:
     )
     assert "dispatch_tier" in html
     for tier in (
-        "'workspace_misconfigured'",
         "'host_offline'",
         "'interface_unresponsive'",
         "'host_unresponsive'",
-        "'provider_unavailable'",
-        "'workspace_unreachable'",
+        "'backend_unreachable'",
     ):
         assert tier in html, f"recovery page JS missing branch for {tier}"
     # The shared landing places for each branch.
-    assert "renderMisconfigured" in html
     assert "renderUnresponsive" in html
-    assert "renderProviderUnavailable" in html
-    assert "renderWorkspaceUnreachable" in html
-    assert "Workspace misconfigured" in html
-    assert "Try restart anyway" in html
+    assert "renderBackendUnreachable" in html
 
 
-def test_render_recovery_page_provider_unavailable_offers_retry_not_restart() -> None:
-    """The provider-unavailable state must surface a Retry affordance and a backed-off
-    background poll, and must NOT auto-dispatch or offer a host restart (a restart routes
-    through the unreachable backend, so it cannot help).
+def test_render_recovery_page_backend_unreachable_offers_retry_not_restart() -> None:
+    """The backend-unreachable state must surface a Retry affordance and a background
+    healthy-poll (auto-return on recovery), and must NOT auto-dispatch or offer a host
+    restart (a restart routes through the unreachable backend, so it cannot help).
     """
     html = render_recovery_page(
         agent_id=_AGENT_A,
@@ -720,15 +714,32 @@ def test_render_recovery_page_provider_unavailable_offers_retry_not_restart() ->
         initial_error="",
     )
     assert 'id="recovery-retry-btn"' in html
-    # The provider branch renders the page and starts the backed-off poll; it
+    # The backend render shows the Retry and the "Can't connect to" copy; it
     # must not fall through to a restart dispatch.
-    provider_start = html.find("function renderProviderUnavailable")
+    provider_start = html.find("function renderBackendUnreachable")
     assert provider_start >= 0
     provider_end = html.find("function ", provider_start + 1)
     provider_block = html[provider_start:provider_end]
-    assert "scheduleProviderPoll" in provider_block
     assert "Can't connect to" in provider_block
+    assert "show(retryBtn, true)" in provider_block
     assert "postRestart" not in provider_block
+    # The copy must be provider-agnostic: a local docker daemon is independent of
+    # the network, so the old "check your internet connection" line is wrong here
+    # and must not return.
+    assert "internet connection" not in provider_block.lower()
+    # Instead of a hand-authored per-provider message, the verbatim provider
+    # error rides along on the response (``unreachable_reason``) and is surfaced.
+    assert "unreachable_reason" in provider_block
+    assert "providerReasonEl.textContent = reason" in provider_block
+    # Diagnostics are suppressed on this tier (the cause is the external backend,
+    # shown verbatim, not anything the in-container probes inspect).
+    assert "show(debugDetailsEl, false)" in provider_block
+    # The backend_unreachable branch arms the healthy-poll (auto-return when the
+    # backend recovers) and returns before any restart dispatch.
+    apply_start = html.find("function applyHealth(")
+    apply_block = html[apply_start : html.find("function ", apply_start + 1)]
+    assert apply_block.find("'backend_unreachable'") < apply_block.find("postRestart")
+    assert "scheduleHealthyPoll()" in apply_block
 
 
 def test_render_recovery_page_loading_hides_diagnostic_dropdown() -> None:
@@ -769,33 +780,6 @@ def test_render_recovery_page_restart_failed_also_runs_probe() -> None:
     # The error-details DOM hook is rendered alongside the diagnostic.
     assert 'id="recovery-error"' in html
     assert 'id="recovery-debug-details"' in html
-
-
-def test_render_recovery_page_honors_misconfigured_before_autodispatch_short_circuit() -> None:
-    """The workspace_misconfigured tier must be honored on the restart_failed path.
-
-    A workspace whose services.toml lacks [services.system_interface] lands in
-    restart_failed once its undeclared interface fails to come back up, so the
-    page runs runProbe(false). If the no-auto-dispatch short-circuit
-    (``if (!autoDispatch) renderUnresponsive()``) ran before the
-    workspace_misconfigured check, that workspace would render a misleading
-    "unresponsive" page even though no restart can recover it. Assert the
-    misconfigured branch precedes the short-circuit inside runProbe so the
-    restart_failed path still reaches renderMisconfigured().
-    """
-    html = render_recovery_page(
-        agent_id=_AGENT_A,
-        return_to="",
-        initial_status="restart_failed",
-        initial_error="boom",
-    )
-    probe_body = html[html.index("function runProbe(") :]
-    misconfigured_pos = probe_body.index("'workspace_misconfigured'")
-    short_circuit_pos = probe_body.index("if (!autoDispatch)")
-    assert misconfigured_pos < short_circuit_pos, (
-        "the workspace_misconfigured branch must precede the !autoDispatch short-circuit "
-        "so a misconfigured workspace on the restart_failed path renders misconfigured"
-    )
 
 
 def test_render_recovery_page_promotes_button_above_troubleshooting() -> None:
@@ -1814,3 +1798,38 @@ def test_badge_class_and_id_pass_through() -> None:
     assert 'id="requests-badge"' in html
     assert "hidden" in html
     assert "absolute" in html
+
+
+def test_base_omits_sentry_bootstrap_when_frontend_reporting_is_off() -> None:
+    # Default shipped state (reporting disabled / placeholder DSNs): no page may
+    # pull in the Sentry browser bundle or its init.
+    html = render_login_page()
+    assert "sentry.browser.min.js" not in html
+    assert "sentry_init.js" not in html
+    assert "minds-sentry-config" not in html
+
+
+def test_base_emits_sentry_bootstrap_when_frontend_reporting_is_on() -> None:
+    # Rendered through a freshly built catalog whose Sentry global is overridden
+    # to return a payload. A fresh catalog is used (rather than mutating the
+    # shared CATALOG global) because reassigning a Jinja env global mid-process
+    # interacts with Jinja's template cache; in production the global never
+    # changes, so this is purely a test concern.
+    payload = {
+        "dsn": "https://key@o1.ingest.us.sentry.io/2",
+        "environment": "staging",
+        "release": "0.3.2",
+        "git_sha": "abc1234",
+    }
+    catalog = _templates_module._build_catalog()
+    # ty narrows the Jinja globals dict to a union of the seeded value types,
+    # which excludes an arbitrary ``() -> dict`` test stub; the assignment is
+    # fine at runtime (Jinja globals are untyped string-keyed values).
+    catalog.jinja_env.globals["frontend_sentry_browser_payload"] = lambda: payload  # ty: ignore[invalid-assignment]
+    html = catalog.render("pages.Login")
+    # Bundle + init load before the page's own scripts; config is passed as JSON.
+    assert '<script src="/_static/sentry.browser.min.js"></script>' in html
+    assert '<script src="/_static/sentry_init.js"></script>' in html
+    assert '<script type="application/json" id="minds-sentry-config">' in html
+    assert '"environment": "staging"' in html
+    assert '"dsn": "https://key@o1.ingest.us.sentry.io/2"' in html

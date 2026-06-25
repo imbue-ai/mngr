@@ -21,6 +21,9 @@ import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 
+from pydantic import SecretStr
+
+from imbue.mngr_latchkey.encryption_key import inject_encryption_key_into_env
 from imbue.mngr_latchkey.store import forward_events_log_path
 from imbue.mngr_latchkey.store import plugin_data_dir as _plugin_data_dir
 
@@ -29,6 +32,7 @@ def spawn_detached_latchkey_ensure_browser(
     latchkey_binary: str,
     log_path: Path,
     latchkey_directory: Path | None = None,
+    encryption_key: SecretStr | None = None,
 ) -> int:
     """Start a detached ``latchkey ensure-browser`` and return its PID.
 
@@ -44,12 +48,21 @@ def spawn_detached_latchkey_ensure_browser(
     is supplied, ``LATCHKEY_DIRECTORY`` is set in the child's environment so
     the browser configuration lands in the shared minds-managed directory
     instead of falling back to ``~/.latchkey``.
+
+    ``encryption_key`` is injected as ``LATCHKEY_ENCRYPTION_KEY`` so the
+    detached child never falls through to Latchkey's startup key-resolution
+    against the system keychain. Latchkey resolves (and migrates) its
+    encryption key on every non-gateway CLI invocation -- including
+    ``ensure-browser``, which does not otherwise touch credentials -- so
+    without this var set, macOS would pop a keychain access dialog on every
+    spawn.
     """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     if latchkey_directory is not None:
         latchkey_directory.mkdir(parents=True, exist_ok=True)
         env["LATCHKEY_DIRECTORY"] = str(latchkey_directory)
+    inject_encryption_key_into_env(env, encryption_key)
 
     log_file = log_path.open("ab")
     try:
@@ -73,6 +86,7 @@ def spawn_detached_mngr_latchkey_forward(
     latchkey_directory: Path,
     log_path: Path,
     extra_env: Mapping[str, str] | None = None,
+    cwd: Path | None = None,
 ) -> int:
     """Start a detached ``mngr latchkey forward`` and return its PID.
 
@@ -83,6 +97,13 @@ def spawn_detached_mngr_latchkey_forward(
     are passed explicitly so the subprocess uses the exact same latchkey
     state the caller knows about, regardless of any env / settings.toml
     state the inherited environment carries.
+
+    ``cwd`` sets the spawned process's working directory. Callers that want
+    the supervisor to behave like a laptop-side ``mngr`` invocation (the minds
+    desktop client) pass ``$HOME`` so it does not resolve project config from a
+    transient cwd -- e.g. a dev checkout whose ``.mngr/settings.toml`` would
+    otherwise be loaded (and, under a pytest run, rejected by mngr's config
+    guard). ``None`` inherits the caller's cwd.
 
     ``extra_env`` lets callers add (or override) environment variables
     for the spawned process; these flow into the ``latchkey gateway``
@@ -142,6 +163,7 @@ def spawn_detached_mngr_latchkey_forward(
             stdout=log_file,
             stderr=log_file,
             env=env,
+            cwd=str(cwd) if cwd is not None else None,
             start_new_session=True,
             close_fds=True,
         )

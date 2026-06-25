@@ -1,13 +1,27 @@
 from pathlib import Path
 
 import pytest
+import sentry_sdk
+from loguru import logger
+from sentry_sdk import Client
+from sentry_sdk import isolation_scope
+from sentry_sdk.envelope import Envelope
+from sentry_sdk.transport import Transport
+from sentry_sdk.types import Event
+from sentry_sdk.types import Hint
 
+from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.utils.sentry.core import ErrorAttachmentsS3Uploader
+from imbue.minds.utils.sentry.core import MINDS_SENTRY_ENABLED_ENV_VAR
 from imbue.minds.utils.sentry.core import SENTRY_DSN_DEV
 from imbue.minds.utils.sentry.core import SENTRY_DSN_PRODUCTION
 from imbue.minds.utils.sentry.core import SENTRY_DSN_STAGING
 from imbue.minds.utils.sentry.core import SentryDeployEnvironment
 from imbue.minds.utils.sentry.core import _SENTRY_DSN_BY_ENVIRONMENT
+from imbue.minds.utils.sentry.core import _before_send_wrapper
+from imbue.minds.utils.sentry.core import is_sentry_enabled
+from imbue.minds.utils.sentry.core import resolve_sentry_environment
+from imbue.minds.utils.sentry.loguru_handler import should_record_sentry_event
 
 
 def test_from_minds_env_name_maps_production_and_staging() -> None:
@@ -18,6 +32,43 @@ def test_from_minds_env_name_maps_production_and_staging() -> None:
 @pytest.mark.parametrize("env_name", ["dev-josh-1", "ci-ephemeral", "", "Production", "STAGING", None])
 def test_from_minds_env_name_defaults_to_development(env_name: str | None) -> None:
     assert SentryDeployEnvironment.from_minds_env_name(env_name) is SentryDeployEnvironment.DEVELOPMENT
+
+
+@pytest.mark.parametrize("raw_value", ["1", "true", "TRUE", "yes", " Yes "])
+def test_is_sentry_enabled_accepts_truthy_values(monkeypatch: pytest.MonkeyPatch, raw_value: str) -> None:
+    monkeypatch.setenv(MINDS_SENTRY_ENABLED_ENV_VAR, raw_value)
+    assert is_sentry_enabled() is True
+
+
+@pytest.mark.parametrize("raw_value", ["0", "false", "no", ""])
+def test_is_sentry_enabled_rejects_other_values(monkeypatch: pytest.MonkeyPatch, raw_value: str) -> None:
+    monkeypatch.setenv(MINDS_SENTRY_ENABLED_ENV_VAR, raw_value)
+    assert is_sentry_enabled() is False
+
+
+def test_is_sentry_enabled_defaults_to_false_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(MINDS_SENTRY_ENABLED_ENV_VAR, raising=False)
+    assert is_sentry_enabled() is False
+
+
+@pytest.mark.parametrize(
+    ("root_name", "expected"),
+    [
+        ("minds", SentryDeployEnvironment.PRODUCTION),
+        ("minds-staging", SentryDeployEnvironment.STAGING),
+        ("minds-dev-someone", SentryDeployEnvironment.DEVELOPMENT),
+    ],
+)
+def test_resolve_sentry_environment_follows_root_name(
+    monkeypatch: pytest.MonkeyPatch, root_name: str, expected: SentryDeployEnvironment
+) -> None:
+    monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, root_name)
+    assert resolve_sentry_environment() is expected
+
+
+def test_resolve_sentry_environment_defaults_to_development_when_unactivated(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(MINDS_ROOT_NAME_ENV_VAR, raising=False)
+    assert resolve_sentry_environment() is SentryDeployEnvironment.DEVELOPMENT
 
 
 def test_dsn_map_pairs_each_environment_with_a_distinct_dsn() -> None:
@@ -50,6 +101,71 @@ def test_collect_external_attachments_classifies_flat_minds_log_layout(tmp_path:
     assert len(groups["electron_logs"]) == 1
     # one callback per upload: traceback + the three log files.
     assert len(callbacks) == 4
+
+
+def test_before_send_wrapper_logs_failure_locally_without_recursing_into_sentry() -> None:
+    # When a before_send callback raises, the wrapper must surface the failure in the local app log
+    # but must NOT let that log line become another Sentry event (which would re-enter this same
+    # hook and recurse). The SentryEventHandler is modeled here by a sink guarded by the real filter.
+    local_messages: list[str] = []
+    sentry_messages: list[str] = []
+
+    def boom(event: Event, hint: Hint) -> Event:
+        raise ValueError("before_send boom")
+
+    local_sink_id = logger.add(lambda message: local_messages.append(message.record["message"]), level=0)
+    sentry_sink_id = logger.add(
+        lambda message: sentry_messages.append(message.record["message"]),
+        level=0,
+        filter=should_record_sentry_event,
+    )
+    try:
+        with pytest.raises(ValueError, match="before_send boom"):
+            _before_send_wrapper({}, {}, [boom])
+        # a normal error (no skip marker) must still flow to the Sentry-event sink: the filter only
+        # suppresses records explicitly marked with _SKIP_SENTRY_EVENT_EXTRA_KEY.
+        logger.error("ordinary error that should reach sentry")
+    finally:
+        logger.remove(local_sink_id)
+        logger.remove(sentry_sink_id)
+
+    assert any("before_send hook" in message for message in local_messages)
+    assert not any("before_send hook" in message for message in sentry_messages)
+    assert any("ordinary error" in message for message in sentry_messages)
+
+
+def test_before_send_failure_reporting_does_not_recurse() -> None:
+    # Reporting a before_send failure goes through capture_event, which re-runs the before_send chain.
+    # A deterministically broken callback would otherwise recurse forever. The reentrancy guard must
+    # bound this: the callback runs once for the original event and once for the minimal report event,
+    # but the guard prevents the report from triggering yet another report.
+    call_count = 0
+
+    def always_broken(event: Event, hint: Hint) -> Event:
+        nonlocal call_count
+        call_count += 1
+        raise ValueError("always broken before_send")
+
+    class _NoOpTransport(Transport):
+        def capture_envelope(self, envelope: Envelope) -> None:
+            pass
+
+    def before_send(event: Event, hint: Hint) -> Event | None:
+        return _before_send_wrapper(event, hint, [always_broken])
+
+    client = Client(
+        dsn="https://public@example.com/1",
+        before_send=before_send,
+        transport=_NoOpTransport(),
+        default_integrations=False,
+        auto_enabling_integrations=False,
+    )
+    with isolation_scope() as scope:
+        scope.set_client(client)
+        # must terminate (no RecursionError) thanks to the guard.
+        sentry_sdk.capture_event({"message": "trigger"})
+
+    assert call_count == 2
 
 
 def test_collect_external_attachments_without_logs_folder_only_uploads_traceback() -> None:

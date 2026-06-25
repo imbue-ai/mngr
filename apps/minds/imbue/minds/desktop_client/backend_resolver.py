@@ -33,8 +33,8 @@ from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 SERVICES_EVENT_SOURCE_NAME: Final[str] = "services"
 REQUESTS_EVENT_SOURCE_NAME: Final[str] = "requests"
 
-# Every minds workspace runs a constant-named ``main``-type agent that owns
-# the bootstrap service manager (and thus the system interface). This is the
+# Every minds workspace runs a constant-named ``main``-type agent whose
+# bootstrap execs supervisord (and thus owns the system interface). This is the
 # canonical definition of that name; ``agent_creator._DEFAULT_AGENT_NAME``
 # is the ``AgentName``-typed form built from it.
 SYSTEM_SERVICES_AGENT_NAME: Final[str] = "system-services"
@@ -201,6 +201,17 @@ class BackendResolverInterface(MutableModel, ABC):
         unverified workspace stale when its provider's last poll errored.
         """
         return {}
+
+    def get_freshness_timestamps(self) -> tuple[datetime | None, datetime | None]:
+        """Return ``(last_event_at, last_full_snapshot_at)`` from discovery.
+
+        Default implementation returns ``(None, None)`` (resolvers without
+        discovery have no freshness to report); ``MngrCliBackendResolver``
+        overrides it. ``None`` for the last full snapshot means discovery has
+        not (recently) confirmed state, so callers that gate on freshness treat
+        it as stale.
+        """
+        return None, None
 
 
 class StaticBackendResolver(BackendResolverInterface):

@@ -76,9 +76,12 @@ flow specifically:
 
 The **pooled** Neon connection string:
 
+Each key is its own single-`value` leaf (see `vault-setup.md` for the split
+layout):
+
 ```bash
-vault kv put -mount=secrets minds/production/neon \
-    DATABASE_URL=postgresql://user:pass@host-pooler.neon.tech/db?sslmode=require
+vault kv put -mount=secrets minds/production/neon/DATABASE_URL \
+    value=postgresql://user:pass@host-pooler.neon.tech/db?sslmode=require
 ```
 
 ### secrets/minds/production/pool-ssh
@@ -86,8 +89,8 @@ vault kv put -mount=secrets minds/production/neon \
 The management private key:
 
 ```bash
-vault kv put -mount=secrets minds/production/pool-ssh \
-    POOL_SSH_PRIVATE_KEY=@.minds/production/pool_management_key/id_ed25519
+vault kv put -mount=secrets minds/production/pool-ssh/POOL_SSH_PRIVATE_KEY \
+    value=@.minds/production/pool_management_key/id_ed25519
 ```
 
 (`@<path>` tells `vault kv put` to read the value from the file -- the
@@ -148,9 +151,16 @@ box must be `ready` and have a free slot):
 # Order / register / prep a bare-metal box; see `--help` on each subcommand.
 uv run mngr imbue_cloud admin server order   ...   # order a box from the supplier
 uv run mngr imbue_cloud admin server register ...  # record it in bare_metal_servers
-uv run mngr imbue_cloud admin server prep    ...   # make it `ready` for slices
+uv run mngr imbue_cloud admin server setup --server-id <id>   # reinstall (injects our host key) + prep -> `ready`
 uv run mngr imbue_cloud admin server list          # find the ready box's id
 ```
+
+`server prep --server-id <id>` re-runs just the prep step (qemu/lima/tooling +
+image staging). It SSHes the box with strict host-key pinning, so the box's sshd
+host key must already be recorded on its `bare_metal_servers` row -- which
+`server setup` does at OS reinstall, or `admin pool backfill-host-keys` captures
+once for a box installed out of band. `prep` fails closed (no trust-on-first-use)
+if no host key is recorded.
 
 Then bake slices onto a chosen box, after activating the tier:
 
@@ -164,11 +174,11 @@ The `just bake-slice-{dev,prod}` recipes wrap `minds pool create --backend slice
 activated tier:
 
 - reads the pool SSH private key from the tier's
-  `secrets/minds/<tier>/pool-ssh.POOL_SSH_PRIVATE_KEY` Vault entry -- the same
+  `secrets/minds/<tier>/pool-ssh/POOL_SSH_PRIVATE_KEY` Vault leaf -- the same
   key the connector loads at lease time, so bake-time and lease-time SSH always
   match (you never generate or pass a key by hand);
 - for staging / production, reads the host_pool DSN from
-  `secrets/minds/<tier>/neon.DATABASE_URL` (those tiers keep no local
+  `secrets/minds/<tier>/neon/DATABASE_URL` (those tiers keep no local
   secrets.toml); dev / ci envs auto-resolve it from their per-env secrets.toml.
 
 The `region` argument is the lease-region **label** stamped on each row (what the
