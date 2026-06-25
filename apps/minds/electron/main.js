@@ -2627,8 +2627,8 @@ async function startBackendWithRetry() {
         : [];
       // (A workspace that no longer exists needs no special accent handling
       // here: ``filterRestorableUrls`` drops windows whose saved URL points at a
-      // destroyed workspace once discovery is complete, and the accent is
-      // re-derived from whatever URL each restored window actually reopens to.)
+      // workspace absent from the known set, and the accent is re-derived from
+      // whatever URL each restored window actually reopens to.)
 
       initialBundle.isLoadingState = false;
       updateBundleBounds(initialBundle);
