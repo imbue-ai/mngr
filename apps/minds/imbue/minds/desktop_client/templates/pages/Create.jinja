@@ -248,7 +248,9 @@
       //    modal (handled in the submit listener).
       var requiresAccountPick = imbueCloudNeedsAccount() && HAS_ANY_ACCOUNT;
       accountError.classList.toggle('hidden', !requiresAccountPick);
-      accountSelect.classList.toggle('ring-1', requiresAccountPick);
+      // ``!ring-1`` (important width) so the red outline survives the picker's
+      // own ``focus:ring-0`` while it is focused; the color is plain.
+      accountSelect.classList.toggle('!ring-1', requiresAccountPick);
       accountSelect.classList.toggle('ring-important', requiresAccountPick);
       submitBtn.disabled = requiresAccountPick;
 
