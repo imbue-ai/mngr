@@ -3,6 +3,8 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_AARCH64
+from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_X86_64
 from imbue.mngr_lima.lima_yaml import generate_default_lima_yaml
 from imbue.mngr_lima.lima_yaml import load_user_lima_yaml
 from imbue.mngr_lima.lima_yaml import merge_lima_yaml
@@ -40,8 +42,12 @@ def test_generate_default_lima_yaml(tmp_path: Path) -> None:
 
     assert "images" in config
     assert len(config["images"]) == 1
-    assert "location" in config["images"][0]
-    assert "arch" in config["images"][0]
+    # The default image must be the arch-appropriate constant, not just present:
+    # a regression shipping an empty or wrong default URL would otherwise pass.
+    arch = config["images"][0]["arch"]
+    assert arch in ("aarch64", "x86_64")
+    expected_location = DEFAULT_IMAGE_URL_AARCH64 if arch == "aarch64" else DEFAULT_IMAGE_URL_X86_64
+    assert config["images"][0]["location"] == expected_location
 
     assert "mounts" in config
     assert len(config["mounts"]) == 1
@@ -116,12 +122,19 @@ def test_write_lima_yaml(tmp_path: Path) -> None:
 
 
 def test_write_lima_yaml_temp_file() -> None:
+    # The no-path branch deliberately writes to a system temp location, so the
+    # file lives outside tmp_path; the try/finally guarantees cleanup even if an
+    # assertion fails first.
     config = {"images": [{"location": "test.qcow2"}]}
     result = write_lima_yaml(config)
-    assert result.exists()
-    assert result.suffix == ".yaml"
-    # Clean up
-    result.unlink()
+    try:
+        assert result.exists()
+        assert result.suffix == ".yaml"
+        # Verify the file actually holds the serialized config, not just that it
+        # exists with the right extension.
+        assert "test.qcow2" in result.read_text()
+    finally:
+        result.unlink()
 
 
 def test_load_user_lima_yaml(tmp_path: Path) -> None:

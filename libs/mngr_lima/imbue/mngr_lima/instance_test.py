@@ -11,6 +11,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
+from imbue.mngr.providers.local.volume import LocalVolume
 from imbue.mngr_lima.config import LimaProviderConfig
 from imbue.mngr_lima.errors import LimaHostRenameError
 from imbue.mngr_lima.host_store import HostRecord
@@ -86,9 +87,13 @@ def test_get_volume_for_nonexistent_host(lima_provider: LimaProviderInstance) ->
 
 def test_get_volume_for_existing_host(lima_provider: LimaProviderInstance) -> None:
     host_id = HostId.generate()
-    lima_provider._ensure_host_volume_dir(host_id)
+    volume_dir = lima_provider._ensure_host_volume_dir(host_id)
     volume = lima_provider.get_volume_for_host(host_id)
     assert volume is not None
+    # The returned volume must be rooted at this host's volume directory, not
+    # merely non-None (a bug returning some other host's dir would pass that).
+    assert isinstance(volume.volume, LocalVolume)
+    assert volume.volume.root_path == volume_dir
 
 
 def test_get_volume_for_host_returns_none_for_btrfs_mode_record(lima_provider: LimaProviderInstance) -> None:
@@ -128,16 +133,34 @@ def test_parse_size_to_gb() -> None:
     assert _parse_size_to_gb("invalid") == 4.0  # default fallback
 
 
-def test_reset_caches(lima_provider: LimaProviderInstance) -> None:
-    # Should not raise
+def test_reset_caches_empties_the_host_store_cache(lima_provider: LimaProviderInstance) -> None:
+    host_id = HostId.generate()
+    now = datetime.now(timezone.utc)
+    record = HostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=str(host_id),
+            host_name="cache-host",
+            user_tags={},
+            snapshots=[],
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    # write_host_record populates the host-store read cache.
+    lima_provider._host_store.write_host_record(record)
+    assert lima_provider._host_store._cache != {}
+
     lima_provider.reset_caches()
 
+    # A no-op reset_caches (e.g. clearing the wrong dict) would leave these full.
+    assert lima_provider._host_store._cache == {}
+    assert lima_provider._host_by_id_cache == {}
 
-def test_provider_dir_structure(lima_provider: LimaProviderInstance) -> None:
-    # Verify the provider directory structure uses the provider name
-    assert "lima-test" in str(lima_provider._provider_dir)
-    assert "providers" in str(lima_provider._provider_dir)
-    assert "lima" in str(lima_provider._provider_dir)
+
+def test_provider_dir_uses_profile_dir_and_provider_name(lima_provider: LimaProviderInstance) -> None:
+    # Pin the full layout rather than asserting loose substrings: the provider
+    # state lives under <profile_dir>/providers/lima/<provider name>.
+    assert lima_provider._provider_dir == lima_provider.mngr_ctx.profile_dir / "providers" / "lima" / "lima-test"
 
 
 def test_ensure_host_keypair_creates_and_is_idempotent(lima_provider: LimaProviderInstance) -> None:

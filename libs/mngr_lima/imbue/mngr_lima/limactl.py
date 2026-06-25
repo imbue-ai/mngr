@@ -344,13 +344,21 @@ def limactl_show_ssh(
     result = cg.run_process_to_completion(cmd, timeout=timeout)
     if result.returncode != 0:
         raise LimaCommandError("show-ssh", result.returncode, result.stderr)
+    return _parse_show_ssh_output(result.stdout)
 
+
+def _parse_show_ssh_output(stdout: str) -> LimaSshConfig:
+    """Parse `limactl show-ssh --format config` output into a LimaSshConfig.
+
+    Any field the output omits falls back to Lima's documented default
+    (loopback host, port 22, root user, the shared per-config identity file).
+    """
     hostname = "127.0.0.1"
     port = 22
     user = "root"
     identity_file = Path.home() / ".lima" / "_config" / "user"
 
-    for line in result.stdout.splitlines():
+    for line in stdout.splitlines():
         line = line.strip()
         if line.startswith("HostName "):
             hostname = _strip_ssh_config_quotes(line.split(None, 1)[1])
