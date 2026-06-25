@@ -64,6 +64,38 @@ class BackupStatus(FrozenModel):
     )
 
 
+def list_workspace_snapshots(
+    paths: WorkspacePaths,
+    agent_id: AgentId,
+    *,
+    parent_cg: ConcurrencyGroup | None = None,
+    timeout_seconds: float = _STATUS_RESTIC_TIMEOUT_SECONDS,
+) -> tuple[restic_cli.ResticSnapshot, ...]:
+    """List a workspace's restic snapshots from its canonical restic.env.
+
+    Works even when the workspace is offline or destroyed, because minds holds
+    the canonical ``restic.env``. Raises ``BackupProvisioningError`` when no
+    backups are configured (no canonical env) or its repository is missing, and
+    propagates restic failures.
+    """
+    content = read_canonical_env(paths, agent_id)
+    if content is None:
+        raise BackupProvisioningError(f"No backups are configured for {agent_id}")
+    env = parse_restic_env(content)
+    repository = env.get("RESTIC_REPOSITORY", "")
+    if not repository:
+        raise BackupProvisioningError(f"Canonical restic.env for {agent_id} has no RESTIC_REPOSITORY")
+    password = env.get("RESTIC_PASSWORD")
+    backend_env = {key: value for key, value in env.items() if key not in ("RESTIC_REPOSITORY", "RESTIC_PASSWORD")}
+    return restic_cli.list_snapshots(
+        repository=repository,
+        backend_env=backend_env,
+        password=password,
+        parent_cg=parent_cg,
+        timeout_seconds=timeout_seconds,
+    )
+
+
 def compute_backup_status_for_workspace(
     paths: WorkspacePaths,
     agent_id: AgentId,

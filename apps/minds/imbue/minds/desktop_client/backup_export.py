@@ -89,9 +89,10 @@ def export_latest_snapshot_zip(
     paths: WorkspacePaths,
     agent_id: AgentId,
     host_id: str,
+    snapshot: str = "latest",
     parent_cg: ConcurrencyGroup | None = None,
 ) -> Path:
-    """Restore the workspace's latest snapshot and zip it; return the zip path.
+    """Restore the given snapshot (default ``latest``) and zip it; return the zip path.
 
     Raises ``BackupExportError`` when the workspace has no canonical restic.env
     (backups were never configured) or its repository address is missing;
@@ -115,6 +116,7 @@ def export_latest_snapshot_zip(
             backend_env=backend_env,
             password=password,
             target_dir=restore_dir,
+            snapshot=snapshot,
             parent_cg=parent_cg,
         )
         _zip_directory_contents(restore_dir, zip_path)
