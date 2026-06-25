@@ -1,0 +1,3 @@
+Loguru error logging now deduplicates exception reports automatically. When the same exception instance is logged at error level more than once (for example a failure that is caught and re-logged at several stack frames as it propagates), only the first `logger.opt(exception=e).error(...)` / `logger.exception(...)` is emitted; later logs of that same instance are dropped from the stderr, JSONL-file, and Sentry sinks so the error is reported only once.
+
+No code changes are required at call sites: ordinary `logger.error()` calls do the right thing on their own. Logging an exception below error level (e.g. at warning) never marks it, so a genuine later error report for the same instance is still delivered.

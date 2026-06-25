@@ -122,14 +122,22 @@ def test_prevent_importlib_import_module() -> None:
 
 
 def test_prevent_getattr() -> None:
-    # Both usages are one line in the ported Sentry HTTP transport, reading the
+    # Two usages are one line each in the ported Sentry HTTP transport, reading the
     # response body whose attribute (``data`` vs ``content``) varies across
-    # sentry-sdk / urllib3 versions.
-    rc.check_getattr(_DIR, snapshot(2))
+    # sentry-sdk / urllib3 versions. The third is in ``utils/logging.py``'s
+    # exception-report dedup patcher, which reads a private "already reported" marker
+    # off arbitrary exception instances it does not own -- there is no typed attribute
+    # to read, and a weak side-registry is not viable because built-in exceptions are
+    # not weak-referenceable (see that module).
+    rc.check_getattr(_DIR, snapshot(3))
 
 
 def test_prevent_setattr() -> None:
-    rc.check_setattr(_DIR, snapshot(0))
+    # The one usage is in ``utils/logging.py``'s exception-report dedup patcher, which
+    # attaches a private "already reported" marker to arbitrary exception instances it
+    # does not own (no typed attribute exists, and built-in exceptions cannot be tracked
+    # via a weak side-registry). See that module for the full rationale.
+    rc.check_setattr(_DIR, snapshot(1))
 
 
 # --- Banned libraries and patterns ---

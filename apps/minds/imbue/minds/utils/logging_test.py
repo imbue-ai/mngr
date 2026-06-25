@@ -1,3 +1,4 @@
+import io
 import json
 from pathlib import Path
 from typing import Any
@@ -8,6 +9,8 @@ from loguru import logger
 from imbue.minds.utils.logging import ConsoleLogLevel
 from imbue.minds.utils.logging import _format_user_message
 from imbue.minds.utils.logging import console_level_from_verbose_and_quiet
+from imbue.minds.utils.logging import install_exception_dedup_patcher
+from imbue.minds.utils.logging import is_not_duplicate_exception
 from imbue.minds.utils.logging import setup_logging
 
 
@@ -153,3 +156,105 @@ def test_setup_logging_with_log_file(tmp_path: Path, capfd: Any) -> None:
     event = json.loads(log_content.strip().split("\n")[-1])
     assert event["message"] == "file-log-test-marker-38291"
     assert event["type"] == "minds"
+
+
+def _make_dedup_buffer() -> io.StringIO:
+    """Add a dedup-filtered in-memory sink and return its buffer.
+
+    Assumes the caller has already removed existing handlers (via ``_isolated_logger``) and installs
+    the dedup patcher so the sink participates in exception-report dedup.
+    """
+    install_exception_dedup_patcher()
+    buffer = io.StringIO()
+    logger.add(
+        buffer,
+        level="DEBUG",
+        format="{level}|{message}",
+        filter=is_not_duplicate_exception,
+        colorize=False,
+        diagnose=False,
+        backtrace=False,
+    )
+    return buffer
+
+
+@pytest.mark.usefixtures("_isolated_logger")
+def test_same_exception_reported_at_error_only_logs_once() -> None:
+    buffer = _make_dedup_buffer()
+    error = ValueError("boom-marker-55512")
+
+    for attempt in range(3):
+        logger.opt(exception=error).error("attempt {}", attempt)
+
+    output = buffer.getvalue()
+    assert "attempt 0" in output
+    assert "attempt 1" not in output
+    assert "attempt 2" not in output
+
+
+@pytest.mark.usefixtures("_isolated_logger")
+def test_distinct_exception_instances_each_report() -> None:
+    buffer = _make_dedup_buffer()
+
+    logger.opt(exception=ValueError("first-marker-22841")).error("first-error")
+    logger.opt(exception=RuntimeError("second-marker-22842")).error("second-error")
+
+    output = buffer.getvalue()
+    assert "first-error" in output
+    assert "second-error" in output
+
+
+@pytest.mark.usefixtures("_isolated_logger")
+def test_exception_below_error_level_is_not_deduped() -> None:
+    buffer = _make_dedup_buffer()
+    error = ValueError("warn-boom-90013")
+
+    # Logging the same exception at warning level must never mark it as reported, so a later
+    # genuine error report for the same instance still goes through.
+    logger.opt(exception=error).warning("warn-one")
+    logger.opt(exception=error).warning("warn-two")
+    logger.opt(exception=error).error("error-after-warnings")
+
+    output = buffer.getvalue()
+    assert "warn-one" in output
+    assert "warn-two" in output
+    assert "error-after-warnings" in output
+
+
+@pytest.mark.usefixtures("_isolated_logger")
+def test_dedup_decision_is_consistent_across_sinks_in_one_emit() -> None:
+    install_exception_dedup_patcher()
+    first_buffer = io.StringIO()
+    second_buffer = io.StringIO()
+    for buffer in (first_buffer, second_buffer):
+        logger.add(
+            buffer,
+            level="DEBUG",
+            format="{message}",
+            filter=is_not_duplicate_exception,
+            colorize=False,
+            diagnose=False,
+            backtrace=False,
+        )
+    error = ValueError("multi-sink-30021")
+
+    logger.opt(exception=error).error("first-emit")
+    logger.opt(exception=error).error("second-emit")
+
+    # The first emit reaches every sink; the second (duplicate) reaches none.
+    for buffer in (first_buffer, second_buffer):
+        assert "first-emit" in buffer.getvalue()
+        assert "second-emit" not in buffer.getvalue()
+
+
+@pytest.mark.usefixtures("_isolated_logger")
+def test_setup_logging_dedups_repeated_exception_on_stderr(capfd: Any) -> None:
+    setup_logging(ConsoleLogLevel.INFO)
+    error = ValueError("setup-dedup-44190")
+
+    logger.opt(exception=error).error("setup-first-marker")
+    logger.opt(exception=error).error("setup-second-marker")
+
+    captured = capfd.readouterr()
+    assert "setup-first-marker" in captured.err
+    assert "setup-second-marker" not in captured.err
