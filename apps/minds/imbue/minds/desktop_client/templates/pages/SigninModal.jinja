@@ -1,0 +1,63 @@
+{#def intro="" #}
+{#
+  Sign-in modal page, hosted in the desktop client's shared modal
+  WebContentsView -- the same overlay layer as the inbox -- so it covers the
+  whole window including the title bar (rather than sitting inside the content
+  view like an in-page dialog). Opened from the create screen when a signed-out
+  user presses "Create" with the Imbue Cloud preset selected.
+
+  Transparent body + a dim backdrop reveal the create screen behind it; the
+  centered card holds the shared auth form (``auth.AuthForm``). All form
+  interactivity lives in ``static/auth.js``; the inline script below tells it
+  how to route post-auth navigations: they must land in the *content* view
+  behind this overlay (the create screen) and dismiss the modal -- not reload
+  the overlay itself. In Electron that goes through ``window.minds``; as a plain
+  standalone page (browser fallback) it navigates normally.
+
+  ``intro`` is the explanatory copy shown under each tab heading (why the user
+  is being asked to sign in).
+#}
+{% set _scripts %}
+<script src="/_static/auth.js" defer></script>
+<script>
+  (function () {
+    // Where auth.js should land the user after a successful sign-in, and where
+    // an email-verification round-trip should return them: the create screen.
+    window.MINDS_AUTH_RETURN_TO = "/create";
+    // How auth.js performs those navigations. In the Electron modal overlay the
+    // form runs in its own WebContentsView, so navigations must target the
+    // content view behind the modal (navigateContent also dismisses the modal).
+    // Without the bridge (standalone page) we just navigate this page.
+    window.MINDS_AUTH_NAV = function (url) {
+      if (window.minds && window.minds.navigateContent) window.minds.navigateContent(url);
+      else window.location.href = url;
+    };
+
+    // Dismiss the overlay without signing in -- the user falls back to running
+    // locally. The close button (DialogCloseButton) calls this by name; Escape
+    // is handled by the Electron main process for any modal-view page.
+    window.dismissSigninModal = function () {
+      if (window.minds && window.minds.closeModal) window.minds.closeModal();
+      else window.location.href = "/create";
+    };
+
+    var backdrop = document.getElementById("signin-modal-backdrop");
+    if (backdrop) {
+      backdrop.addEventListener("click", function (e) {
+        if (e.target === backdrop) window.dismissSigninModal();
+      });
+    }
+  })();
+</script>
+{% endset %}
+<Base title="Sign in"
+      body_class="bg-transparent text-primary font-sans antialiased"
+      body_style="-webkit-app-region: no-drag;"
+      scripts={{ _scripts }}>
+  <div id="signin-modal-backdrop" class="fixed inset-0 flex items-center justify-center bg-surface-overlay p-4">
+    <div class="relative bg-surface-primary rounded-lg shadow-overlay max-w-md w-full p-8 text-left">
+      <DialogCloseButton onclick="dismissSigninModal()" />
+      <auth.AuthForm :default_to_signup="True" :intro="intro" />
+    </div>
+  </div>
+</Base>
