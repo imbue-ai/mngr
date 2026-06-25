@@ -1,5 +1,7 @@
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const zlib = require('zlib');
 const Sentry = require('@sentry/electron/main');
 const { parse: parseToml } = require('smol-toml');
 const paths = require('./paths');
@@ -123,25 +125,183 @@ function initSentry() {
   );
 }
 
+// -- Backend-down report enrichment (logs + host basics) --
+//
+// The full-app error takeover fires captureManualReport when the Python backend
+// is down, so its rich /help collector (report_collector.py) is unreachable. We
+// still attach what the main process can gather on its own: recent log files --
+// including the backend's own minds-events.jsonl, which is still on disk even
+// though that process died -- and cheap host/system basics. Live backend state
+// (accounts, workspaces, discovery) is gone with the backend and is simply
+// absent from a down-backend report.
+//
+// Unlike the backend (which uploads logs to S3 and references URLs in the event,
+// to keep its high-volume automatic stream off Sentry's attachment quota and out
+// of the ~1MB event limit), this rare one-shot path attaches gzipped logs
+// directly via the SDK's native attachment channel -- no S3 client/credentials
+// to duplicate here.
+
+// Per-file cap on how much of each log we attach. We tail the most recent bytes
+// (a crash surfaces at the end of the log; the head is rarely worth the size).
+// gzip typically shrinks logs ~10x, so two ~5 MiB tails land far under Sentry's
+// 40 MB compressed-envelope limit. Staying under that limit is load-bearing: an
+// oversized envelope is dropped WHOLE (HTTP 413), which would lose the user's
+// report along with the logs.
+const MAX_LOG_TAIL_BYTES = 5 * 1024 * 1024;
+// Defensive ceiling on total compressed attachment bytes, well below the 40 MB
+// envelope limit, so we never risk a 413 even if gzip underperforms on logs that
+// are already compact.
+const MAX_TOTAL_COMPRESSED_ATTACHMENT_BYTES = 15 * 1024 * 1024;
+
+/**
+ * Read at most the last ``maxBytes`` of a file. Logs are tailed (not read whole)
+ * because a crash surfaces at the end and the head is rarely worth the size.
+ */
+function readFileTail(filePath, maxBytes) {
+  const { size } = fs.statSync(filePath);
+  if (size <= maxBytes) return fs.readFileSync(filePath);
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const buffer = Buffer.alloc(maxBytes);
+    fs.readSync(fd, buffer, 0, maxBytes, size - maxBytes);
+    return buffer;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/**
+ * The newest (by mtime) regular file in ``dir`` whose name satisfies
+ * ``predicate``, or null when the directory is unreadable or has no match.
+ */
+function newestFileMatching(dir, predicate) {
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return null;
+  }
+  let newest = null;
+  for (const name of names) {
+    if (!predicate(name)) continue;
+    const filePath = path.join(dir, name);
+    try {
+      const stat = fs.statSync(filePath);
+      if (!stat.isFile()) continue;
+      if (!newest || stat.mtimeMs > newest.mtimeMs) newest = { filePath, name, mtimeMs: stat.mtimeMs };
+    } catch {
+      // Raced/removed/permission-denied -- skip this candidate.
+    }
+  }
+  return newest;
+}
+
+/**
+ * Gzip the tails of the most relevant log files into Sentry attachments: the
+ * live Python backend log (``*.jsonl``, written by the now-dead backend but
+ * still on disk) and the Electron main-process log (``*.log``). Returns [] when
+ * the logs directory is unreadable. Best-effort per file -- a file that can't be
+ * read (or that would breach the compressed-attachment budget) is skipped rather
+ * than aborting the whole report.
+ */
+function collectLogAttachments() {
+  const logDir = paths.getLogDir();
+  // The live backend log is exactly ``*.jsonl``; rotated logs are ``*.jsonl.<ts>``.
+  // Matching the bare suffix keeps us on the live file rather than a rotated one.
+  const candidates = [
+    newestFileMatching(logDir, (name) => name.endsWith('.jsonl')),
+    newestFileMatching(logDir, (name) => name.endsWith('.log')),
+  ];
+  const attachments = [];
+  let totalCompressedBytes = 0;
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    let compressed;
+    try {
+      compressed = zlib.gzipSync(readFileTail(candidate.filePath, MAX_LOG_TAIL_BYTES));
+    } catch (err) {
+      console.warn(`[report-error] could not read log ${candidate.name}: ${err && err.message}`);
+      continue;
+    }
+    if (totalCompressedBytes + compressed.length > MAX_TOTAL_COMPRESSED_ATTACHMENT_BYTES) {
+      console.warn(`[report-error] skipping log ${candidate.name}: compressed-attachment budget exceeded`);
+      continue;
+    }
+    totalCompressedBytes += compressed.length;
+    attachments.push({ filename: `${candidate.name}.gz`, data: compressed, contentType: 'application/gzip' });
+  }
+  return attachments;
+}
+
+/**
+ * Cheap host/system facts the main process can gather without the backend,
+ * mirroring the backend collector's "basics" + resource snapshot so a
+ * backend-down report still carries version, platform, and load context.
+ */
+function collectSystemBasics() {
+  const { releaseId, gitSha } = getBuildMetadata();
+  const [load1m, load5m, load15m] = os.loadavg();
+  const basics = {
+    minds_release_id: releaseId,
+    minds_git_sha: gitSha,
+    platform: `${process.platform} ${os.release()} (${os.arch()})`,
+    node_version: process.versions.node,
+    cpu_count: os.cpus().length,
+    load_average: { '1m': load1m, '5m': load5m, '15m': load15m },
+    memory: { total_bytes: os.totalmem(), free_bytes: os.freemem() },
+  };
+  try {
+    const stat = fs.statfsSync(paths.getDataDir());
+    basics.disk = { total_bytes: stat.blocks * stat.bsize, free_bytes: stat.bavail * stat.bsize };
+  } catch (err) {
+    console.warn(`[report-error] could not stat data dir for disk usage: ${err && err.message}`);
+  }
+  return basics;
+}
+
 /**
  * Capture a user-initiated bug report from the Electron main process and return its event id.
  *
  * Used by the full-app error takeover (shell.html): when the Python backend has crashed its normal
  * /help report flow is unreachable, but this main-process Sentry is always initialized, so the user
- * can still file a one-shot report of the on-screen error. The event is tagged ``manually_submitted``
- * so the ``beforeSend`` gate always lets it through, even when automatic reporting is off (an explicit
- * user action). Note this reports to the JavaScript Sentry project, not the Python backend's project.
+ * can still file a report of the on-screen error. Alongside the message/details we attach what the
+ * main process can collect without the backend -- recent log files (gzipped, tailed) and host/system
+ * basics -- so the report is useful even though the backend's richer in-process state is gone with it.
+ * Collection is best-effort: a failure to gather logs or basics never blocks the report itself.
+ *
+ * The event is tagged ``manually_submitted`` so the ``beforeSend`` gate always lets it through, even
+ * when automatic reporting is off (an explicit user action). Note this reports to the JavaScript
+ * Sentry project, not the Python backend's project.
  *
  * Returns the Sentry event id (a 32-char hex string the user can quote), or null if Sentry dropped it.
  */
 function captureManualReport({ message, details }) {
+  let basics = null;
+  try {
+    basics = collectSystemBasics();
+  } catch (err) {
+    console.warn(`[report-error] could not collect system basics: ${err && err.message}`);
+  }
+  let attachments = [];
+  try {
+    attachments = collectLogAttachments();
+  } catch (err) {
+    console.warn(`[report-error] could not collect log attachments: ${err && err.message}`);
+  }
+  // captureEvent's second arg is the event hint; attachments ride the envelope as
+  // separate items (not in the event body). Omit the hint entirely when there are
+  // none so we don't hand the SDK an empty attachments array.
+  const hint = attachments.length ? { attachments } : undefined;
   return (
-    Sentry.captureEvent({
-      message: message || 'Minds app error (manual report)',
-      level: 'error',
-      tags: { manually_submitted: 'true' },
-      extra: { details: details || '' },
-    }) || null
+    Sentry.captureEvent(
+      {
+        message: message || 'Minds app error (manual report)',
+        level: 'error',
+        tags: { manually_submitted: 'true' },
+        extra: { details: details || '', basics },
+      },
+      hint
+    ) || null
   );
 }
 

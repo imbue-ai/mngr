@@ -2836,8 +2836,10 @@ ipcMain.on('toggle-help', (event, agentId) => {
 
 // One-shot bug report from the full-app error takeover (shell.html), used when the
 // Python backend is down and its /help flow is unreachable. Reports the on-screen
-// error via the always-initialized main-process Sentry and returns the event id so
-// the shell can show it. ``invoke`` (not ``send``) so the renderer gets the id back.
+// error via the always-initialized main-process Sentry -- with recent log files and
+// host basics attached by captureManualReport, since the backend's richer collector
+// is gone -- and returns the event id so the shell can show it. ``invoke`` (not
+// ``send``) so the renderer gets the id back.
 ipcMain.handle('report-error', () => {
   try {
     const eventId = captureManualReport({
