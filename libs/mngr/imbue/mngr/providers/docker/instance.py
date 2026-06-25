@@ -1524,6 +1524,9 @@ kill -TERM 1
             # Docker keeps.
             try:
                 self._remove_build_image(host_id)
+            except docker.errors.NotFound:
+                # Raced away by a concurrent gc deleting the same host -- benign.
+                pass
             except docker.errors.DockerException as e:
                 logger.warning("Failed to remove build image for host {}: {}", host_id, e)
                 failures.append(
