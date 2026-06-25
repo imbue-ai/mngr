@@ -134,17 +134,17 @@ def test_can_run_commands_probe_yes_when_sentinel_present() -> None:
     assert _answer(response, "run a command") == ProbeAnswer.YES
 
 
-def test_services_toml_probe_no_when_declaration_missing() -> None:
+def test_applications_toml_probe_no_when_declaration_missing() -> None:
     response = _response(in_container_stdout=_probe_stdout({"applications_toml_declares_system_interface": False}))
     assert _answer(response, "applications.toml") == ProbeAnswer.NO
 
 
-def test_services_toml_probe_yes_when_declaration_present() -> None:
+def test_applications_toml_probe_yes_when_declaration_present() -> None:
     response = _response(in_container_stdout=_probe_stdout({"applications_toml_declares_system_interface": True}))
     assert _answer(response, "applications.toml") == ProbeAnswer.YES
 
 
-def test_services_toml_probe_unknown_when_probe_did_not_run() -> None:
+def test_applications_toml_probe_unknown_when_probe_did_not_run() -> None:
     response = _response(in_container_stdout=None)
     assert _answer(response, "applications.toml") == ProbeAnswer.UNKNOWN
 
@@ -371,7 +371,7 @@ def test_can_run_commands_output_is_the_raw_exec_stdout() -> None:
     assert probe.output == stdout
 
 
-def test_services_toml_command_is_mngr_exec_and_output_is_declared() -> None:
+def test_applications_toml_command_is_mngr_exec_and_output_is_declared() -> None:
     response = _response(in_container_stdout=_healthy_probe_stdout())
     probe = _probe_for(response, "applications.toml")
     assert probe.command.startswith(f"mngr exec {_SERVICES_AGENT_ID} ")
@@ -379,7 +379,7 @@ def test_services_toml_command_is_mngr_exec_and_output_is_declared() -> None:
     assert probe.output == "declared"
 
 
-def test_services_toml_output_is_missing_when_not_declared() -> None:
+def test_applications_toml_output_is_missing_when_not_declared() -> None:
     response = _response(in_container_stdout=_healthy_probe_stdout(applications_toml_declares_system_interface=False))
     assert _probe_for(response, "applications.toml").output == "MISSING"
 
