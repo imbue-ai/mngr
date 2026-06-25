@@ -205,17 +205,24 @@ pytestmark = pytest.mark.skipif(
 
 def _load_todesktop_config() -> dict:
     """Evaluate ``apps/minds/todesktop.js`` and return its exported config."""
+    # The only caller is skipped when node is absent (see the skipif below), so
+    # by the time we get here ``node`` is present; this just narrows the Optional.
     assert _NODE_BINARY is not None
     result = subprocess.run(
         [_NODE_BINARY, "-e", "console.log(JSON.stringify(require('./todesktop.js')))"],
         cwd=APP_ROOT,
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
+    if result.returncode != 0:
+        # Surface node's stderr instead of letting it hide inside a bare
+        # CalledProcessError, so a broken todesktop.js/package.json is diagnosable.
+        pytest.fail(f"node failed to evaluate todesktop.js (exit {result.returncode}):\n{result.stderr}")
     return json.loads(result.stdout)
 
 
+@pytest.mark.skipif(_NODE_BINARY is None, reason="node is required to evaluate todesktop.js")
 def test_bundled_limactl_is_signed_with_virtualization_entitlement() -> None:
     """Guard: the ToDesktop signing config must give bundled limactl the
     virtualization entitlement.

@@ -210,33 +210,33 @@ test-sdk-live args="":
   RUN_SDK_LIVE_TESTS=1 PYTEST_MAX_DURATION_SECONDS=2400 uv run pytest -sv --no-cov -n 0 -o timeout=900 -m sdk_live libs/mngr_robinhood {{args}}
 
 # === minds deployment / services test orchestrator ===
-# Wraps apps/minds/scripts/test_deployments.py. See specs/minds-deployment-tests.md
+# Wraps apps/minds/scripts/run_deployment_tests.py. See specs/minds-deployment-tests.md
 # and apps/minds/deployment_tests/README.md for the full design + usage.
 
 # Full run: shared env stand-up + sequential pytest x2 + teardown.
 minds-test-deployment *args:
-  uv run python apps/minds/scripts/test_deployments.py run {{args}}
+  uv run python apps/minds/scripts/run_deployment_tests.py run {{args}}
 
 # Wipe everything from prior runs that the ledger still tracks as active or leaked.
 minds-test-deployment-cleanup:
-  uv run python apps/minds/scripts/test_deployments.py cleanup
+  uv run python apps/minds/scripts/run_deployment_tests.py cleanup
 
 # Local iterate: stand up one shared env + print a ready-to-paste pytest command.
 minds-test-deployment-up role="default":
-  uv run python apps/minds/scripts/test_deployments.py up "{{role}}"
+  uv run python apps/minds/scripts/run_deployment_tests.py up "{{role}}"
 
 # Local iterate: tear down whatever `minds-test-deployment-up` last stood up.
 minds-test-deployment-down role="default":
-  uv run python apps/minds/scripts/test_deployments.py down "{{role}}"
+  uv run python apps/minds/scripts/run_deployment_tests.py down "{{role}}"
 
 # Point minds_services tests at an already-deployed dev env (e.g. dev-josh).
 minds-test-services-against env_name *tests:
-  uv run python apps/minds/scripts/test_deployments.py services-against "{{env_name}}" {{tests}}
+  uv run python apps/minds/scripts/run_deployment_tests.py services-against "{{env_name}}" {{tests}}
 
 # Run only the minds_deployment pytest batch (each test mints its own ephemeral env).
 # No shared env stand-up, no mail.tm account -- fast iteration for the deploy tests.
 minds-test-deployment-only *tests:
-  uv run python apps/minds/scripts/test_deployments.py deployment-only {{tests}}
+  uv run python apps/minds/scripts/run_deployment_tests.py deployment-only {{tests}}
 
 # End-to-end acceptance test that drives the real Electron minds app to create
 # a local Docker workspace from forever-claude-template. Wraps the invocation
