@@ -530,7 +530,7 @@ jobs:
       # into the job environment (masked in logs); the snapshot script forwards
       # it into the Modal sandbox so the in-sandbox FCT build uses depot.dev.
       - name: Fetch depot token from Vault
-        uses: imbue-ai/vault/.github/actions/export-secrets@main
+        uses: ./.github/actions/export-secrets
         with:
           role: minds_ci_build_gh
           secrets: |
@@ -617,7 +617,7 @@ jobs:
       # masked in the logs and forwarded into the offload sandbox by the just
       # recipe below.
       - name: Fetch test secrets from Vault
-        uses: imbue-ai/vault/.github/actions/export-secrets@main
+        uses: ./.github/actions/export-secrets
         with:
           role: minds_ci_test_gh
           secrets: |
