@@ -73,7 +73,7 @@ def test_render_settings_page() -> None:
     assert "google" in html
     assert "a1b2c3d4e5f67890" in html
     assert "Sign out" in html
-    # The error-reporting toggles moved to the manage-accounts page; they no longer live here.
+    # The error-reporting toggles live on the app-level Settings page, not on account settings.
     assert "Report unexpected errors" not in html
 
 

@@ -1,0 +1,139 @@
+{#def report_unexpected_errors=false, include_error_logs=false #}
+{#
+  App-level settings page, reachable from the floating sidebar's "Settings" entry.
+
+  Hosts the per-machine error-reporting toggles (the same settings the first-launch
+  consent screen records). These are global to the machine, not account-scoped, which
+  is why they live here rather than on the manage-accounts page.
+#}
+{% set _scripts %}
+<script>
+  (function () {
+    var reportToggle = document.getElementById('report-errors-toggle');
+    var logsRow = document.getElementById('include-logs-row');
+    var logsToggle = document.getElementById('include-logs-toggle');
+
+    // "Include logs" is only meaningful when reporting is on; reveal it with the
+    // report toggle and clear it (persisting the cleared state) when reporting goes off.
+    function syncLogsVisibility() {
+      if (reportToggle.checked) {
+        logsRow.classList.remove('hidden');
+      } else {
+        logsRow.classList.add('hidden');
+      }
+    }
+    syncLogsVisibility();
+
+    function saveErrorReporting(payload) {
+      return fetch('/_chrome/error-reporting', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    }
+
+    reportToggle.addEventListener('change', function () {
+      var enabled = reportToggle.checked;
+      var payload = { report_unexpected_errors: enabled };
+      if (!enabled) {
+        // Turning reporting off also clears log inclusion so the stored pair stays consistent.
+        logsToggle.checked = false;
+        payload.include_logs = false;
+      }
+      syncLogsVisibility();
+      saveErrorReporting(payload);
+    });
+
+    logsToggle.addEventListener('change', function () {
+      saveErrorReporting({ include_logs: logsToggle.checked });
+    });
+  })();
+</script>
+{# [DEBUG-ONLY -- remove before merging] Wiring for the manual error triggers. #}
+<script>
+  (function () {
+    var status = document.getElementById('debug-error-status');
+    function setStatus(msg) { if (status) status.textContent = msg; }
+
+    // Backend: hit the temporary /_debug/boom route, which raises -> the Flask catch-all logs it
+    // at ERROR -> Sentry captures it (Python project), gated by "Report unexpected errors".
+    document.getElementById('debug-backend-error').addEventListener('click', function () {
+      setStatus('Triggering backend error...');
+      fetch('/_debug/boom', { credentials: 'same-origin' }).then(function (resp) {
+        setStatus('Backend error triggered (HTTP ' + resp.status + ' -- 500 is expected). Check the Python Sentry project.');
+      }).catch(function (e) {
+        setStatus('Backend request failed: ' + (e && e.message));
+      });
+    });
+
+    // Frontend uncaught: throw on the event loop so the browser SDK's global onerror handler captures
+    // it (JS project), exactly like a real uncaught error. window.Sentry only exists when reporting is on.
+    document.getElementById('debug-frontend-uncaught').addEventListener('click', function () {
+      setStatus(window.Sentry
+        ? 'Throwing an uncaught frontend error -- check the JS Sentry project.'
+        : 'window.Sentry is absent (reporting off) -- nothing will be sent. Turn reporting on and reload.');
+      setTimeout(function () { throw new Error('[debug] frontend uncaught ' + Date.now()); }, 0);
+    });
+
+    // Frontend explicit capture: returns the event id inline so you can search for it.
+    document.getElementById('debug-frontend-capture').addEventListener('click', function () {
+      if (!window.Sentry) {
+        setStatus('window.Sentry is absent (reporting off). Turn reporting on and reload this page.');
+        return;
+      }
+      var id = window.Sentry.captureException(new Error('[debug] frontend capture ' + Date.now()));
+      setStatus('Captured frontend event id: ' + id);
+    });
+
+    // Electron main: ask the (restricted) content-relay preload to forward to the main process, which
+    // calls captureException on its own always-initialized Sentry (JS project), gated by the same setting.
+    // No-op in browser mode (there is no Electron main process there).
+    document.getElementById('debug-electron-error').addEventListener('click', function () {
+      window.parent.postMessage({ type: 'minds:debug-electron-error', message: '[debug] electron main ' + Date.now() }, '*');
+      setStatus('Asked the Electron main process to capture an error -- check the terminal log + JS Sentry project. (No effect in browser mode.)');
+    });
+  })();
+</script>
+{% endset %}
+<Base title="Settings" scripts={{ _scripts }}>
+  <PageContainer>
+    <h1 class="type-heading text-primary mb-4">Settings</h1>
+
+    <h2 class="type-heading text-primary mb-2">Error reporting</h2>
+    <p class="type-helper text-tertiary mb-3">Applies to this device, regardless of which account is signed in.</p>
+    <label class="flex items-start justify-between gap-3 py-3 border-b border-subtle cursor-pointer">
+      <span>
+        <span class="type-body text-primary font-semibold">Report unexpected errors</span>
+        <span class="block type-helper text-tertiary">Send a report to Imbue when something goes wrong.</span>
+      </span>
+      <input type="checkbox" id="report-errors-toggle" class="mt-1 shrink-0"
+             {% if report_unexpected_errors %}checked{% endif %}>
+    </label>
+    <label id="include-logs-row"
+           class="flex items-start justify-between gap-3 py-3 border-b border-subtle cursor-pointer {% if not report_unexpected_errors %}hidden{% endif %}">
+      <span>
+        <span class="type-body text-primary font-semibold">Include logs</span>
+        <span class="block type-helper text-tertiary">Attach recent log files to help diagnose the problem.</span>
+      </span>
+      <input type="checkbox" id="include-logs-toggle" class="mt-1 shrink-0"
+             {% if include_error_logs %}checked{% endif %}>
+    </label>
+
+    {# [DEBUG-ONLY -- remove before merging] Manual triggers for the three automatic-error reporting
+       paths, so you can flip the toggle above and confirm each layer honors it. #}
+    <h2 class="type-heading text-primary mt-8 mb-2">Debug: trigger errors</h2>
+    <p class="type-helper text-tertiary mb-3">
+      Temporary. Each fires an <em>automatic</em> error on one layer (gated by "Report unexpected errors" above).
+      Manual bug reports always send regardless; these test the gate.
+    </p>
+    <div class="flex flex-wrap gap-2">
+      <Button variant="secondary" id="debug-backend-error">Backend error</Button>
+      <Button variant="secondary" id="debug-frontend-uncaught">Frontend uncaught</Button>
+      <Button variant="secondary" id="debug-frontend-capture">Frontend captureException</Button>
+      <Button variant="secondary" id="debug-electron-error">Electron main error</Button>
+    </div>
+    <p id="debug-error-status" class="type-helper text-tertiary mt-2"></p>
+
+    <div class="mt-8"><Link href="/" extra="type-helper">&larr; Back to projects</Link></div>
+  </PageContainer>
+</Base>

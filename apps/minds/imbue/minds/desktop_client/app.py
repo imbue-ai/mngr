@@ -137,6 +137,7 @@ from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.desktop_client.templates import render_recovery_page
+from imbue.minds.desktop_client.templates import render_settings_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
@@ -515,7 +516,7 @@ def _handle_consent_submit() -> Response:
 
 
 def _handle_error_reporting_settings() -> Response:
-    """Persist the error-reporting toggles from the account settings page (POST /_chrome/error-reporting).
+    """Persist the error-reporting toggles from the Settings page (POST /_chrome/error-reporting).
 
     Accepts any subset of ``{report_unexpected_errors, include_logs}``; each present boolean is saved.
     The settings UI clears "include logs" when reporting is turned off, so the stored pair stays
@@ -3607,12 +3608,26 @@ def _handle_accounts_page() -> Response:
     enabled_by_user_id = {
         str(account.user_id): is_imbue_cloud_provider_enabled_for_account(str(account.email)) for account in accounts
     }
-    report_unexpected_errors = minds_config.get_report_unexpected_errors() if minds_config else False
-    include_error_logs = minds_config.get_include_error_logs() if minds_config else False
     html = render_accounts_page(
         accounts=accounts,
         default_account_id=default_account_id,
         enabled_by_user_id=enabled_by_user_id,
+    )
+    return make_html_response(content=html)
+
+
+def _handle_settings_page() -> Response:
+    """Render the app-level settings page (GET /settings).
+
+    Hosts the per-machine error-reporting toggles, seeded from ``MindsConfig``. Requires the same
+    local session as the rest of the app; it is not account-scoped.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    minds_config: MindsConfig | None = get_state().minds_config
+    report_unexpected_errors = minds_config.get_report_unexpected_errors() if minds_config else False
+    include_error_logs = minds_config.get_include_error_logs() if minds_config else False
+    html = render_settings_page(
         report_unexpected_errors=report_unexpected_errors,
         include_error_logs=include_error_logs,
     )
@@ -4548,6 +4563,7 @@ def create_desktop_client(
 
     # Account management routes
     app.add_url_rule("/accounts", view_func=_handle_accounts_page)
+    app.add_url_rule("/settings", view_func=_handle_settings_page)
     app.add_url_rule("/accounts/set-default", view_func=_handle_set_default_account, methods=["POST"])
     app.add_url_rule("/accounts/<user_id>/logout", view_func=_handle_account_logout, methods=["POST"])
 

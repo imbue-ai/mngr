@@ -43,9 +43,12 @@
           <li>No need to bring your own API keys</li>
         </ul>
         <p class="type-helper text-tertiary mb-4">You can always create an account later by clicking "log in" in the upper right.</p>
+        {# Route through "/" rather than straight to "/create": the landing handler shows the
+           "Help improve Minds" error-reporting consent screen first (when still unanswered),
+           so reporting is offered to account-less users too, then lands on the create form. #}
         <div class="flex justify-end gap-3">
           <Button variant="secondary" id="skip-cancel-btn">Cancel</Button>
-          <ButtonLink href="/create" variant="primary" id="skip-continue-btn">Continue</ButtonLink>
+          <ButtonLink href="/" variant="primary" id="skip-continue-btn">Continue</ButtonLink>
         </div>
       </Modal>
     </div>

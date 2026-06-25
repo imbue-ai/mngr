@@ -50,7 +50,7 @@ def render_settings_page(
 ) -> str:
     """Render the account settings page.
 
-    The per-machine error-reporting toggles live on the manage-accounts page (/accounts), not here.
+    The per-machine error-reporting toggles live on the app-level Settings page (/settings), not here.
     """
     return CATALOG.render(
         "auth.Settings",

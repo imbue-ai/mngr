@@ -2,7 +2,7 @@
 {#
   Error-reporting consent screen. Shown just after login (the user is authenticated)
   while MindsConfig.error_reporting_consent_given is False. The two toggles mirror the
-  persistent settings on the manage-accounts page; "Include logs" is only revealed
+  persistent settings on the dedicated Settings page; "Include logs" is only revealed
   once "Report unexpected errors" is enabled. "Continue" records the choices and flips
   the consent-given flag (POST /consent), then reloads the app, which now proceeds past
   this screen to the landing content.
@@ -54,7 +54,7 @@
       <h1 class="type-heading-lg text-primary mb-2">Help improve Minds</h1>
       <p class="text-secondary type-body mb-6">
         Minds can report unexpected errors to Imbue so we can find and fix problems faster. You can
-        change these choices any time in account settings.
+        change these choices any time in Settings.
       </p>
 
       <div class="flex flex-col gap-4 mb-8">

@@ -152,7 +152,7 @@ def _frontend_sentry_browser_payload() -> dict[str, str] | None:
 
     The browser web UI reports automatic JS errors, so it is gated by the same per-machine
     ``report_unexpected_errors`` setting as the backend's automatic error reporting. The setting is
-    read here on every page render, so toggling it via the consent screen or account settings takes
+    read here on every page render, so toggling it via the consent screen or the Settings page takes
     effect on the next navigation without an app restart.
 
     Pages also render outside any Flask app (e.g. template unit tests); with no app-global
@@ -1417,8 +1417,6 @@ def render_accounts_page(
     accounts: Sequence[object],
     default_account_id: str | None = None,
     enabled_by_user_id: Mapping[str, bool] | None = None,
-    report_unexpected_errors: bool = False,
-    include_error_logs: bool = False,
 ) -> str:
     """Render the manage accounts page.
 
@@ -1427,6 +1425,21 @@ def render_accounts_page(
     The template renders a "Signed out" indicator when an account is
     present (still in sessions.json) but the user disabled the block
     via the providers panel.
+    """
+    return CATALOG.render(
+        "pages.Accounts",
+        accounts=accounts,
+        default_account_id=default_account_id or "",
+        enabled_by_user_id=dict(enabled_by_user_id or {}),
+    )
+
+
+@pure
+def render_settings_page(
+    report_unexpected_errors: bool = False,
+    include_error_logs: bool = False,
+) -> str:
+    """Render the app-level settings page (reachable from the sidebar's "Settings" entry).
 
     ``report_unexpected_errors`` / ``include_error_logs`` seed the per-machine
     error-reporting toggles hosted on this page (the same settings the
@@ -1434,10 +1447,7 @@ def render_accounts_page(
     account-scoped.
     """
     return CATALOG.render(
-        "pages.Accounts",
-        accounts=accounts,
-        default_account_id=default_account_id or "",
-        enabled_by_user_id=dict(enabled_by_user_id or {}),
+        "pages.Settings",
         report_unexpected_errors=report_unexpected_errors,
         include_error_logs=include_error_logs,
     )

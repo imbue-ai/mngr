@@ -1726,12 +1726,28 @@ def test_accounts_page_shows_logged_in_accounts(tmp_path: Path) -> None:
     assert "test@example.com" in response.text
 
 
-def test_accounts_page_hosts_error_reporting_toggles(tmp_path: Path) -> None:
-    """The manage-accounts page hosts the per-machine error-reporting toggles, seeded from config."""
-    MindsConfig(data_dir=tmp_path).set_report_unexpected_errors(True)
+def test_accounts_page_no_longer_hosts_error_reporting_toggles(tmp_path: Path) -> None:
+    """The error-reporting toggles moved off the manage-accounts page to the dedicated Settings page."""
     client, auth_store = _create_test_client_with_stores(tmp_path)
     _authenticate_client(client, auth_store)
     response = client.get("/accounts")
+    assert response.status_code == 200
+    assert "report-errors-toggle" not in response.text
+
+
+def test_settings_page_requires_auth(tmp_path: Path) -> None:
+    """The /settings page requires authentication."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/settings")
+    assert response.status_code == 403
+
+
+def test_settings_page_hosts_error_reporting_toggles(tmp_path: Path) -> None:
+    """The Settings page hosts the per-machine error-reporting toggles, seeded from config."""
+    MindsConfig(data_dir=tmp_path).set_report_unexpected_errors(True)
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.get("/settings")
     assert response.status_code == 200
     assert "Report unexpected errors" in response.text
     report_input = response.text.split('id="report-errors-toggle"')[1].split(">")[0]
@@ -2099,6 +2115,26 @@ def test_landing_shows_consent_screen_after_login_when_unanswered(tmp_path: Path
     assert response.status_code == 200
     assert "Help improve Minds" in response.text
     assert "Report unexpected errors" in response.text
+
+
+def test_welcome_continue_without_account_routes_through_consent(tmp_path: Path) -> None:
+    """"Continue without an account" sends the user to "/" so the consent screen is offered.
+
+    Reporting is not gated behind an Imbue account: the account-less skip path lands on "/", whose
+    handler shows the "Help improve Minds" consent screen (when unanswered) before the create form.
+    """
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    welcome = client.get("/welcome")
+    assert welcome.status_code == 200
+    # Isolate the full opening <a> tag that carries the skip-continue id, regardless of
+    # attribute order, and assert it links to "/" (the consent-bearing landing route).
+    before, after = welcome.text.split('id="skip-continue-btn"', 1)
+    skip_tag = before.rsplit("<a", 1)[1] + after.split(">", 1)[0]
+    assert 'href="/"' in skip_tag
+    # Following that link while consent is unanswered shows the consent screen.
+    landing = client.get("/")
+    assert "Help improve Minds" in landing.text
 
 
 def test_consent_page_requires_auth(tmp_path: Path) -> None:

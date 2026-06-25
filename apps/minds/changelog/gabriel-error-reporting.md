@@ -1,6 +1,8 @@
 Error reporting is now controlled by the user instead of environment variables.
 
-On first launch (and once after upgrading), Minds shows a consent screen -- just after you sign in -- that explains error reporting and lets you opt into "Report unexpected errors" and "Include logs" (both default off; "Include logs" only appears once reporting is on). The same two toggles live permanently on the manage-accounts page and take effect immediately, with no restart.
+On first launch (and once after upgrading), Minds shows a consent screen -- the "Help improve Minds" screen -- that explains error reporting and lets you opt into "Report unexpected errors" and "Include logs" (both default off; "Include logs" only appears once reporting is on). The same two toggles live permanently on a new Settings page, reached from the "Settings" entry in the sidebar, and take effect immediately, with no restart.
+
+Error reporting is no longer tied to having an Imbue account: choosing "Continue without an account" now also shows the "Help improve Minds" consent screen before you reach the create form, so anyone can opt in (or out).
 
 Sentry now always initializes, but what it sends is gated live by these settings: with reporting off, automatic errors are never sent; with reporting on but logs off, errors are sent without log/traceback attachments. Manual bug reports (see below) are always sent regardless. The `MINDS_SENTRY_ENABLED` and `MINDS_SENTRY_S3_UPLOADS` environment variables no longer gate any of this.
 
