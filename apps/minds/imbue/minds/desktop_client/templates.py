@@ -183,7 +183,6 @@ CATALOG: Final[Catalog] = _build_catalog()
 def render_landing_page(
     accessible_agent_ids: Sequence[AgentId],
     mngr_forward_origin: str = "",
-    telegram_status_by_agent_id: dict[str, bool] | None = None,
     is_discovering: bool = False,
     agent_names: dict[str, str] | None = None,
     destroying_status_by_agent_id: dict[str, str] | None = None,
@@ -198,9 +197,6 @@ def render_landing_page(
     (e.g. ``"http://localhost:8421"``). Workspace links target
     ``{mngr_forward_origin}/goto/<agent>/`` because Phase 2 deletes minds'
     in-process subdomain forwarder; the plugin owns ``/goto/`` now.
-
-    telegram_status_by_agent_id maps agent ID strings to whether they have
-    active Telegram bot credentials. When None, no telegram buttons are shown.
 
     agent_names maps agent ID strings to human-readable workspace names.
 
@@ -234,8 +230,6 @@ def render_landing_page(
         agent_ids=accessible_agent_ids,
         agent_accents=effective_accents,
         mngr_forward_origin=mngr_forward_origin,
-        telegram_enabled=telegram_status_by_agent_id is not None,
-        telegram_status_by_agent_id=telegram_status_by_agent_id or {},
         is_discovering=is_discovering,
         agent_names=agent_names or {},
         destroying_status_by_agent_id=destroying_status_by_agent_id or {},
@@ -1294,18 +1288,11 @@ def render_workspace_settings(
     current_account: object | None,
     accounts: Sequence[object],
     servers: Sequence[str],
-    telegram_state: str | None = None,
     is_leased_imbue_cloud: bool = False,
     current_color: str = DEFAULT_WORKSPACE_COLOR,
     is_stale: bool = False,
 ) -> str:
     """Render the workspace settings page.
-
-    telegram_state controls whether the Telegram section is shown:
-
-    - ``None`` -- no Telegram orchestrator configured; section is hidden.
-    - ``"active"`` -- Telegram is already set up for this workspace.
-    - ``"pending"`` -- setup button is shown.
 
     ``is_leased_imbue_cloud`` is True for workspaces on a host leased from
     Imbue Cloud; the account section then shows the bound account with a
@@ -1330,7 +1317,6 @@ def render_workspace_settings(
         current_account=current_account,
         accounts=accounts,
         servers=servers,
-        telegram_state=telegram_state,
         is_leased_imbue_cloud=is_leased_imbue_cloud,
         current_color=current_color,
         is_stale=is_stale,

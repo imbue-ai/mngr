@@ -160,8 +160,6 @@ from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.primitives import ServiceName
 from imbue.minds.primitives import UserDataPreference
-from imbue.minds.telegram.setup import TelegramSetupOrchestrator
-from imbue.minds.telegram.setup import TelegramSetupStatus
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.mngr.api.discovery_events import DISCOVERY_STREAM_POLL_INTERVAL_SECONDS
 from imbue.mngr.api.discovery_events import DiscoveryError
@@ -477,10 +475,6 @@ def _handle_landing_page() -> Response:
     destroying_status_by_agent_id = _resolve_destroying_for_landing(paths, backend_resolver, landing_session_store)
 
     if all_agent_ids:
-        telegram_orchestrator: TelegramSetupOrchestrator | None = get_state().telegram_orchestrator
-        telegram_status: dict[str, bool] | None = None
-        if telegram_orchestrator is not None:
-            telegram_status = {str(aid): telegram_orchestrator.agent_has_telegram(aid) for aid in all_agent_ids}
         agent_names: dict[str, str] = {}
         agent_accents: dict[str, str] = {}
         agent_providers: dict[str, str] = {}
@@ -502,7 +496,6 @@ def _handle_landing_page() -> Response:
         html = render_landing_page(
             accessible_agent_ids=all_agent_ids,
             mngr_forward_origin=_get_mngr_forward_origin(),
-            telegram_status_by_agent_id=telegram_status,
             agent_names=agent_names,
             destroying_status_by_agent_id=destroying_status_by_agent_id,
             agent_accents=agent_accents,
@@ -1940,84 +1933,6 @@ def _handle_set_workspace_color_api(
         content=json.dumps({"agent_id": agent_id, "color": normalized}),
         media_type="application/json",
     )
-
-
-# -- Telegram setup route handlers --
-
-
-def _handle_telegram_setup(
-    agent_id: str,
-) -> Response:
-    """Start Telegram bot setup for an agent (POST /api/agents/{agent_id}/telegram/setup)."""
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
-
-    telegram_orchestrator: TelegramSetupOrchestrator | None = get_state().telegram_orchestrator
-    if telegram_orchestrator is None:
-        return make_response(
-            status_code=501,
-            content='{"error": "Telegram setup not configured"}',
-            media_type="application/json",
-        )
-
-    parsed_id = AgentId(agent_id)
-
-    # Use agent_id as the agent name for bot naming (best we have without additional lookups)
-    agent_name = str(parsed_id)[:8]
-    try:
-        body = _read_json_body()
-        agent_name = str(body.get("agent_name", agent_name)).strip() or agent_name
-    except (json.JSONDecodeError, ValueError):
-        pass
-
-    telegram_orchestrator.start_setup(agent_id=parsed_id, agent_name=agent_name)
-    return make_response(
-        content=json.dumps({"agent_id": str(parsed_id), "status": str(TelegramSetupStatus.CHECKING_CREDENTIALS)}),
-        media_type="application/json",
-    )
-
-
-def _handle_telegram_status(
-    agent_id: str,
-) -> Response:
-    """Get Telegram setup status for an agent (GET /api/agents/{agent_id}/telegram/status)."""
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
-
-    telegram_orchestrator: TelegramSetupOrchestrator | None = get_state().telegram_orchestrator
-    if telegram_orchestrator is None:
-        return make_response(
-            status_code=501,
-            content='{"error": "Telegram setup not configured"}',
-            media_type="application/json",
-        )
-
-    parsed_id = AgentId(agent_id)
-    info = telegram_orchestrator.get_setup_info(parsed_id)
-
-    if info is None:
-        # No active setup -- check if already set up
-        is_active = telegram_orchestrator.agent_has_telegram(parsed_id)
-        if is_active:
-            return make_response(
-                content=json.dumps({"agent_id": str(parsed_id), "status": str(TelegramSetupStatus.DONE)}),
-                media_type="application/json",
-            )
-        return make_response(
-            status_code=404,
-            content='{"error": "No Telegram setup in progress for this agent"}',
-            media_type="application/json",
-        )
-
-    result: dict[str, str | None] = {
-        "agent_id": str(info.agent_id),
-        "status": str(info.status),
-    }
-    if info.error is not None:
-        result["error"] = info.error
-    if info.bot_username is not None:
-        result["bot_username"] = info.bot_username
-    return make_response(content=json.dumps(result), media_type="application/json")
 
 
 # -- Providers panel toggle route --
@@ -3505,7 +3420,7 @@ def _is_leased_imbue_cloud_workspace(backend_resolver: BackendResolverInterface,
 def _handle_workspace_settings(
     agent_id: str,
 ) -> Response:
-    """Render workspace settings page with account, sharing, telegram, and delete options."""
+    """Render workspace settings page with account, sharing, and delete options."""
     if not _is_request_authenticated():
         return make_response(status_code=403, content="Not authenticated")
     backend_resolver = get_state().backend_resolver
@@ -3522,11 +3437,6 @@ def _handle_workspace_settings(
 
     servers = [str(s) for s in backend_resolver.list_services_for_agent(parsed_agent_id)]
 
-    telegram_orchestrator: TelegramSetupOrchestrator | None = get_state().telegram_orchestrator
-    telegram_state: str | None = None
-    if telegram_orchestrator is not None:
-        telegram_state = "active" if telegram_orchestrator.agent_has_telegram(parsed_agent_id) else "pending"
-
     # Pre-fill the color picker with the workspace's stored color (or the
     # default when the workspace has no color label yet). Disable
     # the picker controls when the provider that owns this workspace is
@@ -3542,7 +3452,6 @@ def _handle_workspace_settings(
         current_account=current_account,
         accounts=accounts,
         servers=servers,
-        telegram_state=telegram_state,
         is_leased_imbue_cloud=is_leased_imbue_cloud,
         current_color=current_color,
         is_stale=is_stale,
@@ -4220,7 +4129,6 @@ def create_desktop_client(
     http_client: httpx.Client | None,
     agent_creator: AgentCreator | None = None,
     imbue_cloud_cli: ImbueCloudCli | None = None,
-    telegram_orchestrator: TelegramSetupOrchestrator | None = None,
     notification_dispatcher: NotificationDispatcher | None = None,
     paths: WorkspacePaths | None = None,
     minds_config: MindsConfig | None = None,
@@ -4246,7 +4154,7 @@ def create_desktop_client(
     The agent-subdomain forwarding lives in the ``mngr_forward`` plugin
     (``libs/mngr_forward``) now; this app only serves minds-specific routes
     on the bare origin (login, landing, accounts, workspace settings,
-    sharing, telegram, agent create / destroy). Workspace links go to
+    sharing, agent create / destroy). Workspace links go to
     ``http://localhost:<mngr_forward_port>/goto/<agent>/`` instead of being
     routed in-process.
 
@@ -4256,10 +4164,6 @@ def create_desktop_client(
 
     When ``agent_creator`` is provided, the server can create new agents
     from git URLs via the /create form and /api/create-agent API.
-
-    When ``telegram_orchestrator`` is provided, the landing page shows
-    Telegram setup buttons and the /api/agents/{agent_id}/telegram/*
-    endpoints are available.
 
     When ``paths`` is provided, the /api/v1/ REST API router is mounted with
     API key authentication. The notification endpoint within the router
@@ -4311,7 +4215,6 @@ def create_desktop_client(
         agent_creator=agent_creator,
         onboarding_applier=onboarding_applier,
         imbue_cloud_cli=imbue_cloud_cli,
-        telegram_orchestrator=telegram_orchestrator,
         notification_dispatcher=notification_dispatcher,
         api_v1_paths=paths,
         minds_config=minds_config,
@@ -4416,10 +4319,6 @@ def create_desktop_client(
 
     # Workspace color route
     app.add_url_rule("/api/workspaces/<agent_id>/color", view_func=_handle_set_workspace_color_api, methods=["POST"])
-
-    # Telegram setup routes
-    app.add_url_rule("/api/agents/<agent_id>/telegram/setup", view_func=_handle_telegram_setup, methods=["POST"])
-    app.add_url_rule("/api/agents/<agent_id>/telegram/status", view_func=_handle_telegram_status)
 
     # Providers panel toggle (Disable / Enable buttons in the landing page panel)
     app.add_url_rule("/api/providers/<provider_name>/toggle", view_func=_handle_provider_toggle, methods=["POST"])

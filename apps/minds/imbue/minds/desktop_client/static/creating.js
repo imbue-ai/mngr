@@ -133,7 +133,6 @@
     'Tip: your workspace is backed up automatically so your work survives a restart.',
     'Did you know: in <b>privacy mode</b>, the data we gather stays on your own computer.',
     'Tip: switch accounts anytime from the workspace menu.',
-    'Tip: connect a <b>Telegram bot</b> to message your agent from your phone.',
     'Tip: share a running app with a teammate from the workspace’s Share menu.',
     'Did you know: you can revisit permissions and compute settings later.'
   ];

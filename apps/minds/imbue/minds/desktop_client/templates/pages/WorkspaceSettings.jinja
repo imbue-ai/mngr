@@ -1,12 +1,7 @@
-{#def agent_id, ws_name, current_account, accounts, servers, telegram_state, is_leased_imbue_cloud=False, current_color="#0b292b", is_stale=False, palette={} #}
+{#def agent_id, ws_name, current_account, accounts, servers, is_leased_imbue_cloud=False, current_color="#0b292b", is_stale=False, palette={} #}
 {#
   Workspace settings page. Color picker, account section, sharing servers
-  list, optional Telegram setup, and the danger-zone destroy flow.
-
-  telegram_state controls the Telegram section:
-    - None        : no Telegram orchestrator; section hidden
-    - "active"    : Telegram already set up for this workspace
-    - "pending"   : show the setup button
+  list, and the danger-zone destroy flow.
 
   is_leased_imbue_cloud is True for workspaces running on a host leased from
   Imbue Cloud. Such hosts are permanently bound to the leasing account to avoid
@@ -148,15 +143,6 @@
         </div>
       {% else %}
         <p class="text-secondary">No servers discovered for this workspace.</p>
-      {% endif %}
-
-      {% if telegram_state %}
-        <SectionHeader divider>Telegram</SectionHeader>
-        {% if telegram_state == 'active' %}
-          <p class="text-success">Telegram is active for this workspace.</p>
-        {% elif telegram_state == 'pending' %}
-          <Button variant="primary" id="tg-btn">Setup Telegram</Button>
-        {% endif %}
       {% endif %}
 
       <SectionHeader divider>Danger zone</SectionHeader>

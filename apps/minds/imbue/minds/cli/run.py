@@ -80,7 +80,6 @@ from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHe
 from imbue.minds.desktop_client.system_interface_health import should_enroll_suspect_for_backend_failure
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
-from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.output import emit_event
 from imbue.minds.utils.sentry.core import SentryDeployEnvironment
@@ -330,7 +329,6 @@ def run(
         parent_concurrency_group=root_concurrency_group,
         connector_url=client_env_config.connector_url,
     )
-    telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
     session_store = MultiAccountSessionStore(data_dir=data_directory, cli=imbue_cloud_cli)
     response_events = load_response_events(data_directory)
     request_inbox = RequestInbox()
@@ -458,7 +456,6 @@ def run(
         http_client=None,
         agent_creator=agent_creator,
         imbue_cloud_cli=imbue_cloud_cli,
-        telegram_orchestrator=telegram_orchestrator,
         notification_dispatcher=notification_dispatcher,
         paths=paths,
         envelope_stream_consumer=consumer,

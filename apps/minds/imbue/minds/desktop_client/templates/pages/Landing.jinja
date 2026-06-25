@@ -1,7 +1,7 @@
-{#def agent_ids, agent_accents, mngr_forward_origin, telegram_enabled, telegram_status_by_agent_id, is_discovering, agent_names, destroying_status_by_agent_id, shutdown_capable_agent_ids, mind_liveness_by_agent_id, agent_providers={} #}
+{#def agent_ids, agent_accents, mngr_forward_origin, is_discovering, agent_names, destroying_status_by_agent_id, shutdown_capable_agent_ids, mind_liveness_by_agent_id, agent_providers={} #}
 {#
-  Landing page: list of accessible workspaces with per-row health, backup,
-  and telegram status. Subscribes to the chrome SSE so the page reloads
+  Landing page: list of accessible workspaces with per-row health and backup
+  status. Subscribes to the chrome SSE so the page reloads
   when a destroy completes (or any other workspace-list change lands).
 #}
 {% set _scripts %}

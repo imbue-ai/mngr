@@ -1,7 +1,7 @@
-// Workspace settings page: handles the color picker, disassociate, and
-// (optional) Telegram setup. Reads the agent id from the
-// #workspace-settings container's data-agent-id attribute so the
-// template does not have to interpolate anything into JS.
+// Workspace settings page: handles the color picker and disassociate.
+// Reads the agent id from the #workspace-settings container's
+// data-agent-id attribute so the template does not have to interpolate
+// anything into JS.
 (function () {
   var root = document.getElementById('workspace-settings');
   if (!root) return;
@@ -243,46 +243,6 @@
             section.style.pointerEvents = 'auto';
           }
         });
-    });
-  }
-
-  var tgBtn = document.getElementById('tg-btn');
-  if (tgBtn) {
-    tgBtn.addEventListener('click', async function () {
-      tgBtn.disabled = true;
-      tgBtn.textContent = 'Setting up...';
-      try {
-        var resp = await fetch('/api/agents/' + encodeURIComponent(agentId) + '/telegram/setup', { method: 'POST' });
-        if (!resp.ok) {
-          var data = await resp.json();
-          alert('Failed: ' + (data.error || resp.statusText));
-          tgBtn.disabled = false;
-          tgBtn.textContent = 'Setup Telegram';
-          return;
-        }
-        var interval = setInterval(async function () {
-          try {
-            var r = await fetch('/api/agents/' + encodeURIComponent(agentId) + '/telegram/status');
-            if (!r.ok) return;
-            var d = await r.json();
-            if (d.status === 'DONE') {
-              clearInterval(interval);
-              tgBtn.textContent = 'Telegram active';
-              tgBtn.classList.add('text-success');
-            } else if (d.status === 'FAILED') {
-              clearInterval(interval);
-              tgBtn.textContent = 'Setup failed';
-              tgBtn.disabled = false;
-            } else {
-              tgBtn.textContent = d.status;
-            }
-          } catch (e) { /* transient polling error */ }
-        }, 2000);
-      } catch (e) {
-        alert('Failed: ' + e.message);
-        tgBtn.disabled = false;
-        tgBtn.textContent = 'Setup Telegram';
-      }
     });
   }
 })();

@@ -310,7 +310,6 @@ def _build_scenarios() -> list[Scenario]:
                 current_account=None,
                 accounts=(account_a,),
                 servers=("system_interface",),
-                telegram_state=None,
             ),
         ),
         Scenario(
@@ -321,7 +320,6 @@ def _build_scenarios() -> list[Scenario]:
                 current_account=account_a,
                 accounts=(account_a,),
                 servers=("system_interface", "frontend"),
-                telegram_state="active",
             ),
         ),
         Scenario(
@@ -332,7 +330,6 @@ def _build_scenarios() -> list[Scenario]:
                 current_account=account_a,
                 accounts=(account_a,),
                 servers=(),
-                telegram_state="pending",
             ),
         ),
         # -- Sharing editor ----------------------------------------------

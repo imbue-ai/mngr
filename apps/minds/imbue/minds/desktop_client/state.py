@@ -41,7 +41,6 @@ from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.primitives import OutputFormat
-from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
 _STATE_KEY: Final[str] = "minds_desktop_client_state"
@@ -70,9 +69,6 @@ class DesktopClientState(MutableModel):
     )
     imbue_cloud_cli: ImbueCloudCli | None = Field(
         default=None, frozen=True, description="imbue_cloud plugin CLI wrapper"
-    )
-    telegram_orchestrator: TelegramSetupOrchestrator | None = Field(
-        default=None, frozen=True, description="Telegram bot setup orchestrator"
     )
     notification_dispatcher: NotificationDispatcher | None = Field(
         default=None, frozen=True, description="OS notification dispatcher"

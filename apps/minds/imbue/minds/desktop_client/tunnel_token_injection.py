@@ -9,7 +9,7 @@ unnecessarily fan-shaped.
 
 The token lives at ``runtime/secrets/cloudflare_tunnel.env`` inside the agent.
 ``runtime/secrets/`` is a directory of per-secret ``*.env`` files (this token,
-``restic.env`` for backups, ``telegram.env`` for the bot); each writer owns its
+``restic.env`` for backups); each writer owns its
 own file so they never clobber one another. The agent's cloudflare-tunnel
 service (``libs/cloudflare_tunnel/.../runner.py``) watches this file: it starts
 cloudflared when the token appears and stops it when the file is removed.
