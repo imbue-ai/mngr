@@ -1618,10 +1618,8 @@ kill -TERM 1
                         )
                     )
 
-        # Outside the `with`: collecting_cleanup_failures raises on exit if any
-        # step failed, so the host record is deleted -- the host forgotten --
-        # only on a fully clean cleanup. A failure keeps the record so the next
-        # sweep retries (a non-retryable failure stays sticky, but visible).
+        # Reached only if the cleanup above had no failures (the `with` raises
+        # otherwise), so a failed cleanup keeps the host record for retry.
         self._host_store.delete_host_record(host_id)
         self._container_cache_by_id.pop(host_id, None)
         self._evict_cached_host(host_id)
