@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-19
+
+Trimmed the README to user-relevant content and tightened it for concision.
+
+## 2026-06-18
+
+Internal: reworded a docstring example of a config-defined Claude subtype to use a neutral `coder` name. No behavior change.
+
 ## 2026-06-17
 
 The usage statusline-shim provisioner now filters agents with `isinstance(agent, ClaudeCoreAgent)` instead of `ClaudeAgent`. `ClaudeAgent` was split into a shared `ClaudeCoreAgent` base and an interactive TUI subclass, and `headless_claude` now extends the core (not the TUI subclass); switching the check to the shared base keeps the shim provisioned for `claude`, `headless_claude`, and claude-derived custom types exactly as before. Behavior is unchanged.
