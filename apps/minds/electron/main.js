@@ -2664,29 +2664,6 @@ async function startBackendWithRetry() {
       // destroyed workspace once discovery is complete, and the accent is
       // re-derived from whatever URL each restored window actually reopens to.)
 
-      // TEMP DEBUG (reopen-windows diagnosis): dump the decisive restore inputs.
-      // Remove once the create-form-instead-of-restore bug is understood.
-      try {
-        const savedUrls = (savedState.windows || []).map((w) => w.url);
-        const restorableUrls = restorable.map((w) => w.url);
-        const droppedUrls = savedUrls.filter((u) => !restorableUrls.includes(u));
-        console.log('[restore-debug] chromeState=', JSON.stringify({
-          authenticated,
-          discoveryComplete,
-          hasAccounts: chromeState && chromeState.hasAccounts,
-          workspaceCount: workspaceList.length,
-        }));
-        console.log('[restore-debug] workspaceIds=', JSON.stringify(workspaceList.map((w) => w.id)));
-        console.log('[restore-debug] restorableWorkspaceIds=', JSON.stringify(restorableWorkspaceIds));
-        console.log('[restore-debug] savedWindowUrls=', JSON.stringify(savedUrls));
-        console.log('[restore-debug] knownAgentIdsSet=',
-          knownAgentIdsSet === null ? 'null (no filtering)' : JSON.stringify([...knownAgentIdsSet]));
-        console.log('[restore-debug] restorableCount=', restorable.length,
-          'droppedSavedUrls=', JSON.stringify(droppedUrls));
-      } catch (dbgErr) {
-        console.warn('[restore-debug] failed to dump restore state:', dbgErr);
-      }
-
       initialBundle.isLoadingState = false;
       updateBundleBounds(initialBundle);
       if (initialBundle.chromeView && !initialBundle.chromeView.webContents.isDestroyed()) {
@@ -2694,27 +2671,23 @@ async function startBackendWithRetry() {
       }
 
       if (!authenticated) {
-        console.log('[restore-debug] branch=welcome (not authenticated)');
         // The one-time code was already consumed above but fetchInitialChromeState
         // still returned unauthenticated (should not happen, but handle gracefully).
         if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
           initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/welcome');
         }
       } else if (!chromeState.hasAccounts && restorable.length === 0) {
-        console.log('[restore-debug] branch=welcome (no accounts, nothing to restore)');
         // Locally authenticated but user has never signed in with SuperTokens
         // and has no saved windows -- show the welcome/onboarding page.
         if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
           initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/welcome');
         }
       } else if (restorable.length === 0) {
-        console.log('[restore-debug] branch=landing/create (has accounts, nothing to restore -> "/")');
         // Has accounts but nothing to restore -- land on the create page.
         if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
           initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/');
         }
       } else {
-        console.log('[restore-debug] branch=restore (' + restorable.length + ' window(s))');
         // Restore saved windows with their positions and sizes. Each window's
         // titlebar accent is re-derived from its restored content URL by
         // ``loadUrlIntoBundleContentView`` (which ``openNewWindow`` calls too),
