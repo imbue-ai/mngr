@@ -1,10 +1,15 @@
 """REST API v1 blueprint for the minds desktop client.
 
-Every route under ``/api/v1/`` requires ``Authorization: Bearer <key>``
-where ``<key>`` is the central :mod:`api_key_store` minds API key. The
-latchkey gateway's bundled ``minds-api-proxy`` extension injects that
-header on every forwarded request, so a caller (an agent in a
-workspace) reaches us by hitting ``$LATCHKEY_GATEWAY/minds-api-proxy/api/v1/...``.
+The central minds API key is the ``Authorization: Bearer <key>`` credential
+where ``<key>`` is from :mod:`api_key_store`. The latchkey gateway's bundled
+``minds-api-proxy`` extension injects that header on every forwarded request,
+so an agent in a workspace reaches us by hitting
+``$LATCHKEY_GATEWAY/minds-api-proxy/api/v1/...``.
+
+The notifications route is bearer-only. The cross-workspace ``/workspaces``
+routes accept *either* that bearer (agents, via the gateway) *or* the desktop
+client's signed session cookie, so the browser UI can call the same versioned
+API as agents over one HTTP surface (see :func:`require_api_or_cookie_auth`).
 
 Agent identity, when a route needs it, comes from the URL path's
 ``<agent_id>`` parameter -- *not* from the bearer token. The gateway's
