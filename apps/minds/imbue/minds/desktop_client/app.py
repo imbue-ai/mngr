@@ -583,17 +583,6 @@ def _handle_help_report() -> Response:
     )
 
 
-def _handle_debug_boom() -> Response:
-    """[DEBUG-ONLY -- remove before merging] Raise an unhandled exception to exercise auto error reporting.
-
-    The Flask catch-all (``_unhandled_exception_handler``) logs this at ERROR with the exception
-    attached, so the Sentry log handler captures it as an automatic event -- subject to the live
-    ``report_unexpected_errors`` gate. The message is made unique per call so the rate limiter (which
-    keys on the exception type + args) treats each trigger as new instead of throttling repeats.
-    """
-    raise RuntimeError(f"[debug] backend sentry test {time.time()}")
-
-
 def _existing_workspace_host_names(backend_resolver: BackendResolverInterface) -> set[str]:
     """Gather the host names of every known workspace across all providers.
 
@@ -4511,8 +4500,6 @@ def create_desktop_client(
     app.add_url_rule("/_chrome/error-reporting", view_func=_handle_error_reporting_settings, methods=["POST"])
     app.add_url_rule("/help", view_func=_handle_help_page)
     app.add_url_rule("/help/report", view_func=_handle_help_report, methods=["POST"])
-    # [DEBUG-ONLY -- remove before merging] Trigger an automatic backend Sentry event on demand.
-    app.add_url_rule("/_debug/boom", view_func=_handle_debug_boom)
     app.add_url_rule("/welcome", view_func=_handle_welcome_page)
     app.add_url_rule("/login", view_func=_handle_login)
     app.add_url_rule("/authenticate", view_func=_handle_authenticate)

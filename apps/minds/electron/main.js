@@ -2844,22 +2844,6 @@ ipcMain.handle('report-error', () => {
   }
 });
 
-// [DEBUG-ONLY -- remove before merging] Trigger an automatic main-process Sentry capture on demand
-// (from the debug buttons on the accounts page). Unlike the backend-down "Report a bug" path, this is
-// NOT tagged manually, so it runs through the beforeSend gate and tests the report_unexpected_errors
-// setting for the Electron main process. The event id is generated client-side regardless of the gate,
-// so log whether reporting is currently enabled too -- the JS Sentry project is the source of truth.
-ipcMain.on('debug-electron-error', (_event, message) => {
-  try {
-    const SentryMain = require('@sentry/electron/main');
-    const { isErrorReportingEnabled } = require('./sentry');
-    const eventId = SentryMain.captureException(new Error(message || '[debug] electron main sentry test'));
-    console.log(`[debug] electron main captureException: reportingEnabled=${isErrorReportingEnabled()} eventId=${eventId}`);
-  } catch (err) {
-    console.error('[debug] electron main capture failed:', err && err.message);
-  }
-});
-
 ipcMain.on('open-workspace-in-new-window', (event, agentId) => {
   if (!agentId) return;
   openOrFocusWorkspace(agentId, workspaceUrlForAgent(agentId));

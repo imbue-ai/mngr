@@ -50,12 +50,6 @@ window.addEventListener('message', (event) => {
     ipcRenderer.send('open-help', typeof agentId === 'string' ? agentId : '');
     return;
   }
-  // [DEBUG-ONLY -- remove before merging] Forward the manual "trigger an Electron main error" request
-  // from the debug buttons on the Settings page so we can test the main-process automatic-reporting gate.
-  if (data.type === 'minds:debug-electron-error') {
-    ipcRenderer.send('debug-electron-error', typeof data.message === 'string' ? data.message : '');
-    return;
-  }
   // Create-screen sign-in: open the shared modal overlay loaded with the
   // sign-in page (so it covers the whole window, including the title bar).
   // No payload -- the main process builds the fixed `/auth/signin-modal` URL.
