@@ -2900,6 +2900,46 @@ def test_resolve_isolate_raises_on_contradictory_dual_spec() -> None:
         config.resolve_isolate_local_config_dir()
 
 
+def test_resolve_isolate_survives_serialize_reparse_roundtrip_with_alias_only() -> None:
+    """An alias-only config keeps resolving once it is serialized and reparsed.
+
+    Reproduces the in-host ``mngr create`` regression: the config loader builds the
+    agent-type config with ``model_construct`` (validators bypassed, so only
+    ``use_env_config_dir`` is in ``model_fields_set``), and later the config is
+    revalidated (e.g. when the agent object is constructed). Before the fix, that
+    round-trip materialized the default ``isolate_local_config_dir`` into
+    ``model_fields_set``, which ``resolve_isolate_local_config_dir`` then misread as a
+    user-set contradiction and rejected -- hanging mind creation on "waiting for initial
+    chat agent". After the fix, the alias is pinned at the first (faithful) validation,
+    so the round-trip stays consistent and resolves to shared mode.
+    """
+    # model_construct mirrors the loader: validators are skipped, so the deprecated alias
+    # is the only field the user "set", exactly as a [agent_types.claude] block would yield.
+    constructed = ClaudeAgentConfig.model_construct(use_env_config_dir=True, check_installation=False)
+    # Revalidating the instance runs the model validator while model_fields_set is still
+    # faithful (the loader's final MngrConfig.model_validate does this), pinning the alias.
+    revalidated = ClaudeAgentConfig.model_validate(constructed)
+    # A full-dump reparse mirrors the agent-construction round-trip that triggered the bug.
+    roundtripped = ClaudeAgentConfig.model_validate(revalidated.model_dump())
+    assert roundtripped.resolve_isolate_local_config_dir() is False
+
+
+def test_resolve_isolate_still_rejects_contradiction_through_roundtrip() -> None:
+    """A genuine hand-written contradiction is still rejected after a serialize/reparse.
+
+    The user faithfully set both keys to the same (non-inverse) value, so
+    ``isolate_local_config_dir`` is in ``model_fields_set`` from the start and the
+    alias-pinning leaves it untouched; the contradiction survives the round-trip and is
+    still raised.
+    """
+    constructed = ClaudeAgentConfig.model_construct(
+        isolate_local_config_dir=True, use_env_config_dir=True, check_installation=False
+    )
+    roundtripped = ClaudeAgentConfig.model_validate(ClaudeAgentConfig.model_validate(constructed).model_dump())
+    with pytest.raises(ConfigError, match="Contradictory"):
+        roundtripped.resolve_isolate_local_config_dir()
+
+
 def test_on_before_provisioning_warns_when_use_env_config_dir_is_set(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
