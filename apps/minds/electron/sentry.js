@@ -123,16 +123,19 @@ function initSentry() {
     dsn,
     environment,
     release: fixupReleaseId(releaseId),
-    // Drop the native-crash (Crashpad) integration in dev. Its
-    // `crashReporter.start()` spawns a `chrome_crashpad_handler` that inherits
-    // the Electron process's stderr and outlives the app on quit. Under
-    // `just minds-start` that stderr is a socketpair `concurrently` reads to
-    // prefix `[electron]` output; because the orphaned handler never closes it,
-    // `concurrently` never sees EOF, its kill-others never fires, and the dev
-    // launcher hangs after every quit. Packaged builds aren't wrapped in
-    // `concurrently`, so they keep native-crash minidump reporting.
+    // Drop the native-crash (Crashpad) integration when the dev launcher asks
+    // us to (it sets MINDS_DISABLE_CRASHPAD; see the `start` script in
+    // package.json). Crashpad's `crashReporter.start()` spawns a
+    // `chrome_crashpad_handler` that inherits the Electron process's stderr and
+    // outlives the app on quit. The dev launcher pipes that stderr through
+    // `concurrently` to prefix `[electron]` output, and `concurrently` waits for
+    // EOF on the stream before its kill-others fires; the orphaned handler holds
+    // the write end open, so EOF never comes and the launcher hangs after every
+    // quit. Keying off the launcher's flag (not packaged-ness) keeps native-crash
+    // minidump reporting on for every other run -- packaged builds and a plain
+    // `electron .` alike.
     integrations: (defaults) =>
-      paths.isDev()
+      process.env.MINDS_DISABLE_CRASHPAD === '1'
         ? defaults.filter((integration) => integration.name !== 'SentryMinidump')
         : defaults,
     // Error reporting only -- no performance tracing (matches the backend).
