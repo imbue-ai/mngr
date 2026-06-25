@@ -486,25 +486,6 @@
 
   function handleChromeEvent(data) {
     try {
-      if (data.type === 'freeform_accent_preview') {
-        // Create-form preview: no workspace yet, so there's no agentId
-        // to key the cache by. Paint the CSS variables directly and
-        // drop the SSE replay target so a background ``workspaces``
-        // tick (a liveness flip or rename in any workspace) doesn't
-        // repaint the previous workspace's accent over the preview
-        // while the user is still on the create form. main drops this
-        // override when the window leaves ``/create``: it force-sends an
-        // ``accent-changed`` (the new workspace on submit, or null ->
-        // neutral chrome on abandon) even when the accent value didn't
-        // change -- see ``hasFreeformAccentPreview`` in electron/main.js.
-        if (data.accent) {
-          lastRequestedAccentAgentId = null;
-          document.documentElement.style.setProperty('--workspace-accent', data.accent);
-          document.documentElement.style.setProperty('--titlebar-bg', data.accent);
-          setTitlebarSurface(true);
-        }
-        return;
-      }
       if (data.type === 'workspace_accent_preview') {
         // Optimistic single-workspace cache update + repaint, emitted by
         // main.js when the settings page in this bundle picks a color.
