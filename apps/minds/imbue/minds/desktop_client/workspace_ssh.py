@@ -8,9 +8,10 @@ returns the target's SSH connection info. The caller then connects directly with
 its own private key and runs ordinary ``git`` / ``rsync`` / ``ssh``.
 
 Private keys never move: the hub only ever handles public keys. Grants are
-ephemeral -- each authorized key carries an ``expires=`` marker, and stale keys
-are pruned (on the next grant for that target, and -- by a future caller --
-at minds startup).
+ephemeral -- each authorized key carries an ``expires=`` marker so that stale
+grants can be pruned. ``prune_expired_grant_lines`` implements that pruning over
+an ``authorized_keys`` body; wiring it into the grant/startup flow (which must
+read the target's ``authorized_keys`` back over ``mngr exec``) is not done yet.
 
 For a *remote* target (Modal / AWS / Vultr / imbue_cloud), the returned host is
 reachable from anywhere, so the caller connects directly. A *local* target
