@@ -5,3 +5,5 @@ Added the `minds-workspaces` detent scope and its named permissions (`minds-work
 - `store.list_host_permissions_paths` enumerates the per-host permissions files (used by the migration).
 
 - The `services.json` generator now preserves manually-curated, non-detent scope entries (like `minds-workspaces`) across regenerations.
+
+- The `minds-workspaces-ssh` permission now pins its HTTP method to `POST`, matching the other write verbs (`-create`/`-destroy`/`-lifecycle`/`-backups-export`) and the scope's one-verb-per-permission convention.

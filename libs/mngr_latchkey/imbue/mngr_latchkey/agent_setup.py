@@ -294,12 +294,13 @@ _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissi
         },
         _PERM_WORKSPACES_SSH: {
             "properties": {
+                "method": {"const": "POST"},
                 "path": {
                     "type": "string",
                     "pattern": rf"^{_MINDS_WORKSPACES_PATH_PREFIX}/{_MINDS_WORKSPACES_SEGMENT}/ssh$",
                 },
             },
-            "required": ["path"],
+            "required": ["method", "path"],
         },
     },
 )
