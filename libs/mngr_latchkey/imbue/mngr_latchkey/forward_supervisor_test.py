@@ -124,6 +124,11 @@ def _make_fake_mngr_binary(tmp_path: Path) -> Path:
         '    "started_at": datetime.now(timezone.utc).isoformat(),\n'
         '    "gateway_port": None,\n'
         "}))\n"
+        # Drop a per-pid sentinel *after* publishing the record. Unlike the
+        # shared record (which a racing sibling overwrites), this file is never
+        # clobbered, so a test can wait for *each* fake to have finished its
+        # single record write before pinning the shared record.
+        '(record_path.parent / f"ready_{os.getpid()}.txt").write_text("ready")\n'
         "def _on_term(*_):\n"
         "    try:\n"
         "        record_path.unlink()\n"
@@ -151,6 +156,25 @@ def _wait_for_forward_record(plugin_dir: Path) -> LatchkeyForwardInfo:
             return record
         waiter.wait(timeout=_FORWARD_RECORD_POLL_INTERVAL)
     raise AssertionError(f"forward record never appeared at {plugin_dir} within {_FORWARD_RECORD_POLL_TIMEOUT}s")
+
+
+def _wait_for_forward_ready(plugin_dir: Path, pid: int) -> None:
+    """Block until the fake forward ``pid`` has dropped its per-pid ready sentinel.
+
+    The sentinel (``ready_<pid>.txt``) is written *after* the shared record and
+    is never overwritten by a racing sibling, so it proves that *this* specific
+    fake has finished its single record write. Waiting on it for every spawned
+    fake guarantees no late record write can clobber a subsequent pin. Fails the
+    test on timeout.
+    """
+    sentinel = plugin_dir / f"ready_{pid}.txt"
+    deadline = time.monotonic() + _FORWARD_RECORD_POLL_TIMEOUT
+    waiter = threading.Event()
+    while time.monotonic() < deadline:
+        if sentinel.exists():
+            return
+        waiter.wait(timeout=_FORWARD_RECORD_POLL_INTERVAL)
+    raise AssertionError(f"forward pid {pid} never wrote {sentinel} within {_FORWARD_RECORD_POLL_TIMEOUT}s")
 
 
 # -- cmdline matcher ---------------------------------------------------------
@@ -757,11 +781,17 @@ def test_ensure_running_adopts_recorded_forward_and_reaps_the_duplicate(tmp_path
     """When the record points at a live forward, it is adopted and the other reaped."""
     fake_binary = _make_fake_mngr_binary(tmp_path)
     latchkey_directory = tmp_path / f"latchkey-{uuid4().hex}"
+    data_dir = plugin_data_dir(latchkey_directory)
     kept = _spawn_orphan_fake_forward(fake_binary, latchkey_directory)
     duplicate = _spawn_orphan_fake_forward(fake_binary, latchkey_directory)
     try:
-        data_dir = plugin_data_dir(latchkey_directory)
-        # Both fakes raced to publish the shared record; pin it to ``kept``.
+        # Wait for both fakes to finish their single record write (via their
+        # per-pid sentinels) before pinning, so the pin below is the final,
+        # deterministic write -- no late clobber can follow and flip the
+        # adoption to ``duplicate``.
+        _wait_for_forward_ready(data_dir, kept.pid)
+        _wait_for_forward_ready(data_dir, duplicate.pid)
+        # Pin the shared record to ``kept``.
         save_forward_info(
             data_dir,
             LatchkeyForwardInfo(pid=kept.pid, started_at=datetime.now(timezone.utc), gateway_port=None),
