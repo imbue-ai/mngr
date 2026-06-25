@@ -1615,11 +1615,19 @@ kill -TERM 1
         imbue_cloud reads container state out-of-band on its own listing path,
         whereas docker stays on the generic offline fallback and corrects the
         state through this hook. Returns ``None`` (default offline derivation)
-        when no running container backs this host.
+        when no running container backs this host, or when the daemon cannot be
+        reached to confirm one -- this hook runs inside the offline fallback,
+        which must degrade gracefully rather than propagate.
         """
-        container = self._find_container_by_host_id(host_id)
-        if container is not None and self._is_container_running(container):
-            return HostState.UNAUTHENTICATED
+        try:
+            container = self._find_container_by_host_id(host_id)
+            if container is not None and self._is_container_running(container):
+                return HostState.UNAUTHENTICATED
+        except (docker.errors.DockerException, MngrError) as e:
+            # The daemon was reachable during enumeration but dropped before this
+            # out-of-band check (e.g. a daemon restart). Keep the default offline
+            # derivation instead of breaking the offline fallback for this host.
+            logger.warning("Could not read docker container state for host {} during fallback: {}", host_id, e)
         return None
 
     def get_host(

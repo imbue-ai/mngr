@@ -847,6 +847,22 @@ def test_connection_error_fallback_state_no_container_returns_none(
     assert provider.get_connection_error_fallback_state(HostId(HOST_ID_A)) is None
 
 
+@pytest.mark.allow_warnings(match=r"Could not read docker container state for host .* during fallback")
+def test_connection_error_fallback_state_daemon_unreachable_returns_none(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A daemon that drops during the out-of-band check yields None, not an exception.
+
+    This hook runs inside the offline fallback, which must degrade gracefully:
+    if the daemon goes away in the window after host enumeration, the fallback
+    must keep the default offline-state derivation rather than propagate and
+    make the whole host vanish from the listing.
+    """
+    provider = make_docker_provider(temp_mngr_ctx)
+    provider.__dict__["_docker_client"] = _FakeDockerClient(docker.errors.APIError("boom"))
+    assert provider.get_connection_error_fallback_state(HostId(HOST_ID_A)) is None
+
+
 # =========================================================================
 # Build Timeout
 # =========================================================================
