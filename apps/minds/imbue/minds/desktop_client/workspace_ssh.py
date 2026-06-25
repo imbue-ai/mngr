@@ -61,6 +61,23 @@ def _validate_public_key(public_key: str) -> str:
     return stripped
 
 
+def _validate_requester_workspace_id(requester_workspace_id: str) -> str:
+    """Return the requester id, or raise on anything not safe in a single-line marker.
+
+    The requester id is embedded verbatim into the marker comment of a
+    single ``authorized_keys`` line, so -- exactly like the public key -- it
+    must not contain whitespace (a newline would inject an extra
+    ``authorized_keys`` line; any internal space/tab would break the
+    space-delimited marker tokens). mngr ids are a single ``[A-Za-z0-9_-]``
+    token, so rejecting whitespace never refuses a legitimate id.
+    """
+    if not requester_workspace_id:
+        raise SshGrantError("requester_workspace_id is empty")
+    if any(char.isspace() for char in requester_workspace_id):
+        raise SshGrantError("requester_workspace_id must not contain whitespace")
+    return requester_workspace_id
+
+
 def build_authorized_keys_line(*, public_key: str, requester_workspace_id: str, expires_at: datetime) -> str:
     """Build the tagged ``authorized_keys`` line for a grant.
 
@@ -69,8 +86,9 @@ def build_authorized_keys_line(*, public_key: str, requester_workspace_id: str, 
     expiry, so the line is unambiguously minds-owned and prunable.
     """
     validated = _validate_public_key(public_key)
+    validated_requester = _validate_requester_workspace_id(requester_workspace_id)
     key_type, key_material = validated.split()[0], validated.split()[1]
-    marker = f"{_GRANT_MARKER} {_REQUESTER_KEY}={requester_workspace_id} {_EXPIRES_KEY}={expires_at.isoformat()}"
+    marker = f"{_GRANT_MARKER} {_REQUESTER_KEY}={validated_requester} {_EXPIRES_KEY}={expires_at.isoformat()}"
     return f"{key_type} {key_material} {marker}"
 
 

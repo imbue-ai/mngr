@@ -46,6 +46,17 @@ def test_build_authorized_keys_line_rejects_empty() -> None:
         build_authorized_keys_line(public_key="   ", requester_workspace_id="a", expires_at=_NOW)
 
 
+def test_build_authorized_keys_line_rejects_requester_with_newline() -> None:
+    # A newline in the requester id would inject a second authorized_keys line,
+    # exactly the injection the public-key validation guards against.
+    with pytest.raises(SshGrantError):
+        build_authorized_keys_line(
+            public_key=_KEY,
+            requester_workspace_id="agent-abc\nssh-rsa INJECTED",
+            expires_at=_NOW,
+        )
+
+
 def test_prune_expired_grant_lines_drops_expired_minds_keys() -> None:
     expired = build_authorized_keys_line(
         public_key=_KEY, requester_workspace_id="old", expires_at=_NOW - timedelta(hours=1)
