@@ -190,6 +190,7 @@ def _write_aws_provider_blocks(providers_section: Table, desired_names: tuple[st
         block["default_instance_type"] = _AWS_DEFAULT_INSTANCE_TYPE
         block["install_gvisor_runtime"] = _AWS_INSTALL_GVISOR_RUNTIME
         block["docker_runtime"] = _AWS_DOCKER_RUNTIME
+        block["default_start_args"] = list(_AWS_DEFAULT_START_ARGS)
         providers_section[name] = block
 
 
@@ -547,6 +548,18 @@ _AWS_PROVIDER_NAME_PREFIX: Final[str] = "aws-"
 # 2 GB) is too small for the full forever-claude-template build (uv sync + npm
 # ci/build OOMs/thrashes on 2 GB); minds workspaces default to t3.large (8 GB).
 _AWS_DEFAULT_INSTANCE_TYPE: Final[str] = "t3.large"
+# Mount /run as a tmpfs in the AWS workspace container. mngr_aws leaves the
+# container rootfs (and thus /run) on gVisor's gofer-backed 9p filesystem, which
+# returns EOPNOTSUPP for os.link() of a socket inode. supervisord installs its
+# control socket via a hard link (bind a temp socket, then os.link it into place
+# at /var/run/supervisor.sock); on AWS that link fails, supervisord misreads it
+# as a stale socket and loops forever ("Unlinking stale socket") without ever
+# starting system_interface / the browser service -- so the workspace reports
+# "unresponsive". A tmpfs /run supports the hard link (verified: os.link of a
+# socket succeeds on a tmpfs but fails on the gofer rootfs), so the control
+# socket comes up. The ovh/vultr/imbue_cloud paths already get a tmpfs /run via
+# their host setup, which is why this only bites AWS.
+_AWS_DEFAULT_START_ARGS: Final[tuple[str, ...]] = ("--tmpfs", "/run")
 
 
 class BootstrapError(ValueError):
