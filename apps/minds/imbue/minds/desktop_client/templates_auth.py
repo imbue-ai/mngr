@@ -75,7 +75,10 @@ def render_settings_page(
     provider: str,
     user_id_prefix: str,
 ) -> str:
-    """Render the account settings page."""
+    """Render the account settings page.
+
+    The per-machine error-reporting toggles live on the app-level Settings page (/settings), not here.
+    """
     return CATALOG.render(
         "auth.Settings",
         email=email,

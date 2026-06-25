@@ -123,6 +123,58 @@ class MindsConfig(MutableModel):
             data["providers"] = providers
             self._write_raw(data)
 
+    def _get_bool(self, key: str, default: bool) -> bool:
+        """Read a top-level boolean setting, returning ``default`` when unset or malformed."""
+        with self._lock:
+            data = self._read_raw()
+            value = data.get(key)
+            if isinstance(value, bool):
+                return value
+            return default
+
+    def _set_bool(self, key: str, value: bool) -> None:
+        """Persist a top-level boolean setting."""
+        with self._lock:
+            data = self._read_raw()
+            data[key] = value
+            self._write_raw(data)
+
+    def get_error_reporting_consent_given(self) -> bool:
+        """Return whether the user has seen and answered the error-reporting consent screen. Default: False.
+
+        Gates the first-launch consent screen: while False, the consent screen is shown ahead of
+        welcome/login; once the user answers it (either way) this flips to True and stays there.
+        """
+        return self._get_bool("error_reporting_consent_given", default=False)
+
+    def set_error_reporting_consent_given(self, given: bool) -> None:
+        """Record that the user has answered the error-reporting consent screen."""
+        self._set_bool("error_reporting_consent_given", given)
+
+    def get_report_unexpected_errors(self) -> bool:
+        """Return whether unexpected errors are reported to Sentry automatically. Default: False.
+
+        Read live at Sentry send time (so toggling it takes effect without an app restart).
+        Manual bug reports are an explicit user action and are sent regardless of this setting.
+        """
+        return self._get_bool("report_unexpected_errors", default=False)
+
+    def set_report_unexpected_errors(self, enabled: bool) -> None:
+        """Set whether unexpected errors are reported to Sentry automatically."""
+        self._set_bool("report_unexpected_errors", enabled)
+
+    def get_include_error_logs(self) -> bool:
+        """Return whether log/traceback attachments are included with error reports. Default: False.
+
+        Read live when attachments are collected. Only meaningful in production/staging, where the
+        S3 attachment bucket exists; development never uploads attachments regardless.
+        """
+        return self._get_bool("include_error_logs", default=False)
+
+    def set_include_error_logs(self, enabled: bool) -> None:
+        """Set whether log/traceback attachments are included with error reports."""
+        self._set_bool("include_error_logs", enabled)
+
     def get_auto_open_requests_panel(self) -> bool:
         """Return whether the inbox should auto-open on new pending requests. Default: True.
 
