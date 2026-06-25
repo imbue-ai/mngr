@@ -105,9 +105,14 @@ _CREATE_OUTCOME_POLL_INTERVAL_MS: Final[int] = 500
 # Playwright's ``click`` waits for the button to be visible/stable but not for
 # that handler to be wired up, so an early click can silently no-op and leave
 # the wizard on the same screen. We click and confirm the screen advanced,
-# retrying the click if it was lost.
-_ONBOARDING_ADVANCE_TIMEOUT_MS: Final[int] = 5_000
-_ONBOARDING_CLICK_ATTEMPTS: Final[int] = 3
+# retrying the click if it was lost. The budget is generous because the
+# onboarding wizard runs concurrently with the workspace's container build
+# (heavy CPU + a flood of streamed build output through the Electron main
+# process), which can delay ``creating.js`` attaching its handlers in the
+# renderer; too tight a budget turns that transient delay into a spurious
+# failure of the whole snapshot build.
+_ONBOARDING_ADVANCE_TIMEOUT_MS: Final[int] = 10_000
+_ONBOARDING_CLICK_ATTEMPTS: Final[int] = 6
 
 # Pre-tested CSS selector against the system_interface frontend at
 # .external_worktrees/forever-claude-template/apps/system_interface/.
