@@ -1,3 +1,0 @@
-Fixed `mngr create` on the `imbue_cloud` fast path (`fast_mode=require`) failing with "does not accept --image or --start-arg" when the workspace template supplies a `--start-arg` (e.g. the forever-claude-template `imbue_cloud` create template's `--restart=unless-stopped`).
-
-The fast (adopt) path now tolerates start args the pre-baked pool-host container already carries (the `pool_host` template's docker run flags: `--security-opt=no-new-privileges`, `--workdir=/`, `--restart=unless-stopped`), keeping the fast and slow paths in sync. Any other start arg, or an `--image` swap, still requires `fast_mode=prevent` to rebuild.

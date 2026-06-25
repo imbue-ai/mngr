@@ -33,7 +33,15 @@ from typing import Final
 
 import pytest
 
+from imbue.mngr.primitives import AgentId
+
 _NODE_BINARY: Final[str | None] = shutil.which("node")
+
+# A syntactically valid AgentId (``agent-`` + 32 hex chars) used as the request
+# author in tests. The gateway validates agent_id against this exact format (see
+# ``VALID_AGENT_ID_PATTERN`` in permission_requests.mjs), so a body must carry a
+# conforming id or the POST is rejected with 400.
+_VALID_AGENT_ID: Final[str] = "agent-" + "0" * 32
 
 _EXTENSION_PATH: Final[Path] = Path(__file__).resolve().parent / "permission_requests.mjs"
 
@@ -231,7 +239,7 @@ def test_post_creates_predefined_request_with_target_and_effect(
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "needs slack",
             "type": "predefined",
             "payload": {"scope": "slack-api", "permissions": ["slack-read-all"]},
@@ -239,7 +247,7 @@ def test_post_creates_predefined_request_with_target_and_effect(
     )
     assert status == 201
     parsed = json.loads(body)
-    assert parsed["agent_id"] == "agent-1"
+    assert parsed["agent_id"] == _VALID_AGENT_ID
     assert parsed["rationale"] == "needs slack"
     # The persisted/streamed shape renames the wire field ``type`` to
     # ``request_type`` to avoid shadowing the Python ``type`` builtin
@@ -270,7 +278,7 @@ def test_post_creates_file_sharing_request_with_schemas_and_rules(
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "needs to access example data",
             "type": "file-sharing",
             "payload": {"path": target_path, "access": access},
@@ -354,7 +362,7 @@ def test_file_sharing_pattern_matches_percent_encoded_request_path(
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "needs the shared directory",
             "type": "file-sharing",
             "payload": {"path": target_path, "access": "READ"},
@@ -407,7 +415,7 @@ def test_post_expands_tilde_home_path_in_file_sharing(
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "wants something in the home directory",
             "type": "file-sharing",
             "payload": {"path": requested_path, "access": "READ"},
@@ -437,7 +445,7 @@ def test_post_rejects_tilde_user_notation_in_file_sharing(
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "file-sharing",
             "payload": {"path": "~otheruser/secret.txt", "access": "READ"},
@@ -456,7 +464,7 @@ def test_post_rejects_tilde_traversal_in_file_sharing(
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "file-sharing",
             "payload": {"path": "~/../etc/passwd", "access": "READ"},
@@ -474,7 +482,7 @@ def test_approve_with_tilde_path_override_expands_home(
     create_status, create_body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "needs a file",
             "type": "file-sharing",
             "payload": {"path": "/home/example/requested.txt", "access": "READ"},
@@ -508,7 +516,7 @@ def test_read_and_write_grants_for_same_path_coexist_in_persisted_record(
     read_status, read_body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "r",
             "type": "file-sharing",
             "payload": {"path": target_path, "access": "READ"},
@@ -517,7 +525,7 @@ def test_read_and_write_grants_for_same_path_coexist_in_persisted_record(
     write_status, write_body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "w",
             "type": "file-sharing",
             "payload": {"path": target_path, "access": "WRITE"},
@@ -551,7 +559,7 @@ def test_post_rejects_missing_or_invalid_access_in_file_sharing(
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "file-sharing",
             "payload": missing_or_invalid_payload,
@@ -566,7 +574,7 @@ def test_post_rejects_unknown_type(node_extension: tuple[str, Path, Path]) -> No
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "wholesale",
             "payload": {},
@@ -576,12 +584,69 @@ def test_post_rejects_unknown_type(node_extension: tuple[str, Path, Path]) -> No
     assert "type" in json.loads(body)["error"]
 
 
+@pytest.mark.parametrize(
+    "malformed_agent_id",
+    [
+        pytest.param("ENV_AGENT", id="placeholder-from-crash-report"),
+        pytest.param("agent-1", id="right-prefix-wrong-length"),
+        pytest.param("agent-" + "g" * 32, id="non-hex-characters"),
+        pytest.param("agent-" + "0" * 31, id="one-char-too-short"),
+        pytest.param("agent-" + "0" * 33, id="one-char-too-long"),
+        pytest.param("0" * 32, id="missing-agent-prefix"),
+    ],
+)
+def test_post_rejects_malformed_agent_id(
+    node_extension: tuple[str, Path, Path],
+    malformed_agent_id: str,
+) -> None:
+    # A malformed agent_id is rejected at the gateway with a 400 -- so the agent
+    # is notified at its tool call -- and is never persisted. Otherwise the
+    # consumer's ``AgentId(...)`` parse would raise later and kill the
+    # permission-requests consumer thread.
+    base_url, latchkey_directory, _permissions_config_path = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": malformed_agent_id,
+            "rationale": "x",
+            "type": "predefined",
+            "payload": {"scope": "slack-api", "permissions": ["slack-read-all"]},
+        },
+    )
+    assert status == 400, body
+    assert "agent_id" in json.loads(body)["error"]
+    persisted_dir = latchkey_directory / "permission_requests" / "v2"
+    persisted = list(persisted_dir.iterdir()) if persisted_dir.exists() else []
+    assert persisted == [], f"a rejected request must not be persisted, found {persisted}"
+
+
+def test_post_accepts_generated_agent_id(node_extension: tuple[str, Path, Path]) -> None:
+    # Cross-language drift guard: a real id minted by the Python ``AgentId``
+    # source of truth must satisfy the gateway's JS ``VALID_AGENT_ID_PATTERN``.
+    # If the two ever diverge, this 201 assertion fails.
+    base_url, _latchkey_directory, _permissions_config_path = node_extension
+    generated_agent_id = AgentId.generate()
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": generated_agent_id,
+            "rationale": "x",
+            "type": "predefined",
+            "payload": {"scope": "slack-api", "permissions": ["slack-read-all"]},
+        },
+    )
+    assert status == 201, body
+    parsed = json.loads(body)
+    # The persisted agent_id round-trips back through the Python validator.
+    assert AgentId(parsed["agent_id"]) == generated_agent_id
+
+
 def test_post_rejects_relative_path_in_file_sharing(node_extension: tuple[str, Path, Path]) -> None:
     base_url, *_ = node_extension
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "file-sharing",
             "payload": {"path": "relative/path.txt"},
@@ -603,7 +668,7 @@ def test_post_rejects_traversal_in_file_sharing(node_extension: tuple[str, Path,
         status, body = _post_json(
             f"{base_url}/permission-requests",
             {
-                "agent_id": "agent-1",
+                "agent_id": _VALID_AGENT_ID,
                 "rationale": "x",
                 "type": "file-sharing",
                 "payload": {"path": traversal_path},
@@ -620,7 +685,7 @@ def test_post_rejects_path_outside_mount_roots(node_extension: tuple[str, Path, 
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "wants a system file",
             "type": "file-sharing",
             "payload": {"path": "/etc/passwd", "access": "READ"},
@@ -640,7 +705,7 @@ def test_post_accepts_path_under_temp_root(node_extension: tuple[str, Path, Path
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "share a scratch file",
             "type": "file-sharing",
             "payload": {"path": "/tmp/scratch/output.txt", "access": "WRITE"},
@@ -654,7 +719,7 @@ def test_post_rejects_extraneous_top_level_field(node_extension: tuple[str, Path
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "predefined",
             "payload": {"scope": "slack-api", "permissions": ["slack-read-all"]},
@@ -671,7 +736,7 @@ def test_post_rejects_unknown_scope_in_predefined(node_extension: tuple[str, Pat
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "predefined",
             "payload": {"scope": "made-up-api", "permissions": ["slack-read-all"]},
@@ -689,7 +754,7 @@ def test_post_rejects_unknown_permission_in_predefined(node_extension: tuple[str
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "predefined",
             "payload": {"scope": "slack-api", "permissions": ["slack-read-all", "made-up-perm"]},
@@ -713,7 +778,7 @@ def test_post_accepts_any_permission_for_known_scope(node_extension: tuple[str, 
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "predefined",
             "payload": {"scope": scope, "permissions": ["any"]},
@@ -731,7 +796,7 @@ def test_post_rejects_permission_from_a_different_scope(node_extension: tuple[st
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "predefined",
             "payload": {"scope": "slack-api", "permissions": ["github-read-all"]},
@@ -747,7 +812,7 @@ def test_post_rejects_extraneous_payload_field(node_extension: tuple[str, Path, 
     status, body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "file-sharing",
             "payload": {"path": "/tmp/ok.txt", "access": "READ", "extra": "no"},
@@ -764,13 +829,13 @@ def test_get_returns_all_pending_requests(node_extension: tuple[str, Path, Path]
     base_url, *_ = node_extension
     payloads = [
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "predefined",
             "payload": {"scope": "slack-api", "permissions": ["slack-read-all"]},
         },
         {
-            "agent_id": "agent-2",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "y",
             "type": "file-sharing",
             "payload": {"path": "/tmp/visible.txt", "access": "READ"},
@@ -799,7 +864,7 @@ def test_approve_writes_target_permissions_for_file_sharing(
     create_status, create_body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "needs to read example data",
             "type": "file-sharing",
             "payload": {"path": target_path, "access": "READ"},
@@ -839,7 +904,7 @@ def test_approve_merges_predefined_into_existing_rules(
     create_status, create_body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "wants more slack",
             "type": "predefined",
             "payload": {"scope": "slack-api", "permissions": ["slack-write-all"]},
@@ -861,7 +926,7 @@ def test_approve_creates_target_when_missing(node_extension: tuple[str, Path, Pa
     create_status, create_body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "predefined",
             "payload": {"scope": "slack-api", "permissions": ["slack-read-all"]},
@@ -904,7 +969,7 @@ def test_approve_preserves_symlink_at_target_path(
     create_status, create_body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "predefined",
             "payload": {"scope": "slack-api", "permissions": ["slack-read-all"]},
@@ -946,7 +1011,7 @@ def test_approve_with_path_override_recomputes_file_sharing_effect(
     create_status, create_body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "needs a file",
             "type": "file-sharing",
             "payload": {"path": requested_path, "access": "READ"},
@@ -982,7 +1047,7 @@ def test_approve_with_path_override_preserves_requested_access_mode(
     create_status, create_body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "needs to write",
             "type": "file-sharing",
             "payload": {"path": "/home/example/orig", "access": "WRITE"},
@@ -1011,7 +1076,7 @@ def test_approve_rejects_path_override_for_predefined_request(
     create_status, create_body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "predefined",
             "payload": {"scope": "slack-api", "permissions": ["slack-read-all"]},
@@ -1037,7 +1102,7 @@ def test_approve_rejects_traversal_in_path_override(
     create_status, create_body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "file-sharing",
             "payload": {"path": "/home/example/ok.txt", "access": "READ"},
@@ -1061,7 +1126,7 @@ def test_approve_rejects_path_override_outside_mount_roots(
     create_status, create_body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "file-sharing",
             "payload": {"path": "/home/example/ok.txt", "access": "READ"},
@@ -1087,7 +1152,7 @@ def test_approve_rejects_extraneous_field_in_override_body(
     create_status, create_body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "file-sharing",
             "payload": {"path": "/home/example/ok.txt", "access": "READ"},
@@ -1108,7 +1173,7 @@ def test_delete_removes_pending_request(node_extension: tuple[str, Path, Path]) 
     create_status, create_body = _post_json(
         f"{base_url}/permission-requests",
         {
-            "agent_id": "agent-1",
+            "agent_id": _VALID_AGENT_ID,
             "rationale": "x",
             "type": "file-sharing",
             "payload": {"path": "/tmp/data.txt", "access": "WRITE"},

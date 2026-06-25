@@ -14,6 +14,7 @@ Jinja2 macros + ``{% extends %}`` to JinjaX components.
 
 import html
 import os
+from collections.abc import Collection
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
@@ -25,7 +26,6 @@ from jinjax import Catalog
 
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
-from imbue.minds.desktop_client.onboarding import expected_creation_duration_seconds
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.primitives import AIProvider
@@ -34,7 +34,9 @@ from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
+from imbue.minds.utils.sentry.frontend import frontend_sentry_browser_payload
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostName
 from imbue.mngr_forward.loading_page import render_loading_page
 
 TEMPLATE_DIR: Final[Path] = Path(__file__).resolve().parent / "templates"
@@ -109,10 +111,14 @@ _INPUT_BASE: Final[str] = (
 # inherits the parent's text color instead of Figma's hardcoded black. Most
 # glyphs are filled outlines (Figma "Vector (Stroke)" flattened to a single
 # fill path); ``play`` is the lone stroked glyph and carries its own
-# fill=none stroke=currentColor to match the set's line weight. ``settings``
-# (drawn on a 15-unit grid) and ``chevron-down-small`` (a small centered
-# glyph) are nudged into the 16-unit frame with a <g transform>. The dict is
-# the single source of truth -- to add or swap an icon, edit one entry here.
+# fill=none stroke=currentColor to match the set's line weight.
+# ``badge-check-filled`` is the lone solid glyph: a filled badge with the
+# checkmark knocked out via ``fill-rule="evenodd"`` (the cut-out check shows
+# whatever surface sits behind the icon), so it reads as a solid badge rather
+# than an outline. ``settings`` (drawn on a 15-unit grid) and
+# ``chevron-down-small`` (a small centered glyph) are nudged into the 16-unit
+# frame with a <g transform>. The dict is the single source of truth -- to add
+# or swap an icon, edit one entry here.
 _ICONS_16: Final[Mapping[str, str]] = {
     "menu": '<path d="M13.3337 11.4004C13.6649 11.4006 13.9333 11.6687 13.9333 12C13.9333 12.3313 13.6649 12.5994 13.3337 12.5996H2.66667C2.3353 12.5996 2.06706 12.3314 2.06706 12C2.06706 11.6686 2.3353 11.4004 2.66667 11.4004H13.3337ZM13.3337 7.40039C13.6649 7.40057 13.9333 7.66874 13.9333 8C13.9333 8.33126 13.6649 8.59943 13.3337 8.59961H2.66667C2.3353 8.59961 2.06706 8.33137 2.06706 8C2.06706 7.66863 2.3353 7.40039 2.66667 7.40039H13.3337ZM13.3337 3.40039C13.6649 3.40057 13.9333 3.66874 13.9333 4C13.9333 4.33126 13.6649 4.59943 13.3337 4.59961H2.66667C2.3353 4.59961 2.06706 4.33137 2.06706 4C2.06706 3.66863 2.3353 3.40039 2.66667 3.40039H13.3337Z"/>',
     "home": '<path d="M9.40039 9.01301C9.40039 8.99548 9.39316 8.9786 9.38086 8.96613C9.36836 8.95363 9.35069 8.9466 9.33301 8.9466H6.66699C6.64931 8.9466 6.63164 8.95363 6.61914 8.96613C6.60684 8.9786 6.59961 8.99548 6.59961 9.01301V13.7464H9.40039V9.01301ZM10.5996 13.7464H12.667C12.8614 13.7463 13.0481 13.669 13.1855 13.5316C13.323 13.3941 13.4004 13.2074 13.4004 13.013V7.01301C13.4004 6.90648 13.3768 6.80107 13.332 6.70441C13.2871 6.60765 13.2211 6.52132 13.1396 6.45246L13.1367 6.44953L8.47363 2.45246V2.45344C8.34127 2.34157 8.1733 2.27961 8 2.27961C7.8267 2.27961 7.65873 2.34157 7.52637 2.45344L7.52539 2.45246L2.86328 6.44953L2.86035 6.45246C2.77888 6.52132 2.71287 6.60765 2.66797 6.70441C2.62319 6.80107 2.59958 6.90648 2.59961 7.01301V13.013C2.59962 13.2074 2.67703 13.3941 2.81445 13.5316C2.9519 13.669 3.13863 13.7463 3.33301 13.7464H5.40039V9.01301C5.40039 8.67707 5.53394 8.35505 5.77148 8.1175C6.00901 7.88006 6.33113 7.74641 6.66699 7.74641H9.33301C9.66887 7.74641 9.99099 7.88006 10.2285 8.1175C10.4661 8.35505 10.5996 8.67707 10.5996 9.01301V13.7464ZM14.5996 13.013C14.5996 13.5257 14.3966 14.0176 14.0342 14.3802C13.6717 14.7427 13.1796 14.9465 12.667 14.9466H3.33301C2.82037 14.9465 2.32831 14.7427 1.96582 14.3802C1.60335 14.0176 1.4004 13.5257 1.40039 13.013V7.01301C1.40034 6.73181 1.46172 6.45363 1.58008 6.19855C1.69787 5.94487 1.86881 5.71937 2.08203 5.5384L6.74902 1.53937L6.75195 1.53645C7.10089 1.24157 7.54315 1.08039 8 1.08039C8.39979 1.08039 8.78863 1.20339 9.11328 1.43195L9.24805 1.53645L9.25098 1.53937L13.918 5.5384H13.917C14.1305 5.71946 14.302 5.94465 14.4199 6.19855C14.5383 6.45363 14.5997 6.73182 14.5996 7.01301V13.013Z"/>',
@@ -131,6 +137,8 @@ _ICONS_16: Final[Mapping[str, str]] = {
     "check": '<path d="M12.8737 3.54004C13.1274 3.28647 13.5388 3.28658 13.7926 3.54004C14.0465 3.79388 14.0465 4.20612 13.7926 4.45996L6.45964 11.793C6.20585 12.0468 5.79454 12.0466 5.54069 11.793L2.20671 8.45996C1.95287 8.20612 1.95287 7.79388 2.20671 7.54004C2.46055 7.2862 2.87279 7.2862 3.12663 7.54004L5.99967 10.4141L12.8737 3.54004Z"/>',
     "play": '<path d="M4 2.44155C4 2.24722 4.21199 2.1272 4.37862 2.22717L13.6427 7.78563C13.8045 7.88273 13.8045 8.11727 13.6427 8.21437L4.37862 13.7728C4.21199 13.8728 4 13.7528 4 13.5585V2.44155Z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>',
     "pause": '<path d="M6.06641 3.33366C6.06641 3.29684 6.03682 3.26628 6 3.26628H4.66699C4.63017 3.26628 4.59961 3.29684 4.59961 3.33366V12.6667C4.59961 12.7035 4.63017 12.7331 4.66699 12.7331H6C6.03682 12.7331 6.06641 12.7035 6.06641 12.6667V3.33366ZM11.4004 3.33366C11.4004 3.29684 11.3698 3.26628 11.333 3.26628H10C9.96318 3.26628 9.93359 3.29684 9.93359 3.33366V12.6667C9.93359 12.7035 9.96318 12.7331 10 12.7331H11.333C11.3698 12.7331 11.4004 12.7035 11.4004 12.6667V3.33366ZM7.2666 12.6667C7.2666 13.3662 6.69956 13.9333 6 13.9333H4.66699C3.96743 13.9333 3.40039 13.3662 3.40039 12.6667V3.33366C3.40039 2.6341 3.96743 2.06706 4.66699 2.06706H6C6.69956 2.06706 7.2666 2.6341 7.2666 3.33366V12.6667ZM12.5996 12.6667C12.5996 13.3662 12.0326 13.9333 11.333 13.9333H10C9.30044 13.9333 8.7334 13.3662 8.7334 12.6667V3.33366C8.7334 2.6341 9.30044 2.06706 10 2.06706H11.333C12.0326 2.06706 12.5996 2.6341 12.5996 3.33366V12.6667Z"/>',
+    "badge-check": '<path d="M14.0635 7.99966C14.0634 7.65288 13.9761 7.31165 13.8096 7.00748C13.643 6.70322 13.4026 6.44532 13.1104 6.25845C12.8977 6.12241 12.7923 5.86805 12.8477 5.62173C12.9241 5.28175 12.9134 4.92811 12.8164 4.59341C12.7194 4.25865 12.5394 3.95315 12.293 3.7067C12.0466 3.46039 11.7418 3.28026 11.4072 3.18326C11.0725 3.08623 10.718 3.07555 10.3779 3.15201C10.1318 3.20716 9.8772 3.10278 9.74121 2.89029C9.55433 2.59801 9.29648 2.35671 8.99219 2.19009C8.68804 2.02368 8.34671 1.93619 8 1.93619C7.65326 1.93621 7.31198 2.02363 7.00781 2.19009C6.70352 2.35671 6.44567 2.59801 6.25879 2.89029C6.12277 3.10272 5.86823 3.2072 5.62207 3.15201C5.28258 3.07593 4.9289 3.08648 4.59473 3.18326C4.26061 3.28008 3.95619 3.46 3.70996 3.70572C3.46375 3.95143 3.28403 4.25562 3.18652 4.58951C3.08903 4.92353 3.07693 5.27716 3.15234 5.61685C3.2071 5.86373 3.10135 6.1183 2.8877 6.25357C2.59317 6.43996 2.35072 6.69824 2.18262 7.00357C2.01462 7.30875 1.92585 7.6513 1.92578 7.99966C1.92578 8.34821 2.01451 8.69141 2.18262 8.99673C2.35072 9.30206 2.59318 9.56035 2.8877 9.74673C3.10132 9.88204 3.20715 10.1366 3.15234 10.3835C3.07695 10.7231 3.08903 11.0768 3.18652 11.4108C3.28405 11.7446 3.46377 12.0489 3.70996 12.2946C3.95614 12.5402 4.26071 12.7192 4.59473 12.8161C4.92889 12.9128 5.2826 12.9244 5.62207 12.8483L5.71484 12.8346C5.93076 12.8206 6.14095 12.9244 6.25977 13.111C6.44641 13.4044 6.70398 13.6468 7.00879 13.8141C7.31355 13.9814 7.65624 14.069 8.00391 14.069C8.35139 14.0689 8.69343 13.9813 8.99805 13.8141C9.30285 13.6468 9.56043 13.4044 9.74707 13.111C9.8826 12.8981 10.1374 12.7926 10.3838 12.8473C10.7233 12.9227 11.0763 12.9115 11.4102 12.8141C11.7442 12.7166 12.0482 12.536 12.2939 12.2897C12.5397 12.0434 12.7196 11.7392 12.8164 11.4049C12.9132 11.0707 12.9238 10.7171 12.8477 10.3776C12.7927 10.1314 12.8978 9.87676 13.1104 9.74088C13.4025 9.55405 13.643 9.29694 13.8096 8.99283C13.9762 8.68854 14.0635 8.34658 14.0635 7.99966ZM9.57617 6.24283C9.81049 6.00851 10.1905 6.00851 10.4248 6.24283C10.6586 6.47704 10.6586 6.85627 10.4248 7.09048L7.75781 9.75748C7.64541 9.86988 7.49294 9.93313 7.33398 9.93326C7.17485 9.93326 7.0217 9.87 6.90918 9.75748L5.57617 8.42447C5.34186 8.19015 5.34186 7.81015 5.57617 7.57584C5.81049 7.3416 6.19052 7.34155 6.4248 7.57584L7.33301 8.48404L9.57617 6.24283ZM15.2637 7.99966C15.2637 8.54802 15.1257 9.08803 14.8623 9.569C14.6638 9.93147 14.3982 10.251 14.082 10.5133C14.1221 10.9241 14.0842 11.3401 13.9688 11.7389C13.8157 12.2671 13.532 12.7481 13.1436 13.1374C12.7552 13.5266 12.2749 13.8113 11.7471 13.9655C11.3485 14.0818 10.9324 14.1209 10.5215 14.0817C10.2591 14.3994 9.93847 14.6664 9.5752 14.8659C9.09365 15.1302 8.55321 15.2691 8.00391 15.2692C7.45443 15.2692 6.91333 15.1303 6.43164 14.8659C6.06857 14.6665 5.74763 14.4001 5.48535 14.0827C5.07519 14.1224 4.65989 14.0846 4.26172 13.9694C3.73342 13.8164 3.25163 13.5317 2.8623 13.1432C2.47319 12.7548 2.18825 12.2745 2.03418 11.7467C1.91793 11.3485 1.87797 10.9327 1.91699 10.5221C1.59847 10.26 1.33101 9.93936 1.13086 9.57584C0.865144 9.09322 0.726562 8.55059 0.726562 7.99966C0.726628 7.44891 0.865246 6.90694 1.13086 6.42447C1.3311 6.06078 1.59829 5.73944 1.91699 5.4772C1.87809 5.06689 1.91803 4.65155 2.03418 4.25357C2.18829 3.72559 2.47298 3.24462 2.8623 2.85611C3.25162 2.46762 3.73343 2.18391 4.26172 2.03091C4.66022 1.91555 5.07583 1.8777 5.48633 1.91763C5.74865 1.60146 6.06918 1.3368 6.43164 1.13834C6.91254 0.87505 7.45174 0.736991 8 0.736969C8.54835 0.736969 9.08836 0.874983 9.56934 1.13834C9.93135 1.33663 10.2516 1.60092 10.5137 1.91666C10.9251 1.87641 11.3418 1.91515 11.7412 2.03091C12.2703 2.18429 12.7521 2.46949 13.1416 2.85904C13.531 3.24856 13.8164 3.73039 13.9697 4.25943C14.0853 4.65856 14.1222 5.07485 14.082 5.48599C14.3984 5.74838 14.6638 6.06868 14.8623 6.4313C15.1256 6.91213 15.2636 7.45149 15.2637 7.99966Z"/>',
+    "badge-check-filled": '<path fill-rule="evenodd" clip-rule="evenodd" d="M8 0.737305C8.54829 0.737335 9.08842 0.875348 9.56934 1.13867C9.93125 1.33695 10.2516 1.60132 10.5137 1.91699C10.9251 1.87677 11.3419 1.9155 11.7412 2.03125C12.2702 2.18464 12.7521 2.46988 13.1416 2.85938C13.5309 3.24886 13.8164 3.73082 13.9697 4.25977C14.0853 4.65881 14.1222 5.07528 14.082 5.48633C14.3983 5.74868 14.6638 6.0691 14.8623 6.43164C15.1255 6.9124 15.2636 7.45193 15.2637 8C15.2636 8.54827 15.1256 9.08843 14.8623 9.56934C14.6638 9.93176 14.3982 10.2514 14.082 10.5137C14.122 10.9244 14.0842 11.3405 13.9688 11.7393C13.8157 12.2674 13.532 12.7485 13.1436 13.1377C12.7552 13.5269 12.2748 13.8117 11.7471 13.9658C11.3486 14.0821 10.9323 14.1212 10.5215 14.082C10.2591 14.3997 9.93844 14.6668 9.5752 14.8662C9.09371 15.1305 8.55314 15.2694 8.00391 15.2695C7.45452 15.2695 6.91327 15.1305 6.43164 14.8662C6.06866 14.6669 5.74759 14.4003 5.48535 14.083C5.07527 14.1228 4.65982 14.0849 4.26172 13.9697C3.73352 13.8168 3.25159 13.532 2.8623 13.1436C2.47325 12.7552 2.18827 12.2747 2.03418 11.7471C1.91796 11.3489 1.878 10.933 1.91699 10.5225C1.59855 10.2604 1.331 9.93959 1.13086 9.57617C0.865183 9.09363 0.726603 8.55085 0.726562 8C0.726628 7.44929 0.865285 6.90725 1.13086 6.4248C1.33109 6.06112 1.5983 5.73977 1.91699 5.47754C1.8781 5.06729 1.91807 4.65183 2.03418 4.25391C2.18828 3.72594 2.473 3.24495 2.8623 2.85645C3.25162 2.46795 3.73343 2.18425 4.26172 2.03125C4.66019 1.91591 5.07587 1.87804 5.48633 1.91797C5.74865 1.6018 6.06918 1.33713 6.43164 1.13867C6.91253 0.875399 7.45176 0.737326 8 0.737305ZM10.4248 6.24316C10.1905 6.00885 9.81049 6.00885 9.57617 6.24316L7.33301 8.48438L6.4248 7.57617C6.19052 7.34188 5.81049 7.34194 5.57617 7.57617C5.34192 7.81049 5.34188 8.19051 5.57617 8.4248L6.90918 9.75781C7.02168 9.87019 7.17496 9.93359 7.33398 9.93359C7.49285 9.93342 7.64545 9.87014 7.75781 9.75781L10.4248 7.09082C10.6585 6.85669 10.6583 6.47739 10.4248 6.24316Z"/>',
 }
 
 # 12x12 chrome glyph path data (minimize / maximize / close). Title-bar
@@ -167,6 +175,10 @@ def _build_catalog() -> Catalog:
             "INPUT_BASE": _INPUT_BASE,
             "ICONS_16": _ICONS_16,
             "ICONS_12": _ICONS_12,
+            # Resolved per render so the page only boots the frontend Sentry SDK
+            # when reporting is enabled (returns None otherwise). See
+            # imbue/minds/utils/sentry/frontend.py and Base.jinja.
+            "frontend_sentry_browser_payload": frontend_sentry_browser_payload,
         },
     )
     catalog.add_folder(str(TEMPLATE_DIR))
@@ -259,7 +271,6 @@ def render_landing_page(
 # MINDS_WORKSPACE_* env vars only when the operator explicitly opts in -- see
 # ``_operator_workspace_default`` for the gating rationale.
 _FALLBACK_GIT_URL: Final[str] = "https://github.com/imbue-ai/forever-claude-template.git"
-_FALLBACK_HOST_NAME: Final[str] = "assistant"
 # Pin to an annotated FCT tag so a shipped binary clones the exact FCT
 # snapshot it was verified against. Bump to a newer tag only after
 # re-verifying launch-to-msg CI against (this binary, the new tag).
@@ -299,11 +310,75 @@ def _operator_workspace_default(env_var: str, fallback: str) -> str:
     return os.environ.get(env_var, fallback)
 
 
+# Base for auto-generated workspace host names. The generic default is never
+# used bare -- it is always numbered (``mind-1``, ``mind-2``, ...).
+_DEFAULT_HOST_NAME_BASE: Final[str] = "mind"
+
+
+@pure
+def make_unique_host_name(base: str, existing_host_names: Collection[str], *, always_number: bool = False) -> HostName:
+    """Return a host name derived from ``base`` that avoids ``existing_host_names``.
+
+    ``existing_host_names`` is the set of host names already in use across every
+    provider (the create handler gathers it from the discovery snapshot).
+
+    With ``always_number`` False, ``base`` is returned as-is when free, else the
+    smallest free ``base-2``, ``base-3``, ... -- a readable bare name that is
+    numbered only once it collides.
+
+    With ``always_number`` True, ``base`` is never used bare: the smallest free
+    ``base-1``, ``base-2``, ... is returned. This is the generic default's
+    scheme, which has no bare ``mind`` form; a gap left by a destroyed
+    ``mind-2`` is reused before climbing to ``mind-4``.
+
+    Raises ``InvalidName`` if the chosen name is not a valid ``HostName`` (i.e.
+    ``base`` itself is invalid); appending ``-N`` to a valid base stays valid.
+    """
+    existing = set(existing_host_names)
+    if not always_number and base not in existing:
+        return HostName(base)
+    n = 1 if always_number else 2
+    while f"{base}-{n}" in existing:
+        n += 1
+    return HostName(f"{base}-{n}")
+
+
+def resolve_create_host_name(submitted_host_name: str, existing_host_names: Collection[str] = ()) -> HostName:
+    """Resolve the host name for a new workspace.
+
+    The create form no longer asks for a name; it is chosen automatically.
+    Resolution order:
+
+    1. the user-submitted name, if any, used verbatim (validated as a
+       ``HostName``);
+    2. the operator override ``MINDS_WORKSPACE_NAME``, honored only under the
+       explicit opt-in (see ``_operator_workspace_default``) -- this is how the
+       e2e runner / ``just minds-start <name>`` pin a known name, also used
+       verbatim;
+    3. the next free ``mind-N`` name (smallest positive ``N`` whose ``mind-N``
+       is not already in ``existing_host_names``).
+
+    The two named paths (1, 2) are used verbatim and never uniquified -- an
+    explicit collision is the API's 409 to reject, not ours to silently rename
+    (a duplicate name fails the ``mngr create`` pre-flight). Only the generated
+    ``mind-N`` fallback consults ``existing_host_names`` to pick a free name.
+
+    Raises ``InvalidName`` if a non-empty submitted or operator name is not
+    a valid host name; the generated fallback is always valid.
+    """
+    if submitted_host_name:
+        return HostName(submitted_host_name)
+    operator_name = _operator_workspace_default("MINDS_WORKSPACE_NAME", "")
+    if operator_name:
+        return HostName(operator_name)
+    return make_unique_host_name(_DEFAULT_HOST_NAME_BASE, existing_host_names, always_number=True)
+
+
 @pure
 def render_create_form(
     git_url: str = "",
-    host_name: str = "",
     branch: str = "",
+    host_name: str = "",
     launch_mode: LaunchMode | None = None,
     ai_provider: AIProvider | None = None,
     backup_provider: BackupProvider | None = None,
@@ -316,50 +391,75 @@ def render_create_form(
     error_message: str = "",
     region_options_by_launch_mode: Mapping[str, Sequence[str]] | None = None,
     region_selected_by_launch_mode: Mapping[str, str] | None = None,
+    selected_preset: str | None = None,
+    start_advanced: bool = False,
     color: str = DEFAULT_WORKSPACE_COLOR,
 ) -> str:
     """Render the agent creation form page.
 
+    The page has two views over one form. The simple view offers two compute
+    presets -- ``remote`` (Imbue Cloud) and ``local`` (directly on this
+    computer) -- as selectable cards; the advanced view exposes the compute /
+    AI / backup providers, region, and repository / branch inputs directly.
+    The advanced selects are always what gets POSTed; the preset cards just
+    pre-fill them.
+
     The compute provider (``launch_mode``), AI provider, and backup provider
-    are independent. The compute / AI providers default to ``IMBUE_CLOUD``
-    when an account is selected; without an account they drop to ``LIMA`` /
-    ``SUBSCRIPTION``. The backup provider defaults to ``IMBUE_CLOUD`` with an
-    account and ``CONFIGURE_LATER`` without one. The backup encryption method
-    defaults to ``NO_PASSWORD``.
+    follow the selected preset so the highlighted card matches what a plain
+    submit would create: the ``remote`` preset maps to ``IMBUE_CLOUD`` for all
+    three, the ``local`` preset to ``LIMA`` / ``SUBSCRIPTION`` /
+    ``CONFIGURE_LATER``. The backup encryption method defaults to
+    ``NO_PASSWORD``.
+
+    ``selected_preset`` picks which preset card starts selected. When ``None``
+    it defaults to ``remote`` on a fresh form (regardless of whether an account
+    is signed in -- a no-account user is nudged toward signing in via the card
+    click, not by changing the default), and is derived from the submitted
+    launch mode when re-rendering a submitted form (``remote`` for IMBUE_CLOUD,
+    else ``local``) so the user's choice survives a validation error.
+    ``start_advanced`` opens the advanced view on first paint -- used when
+    re-rendering a submit error, whose fields live there.
 
     ``has_saved_backup_password`` toggles the master-password input between a
     "enter a passphrase" field (no saved password yet) and a read-only
     "a saved password will be used" indicator.
 
-    ``host_name`` is the value of the form's "Name" field; it drives the
-    host name on the resulting workspace. (The agent itself is always
-    named ``system-services``.)
-
-    ``color`` is the ``#rrggbb`` hex preselected in the form's palette
-    picker: the matching swatch renders checked and the hidden ``color``
-    input the form POSTs carries it. Callers pass the
-    suggested-unused-palette pick; it defaults to
-    ``DEFAULT_WORKSPACE_COLOR`` so callers that don't care about color
-    (e.g. some tests) can omit it.
+    ``host_name`` is an optional explicit workspace name, exposed as a "Name"
+    field in the advanced view. When empty the name is chosen automatically
+    server-side (the next free ``mind-N`` via ``resolve_create_host_name``); a
+    submitted value is carried back here so it survives a validation-error
+    re-render. The color is always chosen automatically (the first unused
+    palette entry); ``color`` is the ``#rrggbb`` hex carried in the hidden
+    ``color`` input the form POSTs, defaulting to ``DEFAULT_WORKSPACE_COLOR`` so
+    callers that don't care about color (e.g. some tests) can omit it.
     """
     effective_url = git_url if git_url else _operator_workspace_default("MINDS_WORKSPACE_GIT_URL", _FALLBACK_GIT_URL)
-    effective_name = (
-        host_name if host_name else _operator_workspace_default("MINDS_WORKSPACE_NAME", _FALLBACK_HOST_NAME)
-    )
     effective_branch = branch if branch else _operator_workspace_default("MINDS_WORKSPACE_BRANCH", FALLBACK_BRANCH)
-    has_account = bool(default_account_id and accounts)
+    # The selected preset card drives the provider defaults so the highlighted
+    # card always matches what a plain submit would create. A fresh form
+    # (no explicit selection, no submitted launch mode) defaults to the remote
+    # ("Imbue Cloud") preset regardless of whether an account is signed in; a
+    # re-render of a submitted form derives the preset from the submitted
+    # compute provider so the user's choice survives a validation error.
+    if selected_preset is not None:
+        effective_preset = selected_preset
+    elif launch_mode is not None:
+        effective_preset = "remote" if launch_mode is LaunchMode.IMBUE_CLOUD else "local"
+    else:
+        effective_preset = "remote"
+    is_remote_preset = effective_preset == "remote"
     effective_launch_mode = (
-        launch_mode if launch_mode is not None else (LaunchMode.IMBUE_CLOUD if has_account else LaunchMode.LIMA)
+        launch_mode if launch_mode is not None else (LaunchMode.IMBUE_CLOUD if is_remote_preset else LaunchMode.LIMA)
     )
     effective_ai_provider = (
         ai_provider
         if ai_provider is not None
-        else (AIProvider.IMBUE_CLOUD if has_account else AIProvider.SUBSCRIPTION)
+        else (AIProvider.IMBUE_CLOUD if is_remote_preset else AIProvider.SUBSCRIPTION)
     )
     effective_backup_provider = (
         backup_provider
         if backup_provider is not None
-        else (BackupProvider.IMBUE_CLOUD if has_account else BackupProvider.CONFIGURE_LATER)
+        else (BackupProvider.IMBUE_CLOUD if is_remote_preset else BackupProvider.CONFIGURE_LATER)
     )
     effective_backup_encryption = (
         backup_encryption_method if backup_encryption_method is not None else BackupEncryptionMethod.NO_PASSWORD
@@ -367,8 +467,8 @@ def render_create_form(
     return CATALOG.render(
         "pages.Create",
         git_url=effective_url,
-        host_name=effective_name,
         branch=effective_branch,
+        host_name=host_name,
         launch_modes=list(LaunchMode),
         selected_launch_mode=effective_launch_mode.value,
         ai_providers=list(AIProvider),
@@ -387,8 +487,9 @@ def render_create_form(
             key: list(value) for key, value in (region_options_by_launch_mode or {}).items()
         },
         region_selected_by_launch_mode=dict(region_selected_by_launch_mode or {}),
+        selected_preset=effective_preset,
+        start_advanced=start_advanced,
         color=color,
-        palette=WORKSPACE_PALETTE,
     )
 
 
@@ -433,6 +534,34 @@ def status_text_for(
         return "Failed: {}".format(error or "unknown error")
     text_map = _STATUS_TEXT_IMBUE_CLOUD if launch_mode is LaunchMode.IMBUE_CLOUD else _STATUS_TEXT_DEFAULT
     return text_map.get(status, "Working...")
+
+
+# Expected wall-clock duration of ``mngr create`` per compute provider,
+# used only to drive the client-side progress-bar animation on the
+# creating page (the bar eases toward ~80% over this duration). These are
+# rough estimates, not guarantees.
+# LIMA now boots a VM *and* builds the project image inside it (the agent runs
+# in a Docker container in the VM), so a cold create is closer to a VPS build
+# than the old run-directly-in-the-VM path -- bump its progress-bar estimate
+# accordingly.
+EXPECTED_CREATION_DURATION_SECONDS_BY_LAUNCH_MODE: Final[dict[LaunchMode, float]] = {
+    LaunchMode.DOCKER: 30.0,
+    LaunchMode.LIMA: 600.0,
+    LaunchMode.VULTR: 300.0,
+    LaunchMode.AWS: 300.0,
+    LaunchMode.IMBUE_CLOUD: 30.0,
+}
+
+# Fallback when the launch mode is somehow not in the map above.
+DEFAULT_EXPECTED_CREATION_DURATION_SECONDS: Final[float] = 60.0
+
+
+@pure
+def expected_creation_duration_seconds(launch_mode: LaunchMode) -> float:
+    """Resolve the per-provider expected creation duration for the progress bar."""
+    return EXPECTED_CREATION_DURATION_SECONDS_BY_LAUNCH_MODE.get(
+        launch_mode, DEFAULT_EXPECTED_CREATION_DURATION_SECONDS
+    )
 
 
 @pure
@@ -896,21 +1025,6 @@ _RECOVERY_SCRIPT: Final[str] = """\
           hostBtn.classList.remove('secondary');
           show(hostBtn, true);
         }
-        // New tier: services.toml is missing [services.system_interface]. A
-        // restart cannot recover this; the user has to fix the file. Provide
-        // a secondary "Try restart anyway" affordance for completeness.
-        function renderMisconfigured() {
-          titleEl.textContent = 'Workspace misconfigured';
-          messageEl.textContent =
-            "This workspace's services.toml is missing the [services.system_interface] entry, "
-            + 'so the system interface cannot be started. A restart is unlikely to help -- '
-            + 'fix services.toml first. See the diagnostics below for details.';
-          show(spinnerEl, false);
-          show(errorEl, false);
-          hostBtn.textContent = 'Try restart anyway';
-          hostBtn.classList.add('secondary');
-          show(hostBtn, true);
-        }
         function renderDispatchError() {
           titleEl.textContent = 'Workspace unresponsive';
           messageEl.textContent = 'Could not start the restart. Check your connection and try again.';
@@ -979,18 +1093,6 @@ _RECOVERY_SCRIPT: Final[str] = """\
           latestHealth = data || null;
           renderDebugMenu(latestHealth);
           var tier = data && data.dispatch_tier;
-          // A missing [services.system_interface] block means no restart can
-          // recover the workspace, so honor this tier on every entry path --
-          // including restart_failed, which is exactly the state a misconfigured
-          // workspace lands in once its undeclared interface fails to come back
-          // up. This must precede the no-auto-dispatch short-circuit below;
-          // renderMisconfigured() dispatches nothing (it only renders, with a
-          // "Try restart anyway" affordance), so it is safe regardless of
-          // autoDispatch.
-          if (tier === 'workspace_misconfigured') {
-            renderMisconfigured();
-            return;
-          }
           // A backend-unreachable outcome short-circuits before any restart
           // dispatch on EVERY entry path: no restart can or should fire while the
           // backend is unreachable or rejecting us. Render-only, and arm the

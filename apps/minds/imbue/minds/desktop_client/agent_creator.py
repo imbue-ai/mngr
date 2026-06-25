@@ -233,8 +233,7 @@ class AgentCreationInfo(FrozenModel):
         default="",
         description=(
             "Resolved workspace/host name for this creation (the form's Name field, or a "
-            "repo-derived fallback). Carried so onboarding can address the bootstrap-created "
-            "chat agent (named after the host) without re-deriving it."
+            "repo-derived fallback). Carried alongside status as creation metadata."
         ),
     )
     redirect_url: str | None = Field(default=None, description="URL to redirect to when creation is done")
