@@ -605,6 +605,7 @@ class ModalProviderInstance(BaseProviderInstance):
         data = host_record.model_dump_json(by_alias=True, indent=2)
 
         volume.write_files({path: data.encode("utf-8")})
+        volume.commit()
         logger.trace("Wrote host record to volume: {}", path, host_data=data)
 
         # Update the cache with the new host record
@@ -740,6 +741,13 @@ class ModalProviderInstance(BaseProviderInstance):
     ) -> tuple[list[HostRecord], dict[HostId, list[dict[str, Any]]]]:
         with log_span("Listing all host/agent records from state volume"):
             volume = self.get_state_volume()
+            # Refresh to the latest committed state so a just-created host/agent
+            # (written by another mngr process, e.g. `mngr create`) is resolvable
+            # here -- otherwise `mngr destroy`/`list` can read a stale handle and
+            # miss it, silently no-op'ing the destroy. get_state_volume() returns a
+            # fresh wrapper over the shared underlying volume, so this one reload
+            # also refreshes the parallel per-host reads spawned below.
+            volume.reload()
 
             futures: list[Future[HostRecord | None]] = []
             future_by_host_id: dict[HostId, Future[list[dict[str, Any]]]] = {}
@@ -832,6 +840,7 @@ class ModalProviderInstance(BaseProviderInstance):
         data = json.dumps(dict(agent_data), indent=2)
 
         volume.write_files({agent_path: data.encode("utf-8")})
+        volume.commit()
         logger.trace("Persisted agent data to volume: {}", agent_path)
 
     def remove_persisted_agent_data(self, host_id: HostId, agent_id: AgentId) -> None:
