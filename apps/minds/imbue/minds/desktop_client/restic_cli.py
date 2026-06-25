@@ -24,6 +24,7 @@ from typing import NoReturn
 from typing import TypeVar
 
 from loguru import logger
+from pydantic import Field
 from tenacity import RetryCallState
 from tenacity import Retrying
 from tenacity import retry_if_exception_type
@@ -32,6 +33,7 @@ from tenacity import wait_fixed
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.errors import BackupProvisioningError
 
 _T = TypeVar("_T")
@@ -328,6 +330,85 @@ def parse_restic_timestamp(raw: str) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+class ResticSnapshot(FrozenModel):
+    """A single snapshot as reported by ``restic snapshots --json``."""
+
+    snapshot_id: str = Field(description="Full snapshot id (hex)")
+    short_id: str = Field(description="Abbreviated snapshot id restic also accepts when addressing the snapshot")
+    time: datetime = Field(description="When the snapshot was created (UTC)")
+    paths: tuple[str, ...] = Field(default=(), description="Absolute paths captured in the snapshot")
+    hostname: str = Field(default="", description="Hostname recorded in the snapshot")
+    tags: tuple[str, ...] = Field(default=(), description="Tags recorded on the snapshot")
+    total_size_bytes: int | None = Field(
+        default=None,
+        description="Total size in bytes when restic reports a snapshot summary, else None",
+    )
+
+
+def parse_restic_snapshots(stdout: str) -> tuple[ResticSnapshot, ...]:
+    """Parse ``restic snapshots --json`` stdout into typed snapshots (restic's order: oldest first).
+
+    Entries missing a usable id or a parseable time are skipped with a warning
+    rather than aborting the whole listing, so one malformed record can't hide
+    every other snapshot. Raises ``BackupProvisioningError`` only when the
+    overall payload is not a JSON list.
+    """
+    try:
+        raw = json.loads(stdout or "[]")
+    except ValueError as e:
+        raise BackupProvisioningError(f"restic snapshots returned non-JSON output: {e}") from e
+    if not isinstance(raw, list):
+        raise BackupProvisioningError(f"restic snapshots returned a non-list JSON payload: {type(raw).__name__}")
+
+    snapshots: list[ResticSnapshot] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            logger.warning("Skipping non-object restic snapshot entry: {!r}", entry)
+            continue
+        snapshot_id = entry.get("id")
+        snapshot_time = parse_restic_timestamp(str(entry.get("time", "")))
+        if not snapshot_id or snapshot_time is None:
+            logger.warning("Skipping restic snapshot entry missing id/time: {!r}", entry)
+            continue
+        raw_paths = entry.get("paths")
+        raw_tags = entry.get("tags")
+        summary = entry.get("summary")
+        total_size = summary.get("total_size") if isinstance(summary, dict) else None
+        snapshots.append(
+            ResticSnapshot(
+                snapshot_id=str(snapshot_id),
+                short_id=str(entry.get("short_id") or str(snapshot_id)[:8]),
+                time=snapshot_time,
+                paths=tuple(str(path) for path in raw_paths) if isinstance(raw_paths, list) else (),
+                hostname=str(entry.get("hostname", "")),
+                tags=tuple(str(tag) for tag in raw_tags) if isinstance(raw_tags, list) else (),
+                total_size_bytes=int(total_size) if isinstance(total_size, int) else None,
+            )
+        )
+    return tuple(snapshots)
+
+
+def list_snapshots(
+    *,
+    repository: str,
+    backend_env: Mapping[str, str],
+    password: str | None,
+    parent_cg: ConcurrencyGroup | None = None,
+    timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> tuple[ResticSnapshot, ...]:
+    """List every snapshot in the repository (restic's order: oldest first)."""
+    env, flags = _env_and_flags(repository, backend_env, password)
+    result = _run_restic(
+        [*flags, "--no-lock", "snapshots", "--json"],
+        env_overrides=env,
+        parent_cg=parent_cg,
+        timeout_seconds=timeout_seconds,
+    )
+    if result.returncode != 0:
+        raise BackupProvisioningError(f"restic snapshots failed (exit {result.returncode}): {result.stderr.strip()}")
+    return parse_restic_snapshots(result.stdout or "[]")
 
 
 def get_latest_snapshot_time(
