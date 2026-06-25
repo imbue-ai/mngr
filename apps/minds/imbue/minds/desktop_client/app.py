@@ -1077,12 +1077,13 @@ def _handle_create_form_submit() -> Response:
     if not git_url:
         return _re_render_with_error("Repository URL is required.")
 
-    # The workspace name is chosen automatically: a submitted value (none in
-    # normal flow, since the form has no name field), else the operator
-    # ``MINDS_WORKSPACE_NAME`` override, else the next free ``mind-N`` name
-    # (computed from the host names already in use across every provider).
-    # Resolve it eagerly so an invalid operator override surfaces inline rather
-    # than as a deferred "FAILED" status on the creating page.
+    # The workspace name is chosen automatically unless the user typed one: a
+    # submitted value (from the advanced view's optional "Name" field, empty in
+    # the common simple flow), else the operator ``MINDS_WORKSPACE_NAME``
+    # override, else the next free ``mind-N`` name (computed from the host names
+    # already in use across every provider). Resolve it eagerly so an invalid
+    # name surfaces inline rather than as a deferred "FAILED" status on the
+    # creating page.
     try:
         resolved_host_name = resolve_create_host_name(
             host_name, _existing_workspace_host_names(get_state().backend_resolver)
