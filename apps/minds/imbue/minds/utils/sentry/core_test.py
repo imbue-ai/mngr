@@ -18,9 +18,9 @@ from imbue.minds.utils.sentry.core import SENTRY_DSN_PRODUCTION
 from imbue.minds.utils.sentry.core import SENTRY_DSN_STAGING
 from imbue.minds.utils.sentry.core import SentryDeployEnvironment
 from imbue.minds.utils.sentry.core import _SENTRY_DSN_BY_ENVIRONMENT
+from imbue.minds.utils.sentry.core import _before_send_wrapper
 from imbue.minds.utils.sentry.core import is_sentry_enabled
 from imbue.minds.utils.sentry.core import resolve_sentry_environment
-from imbue.minds.utils.sentry.core import _before_send_wrapper
 from imbue.minds.utils.sentry.loguru_handler import should_record_sentry_event
 
 
