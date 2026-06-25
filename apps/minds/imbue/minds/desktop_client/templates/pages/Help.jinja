@@ -135,7 +135,9 @@
   })();
 </script>
 {% endset %}
-<Base title="Get help" scripts={{ _scripts }}>
+<Base title="Get help"
+      body_class="bg-transparent text-primary font-sans antialiased"
+      scripts={{ _scripts }}>
   <div id="help-backdrop"
        class="fixed inset-0 bg-surface-overlay flex items-center justify-center p-4"
        onclick="onHelpBackdropClick(event)">
