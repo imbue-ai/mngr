@@ -28,15 +28,12 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import _CreateEventCapture
-from imbue.minds.desktop_client.agent_creator import _MngrCreateAttemptParams
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _is_git_worktree
 from imbue.minds.desktop_client.agent_creator import _is_local_path
-from imbue.minds.desktop_client.agent_creator import _is_modal_transfer_drop
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_text
 from imbue.minds.desktop_client.agent_creator import _rsync_worktree_over_clone
-from imbue.minds.desktop_client.agent_creator import _run_modal_create_with_transfer_retry
 from imbue.minds.desktop_client.agent_creator import checkout_branch
 from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
@@ -59,7 +56,6 @@ from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
 
@@ -1188,102 +1184,3 @@ def test_start_creation_api_key_ai_without_key_fails_with_clear_message(tmp_path
     assert info is not None
     assert info.status is AgentCreationStatus.FAILED
     assert info.error is not None and "API_KEY" in info.error
-
-
-# --- Modal create transfer-drop retry ---------------------------------------
-#
-# Modal's per-region SSH tunnel drops the work-dir ``git push`` on a meaningful
-# fraction of freshly-booted sandboxes (the fault is per-instance, not size- or
-# idle-related: a warm sandbox takes the same push every time). The create flow
-# discards the bad sandbox and retries on a fresh one, which usually lands on a
-# healthy region. These tests pin that behaviour via the injected
-# ``attempt_create`` so no real sandbox is spun up.
-
-_TRANSFER_DROP_MESSAGE = (
-    "mngr create failed (exit code 1):\n"
-    "Failed to push git repo: Command failed with non-zero exit code 128.\n"
-    "Connection to r446.modal.host closed by remote host.\n"
-    "send-pack: unexpected disconnect while reading sideband packet\n"
-    "fatal: the remote end hung up unexpectedly\n"
-)
-
-
-def _modal_attempt_params() -> _MngrCreateAttemptParams:
-    """Minimal attempt params for the retry tests.
-
-    The injected ``attempt_create`` ignores the params, so only the field types
-    need to be valid.
-    """
-    return _MngrCreateAttemptParams(
-        launch_mode=LaunchMode.MODAL_DIRECT,
-        workspace_dir=None,
-        host_name=HostName("workspace"),
-        on_output=lambda message, is_error: None,
-        latchkey_env=None,
-        account_email=None,
-        repo_source=None,
-        branch_or_tag=None,
-        region=None,
-        anthropic_api_key=None,
-        anthropic_base_url=None,
-        parent_cg=None,
-        color=None,
-    )
-
-
-def test_is_modal_transfer_drop_matches_tunnel_drop() -> None:
-    assert _is_modal_transfer_drop(MngrCommandError(_TRANSFER_DROP_MESSAGE))
-
-
-def test_is_modal_transfer_drop_ignores_other_failures() -> None:
-    assert not _is_modal_transfer_drop(MngrCommandError("mngr create failed: no Modal quota available"))
-
-
-def test_modal_create_retries_transfer_drop_then_succeeds() -> None:
-    """Two flaky-tunnel drops are discarded and the third fresh create succeeds."""
-    agent_id = AgentId.generate()
-    host_id = HostId.generate()
-    attempts: list[int] = []
-
-    def fake_create(fast_mode: str | None, params: _MngrCreateAttemptParams) -> tuple[AgentId, HostId]:
-        attempts.append(1)
-        if len(attempts) < 3:
-            raise MngrCommandError(_TRANSFER_DROP_MESSAGE)
-        return agent_id, host_id
-
-    result = _run_modal_create_with_transfer_retry(
-        _modal_attempt_params(), queue.Queue(), max_attempts=6, attempt_create=fake_create
-    )
-
-    assert result == (agent_id, host_id)
-    assert len(attempts) == 3
-
-
-def test_modal_create_does_not_retry_non_transfer_error() -> None:
-    """A deterministic failure (e.g. no quota) is surfaced immediately, no retry."""
-    attempts: list[int] = []
-
-    def fake_create(fast_mode: str | None, params: _MngrCreateAttemptParams) -> tuple[AgentId, HostId]:
-        attempts.append(1)
-        raise MngrCommandError("mngr create failed: no Modal quota available")
-
-    with pytest.raises(MngrCommandError, match="quota"):
-        _run_modal_create_with_transfer_retry(
-            _modal_attempt_params(), queue.Queue(), max_attempts=6, attempt_create=fake_create
-        )
-    assert len(attempts) == 1
-
-
-def test_modal_create_gives_up_after_max_attempts() -> None:
-    """Persistent transfer drops surface after exhausting the attempt budget."""
-    attempts: list[int] = []
-
-    def fake_create(fast_mode: str | None, params: _MngrCreateAttemptParams) -> tuple[AgentId, HostId]:
-        attempts.append(1)
-        raise MngrCommandError(_TRANSFER_DROP_MESSAGE)
-
-    with pytest.raises(MngrCommandError, match="hung up"):
-        _run_modal_create_with_transfer_retry(
-            _modal_attempt_params(), queue.Queue(), max_attempts=4, attempt_create=fake_create
-        )
-    assert len(attempts) == 4

@@ -274,12 +274,6 @@ class FakeSandbox(SandboxInterface):
             for process in self._cg.unfinished_processes:
                 process.terminate(force_kill_seconds=2.0)
 
-    def copy_from_local(self, local_path: Path, remote_path: str) -> None:
-        if self._is_terminated:
-            raise ModalProxyError("Sandbox has been terminated")
-        # FakeSandbox runs commands locally, so remote_path is a real local path.
-        shutil.copyfile(str(local_path), remote_path)
-
 
 class FakeApp(AppInterface):
     """Lightweight testing app with a generated ID."""

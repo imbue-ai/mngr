@@ -1679,15 +1679,6 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     ) -> None:
         """Push git repo from source to target, mirroring branches and tags."""
         self._warn_if_submodules_detected(source_host, source_path)
-
-        # A provider whose push transport is unreliable for a freshly-booted host
-        # (Modal's per-sandbox unencrypted-port tunnel) moves the repo over its
-        # healthy control plane instead. Every other provider has this flag False
-        # and runs the git-push paths below unchanged.
-        if self.provider_instance.transfers_work_dir_repo_via_bundle:
-            self.provider_instance.transfer_work_dir_repo_bundle(self, source_host, source_path, target_path)
-            return
-
         same_machine = _is_same_machine(source_host, self)
         target_ssh_info = self.get_ssh_connection_info()
 

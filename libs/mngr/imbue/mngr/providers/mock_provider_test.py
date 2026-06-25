@@ -34,10 +34,6 @@ class MockProviderInstance(BaseProviderInstance):
     mock_supports_snapshots: bool = Field(default=True)
     mock_supports_shutdown_hosts: bool = Field(default=True)
     mock_supports_volumes: bool = Field(default=False)
-    # Defaults False so a plain mock models a volume/cached-discovery provider (Modal),
-    # the case the live-agent reconciliation exists for. Set True to model a provider
-    # whose discovery already reads agents live (the default for real non-Modal providers).
-    mock_discovers_agents_from_live_host: bool = Field(default=False)
     mock_snapshots: list[SnapshotInfo] = Field(default_factory=list)
     mock_volumes: list[VolumeInfo] = Field(default_factory=list)
     mock_provider_resources: list[ProviderResourceInfo] = Field(default_factory=list)
@@ -68,10 +64,6 @@ class MockProviderInstance(BaseProviderInstance):
     @property
     def supports_mutable_tags(self) -> bool:
         return True
-
-    @property
-    def discovers_agents_from_live_host(self) -> bool:
-        return self.mock_discovers_agents_from_live_host
 
     def list_snapshots(self, host: HostInterface | HostId) -> list[SnapshotInfo]:
         return self.mock_snapshots
