@@ -123,10 +123,15 @@ def _poll_for_deploy_id_change(*, connector_url: str, baseline_deploy_id: str, t
     with httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS) as client:
         while time.monotonic() < deadline:
             resp = client.get(f"{connector_url}/version")
-            resp.raise_for_status()
-            seen = resp.json().get("deploy_id", "")
-            if seen and seen != baseline_deploy_id:
-                return seen
-            last_seen = seen
+            # With DeployStrategy.RECREATE the first /version GET cold-boots a
+            # fresh container, so a transient 5xx during Modal's swap window is
+            # expected -- treat it as "keep polling" rather than aborting the
+            # test (mirrors _poll_for_deploy_id in test_deploy_rollback.py).
+            if resp.status_code == 200:
+                seen = resp.json().get("deploy_id", "")
+                if seen and seen != baseline_deploy_id:
+                    return seen
+                if seen:
+                    last_seen = seen
             time.sleep(_VERSION_POLL_INTERVAL_SECONDS)
     return last_seen

@@ -37,4 +37,6 @@ just minds-test-services-against dev-josh apps/minds/deployment_tests/test_logge
 
 ## Status
 
-All tests are currently `@pytest.mark.skip`ped while the orchestrator + fixture implementations land. The test bodies are skeleton-quality and document the planned assertions; iterating on them is the next step after the scaffolding ships.
+The `minds_deployment` tests (`test_deploy_round_trip.py`, `test_deploy_rollback.py`, `test_deploy_new_version.py`) and the `test_logged_in_smoke.py` `minds_services` test are implemented and active, with real assertions against live envs.
+
+Two `minds_services` tests remain `@pytest.mark.skip`ped pending their drivers: `test_signup_tunnel.py` (needs the mail.tm-backed signup / one-time-code / in-process desktop-client drivers) and `test_litellm_via_workspace.py` (needs the desktop-client workspace-create driver, a Neon DSN query helper, and a Docker daemon). Their bodies document the planned assertions and `pytest.fail` if the skip is ever removed before the drivers land.

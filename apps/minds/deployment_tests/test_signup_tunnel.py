@@ -19,7 +19,6 @@ import pytest
 from imbue.minds.deployment_tests._mailtm import MailtmInbox
 from imbue.minds.deployment_tests.data_types import FctTemplateRef
 from imbue.minds.deployment_tests.data_types import SharedEnvHandle
-from imbue.minds.deployment_tests.helpers import wait_for_env_ready
 
 pytestmark = pytest.mark.minds_services
 
@@ -76,6 +75,8 @@ def test_realistic_signup_verify_signin_create_tunnel_signout(
        Cloudflare), destroy the workspace, sign out, assert subsequent
        requests with the same session token return 401.
     """
-    wait_for_env_ready(shared_env("default"))
-    _ = (signup_email, fct_template_ref)
-    raise AssertionError("not implemented yet -- see skip reason")
+    # Body intentionally unimplemented (the test is @pytest.mark.skip above);
+    # the docstring is the design record. Fail loudly if the skip is ever
+    # removed before the drivers land.
+    _ = (shared_env, signup_email, fct_template_ref)
+    pytest.fail("not implemented yet -- see skip reason")

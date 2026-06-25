@@ -29,6 +29,7 @@ from imbue.minds.deployment_tests.helpers import supertokens_app_exists
 from imbue.minds.envs.paths import client_config_file
 from imbue.minds.envs.paths import env_root_dir
 from imbue.minds.envs.paths import secrets_file
+from imbue.minds.envs.primitives import DevEnvName
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -72,7 +73,10 @@ def test_deploy_then_destroy_round_trip(ephemeral_env: EphemeralEnvHandle) -> No
         f"Modal env {ephemeral_env.name!r} not found in `modal environment list` after deploy."
     )
 
-    # Both Modal apps reachable.
+    # Both Modal apps reachable. A single GET (no polling) is sufficient here:
+    # the ephemeral_env fixture's `minds env deploy` already awaited
+    # `await_apps_healthy`, so the containers are warm by the time we reach
+    # this line.
     connector_url = str(ephemeral_env.connector_url).rstrip("/")
     litellm_url = str(ephemeral_env.litellm_proxy_url).rstrip("/")
     with httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS) as client:
@@ -117,7 +121,7 @@ def test_deploy_then_destroy_round_trip(ephemeral_env: EphemeralEnvHandle) -> No
     # ephemeral_env fixture teardown's destroy will no-op (env root gone).
 
 
-def _run_minds_env_destroy(name) -> None:
+def _run_minds_env_destroy(name: DevEnvName) -> None:
     """Shell out to ``uv run minds env destroy`` for ``name`` and assert success."""
     sub_env = build_minds_env_subprocess_env(name)
     completed = subprocess.run(
