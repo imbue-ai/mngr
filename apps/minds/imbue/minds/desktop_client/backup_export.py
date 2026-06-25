@@ -84,7 +84,7 @@ def _zip_directory_contents(source_dir: Path, zip_path: Path) -> None:
                     shutil.copyfileobj(source_file, dest_file)
 
 
-def export_latest_snapshot_zip(
+def export_snapshot_zip(
     *,
     paths: WorkspacePaths,
     agent_id: AgentId,

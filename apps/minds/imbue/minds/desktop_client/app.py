@@ -50,7 +50,7 @@ from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
-from imbue.minds.desktop_client.backup_export import export_latest_snapshot_zip
+from imbue.minds.desktop_client.backup_export import export_snapshot_zip
 from imbue.minds.desktop_client.backup_password_store import has_saved_backup_password
 from imbue.minds.desktop_client.backup_password_store import read_saved_backup_password
 from imbue.minds.desktop_client.backup_password_store import save_backup_password_if_absent
@@ -717,7 +717,7 @@ def _handle_backup_export_api(
     download_label = display_info.agent_name if display_info is not None else agent_id
     root_concurrency_group: ConcurrencyGroup | None = get_state().root_concurrency_group
     try:
-        zip_path = export_latest_snapshot_zip(
+        zip_path = export_snapshot_zip(
             paths=paths, agent_id=typed_agent_id, host_id=host_id, parent_cg=root_concurrency_group
         )
     except BackupProvisioningError as e:

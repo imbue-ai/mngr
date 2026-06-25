@@ -37,7 +37,7 @@ from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.api_key_auth import require_minds_api_key
 from imbue.minds.desktop_client.backup_export import BackupExportError
-from imbue.minds.desktop_client.backup_export import export_latest_snapshot_zip
+from imbue.minds.desktop_client.backup_export import export_snapshot_zip
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
@@ -255,7 +255,7 @@ def _handle_workspace_backup_export(agent_id: str, snapshot_id: str) -> Response
     host_id = info.host_id if info is not None else str(parsed_id)
     download_label = info.agent_name if info is not None else str(parsed_id)
     try:
-        zip_path = export_latest_snapshot_zip(
+        zip_path = export_snapshot_zip(
             paths=paths,
             agent_id=parsed_id,
             host_id=host_id,
