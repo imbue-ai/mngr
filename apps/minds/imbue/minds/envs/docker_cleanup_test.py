@@ -1,3 +1,5 @@
+import os
+import shlex
 from collections.abc import Iterator
 from pathlib import Path
 from uuid import uuid4
@@ -5,6 +7,7 @@ from uuid import uuid4
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.envs.docker_cleanup import _is_docker_daemon_unavailable
 from imbue.minds.envs.docker_cleanup import cleanup_env_state_container
 from imbue.minds.envs.docker_cleanup import read_profile_user_id
@@ -30,6 +33,27 @@ def _write_profile(mngr_host_dir: Path, *, profile_id: str, user_id: str) -> Non
     profile_dir = mngr_host_dir / "profiles" / profile_id
     profile_dir.mkdir(parents=True, exist_ok=True)
     (profile_dir / "user_id").write_text(f"{user_id}\n")
+
+
+def _install_fake_docker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, exit_code: int, stderr: str) -> None:
+    """Put a fake ``docker`` on PATH that prints ``stderr`` and exits ``exit_code``.
+
+    Lets the cleanup functions be exercised against a controlled ``docker``
+    failure (e.g. a reachable-but-paused daemon) with no real daemon, so the
+    tests are fast and deterministic.
+    """
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    docker = bin_dir / "docker"
+    docker.write_text(f"#!/bin/sh\nprintf '%s' {shlex.quote(stderr)} 1>&2\nexit {exit_code}\n")
+    docker.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+
+# "Docker Desktop is manually paused" is a reachable daemon that *refuses* the
+# operation -- not one of the "daemon unreachable" strings, so it falls through
+# to a real DockerCleanupError. This is the case the regression tests below pin.
+_PAUSED_DAEMON_STDERR = "Error response from daemon: Docker Desktop is manually paused. Unpause it via the Whale menu."
 
 
 def test_read_profile_user_id_returns_value(tmp_path: Path) -> None:
@@ -86,6 +110,76 @@ def test_stop_active_env_state_container_skips_when_user_id_unresolved(
     # No mngr profile under the given host dir -> user_id can't be resolved ->
     # returns False without targeting (or stopping) anything.
     assert stop_active_env_state_container(mngr_host_dir=tmp_path / "mngr", parent_concurrency_group=_root_cg) is False
+
+
+def test_start_state_container_real_failure_raises_unwrapped_docker_cleanup_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _root_cg: ConcurrencyGroup
+) -> None:
+    # A reachable daemon that refuses the start (Docker Desktop paused) must
+    # surface as a plain DockerCleanupError -- NOT a ConcurrencyExceptionGroup
+    # wrapping it. The launch path in run.py catches DockerCleanupError to keep
+    # startup going; if the error escaped wrapped, that catch would miss it and
+    # minds would crash with "Failed to start minds".
+    _install_fake_docker(monkeypatch, tmp_path, exit_code=1, stderr=_PAUSED_DAEMON_STDERR)
+    with pytest.raises(DockerCleanupError):
+        start_state_container(
+            container_name=f"minds-staging-docker-state-{uuid4().hex}", parent_concurrency_group=_root_cg
+        )
+
+
+def test_stop_state_container_real_failure_raises_unwrapped_docker_cleanup_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _root_cg: ConcurrencyGroup
+) -> None:
+    # Same contract for the quit-time stop: a real failure on a present container
+    # must be a plain DockerCleanupError so app.py's `except DockerCleanupError`
+    # can report it instead of letting a wrapped group escape.
+    _install_fake_docker(monkeypatch, tmp_path, exit_code=1, stderr=_PAUSED_DAEMON_STDERR)
+    with pytest.raises(DockerCleanupError):
+        stop_state_container(
+            container_name=f"minds-staging-docker-state-{uuid4().hex}", parent_concurrency_group=_root_cg
+        )
+
+
+def test_remove_state_container_rm_failure_raises_unwrapped_docker_cleanup_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _root_cg: ConcurrencyGroup
+) -> None:
+    # `inspect` succeeds (container present) but `docker rm -f` fails: the error
+    # must be a plain DockerCleanupError raised from outside the per-command CG
+    # scope, not re-wrapped in a ConcurrencyExceptionGroup.
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    docker = bin_dir / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        # `docker container inspect <name>` -> success (container exists).
+        'if [ "$1" = "container" ]; then exit 0; fi\n'
+        # `docker rm -f <name>` -> failure.
+        f'if [ "$1" = "rm" ]; then printf \'%s\' {shlex.quote(_PAUSED_DAEMON_STDERR)} 1>&2; exit 1; fi\n'
+        "exit 0\n"
+    )
+    docker.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    with pytest.raises(DockerCleanupError):
+        remove_state_container(
+            container_name=f"minds-staging-docker-state-{uuid4().hex}", parent_concurrency_group=_root_cg
+        )
+
+
+def test_start_state_container_daemon_unavailable_message_is_noop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _root_cg: ConcurrencyGroup
+) -> None:
+    # A genuinely-unreachable daemon (distinct from "paused") is classified as a
+    # silent no-op, not a DockerCleanupError -- exercised through the same
+    # outside-the-CG path to confirm the classification still works post-refactor.
+    _install_fake_docker(
+        monkeypatch,
+        tmp_path,
+        exit_code=1,
+        stderr="Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+    )
+    start_state_container(
+        container_name=f"minds-staging-docker-state-{uuid4().hex}", parent_concurrency_group=_root_cg
+    )
 
 
 @pytest.mark.acceptance
