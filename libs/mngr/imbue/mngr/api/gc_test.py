@@ -251,10 +251,11 @@ def test_gc_machines_records_leaked_resource_but_continues_when_delete_host_rais
 ) -> None:
     """A leaked resource during offline-host deletion is recorded but does not abort the sweep.
 
-    delete_host raises a CleanupFailedGroup when the host's records were deleted but a resource
-    was left behind (e.g. a docker build image still referenced by an orphaned container). GC
-    records the leak in result.failures and still counts the host as deleted, rather than letting
-    one host's leak propagate and abort the whole sweep.
+    delete_host raises a CleanupFailedGroup when a resource was left behind (e.g. a docker build
+    image still referenced by an orphaned container); it keeps the host record so the next sweep
+    can retry. GC records the leak in result.failures and continues the sweep, but does NOT count
+    the host as deleted (nor emit a destroyed event), rather than letting one host's leak propagate
+    and abort the whole sweep.
     """
 
     class _LeakyDeleteProvider(MockProviderInstance):
@@ -280,11 +281,11 @@ def test_gc_machines_records_leaked_resource_but_continues_when_delete_host_rais
 
     result = _run_gc_machines(provider)
 
-    # The host record is gone (delete attempted), so it still counts as deleted...
+    # delete_host was attempted...
     assert provider.deleted_hosts == [host.id]
-    assert len(result.machines_deleted) == 1
-    assert result.machines_deleted[0].host_id == host.id
-    # ...but the leak is recorded as a structured failure (preserving the category and host_id
+    # ...but it raised, so the host is NOT counted as deleted (the record is kept for retry)...
+    assert len(result.machines_deleted) == 0
+    # ...and the leak is recorded as a structured failure (preserving the category and host_id
     # from delete_host) rather than swallowed or allowed to abort the sweep.
     assert len(result.failures) == 1
     assert result.failures[0].category == CleanupFailureCategory.HOST_RESOURCE_REMAINS

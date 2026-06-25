@@ -1562,23 +1562,21 @@ kill -TERM 1
         Best-effort: every step is attempted, and a real failure (a resource
         that exists but could not be removed) is recorded and raised as a
         ``CleanupFailedGroup`` rather than aborting the GC sweep with a raw
-        provider exception. The host record is still deleted, so the host does
-        not reappear on the next sweep. Mirrors ``destroy_host``. See
+        provider exception. The host record is deleted (the host forgotten)
+        only when cleanup fully succeeds; if anything was left behind the
+        record is kept so the next sweep can retry. See
         specs/cleanup-error-aggregation.md.
         """
         host_id = host.id
 
         with collecting_cleanup_failures() as failures:
-            # delete_host removes the host *record*, after which nothing can find
-            # this host again -- so it is the last chance to clear any runtime
-            # resource an earlier destroy_host left behind (a container it failed
-            # to remove, or a FAILED/CRASHED host that was never destroyed).
-            # destroy_host converges to the same end state on every call (it
-            # treats already-gone resources as benign) and removes the container
-            # before the build image, so the removal never hits the 409 conflict
-            # a leftover container would otherwise cause. Its cleanup failures
-            # fold into this sweep; a daemon-unreachable MngrError propagates to
-            # gc_machines, which records it and retries the host next sweep.
+            # Re-run destroy_host to clear any runtime resource an earlier
+            # destroy left behind (a container it failed to remove, or a
+            # FAILED/CRASHED host that was never destroyed). It converges to the
+            # same end state on every call (already-gone resources are benign)
+            # and removes the container before the build image, so the removal
+            # never hits the 409 conflict a leftover container would otherwise
+            # cause. Its cleanup failures fold into this sweep.
             try:
                 self.destroy_host(host)
             except CleanupFailedGroup as group:
@@ -1620,6 +1618,10 @@ kill -TERM 1
                         )
                     )
 
+        # Outside the `with`: collecting_cleanup_failures raises on exit if any
+        # step failed, so the host record is deleted -- the host forgotten --
+        # only on a fully clean cleanup. A failure keeps the record so the next
+        # sweep retries (a non-retryable failure stays sticky, but visible).
         self._host_store.delete_host_record(host_id)
         self._container_cache_by_id.pop(host_id, None)
         self._evict_cached_host(host_id)

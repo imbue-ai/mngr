@@ -1013,8 +1013,8 @@ def test_delete_host_records_leak_when_container_removal_stays_stuck(
     When destroy_host still cannot remove the conflicting container, that
     container is recorded as a CleanupFailedGroup leak (which GC aggregates and
     continues past). The build image tag is force-dropped regardless -- mngr
-    relinquishes its claim -- and the host record is still deleted so the host
-    does not reappear next sweep.
+    relinquishes its claim -- but the host record is kept (not forgotten) so the
+    next sweep can retry the leftover.
     """
     provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
     daemon = _LeakedContainerDaemon()
@@ -1030,8 +1030,8 @@ def test_delete_host_records_leak_when_container_removal_stays_stuck(
     # its build image tag regardless...
     assert daemon.containers_present != []
     assert daemon.image_tags == set()
-    # ...and the host record is still deleted, so the host does not reappear next sweep.
-    assert provider._host_store.read_host_record(HostId(HOST_ID_A), use_cache=False) is None
+    # ...and the host record is KEPT (not forgotten) so the next sweep can retry the leak.
+    assert provider._host_store.read_host_record(HostId(HOST_ID_A), use_cache=False) is not None
 
 
 class _RemoveDirectoryFailingVolume(LocalVolume):
@@ -1048,7 +1048,7 @@ def test_delete_host_records_volume_removal_failure_as_leak(temp_mngr_ctx: MngrC
     remove_directory is idempotent on a missing path, so an exception means the
     volume data still exists and could not be removed -- a leftover resource,
     not a benign "no volume" case. delete_host must record it as a
-    CleanupFailedGroup while still deleting the host record.
+    CleanupFailedGroup and keep the host record for the next sweep to retry.
     """
     provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
     provider.__dict__["_state_volume"] = _RemoveDirectoryFailingVolume(root_path=tmp_path)
@@ -1059,4 +1059,5 @@ def test_delete_host_records_volume_removal_failure_as_leak(temp_mngr_ctx: MngrC
         provider.delete_host(host)
 
     assert any("host volume" in f.message for f in exc_info.value.failures)
-    assert provider._host_store.read_host_record(HostId(HOST_ID_A), use_cache=False) is None
+    # The host record is kept on failure so the next sweep can retry.
+    assert provider._host_store.read_host_record(HostId(HOST_ID_A), use_cache=False) is not None
