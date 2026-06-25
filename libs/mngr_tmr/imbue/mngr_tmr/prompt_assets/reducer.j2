@@ -105,11 +105,22 @@ Verifying changes here means running e2e tests, and the e2e tests run on offload
 just test-offload-release
 ```
 
-This recipe REQUIRES three environment variables: `MODAL_TOKEN_ID`,
-`MODAL_TOKEN_SECRET`, and `ANTHROPIC_API_KEY`. They are provided to you as agent
-environment variables (check with `printenv MODAL_TOKEN_ID`). If any is missing you
-cannot verify on offload -- treat the affected change as unverified (mark it so, or
-escalate it) rather than guessing.
+This recipe needs `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`, provided to you as
+agent environment variables (check with `printenv MODAL_TOKEN_ID`). If they are
+absent you cannot verify on offload -- mark the change unverified or escalate it.
+
+The recipe also requires `ANTHROPIC_API_KEY` to be set, but do NOT export that into
+your own environment: a wrong value there breaks your own Claude auth. Pass it
+scoped to the command instead. For tests that do not create real agents (help/flag
+and most non-agent tests) any non-empty value works:
+
+```bash
+ANTHROPIC_API_KEY=unused just test-offload-release
+```
+
+For tests that DO create real agents (e.g. claude/codex agent creation), the
+sandboxes need a real key; if you do not have one, escalate that verification
+rather than running with a fake key.
 
 Run only the blast radius -- the handful of tests a change actually touched -- not
 the whole release suite. Test selection lives in the offload config, so narrow it
