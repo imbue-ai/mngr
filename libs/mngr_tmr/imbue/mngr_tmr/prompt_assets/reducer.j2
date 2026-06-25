@@ -96,6 +96,39 @@ only point in the pipeline where cross-test relationships are visible, so do the
 two things no single test agent could. Keep each normalization change as its own
 commit prefixed `[NORMALIZE]`.
 
+## How to run tests for verification (offload)
+
+Verifying changes here means running e2e tests, and the e2e tests run on offload
+-- it fans them out across Modal sandboxes. Run them from the git repo root:
+
+```bash
+just test-offload-release
+```
+
+This recipe REQUIRES three environment variables: `MODAL_TOKEN_ID`,
+`MODAL_TOKEN_SECRET`, and `ANTHROPIC_API_KEY`. They are provided to you as agent
+environment variables (check with `printenv MODAL_TOKEN_ID`). If any is missing you
+cannot verify on offload -- treat the affected change as unverified (mark it so, or
+escalate it) rather than guessing.
+
+Run only the blast radius -- the handful of tests a change actually touched -- not
+the whole release suite. Test selection lives in the offload config, so narrow it
+and restore it afterwards:
+
+1. In `offload-modal-release.toml`, the `[groups.all]` `filters` value is a pytest
+   `-m '...'` marker expression. Append a `-k` selector for the affected tests:
+
+       filters = "-m 'release and not docker and not docker_sdk and ...' -k 'test_foo or test_bar'"
+
+2. Run `just test-offload-release`. Success prints `All tests passed!`; the junit
+   report and logs land under `test-results/`.
+3. Restore the original `filters` line (e.g. `git checkout offload-modal-release.toml`)
+   so the narrowed filter is never committed.
+
+Whenever you have applied ANY change to the tree (an integrated cherry-pick, an
+extraction, or a FIXME resolution), verify the affected tests on offload before
+publishing. If verification fails, back the change out or record it as unverified.
+
 ## Extract shared scaffolding -- but preserve the tutorial 1:1
 
 Test functions often repeat the same *scaffolding* step: a verification command
