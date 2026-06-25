@@ -995,21 +995,23 @@
       <p class="type-helper text-secondary mb-2">
         Selectable card used by the create page's "where to run" presets.
         Selection is driven by ``aria-checked`` (styled with Tailwind
-        ``aria-checked:`` variants -- dashed neutral border by default, solid
-        accent border + faint tint when selected); hover lifts with
-        ``shadow-raised``. One card per row is checked.
+        ``aria-checked:`` variants -- a 1px dashed neutral outline by default, a
+        2px solid accent outline + faint tint when selected); the outline grows
+        without shifting layout, eased by ``transition-all``. Hover lifts with
+        ``shadow-raised`` and a 1.01 scale; pressing dips to 0.99. One card per
+        row is checked.
       </p>
       <div class="flex gap-4 items-stretch" role="radiogroup" aria-label="Preset card demo">
         <PresetCard preset="demo-a" selected extra="flex-1">
           <span class="type-heading text-primary">Selected</span>
-          <span class="type-body text-secondary">aria-checked="true" -- accent border + tint.</span>
+          <span class="type-body text-secondary">aria-checked="true" -- accent outline + tint.</span>
         </PresetCard>
         <PresetCard preset="demo-b" extra="flex-1">
           <span class="type-heading text-primary">Unselected</span>
-          <span class="type-body text-secondary">Dashed border; lifts with a shadow on hover.</span>
+          <span class="type-body text-secondary">Dashed outline; lifts with a shadow + scale on hover.</span>
         </PresetCard>
       </div>
-      <div class="mt-1 type-helper text-secondary font-mono">PresetCard.jinja :: Tailwind aria-checked: variants + hover:shadow-raised</div>
+      <div class="mt-1 type-helper text-secondary font-mono">PresetCard.jinja :: Tailwind aria-checked: variants + hover scale/shadow</div>
     </section>
 
     {# Page container #}

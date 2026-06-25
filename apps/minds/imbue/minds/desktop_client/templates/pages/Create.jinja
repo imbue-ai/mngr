@@ -94,7 +94,7 @@
 
     function markPresetSelected(name) {
       // Selection is driven purely by aria-checked; the PresetCard's
-      // aria-checked: Tailwind variants paint the selected accent border + tint.
+      // aria-checked: Tailwind variants paint the selected accent outline + tint.
       for (var i = 0; i < presetCards.length; i++) {
         var isOn = presetCards[i].getAttribute('data-preset') === name;
         presetCards[i].setAttribute('aria-checked', isOn ? 'true' : 'false');
