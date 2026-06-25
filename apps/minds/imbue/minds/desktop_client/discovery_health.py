@@ -117,7 +117,9 @@ class ProducerRemediator(MutableModel, ABC):
     raise ``LatchkeyError``; the watchdog catches it and treats it as "did not
     help" (it backs off and retries rather than giving up). ``is_alive`` is a
     cheap probe of whether the producer's supervisor is currently running --
-    a dead supervisor is a stall the watchdog acts on immediately.
+    once the supervisor has been seen up at least once, a later dead reading is
+    a stall the watchdog acts on immediately (before that it defers to the
+    freshness timer, to avoid racing the startup thread that brings it up).
     """
 
     @abstractmethod
