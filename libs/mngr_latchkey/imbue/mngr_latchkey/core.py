@@ -86,11 +86,12 @@ _REENCRYPT_TIMEOUT_SECONDS: Final[float] = 5.0
 # Node-runtime startup on cold filesystems.
 _VERSION_CHECK_TIMEOUT_SECONDS: Final[float] = 5.0
 
-# Minimum version of the upstream ``latchkey`` CLI this package will
-# operate against. 2.18.0 is the first release with the ``auth prepare``
+# Minimum version of the upstream ``latchkey`` CLI this package will operate
+# against. Kept in lockstep with the version we install/bundle (see
+# ``LATCHKEY_VERSION``). 2.18.0 was the first release with the ``auth prepare``
 # subcommand, which the Minds Google OAuth flow (:meth:`Latchkey.auth_prepare`)
 # depends on.
-LATCHKEY_MIN_VERSION: Final[str] = "2.18.0"
+LATCHKEY_MIN_VERSION: Final[str] = "2.19.1"
 
 # Fixed port that every containerized/VM/VPS agent sees on its own 127.0.0.1
 # when reaching the Latchkey gateway. A per-agent SSH reverse tunnel bridges
