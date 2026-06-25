@@ -135,6 +135,17 @@ def test_get_unknown_workspace_returns_404(tmp_path: Path) -> None:
     assert response.status_code == 404
 
 
+def test_malformed_workspace_id_returns_400_not_500(tmp_path: Path) -> None:
+    # A malformed id in the path (cannot parse as an AgentId) is a client error:
+    # the blueprint maps InvalidRandomIdError to 400 rather than letting it 500.
+    client = _client_with_workspace(tmp_path, AgentId())
+
+    response = client.get("/api/v1/workspaces/not-a-valid-agent-id", headers=_auth_header())
+
+    assert response.status_code == 400
+    assert "error" in json.loads(response.data)
+
+
 def test_workspace_version_returns_original_version_label(tmp_path: Path) -> None:
     # The static resolver has no labels, so original is null and the git-derived
     # fields default to null/[] (no concurrency group is wired in this test).

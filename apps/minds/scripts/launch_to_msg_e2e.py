@@ -1583,42 +1583,6 @@ async def amain() -> int:
             else:
                 logger.warning("[mngr-list] {} not found; skipping CLI cross-check", bundled_mngr)
 
-            # 24. Duplicate-name conflict: POST /api/create-agent with
-            # HOST_NAME (still owned by W1) should return 409 with an
-            # "already exists" message. Proves the duplicate-name guard
-            # in _handle_create_agent_api (added on this branch) works,
-            # and that the canonical name set is correctly populated by
-            # backend_resolver.list_known_workspace_ids().
-            logger.info("=== conflict 409: re-create with HOST_NAME already taken ===")
-            # win is currently on W1's chat URL (agent-<hex>.localhost,
-            # served by mngr_forward to the in-VM system_interface). The
-            # /api/create-agent endpoint is on the MINDS backend (origin),
-            # so the fetch needs to land there. Easiest: navigate win to
-            # the minds origin first so the relative fetch resolves there.
-            await win.goto(origin + "/")
-            conflict_resp = await win.evaluate(
-                """async (host_name) => {
-                    const r = await fetch('/api/create-agent', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({
-                            host_name,
-                            git_url: 'https://example.com/dummy.git',
-                        }),
-                    });
-                    return {status: r.status, body: await r.text()};
-                }""",
-                HOST_NAME,
-            )
-            if conflict_resp["status"] != 409:
-                raise E2EFailure(
-                    f"[conflict-409] expected 409 for duplicate name {HOST_NAME!r}, "
-                    f"got {conflict_resp['status']}: {conflict_resp['body']!r}"
-                )
-            if "already exists" not in conflict_resp["body"]:
-                raise E2EFailure(f"[conflict-409] 409 body missing 'already exists' text: {conflict_resp['body']!r}")
-            logger.info("[conflict-409] PASS: duplicate-name guard returned 409")
-
         # Iter 9 (quit + relaunch): a user closes the Mac app, opens it
         # again, and expects W1's chat to still work. Verifies session +
         # mngr data survive the restart, the Electron shutdown chain

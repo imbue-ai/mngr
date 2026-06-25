@@ -103,29 +103,6 @@ def _resolver_with_running_capable_agent(agent_id: AgentId) -> MngrCliBackendRes
 # -- endpoint auth + availability --
 
 
-def test_stop_host_requires_authentication(tmp_path: Path) -> None:
-    agent = AgentId.generate()
-    client, _ = _make_client(tmp_path, _resolver_with_running_capable_agent(agent))
-    response = client.post(f"/api/agents/{agent}/stop-host")
-    assert response.status_code == 403
-
-
-def test_start_host_requires_authentication(tmp_path: Path) -> None:
-    agent = AgentId.generate()
-    client, _ = _make_client(tmp_path, _resolver_with_running_capable_agent(agent))
-    response = client.post(f"/api/agents/{agent}/start-host")
-    assert response.status_code == 403
-
-
-def test_stop_host_unavailable_without_concurrency_group(tmp_path: Path) -> None:
-    """Without a concurrency group (test factory), the action can't run -> 503."""
-    agent = AgentId.generate()
-    client, auth_store = _make_client(tmp_path, _resolver_with_running_capable_agent(agent))
-    _authenticate(client, auth_store)
-    response = client.post(f"/api/agents/{agent}/stop-host")
-    assert response.status_code == 503
-
-
 def test_stop_mind_hosts_requires_authentication(tmp_path: Path) -> None:
     agent = AgentId.generate()
     client, _ = _make_client(tmp_path, _resolver_with_running_capable_agent(agent))

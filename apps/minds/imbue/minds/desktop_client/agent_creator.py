@@ -1712,9 +1712,9 @@ class AgentCreator(MutableModel):
 
                 # Publish the canonical id + DONE atomically so the UI sees
                 # both at once. ``on_created`` runs after publication so any
-                # downstream consumer (e.g. ``_OnCreatedCallbackFactory``,
-                # which kicks off the Cloudflare tunnel + workspace
-                # association) can rely on the canonical id.
+                # downstream consumer (e.g. ``OnCreatedCallback``, which kicks
+                # off the Cloudflare tunnel + workspace association) can rely on
+                # the canonical id.
                 with self._lock:
                     self._canonical_agent_ids[cid_str] = canonical_id
                     self._statuses[cid_str] = AgentCreationStatus.DONE

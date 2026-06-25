@@ -10,11 +10,9 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
-from enum import auto
 from pathlib import Path
 from typing import Any
 from typing import Final
-from typing import assert_never
 from urllib.parse import urlparse
 
 import httpx
@@ -29,7 +27,6 @@ from werkzeug.middleware.dispatcher import DispatcherMiddleware
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
-from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.mutable_model import MutableModel
@@ -135,7 +132,6 @@ from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
 from imbue.minds.desktop_client.workspace_create import build_backup_request_or_error
 from imbue.minds.desktop_client.workspace_create import build_create_on_created_callback
 from imbue.minds.desktop_client.workspace_create import default_region_for_provider_with_config
-from imbue.minds.desktop_client.workspace_create import persist_region_for_launch_mode
 from imbue.minds.desktop_client.workspace_create import resolve_effective_region
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.envs.docker_cleanup import stop_active_env_state_container
@@ -798,207 +794,6 @@ def _handle_create_page() -> Response:
         color=_suggested_create_color(backend_resolver),
     )
     return make_html_response(content=html)
-
-
-def _handle_create_agent_api() -> Response:
-    """API endpoint for creating an agent (POST /api/create-agent).
-
-    Accepts JSON body with git_url. Returns JSON with agent_id and status.
-    """
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
-
-    agent_creator: AgentCreator | None = get_state().agent_creator
-    if agent_creator is None:
-        return make_response(status_code=501, content="Agent creation not configured")
-
-    try:
-        body = _read_json_body()
-    except (json.JSONDecodeError, ValueError):
-        return make_response(
-            status_code=400,
-            content='{"error": "Invalid JSON body"}',
-            media_type="application/json",
-        )
-    git_url = str(body.get("git_url", "")).strip()
-    host_name = str(body.get("host_name", "")).strip()
-    branch = str(body.get("branch", "")).strip()
-    try:
-        launch_mode = LaunchMode(str(body.get("launch_mode", LaunchMode.DOCKER.value)))
-    except ValueError:
-        return make_response(
-            status_code=400,
-            content='{"error": "Invalid launch_mode"}',
-            media_type="application/json",
-        )
-    try:
-        ai_provider = AIProvider(str(body.get("ai_provider", AIProvider.SUBSCRIPTION.value)))
-    except ValueError:
-        return make_response(
-            status_code=400,
-            content='{"error": "Invalid ai_provider"}',
-            media_type="application/json",
-        )
-    try:
-        backup_provider = BackupProvider(str(body.get("backup_provider", BackupProvider.CONFIGURE_LATER.value)))
-    except ValueError:
-        return make_response(
-            status_code=400,
-            content='{"error": "Invalid backup_provider"}',
-            media_type="application/json",
-        )
-    try:
-        backup_encryption_method = BackupEncryptionMethod(
-            str(body.get("backup_encryption_method", BackupEncryptionMethod.NO_PASSWORD.value))
-        )
-    except ValueError:
-        return make_response(
-            status_code=400,
-            content='{"error": "Invalid backup_encryption_method"}',
-            media_type="application/json",
-        )
-    backup_master_password = str(body.get("backup_master_password", ""))
-    is_save_backup_password = bool(body.get("backup_save_password", False))
-    backup_api_key_env = str(body.get("backup_api_key_env", ""))
-    anthropic_api_key = str(body.get("anthropic_api_key", "")).strip()
-    account_id = str(body.get("account_id", "")).strip()
-    submitted_region = str(body.get("region", "")).strip()
-    color = _color_for_new_workspace(body.get("color", ""))
-    if not git_url:
-        return make_response(
-            status_code=400,
-            content='{"error": "git_url is required"}',
-            media_type="application/json",
-        )
-    # Validate the host name eagerly so a malformed value returns 400 from
-    # the API rather than failing deferred in the background thread.
-    if host_name:
-        try:
-            HostName(host_name)
-        except InvalidName as exc:
-            return make_response(
-                status_code=400,
-                content=json.dumps({"error": str(exc)}),
-                media_type="application/json",
-            )
-    # Mirror the form path's account requirement so the API rejects
-    # imbue_cloud-without-account up front instead of failing later inside
-    # the background thread with a vague MngrCommandError.
-    is_imbue_cloud_compute = launch_mode is LaunchMode.IMBUE_CLOUD
-    is_imbue_cloud_ai = ai_provider is AIProvider.IMBUE_CLOUD
-    if not account_id and (is_imbue_cloud_compute or is_imbue_cloud_ai):
-        return make_response(
-            status_code=400,
-            content='{"error": "account_id is required when launch_mode or ai_provider is IMBUE_CLOUD"}',
-            media_type="application/json",
-        )
-    if ai_provider is AIProvider.API_KEY and not anthropic_api_key:
-        return make_response(
-            status_code=400,
-            content='{"error": "anthropic_api_key is required when ai_provider is API_KEY"}',
-            media_type="application/json",
-        )
-
-    # Resolve the account email when an imbue_cloud field is selected (compute,
-    # AI, or backup) so the background creation can mint a LiteLLM key / lease a
-    # pool host / create a backup bucket. The session store is the source of
-    # truth for email <-> user_id mapping.
-    is_imbue_cloud_backup = backup_provider is BackupProvider.IMBUE_CLOUD
-    account_email = ""
-    if account_id and (is_imbue_cloud_compute or is_imbue_cloud_ai or is_imbue_cloud_backup):
-        session_store_inst: MultiAccountSessionStore | None = get_state().session_store
-        if session_store_inst is not None:
-            account_email = session_store_inst.get_account_email(account_id) or ""
-
-    # FIXME: two duplicate-name footguns this 409 doesn't cover:
-    # (1) API + empty ``host_name``: a second POST with the same
-    #     ``git_url`` auto-derives the same name via
-    #     ``extract_repo_name`` and fails as a deferred ``FAILED``
-    #     status mid-creation. Fix: derive + uniquify here, or
-    #     reject the duplicate inline.
-    # (2) Form + default ``"assistant"``: the form pre-fills with
-    #     ``_FALLBACK_HOST_NAME``, but ``_handle_create_form_submit``
-    #     never runs this check, so a second Create with the
-    #     untouched default also fails as ``FAILED``. Fix: uniquify
-    #     the default at render time, or mirror this 409 on the form
-    #     path.
-    if host_name:
-        backend_resolver = get_state().backend_resolver
-        existing_names: set[str] = set()
-        for existing_id in backend_resolver.list_known_workspace_ids():
-            existing_name = backend_resolver.get_workspace_name(existing_id)
-            if existing_name is not None:
-                existing_names.add(existing_name)
-        if host_name in existing_names:
-            return make_response(
-                status_code=409,
-                content=json.dumps(
-                    {
-                        "error": (
-                            "An agent named '{}' already exists. "
-                            "Pick a different name, or destroy the existing one first."
-                        ).format(host_name)
-                    }
-                ),
-                media_type="application/json",
-            )
-
-    backup_request, backup_error = build_backup_request_or_error(
-        backup_provider=backup_provider,
-        encryption_method=backup_encryption_method,
-        typed_master_password=backup_master_password,
-        is_save_password=is_save_backup_password,
-        api_key_env=backup_api_key_env,
-        account_email=account_email,
-        paths=agent_creator.paths,
-    )
-    if backup_error is not None:
-        return make_response(
-            status_code=400,
-            content=json.dumps({"error": backup_error}),
-            media_type="application/json",
-        )
-
-    # Resolve the explicit region (or its default) and persist it on success.
-    minds_config: MindsConfig | None = get_state().minds_config
-    geo_cache: GeoLocationCache | None = get_state().geo_location_cache
-    region = resolve_effective_region(launch_mode, submitted_region, minds_config, geo_cache)
-
-    def _persist_region_on_created(agent_id: AgentId) -> None:
-        persist_region_for_launch_mode(minds_config, launch_mode, region)
-
-    creation_id = agent_creator.start_creation(
-        git_url,
-        host_name=host_name,
-        branch=branch,
-        launch_mode=launch_mode,
-        ai_provider=ai_provider,
-        account_email=account_email,
-        region=region,
-        anthropic_api_key=anthropic_api_key,
-        on_created=_persist_region_on_created,
-        backup_request=backup_request,
-        color=color,
-        original_minds_version=(branch or FALLBACK_BRANCH),
-    )
-
-    # Apply any onboarding answers supplied inline by the API caller. Absent
-    # / empty fields map to the no-op path, so existing callers that omit
-    # them are unaffected. The form-driven UI submits answers separately via
-    # POST /api/create-agent/{id}/onboarding once the user finishes the
-    # questions.
-    onboarding_applier: OnboardingApplier | None = get_state().onboarding_applier
-    if onboarding_applier is not None:
-        onboarding_applier.start_apply(creation_id, _parse_onboarding_answers(body))
-
-    # API contract: the JSON field stays named ``agent_id`` for backwards
-    # compatibility with existing API clients, but the value is now a
-    # CreationId (minds-internal in-flight handle, distinct prefix from a
-    # canonical AgentId). The status-polling endpoints accept either.
-    return make_response(
-        content=json.dumps({"agent_id": str(creation_id), "status": str(AgentCreationStatus.INITIALIZING)}),
-        media_type="application/json",
-    )
 
 
 def _handle_creation_status_api(
@@ -2489,13 +2284,6 @@ def _handle_restart_host_api(
 # via mngr's own executor, rather than one subprocess per mind.
 
 
-class _MindHostAction(UpperCaseStrEnum):
-    """Which lifecycle action a Start/Stop runs on a mind's host."""
-
-    STOP = auto()
-    START = auto()
-
-
 def _resolve_host_id(backend_resolver: BackendResolverInterface, workspace_agent_id: AgentId) -> HostId | None:
     """Return the host id of ``workspace_agent_id`` (the key the liveness override uses), or None."""
     info = backend_resolver.get_agent_display_info(workspace_agent_id)
@@ -2509,95 +2297,6 @@ def _build_mngr_stop_hosts_argv(mngr_binary: str, agent_ids: Sequence[AgentId]) 
     executor), so a single command replaces one subprocess per mind.
     """
     return [mngr_binary, "stop", *(str(aid) for aid in agent_ids), "--quiet", "--stop-host"]
-
-
-def _perform_mind_host_action(
-    workspace_agent_id: AgentId,
-    action: _MindHostAction,
-    backend_resolver: BackendResolverInterface,
-    mngr_binary: str,
-    mngr_host_dir: Path,
-    concurrency_group: ConcurrencyGroup,
-) -> bool:
-    """Stop or start one mind's host, running ``mngr`` to completion; return True on success.
-
-    On success sets the optimistic host-state override (so the landing page and
-    quit prompt flip immediately, reconciling on the next discovery snapshot); on
-    failure clears any override so the UI reverts to the authoritative discovery
-    state. Runs synchronously in the caller's thread, so the endpoint returns the
-    real outcome.
-    """
-    services_agent_id = backend_resolver.get_system_services_agent_id(workspace_agent_id)
-    if services_agent_id is None:
-        logger.warning(
-            "Could not locate the system-services agent for host {} on {}", action.value, workspace_agent_id
-        )
-        return False
-    host_id = _resolve_host_id(backend_resolver, workspace_agent_id)
-    env = dict(os.environ)
-    env["MNGR_HOST_DIR"] = str(mngr_host_dir)
-    match action:
-        case _MindHostAction.STOP:
-            argv = _build_mngr_stop_argv(mngr_binary, services_agent_id, is_host_restart=True)
-        case _MindHostAction.START:
-            argv = _build_mngr_start_argv(mngr_binary, services_agent_id)
-        case _ as unreachable:
-            assert_never(unreachable)
-    try:
-        _run_mngr(concurrency_group, argv, env)
-    except MngrCommandError as exc:
-        logger.warning("Host {} for {} failed: {}", action.value, workspace_agent_id, exc)
-        if host_id is not None:
-            backend_resolver.clear_host_state_override(host_id)
-        return False
-    if host_id is not None:
-        match action:
-            case _MindHostAction.STOP:
-                backend_resolver.set_host_state_override(host_id, HostState.STOPPED)
-            case _MindHostAction.START:
-                backend_resolver.set_host_state_override(host_id, HostState.RUNNING)
-            case _ as unreachable:
-                assert_never(unreachable)
-    return True
-
-
-def _dispatch_mind_host_action(
-    agent_id: str,
-    action: _MindHostAction,
-) -> Response:
-    """Shared body for the stop-host / start-host endpoints: validate, run synchronously, return the outcome."""
-    if not _is_request_authenticated():
-        return _json_error("Not authenticated", status_code=403)
-    aid = AgentId(agent_id)
-    concurrency_group: ConcurrencyGroup | None = get_state().root_concurrency_group
-    backend_resolver: BackendResolverInterface = get_state().backend_resolver
-    if concurrency_group is None:
-        return _json_error("Mind host control is unavailable in this configuration", status_code=503)
-    succeeded = _perform_mind_host_action(
-        workspace_agent_id=aid,
-        action=action,
-        backend_resolver=backend_resolver,
-        mngr_binary=get_state().mngr_binary,
-        mngr_host_dir=get_state().mngr_host_dir,
-        concurrency_group=concurrency_group,
-    )
-    if not succeeded:
-        return _json_error(f"Could not {action.value.lower()} the mind host", status_code=500)
-    return make_response(content="{}", media_type="application/json")
-
-
-def _handle_stop_host_api(
-    agent_id: str,
-) -> Response:
-    """Stop a mind's host (``mngr stop --stop-host``)."""
-    return _dispatch_mind_host_action(agent_id=agent_id, action=_MindHostAction.STOP)
-
-
-def _handle_start_host_api(
-    agent_id: str,
-) -> Response:
-    """Start a mind's stopped host (``mngr start``)."""
-    return _dispatch_mind_host_action(agent_id=agent_id, action=_MindHostAction.START)
 
 
 def _running_mind_entries(backend_resolver: BackendResolverInterface) -> list[dict[str, str]]:
@@ -3814,7 +3513,6 @@ def create_desktop_client(
     app.add_url_rule("/create", view_func=_handle_create_page)
     app.add_url_rule("/create", view_func=_handle_create_form_submit, methods=["POST"])
     app.add_url_rule("/api/backup-status", view_func=_handle_backup_status_api)
-    app.add_url_rule("/api/create-agent", view_func=_handle_create_agent_api, methods=["POST"])
     app.add_url_rule("/api/create-agent/<agent_id>/onboarding", view_func=_handle_onboarding_submit, methods=["POST"])
     app.add_url_rule("/api/create-agent/<agent_id>/status", view_func=_handle_creation_status_api)
     app.add_url_rule("/api/create-agent/<agent_id>/logs", view_func=_handle_creation_logs_sse)
@@ -3842,9 +3540,10 @@ def create_desktop_client(
     )
     app.add_url_rule("/api/agents/<agent_id>/restart-host", view_func=_handle_restart_host_api, methods=["POST"])
 
-    # Mind host Start / Stop + the quit-prompt running-minds lookup and bulk stop
-    app.add_url_rule("/api/agents/<agent_id>/stop-host", view_func=_handle_stop_host_api, methods=["POST"])
-    app.add_url_rule("/api/agents/<agent_id>/start-host", view_func=_handle_start_host_api, methods=["POST"])
+    # Per-mind host Start / Stop are served by the versioned
+    # /api/v1/workspaces/<id>/start|stop routes now (both the browser landing
+    # controls and the Electron shell call those). The quit-prompt running-minds
+    # lookup and the bulk stop-hosts remain here (no v1 equivalent yet).
     app.add_url_rule("/api/minds/running", view_func=_handle_running_minds_api)
     app.add_url_rule("/api/minds/stop-hosts", view_func=_handle_stop_mind_hosts_api, methods=["POST"])
     app.add_url_rule("/api/minds/stop-state-container", view_func=_handle_stop_state_container_api, methods=["POST"])

@@ -39,6 +39,7 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroupError
+from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client import backup_status
 from imbue.minds.desktop_client import destroying
@@ -65,6 +66,8 @@ from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
 from imbue.minds.desktop_client.workspace_create import build_backup_request_or_error
 from imbue.minds.desktop_client.workspace_create import build_create_on_created_callback
 from imbue.minds.desktop_client.workspace_create import resolve_effective_region
+from imbue.minds.desktop_client.workspace_lifecycle import MindHostAction
+from imbue.minds.desktop_client.workspace_lifecycle import perform_mind_host_action
 from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupEncryptionMethod
@@ -96,6 +99,17 @@ def _json_response(data: dict[str, object], status_code: int = 200) -> Response:
 
 def _json_error(message: str, status_code: int) -> Response:
     return _json_response({"error": message}, status_code=status_code)
+
+
+def _handle_invalid_random_id(error: InvalidRandomIdError) -> Response:
+    """Map a malformed workspace/operation id in the URL path to a 400 instead of a 500.
+
+    Every ``/workspaces/<id>`` route constructs an ``AgentId``/``CreationId`` from
+    the raw path param up front; a malformed id raises ``InvalidRandomIdError``
+    (a ``ValueError``). Registered blueprint-wide so that surfaces as a clean 400
+    rather than an uncaught 500.
+    """
+    return _json_error(f"Invalid id: {error}", 400)
 
 
 def _is_cookie_authenticated() -> bool:
@@ -499,17 +513,20 @@ def _handle_workspace_lifecycle(agent_id: str, action: str) -> Response:
     if parsed_id not in backend_resolver.list_known_workspace_ids():
         return _json_error(f"Unknown workspace {agent_id}", 404)
 
-    mngr_binary = get_state().mngr_binary
-    if action == "start":
-        argv = [mngr_binary, "start", str(parsed_id), "--quiet"]
-    else:
-        argv = [mngr_binary, "stop", str(parsed_id), "--stop-host", "--quiet"]
-    try:
-        returncode, stderr = _run_mngr_blocking(argv, parent_cg)
-    except (OSError, ConcurrencyGroupError) as e:
-        return _json_error(f"Could not run mngr {action}: {e}", 502)
-    if returncode != 0:
-        return _json_error(f"mngr {action} failed: {stderr.strip()}", 502)
+    # Shared with the browser landing controls: resolves the workspace to its
+    # system-services agent, runs mngr stop --stop-host / start, and sets the
+    # optimistic host-state override on success.
+    host_action = MindHostAction.START if action == "start" else MindHostAction.STOP
+    succeeded = perform_mind_host_action(
+        parsed_id,
+        host_action,
+        backend_resolver,
+        get_state().mngr_binary,
+        get_state().mngr_host_dir,
+        parent_cg,
+    )
+    if not succeeded:
+        return _json_error(f"Could not {action} the workspace host", 502)
 
     info = backend_resolver.get_agent_display_info(parsed_id)
     host_state = None
@@ -753,6 +770,9 @@ def _handle_establish_ssh(agent_id: str) -> Response:
 def create_api_v1_blueprint() -> Blueprint:
     """Create the /api/v1/ blueprint with all REST API endpoints."""
     blueprint = Blueprint("api_v1", __name__, url_prefix="/api/v1")
+
+    # A malformed workspace/operation id in any route's path -> 400, not a 500.
+    blueprint.register_error_handler(InvalidRandomIdError, _handle_invalid_random_id)
 
     # Notifications (per-agent so the gateway's per-host permission file
     # can restrict each caller to its own agent ids).

@@ -530,20 +530,6 @@ def test_create_form_submit_returns_501_without_agent_creator(tmp_path: Path) ->
     assert response.status_code == 501
 
 
-def test_create_agent_api_returns_501_without_agent_creator(tmp_path: Path) -> None:
-    """POST /api/create-agent returns 501 when no agent_creator is configured."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
-    client, auth_store = _create_test_desktop_client(
-        tmp_path=tmp_path,
-        backend_resolver=backend_resolver,
-        http_client=None,
-    )
-    _authenticate_client(client=client, auth_store=auth_store)
-
-    response = client.post("/api/create-agent", json={"git_url": "file:///nonexistent-repo"})
-    assert response.status_code == 501
-
-
 def test_creating_page_returns_501_without_agent_creator(tmp_path: Path) -> None:
     """GET /creating/{id} returns 501 when no agent_creator is configured."""
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
@@ -568,8 +554,7 @@ def _create_test_server_with_agent_creator(
     The returned client is already authenticated with a global session.
 
     ``backend_resolver`` defaults to an empty ``StaticBackendResolver``; pass a
-    populated resolver to exercise paths that consult it (e.g. the
-    duplicate-agent-name guard in ``_handle_create_agent_api``).
+    populated resolver to exercise paths that consult it.
 
     The ``AgentCreator.root_concurrency_group`` is an ad-hoc group entered for
     the helper and left active for the caller's test duration. These tests only
@@ -632,119 +617,6 @@ def test_create_form_submit_passes_host_name(tmp_path: Path) -> None:
     agent_creator.wait_for_all()
 
 
-def test_create_agent_api_passes_host_name(tmp_path: Path) -> None:
-    """POST /api/create-agent passes host_name to the creator."""
-    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.post(
-        "/api/create-agent",
-        json={"git_url": "file:///nonexistent-repo", "host_name": "my-agent"},
-    )
-    assert response.status_code == 200
-    data = response.get_json()
-    assert "agent_id" in data
-    agent_creator.wait_for_all()
-
-
-def test_create_agent_api_rejects_duplicate_host_name(tmp_path: Path) -> None:
-    """POST /api/create-agent returns 409 when the requested name is already in use.
-
-    The guard walks ``backend_resolver.list_known_workspace_ids()`` and rejects
-    the create if any known workspace agent's ``workspace`` label matches the
-    requested name -- failing fast at the API boundary instead of deep in the
-    git-mirror push.
-    """
-    existing_id = AgentId()
-    resolver = make_resolver_with_data(
-        make_agents_json(existing_id, labels={"workspace": "existing-agent", "is_primary": "true"}),
-    )
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path, backend_resolver=resolver)
-
-    response = client.post(
-        "/api/create-agent",
-        json={"git_url": "file:///nonexistent-repo", "host_name": "existing-agent"},
-    )
-
-    assert response.status_code == 409
-    assert "existing-agent" in response.get_json()["error"]
-
-
-def test_create_agent_api_allows_unique_host_name_when_others_exist(tmp_path: Path) -> None:
-    """The duplicate-name guard must not false-positive on a distinct name."""
-    existing_id = AgentId()
-    resolver = make_resolver_with_data(
-        make_agents_json(existing_id, labels={"workspace": "existing-agent", "is_primary": "true"}),
-    )
-    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path, backend_resolver=resolver)
-
-    response = client.post(
-        "/api/create-agent",
-        json={"git_url": "file:///nonexistent-repo", "host_name": "a-different-name"},
-    )
-
-    assert response.status_code == 200
-    assert "agent_id" in response.get_json()
-    agent_creator.wait_for_all()
-
-
-def test_create_agent_api_returns_agent_id(tmp_path: Path) -> None:
-    """POST /api/create-agent returns JSON with agent_id and status."""
-    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.post("/api/create-agent", json={"git_url": "file:///nonexistent-repo"})
-    assert response.status_code == 200
-    data = response.get_json()
-    assert "agent_id" in data
-    assert data["status"] == "INITIALIZING"
-    agent_creator.wait_for_all()
-
-
-def test_create_agent_api_accepts_json_body_without_content_type_header(tmp_path: Path) -> None:
-    """A JSON body posted without an ``application/json`` Content-Type is still parsed.
-
-    The FastAPI version parsed the request body regardless of its Content-Type
-    (``await request.json()`` ignores the header). The Flask port preserves that
-    via ``get_json(force=True)``; without it, Flask returns None for a missing
-    header and the endpoint would 400 a valid JSON payload. Regression guard for
-    that parity fix.
-    """
-    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.post(
-        "/api/create-agent",
-        data=json.dumps({"git_url": "file:///nonexistent-repo"}),
-        headers={"content-type": "text/plain"},
-    )
-    assert response.status_code == 200
-    assert "agent_id" in response.get_json()
-    agent_creator.wait_for_all()
-
-
-def test_create_agent_api_rejects_empty_git_url(tmp_path: Path) -> None:
-    """POST /api/create-agent with empty git_url returns 400."""
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.post("/api/create-agent", json={"git_url": ""})
-    assert response.status_code == 400
-
-
-def test_create_agent_api_accepts_onboarding_fields(tmp_path: Path) -> None:
-    """POST /api/create-agent accepts the optional onboarding fields without breaking.
-
-    Only ``user_data_preference`` is sent (a local-only side effect) so the
-    background apply thread doesn't spin on ``mngr message`` / ``mngr exec``.
-    """
-    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.post(
-        "/api/create-agent",
-        json={"git_url": "file:///nonexistent-repo", "user_data_preference": "PRIVACY"},
-    )
-    assert response.status_code == 200
-    assert "agent_id" in response.get_json()
-    agent_creator.wait_for_all()
-
-
 def test_onboarding_submit_returns_404_for_unknown_creation(tmp_path: Path) -> None:
     """POST /api/create-agent/{id}/onboarding returns 404 for an untracked creation."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
@@ -760,8 +632,7 @@ def test_onboarding_submit_accepts_answers_for_tracked_creation(tmp_path: Path) 
     """POST /api/create-agent/{id}/onboarding accepts answers for a tracked creation."""
     client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
 
-    create_response = client.post("/api/create-agent", json={"git_url": "file:///nonexistent-repo"})
-    creation_id = create_response.get_json()["agent_id"]
+    creation_id = agent_creator.start_creation("file:///nonexistent-repo")
 
     # Only the data preference is submitted so the apply thread stays local.
     response = client.post(
@@ -801,32 +672,6 @@ def test_create_form_submit_rejects_invalid_host_name(tmp_path: Path) -> None:
     assert response.status_code == 400
     assert "alphanumeric" in response.text
     assert "bad.name" in response.text
-
-
-def test_create_agent_api_rejects_invalid_host_name(tmp_path: Path) -> None:
-    """POST /api/create-agent with a host_name that fails HostName validation returns 400."""
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.post(
-        "/api/create-agent",
-        json={"git_url": "file:///nonexistent-repo", "host_name": "bad.name"},
-    )
-    assert response.status_code == 400
-    body = response.get_json()
-    assert "alphanumeric" in body["error"]
-
-
-def test_create_agent_api_rejects_invalid_json(tmp_path: Path) -> None:
-    """POST /api/create-agent with invalid JSON returns 400."""
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.post(
-        "/api/create-agent",
-        data=b"not json",
-        headers={"content-type": "application/json"},
-    )
-    assert response.status_code == 400
-    assert "Invalid JSON" in response.text
 
 
 def test_creating_page_shows_status(tmp_path: Path) -> None:
@@ -930,19 +775,6 @@ def test_create_form_submit_rejects_unauthenticated(tmp_path: Path) -> None:
     )
 
     response = client.post("/create", data={"git_url": "file:///nonexistent-repo"})
-    assert response.status_code == 403
-
-
-def test_create_agent_api_rejects_unauthenticated(tmp_path: Path) -> None:
-    """POST /api/create-agent returns 403 without authentication."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
-    client, _ = _create_test_desktop_client(
-        tmp_path=tmp_path,
-        backend_resolver=backend_resolver,
-        http_client=None,
-    )
-
-    response = client.post("/api/create-agent", json={"git_url": "file:///nonexistent-repo"})
     assert response.status_code == 403
 
 
@@ -1101,40 +933,6 @@ def test_create_form_submit_passes_launch_mode(tmp_path: Path) -> None:
     agent_creator.wait_for_all()
 
 
-def test_create_agent_api_passes_launch_mode(tmp_path: Path) -> None:
-    """POST /api/create-agent passes launch_mode to the creator."""
-    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.post(
-        "/api/create-agent",
-        json={
-            "git_url": "file:///nonexistent-repo",
-            "host_name": "my-agent",
-            "launch_mode": "DOCKER",
-        },
-    )
-    assert response.status_code == 200
-    data = response.get_json()
-    assert "agent_id" in data
-    agent_creator.wait_for_all()
-
-
-def test_create_agent_api_rejects_invalid_launch_mode(tmp_path: Path) -> None:
-    """POST /api/create-agent returns 400 for an invalid launch_mode."""
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.post(
-        "/api/create-agent",
-        json={
-            "git_url": "file:///nonexistent-repo",
-            "host_name": "my-agent",
-            "launch_mode": "INVALID_MODE",
-        },
-    )
-    assert response.status_code == 400
-    assert "Invalid launch_mode" in response.get_json()["error"]
-
-
 def test_create_form_shows_launch_mode_dropdown(tmp_path: Path) -> None:
     """GET /create form includes the launch mode dropdown."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
@@ -1243,69 +1041,6 @@ def test_create_form_submit_accepts_subscription_with_no_account(tmp_path: Path)
     )
     assert response.status_code == 303
     agent_creator.wait_for_all()
-
-
-def test_create_agent_api_rejects_api_key_provider_without_key(tmp_path: Path) -> None:
-    """The JSON API also rejects AI provider API_KEY without a key."""
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.post(
-        "/api/create-agent",
-        json={
-            "git_url": "file:///nonexistent-repo",
-            "ai_provider": "API_KEY",
-            "anthropic_api_key": "",
-        },
-    )
-    assert response.status_code == 400
-    assert "anthropic_api_key is required" in response.get_json()["error"]
-
-
-def test_create_agent_api_rejects_invalid_ai_provider(tmp_path: Path) -> None:
-    """An unknown ai_provider is rejected by the JSON API."""
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.post(
-        "/api/create-agent",
-        json={
-            "git_url": "file:///nonexistent-repo",
-            "ai_provider": "BOGUS",
-        },
-    )
-    assert response.status_code == 400
-    assert "Invalid ai_provider" in response.get_json()["error"]
-
-
-def test_create_agent_api_rejects_imbue_cloud_compute_without_account(tmp_path: Path) -> None:
-    """API parity with the form path: IMBUE_CLOUD compute requires an account."""
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.post(
-        "/api/create-agent",
-        json={
-            "git_url": "file:///nonexistent-repo",
-            "launch_mode": "IMBUE_CLOUD",
-            "ai_provider": "SUBSCRIPTION",
-        },
-    )
-    assert response.status_code == 400
-    assert "account_id is required" in response.get_json()["error"]
-
-
-def test_create_agent_api_rejects_imbue_cloud_ai_without_account(tmp_path: Path) -> None:
-    """API parity with the form path: IMBUE_CLOUD AI provider requires an account."""
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.post(
-        "/api/create-agent",
-        json={
-            "git_url": "file:///nonexistent-repo",
-            "launch_mode": "DOCKER",
-            "ai_provider": "IMBUE_CLOUD",
-        },
-    )
-    assert response.status_code == 400
-    assert "account_id is required" in response.get_json()["error"]
 
 
 def test_create_form_submit_preserves_account_id_on_validation_error(tmp_path: Path) -> None:
