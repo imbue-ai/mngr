@@ -136,7 +136,7 @@ class ProviderCredentials(FrozenModel):
         description=(
             "Neon organization id under which per-dev-env Neon *projects* are created "
             "(one project per dev env named ``minds-<env>``). Operator-managed; lives in "
-            "``secrets/minds/dev/neon-admin.NEON_ORG_ID``. Required for the dev tier; "
+            "``secrets/minds/dev/neon-admin/NEON_ORG_ID``. Required for the dev tier; "
             "may be the empty string for shared tiers (which never call POST /projects)."
         ),
     )
@@ -152,7 +152,7 @@ class ProviderCredentials(FrozenModel):
         default=None,
         description=(
             "Existing Neon project id for shared tiers (``creates_resources=false``). "
-            "Read from ``secrets/minds/<tier>/neon-admin.NEON_PROJECT_ID``. Required for "
+            "Read from ``secrets/minds/<tier>/neon-admin/NEON_PROJECT_ID``. Required for "
             "shared-tier deploys so the pre-deploy snapshot + rollback restore can target "
             "the right project; ``None`` for dev (where the project is created per-env)."
         ),
@@ -677,7 +677,7 @@ def _deploy_env_locked(
             f"Tier {tier!r} has creates_resources=false but no NEON_PROJECT_ID in Vault. "
             f"Pre-deploy snapshot + recover-time DB restore both require it; refusing to "
             "ship a deploy that can't be rolled back. Populate "
-            f"secrets/minds/{tier}/neon-admin.NEON_PROJECT_ID with the project id from the "
+            f"secrets/minds/{tier}/neon-admin/NEON_PROJECT_ID with the project id from the "
             "Neon console and re-run."
         )
 

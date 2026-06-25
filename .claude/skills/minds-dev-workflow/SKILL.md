@@ -111,8 +111,8 @@ The port is randomly assigned by Docker per agent. The container name is `<MNGR_
 
 ```bash
 eval "$(uv run minds env activate dev-<your-user>)"   # so we know MNGR_PREFIX
-docker ps --format '{{.Names}} {{.Ports}}' | grep "${MNGR_PREFIX}mindtest"
-# e.g.  minds-dev-<your-user>-mindtest-host 0.0.0.0:32772->22/tcp
+docker ps --format '{{.Names}} {{.Ports}}' | grep "${MNGR_PREFIX}mind-"
+# e.g.  minds-dev-<your-user>-mind-1-host 0.0.0.0:32772->22/tcp
 ```
 
 The SSH key for a minds Docker agent lives under the activated env's `MNGR_HOST_DIR`:
@@ -159,7 +159,7 @@ Slice bakes (`minds pool create`, `just bake-slice-{dev,prod}`) read secrets fro
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `MINDS_WORKSPACE_GIT_URL` | Template repo path/URL for the create-form | `<repo>/.external_worktrees/forever-claude-template/` if it exists, else `~/project/forever-claude-template` |
-| `MINDS_WORKSPACE_NAME` | Default agent name in the create-form | `mindtest` (override with `agent_name=...`) |
+| `MINDS_WORKSPACE_NAME` | Pins the workspace name in the create-form (used verbatim; a collision errors at create time) | Unset unless you pass an `agent_name` (`just minds-start my-agent`); when unset the form generates a `mind-N` name |
 | `MINDS_WORKSPACE_BRANCH` | Default git branch for the template | The FCT path's current branch (matches your mngr branch when you set up the worktree on a parallel-named branch) |
 
 The desktop client reads these in `apps/minds/imbue/minds/desktop_client/templates.py`.
@@ -238,7 +238,8 @@ TEMPLATE_BRANCH=$(cd .external_worktrees/forever-claude-template && git branch -
   source .env
   set +a
   export MINDS_WORKSPACE_GIT_URL="$(pwd)/.external_worktrees/forever-claude-template"
-  export MINDS_WORKSPACE_NAME="mindtest"
+  # Optional: pin the workspace name (used verbatim). Omit to let the form pick a `mind-N` name.
+  # export MINDS_WORKSPACE_NAME="my-agent"
   export MINDS_WORKSPACE_BRANCH="$TEMPLATE_BRANCH"
   cd apps/minds && pnpm start
 )

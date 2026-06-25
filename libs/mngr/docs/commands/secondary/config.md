@@ -528,6 +528,53 @@ $ mngr config path
 $ mngr config path --scope user
 ```
 
+## mngr config wizard
+
+Interactively set up common user-scope configuration.
+
+Walks through common one-time configuration steps, writing to the
+user-scope config. Each step short-circuits when its setting is already
+configured, so re-running only prompts for what is still unset. Run
+automatically by the installer.
+
+Steps:
+  Claude config dir isolation  Whether each local Claude agent gets its own
+                               config dir (mngr leaves your default Claude
+                               config untouched) or shares your default config
+                               (needed for Claude subscriptions on macOS).
+
+**Usage:**
+
+```text
+mngr config wizard [OPTIONS]
+```
+**Options:**
+
+## Common
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--format` | text | Output format (human, json, jsonl, FORMAT): Output format for results. When a template is provided, fields use standard python templating like 'name: {agent.name}' See below for available fields. | `human` |
+| `-q`, `--quiet` | boolean | Suppress all console output | `False` |
+| `-v`, `--verbose` | integer range | Increase verbosity (default: BUILD); -v for DEBUG, -vv for TRACE | `0` |
+| `--log-file` | path | Path to log file (overrides default ~/.mngr/events/logs/<timestamp>-<pid>.json) | None |
+| `--log-commands`, `--no-log-commands` | boolean | Log commands that were executed | None |
+| `--headless` | boolean | Disable all interactive behavior (prompts, TUI, editor). Also settable via MNGR_HEADLESS env var or 'headless' config key. | `False` |
+| `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
+| `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
+| `--disable-plugin` | text | Disable a plugin [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
+| `-h`, `--help` | boolean | Show this message and exit. | `False` |
+
+
+## Examples
+
+**Run the configuration wizard**
+
+```bash
+$ mngr config wizard
+```
+
 ## See Also
 
 - [mngr create](../primary/create.md) - Create a new agent with configuration

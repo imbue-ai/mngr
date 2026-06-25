@@ -687,8 +687,14 @@ async def _create_workspace_and_first_message(
     """
     await win.goto(origin + "/create")
     await win.wait_for_selector("#create-form", timeout=10_000)
-    await win.click("#configure-toggle")
-    await win.wait_for_selector("#configure-panel:not(.hidden)", timeout=5_000)
+    # Signed out (no Imbue account): pick the "local" preset first so the AI /
+    # backup providers are the non-cloud set. Otherwise the form defaults to the
+    # Imbue Cloud providers, and submitting a cloud provider with no account
+    # opens the sign-in modal instead of creating. The explicit launch_mode /
+    # ai_provider selections below override the preset's compute / AI choices.
+    await win.click('[data-preset="local"]')
+    await win.click("#toggle-advanced")
+    await win.wait_for_selector("#advanced-view:not(.hidden)", timeout=5_000)
     await win.select_option("#launch_mode", value="LIMA")
     await win.select_option("#ai_provider", value=ai_provider)
     if ai_provider == "API_KEY":

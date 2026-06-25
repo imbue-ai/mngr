@@ -6,6 +6,30 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `HostRealizer` seam inside the VPS provider — a new `isolation` config knob (`IsolationMode.CONTAINER` | `NONE`) selects between the `DockerRealizer` (default; preserves all original Docker-container behavior exactly) and a new `BareRealizer` (places the agent directly on the VM's OS, reached at `vps_ip:22` as root, with no Docker). Bare placement is gated to providers with a machine stop/start lifecycle: a provider without one rejects `isolation=NONE` at create time (`BareIsolationNotSupportedError`). AWS, GCP, and Azure all enable it.
+- Added: SSH host keys are unique per host. Every VPS-backed host (AWS, GCP, Azure, OVH, Vultr, and imbue_cloud slices) gets its own freshly-generated VPS/VM-root and container sshd host keypair at create time, stored under `<key_dir>/host_keys/<host_id>/` (no longer one keypair shared across every host a provider instance created). `mngr create --format json` surfaces them via a new `get_ssh_host_public_keys` provider method, so pool-bake tooling can persist and pin them instead of scanning. Existing hosts created before this change fall back to the legacy provider-global host key.
+- Added: Uniform offline host/agent-state store abstraction (`HostStateStore`) for offline-capable providers, with an object-storage implementation (`BucketHostStateStore`) shared by AWS S3 and Azure Blob. The bucket is required infrastructure: a provider whose bucket has not been provisioned raises an actionable error pointing at its `prepare` command, on the create/label write path as well as on offline reads. Storage errors propagate rather than being swallowed; a malformed record raises rather than being silently dropped.
+- Added: Offline `host_dir` capability as a select-once `HostDirBackend` strategy — a cloud-agnostic, bucket-backed `BucketHostDirBackend` (operator-driven capture at `mngr stop` plus an offline-read volume) or a no-op `NullHostDirBackend` when the feature is off.
+
+### Changed
+
+- Changed: **Package renamed `mngr_vps_docker` -> `mngr_vps`** (distribution `imbue-mngr-vps-docker` -> `imbue-mngr-vps`). The shape-agnostic classes dropped "Docker" from their names: `VpsDockerProvider` -> `VpsProvider`, `VpsDockerProviderConfig` -> `VpsProviderConfig`, `MinimalVpsDockerProvider` -> `MinimalVpsProvider`, `OfflineCapableVpsDockerProvider` -> `OfflineCapableVpsProvider`, `VpsDockerHostRecord` -> `VpsHostRecord`, `VpsDockerHostStore` -> `VpsHostStore`, and the error base `VpsDockerError` -> `VpsError`. The genuinely Docker-specific `DockerRealizer` and the `container_setup` helpers keep their names.
+- Changed: The shared `OfflineCapableVpsProvider` now owns the cloud stop/start lifecycle (`stop_host` pauses the whole instance so a paused agent costs only disk; `start_host` resumes it). Providers supply only the cloud-API hooks (`_pause_cloud_instance` / `_resume_cloud_instance`).
+- Changed: Container hosts self-heal sshd. The agent container's PID-1 entrypoint now restarts sshd on every (re)start once mngr has provisioned a host key, so the container is reachable again after a VM reboot or `docker restart` without waiting for `mngr start`.
+- Changed: Registered the gVisor (runsc) runtime with `--overlay2=none` so a container's writable layer is written through to the persistent overlay2 layer and survives a `docker stop`/`start` or host reboot. Previously runsc used its default per-sandbox overlay, which was recreated on every start, silently losing the injected sshd host key, the `/mngr` host_dir symlink, and provisioning markers — leaving the container unreachable until mngr re-provisioned it.
+
+### Fixed
+
+- Fixed: Host lock reporting for VPS/docker/bare hosts now derives status from a real flock held-probe rather than the lock file's presence (the lock file now persists after release; the previous mtime-based check would have reported every previously-locked host as permanently locked).
+- Fixed: `mngr destroy` of a stopped (deallocated / powered-off) host no longer leaves the underlying cloud instance and its mirrored state behind. The offline destroy path dispatches up front on the instance's own power state and terminates a stopped instance via the same cloud `destroy_instance` primitive the online path uses — failing loudly with a `CleanupFailedGroup` if termination could not complete.
+- Fixed: A running bare (`isolation=NONE`) host is now discoverable and reachable with the default provider config — operations no longer need `-S providers.<cloud>.isolation=NONE` at connect time. A `mngr-isolation` instance marker (tag / metadata) stamped at create lets discovery resolve placement from the cloud API.
+- Fixed: `start_host` resume now waits for the VM to actually serve mngr's expected sshd host key (mirroring create's host-key wait), not just any sshd handshake. Specifically fixes GCP bare resume failing with "Unable to connect to port 22" due to GCE's startup-script re-running and `systemctl restart ssh`ing mid-boot.
+- Fixed: `mngr snapshot delete` on a VPS now actually takes effect — `delete_snapshot` removes the snapshot from the host record (raising `SnapshotNotFoundError` for an unknown id) in addition to removing the docker image. Previously the docker image was removed but `mngr snapshot list` kept showing the deleted snapshot.
+- Fixed: `mngr stop` on a bare host no longer hangs for minutes capturing `host_dir`. A bare `host_dir` holds the agent's full working tree (thousands of small files); per-file uploads now run concurrently across a bounded worker pool, turning a minutes-long stop into seconds.
+- Fixed: Hardened the post-finalize idle-watcher install — a missing host record at `_on_host_finalized` (which runs only after the record has been made durable) now fails `create_host` (raising `HostCreationError`, whose cleanup tears the VPS back down) instead of logging a WARNING and silently shipping a host that can never auto-stop on idle.
+
 ## [v0.1.10] - 2026-06-18
 
 ### Added

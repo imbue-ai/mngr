@@ -1,6 +1,7 @@
 import subprocess
 from datetime import datetime
 from datetime import timezone
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -8,6 +9,7 @@ from click.testing import CliRunner
 from imbue.mngr_imbue_cloud.cli.server import _box_ssh_host_key_options
 from imbue.mngr_imbue_cloud.cli.server import _format_capacity_table
 from imbue.mngr_imbue_cloud.cli.server import _kill_bake_worker_processes
+from imbue.mngr_imbue_cloud.cli.server import _resolve_vendored_mngr_source
 from imbue.mngr_imbue_cloud.cli.server import build_registered_server
 from imbue.mngr_imbue_cloud.cli.server import compute_server_slice_sizing
 from imbue.mngr_imbue_cloud.cli.server import server
@@ -134,3 +136,30 @@ def test_kill_bake_worker_processes_terminates_a_child() -> None:
         if child.poll() is None:
             child.kill()
             child.wait(timeout=5)
+
+
+def test_from_tag_bake_keeps_the_tags_vendored_mngr() -> None:
+    """A --from-tag bake (no explicit --mngr-source) must NOT vendor the local checkout.
+
+    Regression test: --from-tag means byte-for-byte tag content, including the mngr
+    vendored at the tag. Returning the local repo_root here would silently bake the
+    operator's working-tree mngr over the tag's, producing a same-version content
+    skew (the bug that broke chat-agent creation on a minds-vX slice).
+    """
+    resolved = _resolve_vendored_mngr_source(mngr_source=None, repo_root=Path("/monorepo"), is_from_tag=True)
+    assert resolved is None
+
+
+def test_workspace_dir_bake_vendors_the_local_checkout() -> None:
+    """A --workspace-dir (dev) bake with no explicit --mngr-source vendors repo_root."""
+    resolved = _resolve_vendored_mngr_source(mngr_source=None, repo_root=Path("/monorepo"), is_from_tag=False)
+    assert resolved == Path("/monorepo")
+
+
+def test_explicit_mngr_source_always_wins() -> None:
+    """An explicit --mngr-source overrides the vendored mngr for either bake source."""
+    for is_from_tag in (True, False):
+        resolved = _resolve_vendored_mngr_source(
+            mngr_source="/some/other/mngr", repo_root=Path("/monorepo"), is_from_tag=is_from_tag
+        )
+        assert resolved == Path("/some/other/mngr")
