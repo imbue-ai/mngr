@@ -7,6 +7,8 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
+from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.primitives import CreationId
 from imbue.mngr.primitives import AgentId
 
@@ -53,6 +55,29 @@ def test_list_workspaces_requires_bearer(tmp_path: Path) -> None:
     response = client.get("/api/v1/workspaces")
 
     assert response.status_code == 401
+
+
+def test_list_workspaces_accepts_session_cookie(tmp_path: Path) -> None:
+    # The desktop UI calls the cross-workspace routes with its session cookie
+    # (not the bearer), so dual auth must accept a valid signed session cookie.
+    agent_id = AgentId()
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    resolver = StaticBackendResolver(url_by_agent_and_service={str(agent_id): {}})
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=resolver,
+        http_client=None,
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        minds_api_key=_TEST_KEY,
+    )
+    client = app.test_client()
+    client.set_cookie(SESSION_COOKIE_NAME, create_session_cookie(auth_store.get_signing_key()))
+
+    # No bearer header -- only the session cookie.
+    response = client.get("/api/v1/workspaces")
+
+    assert response.status_code == 200
+    assert str(agent_id) in [w["agent_id"] for w in json.loads(response.data)["workspaces"]]
 
 
 def test_get_workspace_returns_detail(tmp_path: Path) -> None:

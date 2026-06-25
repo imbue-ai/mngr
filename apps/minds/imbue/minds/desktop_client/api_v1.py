@@ -17,12 +17,16 @@ on the caller's host".
 """
 
 import json
+import os
 import queue
 import shlex
 import time
+from collections.abc import Callable
 from collections.abc import Iterator
 from datetime import datetime
 from datetime import timezone
+from functools import wraps
+from typing import ParamSpec
 
 from flask import Blueprint
 from flask import Response
@@ -39,15 +43,19 @@ from imbue.minds.desktop_client import workspace_version
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
+from imbue.minds.desktop_client.api_key_auth import is_request_authenticated
 from imbue.minds.desktop_client.api_key_auth import require_minds_api_key
 from imbue.minds.desktop_client.backup_export import BackupExportError
 from imbue.minds.desktop_client.backup_export import export_snapshot_zip
+from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
+from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
 from imbue.minds.desktop_client.responses import make_file_response
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.responses import make_streaming_response
+from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
 from imbue.minds.errors import BackupProvisioningError
@@ -56,6 +64,8 @@ from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+
+_ViewParams = ParamSpec("_ViewParams")
 
 # A blocking lifecycle (start/stop) call shells out to ``mngr`` and waits for
 # the host transition to resolve before returning the final state.
@@ -77,6 +87,43 @@ def _json_response(data: dict[str, object], status_code: int = 200) -> Response:
 
 def _json_error(message: str, status_code: int) -> Response:
     return _json_response({"error": message}, status_code=status_code)
+
+
+def _is_cookie_authenticated() -> bool:
+    """Whether the request carries a valid desktop-client session cookie.
+
+    Mirrors the bare-origin app's own session check (same signing key + cookie
+    name) so the browser UI can call these routes with its session cookie.
+    """
+    if os.getenv("SKIP_AUTH", "0") == "1":
+        return True
+    cookie_value = request.cookies.get(SESSION_COOKIE_NAME)
+    if cookie_value is None:
+        return False
+    return verify_session_cookie(cookie_value=cookie_value, signing_key=get_state().auth_store.get_signing_key())
+
+
+def _is_bearer_authenticated() -> bool:
+    """Whether the request carries the central minds API bearer key."""
+    expected_key = get_state().minds_api_key
+    return expected_key is not None and is_request_authenticated(request.headers.get("authorization"), expected_key)
+
+
+def require_api_or_cookie_auth(view: Callable[_ViewParams, Response]) -> Callable[_ViewParams, Response]:
+    """Allow either the central bearer key (agents, via the gateway) or the session cookie (the UI).
+
+    The cross-workspace routes are reached both by in-workspace agents (which
+    present the gateway-injected bearer) and by the desktop UI itself (which
+    presents the session cookie), so they accept either credential.
+    """
+
+    @wraps(view)
+    def wrapper(*args: _ViewParams.args, **kwargs: _ViewParams.kwargs) -> Response:
+        if _is_bearer_authenticated() or _is_cookie_authenticated():
+            return view(*args, **kwargs)
+        return _json_error("Not authenticated", 401)
+
+    return wrapper
 
 
 # -- Notification route --
@@ -162,7 +209,7 @@ def _serialize_workspace(agent_id: AgentId) -> dict[str, object]:
     }
 
 
-@require_minds_api_key
+@require_api_or_cookie_auth
 def _handle_list_workspaces() -> Response:
     """List all workspaces, including destroyed-but-still-backed-up ones."""
     backend_resolver = get_state().backend_resolver
@@ -170,7 +217,7 @@ def _handle_list_workspaces() -> Response:
     return _json_response({"workspaces": workspaces})
 
 
-@require_minds_api_key
+@require_api_or_cookie_auth
 def _handle_get_workspace(agent_id: str) -> Response:
     """Return the detail summary for one workspace."""
     parsed_id = AgentId(agent_id)
@@ -180,7 +227,7 @@ def _handle_get_workspace(agent_id: str) -> Response:
     return _json_response(_serialize_workspace(parsed_id))
 
 
-@require_minds_api_key
+@require_api_or_cookie_auth
 def _handle_workspace_version(agent_id: str) -> Response:
     """Return version info: the immutable created-at version plus, when online, git-derived current + history.
 
@@ -221,7 +268,7 @@ def _handle_workspace_version(agent_id: str) -> Response:
     )
 
 
-@require_minds_api_key
+@require_api_or_cookie_auth
 def _handle_workspace_backups(agent_id: str) -> Response:
     """List a workspace's restic backup snapshots (works even when it is offline/destroyed)."""
     parsed_id = AgentId(agent_id)
@@ -253,7 +300,7 @@ def _handle_workspace_backups(agent_id: str) -> Response:
     )
 
 
-@require_minds_api_key
+@require_api_or_cookie_auth
 def _handle_workspace_backup_export(agent_id: str, snapshot_id: str) -> Response:
     """Restore the named snapshot and stream it back as a zip."""
     parsed_id = AgentId(agent_id)
@@ -285,19 +332,22 @@ def _handle_workspace_backup_export(agent_id: str, snapshot_id: str) -> Response
 # -- Cross-workspace mutation routes (create / destroy / lifecycle) --
 
 
-@require_minds_api_key
+@require_api_or_cookie_auth
 def _handle_create_workspace() -> Response:
     """Create a new peer workspace; return an operation handle to poll.
 
     Accepts a JSON body with ``git_url`` (required) and optional ``host_name``,
-    ``branch``, ``launch_mode`` (default ``DOCKER``), and ``ai_provider``
-    (default ``SUBSCRIPTION``). Returns ``202`` with an ``operation_id`` the
+    ``branch``, ``launch_mode`` (default ``DOCKER``), ``ai_provider`` (default
+    ``SUBSCRIPTION``), ``account_id`` (selects the imbue_cloud account for
+    compute/AI -- required when ``launch_mode`` or ``ai_provider`` is
+    ``IMBUE_CLOUD``), ``anthropic_api_key`` (required when ``ai_provider`` is
+    ``API_KEY``), and ``region``. Returns ``202`` with an ``operation_id`` the
     caller polls at ``/api/v1/workspaces/operations/<operation_id>``; the
     canonical workspace id appears there once ``mngr create`` returns.
 
-    This covers the common "spawn a peer" case. Account/billing binding,
-    backup provisioning, and Cloudflare tunnel injection are not wired through
-    this lean path yet -- those still go through the desktop UI's create flow.
+    Backup provisioning and Cloudflare tunnel injection are not wired through
+    this path yet (they depend on the desktop UI's create orchestration); a
+    peer created here has neither until configured through the UI.
     """
     agent_creator: AgentCreator | None = get_state().agent_creator
     if agent_creator is None:
@@ -319,6 +369,26 @@ def _handle_create_workspace() -> Response:
         ai_provider = AIProvider(str(body.get("ai_provider", AIProvider.SUBSCRIPTION.value)))
     except ValueError:
         return _json_error(f"Invalid ai_provider: {body.get('ai_provider')!r}", 400)
+    account_id = str(body.get("account_id", "")).strip()
+    anthropic_api_key = str(body.get("anthropic_api_key", "")).strip()
+    region = str(body.get("region", "")).strip()
+
+    # Mirror the UI's create-form validation so misconfiguration fails fast here
+    # rather than deep in the background creation thread.
+    is_imbue_cloud = launch_mode is LaunchMode.IMBUE_CLOUD or ai_provider is AIProvider.IMBUE_CLOUD
+    if is_imbue_cloud and not account_id:
+        return _json_error("account_id is required when launch_mode or ai_provider is IMBUE_CLOUD", 400)
+    if ai_provider is AIProvider.API_KEY and not anthropic_api_key:
+        return _json_error("anthropic_api_key is required when ai_provider is API_KEY", 400)
+
+    # Resolve the imbue_cloud account email (the session store maps account_id
+    # -> email) so the background creation can mint a LiteLLM key / lease a pool
+    # host against the right account.
+    account_email = ""
+    if account_id:
+        session_store: MultiAccountSessionStore | None = get_state().session_store
+        if session_store is not None:
+            account_email = session_store.get_account_email(account_id) or ""
 
     creation_id = agent_creator.start_creation(
         git_url,
@@ -326,12 +396,15 @@ def _handle_create_workspace() -> Response:
         branch=branch,
         launch_mode=launch_mode,
         ai_provider=ai_provider,
+        account_email=account_email,
+        region=region,
+        anthropic_api_key=anthropic_api_key,
         original_minds_version=(branch or FALLBACK_BRANCH),
     )
     return _json_response({"operation_id": str(creation_id), "kind": "create"}, status_code=202)
 
 
-@require_minds_api_key
+@require_api_or_cookie_auth
 def _handle_destroy_workspace(agent_id: str) -> Response:
     """Destroy a workspace's host; return an operation handle to poll.
 
@@ -364,7 +437,7 @@ def _run_mngr_blocking(argv: list[str], parent_cg: ConcurrencyGroup) -> tuple[in
     return returncode, finished.stderr
 
 
-@require_minds_api_key
+@require_api_or_cookie_auth
 def _handle_workspace_lifecycle(agent_id: str, action: str) -> Response:
     """Start or stop a workspace's host, blocking until the transition resolves."""
     parsed_id = AgentId(agent_id)
@@ -403,7 +476,7 @@ def _handle_workspace_lifecycle(agent_id: str, action: str) -> Response:
     )
 
 
-@require_minds_api_key
+@require_api_or_cookie_auth
 def _handle_operation_status(operation_id: str) -> Response:
     """Report the status of a create or destroy operation, keyed by its id.
 
@@ -514,7 +587,7 @@ def _stream_destroy_operation_logs(agent_id: AgentId, paths: WorkspacePaths) -> 
         time.sleep(_DESTROY_LOG_POLL_SECONDS)
 
 
-@require_minds_api_key
+@require_api_or_cookie_auth
 def _handle_operation_logs(operation_id: str) -> Response:
     """Stream a create or destroy operation's logs as server-sent events.
 
@@ -546,7 +619,7 @@ def _handle_operation_logs(operation_id: str) -> Response:
 # -- SSH access route --
 
 
-@require_minds_api_key
+@require_api_or_cookie_auth
 def _handle_establish_ssh(agent_id: str) -> Response:
     """Authorize temporary SSH access into a workspace and return its connection info.
 
