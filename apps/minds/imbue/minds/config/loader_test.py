@@ -4,7 +4,6 @@ import pytest
 from pydantic import AnyUrl
 
 from imbue.minds.config.data_types import ClientEnvConfig
-from imbue.minds.config.data_types import DeployEnvConfig
 from imbue.minds.config.loader import EnvConfigError
 from imbue.minds.config.loader import bundled_client_config_path_or_none
 from imbue.minds.config.loader import load_client_config
@@ -55,22 +54,24 @@ def test_load_client_config_malformed_toml(tmp_path: Path) -> None:
         load_client_config(path)
 
 
-def test_load_deploy_config_dev_tier_round_trip() -> None:
-    """The committed dev/deploy.toml parses cleanly."""
-    config = load_deploy_config("dev")
-    assert isinstance(config, DeployEnvConfig)
-    assert config.vault_path_prefix == "secrets/minds/dev"
-    assert "cloudflare" in config.secrets.services
-    assert "supertokens" in config.secrets.services
+@pytest.mark.parametrize(
+    "tier,expected_vault_prefix",
+    [
+        ("dev", "secrets/minds/dev"),
+        ("ci", "secrets/minds/ci"),
+        ("staging", "secrets/minds/staging"),
+        ("production", "secrets/minds/production"),
+    ],
+)
+def test_load_deploy_config_round_trip_pins_vault_prefix(tier: str, expected_vault_prefix: str) -> None:
+    """Each committed deploy.toml parses cleanly and carries its tier's vault path prefix.
 
-
-def test_load_deploy_config_ci_tier_round_trip() -> None:
-    """The committed ci/deploy.toml parses cleanly."""
-    config = load_deploy_config("ci")
-    assert isinstance(config, DeployEnvConfig)
-    assert config.vault_path_prefix == "secrets/minds/ci"
-    assert "cloudflare" in config.secrets.services
-    assert "supertokens" in config.secrets.services
+    The ``[secrets].services`` content is pinned exactly (for all tiers) by
+    ``test_deploy_config_secrets_match_canonical_per_env_services`` below, so this
+    only asserts the per-tier fact that test does not cover.
+    """
+    config = load_deploy_config(tier)
+    assert config.vault_path_prefix == expected_vault_prefix
 
 
 @pytest.mark.parametrize("tier", ["dev", "staging", "production", "ci"])
@@ -113,11 +114,13 @@ def test_repo_tier_client_config_path_resolves_under_envs_dir() -> None:
     assert path.parent.parent.name == "envs"
 
 
-def test_bundled_client_config_path_or_none_default_is_none() -> None:
-    """The committed repo has no `_bundled/client.toml` -- it ships empty.
+def test_bundled_client_config_path_or_none_returns_none_when_absent(tmp_path: Path) -> None:
+    """An empty bundle dir (the uninstalled-dev-tree case) yields None."""
+    assert bundled_client_config_path_or_none(tmp_path) is None
 
-    Build-time `bundleClientConfig()` writes the file when
-    `MINDS_CLIENT_CONFIG_BUNDLE` is set; an uninstalled dev tree has
-    nothing there.
-    """
-    assert bundled_client_config_path_or_none() is None
+
+def test_bundled_client_config_path_or_none_returns_path_when_present(tmp_path: Path) -> None:
+    """When build-time bundling has written `client.toml`, the path to it is returned."""
+    bundled = tmp_path / "client.toml"
+    bundled.write_text(_VALID_CLIENT_TOML)
+    assert bundled_client_config_path_or_none(tmp_path) == bundled
