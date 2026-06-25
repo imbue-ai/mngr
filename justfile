@@ -248,6 +248,22 @@ minds-test-deployment-only *tests:
 minds-test-electron *args: minds-css
   xvfb-run -a uv run pytest apps/minds/test_desktop_client_e2e.py::test_create_local_docker_workspace_via_electron -v --no-cov --cov-fail-under=0 {{args}}
 
+# Drive the FULL Electron workspace lifecycle end-to-end (create local Docker
+# workspace -> send a chat message + await reply -> open a terminal -> navigate
+# home -> destroy via the v1 settings flow), wrapped in `xvfb-run` for headless
+# Linux. Unlike `minds-test-electron` (create-only pytest acceptance test), this
+# is an operator/debug harness: it needs Docker + live AI creds, so activate an
+# env with a logged-in account first, e.g.
+#   eval "$(uv run minds env activate dev-josh-1)"
+# It also needs the FCT external worktree's vendor/mngr synced to this checkout
+# (otherwise the initial chat agent fails to create on settings the vendored mngr
+# doesn't recognize, and the chat step hangs on "Waiting for initial chat
+# agent..."); run `just sync-vendor-mngr .external_worktrees/forever-claude-template`
+# first (the minds-dev-workflow does this on every startup).
+# Screenshots of each step land in /tmp/minds-electron-flow/.
+minds-test-electron-flow *args: minds-css
+  xvfb-run -a uv run --package minds python apps/minds/scripts/electron_full_flow_e2e.py {{args}}
+
 # Compile the minds desktop client's Tailwind v4 stylesheet
 # (static/app.css -> static/app.min.css, minified + tree-shaken) via the
 # pinned @tailwindcss/cli. `just minds-start` rebuilds + watches it live (its
@@ -284,6 +300,9 @@ sync-vendor-mngr fct="":
         echo "Error: $fct/vendor/mngr not found"
         exit 1
     fi
+    # Resolve to an absolute path: the recipe `cd`s into $fct/vendor/mngr and
+    # later back to $fct, so a relative arg would break the second cd.
+    fct="$(cd "$fct" && pwd)"
     if [ -n "$(git -C "$fct" status --porcelain)" ]; then
         echo "Error: $fct has uncommitted changes; resolve them first:"
         git -C "$fct" status --short
