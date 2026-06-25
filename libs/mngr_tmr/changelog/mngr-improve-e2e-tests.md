@@ -8,4 +8,4 @@ Reworked the TMR agent prompts so generated e2e tests converge to a stable size 
 
 - The integrator outcome schema and the HTML report now carry `normalizations` (suite-wide cleanups applied) and `escalations` (blockers surfaced to the user), so unresolved cross-cutting issues are visible in the report rather than silently dropped.
 
-- The reducer prompt now explains how to verify changes on offload (`just test-offload-release`, narrowing the config `filters` to the affected tests and restoring them), including that `ANTHROPIC_API_KEY` must be passed scoped to the offload command rather than exported into the agent's own environment (where it would break the agent's Claude auth). Verified end to end: a reducer ran the affected tests on offload and integrated the mappers' assertion trims.
+- The reducer prompt now tells the integrator to verify changes by running the affected e2e tests directly with pytest (scoped to the blast radius they touched) in its own work_dir before publishing. Verified end to end on a trial run: a reducer integrated two mappers' assertion trims and re-ran the affected help tests to confirm them.

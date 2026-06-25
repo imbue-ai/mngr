@@ -96,49 +96,24 @@ only point in the pipeline where cross-test relationships are visible, so do the
 two things no single test agent could. Keep each normalization change as its own
 commit prefixed `[NORMALIZE]`.
 
-## How to run tests for verification (offload)
+## How to run tests for verification
 
-Verifying changes here means running e2e tests, and the e2e tests run on offload
--- it fans them out across Modal sandboxes. Run them from the git repo root:
-
-```bash
-just test-offload-release
-```
-
-This recipe needs `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`, provided to you as
-agent environment variables (check with `printenv MODAL_TOKEN_ID`). If they are
-absent you cannot verify on offload -- mark the change unverified or escalate it.
-
-The recipe also requires `ANTHROPIC_API_KEY` to be set, but do NOT export that into
-your own environment: a wrong value there breaks your own Claude auth. Pass it
-scoped to the command instead. For tests that do not create real agents (help/flag
-and most non-agent tests) any non-empty value works:
+Verify a change by running the affected e2e tests directly with pytest in your
+work_dir. Scope to the blast radius -- just the handful of tests a change actually
+touched -- not the whole suite. Run them the same way the test agents did: their
+node ids, with the same `-m` marker. For example:
 
 ```bash
-ANTHROPIC_API_KEY=unused just test-offload-release
+uv run pytest <affected_test_node_id> [<more_node_ids>...] -m release
 ```
 
-For tests that DO create real agents (e.g. claude/codex agent creation), the
-sandboxes need a real key; if you do not have one, escalate that verification
-rather than running with a fake key.
-
-Run only the blast radius -- the handful of tests a change actually touched -- not
-the whole release suite. Test selection lives in the offload config, so narrow it
-and restore it afterwards:
-
-1. In `offload-modal-release.toml`, the `[groups.all]` `filters` value is a pytest
-   `-m '...'` marker expression. Append a `-k` selector for the affected tests:
-
-       filters = "-m 'release and not docker and not docker_sdk and ...' -k 'test_foo or test_bar'"
-
-2. Run `just test-offload-release`. Success prints `All tests passed!`; the junit
-   report and logs land under `test-results/`.
-3. Restore the original `filters` line (e.g. `git checkout offload-modal-release.toml`)
-   so the narrowed filter is never committed.
+Exit code 0 with no failures confirms the change. Otherwise read the output to see
+what broke. If you cannot run a given test in this environment, mark the affected
+change as unverified or escalate it rather than guessing.
 
 Whenever you have applied ANY change to the tree (an integrated cherry-pick, an
-extraction, or a FIXME resolution), verify the affected tests on offload before
-publishing. If verification fails, back the change out or record it as unverified.
+extraction, or a FIXME resolution), verify the affected tests before publishing. If
+verification fails, back the change out or record it as unverified.
 
 ## Extract shared scaffolding -- but preserve the tutorial 1:1
 
