@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed: Modal now raises the contract `ProviderUnavailableError` (it previously raised a plain `MngrError`) on unresolvable credentials, with curated help pointing at `uvx modal token set`.
+
 ## [v0.2.17] - 2026-06-18
 
 ## [v0.2.16] - 2026-06-16

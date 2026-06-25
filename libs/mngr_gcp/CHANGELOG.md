@@ -6,6 +6,24 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Bare placement support (`[providers.gcp].isolation = "NONE"`) — the idle agent runs `shutdown -P now` as the VM's root, which on GCE stops the instance. Added bare-placement release tests.
+- Added: GCP hosts inherit the shared VPS host-setup fix that registers the gVisor (runsc) runtime with `--overlay2=none`, so an agent container's writable layer persists across a `docker stop`/`start` or host reboot instead of being lost to the default per-sandbox overlay.
+
+### Changed
+
+- Changed: Moved mngr host identity (host id and created-at) out of GCE *labels* and into instance *metadata*, joining the host name and per-agent records already kept there. Only `mngr-provider` remains a label (the server-side `instances.list` discovery filter). Host id is now stored verbatim and created-at as an ISO-8601 timestamp (no more GCE-charset lowercasing / `%Y-%m-%dt%H-%M-%S` encoding). **Backward-incompatibility:** a GCE instance created before this change carries its host id / created-at only in labels, so an *already-running* pre-upgrade host will no longer resolve by id for offline discovery / `mngr start` and its reconstructed created-at falls back to now() — destroy and recreate such hosts (online hosts reachable over SSH are unaffected).
+- Changed: `stop_host` / `start_host` moved to the shared `OfflineCapableVpsProvider`; GCP now supplies only the GCE `_pause_cloud_instance` / `_resume_cloud_instance` hooks. The idle-watcher install and the best-effort `_on_host_finalized` step runner moved to the shared base; the host-side idle-watcher systemd unit name changed from `mngr-gcp-idle-watcher` to the shared `mngr-idle-watcher`. Behavior-preserving.
+- Changed: `mngr gcp prepare` / `cleanup` now resolve their `[providers.<name>]` block and refuse-on-existing-instances via the shared `mngr_vps.cli_helpers`. `GcpProviderConfig` lifts `allowed_ssh_cidrs` into a shared config base. The cleanup refusal when instances still exist now raises the unified `ManagedResourcesExistError` (previously `GcpError`) so the message matches the other clouds. `allowed_ssh_cidrs` is now typed `ScalarStrTuple`, so a higher-precedence config layer that sets it replaces the whole list rather than being flagged as narrowing.
+- Changed: The GCP provider's `project_id` config field now defaults to `None` instead of `""`, making "unset" explicit and matching the other optional identifier fields. Resolution behavior is unchanged.
+
+### Fixed
+
+- Fixed: A running bare (`isolation=NONE`) host is now discoverable and reachable with the default provider config — `mngr conn`/`list`/`stop`/`start`/`destroy` no longer need `-S providers.<name>.isolation=NONE` at connect time. GCE instances now carry a `mngr-isolation` value in instance metadata (where GCP keeps mngr identity; GCE labels are too restricted), stamped at create.
+- Fixed: Renaming a host now re-stamps the `mngr-host-name` instance metadata (the cheap identity tag offline discovery reads), not just the host record. Previously this metadata was written only at create, so a renamed-then-stopped host still listed under its old name in offline discovery.
+- Fixed: `start_host` for a bare host. It read the host record via the Docker volume, which a bare host does not have, so it now resolves the store through the realizer.
+
 ## [v0.1.2] - 2026-06-18
 
 ### Added

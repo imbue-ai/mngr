@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: Bumped the latchkey CLI to 2.17.1. The pinned version installed on remote VPS environments (the secondary gateway used by agents when the user's computer is down) is now 2.17.1; the minimum CLI version the wrapper will operate against is also 2.17.1, so initializing the gateway rejects any older installed CLI.
+
 ## [v0.1.6] - 2026-06-18
 
 ### Added

@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Optional `pass_fds` parameter on `ConcurrencyGroup.run_process_in_background`, `run_background`, and `run_local_command_modern_version` that forwards to `subprocess.Popen(pass_fds=...)`, keeping the given file descriptors open in (and inheritable by) the spawned child. Lets callers hand an already-connected `socketpair` endpoint to a child process without a rendezvous file on disk. Defaults to empty, so existing behavior is unchanged.
+
 ## [v0.1.20] - 2026-06-13
 
 ### Changed

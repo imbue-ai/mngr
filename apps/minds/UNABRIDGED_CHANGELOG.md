@@ -4,6 +4,68 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-21
+
+- The Electron e2e workspace runner (`create_workspace_via_electron`) now accepts
+  `launch_mode`, `region`, and `account_label`, so it can drive workspace creation
+  in compute modes other than local Docker (e.g. Lima, AWS). Used to live-test the
+  container/VM restart-recovery behavior.
+
+Multiple developer environments can now safely share a single bare-metal slice box.
+
+`minds pool create --backend slice` now stamps the activated environment into each slice's lima names (forwarded as `--slice-env-name`), so a shared box can attribute every slice to an env and reconciliation only ever touches the right env's slices.
+
+`minds env destroy` now tears down the env's unleased pool slices on their bare-metal boxes before deleting the per-env database, so a destroyed env no longer leaks its baked pool VMs on shared boxes. Leased slices continue to be torn down via their agent's release path.
+
+## 2026-06-20
+
+Deprecated baking new OVH classic VPS pool hosts. Imbue Cloud pool hosts are now baked exclusively as bare-metal slices.
+
+`minds pool create` now defaults to `--backend slice`; `--backend ovh_vps` fails fast (before any Vault / credential resolution) with a deprecation error pointing at `--backend slice`. Existing OVH VPS pool hosts keep working and can still be listed (`minds pool list`) and destroyed (`minds pool destroy`, `minds env destroy`).
+
+The host-pool docs (`host-pool-setup.md` and related) were rewritten around the bare-metal slice workflow; OVH is now described only as the current internal supplier of bare-metal boxes and in a "Legacy OVH VPS teardown" section. The per-tier OVH credentials are reframed as bare-metal box supplier credentials (still required, since they order the slice boxes and tear down legacy VPS hosts).
+
+## 2026-06-19
+
+Fix creating a mind from a remote git URL (e.g. a GitHub HTTPS URL) when no branch is specified.
+
+Cloning a remote repo without an explicit branch left the local clone on a detached HEAD (the no-branch path checked out `FETCH_HEAD` detached, and -- unlike the branch-given path -- nothing renamed it to a real local branch afterward). That left `refs/heads/*` empty, so the downstream `mngr create` mirror push, which only pushes `refs/heads/*` + `refs/tags/*`, failed with `No refs in common and none specified; doing nothing` / `the remote end hung up unexpectedly`.
+
+The no-branch clone now uses a plain `git clone`, which resolves the remote's default branch natively and leaves a real named local branch checked out (whatever the remote's default is -- `main`, `master`, etc.). The explicit-branch path is unchanged (it still uses `git fetch` so that a branch, tag, or commit SHA all work).
+
+Workspace recovery now understands remote (Imbue Cloud) minds, not just local docker/lima ones. When the recovery probe finds that the workspace's provider is unreachable -- your network is down, Imbue Cloud is having an outage, or (locally) the docker daemon is stopped -- it shows a dedicated "Can't connect to ..." page with a Retry button and no restart option, because a restart routes through that same unreachable backend and cannot help. The page reconnects automatically (with a backed-off poll) once the provider is reachable again.
+
+When the provider is reachable but rejects the request for another reason (expired login, no account configured), recovery now shows a plain "Can't reach your workspace" message with the reason instead of offering a restart that cannot fix an auth/account problem.
+
+When the recovery diagnostic can't even list your workspace's provider within its (now much shorter) timeout -- the signature of a full network outage -- recovery now treats that as "provider unreachable" and shows the Retry page instead of the destructive "Workspace unresponsive" page. Previously a dropped connection left the diagnostic spinning on "Loading workspace" for up to two minutes and then offered a restart that could not help.
+
+The "Retry" button on the provider-unreachable page now uses the same prominent, full-width primary-button styling as the "Restart workspace" button, instead of falling back to the unstyled native browser button.
+
+Reworked the in-app `mngr` CLI caller (`MngrCaller`) to stop relying on `multiprocessing`'s fork-without-exec (forkserver), which is unreliable on macOS.
+
+Instead of forking children from a preloaded forkserver, `MngrCaller` now keeps a single pre-warmed, single-use `mngr` process running ahead of time: a freshly execed Python interpreter that has already imported `imbue.mngr.main` and is blocked reading one request off an anonymous socket. Each `call` hands the argv to the waiting warm process over the socket, reads back stdout/stderr/exit-code, and the warm process then exits. As soon as a warm process is claimed for use, a replacement is spawned so the next call again finds one ready.
+
+The transport is an anonymous, connected `socketpair` (no rendezvous file on disk): the parent keeps one end and passes the other end's file descriptor to the child at spawn time. The connection is live from the moment the child is forked, so there is no listen/connect handshake and no readiness polling -- if the warm process is still importing `mngr`, the request simply buffers in the socket until it is ready. This makes the "no warm process ready yet" case correct by construction.
+
+Warm processes are cleaned up on every exit path: the idle one is terminated promptly during graceful shutdown (so it doesn't make the root concurrency group wait out its shutdown timeout and log a spurious "strand did not finish in time" warning), and an orphaned warm process whose parent was hard-killed self-exits when it sees its socket close, so none are ever left hanging around.
+
+This avoids paying mngr's multi-second interpreter+import startup cost on the request path while sidestepping fork-without-exec entirely. No user-visible behavior change to `mngr message` delivery; this is an internal robustness and portability improvement.
+
+Updated imports for the `mngr_vps_docker` -> `mngr_vps` package rename: the VPS
+provider is no longer Docker-only, so the package and its shape-agnostic base
+classes dropped "Docker" from their names (`VpsDockerProvider` -> `VpsProvider`,
+`VpsDockerProviderConfig` -> `VpsProviderConfig`, `VpsDockerHostRecord` ->
+`VpsHostRecord`, `VpsDockerHostStore` -> `VpsHostStore`, `VpsDockerError` ->
+`VpsError`). Import-only change; no behavior difference.
+
+Bump the bundled latchkey CLI to 2.17.1.
+
+## 2026-06-18
+
+Closed a remaining `agent_creator_test` timeout-flake gap. A separate change raised the shared `_wait_until_finished` poll deadline to 30s to match the creation tests' `@pytest.mark.timeout(30)`, but `test_start_creation_api_key_ai_without_key_fails_with_clear_message` (a fourth caller of the helper) carried no per-test timeout and so was still governed by the global 10s pytest-timeout -- which would pre-empt the 30s poll under heavy parallel CI load. It now carries `@pytest.mark.timeout(30)` like its siblings. Test-only change.
+
+Stabilized the minds agent-creator litellm-key tests under offload CI contention: the `_wait_until_finished` poll deadline was raised from 10s to 30s. It only caps a poll that returns the instant creation reaches a terminal state, so passing tests are unaffected; it just stops heavy test setup under CI load from tripping a spurious timeout (matching the `@pytest.mark.timeout(30)` already on those tests).
+
 ## 2026-06-17
 
 Reworked how workspace accent colors interact with the minds app shell:
