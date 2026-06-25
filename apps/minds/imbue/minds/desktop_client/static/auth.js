@@ -10,6 +10,19 @@
     return returnTo ? '/post-login?return_to=' + encodeURIComponent(returnTo) : '/post-login';
   }
 
+  // What to do after a successful sign-in / OAuth. The standalone auth page
+  // navigates to /post-login. When this form is hosted inside the create
+  // page's sign-in modal, the page sets ``window.MINDS_AUTH_RELOAD_ON_SUCCESS``
+  // so we just reload the create screen in place -- the reloaded page sees the
+  // now-signed-in account and the user clicks "Create" again.
+  function onAuthSuccess() {
+    if (window.MINDS_AUTH_RELOAD_ON_SUCCESS) {
+      window.location.reload();
+      return;
+    }
+    window.location.href = postLoginUrl();
+  }
+
   function showTab(tab) {
     document.getElementById('signup-tab').classList.toggle('hidden', tab !== 'signup');
     document.getElementById('signin-tab').classList.toggle('hidden', tab !== 'signin');
@@ -70,7 +83,7 @@
       var data = await res.json();
       if (data.status === 'OK') {
         if (data.needsEmailVerification) window.location.href = '/auth/check-email';
-        else window.location.href = postLoginUrl();
+        else onAuthSuccess();
       } else if (data.status === 'WRONG_CREDENTIALS') {
         showError('signin', data.message);
       } else {
@@ -144,7 +157,7 @@
         if (s.state === 'done') {
           clearInterval(oauthPollInterval);
           oauthPollInterval = null;
-          window.location.href = postLoginUrl();
+          onAuthSuccess();
           return;
         }
         if (s.state === 'error') {

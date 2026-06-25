@@ -245,6 +245,37 @@ def test_render_create_form_shows_preset_cards() -> None:
     assert "Advanced Configuration" in html
 
 
+def test_render_create_form_embeds_signin_modal_with_auth_form() -> None:
+    # Choosing Imbue Cloud while signed out opens an in-page sign-in modal
+    # rather than navigating away: the create page embeds the shared auth form
+    # (sign-up + sign-in) inside a hidden modal, loads auth.js, and tells it to
+    # reload the create screen on success.
+    html = render_create_form(accounts=[])
+    assert 'id="signin-modal"' in html
+    assert 'id="signin-form"' in html
+    assert 'id="signup-form"' in html
+    assert "/_static/auth.js" in html
+    assert "MINDS_AUTH_RELOAD_ON_SUCCESS" in html
+    assert "data-close-signin-modal" in html
+
+
+def test_render_create_form_has_account_picker_error_element() -> None:
+    # A signed-in user who selects Imbue Cloud but "No account" is shown a red
+    # account-picker error (toggled client-side); the element must be present.
+    html = render_create_form()
+    assert 'id="account-error"' in html
+    assert "text-important" in html
+
+
+def test_render_create_form_does_not_redirect_on_card_click() -> None:
+    # The old behavior redirected to the sign-in page on card click / used a
+    # "Sign in & create" submit label. Both are gone: card click only selects,
+    # and the button stays "Create".
+    html = render_create_form(accounts=[])
+    assert "SIGNIN_URL" not in html
+    assert "Sign in & create" not in html
+
+
 def test_render_create_form_prefills_values() -> None:
     html = render_create_form(git_url="https://custom/repo", branch="feature/test")
     assert "https://custom/repo" in html
