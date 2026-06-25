@@ -249,6 +249,14 @@ jobs:
       - name: Clean up old Modal test environments
         run: uv run python scripts/cleanup_old_modal_test_environments.py --max-age-hours 1.0
 
+      # Safety net for leaked minds-snapshot images: the build job records
+      # each built image in a Modal-Dict ledger and the test job deletes it
+      # on success, but a cancelled/failed run can leave one behind. This
+      # sweeps any ledger image older than the threshold (mirrors the env
+      # sweep above).
+      - name: Clean up old minds snapshot images
+        run: uv run python scripts/cleanup_modal_snapshot_images.py sweep --max-age-hours 1.0
+
 
   # Acceptance tests via offload on Modal
   test-offload-acceptance:
@@ -476,3 +484,179 @@ jobs:
         # `@pytest.mark.timeout(900)`, so the suite budget cannot kill
         # the pytest run before the per-test marker fires.
         run: xvfb-run -a env PYTEST_MAX_DURATION_SECONDS=900 uv run pytest -n 0 --timeout 900 --no-cov --cov-fail-under=0 -v --tb=short -m 'minds_electron and not release'
+
+  # Build a fresh minds-workspace Modal snapshot image, then run the
+  # `minds_snapshot_resume` suite against it. Two jobs so the expensive
+  # vm_runtime image build (Docker-in-Docker + Electron workspace
+  # creation, multi-minute) happens once per run and the test job fans
+  # out from the baked image via offload's `--override-image-id` -- no
+  # per-test Docker/image setup. See scripts/snapshot_minds_e2e_state.py
+  # and offload-modal-minds-snapshot.toml.
+  #
+  # Both jobs are gated on the `DISABLE_MINDS_SNAPSHOT_CI` repo variable:
+  # they run by default (blocking on every PR), but setting that variable
+  # to "true" turns them off in one click without a code change -- a kill
+  # switch in case Modal vm_runtime capacity ever wedges the merge queue.
+  build-minds-snapshot:
+    runs-on: ubuntu-latest
+    # Skip on fork PRs to mirror the test job (which authenticates to Vault and
+    # so cannot run on fork PRs). Same-repo branches and pushes to main run
+    # normally.
+    if: >-
+      vars.DISABLE_MINDS_SNAPSHOT_CI != 'true' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    permissions:
+      contents: read
+    # Exposes the freshly-built snapshot image id to the dependent test job.
+    outputs:
+      image_id: ${{ steps.snapshot.outputs.image_id }}
+    env:
+      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+
+    steps:
+      # The snapshot script rsyncs the checked-out working tree into the
+      # Modal image (it excludes .git), so a default shallow single-ref
+      # checkout is all it needs -- no history deepening required.
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+
+      - name: Install Python dependencies
+        run: uv sync --all-packages
+
+      - name: Build and snapshot the minds e2e Modal image
+        id: snapshot
+        # The script builds the vm_runtime image, drives the real Electron
+        # workspace-creation flow inside it (building the FCT agent container
+        # with the local docker builder), docker-stops the container for a clean
+        # state, snapshots the filesystem, and writes the bare image id to the
+        # --image-id-output file for this job's output. It prints a per-phase
+        # timing summary (grep PHASE_TIMING) so the build's wall-clock is visible.
+        # No Job-A retry by design: a build failure should surface.
+        run: |
+          set -euo pipefail
+          uv run python scripts/snapshot_minds_e2e_state.py --image-id-output snapshot-image-id.txt 2>&1 | tee snapshot-build.log
+          IMAGE_ID="$(cat snapshot-image-id.txt)"
+          if [ -z "$IMAGE_ID" ]; then
+            echo "Snapshot script did not produce an image id" >&2
+            exit 1
+          fi
+          echo "image_id=$IMAGE_ID" >> "$GITHUB_OUTPUT"
+          echo "Built snapshot image: $IMAGE_ID"
+
+      # Record the built image in the Modal-Dict cleanup ledger immediately,
+      # so even if the run is cancelled before the test job's delete step the
+      # periodic sweep can still reclaim it.
+      - name: Record snapshot image in cleanup ledger
+        run: uv run python scripts/cleanup_modal_snapshot_images.py record "${{ steps.snapshot.outputs.image_id }}"
+
+  test-minds-snapshot:
+    runs-on: ubuntu-latest
+    needs: build-minds-snapshot
+    # Mirror the build job's fork-PR skip (the test job also authenticates to
+    # Vault, so it cannot run on fork PRs either).
+    if: >-
+      vars.DISABLE_MINDS_SNAPSHOT_CI != 'true' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    # The GitHub Environment whose claim the minds_ci_test_gh Vault role is
+    # bound to; gates which workflows can mint the test secrets.
+    environment: minds-ci-test
+    # `checks: write` is required by the report-flaky-aware-tests composite
+    # action. `id-token: write` lets the use-vault-secrets action mint an OIDC
+    # token for Vault. No `contents: write` here: this job boots from the
+    # prebuilt snapshot image via --override-image-id and never builds or
+    # caches an offload checkpoint, so it has no image-cache git notes to push.
+    permissions:
+      contents: read
+      checks: write
+      id-token: write
+    env:
+      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      # The Anthropic key (for live checks) is always needed; masked in the logs
+      # and forwarded into the offload sandbox by the just recipe below.
+      - name: Fetch Anthropic key from Vault
+        uses: imbue-ai/use-vault-secrets@2375c28b61513dadebebdce845c109a01777a197
+        with:
+          role: minds_ci_test_gh
+          secrets: |
+            minds/ci/litellm/ANTHROPIC_API_KEY
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+
+      - name: Install Python dependencies
+        run: uv sync --all-packages
+
+      - name: Install just
+        uses: extractions/setup-just@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache offload binary
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/offload
+          key: cargo-offload-0.9.7-${{ runner.os }}
+
+      - name: Install offload
+        run: |
+          if ! command -v offload &> /dev/null || ! offload --version | grep -q '0.9.7'; then
+            cargo install offload@0.9.7 --force
+          fi
+
+      - name: Run minds snapshot-resume tests via offload
+        id: tests
+        run: just test-offload-minds-snapshot "${{ needs.build-minds-snapshot.outputs.image_id }}"
+
+      - name: Report test results
+        if: always()
+        uses: ./.github/actions/report-flaky-aware-tests
+        with:
+          check-name: Minds Snapshot Resume Tests
+          junit-path: test-results/junit.xml
+          tests-outcome: ${{ steps.tests.outcome }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results-minds-snapshot
+          path: test-results/
+          include-hidden-files: true
+          retention-days: 30
+
+      # Delete the snapshot image only on a fully successful run (this step
+      # is skipped if any prior step -- including the test-result report --
+      # failed, so a failing run keeps the image around for debugging; the
+      # periodic sweep reclaims it later either way).
+      - name: Delete snapshot image after a successful run
+        if: success()
+        run: uv run python scripts/cleanup_modal_snapshot_images.py delete "${{ needs.build-minds-snapshot.outputs.image_id }}"

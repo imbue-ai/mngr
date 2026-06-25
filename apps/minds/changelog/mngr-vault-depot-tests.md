@@ -1,0 +1,1 @@
+The e2e workspace runner now streams the Electron renderer's console output, JS errors, and failed requests into the run log, so a renderer-side fault during workspace creation (e.g. the onboarding flow getting stuck) is diagnosable from CI output instead of being invisible behind Electron's main-process-only stderr.
