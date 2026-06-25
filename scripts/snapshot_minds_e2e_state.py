@@ -673,11 +673,6 @@ def main() -> None:
     # step broke -- useless in CI. enable_output() is what turns that into
     # the actual build transcript.
     with modal.enable_output():
-        # Stage the repo into a temp dir BEFORE building the image so the
-        # Modal upload reads from a frozen tree. The staging dir lives for
-        # the whole image-build phase; we clean it up after Sandbox.create
-        # returns (Modal has already materialized the image at that point,
-        # so the staged copy is no longer referenced).
         # Resolve depot enablement up front so --builder depot fails fast (before
         # we pay for staging + image build) if its token is missing.
         depot_secret = _resolve_depot_secret(args.builder)
@@ -686,7 +681,9 @@ def main() -> None:
         try:
             with _timed_phase("build image + create sandbox"):
                 # Stage the repo into a temp dir BEFORE building the image so the
-                # Modal upload reads from a frozen tree.
+                # Modal upload reads from a frozen tree. The staging dir is torn
+                # down once Sandbox.create returns (Modal has materialized the
+                # image by then, so the staged copy is no longer referenced).
                 with tempfile.TemporaryDirectory(prefix="mngr-snapshot-stage-") as staging_dir_str:
                     staging_dir = Path(staging_dir_str)
                     staged_repo = _stage_repo_to_temp_dir(staging_dir)
