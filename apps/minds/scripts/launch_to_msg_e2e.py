@@ -1193,6 +1193,9 @@ async def amain() -> int:
                     body = await win.evaluate("document.body.innerText")
                     if CANNED_BODY.lower() in body.lower() and approval_stage >= 3:
                         logger.info("PASS: canned body in reply")
+                        with contextlib.suppress(Exception):
+                            scroll_diag = await win.evaluate("JSON.stringify(window.__chatScrollDiag || {})")
+                            logger.info("[deliv] PASS window.__chatScrollDiag={}", scroll_diag)
                         await snap_page(win, "08-PASS-canned-body")
                         break
 
