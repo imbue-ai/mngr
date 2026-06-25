@@ -1,4 +1,3 @@
-import asyncio
 import sys
 from pathlib import Path
 from typing import cast
@@ -178,19 +177,18 @@ def test_automatic_reporting_gate_always_passes_manual_reports_even_when_disable
 
 def _hint_for_raised(exception: BaseException) -> Hint:
     """Build a before_send ``Hint`` carrying real ``exc_info`` for ``exception`` (raised to get a traceback)."""
-    # Catch BaseException deliberately: KeyboardInterrupt / SystemExit are not Exception subclasses.
+    # Catch the exact type raised (covers KeyboardInterrupt / SystemExit, which are not Exception
+    # subclasses) without catching the whole BaseException hierarchy.
     try:
         raise exception
-    except BaseException:
+    except type(exception):
         return cast(Hint, {"exc_info": sys.exc_info()})
 
 
-def test_drop_interrupt_events_drops_keyboard_interrupt_and_cancelled_error() -> None:
-    # KeyboardInterrupt (Ctrl-C) and CancelledError (task cancellation) reach Sentry via the SDK's
-    # excepthook/threading integrations, bypassing the loguru handler's own filter -- before_send must
-    # drop them since neither is a real fault.
-    for exception in (KeyboardInterrupt(), asyncio.CancelledError()):
-        assert _drop_interrupt_events({"message": "x"}, _hint_for_raised(exception)) is None
+def test_drop_interrupt_events_drops_keyboard_interrupt() -> None:
+    # KeyboardInterrupt (Ctrl-C) reaches Sentry via the SDK's excepthook/threading integrations,
+    # bypassing the loguru handler's own filter -- before_send must drop it since it is not a real fault.
+    assert _drop_interrupt_events({"message": "x"}, _hint_for_raised(KeyboardInterrupt())) is None
 
 
 @pytest.mark.parametrize("clean_exit", [SystemExit(), SystemExit(0), SystemExit(None), SystemExit(False)])

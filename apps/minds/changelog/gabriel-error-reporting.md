@@ -12,7 +12,7 @@ A new "get help" button (question mark) sits in the top bar next to the inbox. I
 
 In dev (`just minds-start`), the Electron main process no longer starts the native-crash (Crashpad) reporter that the Sentry SDK enables by default. Now that Sentry always initializes, its Crashpad handler would spawn and outlive the app on quit, holding open the stderr pipe that the dev launcher reads; `just minds-start` then hung after every quit instead of exiting. Packaged builds are unaffected and keep native-crash reporting.
 
-Interrupting the app (Ctrl-C / a normal shutdown) no longer files a spurious error report. A KeyboardInterrupt or task-cancellation reaching the process is now dropped before it is sent to Sentry, and a clean process exit is ignored too; a genuine fatal exit (non-zero exit code) or any real error during shutdown is still reported.
+Interrupting the app (Ctrl-C / a normal shutdown) no longer files a spurious error report. A KeyboardInterrupt reaching the process is now dropped before it is sent to Sentry, and a clean process exit is ignored too; a genuine fatal exit (non-zero exit code) or any real error during shutdown is still reported.
 
 The get-help modal now dims the workspace behind it (revealing it through a translucent backdrop) instead of covering it with an opaque page surface, matching the inbox modal.
 

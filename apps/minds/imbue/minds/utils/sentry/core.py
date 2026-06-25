@@ -1,4 +1,3 @@
-import asyncio
 import functools
 import gzip
 import os
@@ -507,9 +506,9 @@ def _make_automatic_reporting_gate(is_error_reporting_enabled: Callable[[], bool
 def _drop_interrupt_events(event: Event, hint: Hint) -> Event | None:
     """before_send hook that drops interrupt / clean-shutdown exceptions, which are not real faults.
 
-    ``KeyboardInterrupt`` (Ctrl-C / SIGINT) and ``asyncio.CancelledError`` (task cancellation) are
-    always dropped: neither is itself an error. A ``SystemExit`` is dropped only for a clean exit code
-    (``None`` or ``0``); a non-zero code is a genuine fatal-exit signal and is kept.
+    ``KeyboardInterrupt`` (Ctrl-C / SIGINT) is always dropped: it is not itself an error. A
+    ``SystemExit`` is dropped only for a clean exit code (``None`` or ``0``); a non-zero code is a
+    genuine fatal-exit signal and is kept.
 
     The ``SentryEventHandler`` already filters these out of the *logging* path, but the SDK's default
     excepthook / threading integrations capture every top-level ``BaseException`` and call
@@ -523,7 +522,7 @@ def _drop_interrupt_events(event: Event, hint: Hint) -> Event | None:
     exc_type, exc_value, _ = hint["exc_info"]
     if exc_type is None:
         return event
-    if issubclass(exc_type, (KeyboardInterrupt, asyncio.CancelledError)):
+    if issubclass(exc_type, KeyboardInterrupt):
         return None
     if issubclass(exc_type, SystemExit):
         code = exc_value.code if isinstance(exc_value, SystemExit) else None
