@@ -103,3 +103,20 @@ def test_prune_expired_grant_lines_drops_grant_with_corrupt_expiry() -> None:
 
     assert "requester=old" not in pruned
     assert "requester=new" in pruned
+
+
+def test_prune_expired_grant_lines_drops_grant_with_naive_expiry() -> None:
+    # A parseable but timezone-naive ``expires=`` is treated as expired (the
+    # aware epoch sentinel) rather than compared directly, so the prune does
+    # not raise TypeError on naive-vs-aware datetimes and the grant is dropped
+    # even though its naive timestamp is in the far future.
+    live = build_authorized_keys_line(
+        public_key=_KEY, requester_workspace_id="new", expires_at=_NOW + timedelta(hours=1)
+    )
+    naive = f"{_KEY} minds-ssh-grant requester=old expires=2099-01-01T00:00:00"
+    content = f"{naive}\n{live}\n"
+
+    pruned = prune_expired_grant_lines(content, now=_NOW)
+
+    assert "requester=old" not in pruned
+    assert "requester=new" in pruned

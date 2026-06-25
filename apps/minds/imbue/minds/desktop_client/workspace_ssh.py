@@ -96,9 +96,11 @@ def _parse_grant_expiry(line: str) -> datetime | None:
     """Return the expiry encoded in a minds-owned authorized_keys line, else None.
 
     Lines without our marker (keys the user added by hand) return None and are
-    never pruned. A marker with an unparseable expiry is treated as expired
-    (returns the epoch) so a corrupt grant doesn't linger forever. The epoch
-    sentinel is timezone-aware so it compares cleanly against an aware ``now``.
+    never pruned. A marker with an unparseable *or* timezone-naive expiry is
+    treated as expired (returns the epoch) so a corrupt grant doesn't linger
+    forever and so the comparison against an aware ``now`` can never raise. The
+    epoch sentinel is timezone-aware so it compares cleanly against an aware
+    ``now``; minds only ever writes aware (``...+00:00``) expiries.
     """
     if _GRANT_MARKER not in line:
         return None
@@ -106,9 +108,12 @@ def _parse_grant_expiry(line: str) -> datetime | None:
         if token.startswith(f"{_EXPIRES_KEY}="):
             raw = token[len(_EXPIRES_KEY) + 1 :]
             try:
-                return datetime.fromisoformat(raw)
+                parsed = datetime.fromisoformat(raw)
             except ValueError:
                 return datetime.fromtimestamp(0, tz=timezone.utc)
+            if parsed.tzinfo is None:
+                return datetime.fromtimestamp(0, tz=timezone.utc)
+            return parsed
     return datetime.fromtimestamp(0, tz=timezone.utc)
 
 
