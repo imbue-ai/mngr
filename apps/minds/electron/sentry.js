@@ -26,26 +26,47 @@ const SENTRY_FRONTEND_DSN_STAGING = 'https://b8ce0a0ea4d38de2bda94e5ff6168572@o4
 const SENTRY_FRONTEND_DSN_DEV = 'https://ddc0f18beba95166b72eacd9d4b48bf0@o4504335315501056.ingest.us.sentry.io/4511620043243520';
 
 /**
+ * Parse the per-machine user config (`<dataDir>/config.toml`), or return `{}` when
+ * the file is absent or unreadable.
+ *
+ * The config is written by the backend's MindsConfig when the user answers the
+ * consent screen or toggles account settings; the Electron shell reads it
+ * directly (no IPC) so the error-reporting settings stay in sync. Read live on
+ * each call so toggling a setting takes effect without an app restart. Returning
+ * `{}` on any failure means every setting falls back to its conservative default.
+ */
+function readUserConfig() {
+  try {
+    const configPath = path.join(paths.getDataDir(), 'config.toml');
+    return parseToml(fs.readFileSync(configPath, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+/**
  * Whether the user has enabled automatic error reporting (default off).
  *
  * The browser web UI and this Electron main process both report automatic
  * errors only, so both honor the same per-machine `report_unexpected_errors`
- * user setting that gates the Python backend's automatic sends. The setting
- * lives in `<dataDir>/config.toml` (written by the backend's MindsConfig when
- * the user answers the consent screen or toggles account settings); the Electron
- * shell reads it directly so it stays in sync without any IPC. Read live on
- * every event so toggling the setting takes effect without an app restart.
- * Defaults to false when the file or key is absent or unreadable, so we never
- * report without a confirmed opt-in.
+ * user setting that gates the Python backend's automatic sends. Defaults to
+ * false when the key is absent, so we never report without a confirmed opt-in.
  */
 function isErrorReportingEnabled() {
-  try {
-    const configPath = path.join(paths.getDataDir(), 'config.toml');
-    const parsed = parseToml(fs.readFileSync(configPath, 'utf8'));
-    return parsed.report_unexpected_errors === true;
-  } catch {
-    return false;
-  }
+  return readUserConfig().report_unexpected_errors === true;
+}
+
+/**
+ * Whether the user has opted to include recent logs in error reports (default off).
+ *
+ * Mirrors the Python backend's `include_error_logs` setting (read live there by
+ * imbue/minds/utils/sentry/core.py via `is_log_inclusion_enabled`), stored in the
+ * same `<dataDir>/config.toml`. Gates the log attachments on the one-shot
+ * backend-down manual report (see `captureManualReport`). Defaults to false when
+ * the key is absent, so logs are never attached without a confirmed opt-in.
+ */
+function isLogInclusionEnabled() {
+  return readUserConfig().include_error_logs === true;
 }
 
 /**
@@ -276,10 +297,15 @@ function collectSystemBasics() {
  *
  * Used by the full-app error takeover (shell.html): when the Python backend has crashed its normal
  * /help report flow is unreachable, but this main-process Sentry is always initialized, so the user
- * can still file a report of the on-screen error. Alongside the message/details we attach what the
- * main process can collect without the backend -- recent log files (gzipped, tailed) and host/system
- * basics -- so the report is useful even though the backend's richer in-process state is gone with it.
+ * can still file a report of the on-screen error. Alongside the message/details we attach host/system
+ * basics, and -- when the user has opted into log inclusion -- recent log files (gzipped, tailed), so
+ * the report is useful even though the backend's richer in-process state is gone with it.
  * Collection is best-effort: a failure to gather logs or basics never blocks the report itself.
+ *
+ * Log attachment honors the same opt-in as the backend and the /help flow: logs are attached when the
+ * persistent ``include_error_logs`` setting is on, OR when the per-report ``includeLogs`` (the
+ * takeover's "Include recent logs" checkbox, shown only when that setting is off) is set. Host basics
+ * carry no log/file contents and are always included.
  *
  * The event is tagged ``manually_submitted`` so the ``beforeSend`` gate always lets it through, even
  * when automatic reporting is off (an explicit user action). Note this reports to the JavaScript
@@ -287,7 +313,7 @@ function collectSystemBasics() {
  *
  * Returns the Sentry event id (a 32-char hex string the user can quote), or null if Sentry dropped it.
  */
-function captureManualReport({ message, details }) {
+function captureManualReport({ message, details, includeLogs = false }) {
   let basics = null;
   try {
     basics = collectSystemBasics();
@@ -295,10 +321,12 @@ function captureManualReport({ message, details }) {
     console.warn(`[report-error] could not collect system basics: ${err && err.message}`);
   }
   let attachments = [];
-  try {
-    attachments = collectLogAttachments();
-  } catch (err) {
-    console.warn(`[report-error] could not collect log attachments: ${err && err.message}`);
+  if (isLogInclusionEnabled() || includeLogs) {
+    try {
+      attachments = collectLogAttachments();
+    } catch (err) {
+      console.warn(`[report-error] could not collect log attachments: ${err && err.message}`);
+    }
   }
   // captureEvent's second arg is the event hint; attachments ride the envelope as
   // separate items (not in the event body). Omit the hint entirely when there are
@@ -317,4 +345,11 @@ function captureManualReport({ message, details }) {
   );
 }
 
-module.exports = { initSentry, isErrorReportingEnabled, resolveEnvironment, fixupReleaseId, captureManualReport };
+module.exports = {
+  initSentry,
+  isErrorReportingEnabled,
+  isLogInclusionEnabled,
+  resolveEnvironment,
+  fixupReleaseId,
+  captureManualReport,
+};

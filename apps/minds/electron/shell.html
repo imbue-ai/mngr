@@ -187,6 +187,26 @@
       cursor: pointer;
     }
     #report-copy-btn:hover { background: #d4d4d8; }
+    /* Per-report "include logs" opt-in for the one-shot backend-down report. Shown
+       only when the persistent include-logs setting is off (see the report flow). */
+    #report-options {
+      display: none;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      margin-bottom: 16px;
+      font-size: 13px;
+      color: rgba(0, 0, 0, 0.7);
+      -webkit-app-region: no-drag;
+    }
+    #report-options.visible { display: flex; }
+    #report-options label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      user-select: none;
+    }
   </style>
 </head>
 <body>
@@ -205,6 +225,12 @@
       <button class="btn-primary" id="retry-btn">Retry</button>
       <button class="btn-secondary" id="report-btn">Report a bug</button>
       <button class="btn-secondary" id="log-btn">View full log</button>
+    </div>
+    <div id="report-options">
+      <label>
+        <input type="checkbox" id="report-include-logs">
+        <span>Include recent logs</span>
+      </label>
     </div>
     <div id="report-result">
       <span id="report-result-text"></span>
@@ -239,6 +265,8 @@
     });
 
     var reportBtn = document.getElementById('report-btn');
+    var reportOptions = document.getElementById('report-options');
+    var reportIncludeLogs = document.getElementById('report-include-logs');
     var reportResult = document.getElementById('report-result');
     var reportResultText = document.getElementById('report-result-text');
     var reportEventId = document.getElementById('report-event-id');
@@ -279,7 +307,10 @@
       }
       reportBtn.disabled = true;
       showReportResult('Sending report…', null);
-      window.minds.reportError().then(function(res) {
+      // Per-report opt-in only matters while the checkbox is shown (persistent
+      // include-logs setting off); when hidden, main's persistent setting decides.
+      var includeLogs = reportOptions.classList.contains('visible') && reportIncludeLogs.checked;
+      window.minds.reportError(includeLogs).then(function(res) {
         if (res && res.ok && res.eventId) {
           showReportResult('Report sent. Reference ID:', res.eventId);
         } else {
@@ -311,6 +342,16 @@
         // report outcome and re-enable the button for the new error.
         reportResult.classList.remove('visible');
         reportBtn.disabled = false;
+        // Offer the per-report "include logs" opt-in only on the one-shot
+        // backend-down path (when the backend is up, the /help modal carries its
+        // own logs control) and only when the persistent include-logs setting is
+        // off (when on, logs are always attached, so the checkbox is redundant).
+        reportOptions.classList.remove('visible');
+        if (window.minds && window.minds.getLogInclusionSetting && !(data && data.canUseBackendReport)) {
+          window.minds.getLogInclusionSetting().then(function(enabled) {
+            if (!enabled) reportOptions.classList.add('visible');
+          }, function() { /* ignore: leave the checkbox hidden on failure */ });
+        }
         document.body.classList.add('error');
         errorView.style.display = 'flex';
         if (data.message) document.getElementById('error-message').textContent = data.message;
