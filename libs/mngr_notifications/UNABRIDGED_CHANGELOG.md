@@ -4,6 +4,10 @@ Full, unedited changelog entries for the `mngr_notifications` project, consolida
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-19
+
+Removed the now-vestigial `NotificationsPluginConfig.merge_with` override; the config merge is routed through the overlay pipeline, which reproduces the same assign-by-default semantics. No user-visible behavior change.
+
 ## 2026-06-04
 
 Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.

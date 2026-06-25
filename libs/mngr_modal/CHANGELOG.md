@@ -6,6 +6,16 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: A missing/invalid Modal token now raises the shared `ProviderNotAuthorizedError` from provider construction, and `ModalAuthError` is a subclass of `ProviderNotAuthorizedError` (preserving its existing message and remediation). Modal auth failures are now categorized the same way as the other cloud providers in `mngr list` — one consistent error line and the granular provider-inaccessible exit code — instead of an ad-hoc plugin error.
+
+- Changed: Modal agent lifecycle detection now targets the agent's primary tmux window by name (the configurable `tmux.primary_window_name`, default `agent`) instead of the literal `:0` index, so it works regardless of the user's tmux `base-index` setting.
+
+- Changed: `mngr create` with unresolvable Modal credentials now raises the contract `ProviderUnavailableError` (it previously raised a plain `MngrError`), with curated help pointing at `uvx modal token set`.
+
+- Changed: Host lock reporting for Modal hosts is now derived from a real flock held-probe rather than the lock file's presence (the lock file persists after release).
+
 ## [v0.2.17] - 2026-06-18
 
 ## [v0.2.16] - 2026-06-16

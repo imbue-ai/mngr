@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `mngr forward --on-error {abort,continue}` flag (default `abort`). Under `continue`, the `--no-observe` startup snapshot tolerates an unauthenticated/unreachable provider — it runs `mngr list --on-error continue` and forwards the agents the healthy providers reported instead of failing to start. The observe and `--observe-via-file` modes already tolerate provider errors and are unchanged.
+
+### Changed
+
+- Changed: The websocket forward path now emits a `system_interface_backend_failure` envelope when the backend connection fails (unresolved target, SSH-tunnel setup failure, refused host-loopback dial, or a connect-time backend-websocket failure), matching what the HTTP/SSE paths already did. Previously only HTTP failures emitted this envelope, so a consumer like minds could go blind to a dead system interface whose only live channel was a websocket.
+
 ## [v0.1.6] - 2026-06-18
 
 ## [v0.1.5] - 2026-06-16

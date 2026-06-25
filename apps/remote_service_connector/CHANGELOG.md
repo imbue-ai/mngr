@@ -16,6 +16,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Configurable `scaledown_window` on the connector Modal function, driven by `MINDS_CONNECTOR_SCALEDOWN_WINDOW` (from the tier's `[scaledown_window].connector` in `deploy.toml`). `0` (default) keeps Modal's own default; dev tiers set it high (~10 min) so the no-warm-pool connector stays hot across a dev session.
 - Added: Region-aware host leasing — `POST /hosts/lease` accepts an optional `region` field (equality filter, so only hosts in that OVH datacenter are eligible; when unset the lease is region-agnostic). New migration `007_pool_host_region.sql` adds a nullable `region` column to `pool_hosts`; rows baked before this migration carry NULL and so never match a hard region filter (only leased when no region is requested) until rebaked. The filter is independent of the existing JSONB attribute filter, and the lease stays a single query so the fast path is unaffected.
 
+- Added: Hourly pool-host cleanup cron now also audits each bare-metal box's lima slices against the pool database, scoped to this deployment's environment (via `MINDS_ENV_NAME`). Logs two divergence kinds: a slice stamped for this env present on a box with no database row, and a database row whose VM has vanished from its box. Alert-only — actual orphan reaping stays with the bake-time reaper.
+
 ### Changed
 
 - Changed: `release_host` and the hourly cleanup sweep now branch on `backend_kind`: a real VPS is still cancelled in OVH, while a slice has its lima VM (and btrfs data disk) destroyed by SSHing the owning bare-metal box and running `limactl`. A slice whose VM cannot be destroyed keeps its row in `removing` so the slot is only freed once the VM is really gone.
@@ -32,6 +34,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Fixed: Connector auth endpoints no longer 500 on `/auth/session/revoke`, `/auth/email/is-verified`, and `/auth/email/send-verification` — these had been calling SuperTokens' `syncio.get_user` / `syncio.get_session_without_request_response` from inside an `async def`, where the syncio wrapper's `loop.run_until_complete` hit "RuntimeError: This event loop is already running" against the live FastAPI/uvicorn loop.
 - Fixed: Pool-host teardown no longer leaks running, still-billing VPSes. The bake had been writing the mngr `host_id` into `pool_hosts.vps_instance_id` instead of the OVH service name, so every connector OVH teardown call targeted a nonexistent service and 404'd — and the failure was swallowed into a warning while the release reported success. The release route is now synchronous and returns 5xx (leaving the row `removing`) when any step fails, so the client (or the hourly sweep backstop) retries. Added `PoolHostCleanupError` and mapped it plus `OvhApiError` / `OvhHttpError` in `raise_as_http`. Migration `006_fix_vps_instance_id.sql` backfills existing rows whose `vps_instance_id` still holds a `host-...` id.
+
+### Security
+
+- Security: Host-lease and slice-teardown paths now pin SSH host keys instead of trust-on-first-use. New nullable `outer_host_public_key` / `container_host_public_key` columns on `pool_hosts` and `box_host_public_key` on `bare_metal_servers` (migration `011`). `POST /hosts/lease` returns both pool-host keys and injects the user's key over SSH while strictly verifying each sshd against its recorded host key; a row missing its keys is not leasable (503, pointing at the one-time backfill). `GET /hosts` also returns the keys. Slice teardown and the reconcile sweep verify the bare-metal box against its recorded host key. The management SSH client no longer uses `AutoAddPolicy`.
 
 ## [v0.2.7] - 2026-05-11
 

@@ -6,6 +6,28 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Bare placement (`isolation=NONE`) — the agent runs directly on the VM (no Docker). An Azure OS shutdown does not halt compute billing, so the bare agent's idle `shutdown.sh` runs the ARM self-deallocate directly (the same call the container idle watcher uses), keeping the self-deallocate role assignment. A running bare host is now discoverable with the default provider config via a `mngr-isolation` tag stamped at create.
+
+- Added: Offline `host_dir` support, **on by default** (new `is_offline_host_dir_enabled` provider config field). A deallocated VM's `host_dir` is now readable without SSH, so `mngr event` / `mngr transcript` work against a stopped agent. Capture is operator-driven at `mngr stop`; a VM that idle-self-deallocates (or crashes) is not captured.
+
+### Changed
+
+- Changed: SSH host keys are now unique per host (inherited from the shared VPS provider): each host gets its own VPS/VM-root and container sshd host keypair at create time rather than sharing one keypair across every host the provider instance created. Pause/resume of hosts created before this change still works via a fallback to the legacy provider-global key.
+
+- Changed: A missing subscription or unusable credential now raises the shared `ProviderNotAuthorizedError` (still a `ProviderUnavailableError`), so `mngr list` surfaces one consistent error line and a non-zero exit, matching the other cloud providers. Azure now eagerly requests a management-scope token at construction so the failure is reported up front (rather than as a confusing API error on the first real call).
+
+- Changed: Replaced the VM tag mirror with a required Azure Blob **state bucket** (a private Storage account + container) as the offline store for Azure hosts. Removes the tag mirror's silent 256-char `labels` drop and lets a deallocated VM's *full* host record (config, IP, host keys) be reconstructed. The bucket is required: mngr raises an actionable error pointing at `mngr azure prepare` when it is absent. `mngr azure prepare` now creates a private Storage account + Blob container (`mngrst<hash>` by default; override via `state_storage_account_name`) and grants the operator's own principal `Storage Blob Data Contributor` scoped to that account so offline reads/writes work without `AuthorizationPermissionMismatch`. `mngr azure cleanup` deletes the account (`--force` to delete remaining orphaned state).
+
+- Changed: Import updates for the `mngr_vps_docker` -> `mngr_vps` package rename and accompanying class renames (`VpsDockerProvider` -> `VpsProvider`, etc.). Import-only; no behavior difference.
+
+### Fixed
+
+- Fixed: `mngr start` of a deallocated Azure host now re-mirrors the resumed host record to the external (Blob bucket) store, so offline / `mngr list` reads no longer report a just-resumed Azure VM as STOPPED until the next mirroring write.
+
+- Fixed: `rename_host` now re-stamps the cheap `mngr-host-name` VM tag that offline discovery reads, so a host renamed and then stopped lists under its new name rather than its old one.
+
 ## [v0.1.1] - 2026-06-18
 
 ### Added

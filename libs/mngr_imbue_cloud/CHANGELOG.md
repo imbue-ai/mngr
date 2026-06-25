@@ -6,6 +6,34 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `mngr imbue_cloud admin pool teardown-slices` tears down every unleased slice VM recorded in the pool DB (used by `minds env destroy` so a destroyed env doesn't leak its baked pool slices on shared boxes).
+
+- Added: A one-shot `mngr imbue_cloud admin pool backfill-host-keys` command keyscans pre-existing pool rows and bare-metal boxes to populate the new SSH host-key columns (the single sanctioned, migration-only TOFU). Run it once after deploying this version; afterwards, leasing fails closed on any row missing a pinned key rather than falling back to a scan.
+
+### Changed
+
+- Changed: SSH host keys are now pinned end-to-end with no trust-on-first-use. Each baked slice gets its own unique VM-root and container sshd host keys (no longer shared across an operator's slices), recorded into the connector's `pool_hosts` row and surfaced by `mngr create --format json`. OVH bare-metal boxes get an ed25519 host key generated and injected during OS reinstall. Leasing returns both host keys so clients pin them with strict host-key checking; the slow-path container rebuild pins its own freshly-generated key. `admin server prep` now takes `--server-id` (instead of `--server-address`) and strictly pins the box's recorded sshd host key, failing closed if no key is recorded.
+
+- Changed: Multiple developer environments can now safely share a single bare-metal slice box. Each slice's lima instance and data-disk names are stamped with the owning environment (`mngr-slice-<env>-<host-hex>`); `admin pool create --backend slice` takes a new `--slice-env-name`. Slice baking derives free-slot capacity from the box's real occupancy (every env's slices plus any legacy ones) so independent envs cannot collectively over-subscribe a box, and each carve reserves its slot under a brief box-wide lock so concurrent bakes from different envs never collide. The post-bake orphan reaper only ever deletes the active env's own stamped slices.
+
+- Changed: `mngr list` discovery now reports a transport-level failure reaching the Imbue Cloud connector (connection refused, DNS failure, timeout) as a typed `ProviderUnavailableError` rather than a bare httpx error, so the minds recovery flow can distinguish "the provider is unreachable, retry" from "auth/configuration error".
+
+- Changed: Import updates for the `mngr_vps_docker` -> `mngr_vps` package rename and the accompanying class renames (`VpsDockerProvider` -> `VpsProvider`, etc.). Import-only; no behavior difference.
+
+### Deprecated
+
+- Deprecated: Baking new OVH classic VPS pool hosts in `mngr imbue_cloud admin pool create`. The `--backend` default is now `slice` (bare-metal slices); passing `--backend ovh_vps` fails fast with a deprecation error. Existing OVH VPS pool hosts are unaffected and can still be listed and destroyed.
+
+### Fixed
+
+- Fixed: `mngr create` on the `imbue_cloud` fast path (`fast_mode=require`) failing with "does not accept --image or --start-arg" when the workspace template supplies a `--start-arg` that the pre-baked pool-host container already carries (e.g. the forever-claude-template's `--restart=unless-stopped`). The fast (adopt) path now tolerates the pre-baked docker run flags, keeping the fast and slow paths in sync.
+
+- Fixed: Host lock reporting for imbue_cloud pool hosts now derives a host's lock status from a real flock held-probe rather than the lock file's presence, so a previously-locked host is no longer reported as permanently locked.
+
+- Fixed: Restarting a stopped `imbue_cloud` (leased pool) mind no longer leaves it in a broken, unrecoverable state. `get_host` now probes the container's running state over the outer root SSH and returns an offline host when the container is stopped (so `mngr start` routes through `start_host`), and `start_host` now re-bootstraps the container's SSH (relaunches sshd, re-seeds the per-host authorized key, re-records the host key) instead of doing a bare `docker start`.
+
 ## [v0.1.6] - 2026-06-18
 
 ### Added

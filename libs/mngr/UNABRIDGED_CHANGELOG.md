@@ -4,6 +4,205 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-23
+
+Exposed the discovery polling cadence as a public constant (`DISCOVERY_STREAM_POLL_INTERVAL_SECONDS` in `imbue.mngr.api.discovery_events`, previously a private `_`-prefixed value). Consumers such as minds derive freshness thresholds from it, so deriving the threshold from the cadence keeps the two from silently drifting apart.
+
+`mngr create --format json` now includes `outer_host_public_key` and `container_host_public_key` when the provider exposes them (a new `get_ssh_host_public_keys` host/provider method, defaulting to none), so tooling can pin a host's sshd key for strict host-key checking instead of trust-on-first-use.
+
+## 2026-06-22
+
+Handle unauthenticated providers consistently across `mngr list` and other commands.
+
+Previously every provider reported a missing-credentials state differently: AWS/GCP/Azure raised a verbose error and exited 1, Vultr printed an ad-hoc `WARNING` and exited 0, OVH silently reported zero agents, and a full `mngr list` (default `--on-error abort`) surfaced only whichever provider happened to fail first.
+
+Now:
+
+- A new shared `ProviderNotAuthorizedError` (a subclass of `ProviderUnavailableError`) represents "enabled but unauthenticated" for every provider, carrying structured `short_reason` / `short_remediation` fields plus verbose help text.
+
+- `mngr list --on-error continue` runs the rest of the listing, then reports every failing provider in one consistent block: a single glanceable line per provider on stderr for human output (`<provider>: <reason> — <remediation> (disable: mngr config set ...)`), and structured entries in the `errors` array (with `exception_type`, `help_text`, and an `is_provider_inaccessible` flag) for `--format json` / `jsonl`. The default `--on-error abort` still fails immediately on the first provider error.
+
+- `mngr list` now exits with the granular provider-inaccessible code (6) when every error is a provider that could not be reached or authenticated, and 1 otherwise -- in both abort and continue modes.
+
+- The OVH backend was missing from the internal remote-backends list, so it loaded (and silently no-op'd) in environments where the other cloud backends were correctly skipped; it is now treated like AWS/GCP/Azure/Vultr.
+
+Regenerated the `mngr forward` command reference to document its new
+`--on-error {abort,continue}` option (provided by the mngr_forward plugin).
+
+Unify the `mngr start` host lock with the normal cooperative host lock.
+
+There is now a single host lock. State-changing operations (`create`, `start`, `gc`, ...) all acquire `Host.lock_cooperatively`, which holds a real `flock(2)` on the host's `host_lock` file -- directly on local hosts, and over a long-lived SSH exec channel on remote hosts. Previously the remote path of this lock was only an advisory marker file (no real mutual exclusion), while a separate, newer `lock_for_starting` held a real flock on its own `host_start_lock` file. The separate start lock (and its `host_start_lock` file) is removed; `mngr start` now uses the unified lock, which gives true cross-actor mutual exclusion (e.g. a remote desktop client racing an in-host boot hook) for all of these operations.
+
+Because `start` and `gc` now share the lock, a `gc` that tears down a host/agent is serialized before a concurrent `start`; after acquiring the lock, `start` checks that the target agent's state directory still exists and fails with a clear "not found on host" error instead of trying to boot an agent that was just garbage-collected.
+
+`create` and `start` block indefinitely until the lock is acquired (a contended create now waits rather than failing); `gc` and other callers keep a bounded wait that raises an error on timeout. While waiting on a contended lock, mngr logs a "waiting to acquire host lock" message.
+
+The in-host idle-shutdown watcher and `mngr list`'s lock columns now detect the lock via a non-blocking `flock` probe rather than file existence, since the lock file is intentionally never deleted (its inode must stay stable across local and remote holders). The lock auto-releases when an operation finishes or errors, so a crashed controller no longer leaves a host pinned awake. `MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1` now keeps a failed remote host alive by launching a detached on-host process that keeps holding the flock.
+
+`flock` (the `util-linux` package) is now a required host dependency, bootstrapped alongside `git`/`tmux`/`jq`/`sshd` on all providers (and pre-installed in the bundled image). It is already present on standard Debian-based images, so this only matters for minimal/custom images.
+
+## 2026-06-21
+
+- Container hosts now self-heal sshd after an out-of-band restart. The host
+  container entrypoint (re)starts sshd on boot whenever mngr has already
+  provisioned this host (tracked by a marker, so a host key pre-baked into the
+  base image is never used by mistake), so a `docker restart`, docker daemon
+  restart, or host reboot brings ssh back without waiting for `mngr start`.
+  mngr's own sshd start is now idempotent (a no-op when sshd is already running).
+
+- `mngr start` is now safe to run concurrently for the same host. The agent
+  (re)launch is serialized by a dedicated cross-actor `flock` (local in-host
+  starts coordinate with remote over-SSH starts), so a desktop-driven start and
+  an in-host boot-hook start cannot race. The lock blocks until acquired (wrap
+  the command in `timeout` for a deadline).
+
+- Added a `--post-host-create-outer-command` create option (and matching
+  create-template / settings key `post_host_create_outer_command`). It runs
+  shell commands once on the host's outer machine (the underlying VM/daemon
+  host) after the host is created -- e.g. to install a VM-level systemd unit.
+  Skipped with a warning when the provider exposes no outer host.
+
+Regenerated the `imbue_cloud` command reference doc to cover the new bare-metal slice options: `admin pool create --slice-env-name` and the new `admin pool teardown-slices` command.
+
+## 2026-06-20
+
+`mngr imbue_cloud admin pool create` now defaults `--backend` to `slice` (bare-metal slices) instead of `ovh_vps`. Baking new OVH classic VPS pool hosts is deprecated: passing `--backend ovh_vps` fails with a deprecation error pointing at `--backend slice`. Existing OVH VPS pool hosts can still be listed and destroyed. The generated CLI reference doc (`docs/commands/secondary/imbue_cloud.md`) is updated to match.
+
+## 2026-06-19
+
+Stop `mngr event --follow` from polling the persisted files of an offline (stopped-but-not-destroyed) agent every second.
+
+Previously, a follower whose target host was offline kept re-reading the agent's unchanging event files once per second through the read-only volume. For the Docker provider each such read is a separate `docker exec` into the shared state container, so a handful of stopped agents could drive the Docker engine to a large, wasted CPU load (observed: ~30 `docker exec`/sec into one state container, pushing it to ~90% CPU) even though no agent work was happening.
+
+The follow loop already tracks online/offline status and re-checks it every 30s. Each per-source tail thread now lives for the whole follow session and gates its own I/O on a shared online/offline signal: while the target is offline it parks and does no reads at all (a stopped agent cannot write events), and the periodic source-directory rescan is likewise skipped. On a transition the loop simply swaps the shared target handle and flips the gate -- threads are never torn down and recreated, so the previous teardown/restart churn (and its races) is gone. Each thread reads from whichever target (online host or offline volume) is current, re-reading its source from the start across a transition; existing event-id deduplication ensures nothing is emitted twice on resume.
+
+When the host returns to RUNNING the threads resume reading automatically. This affects every consumer of `mngr event --follow` (the CLI, `mngr forward`, and the minds desktop app), not just one.
+
+`build_add_authorized_keys_command` (the shared SSH-key seeding helper used by every provider's host/container setup) is now idempotent: each entry is appended only if it is not already present (a `grep -qxF` guard), so re-running it does not accumulate duplicate `authorized_keys` lines. This lets the imbue_cloud restart path re-seed a leased container's key by reusing this helper instead of hand-rolling its own command, and makes the first-time seed safe against accidental double-application.
+
+Updated the `mngr create` help docs for `--aws-ami=` to reflect that the AWS provider now falls back to a pinned per-region default when `default_ami_id` is unset (the separate `default_ami_by_region` config field was removed).
+
+Added `extract_agent_data_from_parsed_listing` to the shared
+`providers/listing_utils` helpers, the natural companion to
+`parse_listing_collection_output`. It pulls each agent's `data.json` dict out of a
+parsed listing, replacing three copies of the same logic in the VPS provider's
+realizers. An entry whose `data` is present but not a JSON object (a list/scalar
+from a corrupt or hand-edited `data.json`) is now skipped with a WARNING rather
+than silently, matching the other listing skip-sites. No user-visible behavior
+change beyond the added warning.
+
+
+Updated imports for the `mngr_vps_docker` -> `mngr_vps` package rename and the
+accompanying class renames (`VpsDockerProvider` -> `VpsProvider`,
+`VpsDockerProviderConfig` -> `VpsProviderConfig`, `VpsDockerHostRecord` ->
+`VpsHostRecord`, `VpsDockerError` -> `VpsError`, etc.). Import-only; no behavior
+change.
+
+mngr config now merges with the explicit operator algebra from the new standalone `overlay` library (see the `overlay` changelog for the operators in full): a bare `key` assigns (narrowing-checked), `key__extend` merges onto the layer below -- now **recursively** (a nested `key__extend` merges deeper while a nested bare key still replaces; backward-compatible) -- and the new `key__assign` assigns **without** the narrowing warning (the per-key opt-out to the `allow_settings_key_assignment_narrowing` flag). Within a single layer, resolution is two-phase and order-independent (assigns first, then `__extend`); a bare `key` and `key__assign` for the same field is a contradictory double-assign and raises `ConfigParseError`. New `Static*` markers (`StaticTuple` / `StaticList` / `StaticDict`) mark an aggregate atomic so replacing it is exempt from the narrowing guard; mngr's `StringDerivedTuple` / `ScalarTuple` are now `StaticTuple` subclasses.
+
+A settings *patch* field (a claude agent type's `settings_overrides`) now **accumulates** across config scopes (user < project < local) and `parent_type` inheritance instead of a higher/child scope replacing the whole value: non-overlapping keys from every scope survive and same-key `__extend`s combine, with the narrowing guard threaded recursively (a bare assign dropping a non-empty aggregate is caught at any depth). Its deferred `__extend` / `__assign` markers are preserved through config-load and resolved at provision time against the home `settings.json`, joining the existing `create_templates.<name>` deferred paths. A `key__assign` inside `settings_overrides` now reliably suppresses the cross-scope narrowing guard even when a *lower* scope already set the key -- which is precisely the case a narrowing could fire, so the per-key opt-out now works where it matters (previously the deferred `__assign` collapsed to a bare assign at config-load whenever a lower scope had set the key, and the guard still errored on the opted-out key).
+
+Cross-scope `settings_overrides` narrowing is now surfaced at config-load. A `settings_overrides` field accumulates across scopes, so an additive cross-scope override is a superset that never narrows; previously a higher scope whose *bare* key dropped a non-empty aggregate set by a lower scope did so silently. The merge now surfaces those in-patch drops into the loader's flag-gated narrowing error (escapable via `allow_settings_key_assignment_narrowing = true`, `allow__extend`, or `allow__assign`). Purely additive cross-scope overrides still load unchanged.
+
+Fixed a latent crash: `MngrConfig.merge_with` raised `AttributeError` when the base config's `retry` / `logging` was `None` and the override set them (masked in production, but a real footgun). The overlay pipeline's `drop_none_values` pass treats a `None` sub-model as unset, so the re-parse defaults it rather than dereferencing `None`.
+
+Fixed a config-merge bug where a partial override of a nested sub-model field (`logging`, `retry`, or a provider's `security_group`) silently reverted the base scope's other sub-fields to their defaults. For example, project scope `[logging] file_level = "ERROR"` plus local scope `[logging] console_level = "TRACE"` previously dropped `file_level` back to its default (and spuriously raised the narrowing error); now `file_level` carries through. Sub-model fields are detected by their *live value* being a `BaseModel` (so a `None` is simply unset and a discriminated-union value resolves to its own concrete class), and merge field-by-field across config scopes, `--setting`, and `parent_type` inheritance -- carrying through a base scope's unset sub-fields and narrowing only when a nested list/dict actually drops entries. (This also corrects a latent inconsistency in the old field-by-field merge, which used an `is-not-None` test that dropped any unset sub-field whose default was non-`None`.)
+
+Internal (no user-facing behavior change): the model-free config-merge algebra is extracted into `overlay` (mngr imports it from `imbue.overlay`; `ConfigParseError` now subclasses `OverlayError`), and the whole config-merge surface -- `AgentTypeConfig.merge_with`, `MngrConfig.merge_with`, and `parent_type` inheritance -- now computes through overlay's typed-node pipeline (`config/overlay_merge.py`) instead of field-by-field pydantic copies, guarded by property tests asserting equivalence to the frozen old logic. The now-dead `_merge_container_dict` / `_assign_scalar` helpers and the vestigial per-model `merge_with` overrides are removed. The per-key-merging registries (`agent_types`, `providers`, `plugins`, `commands`, `create_templates`) are now identified by a declarative `RegistryField()` field annotation (parallel to `SettingsPatchField`) rather than a hard-coded field-name set, and sub-models are detected at runtime instead of by annotation introspection.
+
+Internal (no user-facing behavior change): **all** config-load narrowing detection now flows through the single overlay merge; the separate model-walking detector (`detect_settings_narrowing` and helpers) is removed from production, kept only as a frozen equivalence-test reference. To make this faithful, the overlay pipeline re-marks `Static*` markers stripped by `model_dump` (relying on the markers' proven-pure round-trip) on the override side before merging, so an atomic-aggregate replacement (string-shaped `cli_args`, a provider's `allowed_ssh_cidrs`, an explicit `StaticList` / `StaticDict`) stays narrowing-exempt; and the overlay's `narrowing_paths` reports the specific narrowed leaf (e.g. `commands.create.defaults.env`) rather than just the containing field. The loader's two narrowing collectors collapse into one. A nested same-named container field (e.g. a plugin config's own `commands` dict) is narrowing-checked as an ordinary aggregate, since the container per-key merge applies only at the top level of `MngrConfig`.
+
+Internal (no user-facing behavior change): now that the overlay refactor is shipped and CI-green, the equivalence-guard scaffolding is removed -- the frozen `_reference_*` old-logic copies and the `production == reference` tests in `overlay_merge_test.py` (covering `AgentTypeConfig.merge_with`, `MngrConfig.merge_with`, `parent_type` inheritance, and the model-walking narrowing detector). The behaviors they pinned stay covered by the surviving direct-assertion tests there plus the loader / data-types / registry tests. The dead string-suffix merge engine in `overlay` (`combine_patches` and the string-suffix `merge` / `finalize`) is deleted with them.
+
+Internal (no user-facing behavior change): the loader's narrowing-attribution (which lower-precedence layer a dropped value belonged to) is now computed in linear time via a `provenance` map threaded through the config-layer fold, replacing the prior O(n^2) re-merge of every prior layer against each new layer. Attribution output is unchanged.
+
+Internal (no user-facing behavior change): the config-merge pre-processing in `config/overlay_merge.py` is simplified to a single declarative recursive walk. The `SettingsPatchField` / `RegistryField` markers and their collectors move to a new leaf module `config/field_markers.py` (re-exported from `config/data_types.py`, so existing imports keep working), unified behind one generic `get_field_names_with_marker` helper; the marks are now read directly off each live model's class rather than threaded in as resolver callables. The three mark/unmark helper pairs collapse into one recursive `_to_operator_dict` / `_from_operator_dict` pair (a registry entry's own settings-patch and sub-model fields are now handled by the same uniform walk), the redundant per-entry class table is derived from the live entry models, and the `tuple/list/dict -> Static*` shape mapping is shared. The `StringDerivedTuple` marker is removed in favor of the identical `ScalarTuple` (a string-written `cli_args` is now a `ScalarTuple`); its narrowing-exemption behavior is unchanged. Equivalence to the prior field-by-field logic remains pinned by the frozen `_reference_*` guards in `overlay_merge_test.py`.
+
+Internal (no user-facing behavior change): mngr's suffix-keyed-dict extend consumers (`config/key_resolver.py`, `cli/common_opts.py`) now resolve a single `__extend` through the overlay's one extend algebra via the new `extend_plain_value` adapter (a thin lift/finalize over the node engine), replacing the import of the now-deleted parallel `apply_extend` / `extend_dict` plain-dict recursion from `overlay.merge`. Resolution output is unchanged.
+
+Internal (no user-facing behavior change): the overlay's `would_assignment_narrow` predicate moved from `imbue.overlay.merge` to the new `imbue.overlay.narrowing` module; mngr's importers (`cli/common_opts.py`, `config/data_types_test.py`) and doc references (`config/README.md`, `config/loader.py`) are updated accordingly.
+
+Internal (no user-facing behavior change): added `write_json_dict_via_host`, the write-side counterpart to `read_json_dict_via_host`, which serializes a dict to indented JSON and writes it via the host (optionally creating the parent directory first). The Claude plugins now route their settings/hooks writes through it instead of hand-rolling the `json.dumps(..., indent=2) + "\n"` + optional `mkdir -p` dance at each site.
+
+An expected (`MngrError`) error raised during agent provisioning -- e.g. a settings-narrowing `ConfigParseError` while building the per-agent `settings.json` -- now surfaces as a clean one-line error instead of an "Unexpected error" with a full traceback. `provision_agent` runs its body inside a concurrency group that re-raises a body exception wrapped in a `ConcurrencyExceptionGroup`; the `create` flow now unwraps a single expected error from that group (via the group's `only_exception_is_instance_of` / `get_only_exception` helpers) before it reaches the CLI.
+
+The `mngr config` command is now exempt from the settings-narrowing guard, so a config that would otherwise narrow can still be loaded in order to *edit* it: previously `mngr config set` / `mngr config unset` -- the way to fix a narrowing config -- failed with the narrowing error themselves (a catch-22). The guard still fires for every other command.
+
+The narrowing error's `__extend` example is now tailored to the offending key (e.g. `work_dir_extra_paths__extend = ...`, or `permissions__extend = {allow__extend = ...}` for a nested path) instead of a fixed generic example, so the message shows exactly how to fix the user's own config.
+
+Internal (no user-facing behavior change): the per-plugin `merge_with` tests the overlay refactor retired (scalar precedence, `None`-keeps-base, type guards) are subsumed by the centralized overlay/merge tests; the one behavior not yet pinned centrally -- a `plugins` entry preserving its subclass type and type-specific fields when a higher scope sets only `enabled` -- now has a single consolidated test (`overlay_merge_test.py::test_mngr_plugins_registry_subclass_is_preserved`), the plugins-registry analogue of the existing `agent_types` and `providers` subclass-preservation tests.
+
+Updated the shared provider release harness's offline-host_dir capability docstring to note that GCP now also supports the offline ``host_dir`` mirror (alongside AWS S3 and Azure Blob), so Trip 1's opt-in offline-host_dir step runs against GCP too.
+
+Trimmed a monorepo-development-only paragraph from the PyPI README (regenerated from the top-level README) so it stays focused on user-relevant content.
+
+Added a shared provider release-test harness (`imbue.mngr.providers.provider_release_testing`): a `ProviderReleaseProfile` plumbing contract plus a `run_provider_release_trip1` driver that walks one provisioned host through the full lifecycle in a single boot -- create, verify the tagged cloud resource, exec a marker file, plain stop, `stop --stop-host` (real machine stop, or a loud refusal where unsupported), start, persistence, snapshot (where supported), an out-of-band "sketchy kill", crash discovery, `gc`, and a backend-clean check. Mirrors the agent release-test harness so each provider's release suite collapses to a thin profile.
+
+Also added `run_provider_release_trip3` ("snapshot survives destroy"): snapshot a host, destroy it, and assert the snapshot is portable -- a fresh `mngr create --snapshot` restores the captured filesystem -- or, where snapshots are not portable (the container shape's docker-commit dies with the VPS), assert that documented divergence so it flips loudly once portability lands.
+
+Also fixed the shared `delete_modal_apps_in_environment` test helper to pass `--yes` to `modal app stop`, so the app is actually stopped in non-interactive runs (CI / release tests) instead of aborting on a confirmation prompt and relying on the environment deletion to reap it.
+
+Also added `run_provider_release_trip4` ("error classification contract"): a no-boot CLI trip that asserts `mngr create` surfaces the right error for a provider with unresolvable credentials (the contract `ProviderUnavailableError`, or the documented divergence where a provider raises a different class), checks whether the curated help text points at the provider-correct setup command, and -- for the VPS family -- asserts a `--vps-*` build arg is rejected synchronously with the migration hint. Runs in seconds and costs no compute.
+
+Also added `run_provider_release_trip2` ("idle auto-shutdown contract"): a single-boot trip that creates a host with a short auto-shutdown (the idle watcher for the cloud trio; the sandbox lifetime cap for Modal), polls the cloud API until the compute genuinely stops so billing halts, and -- where the provider resumes from that stopped state -- asserts `mngr start` brings it back with a pre-shutdown marker intact. Where the provider does not resume (Modal: the sandbox is terminated by its own timeout), the trip asserts the termination only and skips the resume. The shutdown is driven via `--idle-timeout` (which lands the cloud trio in a resumable stopped state) rather than the `auto_shutdown_seconds` time cap (which terminates/deletes the instance). Adds a `resumes_after_auto_shutdown` capability flag plus `auto_shutdown_create_args` / `write_auto_shutdown_settings` profile hooks.
+
+Trip 1 gained an opt-in offline-host_dir read (off by default behind `MNGR_RELEASE_TEST_OFFLINE_HOST_DIR=1`, so the happy path stays lean): in the `--stop-host` window, where the provider captures host_dir to a state bucket (`supports_offline_host_dir`), it asserts `mngr file get <host> <path> --relative-to host` serves the marker from the offline mirror while the host stays stopped. AWS/Azure run it; GCP (`NullHostDirBackend`) and Modal (no `--stop-host`) skip.
+
+Trip 1 also gained a bare-shape assertion (`is_bare_host` capability flag): where the profile declares a bare (no-container) shape, it asserts the agent shell is the VM's own root -- the bare host store (`/var/lib/mngr-host`) is present and there is no `/.dockerenv` -- so a NONE-isolation host that silently fell back to a container fails loudly. This is the coverage the retired per-provider bare lifecycle tests used to own, now folded into the trip's NONE parametrization.
+
+Merge intent for an agent type's `settings_overrides` is now declared with a Claude-compatible `__mngr_merge` map instead of the `__extend` / `__assign` key suffixes.
+
+Because `settings_overrides` is folded into a file the external AI CLI also reads (Claude Code's / antigravity's `settings.json`), the suffixes -- which that CLI does not understand and would surface as junk literal keys -- are no longer allowed there. Instead, declare the operator in a single top-level `__mngr_merge` map keyed by dotted path, which the external CLI silently ignores:
+
+```toml
+[agent_types.claude.settings_overrides.permissions]
+allow = ["Bash(npm *)"]
+[agent_types.claude.settings_overrides.__mngr_merge]
+"permissions.allow" = "extend"   # merge onto the base; "assign" replaces without the narrowing guard
+```
+
+A bare key still assigns with the narrowing guard; the narrowing error now prints the exact `__mngr_merge` patch to add. The suggested patch is the full nested one in a single error: a dict that would drop a sibling key is suggested as `extend` (so the sibling survives) and a replaced list/value as `assign` (so your exact value is kept, not silently broadened). Raw `__extend` / `__assign` suffix keys under `settings_overrides` are a hard error pointing to `__mngr_merge`. mngr's own (non-`settings_overrides`) config is unchanged and still uses the suffixes.
+
+New `mngr config assign <key> <value>` command, mirroring `mngr config extend`: it writes a `key__assign` entry (replace without the narrowing guard), or -- on a `settings_overrides` path -- a `__mngr_merge` `assign` directive. `mngr config set key__assign <value>` routes to it, and `mngr config get` resolves the `__assign` form.
+
+A settings key that contains a literal dot (e.g. an MCP server name like `my.server`) cannot be targeted by a dotted `__mngr_merge` path: such a directive errors as dangling and the auto-remediation skips it rather than mis-advising.
+
+`mngr config set` / `extend` / `assign` now let configuration errors render through the central CLI error handler (a `ConfigParseError` is a `MngrError`) instead of a local catch, so an invalid value prints e.g. `Error: Unknown configuration fields: ['provider']` rather than an `Invalid configuration: ...` line.
+
+## 2026-06-18
+
+Added a shared `AgentUpdatePolicy` (`AUTO` / `ASK` / `NEVER`) used by the agent plugins to govern an agent CLI's self-updater. When unset, the default is `NEVER` (block self-update) so a managed agent stays on its installed version, except an *attended* agent that implements an interactive update flow, which defaults to `ASK`; unattended agents always default to `NEVER`.
+
+Added a shared `verify_pinned_cli_version` installation helper so agent plugins can verify an installed CLI matches a pinned version (needed because installation is skipped when the binary is already present). It matches the user's pinned string verbatim against the `--version` banner (no version scheme assumed, so pre-release/four-component pins work), errors on a confirmed mismatch, and skips when the CLI reports no version.
+
+Clarified `non_issues.md`: the `is_`-prefix exemption and the missing-`Field()`/description exemption apply specifically to CLI command functions and CLI-options data classes (e.g. `ListCliOptions`) that mirror user-facing click options. Internal boolean fields on non-CLI data classes should still use the `is_` prefix. Also fixed a typo in that file ("duplicated" -> "duplicate").
+
+Fixed `mngr plugin list` mislabeling opt-in plugins (e.g. `claude_subagent_proxy`) as `enabled=true` when they are actually blocked.
+
+The reported `enabled` state now reflects the plugin's real block state: opt-in plugins that were not explicitly enabled show `enabled=false`, while a plugin enabled via `[plugins.<name>] enabled = true` still shows `enabled=true`.
+
+Underlying this, `config.disabled_plugins` now faithfully includes opt-in plugins that are disabled by default, so every consumer of that field (not just the plugin list) sees the correct effective disabled set. This is suppressed under `MNGR_LOAD_ALL_PLUGINS`, matching plugin-manager startup, so doc/tooling runs still load every plugin.
+
+Added a `[tmux]` configuration section for customizing the tmux sessions mngr runs agents in:
+
+- `tmux.attach_args` -- extra tmux client flags inserted before the `attach` subcommand when connecting to an agent (`tmux <attach_args> attach ...`). The motivating case is `["-CC"]` for iTerm2 control mode (native tabs/windows); `-u` / `-2` also work. Applies to both local and remote (SSH) agents.
+- `tmux.additional_config_path` -- an extra tmux config file sourced into every mngr session. Unlike the auto-generated `~/.mngr/tmux.conf`, this file is never overwritten, so it is a stable place for mngr-session-specific tmux config.
+- `tmux.primary_window_name` (default `agent`) -- mngr now names the agent's primary window and targets it by name instead of the literal `:0` index, so mngr works regardless of the user's tmux `base-index` setting.
+
+Agents that were already running before this change have an unnamed primary window that name-based targeting would miss. mngr now self-heals these in-flight sessions: the first time it inspects such an agent, it renames the session's existing primary window to `tmux.primary_window_name`, so lifecycle detection, messaging, capture, attach, and ttyd keep working across the upgrade.
+
+See `docs/tmux_users.md` for usage.
+
+Fixed `mngr transcript` failing with "Unknown agent type" for config-defined agent subtypes (a custom `[agent_types.X]` with a `parent_type`, e.g. `parent_type = "claude"`). The command now resolves the type through its parent chain (like every other command) instead of a flat class-registry lookup, so it recognizes such subtypes and reads the parent's transcript.
+
+Removed `TagLimitExceededError`: it existed only to flag the EC2 50-tag ceiling for the AWS provider's offline tag mirror, which this PR replaces with the S3 state bucket.
+
+Regenerated the `mngr aws` / `mngr azure` CLI doc pages to cover the state-bucket setup these commands now perform (the providers' state-bucket feature is described in the `mngr_aws` / `mngr_azure` changelogs).
+
+Added shared operator-command output helpers in `mngr.cli.output_helpers`, used by the `mngr aws` / `mngr azure` / `mngr gcp` prepare/cleanup commands: `emit_operator_result(event_name, parts, output_format)` renders a sequence of `OperatorResultPart`s -- each pairing a structured-data fragment with its human line, built via `OperatorResultPart.shown(human, **data)` or `shown_if(present, human, **data)` -- as JSON / JSONL / human in one place, plus a `write_event_line` primitive for the shared `{"event": <type>, ...payload}` JSONL shape.
+
+Test-only: raised the per-test timeout on the tmux lifecycle tests `test_start_restart_running_agent` / `test_start_restart_stopped_agent` from the default 10s to 30s (they run several sequential tmux create/stop/restart operations that can exceed 10s on a loaded CI runner).
+
 ## 2026-06-17
 
 Added a code-derived agent capability registry: a description of which agent types have which capabilities, where each capability declares how its presence is detected (a class mixin via `issubclass`, a `waiting_reason` field generator, a plugin hookimpl, or a sibling usage plugin).

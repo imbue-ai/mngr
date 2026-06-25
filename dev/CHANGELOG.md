@@ -4,6 +4,90 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-06-23
+
+### Added
+
+- Added: `just minds-start-cloud` recipe for launching the minds desktop client in dev mode against pre-baked `imbue_cloud` pool slices (leaves the shipped FCT remote + `FALLBACK_BRANCH` defaults in place and skips the live-mngr rsync).
+
+- Added: `just backfill-pool-host-keys` recipe wrapping `minds pool backfill-host-keys` for the one-time SSH host-key backfill after deploying the host-key-pinning connector.
+
+- Added: optional `fct` argument to `just minds-start` to point a launch at a specific forever-claude-template worktree instead of the fixed `.external_worktrees/forever-claude-template`.
+
+- Added: design blueprints `blueprint/discovery-health-watchdog/` (app-global watchdog for stalled workspace discovery with self-heal ladder + terminal "blocked" recovery screen) and `blueprint/pin-imbue-cloud-host-keys/` (removing TOFU from the imbue_cloud pool flow by pinning all SSH host keys).
+
+- Added: `traceback-with-variables` to the workspace (used by minds' Sentry integration), updating root `uv.lock`.
+
+### Changed
+
+- Changed: Consolidated the FCT `vendor/mngr` sync docs (release `git archive` vs dev/bake `rsync`) into one canonical doc at `apps/minds/docs/vendor-mngr-sync.md`; trimmed duplicated explanations out of the `minds-dev-workflow` and `minds-justfile` skills and corrected the editable-install attribution to `scripts/build_workspace.sh`.
+
+- Changed: Updated the `blueprint/remote-mind-recovery/` plan -- collapsed the recovery page's redundant state sampler onto the passive discovery resolver, gated the recovery-page redirect on fresh discovery, and merged the two backend-unreachable tiers into a single `BACKEND_UNREACHABLE` tier.
+
+- Changed: Rewrote the `release-minds` skill to be a thin pointer to `apps/minds/docs/release.md` instead of describing an obsolete release flow.
+
+## 2026-06-22
+
+### Added
+
+- Added: design blueprints `blueprint/consistent-provider-auth-failures/`, `blueprint/robust-minds-list-provider-errors/`, `blueprint/minds-flask-migration/` (minds FastAPI-to-Flask migration), `blueprint/remove-system-interface-asyncio/`, and `blueprint/unify-remote-host-lock/`.
+
+### Changed
+
+- Changed: Renamed the `just minds-tailwind` recipe to `just minds-css`; it now compiles the minds Tailwind v4 stylesheet (`static/app.css` -> minified `static/app.min.css`) via the pinned `@tailwindcss/cli` instead of fetching the Tailwind Play CDN JS bundle. The `.gitignore` now tracks `app.min.css` in place of the retired `tailwind.js`.
+
+- Changed: `forward-system-interface` justfile recipe resolves the agent id with `mngr list --on-error continue`, so an unauthenticated/unreachable provider no longer aborts the lookup of a local agent.
+
+## 2026-06-21
+
+### Added
+
+- Added: design blueprints `blueprint/sshd-restart-robustness/` (sshd/agent restart-robustness work) and `blueprint/share-bare-metal-across-dev-envs/` (sharing a bare-metal slice box across developer environments).
+
+## 2026-06-20
+
+### Removed
+
+- Removed: `bake-pool-host-{dev,prod}` justfile recipes -- OVH classic VPS pool hosts are deprecated; pool hosts are now baked as bare-metal slices via `bake-slice-{dev,prod}`. `list-pool-hosts` and `destroy-pool-host` are unchanged and still cover legacy OVH VPS rows. The `minds-justfile` and `minds-dev-workflow` skill docs were updated to match.
+
+## 2026-06-19
+
+### Added
+
+- Added: `specs/bare-providers/` (spec.md, concise.md, extraction_design.md) proposing a `HostRealizer` seam so "with Docker" vs "without Docker" becomes a reusable axis across aws/gcp/azure, plus `specs/uncertainties.md`.
+
+- Added: a cross-provider review and prescriptive shape under `specs/provider-uniformity-review.md`, `specs/provider-shape.md`, `specs/implementing-a-provider.md`, `specs/provider-release-tests.md`, and a cite/naming refresh of `specs/cleanup-error-aggregation.md`, all aligned with the `mngr_vps_docker` -> `mngr_vps` rename and the realizer/isolation architecture.
+
+- Added: `blueprint/remote-mind-recovery/` design doc for extending minds' workspace-recovery flow to remote (Imbue Cloud) minds.
+
+- Added: `google-cloud-storage>=2.18` runtime dependency at the repo root (via `libs/mngr_gcp`), used by the GCP provider's new offline `host_dir` GCS state bucket.
+
+### Changed
+
+- Changed: `make_cli_docs.py` now generates the provider/agent config tables in each plugin README from Pydantic field descriptions (the source of truth), spliced between markers; the `regenerate-cli-docs` pre-commit hook now runs `make_cli_docs.py --check` (non-mutating, covering every generated file) instead of regenerating in place and diffing only the mngr command docs, and triggers on provider/agent `config.py`/`plugin.py` sources too.
+
+- Changed: Registered the new `overlay` workspace library in root `pyproject.toml` (uv workspace source plus `--cov=imbue.overlay`); renamed pytest coverage from `imbue.mngr_vps_docker` to `imbue.mngr_vps`.
+
+- Changed: Documented Vault setup for pool/slice bakes in the `minds-dev-workflow` skill (interactive `vault login -method=oidc`, auto-applied HCP `VAULT_ADDR`/`VAULT_NAMESPACE` defaults, and the `127.0.0.1:8200` "connection refused" troubleshooting hint).
+
+### Removed
+
+- Removed: a monorepo-development-only paragraph (the `~/.local/bin` pre-commit shim note) from the top-level README so the published PyPI README stays focused.
+
+## 2026-06-18
+
+### Added
+
+- Added: `identify-suspicious-edge-cases` skill that flags over-broad exception catches, fallback `else` branches, defensive guards, and unnecessary `| None` types under a given path.
+
+- Added: design spec `specs/provider-state-bucket/` proposing an S3/Azure Blob state bucket for AWS/Azure providers so a stopped instance's host record, agent metadata, and `host_dir` are readable offline without hitting the 256-char tag-value limit.
+
+- Added: `moto[s3]` to the root dev dependency group for in-memory S3 unit tests of the new AWS state bucket.
+
+### Changed
+
+- Changed: The `identify-*` skills (`identify-doc-code-disagreements`, `identify-inconsistencies`, `identify-outdated-docstrings`, `identify-style-issues`) now accept a `target_path` argument instead of a bare library name -- scope to a whole library or any subdirectory within one. Findings are written to the containing library's `_tasks/` folder.
+
 ## 2026-06-17
 
 ### Added

@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: An unauthenticated Vultr provider now errors (`ProviderNotAuthorizedError` at construction) instead of silently reporting zero agents. An enabled-but-unauthenticated Vultr provider is now reported consistently with the other cloud providers (one consistent error line in `mngr list`, contributing a non-zero exit) rather than vanishing. The bespoke `WARNING: Vultr API key not configured, skipping VPS discovery` print has been removed.
+
 ## [v0.1.10] - 2026-06-18
 
 ## [v0.1.9] - 2026-06-16

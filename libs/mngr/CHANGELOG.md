@@ -6,6 +6,58 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `mngr create --format json` now includes `outer_host_public_key` / `container_host_public_key` when the provider exposes them, so tooling can pin sshd keys for strict host-key checking.
+
+- Added: New `--post-host-create-outer-command` create option (and matching `post_host_create_outer_command` template / settings key) that runs shell on the host's outer VM/daemon after host creation; fails fast with `MngrError` when configured for a provider that exposes no outer host.
+
+- Added: New `[tmux]` configuration section for customizing the tmux sessions mngr runs agents in: `tmux.attach_args` (extra client flags such as `["-CC"]` for iTerm2 control mode), `tmux.additional_config_path` (a user-owned tmux config file sourced into every mngr session), and `tmux.primary_window_name` (default `agent`, used to target the primary window by name instead of `:0`).
+
+- Added: New `mngr config assign <key> <value>` command (and `key__assign` operator) that writes an assign-without-narrowing-guard entry; on `settings_overrides` paths it writes a `__mngr_merge` `assign` directive.
+
+- Added: Shared `AgentUpdatePolicy` (`AUTO` / `ASK` / `NEVER`) governing each agent CLI's self-updater; defaults to `NEVER` for managed/unattended agents and `ASK` for attended agents with an interactive update flow.
+
+- Added: Shared `ProviderNotAuthorizedError` (a subclass of `ProviderUnavailableError`) representing "enabled but unauthenticated" for every provider, carrying `short_reason` / `short_remediation` plus help text; `mngr list --on-error continue` now reports every failing provider in one consistent block with structured `errors` entries (`exception_type`, `help_text`, `is_provider_inaccessible`).
+
+- Added: Claude-compatible `__mngr_merge` map for declaring merge intent on `settings_overrides` (e.g. `"permissions.allow" = "extend"`); raw `__extend` / `__assign` suffix keys under `settings_overrides` are now a hard error pointing to `__mngr_merge`.
+
+### Changed
+
+- Changed: Unified `mngr start`'s host lock with the normal cooperative host lock. There is now one host lock backed by a real `flock(2)` (directly on local hosts, over a long-lived SSH exec channel on remote hosts); the separate advisory `host_start_lock` is removed, `create` and `start` now block indefinitely until acquired, and `gc` is serialized before a concurrent `start`. `flock` (from `util-linux`) is now a required host dependency, bootstrapped alongside `git` / `tmux` / `jq` / `sshd` on all providers.
+
+- Changed: Config merge migrated to the new standalone `overlay` library with explicit operator algebra: a bare key assigns (narrowing-checked), `key__extend` merges recursively onto the layer below (a nested `__extend` merges deeper while a nested bare key still replaces), and the new `key__assign` assigns without the narrowing guard. A `settings_overrides` patch field now accumulates across config scopes (user < project < local) and `parent_type` inheritance rather than being replaced wholesale; cross-scope `settings_overrides` narrowing now surfaces at config-load.
+
+- Changed: `mngr imbue_cloud admin pool create` now defaults `--backend` to `slice` (bare-metal slices); baking new OVH classic VPS pool hosts is deprecated and passing `--backend ovh_vps` fails with a deprecation error.
+
+- Changed: `mngr list` now exits with the granular provider-inaccessible code (6) when every error is a provider that could not be reached or authenticated, and 1 otherwise (in both abort and continue modes).
+
+- Changed: Exposed the discovery polling cadence as a public constant `DISCOVERY_STREAM_POLL_INTERVAL_SECONDS` in `imbue.mngr.api.discovery_events` (previously private), so consumers can derive freshness thresholds from it without silent drift.
+
+- Changed: An expected `MngrError` raised during agent provisioning (e.g. a settings-narrowing `ConfigParseError`) now surfaces as a clean one-line error instead of an "Unexpected error" with a full traceback; `mngr config set` / `extend` / `assign` likewise route configuration errors through the central CLI error handler.
+
+- Changed: The settings-narrowing error message is now tailored to the offending key (e.g. `work_dir_extra_paths__extend = ...`, or a nested `__mngr_merge` patch for `settings_overrides`) instead of a fixed generic example.
+
+### Removed
+
+- Removed: `TagLimitExceededError`, which existed only to flag the EC2 50-tag ceiling for the AWS provider's offline tag mirror (replaced by the S3 state bucket).
+
+### Fixed
+
+- Fixed: Container hosts now self-heal sshd after an out-of-band restart (a `docker restart`, docker daemon restart, or host reboot brings ssh back without waiting for `mngr start`); mngr's own sshd start is now idempotent.
+
+- Fixed: `mngr event --follow` no longer polls an offline (stopped-but-not-destroyed) agent's persisted event files once per second. Per-source tail threads now park on a shared online/offline gate and resume automatically when the host returns to RUNNING; observed Docker-engine CPU load from a handful of stopped agents drops accordingly.
+
+- Fixed: `mngr plugin list` no longer mislabels opt-in plugins (e.g. `claude_subagent_proxy`) as `enabled=true` when they are actually blocked; `config.disabled_plugins` now faithfully includes opt-in plugins that are disabled by default.
+
+- Fixed: `mngr transcript` no longer fails with "Unknown agent type" for config-defined agent subtypes (a `[agent_types.X]` with a `parent_type`); the command now resolves the type through its parent chain like every other command.
+
+- Fixed: Config-merge bug where a partial override of a nested sub-model field (`logging`, `retry`, or a provider's `security_group`) silently reverted the base scope's other sub-fields to defaults; sub-model fields now merge field-by-field across config scopes, `--setting`, and `parent_type` inheritance.
+
+- Fixed: `mngr config set` / `unset` / `extend` / `assign` are now exempt from the settings-narrowing guard, so a config that would otherwise narrow can still be loaded in order to edit it (previously a catch-22).
+
+- Fixed: The OVH backend was missing from the internal remote-backends list and silently no-op'd in environments where the other cloud backends were correctly skipped; it is now treated like AWS / GCP / Azure / Vultr.
+
 ## [v0.2.17] - 2026-06-18
 
 ### Added
