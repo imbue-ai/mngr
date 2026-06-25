@@ -1,3 +1,4 @@
+import asyncio
 import functools
 import gzip
 import os
@@ -503,6 +504,34 @@ def _make_automatic_reporting_gate(is_error_reporting_enabled: Callable[[], bool
     return _AutomaticReportingGate(is_error_reporting_enabled=is_error_reporting_enabled).before_send
 
 
+def _drop_interrupt_events(event: Event, hint: Hint) -> Event | None:
+    """before_send hook that drops interrupt / clean-shutdown exceptions, which are not real faults.
+
+    ``KeyboardInterrupt`` (Ctrl-C / SIGINT) and ``asyncio.CancelledError`` (task cancellation) are
+    always dropped: neither is itself an error. A ``SystemExit`` is dropped only for a clean exit code
+    (``None`` or ``0``); a non-zero code is a genuine fatal-exit signal and is kept.
+
+    The ``SentryEventHandler`` already filters these out of the *logging* path, but the SDK's default
+    excepthook / threading integrations capture every top-level ``BaseException`` and call
+    ``capture_event`` directly, bypassing that handler. ``before_send`` is the one place every event
+    passes through regardless of which integration produced it, so the filter belongs here. Any *other*
+    exception raised during shutdown has a different type and is left untouched, so genuine errors are
+    still reported.
+    """
+    if "exc_info" not in hint:
+        return event
+    exc_type, exc_value, _ = hint["exc_info"]
+    if exc_type is None:
+        return event
+    if issubclass(exc_type, (KeyboardInterrupt, asyncio.CancelledError)):
+        return None
+    if issubclass(exc_type, SystemExit):
+        code = exc_value.code if isinstance(exc_value, SystemExit) else None
+        if code is None or code == 0:
+            return None
+    return event
+
+
 # NOTE: if the actual event (without attachments) being too large is a problem, then it will be handled
 #       in our custom logic in ImbueSentryHttpTransport above.
 def _before_send_wrapper(
@@ -581,12 +610,14 @@ def setup_sentry(
 
     # NOTE: the rate limiter object's lifetime is maintained by being captured in the
     #       closure of the before_send function.
-    # The automatic-reporting gate runs first so events the user has opted out of are dropped before
-    # they consume a rate-limiter slot.
+    # Interrupt / clean-shutdown exceptions are dropped first (they are never real faults), then the
+    # automatic-reporting gate drops events the user has opted out of, both before they consume a
+    # rate-limiter slot.
     rate_limiter = _SentryEventRateLimiter()
     before_send = functools.partial(
         _before_send_wrapper,
         before_send_list=[
+            _drop_interrupt_events,
             _make_automatic_reporting_gate(is_error_reporting_enabled),
             rate_limiter.before_send,
         ],

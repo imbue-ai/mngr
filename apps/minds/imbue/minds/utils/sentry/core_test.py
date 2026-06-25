@@ -1,3 +1,5 @@
+import asyncio
+import sys
 from pathlib import Path
 from typing import cast
 
@@ -20,6 +22,7 @@ from imbue.minds.utils.sentry.core import SENTRY_DSN_STAGING
 from imbue.minds.utils.sentry.core import SentryDeployEnvironment
 from imbue.minds.utils.sentry.core import _SENTRY_DSN_BY_ENVIRONMENT
 from imbue.minds.utils.sentry.core import _before_send_wrapper
+from imbue.minds.utils.sentry.core import _drop_interrupt_events
 from imbue.minds.utils.sentry.core import _make_automatic_reporting_gate
 from imbue.minds.utils.sentry.core import add_extra_info_hook
 from imbue.minds.utils.sentry.core import resolve_sentry_environment
@@ -171,6 +174,45 @@ def test_automatic_reporting_gate_always_passes_manual_reports_even_when_disable
     gate = _make_automatic_reporting_gate(lambda: False)
     event: Event = {"message": "bug", "tags": {MANUALLY_SUBMITTED_TAG: "true"}}
     assert gate(event, {}) is event
+
+
+def _hint_for_raised(exception: BaseException) -> Hint:
+    """Build a before_send ``Hint`` carrying real ``exc_info`` for ``exception`` (raised to get a traceback)."""
+    # Catch BaseException deliberately: KeyboardInterrupt / SystemExit are not Exception subclasses.
+    try:
+        raise exception
+    except BaseException:
+        return cast(Hint, {"exc_info": sys.exc_info()})
+
+
+def test_drop_interrupt_events_drops_keyboard_interrupt_and_cancelled_error() -> None:
+    # KeyboardInterrupt (Ctrl-C) and CancelledError (task cancellation) reach Sentry via the SDK's
+    # excepthook/threading integrations, bypassing the loguru handler's own filter -- before_send must
+    # drop them since neither is a real fault.
+    for exception in (KeyboardInterrupt(), asyncio.CancelledError()):
+        assert _drop_interrupt_events({"message": "x"}, _hint_for_raised(exception)) is None
+
+
+@pytest.mark.parametrize("clean_exit", [SystemExit(), SystemExit(0), SystemExit(None), SystemExit(False)])
+def test_drop_interrupt_events_drops_clean_system_exit(clean_exit: SystemExit) -> None:
+    # A clean SystemExit (code None/0) is normal teardown, not an error.
+    assert _drop_interrupt_events({"message": "x"}, _hint_for_raised(clean_exit)) is None
+
+
+@pytest.mark.parametrize("fatal_exit", [SystemExit(1), SystemExit("boom")])
+def test_drop_interrupt_events_keeps_nonzero_system_exit(fatal_exit: SystemExit) -> None:
+    # A non-zero / message-bearing SystemExit is a genuine fatal-exit signal and must still report,
+    # so a real error during shutdown is not silently swallowed.
+    event: Event = {"message": "x"}
+    assert _drop_interrupt_events(event, _hint_for_raised(fatal_exit)) is event
+
+
+def test_drop_interrupt_events_keeps_ordinary_exception_and_eventless_hints() -> None:
+    # Ordinary exceptions (the common case) and events without exc_info pass straight through.
+    event: Event = {"message": "x"}
+    assert _drop_interrupt_events(event, _hint_for_raised(ValueError("real error"))) is event
+    assert _drop_interrupt_events(event, cast(Hint, {})) is event
+    assert _drop_interrupt_events(event, cast(Hint, {"exc_info": (None, None, None)})) is event
 
 
 def test_add_extra_info_hook_skips_attachments_when_log_inclusion_disabled() -> None:
