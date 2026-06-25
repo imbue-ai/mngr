@@ -436,7 +436,14 @@ def _has_api_credentials_available(
 
     auth_path = _get_pi_home_dir(home_dir) / "auth.json"
     if auth_path.exists():
-        auth_data = json.loads(auth_path.read_text())
+        # This is a best-effort heuristic that only drives a warning, so a corrupt or
+        # unreadable auth.json must not abort provisioning -- treat it as "no credentials".
+        try:
+            auth_data = json.loads(auth_path.read_text())
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("Could not read pi auth.json at {}: {}", auth_path, e)
+            return False
+        # A present-but-empty auth.json ({}) legitimately means no credentials.
         if auth_data:
             return True
 
@@ -731,7 +738,9 @@ class PiCodingAgent(
 
             for dir_name in _SYNCED_RESOURCE_DIRS:
                 source = home_pi / dir_name
-                if source.exists():
+                # These resources are expected to be directories; skip non-dir entries to
+                # stay consistent with the remote path (_setup_remote_config_dir).
+                if source.exists() and source.is_dir():
                     symlink_on_host(host, source, config_dir / dir_name)
 
     def _setup_remote_config_dir(
