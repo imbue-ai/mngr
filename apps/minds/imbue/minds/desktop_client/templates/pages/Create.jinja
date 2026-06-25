@@ -119,6 +119,20 @@
       if (signinModal) signinModal.classList.add('hidden');
     }
 
+    function showAccountError() {
+      // Red outline + message at the account picker. Shown only on a Create
+      // attempt (never proactively), cleared by update() once a valid account
+      // is chosen. ``!ring-1`` (important width) survives the picker's own
+      // ``focus:ring-0`` while it is focused; the color is plain.
+      accountError.classList.remove('hidden');
+      accountSelect.classList.add('!ring-1', 'ring-important');
+    }
+
+    function hideAccountError() {
+      accountError.classList.add('hidden');
+      accountSelect.classList.remove('!ring-1', 'ring-important');
+    }
+
     function onPresetClick(name) {
       // Clicking a card only selects it -- it never navigates. Remote (Imbue
       // Cloud) compute needs an account: when the user has signed-in accounts
@@ -162,11 +176,13 @@
     form.addEventListener('submit', function (e) {
       // Imbue Cloud needs an account. If none is selected, don't submit:
       //  - signed out -> open the in-page sign-in modal.
-      //  - signed in  -> the account-picker error (shown by update()) tells the
-      //    user to pick an account; submit stays blocked.
+      //  - signed in  -> surface the account-picker error, but only now (on a
+      //    Create attempt) -- not proactively as the user clicks between
+      //    presets, which is too distracting.
       if (imbueCloudNeedsAccount()) {
         e.preventDefault();
-        if (!HAS_ANY_ACCOUNT) openSigninModal();
+        if (HAS_ANY_ACCOUNT) showAccountError();
+        else openSigninModal();
         return;
       }
       submitBtn.disabled = true;
@@ -241,18 +257,13 @@
       aiProviderError.classList.toggle('hidden', !aiInvalid);
       backupProviderError.classList.toggle('hidden', !backupInvalid);
 
-      // Imbue Cloud with no account selected:
-      //  - signed in  -> the user must pick an account: show the red outline +
-      //    message at the account picker and block "Create".
-      //  - signed out -> keep "Create" enabled; pressing it opens the sign-in
-      //    modal (handled in the submit listener).
-      var requiresAccountPick = imbueCloudNeedsAccount() && HAS_ANY_ACCOUNT;
-      accountError.classList.toggle('hidden', !requiresAccountPick);
-      // ``!ring-1`` (important width) so the red outline survives the picker's
-      // own ``focus:ring-0`` while it is focused; the color is plain.
-      accountSelect.classList.toggle('!ring-1', requiresAccountPick);
-      accountSelect.classList.toggle('ring-important', requiresAccountPick);
-      submitBtn.disabled = requiresAccountPick;
+      // "Create" stays enabled; the account requirement is enforced on submit
+      // (open the modal when signed out, or show the picker error when signed
+      // in), not by disabling the button or flashing an error proactively. Here
+      // we only *clear* a previously-shown picker error once the selection is
+      // valid again, so picking an account (or switching to local) removes it.
+      if (!imbueCloudNeedsAccount()) hideAccountError();
+      submitBtn.disabled = false;
 
       updateRegion();
     }

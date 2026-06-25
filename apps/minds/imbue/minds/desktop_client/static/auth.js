@@ -23,6 +23,24 @@
     window.location.href = postLoginUrl();
   }
 
+  // Where to return after an email-verification round-trip (sign-up, or
+  // sign-in of an unverified account). The standalone auth page honors its
+  // ``?return_to=`` query param; the in-page create modal (reload mode) returns
+  // to the page hosting it (e.g. /create) so the user lands back in the create
+  // flow rather than on the accounts page. The path is carried through
+  // /auth/check-email -> /post-login, which re-validates it as a safe path.
+  function verificationReturnTo() {
+    var q = new URLSearchParams(window.location.search).get('return_to');
+    if (q) return q;
+    if (window.MINDS_AUTH_RELOAD_ON_SUCCESS) return window.location.pathname;
+    return null;
+  }
+
+  function goToCheckEmail() {
+    var rt = verificationReturnTo();
+    window.location.href = '/auth/check-email' + (rt ? '?return_to=' + encodeURIComponent(rt) : '');
+  }
+
   function showTab(tab) {
     document.getElementById('signup-tab').classList.toggle('hidden', tab !== 'signup');
     document.getElementById('signin-tab').classList.toggle('hidden', tab !== 'signin');
@@ -51,7 +69,7 @@
       });
       var data = await res.json();
       if (data.status === 'OK') {
-        window.location.href = '/auth/check-email';
+        goToCheckEmail();
       } else if (data.status === 'EMAIL_ALREADY_EXISTS' || data.status === 'FIELD_ERROR') {
         showError('signup', data.message);
       } else {
@@ -82,7 +100,7 @@
       });
       var data = await res.json();
       if (data.status === 'OK') {
-        if (data.needsEmailVerification) window.location.href = '/auth/check-email';
+        if (data.needsEmailVerification) goToCheckEmail();
         else onAuthSuccess();
       } else if (data.status === 'WRONG_CREDENTIALS') {
         showError('signin', data.message);
