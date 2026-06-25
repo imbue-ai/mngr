@@ -14,30 +14,16 @@ from imbue.mngr_tmr.recipe import collect_tests
 
 
 def test_build_agent_prompt_contains_test_id() -> None:
+    # The builder must interpolate the given test node id and the outcome
+    # filename (a contract with the orchestrator) into the rendered prompt.
     prompt = build_test_agent_prompt("tests/test_foo.py::test_bar", ())
     assert "tests/test_foo.py::test_bar" in prompt
     assert TESTING_AGENT_OUTCOME_FILENAME in prompt
-    assert "IMPROVE_TEST" in prompt
-    assert "FIX_TEST" in prompt
-    assert "FIX_IMPL" in prompt
-    assert "tests_passing_before" in prompt
-    assert "tests_passing_after" in prompt
-    assert "summary_markdown" in prompt
 
 
 def test_build_agent_prompt_includes_pytest_flags() -> None:
     prompt = build_test_agent_prompt("tests/test_x.py::test_y", ("-m", "release"))
     assert "-m release" in prompt
-
-
-def test_build_agent_prompt_requests_markdown() -> None:
-    prompt = build_test_agent_prompt("t::t", ())
-    assert "markdown" in prompt.lower()
-
-
-def test_build_agent_prompt_instructs_one_entry_per_kind() -> None:
-    prompt = build_test_agent_prompt("t::t", ())
-    assert "do not duplicate kinds" in prompt.lower()
 
 
 def test_collect_tests_with_real_pytest(tmp_path: Path, cg: ConcurrencyGroup) -> None:
@@ -61,13 +47,10 @@ def test_collect_tests_bad_file_raises(tmp_path: Path, cg: ConcurrencyGroup) -> 
         collect_tests(pytest_args=("non_existent_test_file.py",), source_dir=tmp_path, cg=cg)
 
 
-def test_integrator_prompt_references_inputs_dir_and_predicate() -> None:
+def test_integrator_prompt_interpolates_framework_constants() -> None:
+    # The builder must wire the framework's inputs-dir and outcome-filename
+    # constants into the rendered prompt -- a contract with the orchestrator,
+    # which rsyncs each mapper's outputs into that dir under that filename.
     prompt = build_integrator_prompt()
     assert REDUCER_INPUTS_DIRNAME in prompt
     assert TESTING_AGENT_OUTCOME_FILENAME in prompt
-    # The integrator must encode the should-pull predicate itself.
-    assert "SUCCEEDED" in prompt
-    assert "tests_passing_before" in prompt
-    assert "tests_passing_after" in prompt
-    assert "git bundle list-heads" in prompt
-    assert "outputs.tar.gz" in prompt

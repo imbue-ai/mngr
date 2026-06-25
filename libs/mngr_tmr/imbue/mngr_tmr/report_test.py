@@ -433,6 +433,65 @@ def test_generate_html_report_without_integrator(tmp_path: Path) -> None:
     assert "Test Map-Reduce Report" in result_path.read_text()
 
 
+def test_generate_html_report_renders_escalations_and_normalizations(tmp_path: Path) -> None:
+    output_dir = tmp_path / "out"
+    agents = [make_metadata_and_outcome(output_dir, "a", tests_passing_before=True, tests_passing_after=True)]
+    integrator_meta = AgentMetadata(
+        kind=AgentKind.REDUCER,
+        agent_name=AgentName("tmr-integrator-esc-render"),
+        branch_name="mngr-tmr/integrated-esc-render",
+    )
+    write_integrator_outcome(
+        output_dir,
+        integrator_meta.agent_name,
+        {
+            "squashed_branches": ["mngr-tmr/a"],
+            "normalizations": [{"summary_markdown": "Extracted **assert_agent_running** helper"}],
+            "escalations": [{"title": "codex needs OpenAI creds", "detail_markdown": "Provide a fake-codex fixture"}],
+        },
+    )
+    result_path = generate_html_report(agents, output_dir, integrator_metadata=integrator_meta)
+    content = result_path.read_text()
+    assert "Escalations (1)" in content
+    assert "codex needs OpenAI creds" in content
+    assert "Provide a fake-codex fixture" in content
+    assert "Suite normalizations (1)" in content
+    # Markdown in the normalization summary is rendered to HTML.
+    assert "<strong>assert_agent_running</strong>" in content
+
+
+def test_generate_html_report_no_escalations_section_when_empty(tmp_path: Path) -> None:
+    output_dir = tmp_path / "out"
+    agents = [make_metadata_and_outcome(output_dir, "a", tests_passing_before=True, tests_passing_after=True)]
+    integrator_meta = AgentMetadata(
+        kind=AgentKind.REDUCER,
+        agent_name=AgentName("tmr-integrator-esc-empty"),
+        branch_name="mngr-tmr/integrated-esc-empty",
+    )
+    write_integrator_outcome(output_dir, integrator_meta.agent_name, {"squashed_branches": ["mngr-tmr/a"]})
+    content = generate_html_report(agents, output_dir, integrator_metadata=integrator_meta).read_text()
+    assert "Escalations" not in content
+    assert "Suite normalizations" not in content
+
+
+def test_generate_html_report_escalation_title_escaped(tmp_path: Path) -> None:
+    output_dir = tmp_path / "out"
+    agents = [make_metadata_and_outcome(output_dir, "a", tests_passing_before=True, tests_passing_after=True)]
+    integrator_meta = AgentMetadata(
+        kind=AgentKind.REDUCER,
+        agent_name=AgentName("tmr-integrator-esc-xss"),
+        branch_name=None,
+    )
+    write_integrator_outcome(
+        output_dir,
+        integrator_meta.agent_name,
+        {"escalations": [{"title": "<script>alert('xss')</script>", "detail_markdown": "x"}]},
+    )
+    content = generate_html_report(agents, output_dir, integrator_metadata=integrator_meta).read_text()
+    assert "<script>alert" not in content
+    assert "&lt;script&gt;" in content
+
+
 def test_generate_html_report_html_escaped(tmp_path: Path) -> None:
     output_dir = tmp_path / "out"
     xss_branch = "<script>alert('xss')</script>"
