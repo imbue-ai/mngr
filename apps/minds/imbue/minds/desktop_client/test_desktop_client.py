@@ -2829,11 +2829,11 @@ def _write_fake_mngr(tmp_path: Path, stop_exit: int = 0, start_exit: int = 0, st
     provider would surface (e.g. ``NoResumableSnapshotModalMngrError``).
     """
     script = tmp_path / "fake_mngr"
-    start_stderr_line = f'echo {shlex.quote(start_stderr)} >&2; ' if start_stderr else ""
+    start_stderr_line = f"echo {shlex.quote(start_stderr)} >&2; " if start_stderr else ""
     script.write_text(
         "#!/bin/sh\n"
         'echo "$@" >> "$0.log"\n'
-        "case \"$1\" in\n"
+        'case "$1" in\n'
         f"  stop) exit {stop_exit} ;;\n"
         f"  start) {start_stderr_line}exit {start_exit} ;;\n"
         "  *) exit 0 ;;\n"
@@ -2843,9 +2843,7 @@ def _write_fake_mngr(tmp_path: Path, stop_exit: int = 0, start_exit: int = 0, st
     return str(script)
 
 
-def _resolver_with_modal_system_services(
-    workspace_agent: AgentId, services_agent: AgentId
-) -> MngrCliBackendResolver:
+def _resolver_with_modal_system_services(workspace_agent: AgentId, services_agent: AgentId) -> MngrCliBackendResolver:
     """Build a resolver where workspace + system-services agents share a Modal host.
 
     Modal is resume-capable but not shutdown-capable, so it exercises the

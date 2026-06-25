@@ -178,6 +178,7 @@ def select_latest_resumable_snapshot(snapshots: Sequence[SnapshotRecord]) -> Sna
         return None
     return sorted(resumable, key=lambda snap: snap.created_at, reverse=True)[0]
 
+
 P = ParamSpec("P")
 T = TypeVar("T")
 

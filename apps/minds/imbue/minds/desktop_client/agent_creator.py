@@ -1127,9 +1127,7 @@ def _run_modal_create_with_transfer_retry(
     log_queue: queue.Queue[str],
     *,
     max_attempts: int = _MODAL_TRANSFER_MAX_ATTEMPTS,
-    attempt_create: Callable[
-        [str | None, _MngrCreateAttemptParams], tuple[AgentId, HostId]
-    ] = _attempt_mngr_create,
+    attempt_create: Callable[[str | None, _MngrCreateAttemptParams], tuple[AgentId, HostId]] = _attempt_mngr_create,
 ) -> tuple[AgentId, HostId]:
     """Create a Modal workspace, retrying when the sandbox's tunnel drops the transfer.
 
@@ -1149,9 +1147,7 @@ def _run_modal_create_with_transfer_retry(
                 raise
             log_queue.put(
                 "[minds] Modal sandbox transfer dropped (attempt {}/{}) -- that region's "
-                "tunnel was flaky. Discarding the sandbox and trying a fresh one...".format(
-                    attempt, max_attempts
-                )
+                "tunnel was flaky. Discarding the sandbox and trying a fresh one...".format(attempt, max_attempts)
             )
     return attempt_create(None, params)
 
@@ -1700,9 +1696,7 @@ class AgentCreator(MutableModel):
                 elif launch_mode is LaunchMode.MODAL_DIRECT:
                     # Modal's fresh-sandbox tunnel drops the transfer ~half the time;
                     # retry on a new sandbox until one lands on a healthy region.
-                    canonical_id, canonical_host_id = _run_modal_create_with_transfer_retry(
-                        attempt_params, log_queue
-                    )
+                    canonical_id, canonical_host_id = _run_modal_create_with_transfer_retry(attempt_params, log_queue)
                 else:
                     canonical_id, canonical_host_id = _attempt_mngr_create(None, attempt_params)
 
