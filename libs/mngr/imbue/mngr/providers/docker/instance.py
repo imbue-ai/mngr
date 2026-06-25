@@ -1519,9 +1519,8 @@ kill -TERM 1
                     )
 
             # Remove the per-host build image so built images don't pile up. The
-            # container is gone, so force-removing drops mngr's tag and deletes
-            # the image -- unless a snapshot still shares its layers, which
-            # Docker keeps.
+            # container is gone, so force-removing drops mngr's tag.
+            # Docker will handle the gc of image if no other references to it.
             try:
                 self._remove_build_image(host_id)
             except docker.errors.NotFound:
