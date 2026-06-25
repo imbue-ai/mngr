@@ -379,6 +379,27 @@ def test_render_create_form_default_preset_is_remote_with_account() -> None:
     assert "aria-checked:outline-accent" in html
 
 
+def test_render_create_form_preset_cards_use_badge_check_icons() -> None:
+    # The feature checklists use the badge-check glyphs rather than a plain
+    # check: the remote (Imbue Cloud) card shows the blue *filled* badge
+    # (``badge-check-filled`` -- the lone evenodd-knockout glyph) and the local
+    # card the *unfilled* outline badge (``badge-check``) in regular content
+    # color. Icons render to raw path data, so scope each card's region and
+    # assert on the glyph fingerprints.
+    html = render_create_form()
+    remote_region = html[html.index('data-preset="remote"') : html.index('data-preset="local"')]
+    local_region = html[html.index('data-preset="local"') : html.index('id="advanced-view"')]
+    # Remote: blue (text-accent) filled badge -- the only glyph with an
+    # evenodd knockout.
+    assert "text-accent" in remote_region
+    assert 'fill-rule="evenodd"' in remote_region
+    # Local: regular-content-color (text-secondary) outline badge, with no
+    # filled-badge knockout in that card.
+    assert "text-secondary" in local_region
+    assert "M14.0635 7.99966" in local_region
+    assert 'fill-rule="evenodd"' not in local_region
+
+
 def test_render_create_form_start_advanced_opens_advanced_view() -> None:
     # ``start_advanced`` drives the inline init so the advanced view shows first.
     assert "showAdvanced(true)" in render_create_form(start_advanced=True)
@@ -1714,6 +1735,29 @@ def test_icon16_play_is_the_lone_stroked_glyph() -> None:
     html = CATALOG.render("Icon16", name="play")
     assert 'viewBox="0 0 16 16"' in html
     assert 'fill="none" stroke="currentColor" stroke-width="1.2"' in html
+    assert "black" not in html
+
+
+def test_icon16_badge_check_renders_as_an_outline_glyph() -> None:
+    # ``badge-check`` (the unfilled badge on the local preset card) is a single
+    # currentColor fill outline like the rest of the set -- no hardcoded black,
+    # no evenodd knockout.
+    html = CATALOG.render("Icon16", name="badge-check")
+    assert 'viewBox="0 0 16 16"' in html
+    assert '<path d="M14.0635 7.99966' in html
+    assert "black" not in html
+    assert "fill-rule" not in html
+
+
+def test_icon16_badge_check_filled_is_a_solid_knockout_glyph() -> None:
+    # ``badge-check-filled`` (the blue badge on the remote preset card) is the
+    # lone solid glyph: a filled badge with the check knocked out via
+    # ``fill-rule="evenodd"``, so the cut-out shows the surface behind it. It
+    # still inherits currentColor from the shell (no hardcoded black).
+    html = CATALOG.render("Icon16", name="badge-check-filled")
+    assert 'viewBox="0 0 16 16"' in html
+    assert 'fill-rule="evenodd"' in html
+    assert 'clip-rule="evenodd"' in html
     assert "black" not in html
 
 
