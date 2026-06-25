@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-19
+
+Trimmed the README to user-relevant content and tightened it for concision.
+
 ## 2026-06-17
 
 Bumped the trailing-comment ratchet snapshot to account for the converter's pre-existing `# noqa` lint suppression (an immovable trailing comment), surfaced by CI on the agent-mixins branch.

@@ -1,8 +1,9 @@
-const { spawn, execSync } = require('child_process');
+const { spawn } = require('child_process');
 const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const paths = require('./paths');
+const { getBuildMetadata } = require('./build-metadata');
 
 // Swallow EPIPE on the Electron main process's own stdout/stderr. When dev
 // launches go through a pipe (e.g. `just minds-start | head -30`), the
@@ -20,38 +21,6 @@ for (const stream of [process.stdout, process.stderr]) {
 }
 
 let backendProcess = null;
-
-/**
- * Resolve the release id + git SHA handed to the Python backend (which forwards
- * them to Sentry as the release + git_sha tag).
- *
- * - releaseId always comes from package.json (the desktop app version).
- * - gitSha: dev runs resolve it live from the monorepo's git checkout (this is
- *   `just minds-start` -> `pnpm start` -> `electron .`); packaged builds read
- *   the SHA baked into build-info.json by build.js (build-info.json is only
- *   written at build time, so reading it in dev would surface a stale value).
- * Both fall back to "unknown" when unavailable (e.g. a tarball with no .git, or
- *   a packaged build whose build-info.json is missing).
- */
-function getBuildMetadata() {
-  const releaseId = require('../package.json').version || 'unknown';
-  let gitSha = 'unknown';
-  if (paths.isDev()) {
-    try {
-      gitSha = execSync('git rev-parse HEAD', { cwd: paths.getMonorepoRoot() }).toString().trim() || 'unknown';
-    } catch (err) {
-      console.warn(`[build-metadata] Could not resolve git SHA from checkout: ${err.message}`);
-    }
-  } else {
-    try {
-      const info = JSON.parse(fs.readFileSync(path.join(__dirname, 'build-info.json'), 'utf8'));
-      gitSha = info.gitSha || 'unknown';
-    } catch (err) {
-      console.warn(`[build-metadata] Could not read build-info.json: ${err.message}`);
-    }
-  }
-  return { releaseId, gitSha };
-}
 
 /**
  * Find an available port by briefly binding to port 0.

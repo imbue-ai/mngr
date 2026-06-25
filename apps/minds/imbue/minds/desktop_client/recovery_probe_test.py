@@ -12,6 +12,7 @@ from imbue.minds.desktop_client.recovery_probe import build_host_health_response
 from imbue.minds.desktop_client.recovery_probe import build_probe_argv
 from imbue.minds.desktop_client.recovery_probe import parse_inner_port_from_command
 from imbue.minds.desktop_client.recovery_probe import parse_listening_sockets
+from imbue.minds.desktop_client.recovery_probe import parse_supervisorctl_status_state
 from imbue.mngr.primitives import AgentId
 
 _SERVICES_AGENT_ID: AgentId = AgentId("agent-" + "0" * 31 + "2")
@@ -76,6 +77,24 @@ def test_parse_inner_port_returns_none_when_command_lacks_url_flag() -> None:
     assert parse_inner_port_from_command("system-interface") is None
 
 
+# --- supervisorctl status parsing -----------------------------------------
+
+
+def test_parse_supervisorctl_status_state_reads_running() -> None:
+    line = "system_interface                 RUNNING   pid 42, uptime 0:10:00"
+    assert parse_supervisorctl_status_state(line) == "RUNNING"
+
+
+def test_parse_supervisorctl_status_state_reads_non_running_state() -> None:
+    assert parse_supervisorctl_status_state("system_interface   FATAL     Exited too quickly") == "FATAL"
+
+
+def test_parse_supervisorctl_status_state_none_on_connection_error() -> None:
+    """A socket/connection error is not a process state -> None (UNKNOWN), not NO."""
+    assert parse_supervisorctl_status_state("unix:///var/run/supervisor.sock refused connection") is None
+    assert parse_supervisorctl_status_state("system_interface: ERROR (no such process)") is None
+
+
 # --- build_probe_argv -----------------------------------------------------
 
 
@@ -131,40 +150,58 @@ def test_can_run_commands_probe_no_when_sentinel_absent() -> None:
 
 
 def test_can_run_commands_probe_yes_when_sentinel_present() -> None:
-    response = _response(in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": True}))
+    response = _response(in_container_stdout=_probe_stdout({"system_interface_status": "system_interface RUNNING"}))
     assert _answer(response, "run a command") == ProbeAnswer.YES
 
 
-def test_services_toml_probe_no_when_declaration_missing() -> None:
-    response = _response(in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": False}))
-    assert _answer(response, "services.toml") == ProbeAnswer.NO
+def test_system_interface_probe_yes_when_running() -> None:
+    response = _response(
+        in_container_stdout=_probe_stdout(
+            {"system_interface_status": "system_interface   RUNNING   pid 42, uptime 0:10:00"}
+        )
+    )
+    assert _answer(response, "running under supervisord") == ProbeAnswer.YES
 
 
-def test_services_toml_probe_yes_when_declaration_present() -> None:
-    response = _response(in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": True}))
-    assert _answer(response, "services.toml") == ProbeAnswer.YES
+def test_system_interface_probe_no_when_not_running() -> None:
+    response = _response(
+        in_container_stdout=_probe_stdout(
+            {"system_interface_status": "system_interface   FATAL     Exited too quickly"}
+        )
+    )
+    assert _answer(response, "running under supervisord") == ProbeAnswer.NO
 
 
-def test_services_toml_probe_unknown_when_probe_did_not_run() -> None:
+def test_system_interface_probe_unknown_when_supervisorctl_errored() -> None:
+    """A supervisorctl error (couldn't reach supervisord) is UNKNOWN, not NO."""
+    response = _response(
+        in_container_stdout=_probe_stdout({"supervisorctl_error": "FileNotFoundError('supervisorctl')"})
+    )
+    assert _answer(response, "running under supervisord") == ProbeAnswer.UNKNOWN
+
+
+def test_system_interface_probe_unknown_when_status_unparseable() -> None:
+    """A connection-error line carries no state word -> UNKNOWN, not NO."""
+    response = _response(
+        in_container_stdout=_probe_stdout(
+            {"system_interface_status": "unix:///var/run/supervisor.sock refused connection"}
+        )
+    )
+    assert _answer(response, "running under supervisord") == ProbeAnswer.UNKNOWN
+
+
+def test_system_interface_probe_unknown_when_probe_did_not_run() -> None:
     response = _response(in_container_stdout=None)
-    assert _answer(response, "services.toml") == ProbeAnswer.UNKNOWN
+    assert _answer(response, "running under supervisord") == ProbeAnswer.UNKNOWN
 
 
 def test_curl_probe_yes_for_200() -> None:
-    response = _response(
-        in_container_stdout=_probe_stdout(
-            {"services_toml_declares_system_interface": True, "inner_port": 8000, "curl_status": "200"}
-        )
-    )
+    response = _response(in_container_stdout=_probe_stdout({"inner_port": 8000, "curl_status": "200"}))
     assert _answer(response, "GET /") == ProbeAnswer.YES
 
 
 def test_curl_probe_no_for_non_200() -> None:
-    response = _response(
-        in_container_stdout=_probe_stdout(
-            {"services_toml_declares_system_interface": True, "inner_port": 8000, "curl_status": "502"}
-        )
-    )
+    response = _response(in_container_stdout=_probe_stdout({"inner_port": 8000, "curl_status": "502"}))
     assert _answer(response, "GET /") == ProbeAnswer.NO
 
 
@@ -172,7 +209,6 @@ def test_port_listener_probe_yes_when_listener_present() -> None:
     response = _response(
         in_container_stdout=_probe_stdout(
             {
-                "services_toml_declares_system_interface": True,
                 "inner_port": 8000,
                 "port_listener": "LISTEN 0.0.0.0:8000\nLISTEN ::1:8000",
             }
@@ -183,7 +219,7 @@ def test_port_listener_probe_yes_when_listener_present() -> None:
 
 def test_plugin_resolver_probe_yes_when_services_registered() -> None:
     response = _response(
-        in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": True}),
+        in_container_stdout=_probe_stdout({"system_interface_status": "system_interface RUNNING"}),
         plugin_resolver_services={"system_interface": "http://127.0.0.1:9100"},
     )
     probe = _probe_for(response, "registered with the plugin resolver")
@@ -192,7 +228,7 @@ def test_plugin_resolver_probe_yes_when_services_registered() -> None:
 
 
 def test_plugin_resolver_probe_no_when_no_services_registered() -> None:
-    response = _response(in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": True}))
+    response = _response(in_container_stdout=_probe_stdout({"system_interface_status": "system_interface RUNNING"}))
     assert _answer(response, "registered with the plugin resolver") == ProbeAnswer.NO
 
 
@@ -202,8 +238,22 @@ def test_plugin_resolver_probe_no_when_no_services_registered() -> None:
 def test_dispatch_tier_interface_unresponsive_when_container_running_and_exec_works() -> None:
     response = _response(
         host_state="RUNNING",
+        in_container_stdout=_probe_stdout({"inner_port": 8000, "curl_status": "502"}),
+    )
+    assert response.dispatch_tier == DispatchTier.INTERFACE_UNRESPONSIVE
+
+
+def test_dispatch_tier_interface_unresponsive_when_system_interface_not_running() -> None:
+    """A not-RUNNING system_interface (container up, exec works) is still INTERFACE_UNRESPONSIVE.
+
+    The supervisorctl probe is diagnostic detail, not its own tier: a surgical
+    restart bounces supervisord (and the system_interface with it), which is the
+    correct recovery, so the dispatch tier must not branch on probe 4.
+    """
+    response = _response(
+        host_state="RUNNING",
         in_container_stdout=_probe_stdout(
-            {"services_toml_declares_system_interface": True, "inner_port": 8000, "curl_status": "502"}
+            {"system_interface_status": "system_interface   FATAL     Exited too quickly", "inner_port": 8000}
         ),
     )
     assert response.dispatch_tier == DispatchTier.INTERFACE_UNRESPONSIVE
@@ -223,16 +273,6 @@ def test_dispatch_tier_host_unresponsive_when_container_running_but_exec_dead() 
     """
     response = _response(host_state="RUNNING", in_container_stdout=None)
     assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
-
-
-def test_dispatch_tier_misconfigured_beats_other_signals() -> None:
-    """A missing [services.system_interface] block dominates: no restart will help."""
-    response = _response(
-        host_state="RUNNING",
-        in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": False}),
-        plugin_resolver_services={"system_interface": "http://127.0.0.1:9100"},
-    )
-    assert response.dispatch_tier == DispatchTier.WORKSPACE_MISCONFIGURED
 
 
 def test_dispatch_tier_host_unresponsive_for_ambiguous_host_state() -> None:
@@ -311,16 +351,12 @@ def _inner_python_body(command: str) -> str | None:
 def test_python_probe_commands_are_well_formed_and_runnable() -> None:
     """Every ``python3 -c`` probe command must unwrap and compile as Python.
 
-    Guards against quote-nesting bugs (the original services.toml command
-    nested single quotes inside a single-quoted ``-c`` body) and against the
-    ``mngr exec`` wrapper mangling the inner script. compile() validates the
-    inner body's syntax without executing it.
+    Guards against quote-nesting bugs (the inner-port LISTEN scan nests single
+    quotes inside a single-quoted ``-c`` body) and against the ``mngr exec``
+    wrapper mangling the inner script. compile() validates the inner body's
+    syntax without executing it.
     """
-    response = _response(
-        in_container_stdout=_probe_stdout(
-            {"services_toml_declares_system_interface": True, "inner_port": 8000, "curl_status": "200"}
-        )
-    )
+    response = _response(in_container_stdout=_probe_stdout({"inner_port": 8000, "curl_status": "200"}))
     checked: list[tuple[str, str]] = []
     for p in response.probes:
         body = _inner_python_body(p.command)
@@ -341,7 +377,7 @@ def test_python_probe_commands_are_well_formed_and_runnable() -> None:
 
 def _healthy_probe_stdout(**overrides: object) -> str:
     payload: dict[str, object] = {
-        "services_toml_declares_system_interface": True,
+        "system_interface_status": "system_interface   RUNNING   pid 42, uptime 0:10:00",
         "inner_port": 8000,
         "curl_status": "200",
         "port_listener": "LISTEN 0.0.0.0:8000",
@@ -364,7 +400,7 @@ def test_services_agent_probe_outputs_the_resolved_agent_id() -> None:
 
 
 def test_can_run_commands_output_is_the_raw_exec_stdout() -> None:
-    stdout = _probe_stdout({"services_toml_declares_system_interface": True})
+    stdout = _probe_stdout({"system_interface_status": "system_interface RUNNING"})
     response = _response(in_container_stdout=stdout, mngr_exec_command="mngr exec agent-x 'echo hi' --quiet")
     probe = _probe_for(response, "run a command")
     assert probe.command == "mngr exec agent-x 'echo hi' --quiet"
@@ -372,17 +408,22 @@ def test_can_run_commands_output_is_the_raw_exec_stdout() -> None:
     assert probe.output == stdout
 
 
-def test_services_toml_command_is_mngr_exec_and_output_is_declared() -> None:
-    response = _response(in_container_stdout=_healthy_probe_stdout())
-    probe = _probe_for(response, "services.toml")
+def test_system_interface_command_is_supervisorctl_and_output_is_status_line() -> None:
+    status = "system_interface   RUNNING   pid 42, uptime 0:10:00"
+    response = _response(in_container_stdout=_healthy_probe_stdout(system_interface_status=status))
+    probe = _probe_for(response, "running under supervisord")
     assert probe.command.startswith(f"mngr exec {_SERVICES_AGENT_ID} ")
-    assert "python3 -c" in probe.command
-    assert probe.output == "declared"
+    assert "supervisorctl -c /code/supervisord.conf status system_interface" in probe.command
+    # The output is supervisord's own status line, verbatim.
+    assert probe.output == status
 
 
-def test_services_toml_output_is_missing_when_not_declared() -> None:
-    response = _response(in_container_stdout=_healthy_probe_stdout(services_toml_declares_system_interface=False))
-    assert _probe_for(response, "services.toml").output == "MISSING"
+def test_system_interface_output_is_status_line_when_not_running() -> None:
+    status = "system_interface   FATAL     Exited too quickly"
+    response = _response(in_container_stdout=_healthy_probe_stdout(system_interface_status=status))
+    probe = _probe_for(response, "running under supervisord")
+    assert probe.answer == ProbeAnswer.NO
+    assert probe.output == status
 
 
 def test_curl_output_is_bare_status_code() -> None:

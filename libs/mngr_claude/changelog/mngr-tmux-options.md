@@ -1,2 +1,0 @@
-- The Claude response-streaming snapshot watcher now captures the agent's tmux pane by the configured primary window name (`tmux.primary_window_name`, default `agent`) instead of the literal `:0` index, so response streaming works regardless of the user's tmux `base-index`.
-- Internal refactor: the Claude agent now builds its tmux session name via the shared `AgentInterface.session_name` helper instead of hand-rolling the `prefix + name` string, keeping it consistent with mngr's centralized session-name construction.
