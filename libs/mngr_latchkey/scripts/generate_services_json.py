@@ -103,8 +103,8 @@ _MANUAL_SERVICE_ENTRIES: Final[Mapping[str, list[dict[str, object]]]] = {
                 {
                     "name": "minds-workspaces-ssh",
                     "description": (
-                        "Open temporary SSH access into a workspace (inject a public key and "
-                        "broker a forwarding tunnel)."
+                        "Open temporary SSH access into a remote workspace (inject your public "
+                        "key so you can connect to it directly)."
                     ),
                 },
             ],

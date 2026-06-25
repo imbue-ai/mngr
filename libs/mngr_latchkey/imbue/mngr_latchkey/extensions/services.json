@@ -1793,7 +1793,7 @@
         },
         {
           "name": "minds-workspaces-ssh",
-          "description": "Open temporary SSH access into a workspace (inject a public key and broker a forwarding tunnel)."
+          "description": "Open temporary SSH access into a remote workspace (inject your public key so you can connect to it directly)."
         }
       ]
     }
