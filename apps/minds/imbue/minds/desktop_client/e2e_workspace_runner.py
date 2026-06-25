@@ -787,11 +787,11 @@ def _drive_create_flow(
     page.goto(f"{backend_origin}/create", wait_until="domcontentloaded")
     page.wait_for_selector("#create-form", state="attached", timeout=10_000)
 
-    # The repo field lives inside the collapsed "Configure..."
-    # panel's nested "Show advanced settings" section; open both
-    # so the field is visible (and to mirror what a user setting
-    # a non-default repo would do). ``#host_name`` is top-level.
-    page.click("#configure-toggle")
+    # The repo field, the workspace-name field, and the compute-provider
+    # controls all live in the create form's advanced configuration view,
+    # which is collapsed by default. Open it via the single "Advanced
+    # Configuration" toggle so those fields are visible (mirroring what a
+    # user setting a non-default repo would do).
     page.wait_for_selector("#toggle-advanced:visible", timeout=5_000)
     page.click("#toggle-advanced")
     page.wait_for_selector("#git_url:visible", timeout=5_000)
@@ -804,7 +804,7 @@ def _drive_create_flow(
         page.select_option("#account_id", label=account_label)
     # Select the requested compute provider. With no account selected the
     # form defaults to LIMA; CI's local-Docker test pins DOCKER. The select
-    # lives in the (now-open) "Configure..." panel.
+    # lives in the (now-open) advanced configuration view.
     page.select_option("#launch_mode", launch_mode)
     # Region-aware modes (aws/vultr/imbue_cloud) reveal a region select
     # that must carry a value; the JS shows the row on the launch_mode

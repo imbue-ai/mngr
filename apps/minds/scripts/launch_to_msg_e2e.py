@@ -687,8 +687,8 @@ async def _create_workspace_and_first_message(
     """
     await win.goto(origin + "/create")
     await win.wait_for_selector("#create-form", timeout=10_000)
-    await win.click("#configure-toggle")
-    await win.wait_for_selector("#configure-panel:not(.hidden)", timeout=5_000)
+    await win.click("#toggle-advanced")
+    await win.wait_for_selector("#advanced-view:not(.hidden)", timeout=5_000)
     await win.select_option("#launch_mode", value="LIMA")
     await win.select_option("#ai_provider", value=ai_provider)
     if ai_provider == "API_KEY":
