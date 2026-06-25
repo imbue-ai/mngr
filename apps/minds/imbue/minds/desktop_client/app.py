@@ -4597,6 +4597,6 @@ def _run_discovery_health_watchdog_loop(
         )
         return
     while not root_concurrency_group.is_shutting_down():
-        _, last_full_snapshot_at = backend_resolver.get_freshness_timestamps()
-        watchdog.evaluate(last_full_snapshot_at)
+        last_event_at, _ = backend_resolver.get_freshness_timestamps()
+        watchdog.evaluate(last_event_at)
         threading.Event().wait(timeout=_DISCOVERY_WATCHDOG_POLL_INTERVAL_SECONDS)

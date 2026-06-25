@@ -454,6 +454,49 @@ def test_get_forward_info_returns_none_when_unstarted(tmp_path: Path) -> None:
     assert supervisor.get_forward_info() is None
 
 
+def test_is_running_false_when_unstarted(tmp_path: Path) -> None:
+    supervisor = LatchkeyForwardSupervisor(
+        mngr_binary="/nonexistent-binary",
+        latchkey_binary="/nonexistent-binary",
+        latchkey_directory=tmp_path / f"latchkey-{uuid4().hex}",
+    )
+    assert supervisor.is_running() is False
+
+
+def test_is_running_false_for_stale_pid_record(tmp_path: Path) -> None:
+    supervisor = LatchkeyForwardSupervisor(
+        mngr_binary="/nonexistent-binary",
+        latchkey_binary="/nonexistent-binary",
+        latchkey_directory=tmp_path / f"latchkey-{uuid4().hex}",
+    )
+    # A record whose PID is not a live ``mngr latchkey forward`` reads as not
+    # running (pid 1 is alive but its cmdline does not match).
+    save_forward_info(
+        supervisor.plugin_data_dir,
+        LatchkeyForwardInfo(pid=1, started_at=datetime.now(timezone.utc)),
+    )
+    assert supervisor.is_running() is False
+
+
+def test_is_running_true_for_live_supervisor(tmp_path: Path) -> None:
+    fake_binary = _make_fake_mngr_binary(tmp_path)
+    supervisor = LatchkeyForwardSupervisor(
+        mngr_binary=str(fake_binary),
+        latchkey_binary="/usr/bin/latchkey-unused",
+        latchkey_directory=tmp_path / f"latchkey-{uuid4().hex}",
+    )
+    info = supervisor.ensure_running()
+    try:
+        # The child publishes its record asynchronously; once it lands, the
+        # liveness probe sees the live, cmdline-matching supervisor.
+        _wait_for_forward_record(supervisor.plugin_data_dir)
+        assert supervisor.is_running() is True
+    finally:
+        supervisor.stop()
+        assert _wait_for_process_exit(info.pid)
+    assert supervisor.is_running() is False
+
+
 # -- liveness probe (direct) -------------------------------------------------
 
 

@@ -1,0 +1,9 @@
+Changed: the discovery-pipeline health watchdog no longer gives up on a stalled discovery *producer*. Previously a producer stall ran one bounce + one restart and then, if freshness still hadn't returned, surfaced the terminal "Minds has disconnected from your workspaces" takeover screen — a dead end that even "Restart Minds" couldn't reliably clear, since a freshly-respawned supervisor could re-stall the same way. Now a stall keeps the app in the silent, background `reconnecting` state and keeps retrying forever: one bounce, then repeated supervisor restarts on a capped exponential backoff (15s → 30s → 60s → 120s → … capped at 5 min). The backoff is deliberate — a full restart re-provisions every managed host, so hammering a merely-slow producer would make things worse.
+
+Changed: the watchdog detects a *dead* supervisor directly (a liveness probe) and remediates it immediately, instead of waiting out the stall timer first.
+
+Changed: the stall signal is now the age of the last discovery *event* (any update from the producer) rather than the last full *snapshot*. A producer that is alive and still emitting — just slow to complete a full re-poll because, say, one provider is down — is now correctly treated as healthy and left alone, rather than being needlessly bounced/restarted.
+
+Changed: the full-screen "disconnected from your workspaces" takeover is now reserved for the genuinely-unusable case — the forwarding subprocess (which is also the HTTP traffic proxy) dying. A producer stall, where the currently-open workspace still works, no longer escalates to that screen.
+
+Fixed: when the takeover screen does appear, its "Show details" panel is now populated with the tail of the log instead of being an empty box, matching the app's other error screens.

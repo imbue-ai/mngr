@@ -1422,6 +1422,9 @@ class _NoopRemediator(ProducerRemediator):
     def restart(self) -> None:
         pass
 
+    def is_alive(self) -> bool:
+        return True
+
 
 def test_chrome_events_sse_emits_discovery_health_blocked_on_connect(tmp_path: Path) -> None:
     """A BLOCKED watchdog makes the chrome SSE emit a discovery_health payload on connect.

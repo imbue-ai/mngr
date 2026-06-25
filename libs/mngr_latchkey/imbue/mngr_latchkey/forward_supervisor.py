@@ -213,6 +213,19 @@ class LatchkeyForwardSupervisor(MutableModel):
         """Return the persisted supervisor record, if any."""
         return load_forward_info(self.plugin_data_dir)
 
+    def is_running(self) -> bool:
+        """Whether a live ``mngr latchkey forward`` supervisor is currently running.
+
+        Reads the on-disk record and verifies its PID is alive and its cmdline
+        still matches ``mngr latchkey forward`` (a stale record pointing at a
+        dead or recycled PID reads as not running). A best-effort, lock-free
+        probe -- used by embedders such as the minds discovery-health watchdog
+        to distinguish a dead supervisor (needs a restart) from a live one
+        (leave it be).
+        """
+        info = load_forward_info(self.plugin_data_dir)
+        return info is not None and is_forward_info_alive(info)
+
     def ensure_running(self) -> LatchkeyForwardInfo:
         """Spawn (or adopt) a detached ``mngr latchkey forward`` and return its info.
 

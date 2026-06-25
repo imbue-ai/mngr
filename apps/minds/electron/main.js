@@ -1563,16 +1563,18 @@ function handleChromeSSEEvent(evt) {
     }
   } else if (evt.type === 'discovery_health') {
     // App-global discovery-pipeline health. Only the terminal `blocked` state is
-    // ever sent (the reconnecting tier heals silently in the background). The
-    // watchdog has exhausted its self-healing -- or the consumer died -- so agent
-    // forwarding is down / the app is unusable. Take over every window with the
-    // error screen; its Retry button runs the existing restart path (shut down +
-    // restart the backend, respawning the discovery producer + consumer).
+    // ever sent (the reconnecting tier heals silently in the background, retrying
+    // forever). `blocked` means the consumer subprocess died -- it is also the
+    // HTTP traffic proxy, so agent forwarding is down / the app is unusable. Take
+    // over every window with the error screen; its Restart button runs the
+    // existing retry path (shut down + restart the backend, respawning the
+    // consumer). Surface the tail of the log as details so "Show details" isn't
+    // an empty box (matches the other takeover sites).
     if (evt.state === 'blocked' && !discoveryBlockedShown) {
       discoveryBlockedShown = true;
       showErrorInAllWindows(
         "Minds has disconnected from your workspaces and can't automatically reconnect. Restart the app to recover. Your data has not been lost.",
-        null,
+        readLastLogLines(50),
         'Restart Minds',
       );
     }
