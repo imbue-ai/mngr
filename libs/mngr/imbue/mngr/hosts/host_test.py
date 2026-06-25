@@ -1383,6 +1383,49 @@ def test_stop_agents_treats_tmux_no_current_target_as_benign(
     assert get_cleanup_failures(lambda: host.stop_agents([agent.id])) == []
 
 
+def test_reap_agent_process_tree_kills_pane_and_env_marked_orphans_but_not_the_session(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """reap_agent_process_tree kills the pane descendants AND the MNGR_AGENT_ID-tagged
+    orphans (reparented to PID 1), with SIGTERM then SIGKILL, but does NOT kill the
+    tmux session itself.
+
+    Regression: a long-lived daemon launched under an agent (the FCT bootstrap's
+    supervisord and its ttyd) could be orphaned to PID 1 on an abrupt teardown and
+    outlive the agent, holding a fixed port (EADDRINUSE on the next relaunch). The
+    shared reap must catch such orphans via the env marker, which a pane/tree walk
+    misses. It must NOT kill the session, so callers can reap-then-relaunch in place.
+    """
+    agent = make_test_agent_details("reap-tree-agent")
+    pane_pid = "55502"
+    orphan_pid = "55501"
+
+    def handle(command: str) -> CommandResult:
+        if "list-windows" in command:
+            return CommandResult(stdout="0", stderr="", success=True)
+        if "list-panes" in command:
+            return CommandResult(stdout=pane_pid, stderr="", success=True)
+        # The env-marker /proc scan that finds orphans reparented to PID 1.
+        if "MNGR_AGENT_ID" in command:
+            return CommandResult(stdout=orphan_pid, stderr="", success=True)
+        return CommandResult(stdout="", stderr="", success=True)
+
+    host, recorded = _make_stop_agents_test_host(local_provider, cast(AgentInterface, agent), handle)
+
+    failures = host.reap_agent_process_tree(cast(AgentInterface, agent))
+
+    assert failures == []
+    commands = [command for command, _ in recorded]
+    # It ran the env-marker orphan scan.
+    assert any("MNGR_AGENT_ID" in command for command in commands)
+    # It killed BOTH the pane pid and the env-marked orphan, via SIGTERM and SIGKILL.
+    kill_commands = " ".join(c for c in commands if "kill -TERM" in c or "kill -KILL" in c)
+    assert "kill -TERM" in kill_commands and "kill -KILL" in kill_commands
+    assert pane_pid in kill_commands and orphan_pid in kill_commands
+    # It must NOT kill the tmux session -- that's stop_agents' job, not the reap's.
+    assert not any("kill-session" in command for command in commands)
+
+
 def test_execute_idempotent_command_raises_command_timeout_error_on_local_timeout(
     local_host: Host,
 ) -> None:

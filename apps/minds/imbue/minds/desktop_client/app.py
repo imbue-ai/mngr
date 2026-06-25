@@ -66,6 +66,8 @@ from imbue.minds.desktop_client.destroying import read_destroying
 from imbue.minds.desktop_client.destroying import read_host_id
 from imbue.minds.desktop_client.destroying import read_log_chunk
 from imbue.minds.desktop_client.destroying import start_destroy
+from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
+from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
@@ -249,6 +251,11 @@ def _should_emit_system_interface_status(
     if onset is None:
         return _is_discovery_fresh(last_full_snapshot_at)
     return last_full_snapshot_at is not None and last_full_snapshot_at >= onset
+
+
+def _discovery_health_payload(health: DiscoveryHealth) -> dict[str, str]:
+    """Build a ``discovery_health`` SSE payload for the app-global pipeline state."""
+    return {"type": "discovery_health", "state": health.value}
 
 
 # -- Request-body + dependency helpers --
@@ -2147,6 +2154,14 @@ def _handle_chrome_events() -> Response:
         if tracker is not None:
             tracker.add_on_change_callback(_on_health_change)
 
+        # The watchdog's no-arg on-change reuses the same wake as the resolver;
+        # the loop re-reads its tier each tick (like providers_state) and emits
+        # only the terminal BLOCKED transition, once.
+        discovery_watchdog: DiscoveryHealthWatchdog | None = get_state().discovery_health_watchdog
+        if discovery_watchdog is not None:
+            discovery_watchdog.add_on_change_callback(_on_change)
+        discovery_blocked_emitted = False
+
         # Local-mind liveness is derived from discovery host state, which the
         # resolver already wakes us on (the on-change above). A Start/Stop action
         # sets an optimistic override on the same resolver and fires that same
@@ -2199,6 +2214,13 @@ def _handle_chrome_events() -> Response:
                     yield "data: {}\n\n".format(
                         json.dumps(_system_interface_status_payload(tracker, str(aid), status))
                     )
+            # Replay the app-global discovery-pipeline state if it is already
+            # BLOCKED, so a freshly (re)loaded chrome re-learns it and takes over
+            # the whole app. BLOCKED is terminal, so a single connect-time emit
+            # plus the on-change push below is sufficient.
+            if discovery_watchdog is not None and discovery_watchdog.get_health() is DiscoveryHealth.BLOCKED:
+                yield "data: {}\n\n".format(json.dumps(_discovery_health_payload(DiscoveryHealth.BLOCKED)))
+                discovery_blocked_emitted = True
             # Anchor the periodic re-assert clock to the connect-time snapshot
             # just sent, so the first backstop re-assert is a full interval out.
             last_status_reassert = time.monotonic()
@@ -2277,6 +2299,14 @@ def _handle_chrome_events() -> Response:
                             json.dumps(_system_interface_status_payload(tracker, str(aid), status))
                         )
 
+                if (
+                    discovery_watchdog is not None
+                    and not discovery_blocked_emitted
+                    and discovery_watchdog.get_health() is DiscoveryHealth.BLOCKED
+                ):
+                    discovery_blocked_emitted = True
+                    yield "data: {}\n\n".format(json.dumps(_discovery_health_payload(DiscoveryHealth.BLOCKED)))
+
                 # Periodic backstop: re-assert the current non-HEALTHY statuses
                 # even when no transition fired this tick. The tracker only
                 # *transitions* on edges (HEALTHY <-> STUCK/RESTARTING/...), so a
@@ -2343,6 +2373,8 @@ def _handle_chrome_events() -> Response:
                 backend_resolver.remove_on_change_callback(_on_change)
             if tracker is not None:
                 tracker.remove_on_change_callback(_on_health_change)
+            if discovery_watchdog is not None:
+                discovery_watchdog.remove_on_change_callback(_on_change)
 
     return make_streaming_response(
         _event_generator(),
@@ -4183,6 +4215,7 @@ def create_desktop_client(
     mngr_host_dir: Path | None = None,
     minds_api_key: str | None = None,
     latchkey_forward_supervisor: LatchkeyForwardSupervisor | None = None,
+    discovery_health_watchdog: DiscoveryHealthWatchdog | None = None,
 ) -> Flask:
     """Create the bare-origin minds Flask application.
 
@@ -4254,6 +4287,7 @@ def create_desktop_client(
         mngr_host_dir=mngr_host_dir if mngr_host_dir is not None else Path.home() / ".mngr",
         minds_api_key=minds_api_key,
         latchkey_forward_supervisor=latchkey_forward_supervisor,
+        discovery_health_watchdog=discovery_health_watchdog,
     )
     set_state(app, state)
 
@@ -4461,3 +4495,52 @@ def _run_system_interface_health_probe_loop(
                 else:
                     tracker.record_probe_failure(aid)
             threading.Event().wait(timeout=_HEALTH_PROBE_INTERVAL_SECONDS)
+
+
+# How often the discovery-health watchdog re-reads the resolver's snapshot
+# freshness. Comfortably below the watchdog's inter-remediation wait so a due
+# producer remediation fires within a tick or two of becoming due.
+_DISCOVERY_WATCHDOG_POLL_INTERVAL_SECONDS: Final[float] = 5.0
+
+
+def start_discovery_health_watchdog_loop(
+    watchdog: DiscoveryHealthWatchdog,
+    backend_resolver: BackendResolverInterface,
+    root_concurrency_group: ConcurrencyGroup | None,
+) -> None:
+    """Start the background thread that drives the discovery-health watchdog.
+
+    Each tick reads the resolver's ``last_full_snapshot_at`` and hands it to
+    ``watchdog.evaluate``, which detects a producer stall, runs the
+    bounce -> restart remediations, and escalates to BLOCKED. The thread no-ops when
+    there is no concurrency group (test factories that skip background threads).
+    """
+    if root_concurrency_group is None:
+        return
+    root_concurrency_group.start_new_thread(
+        target=_run_discovery_health_watchdog_loop,
+        args=(watchdog, backend_resolver, root_concurrency_group),
+        name="discovery-health-watchdog",
+        daemon=True,
+    )
+
+
+def _run_discovery_health_watchdog_loop(
+    watchdog: DiscoveryHealthWatchdog,
+    backend_resolver: BackendResolverInterface,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """Loop body for the discovery-health watchdog thread."""
+    if not isinstance(backend_resolver, MngrCliBackendResolver):
+        # Static resolvers used by tests report no freshness, so there is
+        # nothing to watch. Resolver type is fixed for the process lifetime, so
+        # exit immediately rather than spinning doing nothing.
+        logger.debug(
+            "Discovery-health watchdog thread exiting: backend_resolver is {}, not MngrCliBackendResolver",
+            type(backend_resolver).__name__,
+        )
+        return
+    while not root_concurrency_group.is_shutting_down():
+        _, last_full_snapshot_at = backend_resolver.get_freshness_timestamps()
+        watchdog.evaluate(last_full_snapshot_at)
+        threading.Event().wait(timeout=_DISCOVERY_WATCHDOG_POLL_INTERVAL_SECONDS)
