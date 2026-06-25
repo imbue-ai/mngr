@@ -523,13 +523,14 @@ def test_resolve_create_host_name_honors_operator_override_when_opted_in(monkeyp
     assert str(resolve_create_host_name("")) == "mindtest"
 
 
-def test_resolve_create_host_name_uniquifies_operator_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    # In dev the pinned name is shared by every create; once it is taken, the
-    # override is uniquified instead of colliding and failing.
+def test_resolve_create_host_name_operator_override_is_not_uniquified(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The operator override is used verbatim, even when it collides with an
+    # existing workspace -- a duplicate name errors at create time (like a typed
+    # name) rather than being silently renamed to ``mindtest-2``.
     monkeypatch.setenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", "1")
     monkeypatch.setenv("MINDS_WORKSPACE_NAME", "mindtest")
-    assert str(resolve_create_host_name("", {"mindtest"})) == "mindtest-2"
-    assert str(resolve_create_host_name("", {"mindtest", "mindtest-2"})) == "mindtest-3"
+    assert str(resolve_create_host_name("", {"mindtest"})) == "mindtest"
+    assert str(resolve_create_host_name("", {"mindtest", "mindtest-2"})) == "mindtest"
 
 
 def test_resolve_create_host_name_ignores_operator_override_without_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
