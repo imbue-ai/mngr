@@ -89,36 +89,13 @@ def test_relative_path_works_with_path_division() -> None:
 # =============================================================================
 
 
-def test_ssh_info_basic_creation() -> None:
-    """Test that SSHInfo can be created with required fields."""
-    ssh_info = SSHInfo(
-        user="root",
-        host="example.com",
-        port=22,
-        key_path=Path("/home/user/.ssh/id_rsa"),
-        command="ssh -i /home/user/.ssh/id_rsa -p 22 root@example.com",
-    )
-    assert ssh_info.user == "root"
-    assert ssh_info.host == "example.com"
-    assert ssh_info.port == 22
-    assert ssh_info.key_path == Path("/home/user/.ssh/id_rsa")
-    assert ssh_info.command == "ssh -i /home/user/.ssh/id_rsa -p 22 root@example.com"
+def test_ssh_info_json_round_trip_coerces_path() -> None:
+    """SSHInfo survives a JSON dump/load round-trip, coercing key_path Path<->str.
 
-
-def test_ssh_info_custom_port() -> None:
-    """Test SSHInfo with a custom port."""
-    ssh_info = SSHInfo(
-        user="deploy",
-        host="192.168.1.100",
-        port=2222,
-        key_path=Path("/keys/deploy.pem"),
-        command="ssh -i /keys/deploy.pem -p 2222 deploy@192.168.1.100",
-    )
-    assert ssh_info.port == 2222
-
-
-def test_ssh_info_serialization() -> None:
-    """Test that SSHInfo serializes to JSON correctly."""
+    The behavioral content here is the ``Path`` -> ``str`` coercion that
+    ``mode="json"`` performs (and its inverse on validation); a plain
+    field-by-field echo of the constructor inputs would catch no real bug.
+    """
     ssh_info = SSHInfo(
         user="root",
         host="example.com",
@@ -127,11 +104,13 @@ def test_ssh_info_serialization() -> None:
         command="ssh -i /home/user/.ssh/id_rsa -p 22 root@example.com",
     )
     data = ssh_info.model_dump(mode="json")
-    assert data["user"] == "root"
-    assert data["host"] == "example.com"
-    assert data["port"] == 22
+    # key_path is a Path on the model but must serialize to a plain string in JSON.
     assert data["key_path"] == "/home/user/.ssh/id_rsa"
-    assert data["command"] == "ssh -i /home/user/.ssh/id_rsa -p 22 root@example.com"
+    assert isinstance(data["key_path"], str)
+
+    restored = SSHInfo.model_validate(data)
+    assert restored == ssh_info
+    assert restored.key_path == Path("/home/user/.ssh/id_rsa")
 
 
 # =============================================================================
@@ -159,47 +138,15 @@ def test_host_details_minimal_creation() -> None:
     assert host_details.snapshots == []
 
 
-def test_host_details_with_extended_fields() -> None:
-    """Test that HostDetails can be created with all extended fields."""
-    boot_time = datetime.now(timezone.utc)
-    ssh_info = SSHInfo(
-        user="root",
-        host="example.com",
-        port=22,
-        key_path=Path("/home/user/.ssh/id_rsa"),
-        command="ssh -i /home/user/.ssh/id_rsa -p 22 root@example.com",
-    )
-    resources = HostResources(cpu=CpuResources(count=4), memory_gb=16.0, disk_gb=100.0)
+def test_host_details_json_round_trip_coerces_enum_and_nested_models() -> None:
+    """HostDetails survives a JSON dump/load round-trip with its extended fields.
 
-    host_details = HostDetails(
-        id=HostId.generate(),
-        name="test-host",
-        provider_name=ProviderInstanceName("docker"),
-        state=HostState.RUNNING,
-        image="ubuntu:22.04",
-        tags={"env": "production", "team": "infra"},
-        boot_time=boot_time,
-        uptime_seconds=3600.5,
-        resource=resources,
-        ssh=ssh_info,
-        # Note: not testing snapshots here as SnapshotInfo has complex ID requirements
-    )
-
-    assert host_details.state == HostState.RUNNING
-    assert host_details.image == "ubuntu:22.04"
-    assert host_details.tags == {"env": "production", "team": "infra"}
-    assert host_details.boot_time == boot_time
-    assert host_details.uptime_seconds == 3600.5
-    assert host_details.resource is not None
-    assert host_details.resource.memory_gb == 16.0
-    assert host_details.ssh is not None
-    assert host_details.ssh.user == "root"
-    # Snapshots should be empty by default
-    assert host_details.snapshots == []
-
-
-def test_host_details_serialization_with_extended_fields() -> None:
-    """Test that HostDetails with extended fields serializes correctly."""
+    The behavioral content is the coercion that ``mode="json"`` performs --
+    the ``HostState`` enum to its ``.value`` string, the ``boot_time``
+    datetime to an ISO string, and the nested ``SSHInfo`` (with its ``Path``)
+    to a plain dict -- plus the inverse on validation. A field-by-field echo
+    of the constructor inputs would catch none of that.
+    """
     boot_time = datetime(2024, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
     ssh_info = SSHInfo(
         user="root",
@@ -208,7 +155,7 @@ def test_host_details_serialization_with_extended_fields() -> None:
         key_path=Path("/keys/id_rsa"),
         command="ssh -i /keys/id_rsa -p 22 root@example.com",
     )
-
+    resources = HostResources(cpu=CpuResources(count=4), memory_gb=16.0, disk_gb=100.0)
     host_details = HostDetails(
         id=HostId.generate(),
         name="test-host",
@@ -218,17 +165,18 @@ def test_host_details_serialization_with_extended_fields() -> None:
         tags={"key": "value"},
         boot_time=boot_time,
         uptime_seconds=7200.0,
+        resource=resources,
         ssh=ssh_info,
     )
 
     data = host_details.model_dump(mode="json")
-
+    # The enum must serialize to its string value, not the enum object.
     assert data["state"] == HostState.RUNNING.value
-    assert data["image"] == "custom-image:v1"
-    assert data["tags"] == {"key": "value"}
-    assert data["uptime_seconds"] == 7200.0
-    assert data["ssh"]["user"] == "root"
-    assert data["ssh"]["port"] == 22
+    # The nested SSHInfo's Path must be coerced to a string inside the dict.
+    assert data["ssh"]["key_path"] == "/keys/id_rsa"
+
+    restored = HostDetails.model_validate(data)
+    assert restored == host_details
 
 
 # =============================================================================
@@ -241,19 +189,6 @@ def test_certified_host_data_tmux_session_prefix_defaults_to_none() -> None:
     now = datetime.now(timezone.utc)
     data = CertifiedHostData(host_id="host-123", host_name="test-host", created_at=now, updated_at=now)
     assert data.tmux_session_prefix is None
-
-
-def test_certified_host_data_tmux_session_prefix_set() -> None:
-    """tmux_session_prefix should be settable."""
-    now = datetime.now(timezone.utc)
-    data = CertifiedHostData(
-        host_id="host-123",
-        host_name="test-host",
-        tmux_session_prefix="mngr-",
-        created_at=now,
-        updated_at=now,
-    )
-    assert data.tmux_session_prefix == "mngr-"
 
 
 def test_certified_host_data_tmux_session_prefix_serializes_to_json() -> None:
@@ -366,19 +301,6 @@ def test_certified_host_data_preserves_non_local_host_name() -> None:
 # =============================================================================
 
 
-def test_certified_host_data_created_at_and_updated_at_explicit() -> None:
-    """created_at and updated_at should be settable explicitly."""
-    now = datetime(2026, 2, 15, 12, 0, 0, tzinfo=timezone.utc)
-    data = CertifiedHostData(
-        host_id="host-ts-1",
-        host_name="ts-host",
-        created_at=now,
-        updated_at=now,
-    )
-    assert data.created_at == now
-    assert data.updated_at == now
-
-
 def test_certified_host_data_timestamps_backward_compat_from_json() -> None:
     """Old data.json without created_at/updated_at should deserialize with defaults."""
     old_json = {
@@ -412,19 +334,6 @@ def test_certified_host_data_timestamps_round_trip_through_json() -> None:
 
     assert restored.created_at == now
     assert restored.updated_at == now
-
-
-def test_certified_host_data_timestamps_are_utc() -> None:
-    """Timestamps should be timezone-aware UTC datetimes."""
-    now = datetime.now(timezone.utc)
-    data = CertifiedHostData(
-        host_id="host-utc-1",
-        host_name="utc-host",
-        created_at=now,
-        updated_at=now,
-    )
-    assert data.created_at.tzinfo is not None
-    assert data.updated_at.tzinfo is not None
 
 
 # =============================================================================
