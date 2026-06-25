@@ -1093,6 +1093,68 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
     )
 
 
+# Modal's per-region SSH tunnel (``unencrypted_ports`` + ``sandbox.tunnels()``) is
+# reliable once a sandbox is warm but drops the work-dir ``git push`` partway
+# through on a meaningful fraction of *freshly booted* sandboxes. The fault is
+# per-region/per-instance, not size- or idle-related: a warm sandbox takes the
+# same push every time, and shrinking the payload does not fix it. A dropped push
+# rolls the half-created host back, so the cheap, deterministic fix is to throw the
+# bad sandbox away and create another -- a fresh create usually lands on a healthy
+# region. The markers below are the connection-drop signatures the git client
+# prints when the remote tunnel closes mid-transfer; matching them keeps the retry
+# scoped to this transient infra fault. A genuine deterministic failure (bad
+# config, no quota) carries a different message and is re-raised on the spot.
+_MODAL_TRANSFER_MAX_ATTEMPTS: Final[int] = 6
+_MODAL_TRANSFER_DROP_MARKERS: Final[tuple[str, ...]] = (
+    "the remote end hung up unexpectedly",
+    "unexpected disconnect while reading sideband",
+    "closed by remote host",
+)
+
+
+def _is_modal_transfer_drop(error: MngrCommandError) -> bool:
+    """True when ``error`` is a Modal tunnel dropping the work-dir transfer mid-push.
+
+    These drops are transient and host-specific, so the caller retries on a fresh
+    sandbox rather than surfacing them to the user.
+    """
+    message = str(error)
+    return any(marker in message for marker in _MODAL_TRANSFER_DROP_MARKERS)
+
+
+def _run_modal_create_with_transfer_retry(
+    params: _MngrCreateAttemptParams,
+    log_queue: queue.Queue[str],
+    *,
+    max_attempts: int = _MODAL_TRANSFER_MAX_ATTEMPTS,
+    attempt_create: Callable[
+        [str | None, _MngrCreateAttemptParams], tuple[AgentId, HostId]
+    ] = _attempt_mngr_create,
+) -> tuple[AgentId, HostId]:
+    """Create a Modal workspace, retrying when the sandbox's tunnel drops the transfer.
+
+    Only the Modal-tunnel transfer drop (see :func:`_is_modal_transfer_drop`) is
+    retried, and only by creating a *new* sandbox: the failed ``mngr create`` has
+    already rolled its host back, so re-running with the same name is clean. Any
+    other failure -- or exhausting ``max_attempts`` -- propagates unchanged.
+    """
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return attempt_create(None, params)
+        except MngrCommandError as error:
+            if attempt >= max_attempts or not _is_modal_transfer_drop(error):
+                raise
+            log_queue.put(
+                "[minds] Modal sandbox transfer dropped (attempt {}/{}) -- that region's "
+                "tunnel was flaky. Discarding the sandbox and trying a fresh one...".format(
+                    attempt, max_attempts
+                )
+            )
+    # Unreachable: the last attempt either returns or re-raises above. Present so
+    # every path has a definite return/raise for the type checker.
+    raise AssertionError("modal create retry loop exited without returning or raising")
+
+
 def _log_backup_attempt(agent_id: AgentId, retry_state: RetryCallState) -> None:
     """Debug-log a backup-setup retry, called at the start of each retry attempt.
 
@@ -1634,6 +1696,12 @@ class AgentCreator(MutableModel):
 
                 if launch_mode is LaunchMode.IMBUE_CLOUD:
                     canonical_id, canonical_host_id = self._create_imbue_cloud_with_fallback(attempt_params, log_queue)
+                elif launch_mode is LaunchMode.MODAL_DIRECT:
+                    # Modal's fresh-sandbox tunnel drops the transfer ~half the time;
+                    # retry on a new sandbox until one lands on a healthy region.
+                    canonical_id, canonical_host_id = _run_modal_create_with_transfer_retry(
+                        attempt_params, log_queue
+                    )
                 else:
                     canonical_id, canonical_host_id = _attempt_mngr_create(None, attempt_params)
 
