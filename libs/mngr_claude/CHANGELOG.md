@@ -6,6 +6,26 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `update_policy` field on the claude agent type. `NEVER` sets `DISABLE_AUTOUPDATER=1` so the installed binary stays put; `AUTO`/`ASK` leave Claude Code's auto-updater enabled. Defaults to `NEVER` -- which means claude agents now disable Claude Code's auto-updater by default (local and remote). Set `update_policy = "AUTO"` to opt back in. Ignored in `use_env_config_dir` mode.
+
+### Changed
+
+- Changed: `settings_overrides` now expresses merge intent with a Claude-compatible `__mngr_merge` map (`"permissions.allow" = "extend"` or `"assign"`) instead of the `__extend` / `__assign` key suffixes, so the same overrides behave consistently whether mngr or vanilla Claude Code reads them. The suffix keys leaked into the generated `settings.json` as keys Claude does not recognise; they are now rejected under `settings_overrides`. A bare key assigns with the narrowing guard, and the narrowing error prints the exact `__mngr_merge` patch to add.
+
+- Changed: `settings_overrides` accumulates across config scopes (user < project < local) and `parent_type` inheritance rather than a higher/child scope replacing the entire lower/parent value: non-overlapping keys from every scope survive and same-key `__extend`s combine.
+
+- Changed: Cross-scope `settings_overrides` narrowing is now caught at config-load. A higher scope whose bare key dropped a non-empty aggregate set by a lower scope previously dropped the entries silently; the config loader now surfaces these through the standard narrowing error, escapable via `allow_settings_key_assignment_narrowing` or `key__extend` / `key__assign`.
+
+- Changed: The Claude response-streaming snapshot watcher now captures the agent's tmux pane by the configured primary window name (`tmux.primary_window_name`, default `agent`) instead of the literal `:0` index, so response streaming works regardless of the user's tmux `base-index`.
+
+### Fixed
+
+- Fixed: mngr's Claude hooks no longer leak into "normal" (non-mngr) Claude config. mngr previously wrote its readiness/credential/permission hooks into the project's `.claude/settings.local.json`, which plain `claude` runs in that directory also read -- so the hooks fired outside mngr with unset env vars (e.g. `mkdir: cannot create directory '/events': Permission denied`). mngr now bakes its own hooks into the per-agent config-dir `settings.json` (`$MNGR_AGENT_STATE_DIR/plugin/claude/anthropic/settings.json`) instead. Existing leaked hooks in `settings.local.json` from prior mngr versions need manual cleanup.
+
+- Fixed: `mngr create` no longer requires `.claude/settings.local.json` to be gitignored across the board; that requirement now applies only when the `claude_subagent_proxy` plugin actually needs to rewrite user-defined Stop hooks there.
+
 ## [v0.2.17] - 2026-06-18
 
 ### Added

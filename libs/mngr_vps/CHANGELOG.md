@@ -6,6 +6,36 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `HostRealizer` seam and `isolation` config knob (`IsolationMode.CONTAINER` | `NONE`, default `CONTAINER`). All Docker-container placement logic (image build/pull, container run, in-container sshd setup, btrfs volume + snapshot helper, container lifecycle, `docker commit` snapshots) moved behind a `DockerRealizer` that the provider's base methods delegate to. The agent SSH endpoint, placement lifecycle, and snapshots are realizer concerns; the machine (provisioning, boot, instance lifecycle, host record, discovery) stays with the provider.
+
+- Added: `BareRealizer` for `isolation=NONE`: places the agent directly on the VM's OS (no Docker), reached at `vps_ip:22` as root with the same VPS keypair. It installs the lightweight host packages and `host_dir` layout on the VM, keeps the host record in a plain root-disk directory, and reports no snapshot support. Bare placement is gated to providers with a machine stop/start lifecycle: a provider without one rejects `isolation=NONE` at create time (`BareIsolationNotSupportedError`). A bare create also rejects container-only inputs up front (image overrides, Dockerfile builds, docker run start-args).
+
+- Added: Uniform offline host/agent-state store for cloud providers via a new `HostStateStore` abstraction. The base `VpsProvider` calls `_persist_host_record_externally` / `_delete_host_record_externally` hooks after every on-volume host-record write and on destroy. `BucketHostStateStore` (over a `StateBucket` protocol) backs the AWS/Azure object-storage state buckets and treats them as required infrastructure -- a provider whose bucket is not provisioned raises an actionable error pointing at its `prepare` command.
+
+- Added: Offline `host_dir` capability as a select-once `HostDirBackend` strategy. A cloud-agnostic, bucket-backed `BucketHostDirBackend` captures the host's `host_dir` operator-side at `mngr stop` (rsync via the operator's outer SSH; no instance identity, no on-box sync daemon) and serves it back from the bucket as an offline-read volume.
+
+- Added: Shared `cli_helpers` module for cloud-provider operator CLIs: `resolve_provider_config` and `refuse_if_managed_resources_exist`. The cleanup refusal now raises a single `ManagedResourcesExistError` across AWS / Azure / GCP / OVH. New config bases `OfflineCapableVpsProviderConfig` (carries `allowed_ssh_cidrs`) and `PublicIpVpsProviderConfig` (adds `associate_public_ip`), with `allowed_ssh_cidrs` unified to `ScalarStrTuple`. No user-facing config key changed.
+
+### Changed
+
+- Changed: Renamed the package from `mngr_vps_docker` to `mngr_vps` (distribution `imbue-mngr-vps-docker` -> `imbue-mngr-vps`), since Docker is now one of two placement shapes. The shape-agnostic classes dropped "Docker" from their names: `VpsDockerProvider` -> `VpsProvider`, `VpsDockerProviderConfig` -> `VpsProviderConfig`, `MinimalVpsDockerProvider` -> `MinimalVpsProvider`, `OfflineCapableVpsDockerProvider` -> `OfflineCapableVpsProvider`, `VpsDockerHostRecord` -> `VpsHostRecord`, `VpsDockerHostStore` -> `VpsHostStore`, error base `VpsDockerError` -> `VpsError`.
+
+- Changed: `OfflineCapableVpsProvider` now owns the cloud stop/start lifecycle: `stop_host` pauses the whole instance (so a paused agent costs only disk) and `start_host` resumes it, doing the resumed record's on-volume write and external-store mirror together in one place. Providers supply only `_pause_cloud_instance` / `_resume_cloud_instance` hooks.
+
+- Changed: Snapshot support is now a structural fact rather than a method that raises. `snapshot_placement` / `delete_snapshot_placement` moved off the base `HostRealizer` into a narrow `SnapshotCapableRealizer` sub-interface that only the container realizer implements. A snapshot request on a bare placement fails up front with `SnapshotsNotSupportedError`.
+
+- Changed: A missing host record at `_on_host_finalized` -- which runs after the record is durable -- now fails `create_host` (raising `HostCreationError`, whose cleanup tears the VPS back down) instead of logging a WARNING and silently shipping a host that can never auto-stop on idle. Genuine idle-watcher *install* failures stay best-effort.
+
+- Changed: `host_setup.build_remote_script_command` is the shared base64 remote-script wrapper (renamed from the private `_remote_script_command`).
+
+### Fixed
+
+- Fixed: `mngr snapshot delete` on a VPS now actually takes effect. `delete_snapshot` previously removed the docker image but never dropped the snapshot from the host record, so `mngr snapshot list` kept showing a deleted snapshot. It now removes the entry from the record (raising `SnapshotNotFoundError` for an unknown id) and refreshes the cache; the image removal raises on any non-absent failure.
+
+- Fixed: VM-leak bug: `mngr destroy` of a stopped (deallocated / powered-off) host no longer leaves the underlying cloud instance and its mirrored state behind. `OfflineCapableVpsProvider` now overrides destroy to dispatch on the instance's power state and take the offline teardown path for a stopped instance, terminating it through the same `destroy_instance` primitive the online path uses, cleaning up the per-host provider SSH key, and deleting the external state. It fails loudly when termination cannot be carried out.
+
 ## [v0.1.10] - 2026-06-18
 
 ### Added

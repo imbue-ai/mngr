@@ -60,6 +60,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `agent_creator`'s `clone_git_repo` and `checkout_branch` now accept commit SHAs in addition to branch and tag names. The underlying clone path switched from `git clone --single-branch --branch <ref>` to `git init && git fetch origin <ref> && git checkout -B <name> FETCH_HEAD`, which is uniform across all three input shapes (non-shallow, mirror-pushable). No behavior change for existing branch/tag inputs.
 - Added: AWS as a workspace compute-provider option (with a required per-region picker; US datacenters by default), alongside Docker, Lima, Vultr, and Imbue Cloud. Selecting AWS runs the agent in a runsc-hardened Docker container on EC2; the workspace listing now labels every row with its compute provider, and AWS hosts are long-lived (no idle shutdown, no max-lifetime cap).
 
+- Added: Workspace recovery now understands remote (Imbue Cloud) minds, not just local docker/lima ones. When the recovery probe finds the provider unreachable (network down, Imbue Cloud outage, docker daemon stopped) it shows a dedicated "Can't connect to ..." page with a Retry button and no restart option (a restart routes through the same unreachable backend and cannot help), and reconnects automatically once the provider is reachable. When the provider is reachable but rejects for another reason (expired login, no account configured), recovery shows a plain "Can't reach your workspace" message instead of offering a useless restart. The "Retry" button uses the same prominent primary-button styling as the "Restart workspace" button.
+
 ### Changed
 
 - Changed: Reworked workspace accent colors. Non-workspace screens (Home, Create, accounts, inbox, auth) and the startup/quitting/error screens now paint a pure-white neutral background instead of the previous light-gray/dark chrome (light mode only for now). The titlebar adopts a workspace's accent only on workspace-scoped screens (the workspace itself plus its settings, sharing, destroying, and recovery screens), instead of keeping the last-opened workspace's accent after navigating away. Pure black and pure white were removed from the swatch picker (still typable in the hex input), and cancelling the Create form now clears the previewed color from the titlebar.
@@ -145,6 +147,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Window state is now persisted in most-recently-focused order, so for multi-window users the loading screen opens at the bounds of the last window they interacted with; lesser-MRU windows are restored without stealing keyboard focus, and the most-recently-focused window is re-raised as each restored window appears.
 - Changed: Renamed the workspace "Cloud" compute option to "Vultr" to name its provider plainly.
 
+- Changed: Reworked the in-app `mngr` CLI caller (`MngrCaller`) to stop relying on `multiprocessing`'s fork-without-exec (unreliable on macOS). It now keeps a single pre-warmed, single-use `mngr` process running ahead of time and hands argv off over an anonymous, connected `socketpair` (no rendezvous file on disk). As soon as a warm process is claimed for use, a replacement is spawned so the next call finds one ready. No user-visible behavior change to `mngr message` delivery.
+
+- Changed: Bumped the bundled latchkey CLI to 2.17.1.
+
+### Deprecated
+
+- Deprecated: Baking new OVH classic VPS pool hosts. Imbue Cloud pool hosts are now baked exclusively as bare-metal slices: `minds pool create` defaults to `--backend slice` and `--backend ovh_vps` fails fast (before any Vault / credential resolution) with a deprecation error pointing at `--backend slice`. Existing OVH VPS pool hosts keep working and can still be listed (`minds pool list`) and destroyed (`minds pool destroy`, `minds env destroy`). The host-pool docs were rewritten around the bare-metal slice workflow.
+
 ### Removed
 
 - Removed: Per-agent reverse SSH tunnel that exposed `/api/v1/...` to workspaces; agents now reach the Minds API exclusively through the latchkey gateway's `minds-api-proxy` extension.
@@ -175,6 +185,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: `parse_agents_from_mngr_output` now raises `MalformedMngrOutputError` (instead of silently returning an empty list) when mngr's stdout is empty/blank, and raises it (instead of a bare `KeyError`) when the parsed JSON object lacks an `agents` key.
 - Fixed: `load_client_config` / `load_deploy_config` now catch the precise `tomllib.TOMLDecodeError` and `pydantic.ValidationError` instead of the broad `ValueError`, so an unrelated `ValueError` bug is no longer mislabeled as a config parse/validation failure.
 - Fixed: Destroying a workspace now reliably tears down its entire host (the workspace agent plus the per-host `system-services` agent) instead of sometimes leaving the underlying cloud instance running and billing. The workspace stays visible as "destroying"/"failed" until the host is confirmed gone.
+
+- Fixed: Creating a mind from a remote git URL (e.g. a GitHub HTTPS URL) without specifying a branch. The no-branch clone path previously left the local clone on a detached `FETCH_HEAD`, so `refs/heads/*` was empty and the downstream `mngr create` mirror push failed with "No refs in common". The no-branch clone now uses a plain `git clone` which resolves the remote's default branch natively and leaves a real named local branch checked out.
 
 ## [v0.2.8] - 2026-05-13
 

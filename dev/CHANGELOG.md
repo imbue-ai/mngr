@@ -4,6 +4,52 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-06-20
+
+### Removed
+
+- Removed: The `bake-pool-host-{dev,prod}` justfile recipes (they baked OVH classic VPS pool hosts, now deprecated). Pool hosts are baked as bare-metal slices via the `bake-slice-{dev,prod}` recipes. The `minds-justfile` and `minds-dev-workflow` skill docs were updated to match.
+
+## 2026-06-19
+
+### Added
+
+- Added: `specs/bare-providers/` (spec.md + concise.md + extraction_design.md): design proposal for running agents directly on a cloud VM with no Docker container, as a second config-selected shape of the aws/gcp/azure providers. Introduces a substrate-x-realizer architecture (`HostRealizer` seam injected like `VpsClient`). Also adds `specs/uncertainties.md` noting that bare mode supersedes the "single mode of operation" framing in the existing VPS spec.
+
+- Added: Provider specs under `specs/` covering all nine `mngr` provider plugins (modal, aws, azure, gcp, vultr, ovh, lima, docker, ssh): `provider-uniformity-review.md` (descriptive current state), `provider-shape.md` (prescriptive contract), `implementing-a-provider.md` (dev guide), `provider-release-tests.md` (remaining-gaps tracker after the trip harness landed), and `cleanup-error-aggregation.md` (cite refresh). Brought into agreement with the `mngr/bare-providers` merge.
+
+- Added: `specs/provider-state-bucket/` design spec for giving the AWS and Azure providers a cloud object-storage bucket holding mngr control-plane state, so a stopped instance's host record, agent metadata, and `host_dir` are readable offline without hitting the 256-char EC2/VM tag-value limit.
+
+- Added: Blueprint plan under `blueprint/remote-mind-recovery/` for extending minds' workspace-recovery flow to remote (Imbue Cloud) minds.
+
+- Added: `google-cloud-storage>=2.18` as a new runtime dependency (declared in `libs/mngr_gcp/pyproject.toml`, propagating to the root `uv.lock`), used by the GCP provider's new offline `host_dir` GCS state bucket.
+
+- Added: New `overlay` workspace library registered in the root `pyproject.toml` (`[tool.uv.sources]` source + `--cov=imbue.overlay` in shared coverage flags).
+
+### Changed
+
+- Changed: `make_cli_docs.py` now also generates provider/agent config tables in each plugin README from the Pydantic field descriptions, spliced between markers and verified by the docs `--check` gate so the tables can no longer drift from the code. A field added to a config model now appears in its table automatically.
+
+- Changed: The `regenerate-cli-docs` pre-commit hook now runs `make_cli_docs.py --check` (non-mutating, covering every generated file) instead of regenerating in place and diffing only the mngr command docs, and its trigger now includes the provider/agent `config.py` / `plugin.py` sources and generated provider READMEs.
+
+- Changed: Root pytest coverage config tracks the renamed `imbue.mngr_vps` package (was `imbue.mngr_vps_docker`).
+
+- Changed: Vendored `specs/provider-release-tests.md` into the tree so the new provider release harness ships alongside the design doc its docstrings cite as the source of truth.
+
+- Changed: Removed a monorepo-development-only paragraph from the top-level README so the published PyPI README stays focused on user-relevant content.
+
+## 2026-06-18
+
+### Added
+
+- Added: `identify-suspicious-edge-cases` skill that flags over-broad exception catches, fallback `else` branches, defensive guards, and unnecessary `| None` types under a given path.
+
+- Added: `moto[s3]` to the root dev dependency group for in-memory S3 unit tests of the new AWS state bucket.
+
+### Changed
+
+- Changed: The `identify-*` skills (`identify-doc-code-disagreements`, `identify-inconsistencies`, `identify-outdated-docstrings`, `identify-style-issues`) now accept a `target_path` argument instead of a bare library name. You can scope them to a whole library (`libs/mngr` or just `mngr`) or to any subdirectory within one. Each skill resolves the scan scope and its containing library, gathers the containing library's context, and writes findings to the containing library's `_tasks/` folder.
+
 ## 2026-06-17
 
 ### Added

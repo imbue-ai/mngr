@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: Bumped the bundled latchkey CLI to 2.17.1 and raised the wrapper's minimum supported CLI version to 2.17.1; older installed CLIs are rejected at gateway initialization.
+
 ## [v0.1.6] - 2026-06-18
 
 ### Added

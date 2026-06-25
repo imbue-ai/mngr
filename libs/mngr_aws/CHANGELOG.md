@@ -6,6 +6,32 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Bare placement (`isolation=NONE`): the agent runs directly on the EC2 VM (no Docker container), reached as root over the same VPS keypair. The idle agent runs `shutdown -P now` to stop the instance via InstanceInitiatedShutdownBehavior. The `mngr-isolation` instance tag stamped at create lets discovery resolve a stopped bare host's placement from the cloud API without SSH.
+
+### Changed
+
+- Changed: Replaced the EC2 tag mirror with a required, private, encrypted S3 **state bucket** as the offline store. A stopped instance's full `VpsHostRecord` (config, IP, host keys) and per-agent records live in the bucket instead of `mngr-agent-<id>-*` EC2 tags -- removing the silent 256-char `labels` drop and the EC2 50-tag ceiling. The bucket is required: mngr raises an actionable error pointing at `mngr aws prepare` when it is absent. `mngr aws prepare` creates the bucket (default name `mngr-state-<account_id>-<region>`, overridable via `state_bucket_name`); `mngr aws cleanup` deletes it and refuses to delete a non-empty bucket unless `--force`.
+
+- Changed: Added an offline `host_dir` on by default (`is_offline_host_dir_enabled`). A stopped instance's `host_dir` is now readable without SSH so `mngr event` / `mngr transcript` / `mngr file` work against a paused host. Capture is operator-driven at `mngr stop` and uses the operator's own credentials (no instance IAM profile, no `iam:PassRole`). Limitation: a host that idle-self-poweroffs or crashes is not captured.
+
+- Changed: Collapsed the AWS provider's two AMI config knobs. `default_ami_by_region` is gone; `default_ami_id` now defaults to `None` and falls back to a pinned per-region default (`DEFAULT_AMI_BY_REGION`, Debian 12 amd64) when unset.
+
+- Changed: `mngr aws prepare` is now idempotent under a concurrent prepare race (a `BucketAlreadyOwnedByYou` is treated as a no-op).
+
+- Changed: Renamed the package to `mngr_vps` (was `mngr_vps_docker`); the AWS provider follows shared base classes whose names dropped "Docker" (`VpsProvider`, `VpsHostRecord`, etc.). Import-only.
+
+### Removed
+
+- Removed: The orphaned `AwsVpsClient.add_tags` / `AwsVpsClient.remove_tags` client methods that only ever existed to push per-agent records into EC2 instance tags for the old tag mirror.
+
+### Fixed
+
+- Fixed: `mngr destroy` of a stopped AWS host no longer leaks its EC2 instance. Destroying a host that had been stopped (`mngr stop --stop-host` or idle self-stop) previously failed to terminate the still-billing instance while reporting success. Destroy now falls back to the offline path, resolving the instance by its `mngr-host-id` tag and terminating via `TerminateInstances`, then removes the state-bucket records, failing loudly if termination could not be carried out.
+
+- Fixed: `mngr rename` now re-stamps the EC2 `Name` identity tag that offline discovery reads, so a host renamed while running lists under its new name once stopped.
+
 ## [v0.1.4] - 2026-06-18
 
 ### Changed

@@ -6,6 +6,28 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Bare placement (`isolation=NONE`): the agent runs directly on the Azure VM (no Docker container). Because an Azure OS shutdown does not halt compute billing, the bare agent's idle `shutdown.sh` runs the ARM self-deallocate directly. The `mngr-isolation` tag stamped at create lets discovery resolve a stopped bare host's placement from the cloud API without SSH.
+
+### Changed
+
+- Changed: Replaced the VM tag mirror with a required Azure Blob **state bucket** (a private Storage account + container) as the offline store. A deallocated VM's full host record and per-agent records live in the bucket instead of `mngr-agent-<id>-*` VM tags, removing the silent 256-char `labels` drop. The bucket is required: mngr raises an actionable error pointing at `mngr azure prepare` when absent. `mngr azure prepare` creates the account (default name `mngrst<hash>`, overridable via `state_storage_account_name`) and grants the operator's own principal `Storage Blob Data Contributor` on it (needed because Azure splits control plane from data plane). `mngr azure cleanup` deletes the account; `--force` allows deleting one that still holds orphaned state.
+
+- Changed: Added an offline `host_dir` on by default (`is_offline_host_dir_enabled`). A deallocated VM's `host_dir` is now readable without SSH so `mngr event` / `mngr transcript` work against a stopped agent. Capture is operator-driven at `mngr stop` and uses the operator's own credentials (no VM managed identity). Limitation: a VM that idle-self-deallocates or crashes is not captured.
+
+- Changed: `allowed_ssh_cidrs` is now typed `ScalarStrTuple` (matching AWS) so a higher-precedence config layer that sets it replaces the whole list rather than being flagged as narrowing. Config key and default are unchanged.
+
+- Changed: Renamed the package to `mngr_vps`; the Azure provider follows shared base classes whose names dropped "Docker" (`VpsProvider`, `VpsHostRecord`, etc.). Import-only.
+
+### Removed
+
+- Removed: The orphaned `AzureVpsClient.add_tags` / `AzureVpsClient.remove_tags` client methods that only existed for the old VM tag mirror.
+
+### Fixed
+
+- Fixed: `rename_host` now re-stamps the cheap `mngr-host-name` VM tag that offline discovery reads, so a host renamed while running lists under its new name once stopped.
+
 ## [v0.1.1] - 2026-06-18
 
 ### Added
