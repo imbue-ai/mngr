@@ -428,7 +428,12 @@ def test_minds_recovery_restores_dead_system_interface() -> None:
     )
 
 
+# @pytest.mark.docker: `depot build` shells out to the local docker daemon (it
+# loads/inspects via docker under the hood), which the pytest resource guard
+# intercepts -- so this test must carry the docker mark like the others, even
+# though it invokes `depot` directly rather than `docker`.
 @pytest.mark.minds_snapshot_resume
+@pytest.mark.docker
 @pytest.mark.timeout(_DEPOT_BUILD_TIMEOUT_SECONDS + 60)
 def test_fct_image_rebuild_hits_depot_cache(tmp_path: Path) -> None:
     """A fresh FCT image build via depot reuses the layer cache from the build stage.
