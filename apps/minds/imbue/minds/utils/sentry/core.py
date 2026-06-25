@@ -21,7 +21,6 @@ from typing import MutableMapping
 from typing import TypedDict
 from typing import cast
 
-import loguru
 import sentry_sdk
 import sentry_sdk.utils
 import traceback_with_variables
@@ -530,15 +529,6 @@ def fixup_release_id(release_id: str) -> str:
     return re.sub(r"(\d+\.\d+\.\d+)rc(\d+)", r"\1-rc.\2", release_id)
 
 
-def _should_record_sentry_event_and_not_duplicate(record: "loguru.Record") -> bool:
-    """Filter for the SentryEventHandler combining the skip-Sentry and exception-dedup predicates.
-
-    A record reaches Sentry only if it is not explicitly marked to skip Sentry *and* it is not a
-    duplicate report of an exception already sent at error level.
-    """
-    return should_record_sentry_event(record) and is_not_duplicate_exception(record)
-
-
 def setup_sentry(
     environment: SentryDeployEnvironment,
     release_id: str,
@@ -645,10 +635,10 @@ def setup_sentry(
         level=min_sentry_level,
         diagnose=False,
         format=SENTRY_LOG_FORMAT,
-        # records explicitly marked to skip Sentry (e.g. the local app-log line emitted by
-        # log_error_inside_sentry) must reach the file sinks but never become Sentry events themselves,
-        # and an exception already reported at error level must not become a second Sentry event.
-        filter=_should_record_sentry_event_and_not_duplicate,
+        # should_record_sentry_event drops records that must not become Sentry events: those marked
+        # to skip Sentry (e.g. the local app-log line from log_error_inside_sentry, which must still
+        # reach the file sinks) and duplicate reports of an exception already sent at error level.
+        filter=should_record_sentry_event,
     )
     # capture lower level loguru messages to add as breadcrumbs on events
     # the extra info is not helpful here and makes the breadcrumbs larger; they're still available in the log file attachment
