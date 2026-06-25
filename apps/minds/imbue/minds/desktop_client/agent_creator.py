@@ -1138,11 +1138,14 @@ def _run_modal_create_with_transfer_retry(
     already rolled its host back, so re-running with the same name is clean. Any
     other failure -- or exhausting ``max_attempts`` -- propagates unchanged.
     """
-    for attempt in range(1, max_attempts + 1):
+    # All attempts but the last are guarded so a tunnel drop retries on a fresh
+    # sandbox; the final attempt is unguarded so its outcome (success or any
+    # error) is returned/raised directly -- no unreachable fall-through.
+    for attempt in range(1, max_attempts):
         try:
             return attempt_create(None, params)
         except MngrCommandError as error:
-            if attempt >= max_attempts or not _is_modal_transfer_drop(error):
+            if not _is_modal_transfer_drop(error):
                 raise
             log_queue.put(
                 "[minds] Modal sandbox transfer dropped (attempt {}/{}) -- that region's "
@@ -1150,9 +1153,7 @@ def _run_modal_create_with_transfer_retry(
                     attempt, max_attempts
                 )
             )
-    # Unreachable: the last attempt either returns or re-raises above. Present so
-    # every path has a definite return/raise for the type checker.
-    raise AssertionError("modal create retry loop exited without returning or raising")
+    return attempt_create(None, params)
 
 
 def _log_backup_attempt(agent_id: AgentId, retry_state: RetryCallState) -> None:
