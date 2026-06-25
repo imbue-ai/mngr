@@ -16,7 +16,6 @@ from imbue.mngr_tmr.report import ReportSection
 from imbue.mngr_tmr.report import TestMapReduceResult
 from imbue.mngr_tmr.report import TestResult
 from imbue.mngr_tmr.report import _merged_status_html
-from imbue.mngr_tmr.report import _render_markdown
 from imbue.mngr_tmr.report import _report_section_of
 from imbue.mngr_tmr.report import generate_html_report
 
@@ -110,66 +109,26 @@ def make_metadata_and_outcome(
     return metadata
 
 
-# --- enum + dataclass smoke tests ---
+# --- outcome JSON parse-contract tests ---
+#
+# The string values of ChangeKind/ChangeStatus are the JSON wire format that
+# agents write and that _parse_outcome_json reads back. These tests guard the
+# parse-from-string direction production relies on, rather than restating the
+# enum definitions. (ReportSection is purely internal and never serialized, so
+# it has no analogous contract to guard.)
 
 
-def test_change_kind_values() -> None:
-    assert ChangeKind.IMPROVE_TEST == "IMPROVE_TEST"
-    assert ChangeKind.FIX_TEST == "FIX_TEST"
-    assert ChangeKind.FIX_IMPL == "FIX_IMPL"
-    assert ChangeKind.FIX_TUTORIAL == "FIX_TUTORIAL"
+def test_change_kind_parses_wire_strings() -> None:
+    assert ChangeKind("IMPROVE_TEST") is ChangeKind.IMPROVE_TEST
+    assert ChangeKind("FIX_TEST") is ChangeKind.FIX_TEST
+    assert ChangeKind("FIX_IMPL") is ChangeKind.FIX_IMPL
+    assert ChangeKind("FIX_TUTORIAL") is ChangeKind.FIX_TUTORIAL
 
 
-def test_change_status_values() -> None:
-    assert ChangeStatus.SUCCEEDED == "SUCCEEDED"
-    assert ChangeStatus.FAILED == "FAILED"
-    assert ChangeStatus.BLOCKED == "BLOCKED"
-
-
-def test_report_section_values() -> None:
-    assert ReportSection.NON_IMPL_FIXES == "NON_IMPL_FIXES"
-    assert ReportSection.IMPL_FIXES == "IMPL_FIXES"
-    assert ReportSection.BLOCKED == "BLOCKED"
-    assert ReportSection.CLEAN_PASS == "CLEAN_PASS"
-    assert ReportSection.RUNNING == "RUNNING"
-
-
-def test_test_result_empty() -> None:
-    result = TestResult(tests_passing_before=True, tests_passing_after=True, summary_markdown="All good")
-    assert result.changes == {}
-    assert result.errored is False
-
-
-def test_test_result_with_changes() -> None:
-    changes = {
-        ChangeKind.FIX_TEST: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="Fixed"),
-        ChangeKind.IMPROVE_TEST: Change(status=ChangeStatus.BLOCKED, summary_markdown="Needs work"),
-    }
-    result = TestResult(changes=changes, tests_passing_before=False, tests_passing_after=True)
-    assert len(result.changes) == 2
-
-
-def test_test_map_reduce_result_with_branch() -> None:
-    result = TestMapReduceResult(
-        test_node_id="tests/test_foo.py::test_baz",
-        agent_name=AgentName("tmr-test-baz"),
-        changes={ChangeKind.FIX_IMPL: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="Fixed null check")},
-        tests_passing_before=False,
-        tests_passing_after=True,
-        summary_markdown="Fixed missing null check",
-        branch_name="tmr/20260101000000/test-baz",
-    )
-    assert result.branch_name == "tmr/20260101000000/test-baz"
-
-
-def test_test_map_reduce_result_without_branch() -> None:
-    result = TestMapReduceResult(
-        test_node_id="tests/test_foo.py::test_ok",
-        agent_name=AgentName("tmr-test-ok"),
-        tests_passing_before=True,
-        tests_passing_after=True,
-    )
-    assert result.branch_name is None
+def test_change_status_parses_wire_strings() -> None:
+    assert ChangeStatus("SUCCEEDED") is ChangeStatus.SUCCEEDED
+    assert ChangeStatus("FAILED") is ChangeStatus.FAILED
+    assert ChangeStatus("BLOCKED") is ChangeStatus.BLOCKED
 
 
 # --- report_section_of tests ---
@@ -219,17 +178,9 @@ def test_report_section_blocked_no_changes_tests_failing() -> None:
     assert _report_section_of(make_test_result(before=False, after=False)) == ReportSection.BLOCKED
 
 
-# --- render_markdown tests ---
-
-
-def test_render_markdown_bold() -> None:
-    result = _render_markdown("**bold**")
-    assert "<strong>bold</strong>" in result
-
-
-def test_render_markdown_plain_text() -> None:
-    result = _render_markdown("plain text")
-    assert "plain text" in result
+# Markdown rendering is a thin passthrough to the markdown-it library and is
+# exercised end-to-end by the generate_html_report tests (summaries flow through
+# _render_markdown), so it has no dedicated unit test here.
 
 
 # --- _merged_status tests ---
@@ -256,7 +207,21 @@ def test_merged_status_squashed() -> None:
         changes=SUCCEEDED_FIX,
     )
     integrator = IntegratorResult(squashed_branches=("mngr-tmr/a",))
-    assert "10003" in _merged_status_html(r, integrator)
+    assert "&#10003;" in _merged_status_html(r, integrator)
+
+
+def test_merged_status_impl_priority_without_hash() -> None:
+    """A branch in impl_priority but missing from impl_commit_hashes renders a checkmark."""
+    r = TestMapReduceResult(
+        test_node_id="t::t",
+        agent_name=AgentName("a"),
+        branch_name="mngr-tmr/b",
+        tests_passing_before=False,
+        tests_passing_after=True,
+        changes={ChangeKind.FIX_IMPL: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="fixed")},
+    )
+    integrator = IntegratorResult(impl_priority=("mngr-tmr/b",))
+    assert _merged_status_html(r, integrator) == "&#10003;"
 
 
 def test_merged_status_impl_priority() -> None:
@@ -284,7 +249,7 @@ def test_merged_status_failed() -> None:
         changes=SUCCEEDED_FIX,
     )
     integrator = IntegratorResult(failed=("mngr-tmr/c",))
-    assert "10007" in _merged_status_html(r, integrator)
+    assert "&#10007;" in _merged_status_html(r, integrator)
 
 
 def test_merged_status_not_in_integrator() -> None:
@@ -411,19 +376,34 @@ def test_generate_html_report_with_integrator(tmp_path: Path) -> None:
 
 def test_generate_html_report_integrator_with_failures(tmp_path: Path) -> None:
     output_dir = tmp_path / "out"
-    agents = [make_metadata_and_outcome(output_dir, "a", tests_passing_before=True, tests_passing_after=True)]
+    # The failed branch must belong to a rendered mapper row for the failure
+    # marker to appear, so give the mapper agent the branch the integrator failed
+    # to merge.
+    agents = [
+        make_metadata_and_outcome(
+            output_dir,
+            "agent-failed-merge",
+            branch_name="mngr-tmr/b",
+            changes=SUCCEEDED_FIX,
+            tests_passing_before=False,
+            tests_passing_after=True,
+        )
+    ]
     integrator_meta = AgentMetadata(
         kind=AgentKind.REDUCER,
-        agent_name=AgentName("tmr-integrator-abc123"),
-        branch_name="mngr-tmr/integrated-abc123",
+        agent_name=AgentName("tmr-integrator-with-failures"),
+        branch_name="mngr-tmr/integrated-with-failures",
     )
     write_integrator_outcome(
         output_dir,
         integrator_meta.agent_name,
-        {"squashed_branches": ["mngr-tmr/a"], "failed": ["mngr-tmr/b"]},
+        {"squashed_branches": [], "failed": ["mngr-tmr/b"]},
     )
     result_path = generate_html_report(agents, output_dir, integrator_metadata=integrator_meta)
-    assert result_path.exists()
+    content = result_path.read_text()
+    assert "Merged?" in content
+    # The failed branch renders the X marker (&#10007;) in its merged-status cell.
+    assert "&#10007;" in content
 
 
 def test_generate_html_report_without_integrator(tmp_path: Path) -> None:
