@@ -89,6 +89,36 @@ def test_pool_create_requires_region() -> None:
     assert "Missing option" in result.output and "--region" in result.output
 
 
+def test_pool_create_rejects_ovh_datacenter_code_as_region() -> None:
+    """A raw OVH datacenter code (e.g. 'vin') must be rejected -- only lease labels are valid.
+
+    Regression test: feeding the datacenter code that `admin server list` prints
+    (``vin``) instead of the lease-region label (``US-EAST-VA``) stamps an
+    unleasable region onto every baked pool_hosts row, since the connector's
+    region filter is an exact, never-relaxed string match.
+    """
+    runner = CliRunner()
+    result = runner.invoke(
+        pool,
+        [
+            "create",
+            "--count",
+            "1",
+            "--backend",
+            "slice",
+            "--region",
+            "vin",
+            "--server-id",
+            "00000000-0000-0000-0000-000000000000",
+            "--database-url",
+            "postgres://example",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "not a known lease region" in result.output
+    assert "US-EAST-VA" in result.output
+
+
 def test_pool_hosts_insert_has_required_columns() -> None:
     """The INSERT must include every pool_hosts NOT-NULL column the schema requires.
 
@@ -202,6 +232,8 @@ def test_pool_host_insert_writes_service_name_into_vps_instance_id() -> None:
         container_ssh_port=_CONTAINER_SSH_PORT,
         attributes_json="{}",
         region="US-EAST-VA",
+        outer_host_public_key="ssh-ed25519 AAAAouter",
+        container_host_public_key="ssh-ed25519 AAAAcontainer",
     )
     column_to_value = _insert_column_to_value(values)
     assert column_to_value["vps_instance_id"] == "vps-deadbeef.vps.ovh.us"
@@ -210,6 +242,9 @@ def test_pool_host_insert_writes_service_name_into_vps_instance_id() -> None:
     # Sanity: host_id still lands in its own column.
     assert column_to_value["host_id"] == "host-bbbb"
     assert column_to_value["vps_address"] == "vps-deadbeef.vps.ovh.us"
+    # The baked host keys land in their own columns for strict pinning at lease time.
+    assert column_to_value["outer_host_public_key"] == "ssh-ed25519 AAAAouter"
+    assert column_to_value["container_host_public_key"] == "ssh-ed25519 AAAAcontainer"
 
 
 def test_pool_create_backend_defaults_to_slice() -> None:

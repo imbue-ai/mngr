@@ -13,7 +13,12 @@ from imbue.mngr_vps.primitives import VpsInstanceId
 
 
 def _client() -> LimaSliceVpsClient:
-    return LimaSliceVpsClient(box_address="box.example", box_ssh_user="limahost", private_key_path="/tmp/id")
+    return LimaSliceVpsClient(
+        box_address="box.example",
+        box_ssh_user="limahost",
+        private_key_path="/tmp/id",
+        box_host_public_key="ssh-ed25519 AAAAtestboxhostkey",
+    )
 
 
 def test_cloud_only_operations_raise_not_implemented() -> None:
@@ -37,6 +42,10 @@ def test_box_ssh_command_targets_the_lima_user_with_the_pool_key() -> None:
     assert command[0] == "ssh"
     assert "-i" in command and "/tmp/id" in command
     assert "limahost@box.example" in command
+    # The box host key is pinned strictly (no trust-on-first-use).
+    assert "StrictHostKeyChecking=yes" in command
+    assert any(arg.startswith("UserKnownHostsFile=") for arg in command)
+    assert "StrictHostKeyChecking=accept-new" not in command
     # The remote command is the last arg, prefixed with an explicit PATH so a
     # non-login shell still finds limactl (extracted to /usr/local/bin by prep).
     assert command[-1].endswith("limactl list --json")

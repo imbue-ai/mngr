@@ -9,6 +9,7 @@ from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
+from datetime import timezone
 from enum import auto
 from pathlib import Path
 from typing import Any
@@ -65,6 +66,8 @@ from imbue.minds.desktop_client.destroying import read_destroying
 from imbue.minds.desktop_client.destroying import read_host_id
 from imbue.minds.desktop_client.destroying import read_log_chunk
 from imbue.minds.desktop_client.destroying import start_destroy
+from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
+from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
@@ -84,11 +87,8 @@ from imbue.minds.desktop_client.onboarding import OnboardingAnswers
 from imbue.minds.desktop_client.onboarding import OnboardingApplier
 from imbue.minds.desktop_client.provider_display import friendly_provider_label
 from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
-from imbue.minds.desktop_client.recovery_probe import ProviderProbeError
 from imbue.minds.desktop_client.recovery_probe import build_host_health_response
 from imbue.minds.desktop_client.recovery_probe import build_probe_argv
-from imbue.minds.desktop_client.recovery_probe import extract_provider_error
-from imbue.minds.desktop_client.recovery_probe import provider_unavailable_error
 from imbue.minds.desktop_client.region_preference import AWS_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import GeoLocationCache
 from imbue.minds.desktop_client.region_preference import IMBUE_CLOUD_PROVIDER_KEY
@@ -167,11 +167,14 @@ from imbue.minds.primitives import UserDataPreference
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.telegram.setup import TelegramSetupStatus
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
+from imbue.mngr.api.discovery_events import DISCOVERY_STREAM_POLL_INTERVAL_SECONDS
+from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import InvalidName
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
@@ -209,6 +212,57 @@ def _system_interface_status_payload(
         if error is not None:
             payload["error"] = error
     return payload
+
+
+def _should_emit_system_interface_status(
+    backend_resolver: BackendResolverInterface,
+    tracker: SystemInterfaceHealthTracker | None,
+    agent_id: AgentId,
+    status: AgentHealth,
+) -> bool:
+    """Whether to push a ``system_interface_status`` event for an agent in ``status``.
+
+    A STUCK status is what drives the chrome to redirect the content view to the
+    recovery page. Gate that redirect on a discovery snapshot taken *after* the
+    outage began: a snapshot that predates the outage still carries the pre-outage
+    host state (a just-stopped container still reads RUNNING), which would
+    misclassify the recovery tier and ask the user to confirm a restart instead of
+    auto-dispatching one. So suppress STUCK -- keeping the user on the
+    auto-refreshing "Loading workspace" loader -- until a full snapshot whose
+    producer timestamp is at or after the agent's outage onset
+    (``get_failure_run_started_wall_at``) has landed; by then discovery has
+    re-observed the host and the classification is trustworthy. The next emission
+    (the per-wake flip check or the periodic re-assert in the chrome-events loop)
+    then pushes STUCK and the redirect fires.
+
+    When no onset is recorded (only the force-``mark_stuck`` path, used in tests,
+    lacks one) fall back to the absolute-age freshness gate so that path is not
+    stranded. Non-STUCK statuses (RESTARTING, RESTART_FAILED, HEALTHY) are emitted
+    unconditionally -- they do not trigger the redirect, and the user is already on
+    the recovery page when they apply. Only the passive-discovery resolver tracks
+    snapshot freshness; for any other resolver the redirect is not gated.
+    """
+    if status != AgentHealth.STUCK:
+        return True
+    if not isinstance(backend_resolver, MngrCliBackendResolver):
+        return True
+    _, last_full_snapshot_at = backend_resolver.get_freshness_timestamps()
+    onset = tracker.get_failure_run_started_wall_at(agent_id) if tracker is not None else None
+    # FIXME: when discovery is *persistently* stale -- the producer/consumer
+    # pipeline has stalled, not merely a provider being down -- no post-onset
+    # snapshot ever arrives, so this gate never lets the STUCK redirect through and
+    # the user is stranded on the "Loading workspace" loader with no recourse. A
+    # discovery-health watchdog should detect a stalled pipeline (snapshot age),
+    # auto-restart it, and surface a distinct app-level state; once that exists
+    # this gate gains an escape and this FIXME should be removed.
+    if onset is None:
+        return _is_discovery_fresh(last_full_snapshot_at)
+    return last_full_snapshot_at is not None and last_full_snapshot_at >= onset
+
+
+def _discovery_health_payload(health: DiscoveryHealth) -> dict[str, str]:
+    """Build a ``discovery_health`` SSE payload for the app-global pipeline state."""
+    return {"type": "discovery_health", "state": health.value}
 
 
 # -- Request-body + dependency helpers --
@@ -2141,6 +2195,14 @@ def _handle_chrome_events() -> Response:
         if tracker is not None:
             tracker.add_on_change_callback(_on_health_change)
 
+        # The watchdog's no-arg on-change reuses the same wake as the resolver;
+        # the loop re-reads its tier each tick (like providers_state) and emits
+        # only the terminal BLOCKED transition, once.
+        discovery_watchdog: DiscoveryHealthWatchdog | None = get_state().discovery_health_watchdog
+        if discovery_watchdog is not None:
+            discovery_watchdog.add_on_change_callback(_on_change)
+        discovery_blocked_emitted = False
+
         # Local-mind liveness is derived from discovery host state, which the
         # resolver already wakes us on (the on-change above). A Start/Stop action
         # sets an optimistic override on the same resolver and fires that same
@@ -2178,11 +2240,28 @@ def _handle_chrome_events() -> Response:
                 json.dumps({"type": "requests", **last_requests_payload, "auto_open": auto_open})
             )
 
+            # Agents for which a STUCK redirect has already been emitted on this
+            # connection, so the per-wake flip check below emits each stuck episode
+            # exactly once (the 15s re-assert still re-delivers for a chrome that
+            # lost the one-shot). An agent is dropped from the set when it leaves
+            # STUCK so a later re-STUCK re-promotes.
+            redirected_agent_ids: set[str] = set()
             if tracker is not None:
                 for aid, status in tracker.snapshot_all().items():
+                    if not _should_emit_system_interface_status(backend_resolver, tracker, aid, status):
+                        continue
+                    if status == AgentHealth.STUCK:
+                        redirected_agent_ids.add(str(aid))
                     yield "data: {}\n\n".format(
                         json.dumps(_system_interface_status_payload(tracker, str(aid), status))
                     )
+            # Replay the app-global discovery-pipeline state if it is already
+            # BLOCKED, so a freshly (re)loaded chrome re-learns it and takes over
+            # the whole app. BLOCKED is terminal, so a single connect-time emit
+            # plus the on-change push below is sufficient.
+            if discovery_watchdog is not None and discovery_watchdog.get_health() is DiscoveryHealth.BLOCKED:
+                yield "data: {}\n\n".format(json.dumps(_discovery_health_payload(DiscoveryHealth.BLOCKED)))
+                discovery_blocked_emitted = True
             # Anchor the periodic re-assert clock to the connect-time snapshot
             # just sent, so the first backstop re-assert is a full interval out.
             last_status_reassert = time.monotonic()
@@ -2234,7 +2313,40 @@ def _handle_chrome_events() -> Response:
 
                 while not health_queue.empty():
                     aid_str, status = health_queue.get_nowait()
+                    # Leaving STUCK clears the redirect latch so a later re-STUCK
+                    # is promoted again by the flip check below.
+                    if status != AgentHealth.STUCK:
+                        redirected_agent_ids.discard(aid_str)
+                    if not _should_emit_system_interface_status(backend_resolver, tracker, AgentId(aid_str), status):
+                        continue
+                    if status == AgentHealth.STUCK:
+                        redirected_agent_ids.add(aid_str)
                     yield "data: {}\n\n".format(json.dumps(_system_interface_status_payload(tracker, aid_str, status)))
+
+                # Promote any STUCK agent whose suppression has just lifted: the
+                # STUCK edge fired earlier (and was suppressed because no post-onset
+                # snapshot had landed yet), and this wake is the snapshot arriving.
+                # Emit immediately rather than waiting for the 15s re-assert below,
+                # bounding redirect latency to one discovery poll. The latch keeps
+                # this to one emit per stuck episode.
+                if tracker is not None:
+                    for aid, status in tracker.snapshot_all().items():
+                        if status != AgentHealth.STUCK or str(aid) in redirected_agent_ids:
+                            continue
+                        if not _should_emit_system_interface_status(backend_resolver, tracker, aid, status):
+                            continue
+                        redirected_agent_ids.add(str(aid))
+                        yield "data: {}\n\n".format(
+                            json.dumps(_system_interface_status_payload(tracker, str(aid), status))
+                        )
+
+                if (
+                    discovery_watchdog is not None
+                    and not discovery_blocked_emitted
+                    and discovery_watchdog.get_health() is DiscoveryHealth.BLOCKED
+                ):
+                    discovery_blocked_emitted = True
+                    yield "data: {}\n\n".format(json.dumps(_discovery_health_payload(DiscoveryHealth.BLOCKED)))
 
                 # Periodic backstop: re-assert the current non-HEALTHY statuses
                 # even when no transition fired this tick. The tracker only
@@ -2244,6 +2356,9 @@ def _handle_chrome_events() -> Response:
                 # reloaded chrome webview) would otherwise never re-learn it and
                 # never redirect to the recovery page. Re-asserting is idempotent
                 # client-side (the recovery-redirect lock prevents re-navigation).
+                # Prompt promotion of a suppressed STUCK once a post-onset snapshot
+                # lands is handled by the flip check above; this is the slower
+                # lost-event backstop.
                 now = time.monotonic()
                 if (
                     tracker is not None
@@ -2251,6 +2366,10 @@ def _handle_chrome_events() -> Response:
                 ):
                     last_status_reassert = now
                     for aid, status in tracker.snapshot_all().items():
+                        if not _should_emit_system_interface_status(backend_resolver, tracker, aid, status):
+                            continue
+                        if status == AgentHealth.STUCK:
+                            redirected_agent_ids.add(str(aid))
                         yield "data: {}\n\n".format(
                             json.dumps(_system_interface_status_payload(tracker, str(aid), status))
                         )
@@ -2295,6 +2414,8 @@ def _handle_chrome_events() -> Response:
                 backend_resolver.remove_on_change_callback(_on_change)
             if tracker is not None:
                 tracker.remove_on_change_callback(_on_health_change)
+            if discovery_watchdog is not None:
+                discovery_watchdog.remove_on_change_callback(_on_change)
 
     return make_streaming_response(
         _event_generator(),
@@ -2543,17 +2664,30 @@ def _build_requests_payload(
 # Used by the background system-interface-health probe loop -- we want a short,
 # snappy timeout so a wedged workspace doesn't gate the recovery UI.
 _WORKSPACE_PROBE_TIMEOUT_SECONDS: Final[float] = 2.0
-# Hard timeout for a single ``mngr`` stop/start subprocess during a restart.
-# Generous: a host stop/start bounces a container and can legitimately take
-# tens of seconds, so this is a "definitely wedged" ceiling, not an estimate.
-_RESTART_COMMAND_TIMEOUT_SECONDS: Final[float] = 120.0
-# Hard timeout for the recovery host-health probe's ``mngr list``. Far shorter
-# than the restart ceiling: this is a *diagnostic* that gates the recovery UI,
-# so a healthy-but-slow network has ample room while a dead network resolves to
-# "can't reach the provider" in tens of seconds instead of stranding the user on
-# the "Loading workspace" loader for the full restart timeout. A timeout here is
-# itself classified as provider-unavailable (see _run_host_health_probe).
+# Default hard timeout for an ``mngr`` subprocess run via ``_run_mngr``. Generous
+# because it is sized for the slowest legitimate case -- a host stop/start, which
+# bounces a container and can take tens of seconds -- so it is a "definitely
+# wedged" ceiling, not an estimate. Most callers (stop/start, bulk host stop,
+# ``mngr label``) take this default; the recovery host-health exec probe
+# overrides it with a much shorter cap.
+_MNGR_COMMAND_TIMEOUT_SECONDS: Final[float] = 120.0
+# Hard timeout for the recovery host-health probe's in-container ``mngr exec``.
+# Far shorter than the default ceiling: this is a *diagnostic* that gates the
+# recovery UI. The exec touches the provider (``get_host`` -> the connector's
+# ~30s httpx) before reaching the container, so it must carry its own 30s-class
+# cap rather than inheriting the 120s default -- otherwise a wedged host could
+# gate the recovery UI for the full timeout. The probe is only fired when the
+# provider is reachable and the host is RUNNING, so it never stacks a doomed
+# round-trip during an outage.
 _HOST_HEALTH_PROBE_TIMEOUT_SECONDS: Final[float] = 30.0
+# How recent the last full discovery snapshot must be to treat discovery as
+# trustworthy. A healthy discovery poll emits a snapshot every
+# ``DISCOVERY_STREAM_POLL_INTERVAL_SECONDS``; three missed snapshots means the
+# pipeline has stalled, so the host/provider state it last reported can no longer
+# be trusted to drive the recovery redirect. The 3x multiple stays comfortably
+# above the normal inter-snapshot interval to avoid a false "stale" during a
+# single slow-but-healthy poll.
+_DISCOVERY_FRESHNESS_THRESHOLD_SECONDS: Final[float] = 3 * DISCOVERY_STREAM_POLL_INTERVAL_SECONDS
 # How long we wait for the system interface to answer again after a restart,
 # split by tier. A surgical (in-place) restart leaves the container running, so
 # the interface should answer again quickly. A host restart cold-boots the
@@ -2591,48 +2725,6 @@ def _build_mngr_stop_argv(mngr_binary: str, agent_id: AgentId, is_host_restart: 
 def _build_mngr_start_argv(mngr_binary: str, agent_id: AgentId) -> list[str]:
     """Build the argv for ``mngr start`` on ``agent_id`` (also starts the host if it is stopped)."""
     return [mngr_binary, "start", str(agent_id), "--quiet"]
-
-
-def _build_mngr_host_state_argv(
-    mngr_binary: str,
-    agent_id: AgentId,
-    services_agent_id: AgentId | None,
-    provider_name: str | None,
-) -> list[str]:
-    """Build the argv for the layer-2 probe: list agents to read each host's lifecycle state.
-
-    The recovery page keys its restart tier off the workspace host's state:
-    a RUNNING host can be recovered with the surgical system-interface
-    restart, while a stopped host needs a full host restart. ``mngr list``
-    is a pure read -- it never starts a stopped container.
-
-    Scopes the listing to just this workspace's chat agent + system-services
-    agent via a CEL ``id == ...`` include, for a smaller payload. When the
-    workspace's provider is known it also passes ``--provider`` so discovery
-    only queries that provider: ``--provider`` is a discovery fan-out control
-    (unlike the post-discovery CEL ``--include``), so an unrelated provider
-    being unreachable does not make this listing exit nonzero and blank out
-    this workspace's own host state. ``--on-error continue`` keeps a per-host
-    failure within the scoped provider from hard-failing the listing.
-    """
-    if services_agent_id is None:
-        include = f'id == "{agent_id}"'
-    else:
-        include = f'id == "{agent_id}" || id == "{services_agent_id}"'
-    argv = [
-        mngr_binary,
-        "list",
-        "--format",
-        "json",
-        "--quiet",
-        "--include",
-        include,
-        "--on-error",
-        "continue",
-    ]
-    if provider_name is not None:
-        argv += ["--provider", provider_name]
-    return argv
 
 
 def _sanitize_recovery_return_to(raw: str) -> str:
@@ -2733,7 +2825,12 @@ def _handle_recovery_page(
     return make_html_response(content=html_body)
 
 
-def _run_mngr(concurrency_group: ConcurrencyGroup, argv: list[str], env: dict[str, str]) -> str:
+def _run_mngr(
+    concurrency_group: ConcurrencyGroup,
+    argv: list[str],
+    env: dict[str, str],
+    timeout_seconds: float = _MNGR_COMMAND_TIMEOUT_SECONDS,
+) -> str:
     """Run an ``mngr`` subprocess to completion and return its stdout on a clean exit.
 
     Raises ``MngrCommandError`` for every non-clean outcome, like the rest of
@@ -2745,8 +2842,12 @@ def _run_mngr(concurrency_group: ConcurrencyGroup, argv: list[str], env: dict[st
     ``except MngrCommandError`` callers are unaffected), a nonzero exit as a bare
     ``MngrCommandError`` (discarding stdout, unlike ``_run_mngr_capturing``), and
     a launch failure as a bare ``MngrCommandError``.
+
+    ``timeout_seconds`` defaults to the generous ceiling sized for a host
+    stop/start; the recovery host-health exec probe overrides it with a much
+    shorter cap since it must not gate the recovery UI for tens of seconds.
     """
-    stdout, returncode, stderr = _run_mngr_capturing(concurrency_group, argv, env)
+    stdout, returncode, stderr = _run_mngr_capturing(concurrency_group, argv, env, timeout_seconds=timeout_seconds)
     if returncode != 0:
         raise MngrCommandError(f"exited {returncode}: {stderr.strip()}")
     return stdout
@@ -2756,7 +2857,7 @@ def _run_mngr_capturing(
     concurrency_group: ConcurrencyGroup,
     argv: list[str],
     env: dict[str, str],
-    timeout_seconds: float = _RESTART_COMMAND_TIMEOUT_SECONDS,
+    timeout_seconds: float = _MNGR_COMMAND_TIMEOUT_SECONDS,
 ) -> tuple[str, int, str]:
     """Run an ``mngr`` subprocess, returning ``(stdout, returncode, stderr)`` without raising on a nonzero exit.
 
@@ -3299,15 +3400,57 @@ def _handle_host_health_probe_api(
     )
 
 
+def _provider_error_message_for_workspace(
+    provider_errors: Mapping[ProviderInstanceName, DiscoveryError], provider_name: str | None
+) -> str | None:
+    """Map this workspace's provider error message (if any) from the discovery snapshot.
+
+    ``get_provider_errors()`` keys per-provider discovery errors by provider
+    name, so attribution to *this* workspace's provider is exact -- a docker
+    mind's recovery is never blamed on a simultaneous imbue_cloud outage. Returns
+    None in the brief pre-discovery window where the provider is unknown
+    (``provider_name is None``) rather than guess, and None when this workspace's
+    provider has no surfaced error. Otherwise returns the provider's own error
+    message, which the recovery page surfaces verbatim.
+    """
+    if provider_name is None:
+        return None
+    for name, error in provider_errors.items():
+        if str(name) == provider_name:
+            return error.message
+    return None
+
+
+def _is_discovery_fresh(last_full_snapshot_at: datetime | None) -> bool:
+    """Whether the most recent full discovery snapshot is recent enough to trust.
+
+    A snapshot older than ``_DISCOVERY_FRESHNESS_THRESHOLD_SECONDS`` (or no
+    snapshot at all) means discovery has stalled -- the resolver's host state may
+    pre-date an outage -- so reachability cannot be positively established.
+    """
+    if last_full_snapshot_at is None:
+        return False
+    age_seconds = (datetime.now(timezone.utc) - last_full_snapshot_at).total_seconds()
+    return age_seconds <= _DISCOVERY_FRESHNESS_THRESHOLD_SECONDS
+
+
 def _run_host_health_probe(
     agent_id: AgentId,
     concurrency_group: ConcurrencyGroup,
 ) -> HostHealthResponse:
-    """Run the batched ``mngr exec`` probe + ``mngr list`` lookup, return the response.
+    """Compose the host-health response from the passive resolver + an in-container probe.
 
-    Composes the response from three independent inputs: ``mngr list`` for
-    host state / services-agent state, the batched in-container
-    ``mngr exec`` probe, and the plugin's resolver-snapshot mirror.
+    Provider reachability and host lifecycle are read from the
+    ``backend_resolver`` -- the single passive-discovery sampler shared with the
+    rest of minds -- not re-sampled with a synchronous ``mngr list``. The reason
+    the inner interface isn't answering comes from the batched in-container
+    ``mngr exec`` probe, which is fired only when the provider is reachable and
+    the host is RUNNING so an outage never pays a doomed provider round-trip. The
+    plugin's resolver-snapshot mirror supplies the last probe.
+
+    Callers reach this only once discovery is fresh (the recovery redirect is
+    gated on freshness in the chrome-events stream), so the host/provider state
+    read here is trustworthy without a per-call freshness gate.
     """
     env = dict(os.environ)
     env["MNGR_HOST_DIR"] = str(get_state().mngr_host_dir)
@@ -3322,74 +3465,37 @@ def _run_host_health_probe(
     # manual "Restart workspace" button instead of auto-dispatching.
     backend = resolve_agent_backend(backend_resolver, agent_id)
     is_auto_restart_suppressed = backend is not None and provider_backend_suppresses_recovery_auto_restart(backend)
-    list_argv = _build_mngr_host_state_argv(mngr_binary, agent_id, services_agent_id, provider_name)
-    list_command = shlex.join(list_argv)
     # Friendly provider name for the "Can't connect to ..." page title; reuse the
     # workspace-listing label map (docker -> "Docker", imbue_cloud_* -> "Imbue
     # Cloud", ...), falling back to a generic label for an unknown/None provider.
     provider_label = friendly_provider_label(provider_name) or "the workspace backend"
-    list_error: str | None = None
-    list_stdout = ""
-    list_timed_out = False
-    provider_error: ProviderProbeError | None = None
-    try:
-        # Capture stdout even on a nonzero exit: with ``--on-error continue`` the
-        # listing still emits its JSON body (including the ``errors[]`` array that
-        # carries the provider-reachability signal) and then exits 1 when a
-        # provider failed. The listing is scoped to this workspace's own provider
-        # (see _build_mngr_host_state_argv), so a nonzero exit reflects a problem
-        # with *this* provider/host. Record the reason for the host-state rows,
-        # but keep the body so ``extract_provider_error`` can classify it.
-        list_stdout, returncode, list_stderr = _run_mngr_capturing(
-            concurrency_group, list_argv, env, timeout_seconds=_HOST_HEALTH_PROBE_TIMEOUT_SECONDS
-        )
-        if returncode != 0:
-            list_error = f"exited {returncode}: {list_stderr.strip()}"
-            logger.warning("`mngr list` for host-health probe of {} did not exit cleanly: {}", agent_id, list_error)
-    except MngrCommandTimeoutError as exc:
-        # The listing never completed within the probe window. There is no body to
-        # parse and -- crucially -- no positive evidence the host is reachable but
-        # wedged, so we must not offer a destructive restart. Classify the provider
-        # as unreachable (retry, not restart): the same tier a connector-raised
-        # ProviderUnavailableError lands in. Without this, an unreachable provider
-        # produces UNKNOWN host state and falls through to HOST_UNRESPONSIVE, which
-        # is exactly what handed users a destructive button during a full outage.
-        list_error = str(exc)
-        list_timed_out = True
-        provider_error = provider_unavailable_error(
-            f"Could not reach {provider_label}: the workspace listing timed out after "
-            f"{int(_HOST_HEALTH_PROBE_TIMEOUT_SECONDS)}s."
-        )
-        logger.warning(
-            "`mngr list` for host-health probe of {} timed out; classifying provider as unreachable: {}",
-            agent_id,
-            list_error,
-        )
-    except MngrCommandError as exc:
-        # Failed to launch the process at all (no body); continue with an empty
-        # listing and surface the reason on the host-state rows.
-        list_error = str(exc)
-        logger.warning("`mngr list` for host-health probe of {} did not run: {}", agent_id, list_error)
-    list_json: str | None = list_stdout or None
-    if provider_error is None:
-        provider_error = extract_provider_error(list_json, provider_name)
-    # The in-container probe stays quiet at warning level: its argv embeds a
-    # long base64 inner script that adds nothing to diagnostics, and the
-    # dispatch_tier INFO line already records the outcome. Trust the stdout only
-    # on a clean exit -- any non-clean outcome (a failed ``mngr exec`` such as
-    # ``--no-start`` against a stopped host, a timeout, or a launch / group
-    # failure) raises and leaves ``in_container_stdout`` None, which parses to a
-    # "no" on the can-we-run-commands probe, and is recorded only at debug.
+
+    # Read host/provider state from the passive discovery resolver.
+    host_state_enum = (
+        backend_resolver.get_host_state(HostId(display_info.host_id)) if display_info is not None else None
+    )
+    host_state = host_state_enum.value if host_state_enum is not None else ""
+    provider_error_message = _provider_error_message_for_workspace(
+        backend_resolver.get_provider_errors(), provider_name
+    )
+
+    # In-container exec probe, only when the provider is reachable and the host is
+    # RUNNING. The exec SSHes to the container via ``get_host`` (the connector's
+    # ~30s httpx), so it carries an explicit 30s-class cap (never the 120s
+    # default) and is skipped entirely unless the provider has no surfaced error
+    # and the host is RUNNING -- so an outage never stacks a doomed round-trip
+    # here, and a stopped host is classified offline without an exec attempt. A
+    # non-clean outcome leaves ``in_container_stdout`` None (parses to "no" on the
+    # can-we-run-commands probe) and is recorded only at debug.
     in_container_stdout: str | None = None
-    # Skip the in-container exec probe when the listing timed out: the exec SSHes
-    # to the container over the same network that just failed to even enumerate
-    # the provider, so it would only add another doomed round-trip -- and the tier
-    # is already PROVIDER_UNAVAILABLE regardless of what it answers. A provider
-    # error *with* a body is different (the connector can be down while the host's
-    # own SSH path is fine), so we still probe in that case.
-    if services_agent_id is not None and not list_timed_out:
+    if services_agent_id is not None and provider_error_message is None and host_state_enum == HostState.RUNNING:
         try:
-            in_container_stdout = _run_mngr(concurrency_group, build_probe_argv(mngr_binary, services_agent_id), env)
+            in_container_stdout = _run_mngr(
+                concurrency_group,
+                build_probe_argv(mngr_binary, services_agent_id),
+                env,
+                timeout_seconds=_HOST_HEALTH_PROBE_TIMEOUT_SECONDS,
+            )
         except MngrCommandError as exc:
             logger.debug("in-container probe for host-health of {} did not exit cleanly: {}", agent_id, exc)
     consumer: EnvelopeStreamConsumer | None = get_state().envelope_stream_consumer
@@ -3401,16 +3507,13 @@ def _run_host_health_probe(
     else:
         exec_command = "(mngr exec <system-services-agent>) -- no services agent id known"
     return build_host_health_response(
-        list_json=list_json,
-        agent_id=agent_id,
+        host_state=host_state,
         services_agent_id=services_agent_id,
         in_container_stdout=in_container_stdout,
         plugin_resolver_services=plugin_resolver_services,
-        mngr_list_command=list_command,
-        mngr_list_error=list_error,
         mngr_exec_command=exec_command,
         mngr_binary=mngr_binary,
-        provider_error=provider_error,
+        provider_error_message=provider_error_message,
         provider_label=provider_label,
         is_auto_restart_suppressed=is_auto_restart_suppressed,
     )
@@ -4226,6 +4329,7 @@ def create_desktop_client(
     mngr_host_dir: Path | None = None,
     minds_api_key: str | None = None,
     latchkey_forward_supervisor: LatchkeyForwardSupervisor | None = None,
+    discovery_health_watchdog: DiscoveryHealthWatchdog | None = None,
 ) -> Flask:
     """Create the bare-origin minds Flask application.
 
@@ -4316,6 +4420,7 @@ def create_desktop_client(
         mngr_host_dir=mngr_host_dir if mngr_host_dir is not None else Path.home() / ".mngr",
         minds_api_key=minds_api_key,
         latchkey_forward_supervisor=latchkey_forward_supervisor,
+        discovery_health_watchdog=discovery_health_watchdog,
     )
     set_state(app, state)
 
@@ -4524,3 +4629,52 @@ def _run_system_interface_health_probe_loop(
                 else:
                     tracker.record_probe_failure(aid)
             threading.Event().wait(timeout=_HEALTH_PROBE_INTERVAL_SECONDS)
+
+
+# How often the discovery-health watchdog re-reads the resolver's snapshot
+# freshness. Comfortably below the watchdog's inter-remediation wait so a due
+# producer remediation fires within a tick or two of becoming due.
+_DISCOVERY_WATCHDOG_POLL_INTERVAL_SECONDS: Final[float] = 5.0
+
+
+def start_discovery_health_watchdog_loop(
+    watchdog: DiscoveryHealthWatchdog,
+    backend_resolver: BackendResolverInterface,
+    root_concurrency_group: ConcurrencyGroup | None,
+) -> None:
+    """Start the background thread that drives the discovery-health watchdog.
+
+    Each tick reads the resolver's ``last_full_snapshot_at`` and hands it to
+    ``watchdog.evaluate``, which detects a producer stall, runs the
+    bounce -> restart remediations, and escalates to BLOCKED. The thread no-ops when
+    there is no concurrency group (test factories that skip background threads).
+    """
+    if root_concurrency_group is None:
+        return
+    root_concurrency_group.start_new_thread(
+        target=_run_discovery_health_watchdog_loop,
+        args=(watchdog, backend_resolver, root_concurrency_group),
+        name="discovery-health-watchdog",
+        daemon=True,
+    )
+
+
+def _run_discovery_health_watchdog_loop(
+    watchdog: DiscoveryHealthWatchdog,
+    backend_resolver: BackendResolverInterface,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """Loop body for the discovery-health watchdog thread."""
+    if not isinstance(backend_resolver, MngrCliBackendResolver):
+        # Static resolvers used by tests report no freshness, so there is
+        # nothing to watch. Resolver type is fixed for the process lifetime, so
+        # exit immediately rather than spinning doing nothing.
+        logger.debug(
+            "Discovery-health watchdog thread exiting: backend_resolver is {}, not MngrCliBackendResolver",
+            type(backend_resolver).__name__,
+        )
+        return
+    while not root_concurrency_group.is_shutting_down():
+        _, last_full_snapshot_at = backend_resolver.get_freshness_timestamps()
+        watchdog.evaluate(last_full_snapshot_at)
+        threading.Event().wait(timeout=_DISCOVERY_WATCHDOG_POLL_INTERVAL_SECONDS)

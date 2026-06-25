@@ -8,23 +8,13 @@ from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
 from imbue.minds.desktop_client.recovery_probe import PROBE_SENTINEL
 from imbue.minds.desktop_client.recovery_probe import Probe
 from imbue.minds.desktop_client.recovery_probe import ProbeAnswer
-from imbue.minds.desktop_client.recovery_probe import ProviderProbeError
 from imbue.minds.desktop_client.recovery_probe import build_host_health_response
 from imbue.minds.desktop_client.recovery_probe import build_probe_argv
-from imbue.minds.desktop_client.recovery_probe import extract_provider_error
 from imbue.minds.desktop_client.recovery_probe import parse_inner_port_from_command
 from imbue.minds.desktop_client.recovery_probe import parse_listening_sockets
-from imbue.minds.desktop_client.recovery_probe import provider_unavailable_error
 from imbue.mngr.primitives import AgentId
 
-_AGENT_ID: AgentId = AgentId("agent-" + "0" * 31 + "1")
 _SERVICES_AGENT_ID: AgentId = AgentId("agent-" + "0" * 31 + "2")
-_PROVIDER_NAME: str = "imbue_cloud_acme"
-
-
-def _list_json_with_errors(errors: list[dict[str, object]], host_state: str = "RUNNING") -> str:
-    """`mngr list` JSON whose agents[] may be empty but whose errors[] carries provider failures."""
-    return json.dumps({"agents": [{"id": str(_AGENT_ID), "host": {"state": host_state}}], "errors": errors})
 
 
 def _probe_stdout(payload: dict[str, object]) -> str:
@@ -32,11 +22,30 @@ def _probe_stdout(payload: dict[str, object]) -> str:
     return PROBE_SENTINEL + "\n" + json.dumps(payload) + "\n"
 
 
-def _list_json(host_state: str = "RUNNING", services_state: str | None = "RUNNING") -> str:
-    agents: list[dict[str, object]] = [{"id": str(_AGENT_ID), "host": {"state": host_state}}]
-    if services_state is not None:
-        agents.append({"id": str(_SERVICES_AGENT_ID), "state": services_state})
-    return json.dumps({"agents": agents, "errors": []})
+def _response(
+    *,
+    host_state: str = "RUNNING",
+    services_agent_id: AgentId | None = _SERVICES_AGENT_ID,
+    in_container_stdout: str | None = None,
+    plugin_resolver_services: dict[str, str] | None = None,
+    provider_error_message: str | None = None,
+    provider_label: str = "",
+    mngr_exec_command: str = "",
+) -> HostHealthResponse:
+    """Call ``build_host_health_response`` with resolver-sourced defaults.
+
+    Defaults to a healthy RUNNING host so each test only has to vary the inputs
+    it exercises.
+    """
+    return build_host_health_response(
+        host_state=host_state,
+        services_agent_id=services_agent_id,
+        in_container_stdout=in_container_stdout,
+        plugin_resolver_services=plugin_resolver_services or {},
+        provider_error_message=provider_error_message,
+        provider_label=provider_label,
+        mngr_exec_command=mngr_exec_command,
+    )
 
 
 def _answer(response: HostHealthResponse, question_fragment: str) -> ProbeAnswer:
@@ -82,35 +91,17 @@ def test_build_probe_argv_targets_services_agent_with_timeout_and_no_start() -> 
 
 
 def test_container_running_probe_says_yes_when_host_state_is_running() -> None:
-    response = build_host_health_response(
-        list_json=_list_json(host_state="RUNNING"),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": True}),
-        plugin_resolver_services={},
-    )
+    response = _response(host_state="RUNNING", in_container_stdout=_probe_stdout({}))
     assert _answer(response, "container running") == ProbeAnswer.YES
 
 
 def test_container_running_probe_says_no_when_host_state_is_stopped() -> None:
-    response = build_host_health_response(
-        list_json=_list_json(host_state="STOPPED"),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        in_container_stdout=None,
-        plugin_resolver_services={},
-    )
+    response = _response(host_state="STOPPED")
     assert _answer(response, "container running") == ProbeAnswer.NO
 
 
 def test_container_running_probe_is_unknown_for_ambiguous_host_state() -> None:
-    response = build_host_health_response(
-        list_json=_list_json(host_state="STARTING"),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        in_container_stdout=None,
-        plugin_resolver_services={},
-    )
+    response = _response(host_state="STARTING")
     assert _answer(response, "container running") == ProbeAnswer.UNKNOWN
 
 
@@ -121,196 +112,88 @@ def test_container_running_probe_says_no_when_host_state_is_paused() -> None:
     Modal workspace drives the HOST_OFFLINE recovery tier (auto ``mngr start`` ->
     resume) rather than an ambiguous UNKNOWN.
     """
-    response = build_host_health_response(
-        list_json=_list_json(host_state="PAUSED"),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        in_container_stdout=None,
-        plugin_resolver_services={},
-    )
+    response = _response(host_state="PAUSED")
     assert _answer(response, "container running") == ProbeAnswer.NO
 
 
-def test_services_agent_registered_probe_yes_when_row_present() -> None:
-    response = build_host_health_response(
-        list_json=_list_json(services_state="RUNNING"),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": True}),
-        plugin_resolver_services={},
-    )
-    assert _answer(response, "system-services agent registered") == ProbeAnswer.YES
+def test_container_running_probe_is_unknown_when_host_state_absent() -> None:
+    """No host in the discovery snapshot -> UNKNOWN, with an explanatory output."""
+    response = _response(host_state="")
+    probe = _probe_for(response, "container running")
+    assert probe.answer == ProbeAnswer.UNKNOWN
+    assert probe.output == "(no host state in the discovery snapshot)"
 
 
-def test_services_agent_registered_probe_no_when_row_absent() -> None:
-    response = build_host_health_response(
-        list_json=_list_json(services_state=None),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        in_container_stdout=None,
-        plugin_resolver_services={},
-    )
-    assert _answer(response, "system-services agent registered") == ProbeAnswer.NO
+def test_services_agent_registered_probe_yes_when_id_resolved() -> None:
+    response = _response(services_agent_id=_SERVICES_AGENT_ID)
+    probe = _probe_for(response, "system-services agent registered")
+    assert probe.answer == ProbeAnswer.YES
+    assert probe.output == str(_SERVICES_AGENT_ID)
 
 
 def test_services_agent_registered_probe_unknown_when_id_not_known() -> None:
-    response = build_host_health_response(
-        list_json=_list_json(services_state=None),
-        agent_id=_AGENT_ID,
-        services_agent_id=None,
-        in_container_stdout=None,
-        plugin_resolver_services={},
-    )
+    response = _response(services_agent_id=None)
     assert _answer(response, "system-services agent registered") == ProbeAnswer.UNKNOWN
 
 
-def test_host_state_probes_surface_mngr_list_failure_when_row_missing() -> None:
-    """A failed ``mngr list`` (no usable row) surfaces its reason on the host-state probes.
-
-    The reason is shown in place of a bare "no row" so the user can tell the
-    listing failed (e.g. a provider was unreachable) rather than concluding the
-    host / agent is genuinely absent; both probes answer UNKNOWN since the
-    listing told us nothing about this workspace.
-    """
-    response = build_host_health_response(
-        list_json=None,
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        in_container_stdout=None,
-        plugin_resolver_services={},
-        mngr_list_error="timed out after 120s",
-    )
-    container_probe = _probe_for(response, "container running")
-    assert container_probe.answer == ProbeAnswer.UNKNOWN
-    assert "mngr list failed: timed out after 120s" in container_probe.output
-    services_probe = _probe_for(response, "system-services agent registered")
-    assert services_probe.answer == ProbeAnswer.UNKNOWN
-    assert "mngr list failed: timed out after 120s" in services_probe.output
-
-
-def test_host_state_probes_prefer_partial_list_data_over_failure_reason() -> None:
-    """When ``mngr list`` returns this workspace's row despite a non-clean exit, show the data.
-
-    ``--on-error continue`` can yield a usable row for our own host even when an
-    unrelated provider failed, so a present row wins over the failure reason.
-    """
-    response = build_host_health_response(
-        list_json=_list_json(host_state="RUNNING", services_state="RUNNING"),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        in_container_stdout=None,
-        plugin_resolver_services={},
-        mngr_list_error="exited 1: provider 'other' unreachable",
-    )
-    container_probe = _probe_for(response, "container running")
-    assert container_probe.answer == ProbeAnswer.YES
-    assert container_probe.output == "RUNNING"
-    assert "mngr list failed" not in container_probe.output
-
-
 def test_can_run_commands_probe_no_when_sentinel_absent() -> None:
-    response = build_host_health_response(
-        list_json=_list_json(),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        in_container_stdout=None,
-        plugin_resolver_services={},
-    )
+    response = _response(in_container_stdout=None)
     assert _answer(response, "run a command") == ProbeAnswer.NO
 
 
 def test_can_run_commands_probe_yes_when_sentinel_present() -> None:
-    response = build_host_health_response(
-        list_json=_list_json(),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": True}),
-        plugin_resolver_services={},
-    )
+    response = _response(in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": True}))
     assert _answer(response, "run a command") == ProbeAnswer.YES
 
 
 def test_services_toml_probe_no_when_declaration_missing() -> None:
-    response = build_host_health_response(
-        list_json=_list_json(),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": False}),
-        plugin_resolver_services={},
-    )
+    response = _response(in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": False}))
     assert _answer(response, "services.toml") == ProbeAnswer.NO
 
 
 def test_services_toml_probe_yes_when_declaration_present() -> None:
-    response = build_host_health_response(
-        list_json=_list_json(),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": True}),
-        plugin_resolver_services={},
-    )
+    response = _response(in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": True}))
     assert _answer(response, "services.toml") == ProbeAnswer.YES
 
 
 def test_services_toml_probe_unknown_when_probe_did_not_run() -> None:
-    response = build_host_health_response(
-        list_json=_list_json(),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        in_container_stdout=None,
-        plugin_resolver_services={},
-    )
+    response = _response(in_container_stdout=None)
     assert _answer(response, "services.toml") == ProbeAnswer.UNKNOWN
 
 
 def test_curl_probe_yes_for_200() -> None:
-    response = build_host_health_response(
-        list_json=_list_json(),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
+    response = _response(
         in_container_stdout=_probe_stdout(
             {"services_toml_declares_system_interface": True, "inner_port": 8000, "curl_status": "200"}
-        ),
-        plugin_resolver_services={},
+        )
     )
     assert _answer(response, "GET /") == ProbeAnswer.YES
 
 
 def test_curl_probe_no_for_non_200() -> None:
-    response = build_host_health_response(
-        list_json=_list_json(),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
+    response = _response(
         in_container_stdout=_probe_stdout(
             {"services_toml_declares_system_interface": True, "inner_port": 8000, "curl_status": "502"}
-        ),
-        plugin_resolver_services={},
+        )
     )
     assert _answer(response, "GET /") == ProbeAnswer.NO
 
 
 def test_port_listener_probe_yes_when_listener_present() -> None:
-    response = build_host_health_response(
-        list_json=_list_json(),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
+    response = _response(
         in_container_stdout=_probe_stdout(
             {
                 "services_toml_declares_system_interface": True,
                 "inner_port": 8000,
                 "port_listener": "LISTEN 0.0.0.0:8000\nLISTEN ::1:8000",
             }
-        ),
-        plugin_resolver_services={},
+        )
     )
     assert _answer(response, "listening on the system-interface inner port") == ProbeAnswer.YES
 
 
 def test_plugin_resolver_probe_yes_when_services_registered() -> None:
-    response = build_host_health_response(
-        list_json=_list_json(),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
+    response = _response(
         in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": True}),
         plugin_resolver_services={"system_interface": "http://127.0.0.1:9100"},
     )
@@ -320,13 +203,7 @@ def test_plugin_resolver_probe_yes_when_services_registered() -> None:
 
 
 def test_plugin_resolver_probe_no_when_no_services_registered() -> None:
-    response = build_host_health_response(
-        list_json=_list_json(),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": True}),
-        plugin_resolver_services={},
-    )
+    response = _response(in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": True}))
     assert _answer(response, "registered with the plugin resolver") == ProbeAnswer.NO
 
 
@@ -334,47 +211,35 @@ def test_plugin_resolver_probe_no_when_no_services_registered() -> None:
 
 
 def test_dispatch_tier_interface_unresponsive_when_container_running_and_exec_works() -> None:
-    response = build_host_health_response(
-        list_json=_list_json(host_state="RUNNING"),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
+    response = _response(
+        host_state="RUNNING",
         in_container_stdout=_probe_stdout(
             {"services_toml_declares_system_interface": True, "inner_port": 8000, "curl_status": "502"}
         ),
-        plugin_resolver_services={},
     )
     assert response.dispatch_tier == DispatchTier.INTERFACE_UNRESPONSIVE
 
 
 def test_dispatch_tier_host_offline_when_container_is_offline() -> None:
-    response = build_host_health_response(
-        list_json=_list_json(host_state="STOPPED"),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        in_container_stdout=None,
-        plugin_resolver_services={},
-    )
+    response = _response(host_state="STOPPED")
     assert response.dispatch_tier == DispatchTier.HOST_OFFLINE
 
 
 def test_dispatch_tier_host_unresponsive_when_container_running_but_exec_dead() -> None:
-    """SSH-dead path: host claims RUNNING but mngr exec failed -- require user consent."""
-    response = build_host_health_response(
-        list_json=_list_json(host_state="RUNNING"),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        in_container_stdout=None,
-        plugin_resolver_services={},
-    )
+    """SSH-dead path: host claims RUNNING but exec failed -> consent-gated host restart.
+
+    The recovery page is only reached once discovery is fresh (the redirect is
+    gated on freshness upstream), so the RUNNING claim is trustworthy here and
+    HOST_UNRESPONSIVE is returned unconditionally.
+    """
+    response = _response(host_state="RUNNING", in_container_stdout=None)
     assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
 
 
 def test_dispatch_tier_misconfigured_beats_other_signals() -> None:
     """A missing [services.system_interface] block dominates: no restart will help."""
-    response = build_host_health_response(
-        list_json=_list_json(host_state="RUNNING"),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
+    response = _response(
+        host_state="RUNNING",
         in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": False}),
         plugin_resolver_services={"system_interface": "http://127.0.0.1:9100"},
     )
@@ -382,13 +247,7 @@ def test_dispatch_tier_misconfigured_beats_other_signals() -> None:
 
 
 def test_dispatch_tier_host_unresponsive_for_ambiguous_host_state() -> None:
-    response = build_host_health_response(
-        list_json=_list_json(host_state="STARTING"),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        in_container_stdout=None,
-        plugin_resolver_services={},
-    )
+    response = _response(host_state="STARTING", in_container_stdout=None)
     assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
 
 
@@ -399,8 +258,7 @@ def test_is_auto_restart_suppressed_passes_through_to_response() -> None:
     the host_offline / interface_unresponsive tiers instead of auto-dispatching.
     """
     suppressed = build_host_health_response(
-        list_json=_list_json(host_state="STOPPED"),
-        agent_id=_AGENT_ID,
+        host_state="STOPPED",
         services_agent_id=_SERVICES_AGENT_ID,
         in_container_stdout=None,
         plugin_resolver_services={},
@@ -409,8 +267,7 @@ def test_is_auto_restart_suppressed_passes_through_to_response() -> None:
     assert suppressed.is_auto_restart_suppressed is True
 
     not_suppressed = build_host_health_response(
-        list_json=_list_json(host_state="STOPPED"),
-        agent_id=_AGENT_ID,
+        host_state="STOPPED",
         services_agent_id=_SERVICES_AGENT_ID,
         in_container_stdout=None,
         plugin_resolver_services={},
@@ -419,111 +276,37 @@ def test_is_auto_restart_suppressed_passes_through_to_response() -> None:
     assert not_suppressed.is_auto_restart_suppressed is False
 
 
-# --- provider reachability extraction + tiers ----------------------------
+# --- provider reachability tiers -----------------------------------------
 
 
-def test_extract_provider_error_returns_unavailable_for_this_provider() -> None:
-    list_json = _list_json_with_errors(
-        [
-            {
-                "exception_type": "ProviderUnavailableError",
-                "message": "Provider 'imbue_cloud_acme' is not available: could not reach Imbue Cloud",
-                "provider_name": _PROVIDER_NAME,
-            }
-        ]
-    )
-    error = extract_provider_error(list_json, _PROVIDER_NAME)
-    assert error == ProviderProbeError(
-        exception_type="ProviderUnavailableError",
-        message="Provider 'imbue_cloud_acme' is not available: could not reach Imbue Cloud",
-    )
+def test_dispatch_tier_backend_unreachable_beats_host_state() -> None:
+    """A provider error classifies as BACKEND_UNREACHABLE regardless of host state.
 
-
-def test_extract_provider_error_ignores_other_providers() -> None:
-    """An error attributed to a different provider must not be blamed on this workspace."""
-    list_json = _list_json_with_errors(
-        [{"exception_type": "ProviderUnavailableError", "message": "docker down", "provider_name": "docker"}]
-    )
-    assert extract_provider_error(list_json, _PROVIDER_NAME) is None
-
-
-def test_extract_provider_error_returns_none_when_provider_unknown() -> None:
-    """Pre-discovery (provider unknown), we cannot attribute any error to this workspace."""
-    list_json = _list_json_with_errors(
-        [{"exception_type": "ProviderUnavailableError", "message": "down", "provider_name": _PROVIDER_NAME}]
-    )
-    assert extract_provider_error(list_json, None) is None
-
-
-def test_extract_provider_error_prefers_unavailable_over_other_error() -> None:
-    """A genuine connector outage must win over an incidental auth error so it classifies as retryable."""
-    list_json = _list_json_with_errors(
-        [
-            {"exception_type": "ImbueCloudAuthError", "message": "401", "provider_name": _PROVIDER_NAME},
-            {"exception_type": "ProviderUnavailableError", "message": "unreachable", "provider_name": _PROVIDER_NAME},
-        ]
-    )
-    error = extract_provider_error(list_json, _PROVIDER_NAME)
-    assert error is not None
-    assert error.exception_type == "ProviderUnavailableError"
-
-
-def test_dispatch_tier_provider_unavailable_beats_host_state() -> None:
-    """Even with a host row present, an unreachable provider classifies as PROVIDER_UNAVAILABLE."""
-    response = build_host_health_response(
-        list_json=_list_json_with_errors(
-            [{"exception_type": "ProviderUnavailableError", "message": "unreachable", "provider_name": _PROVIDER_NAME}]
-        ),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        in_container_stdout=None,
-        plugin_resolver_services={},
-        provider_error=ProviderProbeError(exception_type="ProviderUnavailableError", message="unreachable"),
-        provider_label="Imbue Cloud",
-    )
-    assert response.dispatch_tier == DispatchTier.PROVIDER_UNAVAILABLE
-    assert response.unreachable_reason == "unreachable"
-    assert response.provider_label == "Imbue Cloud"
-
-
-def test_dispatch_tier_provider_unavailable_from_timed_out_listing() -> None:
-    """A host-health listing that times out (no body, no row) classifies as PROVIDER_UNAVAILABLE.
-
-    This is the regression for the full-network-outage case: when `mngr list`
-    never completes there is no errors[] body to parse and no host row, so the
-    probe synthesizes a provider-unavailable error (see ``provider_unavailable_error``
-    / ``_run_host_health_probe``). Without it, ``list_json=None`` yields an UNKNOWN
-    container state that falls through to the destructive HOST_UNRESPONSIVE tier.
+    The provider that produces the host-state observations is itself unreachable,
+    so its error wins over any (now-untrustworthy) host probe.
     """
-    response = build_host_health_response(
-        list_json=None,
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        in_container_stdout=None,
-        plugin_resolver_services={},
-        mngr_list_error="timed out after 30s",
-        provider_error=provider_unavailable_error(
-            "Could not reach Imbue Cloud: the workspace listing timed out after 30s."
-        ),
-        provider_label="Imbue Cloud",
+    response = _response(
+        host_state="RUNNING",
+        provider_error_message="Docker Desktop is manually paused.",
+        provider_label="Docker",
     )
-    assert response.dispatch_tier == DispatchTier.PROVIDER_UNAVAILABLE
-    assert response.provider_label == "Imbue Cloud"
+    assert response.dispatch_tier == DispatchTier.BACKEND_UNREACHABLE
+    assert response.unreachable_reason == "Docker Desktop is manually paused."
+    assert response.provider_label == "Docker"
 
 
-def test_dispatch_tier_workspace_unreachable_for_non_connectivity_provider_error() -> None:
-    """A non-ProviderUnavailable provider error (auth/config) is the generic, non-retryable bucket."""
-    response = build_host_health_response(
-        list_json=_list_json(host_state="RUNNING"),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        in_container_stdout=None,
-        plugin_resolver_services={},
-        provider_error=ProviderProbeError(exception_type="ImbueCloudAuthError", message="Your login expired."),
+def test_dispatch_tier_backend_unreachable_for_any_provider_error_kind() -> None:
+    """Any provider error -- connectivity outage or auth/config rejection -- is the
+    same BACKEND_UNREACHABLE tier; we no longer sub-classify by error kind because
+    the user-facing impact (show the error, retry, wait) is identical."""
+    response = _response(
+        host_state="RUNNING",
+        provider_error_message="Your login expired.",
         provider_label="Imbue Cloud",
     )
-    assert response.dispatch_tier == DispatchTier.WORKSPACE_UNREACHABLE
+    assert response.dispatch_tier == DispatchTier.BACKEND_UNREACHABLE
     assert response.unreachable_reason == "Your login expired."
+    assert response.provider_label == "Imbue Cloud"
 
 
 # --- shape sanity --------------------------------------------------------
@@ -531,13 +314,9 @@ def test_dispatch_tier_workspace_unreachable_for_non_connectivity_provider_error
 
 def test_every_probe_has_a_command_and_an_output() -> None:
     """No probe should render with an empty command label or empty output text."""
-    response = build_host_health_response(
-        list_json=_list_json(),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
+    response = _response(
+        host_state="RUNNING",
         in_container_stdout=None,
-        plugin_resolver_services={},
-        mngr_list_command="/usr/local/bin/mngr list --format json --quiet",
         mngr_exec_command="/usr/local/bin/mngr exec ... probe-script",
     )
     assert response.probes
@@ -552,8 +331,8 @@ def _inner_python_body(command: str) -> str | None:
     The in-container probe commands render as
     ``mngr exec <id> 'python3 -c '\\''<body>'\\''' --no-start --quiet``; this
     peels off the ``mngr exec`` wrapper and the inner ``-c`` to return the
-    body. Returns None for commands that are not python reproductions (the jq
-    and curl ones).
+    body. Returns None for commands that are not python reproductions (the curl
+    one and the resolver-sourced pseudo-command labels).
     """
     tokens = shlex.split(command)
     if len(tokens) >= 4 and tokens[0].endswith("mngr") and tokens[1] == "exec":
@@ -573,14 +352,10 @@ def test_python_probe_commands_are_well_formed_and_runnable() -> None:
     ``mngr exec`` wrapper mangling the inner script. compile() validates the
     inner body's syntax without executing it.
     """
-    response = build_host_health_response(
-        list_json=_list_json(),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
+    response = _response(
         in_container_stdout=_probe_stdout(
             {"services_toml_declares_system_interface": True, "inner_port": 8000, "curl_status": "200"}
-        ),
-        plugin_resolver_services={},
+        )
     )
     checked: list[tuple[str, str]] = []
     for p in response.probes:
@@ -594,9 +369,10 @@ def test_python_probe_commands_are_well_formed_and_runnable() -> None:
 
 # --- command / output alignment -------------------------------------------
 #
-# Each probe's command, run where minds ran it, must print exactly its output.
-# These tests pin the command shape and assert the rendered output is the value
-# the command would emit (not a derived prose description).
+# Each probe's output is exactly what its command (run where minds ran it) would
+# print. The host-state and system-services-agent probes are read from the passive
+# discovery snapshot, so they carry a pseudo-command label and their output is the raw resolver datum;
+# the in-container probes carry a runnable ``mngr exec`` reproduction.
 
 
 def _healthy_probe_stdout(**overrides: object) -> str:
@@ -610,48 +386,22 @@ def _healthy_probe_stdout(**overrides: object) -> str:
     return _probe_stdout(payload)
 
 
-def test_container_running_command_derives_state_with_jq() -> None:
-    response = build_host_health_response(
-        list_json=_list_json(host_state="RUNNING"),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        in_container_stdout=None,
-        plugin_resolver_services={},
-        mngr_list_command="mngr list --format json --quiet --on-error continue",
-    )
-    probe = _probe_for(response, "container running")
-    assert " | jq -r " in probe.command
-    # the jq filter targets this agent
-    assert str(_AGENT_ID) in probe.command
-    # exactly what the jq pipeline prints
+def test_container_running_probe_reads_state_from_discovery_snapshot() -> None:
+    probe = _probe_for(_response(host_state="RUNNING"), "container running")
+    # No runnable reproduction -- the datum is read from the passive snapshot.
+    assert probe.command == "(host state from the discovery snapshot)"
     assert probe.output == "RUNNING"
 
 
-def test_services_agent_command_outputs_bare_state_without_prefix() -> None:
-    response = build_host_health_response(
-        list_json=_list_json(services_state="RUNNING_UNKNOWN_AGENT_TYPE"),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        in_container_stdout=None,
-        plugin_resolver_services={},
-        mngr_list_command="mngr list --format json --quiet --on-error continue",
-    )
-    probe = _probe_for(response, "services agent")
-    assert " | jq -r " in probe.command
-    # no synthetic "state=" prefix
-    assert probe.output == "RUNNING_UNKNOWN_AGENT_TYPE"
+def test_services_agent_probe_outputs_the_resolved_agent_id() -> None:
+    probe = _probe_for(_response(services_agent_id=_SERVICES_AGENT_ID), "system-services agent")
+    assert probe.command == "(system-services agent from the discovery snapshot)"
+    assert probe.output == str(_SERVICES_AGENT_ID)
 
 
 def test_can_run_commands_output_is_the_raw_exec_stdout() -> None:
     stdout = _probe_stdout({"services_toml_declares_system_interface": True})
-    response = build_host_health_response(
-        list_json=_list_json(),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        in_container_stdout=stdout,
-        plugin_resolver_services={},
-        mngr_exec_command="mngr exec agent-x 'echo hi' --quiet",
-    )
+    response = _response(in_container_stdout=stdout, mngr_exec_command="mngr exec agent-x 'echo hi' --quiet")
     probe = _probe_for(response, "run a command")
     assert probe.command == "mngr exec agent-x 'echo hi' --quiet"
     # the verbatim stdout the command produced
@@ -659,13 +409,7 @@ def test_can_run_commands_output_is_the_raw_exec_stdout() -> None:
 
 
 def test_services_toml_command_is_mngr_exec_and_output_is_declared() -> None:
-    response = build_host_health_response(
-        list_json=_list_json(),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        in_container_stdout=_healthy_probe_stdout(),
-        plugin_resolver_services={},
-    )
+    response = _response(in_container_stdout=_healthy_probe_stdout())
     probe = _probe_for(response, "services.toml")
     assert probe.command.startswith(f"mngr exec {_SERVICES_AGENT_ID} ")
     assert "python3 -c" in probe.command
@@ -673,24 +417,12 @@ def test_services_toml_command_is_mngr_exec_and_output_is_declared() -> None:
 
 
 def test_services_toml_output_is_missing_when_not_declared() -> None:
-    response = build_host_health_response(
-        list_json=_list_json(),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        in_container_stdout=_healthy_probe_stdout(services_toml_declares_system_interface=False),
-        plugin_resolver_services={},
-    )
+    response = _response(in_container_stdout=_healthy_probe_stdout(services_toml_declares_system_interface=False))
     assert _probe_for(response, "services.toml").output == "MISSING"
 
 
 def test_curl_output_is_bare_status_code() -> None:
-    response = build_host_health_response(
-        list_json=_list_json(),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        in_container_stdout=_healthy_probe_stdout(curl_status="200"),
-        plugin_resolver_services={},
-    )
+    response = _response(in_container_stdout=_healthy_probe_stdout(curl_status="200"))
     probe = _probe_for(response, "GET /")
     assert probe.command.startswith(f"mngr exec {_SERVICES_AGENT_ID} ")
     assert "curl" in probe.command
@@ -702,12 +434,8 @@ def test_curl_output_is_bare_status_code() -> None:
 
 
 def test_port_listening_output_matches_listener_lines() -> None:
-    response = build_host_health_response(
-        list_json=_list_json(),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        in_container_stdout=_healthy_probe_stdout(port_listener="LISTEN 0.0.0.0:8000\nLISTEN ::1:8000"),
-        plugin_resolver_services={},
+    response = _response(
+        in_container_stdout=_healthy_probe_stdout(port_listener="LISTEN 0.0.0.0:8000\nLISTEN ::1:8000")
     )
     probe = _probe_for(response, "listening on the system-interface inner port")
     assert probe.command.startswith(f"mngr exec {_SERVICES_AGENT_ID} ")
@@ -717,13 +445,7 @@ def test_port_listening_output_matches_listener_lines() -> None:
 
 def test_port_listening_no_listener_output_matches_command_fallback() -> None:
     """The no-listener output must be byte-identical to what the command prints."""
-    response = build_host_health_response(
-        list_json=_list_json(),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        in_container_stdout=_healthy_probe_stdout(port_listener=""),
-        plugin_resolver_services={},
-    )
+    response = _response(in_container_stdout=_healthy_probe_stdout(port_listener=""))
     probe = _probe_for(response, "listening on the system-interface inner port")
     assert probe.answer == ProbeAnswer.NO
     assert probe.output == "(no LISTEN socket on port 8000)"

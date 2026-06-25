@@ -1,0 +1,1 @@
+Updated the `cleanup_released_hosts.py` operator docstring for the new "split" Vault secret layout: OVH credentials are now sourced per key from `secrets/minds/<tier>/ovh/<KEY>` (value at `.data.data.value`) and the host-pool DSN from `secrets/minds/<tier>/neon/DATABASE_URL`, instead of the old flat single-entry layout.

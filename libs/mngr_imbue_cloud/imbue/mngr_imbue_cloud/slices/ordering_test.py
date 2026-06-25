@@ -1,12 +1,17 @@
+from typing import cast
+
 import pytest
 
 from imbue.mngr_imbue_cloud.errors import BareMetalConfigError
 from imbue.mngr_imbue_cloud.errors import BareMetalProvisioningError
 from imbue.mngr_imbue_cloud.slices.ordering import _looks_like_service_name
+from imbue.mngr_imbue_cloud.slices.ordering import build_box_host_key_postinstall_script
 from imbue.mngr_imbue_cloud.slices.ordering import derive_server_specs
 from imbue.mngr_imbue_cloud.slices.ordering import extract_order_id
 from imbue.mngr_imbue_cloud.slices.ordering import select_eco_option_codes
+from imbue.mngr_imbue_cloud.slices.ordering import start_os_reinstall
 from imbue.mngr_imbue_cloud.slices.ordering import summarize_checkout_prices
+from imbue.mngr_ovh.client import OvhVpsClient
 
 
 def _eco_options() -> list[dict]:
@@ -220,3 +225,45 @@ def test_derive_server_specs_raises_when_cpu_specs_absent() -> None:
     catalog = {"products": [{"name": "x", "blobs": {}}], "plans": [{"planCode": "p", "product": "x"}]}
     with pytest.raises(BareMetalConfigError):
         derive_server_specs(catalog, "p", "softraid-2x512nvme")
+
+
+def test_build_box_host_key_postinstall_script_installs_ed25519_and_drops_other_types() -> None:
+    script = build_box_host_key_postinstall_script(
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nFAKEKEYBODY\n-----END OPENSSH PRIVATE KEY-----",
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5FAKE box",
+    )
+    # Writes our generated host key into /etc/ssh ...
+    assert "/etc/ssh/ssh_host_ed25519_key" in script
+    assert "FAKEKEYBODY" in script
+    assert "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5FAKE box" in script
+    assert "chmod 600 /etc/ssh/ssh_host_ed25519_key" in script
+    # ... removes the other host key types (ed25519-only) ...
+    assert "ssh_host_rsa_key" in script
+    assert "ssh_host_ecdsa_key" in script
+    # ... and restarts sshd so the new key takes effect.
+    assert "restart" in script and "ssh" in script
+
+
+class _FakeReinstallClient:
+    """Records the reinstall call body and returns a scripted task id."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def call_api(self, method: str, path: str, **body: object) -> dict:
+        self.calls.append({"method": method, "path": path, **body})
+        return {"taskId": 4242}
+
+
+def test_start_os_reinstall_injects_a_known_host_key_and_returns_its_public_half() -> None:
+    client = _FakeReinstallClient()
+    result = start_os_reinstall(
+        cast(OvhVpsClient, client), service_name="ns1.example", ssh_public_key="ssh-ed25519 AAAAclient"
+    )
+    assert result.task_id == 4242
+    # The reinstall request injects our login key AND a post-install script (the
+    # private host-key delivery channel), and we get back the host PUBLIC key to pin.
+    customizations = client.calls[0]["customizations"]
+    assert customizations["sshKey"] == "ssh-ed25519 AAAAclient"
+    assert customizations["postInstallationScript"]
+    assert result.box_host_public_key.startswith("ssh-ed25519 ")

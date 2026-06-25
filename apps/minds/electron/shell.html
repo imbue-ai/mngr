@@ -216,6 +216,12 @@
         errorView.style.display = 'flex';
         if (data.message) document.getElementById('error-message').textContent = data.message;
         if (data.details) document.getElementById('error-details').textContent = data.details;
+        // Optional per-takeover label for the primary action (e.g. "Restart
+        // Minds" for the discovery-pipeline takeover). Falls back to the static
+        // "Retry" label for the generic backend-crash case. Always reassigned so
+        // a label set by a prior takeover (this page is reused, not reloaded,
+        // when the chrome view is already on shell.html) does not linger.
+        document.getElementById('retry-btn').textContent = data.actionLabel || 'Retry';
       });
     }
   </script>

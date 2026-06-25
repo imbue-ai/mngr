@@ -31,7 +31,7 @@ from typing import Final
 from uuid import uuid4
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.minds.envs.primitives import VaultReadError
+from imbue.minds.envs.primitives import VaultSecretNotFoundError
 from imbue.minds.envs.vault_reader import VAULT_BINARY
 from imbue.minds.envs.vault_reader import VaultPath
 from imbue.minds.envs.vault_reader import delete_vault_kv
@@ -68,13 +68,10 @@ def read_generation_id(
             parent_concurrency_group=parent_concurrency_group,
             vault_binary=vault_binary,
         )
-    except VaultReadError as exc:
-        # Treat "no entry" / "not found" as "no id yet"; surface anything
-        # else so the operator notices Vault problems early.
-        message = str(exc).lower()
-        if "not found" in message or "no value found" in message or "404" in message:
-            return None
-        raise
+    except VaultSecretNotFoundError:
+        # Treat a genuinely-absent entry as "no id yet"; any other Vault
+        # failure propagates so the operator notices problems early.
+        return None
     return values.get(GENERATION_ID_KEY)
 
 

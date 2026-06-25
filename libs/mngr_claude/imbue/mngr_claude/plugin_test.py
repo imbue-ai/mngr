@@ -34,6 +34,7 @@ from imbue.mngr.config.data_types import split_cli_args_string
 from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.errors import AgentInstallationError
 from imbue.mngr.errors import AgentStartError
+from imbue.mngr.errors import ConfigError
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import UserInputError
@@ -92,6 +93,7 @@ from imbue.mngr_claude.plugin import _generate_known_marketplaces_content
 from imbue.mngr_claude.plugin import _get_claude_version
 from imbue.mngr_claude.plugin import _has_api_credentials_available
 from imbue.mngr_claude.plugin import _install_claude
+from imbue.mngr_claude.plugin import _is_using_claude_oauth_subscription
 from imbue.mngr_claude.plugin import _parse_claude_version_output
 from imbue.mngr_claude.plugin import _provision_local_credentials
 from imbue.mngr_claude.plugin import _read_macos_keychain_credential
@@ -215,6 +217,20 @@ def _write_claude_trust(source_path: Path) -> None:
             }
         },
     }
+    config_path.write_text(json.dumps(config))
+
+
+def _write_dialogs_dismissed_at(config_path: Path, trust_path: Path) -> None:
+    """Write a .claude.json at ``config_path`` with all dialogs dismissed and trust for ``trust_path``.
+
+    Used for shared-mode tests where mngr dismisses dialogs against the config file the
+    agent's claude reads ($CLAUDE_CONFIG_DIR/.claude.json), which is not ~/.claude.json.
+    """
+    config = {
+        **_ALL_DIALOGS_DISMISSED,
+        "projects": {str(trust_path.resolve()): {"hasTrustDialogAccepted": True}},
+    }
+    config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(json.dumps(config))
 
 
@@ -554,6 +570,36 @@ def test_claude_agent_assemble_command_injects_mngr_settings_in_env_config_dir_m
     assert parsed.create_args == ["--settings", '{"model": "opus"}']
 
 
+def test_claude_agent_assemble_command_injects_mngr_settings_for_isolate_false_flag(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared mode set via the current isolate_local_config_dir=False flag (not the deprecated
+    use_env_config_dir alias) must still inject mngr's managed --settings.
+
+    The hooks-write gate and the hooks-load gate both key off the resolved predicate, so the
+    managed hooks file written at provision time is actually loaded by claude at launch.
+    """
+    shared_dir = tmp_path / "shared"
+    shared_dir.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(shared_dir))
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False),
+    )
+
+    command = agent.assemble_command(host=host, agent_args=(), command_override=None)
+
+    parsed = _ParsedAssembleCommand(str(command), mngr_injects_settings=True)
+    expected_settings = shlex.split(MANAGED_SETTINGS_LAUNCH_ARG)[1]
+    assert parsed.resume_settings == expected_settings
+    assert parsed.create_settings == expected_settings
+
+
 def test_claude_agent_assemble_command_with_command_override(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
@@ -612,7 +658,7 @@ def test_claude_agent_assemble_command_sets_is_sandbox_for_remote_host(
     sid_export = _sid_export_for(uuid)
     # Remote hosts SHOULD have IS_SANDBOX set
     assert command == CommandString(
-        f'{background_cmd} export IS_SANDBOX=1 && {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" ) || claude --session-id {uuid}'
+        f'{background_cmd} export IS_SANDBOX=1 && {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" ) || claude --session-id {uuid}'
     )
 
 
@@ -815,7 +861,7 @@ def test_on_before_provisioning_rejects_user_settings_flag_in_agent_args_for_env
     )
     options = CreateAgentOptions(agent_type=AgentTypeName("claude"), agent_args=("--settings=/tmp/custom.json",))
 
-    with pytest.raises(UserInputError, match="use_env_config_dir"):
+    with pytest.raises(UserInputError, match="isolate_local_config_dir"):
         agent.on_before_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
 
 
@@ -1683,6 +1729,9 @@ def test_provision_configures_readiness_hooks_in_env_config_dir_mode(
         agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
     )
     _init_git_with_gitignore(agent.work_dir)
+    # Shared mode dismisses dialogs against the shared config; pre-dismiss them so the
+    # non-interactive provision does not raise on the trust dialog.
+    _write_dialogs_dismissed_at(shared_dir / ".claude.json", agent.work_dir)
 
     options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
     agent.provision(host=host, options=options, mngr_ctx=temp_mngr_ctx)
@@ -1693,6 +1742,45 @@ def test_provision_configures_readiness_hooks_in_env_config_dir_mode(
     settings = json.loads(managed_path.read_text())
     assert "hooks" in settings
     assert "SessionStart" in settings["hooks"]
+
+
+def test_provision_shared_mode_dismisses_dialogs_in_global_config_but_not_permissions(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared mode mutates the user's global config to dismiss the cosmetic startup dialogs
+    (trust, onboarding, effort callout, cost threshold) -- but never the bypass-permissions
+    grant, which must not be silently accepted via the global config."""
+    shared_dir = tmp_path / "shared"
+    shared_dir.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(shared_dir))
+    # auto_dismiss_dialogs lets the non-interactive provision silently dismiss dialogs.
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(
+            check_installation=False, isolate_local_config_dir=False, auto_dismiss_dialogs=True
+        ),
+    )
+    _init_git_with_gitignore(agent.work_dir)
+
+    options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
+    agent.provision(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+
+    # The dismissals land in the shared config file (the one the agent's claude reads),
+    # NOT in ~/.claude.json.
+    shared_config = json.loads((shared_dir / ".claude.json").read_text())
+    assert shared_config["hasCompletedOnboarding"] is True
+    assert shared_config["effortCalloutDismissed"] is True
+    assert shared_config["hasAcknowledgedCostThreshold"] is True
+    assert shared_config["projects"][str(agent.work_dir.resolve())]["hasTrustDialogAccepted"] is True
+
+    # The bypass-permissions grant is never written to the global config.
+    assert "bypassPermissionsModeAccepted" not in shared_config
+    assert not (Path.home() / ".claude.json").exists()
 
 
 @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
@@ -1974,85 +2062,130 @@ def test_on_before_provisioning_skips_trust_check_when_git_common_dir_is_none(
     assert config_path.read_text() == config_before
 
 
-def test_on_before_provisioning_shared_mode_succeeds_without_dialog_checks(
+def test_on_before_provisioning_shared_mode_validates_dialogs_against_shared_config(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     temp_mngr_ctx: MngrContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """In shared mode, on_before_provisioning does NOT validate dialog dismissal in user config."""
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "shared"))
+    """In shared mode, on_before_provisioning validates dialog dismissal against the shared
+    config file (``$CLAUDE_CONFIG_DIR/.claude.json``), the file the agent's claude reads."""
+    shared_dir = tmp_path / "shared"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(shared_dir))
     agent, host = make_claude_agent(
         local_provider,
         tmp_path,
         temp_mngr_ctx,
-        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
+        agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False),
     )
-    # Deliberately leave ~/.claude.json absent (no dialogs dismissed, no trust) --
-    # a non-shared agent would raise during the dialog-dismissal check here.
-    config_path = Path.home() / ".claude.json"
-    assert not config_path.exists()
-
     options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
 
+    # With no dialogs dismissed in the shared config, the non-interactive check raises.
+    with pytest.raises(ClaudeDirectoryNotTrustedError):
+        agent.on_before_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+
+    # Dismissing the dialogs in the shared config (not ~/.claude.json) makes it pass.
+    _write_dialogs_dismissed_at(shared_dir / ".claude.json", agent.work_dir)
     agent.on_before_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
 
-    # Shared mode skips the dialog check entirely and writes nothing to the user's
-    # config, so the file must still be absent.
-    assert not config_path.exists()
+
+def _make_remote_claude_agent(
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    agent_config: ClaudeAgentConfig,
+) -> tuple[ClaudeAgent, OnlineHostInterface]:
+    """Construct a ClaudeAgent bound to a (fake) remote host."""
+    remote_host = cast(OnlineHostInterface, FakeHost(is_local=False, host_dir=tmp_path / "remote_host_dir"))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir(exist_ok=True)
+    agent = ClaudeAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("test-remote-agent"),
+        agent_type=AgentTypeName("claude"),
+        work_dir=work_dir,
+        create_time=datetime.now(timezone.utc),
+        host_id=HostId("host-0000000000000000000000000000beef"),
+        mngr_ctx=temp_mngr_ctx,
+        agent_config=agent_config,
+        host=remote_host,
+    )
+    return agent, remote_host
 
 
-def test_on_before_provisioning_shared_mode_raises_for_remote_host(
-    local_provider: LocalProviderInstance,
+def test_on_before_provisioning_remote_ignores_shared_flag(
     tmp_path: Path,
     temp_mngr_ctx: MngrContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """use_env_config_dir is local-only; remote host raises UserInputError."""
+    """isolate_local_config_dir is local-only: a remote agent with the flag set to False
+    must NOT raise (remote agents always use an isolated per-agent config dir)."""
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "shared"))
-    agent, _ = make_claude_agent(
-        local_provider,
+    agent, remote_host = _make_remote_claude_agent(
         tmp_path,
         temp_mngr_ctx,
-        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
-    )
-    remote_host = cast(
-        OnlineHostInterface,
-        FakeHost(is_local=False, host_dir=tmp_path / "remote_host_dir"),
+        agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False),
     )
 
     options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
 
-    with pytest.raises(UserInputError, match="local hosts"):
-        agent.on_before_provisioning(host=remote_host, options=options, mngr_ctx=temp_mngr_ctx)
+    # Must not raise -- the flag is simply ignored for remote hosts.
+    agent.on_before_provisioning(host=remote_host, options=options, mngr_ctx=temp_mngr_ctx)
+
+    # ...and the agent uses an isolated per-agent config dir, not the local shared dir.
+    assert agent._is_isolated_config_dir() is True
+    assert agent.get_claude_config_dir() == agent._get_agent_dir() / "plugin" / "claude" / "anthropic"
 
 
-def test_on_before_provisioning_shared_mode_passes_when_env_unset(
+def test_remote_agent_modify_env_vars_uses_isolated_dir_despite_shared_flag(
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A remote agent with isolate_local_config_dir=False still gets CLAUDE_CONFIG_DIR and
+    ORIGINAL_CLAUDE_CONFIG_DIR pointing at its isolated per-agent config dir."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "shared"))
+    agent, remote_host = _make_remote_claude_agent(
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False),
+    )
+    env_vars: dict[str, str] = {}
+
+    agent.modify_env_vars(remote_host, env_vars)
+
+    per_agent_dir = agent._get_agent_dir() / "plugin" / "claude" / "anthropic"
+    assert env_vars["CLAUDE_CONFIG_DIR"] == str(per_agent_dir)
+    # Remote agents are isolated, so ORIGINAL_CLAUDE_CONFIG_DIR is set (unlike local shared mode).
+    assert "ORIGINAL_CLAUDE_CONFIG_DIR" in env_vars
+
+
+def test_on_before_provisioning_shared_mode_validates_default_config_when_env_unset(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     temp_mngr_ctx: MngrContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With use_env_config_dir=True and $CLAUDE_CONFIG_DIR unset, on_before_provisioning falls
-    back to ``~/.claude/`` and does not raise (it's the "don't touch the config" path)."""
+    """With isolate_local_config_dir=False and $CLAUDE_CONFIG_DIR unset, on_before_provisioning
+    validates dialogs against the default ``~/.claude.json`` (where claude reads them)."""
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     agent, host = make_claude_agent(
         local_provider,
         tmp_path,
         temp_mngr_ctx,
-        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
+        agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False),
     )
-
     options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
 
-    # Shared mode does not touch the user's config; with no ~/.claude.json present
-    # it must neither raise nor create one (the "don't touch the config" path).
+    # No ~/.claude.json present -> the non-interactive dialog check raises.
     config_path = Path.home() / ".claude.json"
     assert not config_path.exists()
+    with pytest.raises(ClaudeDirectoryNotTrustedError):
+        agent.on_before_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
 
+    # Dismissing the dialogs in ~/.claude.json (the default location) makes it pass.
+    _write_all_dialogs_dismissed(agent.work_dir)
     agent.on_before_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
-
-    assert not config_path.exists()
 
 
 def test_on_destroy_removes_trust(
@@ -2212,7 +2345,7 @@ def test_on_destroy_skips_keychain_cleanup_in_shared_mode(
         local_provider,
         tmp_path,
         temp_mngr_ctx,
-        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
+        agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False),
     )
 
     delete_calls: list[str] = []
@@ -2297,7 +2430,7 @@ def test_preserve_session_files_skips_projects_in_shared_mode(
     temp_mngr_ctx: MngrContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """In use_env_config_dir mode, preservation must NOT copy the per-agent
+    """In shared mode (isolate_local_config_dir=False), preservation must NOT copy the per-agent
     plugin/claude/anthropic/projects directory -- in shared mode the projects
     live in the user's persistent $CLAUDE_CONFIG_DIR (not under the agent state
     dir) and hold the user's full cross-project session history. Transcripts and
@@ -2311,7 +2444,7 @@ def test_preserve_session_files_skips_projects_in_shared_mode(
         tmp_path,
         temp_mngr_ctx,
         agent_config=ClaudeAgentConfig(
-            check_installation=False, use_env_config_dir=True, preserve_sessions_on_destroy=True
+            check_installation=False, isolate_local_config_dir=False, preserve_sessions_on_destroy=True
         ),
     )
     agent_dir = agent._get_agent_dir()
@@ -2724,6 +2857,184 @@ def test_on_before_provisioning_succeeds_with_credentials(
     # With a real credential available, the missing-credentials warning must NOT
     # be emitted (a flipped warn/no-warn branch would be caught here).
     assert _NO_CREDENTIALS_WARNING_SUBSTRING not in log_output.getvalue()
+
+
+# =============================================================================
+# Deprecated use_env_config_dir alias reconciliation Tests
+# =============================================================================
+
+
+def test_resolve_isolate_defaults_to_true_without_either_key() -> None:
+    """With neither key set, the default isolate_local_config_dir=True is used."""
+    assert ClaudeAgentConfig(check_installation=False).resolve_isolate_local_config_dir() is True
+
+
+def test_resolve_isolate_uses_new_key_when_only_it_is_set() -> None:
+    assert (
+        ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False).resolve_isolate_local_config_dir()
+        is False
+    )
+
+
+def test_resolve_isolate_inverts_deprecated_use_env_true() -> None:
+    """The deprecated use_env_config_dir=true means isolate_local_config_dir=false (its inverse)."""
+    config = ClaudeAgentConfig(check_installation=False, use_env_config_dir=True)
+    assert config.resolve_isolate_local_config_dir() is False
+
+
+def test_resolve_isolate_inverts_deprecated_use_env_false() -> None:
+    config = ClaudeAgentConfig(check_installation=False, use_env_config_dir=False)
+    assert config.resolve_isolate_local_config_dir() is True
+
+
+def test_resolve_isolate_allows_consistent_inverse_dual_spec() -> None:
+    """Setting both keys to consistent inverses (isolate=false, use_env=true) is allowed."""
+    config = ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False, use_env_config_dir=True)
+    assert config.resolve_isolate_local_config_dir() is False
+
+
+def test_resolve_isolate_raises_on_contradictory_dual_spec() -> None:
+    """Setting both keys to the same value (they are inverses) is contradictory and raises."""
+    config = ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=True, use_env_config_dir=True)
+    with pytest.raises(ConfigError, match="Contradictory"):
+        config.resolve_isolate_local_config_dir()
+
+
+def test_on_before_provisioning_warns_when_use_env_config_dir_is_set(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Setting the deprecated use_env_config_dir emits a deprecation warning at provisioning time."""
+    shared_dir = tmp_path / "shared"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(shared_dir))
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
+    )
+    # Shared mode now validates dialogs against the shared config, so dismiss them
+    # there to reach the deprecation warning without raising.
+    _write_dialogs_dismissed_at(shared_dir / ".claude.json", agent.work_dir)
+
+    options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
+    with capture_loguru() as log_output:
+        agent.on_before_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+
+    assert "use_env_config_dir" in log_output.getvalue()
+    assert "deprecated" in log_output.getvalue()
+
+
+# =============================================================================
+# Subscription-credential isolation warning Tests
+# =============================================================================
+
+# The actionable part of the warning: the exact command to disable isolation.
+_SUBSCRIPTION_ISOLATION_WARNING_SUBSTRING = "isolate_local_config_dir false"
+
+
+def test_is_using_claude_oauth_subscription_detects_credentials_file(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A .credentials.json containing the claudeAiOauth key signals subscription usage."""
+    config_dir = tmp_path / "claude"
+    config_dir.mkdir()
+    (config_dir / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {"accessToken": "tok"}}))
+
+    # Patch the keychain read so the file branch is what determines the result
+    # (and so the test never touches the real macOS login keychain).
+    with patch(f"{_CLAUDE_AGENT_MODULE}._read_macos_keychain_credential", return_value=None):
+        assert _is_using_claude_oauth_subscription(config_dir, temp_mngr_ctx.concurrency_group) is True
+
+
+def test_is_using_claude_oauth_subscription_false_without_oauth(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    """No OAuth credentials file and no OAuth keychain entry means no subscription detected."""
+    config_dir = tmp_path / "claude"
+    config_dir.mkdir()
+
+    with patch(f"{_CLAUDE_AGENT_MODULE}._read_macos_keychain_credential", return_value=None):
+        assert _is_using_claude_oauth_subscription(config_dir, temp_mngr_ctx.concurrency_group) is False
+
+
+def test_warns_about_subscription_credentials_with_isolation_on_macos(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """macOS + subscription OAuth credentials + config-dir isolation enabled (the default)
+    must warn, printing the command to disable isolation."""
+    user_claude = tmp_path / "user-claude"
+    user_claude.mkdir()
+    (user_claude / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {"accessToken": "tok"}}))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(user_claude))
+    monkeypatch.delenv("ORIGINAL_CLAUDE_CONFIG_DIR", raising=False)
+    # Default config isolates the local config dir (isolate_local_config_dir=True).
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    with (
+        patch(f"{_CLAUDE_AGENT_MODULE}.is_macos", return_value=True),
+        patch(f"{_CLAUDE_AGENT_MODULE}._read_macos_keychain_credential", return_value=None),
+        capture_loguru() as log_output,
+    ):
+        agent._maybe_warn_subscription_credentials(host, temp_mngr_ctx)
+
+    assert _SUBSCRIPTION_ISOLATION_WARNING_SUBSTRING in log_output.getvalue()
+
+
+def test_no_subscription_warning_in_shared_mode(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared mode (isolate_local_config_dir=False) reuses the user's keychain entry, so
+    even with subscription credentials on macOS there is no stale-credential problem to warn about."""
+    user_claude = tmp_path / "user-claude"
+    user_claude.mkdir()
+    (user_claude / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {"accessToken": "tok"}}))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(user_claude))
+    monkeypatch.delenv("ORIGINAL_CLAUDE_CONFIG_DIR", raising=False)
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False),
+    )
+
+    with (
+        patch(f"{_CLAUDE_AGENT_MODULE}.is_macos", return_value=True),
+        patch(f"{_CLAUDE_AGENT_MODULE}._read_macos_keychain_credential", return_value=None),
+        capture_loguru() as log_output,
+    ):
+        agent._maybe_warn_subscription_credentials(host, temp_mngr_ctx)
+
+    assert _SUBSCRIPTION_ISOLATION_WARNING_SUBSTRING not in log_output.getvalue()
+
+
+def test_no_subscription_warning_without_oauth_credentials(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Isolation on macOS but no OAuth credentials (e.g. API-key auth) must not warn."""
+    user_claude = tmp_path / "user-claude"
+    user_claude.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(user_claude))
+    monkeypatch.delenv("ORIGINAL_CLAUDE_CONFIG_DIR", raising=False)
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    with (
+        patch(f"{_CLAUDE_AGENT_MODULE}.is_macos", return_value=True),
+        patch(f"{_CLAUDE_AGENT_MODULE}._read_macos_keychain_credential", return_value=None),
+        capture_loguru() as log_output,
+    ):
+        agent._maybe_warn_subscription_credentials(host, temp_mngr_ctx)
+
+    assert _SUBSCRIPTION_ISOLATION_WARNING_SUBSTRING not in log_output.getvalue()
 
 
 # =============================================================================
@@ -3726,7 +4037,7 @@ def test_on_after_provisioning_adopts_session_by_id(
     assert dest_memory_file.read_text() == "# Memory\n"
 
     # Regression: verify the session file is discoverable the same way Claude Code
-    # finds it at runtime: `find "$CLAUDE_CONFIG_DIR" -name "$SESSION_ID.jsonl"`.
+    # finds it at runtime: `find "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" -name "$SESSION_ID.jsonl"`.
     claude_config_dir = agent.get_claude_config_dir()
     matches = list(claude_config_dir.rglob(target_session_id + ".jsonl"))
     assert len(matches) == 1, (
@@ -5289,7 +5600,7 @@ def _write_docker_agent_record(
     agent_id: AgentId,
     agent_name: AgentName,
     *,
-    use_env_config_dir: bool,
+    isolate_local_config_dir: bool,
 ) -> None:
     """Persist a Claude agent record so the offline host's discover_agents() returns it.
 
@@ -5306,7 +5617,7 @@ def _write_docker_agent_record(
                 "type": "claude",
                 "agent_config": {
                     "preserve_sessions_on_destroy": True,
-                    "use_env_config_dir": use_env_config_dir,
+                    "isolate_local_config_dir": isolate_local_config_dir,
                 },
             }
         )
@@ -5325,12 +5636,12 @@ def test_on_before_host_destroy_offline_skips_projects_in_shared_config_mode(
     temp_mngr_ctx: MngrContext,
     tmp_path: Path,
 ) -> None:
-    """The offline destroy hook honors use_env_config_dir: the per-agent ``projects``
-    dir is skipped (it lives in the shared $CLAUDE_CONFIG_DIR) while the transcripts
-    and history are still preserved.
+    """The offline destroy hook honors isolate_local_config_dir: in shared mode the
+    per-agent ``projects`` dir is skipped (it lives in the shared $CLAUDE_CONFIG_DIR)
+    while the transcripts and history are still preserved.
 
     Exercises ``on_before_host_destroy`` end-to-end -- the HostFileReadInterface
-    guard, discover_agents, the use_env_config_dir extraction from raw certified
+    guard, discover_agents, the isolate_local_config_dir extraction from raw certified
     data, and the preserve call -- rather than calling ``preserve_agent_data``
     directly as the other offline tests do.
     """
@@ -5338,7 +5649,7 @@ def test_on_before_host_destroy_offline_skips_projects_in_shared_config_mode(
     agent_id = AgentId.generate()
     agent_name = AgentName("test-offline-hook")
     provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
-    _write_docker_agent_record(host_id, tmp_path, agent_id, agent_name, use_env_config_dir=True)
+    _write_docker_agent_record(host_id, tmp_path, agent_id, agent_name, isolate_local_config_dir=False)
 
     record = HostRecord(
         certified_host_data=CertifiedHostData(
@@ -5362,7 +5673,7 @@ def test_on_before_host_destroy_offline_skips_projects_in_shared_config_mode(
     assert (dest_dir / "logs" / "claude_transcript" / "events.jsonl").exists()
     assert (dest_dir / "events" / "claude" / "common_transcript" / "events.jsonl").exists()
     assert (dest_dir / "claude_session_id_history").exists()
-    # ...but the per-agent projects dir is skipped in use_env_config_dir mode.
+    # ...but the per-agent projects dir is skipped in shared mode.
     assert not (dest_dir / "plugin" / "claude" / "anthropic" / "projects").exists()
 
 
@@ -5537,29 +5848,59 @@ def test_modify_env_vars_sets_claude_config_dirs(
     assert env_vars["DISABLE_AUTOUPDATER"] == "1"
 
 
-def test_modify_env_vars_omits_claude_config_dir_in_shared_mode(
+def test_modify_env_vars_sets_shared_claude_config_dir_in_shared_mode(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     temp_mngr_ctx: MngrContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """In shared mode, modify_env_vars leaves CLAUDE_CONFIG_DIR / ORIGINAL_CLAUDE_CONFIG_DIR
-    untouched so the agent inherits the parent shell's values, and adds no other env vars."""
+    """In shared mode, when the user's own shell already exported CLAUDE_CONFIG_DIR,
+    modify_env_vars propagates that value (their .claude.json already lives inside it,
+    so sharing stays consistent) but does NOT set ORIGINAL_CLAUDE_CONFIG_DIR or force
+    DISABLE_AUTOUPDATER (it leaves the user's claude environment otherwise alone)."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "shared"))
+    shared = tmp_path / "shared"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(shared))
     agent, host = make_claude_agent(
         local_provider,
         tmp_path,
         temp_mngr_ctx,
-        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
+        agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False),
     )
     env_vars: dict[str, str] = {}
 
     agent.modify_env_vars(host, env_vars)
 
-    # In shared mode there's nothing to add: the transcript opt-out is
-    # gated at provisioning time (on-disk script presence), not via env var.
-    assert env_vars == {}
+    # CLAUDE_CONFIG_DIR points at the shared dir so claude reads the user's real config.
+    assert env_vars == {"CLAUDE_CONFIG_DIR": str(shared)}
+
+
+def test_modify_env_vars_does_not_set_config_dir_in_shared_mode_when_env_unset(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In shared mode with $CLAUDE_CONFIG_DIR unset in the user's shell, modify_env_vars
+    must NOT export CLAUDE_CONFIG_DIR. Exporting it -- even to claude's own ~/.claude
+    default -- would relocate claude's global .claude.json lookup from ~/.claude.json
+    to ~/.claude/.claude.json (an inner stub lacking the user's onboarding state),
+    re-triggering the theme/onboarding screen on every shared-mode agent. The launch
+    command's session-file lookup falls back to $HOME/.claude on its own."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False),
+    )
+    env_vars: dict[str, str] = {}
+
+    agent.modify_env_vars(host, env_vars)
+
+    assert "CLAUDE_CONFIG_DIR" not in env_vars
+    assert "ORIGINAL_CLAUDE_CONFIG_DIR" not in env_vars
 
 
 def test_modify_env_vars_disables_autoupdater_when_policy_never(
@@ -5639,7 +5980,7 @@ def test_generate_claude_json_autoupdates_follows_disable_flag() -> None:
 def test_get_claude_config_dir_returns_per_agent_dir_by_default(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """Without use_env_config_dir, get_claude_config_dir returns the per-agent path."""
+    """With isolate_local_config_dir=True (default), get_claude_config_dir returns the per-agent path."""
     agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
 
     config_dir = agent.get_claude_config_dir()
@@ -5660,7 +6001,7 @@ def test_get_claude_config_dir_returns_shared_env_value_in_shared_mode(
         local_provider,
         tmp_path,
         temp_mngr_ctx,
-        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
+        agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False),
     )
 
     assert agent.get_claude_config_dir() == shared
@@ -5673,7 +6014,7 @@ def test_get_claude_config_dir_falls_back_to_home_in_shared_mode_when_env_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """In shared mode with $CLAUDE_CONFIG_DIR unset, get_claude_config_dir falls back
-    to ``~/.claude/`` (claude's own default), so ``use_env_config_dir=True`` effectively
+    to ``~/.claude/`` (claude's own default), so shared mode effectively
     means "don't touch the config dir at all -- inherit whatever the parent shell would
     have used."
     """
@@ -5682,7 +6023,7 @@ def test_get_claude_config_dir_falls_back_to_home_in_shared_mode_when_env_unset(
         local_provider,
         tmp_path,
         temp_mngr_ctx,
-        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
+        agent_config=ClaudeAgentConfig(check_installation=False, isolate_local_config_dir=False),
     )
 
     assert agent.get_claude_config_dir() == Path.home() / ".claude"
