@@ -17,6 +17,9 @@ on the caller's host".
 """
 
 import json
+import shlex
+from datetime import datetime
+from datetime import timezone
 
 from flask import Blueprint
 from flask import Response
@@ -28,6 +31,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroupError
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client import backup_status
 from imbue.minds.desktop_client import destroying
+from imbue.minds.desktop_client import workspace_ssh
 from imbue.minds.desktop_client import workspace_version
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
@@ -435,6 +439,87 @@ def _handle_operation_status(operation_id: str) -> Response:
     )
 
 
+# -- SSH access route --
+
+
+@require_minds_api_key
+def _handle_establish_ssh(agent_id: str) -> Response:
+    """Authorize temporary SSH access into a workspace and return its connection info.
+
+    Body: ``{"public_key": "<openssh public key>", "requester_workspace_id":
+    "<caller's own id>"}``. The caller's private key never leaves the caller.
+    The hub injects the (TTL-tagged) public key into the target's
+    ``authorized_keys`` and returns the target's SSH ``user``/``host``/``port``.
+
+    Only *remote* targets (reachable from anywhere) are supported: a local
+    (Docker/Lima) target has no externally reachable address, so brokering a
+    forwarding tunnel for the remote->local case is not yet implemented and the
+    route returns 501. The target must be online; a stopped target returns 409.
+    """
+    parsed_id = AgentId(agent_id)
+    backend_resolver = get_state().backend_resolver
+    if parsed_id not in backend_resolver.list_known_workspace_ids():
+        return _json_error(f"Unknown workspace {agent_id}", 404)
+    parent_cg = get_state().root_concurrency_group
+    if parent_cg is None:
+        return _json_error("SSH access not configured", 501)
+
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return _json_error("Request body must be a JSON object", 400)
+    public_key = str(body.get("public_key", ""))
+    requester_workspace_id = str(body.get("requester_workspace_id", "")).strip()
+    if not requester_workspace_id:
+        return _json_error("'requester_workspace_id' is required", 400)
+
+    # The target must be a reachable remote host. ``get_ssh_info`` returns None
+    # for local agents (Docker/Lima), which a remote caller cannot reach.
+    ssh_info = backend_resolver.get_ssh_info(parsed_id)
+    if ssh_info is None:
+        return _json_error(
+            "Target is a local workspace with no externally reachable SSH endpoint; "
+            "brokering a forwarding tunnel for the remote->local case is not yet supported.",
+            501,
+        )
+
+    try:
+        expires_at = datetime.now(timezone.utc) + workspace_ssh.DEFAULT_SSH_GRANT_TTL
+        authorized_line = workspace_ssh.build_authorized_keys_line(
+            public_key=public_key,
+            requester_workspace_id=requester_workspace_id,
+            expires_at=expires_at,
+        )
+    except workspace_ssh.SshGrantError as e:
+        return _json_error(str(e), 400)
+
+    # Append the tagged key to the target's authorized_keys via mngr exec.
+    install_script = (
+        "set -e; mkdir -p ~/.ssh; chmod 700 ~/.ssh; "
+        f"printf '%s\\n' {shlex.quote(authorized_line)} >> ~/.ssh/authorized_keys; "
+        "chmod 600 ~/.ssh/authorized_keys"
+    )
+    argv = [get_state().mngr_binary, "exec", str(parsed_id), "--", "bash", "-lc", install_script]
+    try:
+        returncode, stderr = _run_mngr_blocking(argv, parent_cg)
+    except (OSError, ConcurrencyGroupError) as e:
+        return _json_error(f"Could not authorize SSH key on the target: {e}", 502)
+    if returncode != 0:
+        return _json_error(f"Could not authorize SSH key on the target: {stderr.strip()}", 502)
+
+    connection = workspace_ssh.SshConnectionInfo(
+        user=ssh_info.user, host=ssh_info.host, port=ssh_info.port, expires_at=expires_at
+    )
+    return _json_response(
+        {
+            "agent_id": str(parsed_id),
+            "user": connection.user,
+            "host": connection.host,
+            "port": connection.port,
+            "expires_at": connection.expires_at.isoformat(),
+        }
+    )
+
+
 # -- Blueprint factory --
 
 
@@ -476,5 +561,8 @@ def create_api_v1_blueprint() -> Blueprint:
     blueprint.add_url_rule(
         "/workspaces/operations/<operation_id>", view_func=_handle_operation_status, methods=["GET"]
     )
+
+    # SSH access (establish): inject a public key + return connection info.
+    blueprint.add_url_rule("/workspaces/<agent_id>/ssh", view_func=_handle_establish_ssh, methods=["POST"])
 
     return blueprint

@@ -145,3 +145,25 @@ def test_operation_status_unknown_destroy_id_returns_404(tmp_path: Path) -> None
     response = client.get(f"/api/v1/workspaces/operations/{other_id}", headers=_auth_header())
 
     assert response.status_code == 404
+
+
+def test_establish_ssh_unknown_workspace_returns_404(tmp_path: Path) -> None:
+    client = _client_with_workspace(tmp_path, AgentId())
+    other_id = AgentId()
+
+    response = client.post(
+        f"/api/v1/workspaces/{other_id}/ssh",
+        headers=_auth_header(),
+        json={"public_key": "ssh-ed25519 AAAA", "requester_workspace_id": "agent-x"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_establish_ssh_requires_bearer(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/ssh", json={})
+
+    assert response.status_code == 401
