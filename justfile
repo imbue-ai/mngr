@@ -142,10 +142,26 @@ test-offload-minds-snapshot snapshot_image_id args="":
     fi
     just _generate-dockerignore
     trap "rm -f .dockerignore" EXIT
+    # Forward depot + Anthropic credentials into the offload sandbox only when
+    # present (CI injects them from Vault). DEPOT_TOKEN gates the depot args so
+    # local runs without a token still work; the builder override lets any
+    # in-sandbox mngr docker rebuild use depot, and the cache-hit test reads
+    # DEPOT_TOKEN/DEPOT_PROJECT_ID directly. Secret values are masked in CI logs
+    # by the Vault export-secrets action even though offload --trace echoes args.
+    DEPOT_ENV_ARGS=()
+    if [ -n "${DEPOT_TOKEN:-}" ]; then
+        DEPOT_ENV_ARGS+=(--env "DEPOT_TOKEN=${DEPOT_TOKEN}")
+        DEPOT_ENV_ARGS+=(--env "DEPOT_PROJECT_ID=${DEPOT_PROJECT_ID:-fsjzltqvxq}")
+        DEPOT_ENV_ARGS+=(--env "MNGR__PROVIDERS__DOCKER__BUILDER=DEPOT")
+    fi
+    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+        DEPOT_ENV_ARGS+=(--env "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}")
+    fi
     offload -c offload-modal-minds-snapshot.toml run --trace \
         --override-image-id "{{snapshot_image_id}}" \
         --env "GITHUB_HEAD_REF=${GITHUB_HEAD_REF:-}" \
-        --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" {{args}} || [[ $? -eq 2 ]]
+        --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" \
+        ${DEPOT_ENV_ARGS[@]+"${DEPOT_ENV_ARGS[@]}"} {{args}} || [[ $? -eq 2 ]]
 
     # Copy results to the main worktree so new worktrees inherit baselines via COPY mode.
     MAIN_WORKTREE=$(git worktree list --porcelain | head -1 | sed 's/^worktree //')
