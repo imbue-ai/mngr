@@ -1,5 +1,0 @@
-Hardened agent process-tree teardown so a long-lived daemon launched under an agent (e.g. a bootstrap-managed `supervisord` and its children, like a `ttyd` bound to a fixed port) can no longer outlive the agent and collide with a relaunch.
-
-- Lifted the `stop_agents` teardown into a shared `reap_agent_process_tree(agent)` helper: it kills the agent's tmux-session pane descendants **and** any `MNGR_AGENT_ID`-tagged orphans that reparented to PID 1 (SIGTERM then SIGKILL), without killing the tmux session itself. `stop_agents` now uses this helper (plus the session kill) via the extracted `_collect_agent_process_pids` / `_terminate_pids`.
-
-- `start_agents` now reaps any stale process tree for an agent id before launching, but only when that agent isn't already running (so an idempotent start never tears down a live agent). This prevents a relaunch from straddling an orphaned daemon from a prior incarnation (which previously caused, e.g., `EADDRINUSE` on a service's fixed port, leaving the new service stuck restarting while the orphan kept serving).

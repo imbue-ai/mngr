@@ -4,6 +4,128 @@ Full, unedited changelog entries consolidated nightly from individual files in t
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-23
+
+SSH host keys are now unique per host (inherited from the shared VPS provider): each host gets its own VPS/VM-root and container sshd host keypair at create time rather than sharing one keypair across every host the provider instance created. Pause/resume of hosts created before this change still works via a fallback to the legacy provider-global key.
+
+## 2026-06-22
+
+Report an unauthenticated AWS provider consistently with the other cloud providers.
+
+A missing/unresolvable AWS session now raises the shared `ProviderNotAuthorizedError` (still a `ProviderUnavailableError`, so read paths treat it as unavailable). In `mngr list` this surfaces as one consistent error line and a non-zero exit, instead of a one-off message.
+
+## 2026-06-19
+
+Collapsed the AWS provider's two AMI config knobs into one. The `default_ami_by_region` field is gone; `default_ami_id` now defaults to `None`, and when unset the pinned per-region default (`DEFAULT_AMI_BY_REGION`, Debian 12 amd64) for the chosen region is used. Behavior is unchanged -- only the configuration surface is simpler.
+
+Renamed the `_AGENT_TAG_FIELDS` constant imported from `mngr_vps` to the
+public `AGENT_TAG_FIELDS` (matching its sibling `AGENT_TAG_PREFIX`), so the
+AWS tag-mirror code no longer imports a private name across modules. No
+behavior change.
+
+
+Updated imports for the `mngr_vps_docker` -> `mngr_vps` package rename and the
+accompanying class renames (`VpsDockerProvider` -> `VpsProvider`,
+`VpsDockerProviderConfig` -> `VpsProviderConfig`, `VpsDockerHostRecord` ->
+`VpsHostRecord`, `VpsDockerError` -> `VpsError`, etc.). Import-only; no behavior
+change.
+
+
+Enabled bare placement (`isolation=NONE`): the idle agent runs `shutdown -P now`
+as the VM's root, which stops the EC2 instance via InstanceInitiatedShutdownBehavior,
+so the container-only sentinel + host-side systemd watcher is skipped for bare.
+
+Added bare-placement (`isolation=NONE`) release tests, and fixed a resume bug they
+caught: `start_host` read the host record via the Docker volume, which a bare host
+does not have, so it now resolves the store through the realizer.
+
+``stop_host`` / ``start_host`` moved to the shared base ``OfflineCapableVpsProvider``; AWS now supplies only the EC2 ``_pause_cloud_instance`` / ``_resume_cloud_instance`` hooks (and the final host_dir-to-bucket sync before pause). Behavior-preserving.
+
+Updated the host_dir sync to call the realizer's `host_dir_path_on_outer`
+directly after the redundant `_host_dir_path_on_outer` forwarder was removed
+from the shared VPS provider. No behavior change.
+
+The idle-watcher install, the host_dir-to-bucket sync daemon install/before-pause, and the best-effort `_on_host_finalized` step runner all moved to the shared `OfflineCapableVpsProvider`. AWS now supplies only small hooks: the `EC2 instance` display name, the `is_host_dir_synced_to_bucket`-plus-bucket sync gate, and the awscli install / `aws s3 sync` `.service` body / s3 target URI. The host-side systemd unit names changed from `mngr-aws-idle-watcher` / `mngr-aws-host-dir-sync` to the shared `mngr-idle-watcher` / `mngr-host-dir-sync`. Behavior-preserving otherwise.
+
+Updated the VPS build-arg parsing imports to point at the new `imbue.mngr_vps.build_args` module (moved out of `imbue.mngr_vps.instance`). Import-only change; no behavior difference.
+
+Updated imports for `TagMirrorVpsProvider`, `AGENT_TAG_PREFIX`, `AGENT_TAG_FIELDS`, and the host_dir-sync unit symbols to the new `imbue.mngr_vps.instance_offline` module (split out of `imbue.mngr_vps.instance`). Import-only change; no behavior difference.
+
+The shared offline read-side reconstruction moved up into the new `KeyValueMirrorVpsProvider` base that `TagMirrorVpsProvider` now extends, so the AWS provider's host-name hook was renamed `_host_name_tag_key` -> `_host_name_key` and its tag-mirror agent-record write call now invokes the renamed `_agent_field_items` (formerly `_agent_field_tags`). The EC2 256-char tag-value cap is still applied (the base reads it from the new `_max_value_len` hook). Internal refactor; no user-visible behavior change.
+
+The host_dir-sync daemon now runs its `aws s3 sync` command from an installed `/usr/local/sbin/mngr-host-dir-sync.sh` script (referenced directly by the oneshot `.service`'s `ExecStart`) instead of an inline `ExecStart=/bin/sh -c '...'`, removing a layer of systemd + shell quoting around the host_dir path and S3 URI. The `.service` unit is now rendered via the shared `render_systemd_unit` helper. No behavior change.
+
+`S3Volume` is now a thin subclass of the shared `BaseObjectStoreVolume` (in
+`mngr_vps.state_bucket_base`), supplying only the boto3 S3 primitives and an
+error seam (`_translate_errors` / `_is_not_found` / `_bucket_error_type`); the
+listing / existence / read / write / delete logic it duplicated with the Azure
+`BlobVolume` now lives on the base. `S3StateBucket`'s `_get_object` /
+`_delete_object` / `_prefix_has_objects` likewise moved to `BaseStateBucket`,
+leaving the bucket with just its raw S3 primitives and the seam. The 1000-key
+`DeleteObjects` batching stays S3-specific. No user-visible behavior change.
+
+`mngr aws prepare` / `cleanup` now resolve their `[providers.<name>]` block and refuse-on-existing-instances via the shared `mngr_vps.cli_helpers`, and `AwsProviderConfig` lifts `allowed_ssh_cidrs` / `associate_public_ip` into shared config bases instead of carrying AWS-local copies. The cleanup refusal when instances still exist now raises the unified `ManagedResourcesExistError` (a `MngrError`) so the message matches the other clouds. The `allowed_ssh_cidrs` type is unchanged for AWS (already `ScalarStrTuple`, now unified across all three clouds); no config key changed.
+
+Further internal dedup against the shared offline layer (no user-visible behavior change): the AWS EC2-tag `HostStateStore` (`_Ec2TagHostStateStore`) is gone in favor of the shared `TagHostStateStore`, with AWS supplying only a `_remove_instance_tags` hook for the EC2 tag-removal call; the `_state_store` selection now comes from the base via new `_bucket_error_type` / `_bucket_label` hooks (`_state_bucket` is unchanged); offline `host_dir` is captured operator-side at `mngr stop` by the shared, cloud-agnostic `BucketHostDirBackend` (no AWS host_dir subclass, no IAM instance profile, no on-box sync daemon); `_list_provider_vps_hostnames` is inherited from the shared base; and `_create_vps_instance` uses the shared `_require_parsed` helper.
+
+Integrated the `mngr/volumes` offline-store simplification (commit `f8bb5c0a5`): the per-agent instance-tag mirror is removed in favor of a single uniform external `HostStateStore` per provider -- AWS/Azure use their object-storage state bucket as the sole offline store (a stopped host's offline metadata now requires the bucket; the provider's `_state_store` raises an actionable `missing_state_bucket_error` pointing at `mngr <cloud> prepare` when the bucket is absent), and GCP uses a lossless instance-metadata-backed store (full host record + one JSON value per agent). AWS/Azure/GCP now extend `OfflineCapableVpsProvider` directly. This supersedes the earlier-on-this-branch tag-mirror dedup (the lifted `TagHostStateStore` / `KeyValueMirrorVpsProvider` / `TagMirrorVpsProvider` are gone); the realizer architecture, the systemd-unit hardening, and the cli/config/state-bucket dedup are retained. No behavior change for container hosts beyond the offline-metadata-requires-bucket consequence noted above.
+
+Bugfix: a running bare (`isolation=NONE`) host is now discoverable and reachable
+with the default provider config -- `mngr conn`/`list`/`stop`/`start`/`destroy`
+no longer need `-S providers.<name>.isolation=NONE` at connect time. Instances
+now carry a `mngr-isolation` tag stamped at create (alongside `mngr-host-id` /
+`mngr-provider`), so discovery reads the host's placement from the cloud API
+without SSH and probes it with the matching realizer. Pre-existing hosts have no
+tag and default to container, preserving prior behavior.
+
+Behavior-preserving dedup against the shared offline layer. The AWS `_state_store` / `_host_dir_backend` cached properties are now thin wrappers over the shared `OfflineCapableVpsProvider._select_bucket_store` / `_select_bucket_host_dir_backend` (supplying only the resolved S3 bucket, its label, and `mngr aws prepare`). The near-identical `_offline_discovered_host_from_instance` is dropped in favor of the shared default; AWS now sets only the `Name` host-name tag key via the new `_host_name_tag_key()` hook. No user-visible behavior change.
+
+
+Bugfix: `mngr rename` now re-stamps the EC2 `Name` identity tag (read by offline discovery) so a renamed-then-stopped host lists under its new name in `mngr list`. Previously the `Name` tag was stamped only at create, so a host renamed while running still surfaced under its old name once stopped. Implemented via a new `AwsVpsClient.set_instance_tags` (an EC2 `create_tags` upsert) called from the AWS provider's `_remirror_host_name` hook.
+
+Doc: removed a stale README note about speculative EBS `create_snapshot` /
+`list_snapshots` / `delete_snapshot` client methods that no longer exist.
+
+No production behavior change. The `allowed_ssh_cidrs` narrowing-exemption test now exercises the unified overlay narrowing path (`merge_models_via_overlay`) instead of the removed model-walking `detect_settings_narrowing`. The behavior it locks in is unchanged: a `ScalarStrTuple`-validated `allowed_ssh_cidrs` override replaces the committed default without tripping the cross-scope narrowing guard (the overlay pipeline re-marks the `ScalarTuple` stripped by `model_dump`), while an unmarked plain-tuple override of the same shape still narrows.
+
+Trimmed the README to user-relevant content (removed internal implementation details, release-test instructions, and roadmap notes) and tightened it for concision.
+
+Aligned the `AwsProviderConfig` field descriptions (surfaced via `mngr config` / help) with the README configuration table so the two are consistent.
+
+Fact-checked the README against the collapsed `default_ami_id` (a single nullable field that falls back to the pinned per-region default) and documented the required offline-state S3 bucket that `mngr aws prepare` creates.
+
+Added `test_provider_release_trip1` to the AWS release suite: a single-boot full-lifecycle trip (create, exec, stop, real `--stop-host`, start, persistence, snapshot, out-of-band kill, gc, backend-clean) parametrized over container and bare isolation, built on the shared provider release harness. Also added `test_provider_release_trip3` (snapshot survives destroy); on AWS the docker-commit snapshot is not portable, so the trip asserts that documented divergence (the snapshot is gone after destroy).
+
+Retired the old per-step AWS lifecycle release tests now that the trips supersede them: the container and bare variants of create/exec/destroy, stop/start, `--stop-host`, and the idle-watcher auto-stop tests. The bare-shape check the bare tests owned (the agent shell is the VM's own root -- `/var/lib/mngr-host` present, no `/.dockerenv`) now runs inside Trip 1 for the NONE-isolation parametrization.
+
+Also added `test_provider_release_trip4` (error classification): a no-boot CLI trip asserting `mngr create` with unresolvable AWS credentials surfaces the contract `ProviderUnavailableError`, and that a `--vps-*` build arg is rejected with the migration hint. This PR also fixes the AWS missing-credential help text to point at `aws configure` (and the rest of the boto3 credential chain) instead of the generic "start Docker" guidance; the trip asserts that curated help.
+
+Also added `test_provider_release_trip2` (idle auto-shutdown contract), parametrized over container and bare isolation: it creates an idle host with the `terminate_on_shutdown = false` settings variant so the idle poweroff STOPS (not terminates) the EC2 instance, polls until it is HALTED (billing stops), then resumes via `mngr start` and asserts a pre-shutdown marker survived.
+
+AWS also opts into Trip 1's offline-host_dir read (`supports_offline_host_dir`): with `MNGR_RELEASE_TEST_OFFLINE_HOST_DIR=1`, the trip asserts a stopped host's host_dir marker is served from the S3 state bucket via `mngr file get --relative-to host`.
+
+## 2026-06-18
+
+Replaced the EC2 tag mirror with a required, private, encrypted S3 **state bucket** as the offline store for AWS hosts. A stopped instance's offline host/agent records (so `mngr list` / `mngr start` / `mngr event` work while it is stopped) now live in the bucket instead of `mngr-agent-<id>-*` EC2 tags. This removes the tag mirror's limits -- the silent 256-char `labels` drop and the EC2 50-tag ceiling -- and lets a stopped host's *full* `VpsDockerHostRecord` (config, IP, host keys) be reconstructed rather than a lossy tag subset. The bucket is **required**, with no tag-mirror fallback: mngr raises an actionable error pointing at `mngr aws prepare` when the bucket is absent -- on the `mngr create` / `mngr label` write path as well as on offline reads -- and a transient S3 error on a mirror read/write propagates rather than being swallowed.
+
+- `mngr aws prepare` creates (idempotently) the S3 state bucket, named `mngr-state-<account_id>-<region>` by default or overridable via the new `state_bucket_name` provider config field. The bucket is prepare's primary job: a missing S3/STS permission, an unresolvable bucket name, or any create failure fails the command.
+
+- `mngr aws cleanup` deletes the state bucket. Since it runs after the refuse-while-instances-exist check, any remaining state is orphaned (hosts no longer present as instances), so cleanup refuses to delete a non-empty bucket rather than silently dropping records; pass the new `--force` flag to delete the bucket and its remaining state.
+
+Added an offline `host_dir`, **on by default** (new `is_offline_host_dir_enabled` provider config field). A stopped instance's `host_dir` is now readable without SSH, so `mngr event` / `mngr transcript` / `mngr file` work against a paused host.
+
+- Capture is **operator-driven** -- it needs no instance IAM identity. At `mngr stop`, mngr (already SSH-connected and holding the bucket credentials) reads the host's `host_dir` off the box and uploads it to `s3://<bucket>/hosts/<host_id>/host_dir/` with the operator's own credentials (the same ones that write the state records). So `mngr aws prepare` provisions no host-dir IAM identity, `mngr create` attaches no profile for it, `cleanup` deletes none, and `iam:PassRole` is needed only for an operator-supplied `iam_instance_profile`. Offline reads serve `host_dir` back from the bucket.
+
+- Limitation: capture happens only at `mngr stop`. A host that idle-self-poweroffs (or crashes) is **not** captured -- its offline `host_dir` then reflects its last `mngr stop` (or is empty if never stopped that way); the state *records* are unaffected (always operator-written). An empty `host_dir` prefix reads as no volume. Set `is_offline_host_dir_enabled = false` to disable the capture entirely.
+
+Fixed `mngr destroy` of a stopped AWS host leaking its EC2 instance. Destroying a host that had been stopped (`mngr stop --stop-host`, or idle self-stop) previously failed to terminate the still-billing EC2 instance and left its S3 state behind while appearing to succeed. Destroy now falls back to the offline path -- resolving the stopped instance by its `mngr-host-id` tag and terminating it via `TerminateInstances` -- and removes the state-bucket records, failing loudly if the instance could not be terminated.
+
+A partial S3 `DeleteObjects` failure (the API returns HTTP 200 with per-key failures only in the response `Errors` array) now raises instead of being silently dropped, so a failed state/`host_dir` removal can't leave orphaned objects behind unnoticed.
+
+Follow-up cleanup: removed the now-orphaned `AwsVpsClient.add_tags` / `AwsVpsClient.remove_tags` client methods (and their unit tests). They only ever existed to push per-agent records into EC2 instance tags for the old tag mirror, which the state bucket replaces; nothing reachable called them.
+
+`mngr aws prepare` is now idempotent under a concurrent `prepare` race: a `BucketAlreadyOwnedByYou` from the bucket create (two prepares racing, or the existence check racing the create) is treated as a no-op -- mngr still applies the bucket's (idempotent) hardening config and reports it as not-created -- rather than surfacing as an error. Any other create failure still raises.
+
 ## 2026-06-17
 
 Internal: AWS's stopped-host offline discovery and resolution (listing stopped / mid-stop hosts, resolving them by id, and falling back to EC2 tags), plus its stop/start lifecycle, known_hosts rebinding, and idle-watcher install, now come from a shared `OfflineCapableVpsDockerProvider` base instead of AWS-specific copies; AWS supplies only the EC2-specific hooks (stop/start the instance, poweroff idle action). No behavior change.

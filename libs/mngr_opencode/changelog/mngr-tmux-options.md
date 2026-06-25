@@ -1,1 +1,0 @@
-Opencode agent lifecycle detection now targets the agent's primary tmux window by name (the configurable `tmux.primary_window_name`, default `agent`) instead of the literal `:0` index, so it works regardless of the user's tmux `base-index` setting. (The behavior comes from the shared base agent; the opencode lifecycle test was updated to name its primary window accordingly.)
