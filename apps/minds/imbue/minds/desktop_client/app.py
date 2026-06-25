@@ -90,6 +90,7 @@ from imbue.minds.desktop_client.region_preference import VULTR_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import default_region_for_provider
 from imbue.minds.desktop_client.region_preference import known_regions_for_provider
 from imbue.minds.desktop_client.region_preference import resolve_default_region
+from imbue.minds.desktop_client.report_collector import submit_bug_report_from_body
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestType
@@ -121,10 +122,12 @@ from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHe
 from imbue.minds.desktop_client.templates import render_accounts_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
+from imbue.minds.desktop_client.templates import render_consent_page
 from imbue.minds.desktop_client.templates import render_create_form
 from imbue.minds.desktop_client.templates import render_creating_page
 from imbue.minds.desktop_client.templates import render_destroying_page
 from imbue.minds.desktop_client.templates import render_dev_styleguide_page
+from imbue.minds.desktop_client.templates import render_help_page
 from imbue.minds.desktop_client.templates import render_inbox_list_fragment
 from imbue.minds.desktop_client.templates import render_inbox_page
 from imbue.minds.desktop_client.templates import render_inbox_unavailable_fragment
@@ -132,6 +135,7 @@ from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.desktop_client.templates import render_recovery_page
+from imbue.minds.desktop_client.templates import render_settings_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
@@ -454,6 +458,131 @@ def _suggested_create_color(backend_resolver: BackendResolverInterface) -> str:
     return pick_unused_create_color(used)
 
 
+def _maybe_consent_screen() -> Response | None:
+    """Return the error-reporting consent screen if it still needs answering, else None.
+
+    The screen is shown once per machine -- on first launch, and once more after upgrading from a
+    build that predates it -- after the user has authenticated and before the landing content, until
+    they answer it via POST /consent. Callers are responsible for gating this on authentication. When
+    config is unavailable (e.g. minimal test apps) there is nothing to gate on, so this is a no-op.
+    """
+    minds_config: MindsConfig | None = get_state().minds_config
+    if minds_config is None or minds_config.get_error_reporting_consent_given():
+        return None
+    return make_html_response(
+        content=render_consent_page(
+            report_unexpected_errors=minds_config.get_report_unexpected_errors(),
+            include_logs=minds_config.get_include_error_logs(),
+        )
+    )
+
+
+def _handle_consent_page() -> Response:
+    """Render the error-reporting consent screen (GET /consent).
+
+    The consent screen sits just after login, so an unauthenticated request is bounced to the login
+    page. If consent was already answered, redirect home so the screen never reappears.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=302, headers={"Location": "/login"})
+    consent_response = _maybe_consent_screen()
+    if consent_response is not None:
+        return consent_response
+    return make_response(status_code=302, headers={"Location": "/"})
+
+
+def _handle_consent_submit() -> Response:
+    """Record the consent-screen choices and mark consent as answered (POST /consent).
+
+    The consent screen sits just after login, so this requires authentication. "Include logs" is only
+    persisted as on when reporting is also on, matching the screen's coupling.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
+    minds_config: MindsConfig | None = get_state().minds_config
+    if minds_config is not None:
+        report = bool(body.get("report_unexpected_errors", False))
+        include_logs = bool(body.get("include_logs", False))
+        minds_config.set_report_unexpected_errors(report)
+        minds_config.set_include_error_logs(include_logs and report)
+        minds_config.set_error_reporting_consent_given(True)
+    return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
+
+
+def _handle_error_reporting_settings() -> Response:
+    """Persist the error-reporting toggles from the Settings page (POST /_chrome/error-reporting).
+
+    Accepts any subset of ``{report_unexpected_errors, include_logs}``; each present boolean is saved.
+    The settings UI clears "include logs" when reporting is turned off, so the stored pair stays
+    consistent without extra coercion here.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
+    minds_config: MindsConfig | None = get_state().minds_config
+    if minds_config:
+        if "report_unexpected_errors" in body:
+            minds_config.set_report_unexpected_errors(bool(body["report_unexpected_errors"]))
+        if "include_logs" in body:
+            minds_config.set_include_error_logs(bool(body["include_logs"]))
+    return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
+
+
+def _handle_help_page() -> Response:
+    """Render the get-help modal page (GET /help).
+
+    Intentionally unauthenticated: reporting a bug must work even when sign-in itself is broken. The
+    ``workspace`` query param (set by the titlebar button) scopes the optional workspace section.
+    """
+    minds_config: MindsConfig | None = get_state().minds_config
+    include_logs_setting = minds_config.get_include_error_logs() if minds_config else False
+    workspace_agent_id = request.args.get("workspace", "")
+    return make_html_response(
+        content=render_help_page(
+            include_logs_setting=include_logs_setting,
+            workspace_agent_id=workspace_agent_id,
+        )
+    )
+
+
+def _handle_help_report() -> Response:
+    """Collect and submit a user-submitted bug report from the help form (POST /help/report).
+
+    Unauthenticated for the same reason as the page: the user may be reporting a sign-in problem. The
+    shared collector also backs the ``/api/v1`` bug-report route, so both paths produce identical reports.
+    """
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return make_response(
+            status_code=400,
+            content='{"error": "Request body must be a JSON object"}',
+            media_type="application/json",
+        )
+    if not str(body.get("description", "")).strip():
+        return make_response(
+            status_code=400, content='{"error": "A description is required"}', media_type="application/json"
+        )
+
+    state = get_state()
+    event_id = submit_bug_report_from_body(
+        body=body,
+        session_store=state.session_store,
+        backend_resolver=state.backend_resolver,
+        minds_config=state.minds_config,
+        paths=state.api_v1_paths,
+    )
+    return make_response(
+        status_code=200,
+        content=json.dumps({"ok": True, "event_id": event_id}),
+        media_type="application/json",
+    )
+
+
 def _existing_workspace_host_names(backend_resolver: BackendResolverInterface) -> set[str]:
     """Gather the host names of every known workspace across all providers.
 
@@ -486,6 +615,13 @@ def _handle_landing_page() -> Response:
     if not _is_request_authenticated():
         html = render_login_page()
         return make_html_response(content=html)
+
+    # The error-reporting consent screen sits just after login: once the user is authenticated but
+    # has not yet answered it, show it here before the landing content (the Electron content view and
+    # browser both load "/" first, and _handle_post_login_redirect routes here while it is unanswered).
+    consent_response = _maybe_consent_screen()
+    if consent_response is not None:
+        return consent_response
 
     backend_resolver = get_state().backend_resolver
     all_agent_ids = backend_resolver.list_active_workspace_ids()
@@ -580,6 +716,12 @@ def _handle_post_login_redirect() -> Response:
     """
     if not _is_request_authenticated():
         return make_response(status_code=302, headers={"Location": "/login"})
+    # The error-reporting consent screen sits just after login. While it is unanswered, send the user
+    # to "/" (the landing handler shows the consent screen there) rather than straight to /accounts or
+    # a return_to deep-link, so the one-time consent gate is answered first.
+    minds_config: MindsConfig | None = get_state().minds_config
+    if minds_config is not None and not minds_config.get_error_reporting_consent_given():
+        return make_response(status_code=302, headers={"Location": "/"})
     return_to = safe_local_redirect_path(request.args.get("return_to"))
     if return_to is not None:
         return make_response(status_code=302, headers={"Location": return_to})
@@ -3440,6 +3582,24 @@ def _handle_accounts_page() -> Response:
     return make_html_response(content=html)
 
 
+def _handle_settings_page() -> Response:
+    """Render the app-level settings page (GET /settings).
+
+    Hosts the per-machine error-reporting toggles, seeded from ``MindsConfig``. Requires the same
+    local session as the rest of the app; it is not account-scoped.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    minds_config: MindsConfig | None = get_state().minds_config
+    report_unexpected_errors = minds_config.get_report_unexpected_errors() if minds_config else False
+    include_error_logs = minds_config.get_include_error_logs() if minds_config else False
+    html = render_settings_page(
+        report_unexpected_errors=report_unexpected_errors,
+        include_error_logs=include_error_logs,
+    )
+    return make_html_response(content=html)
+
+
 def _handle_set_default_account() -> Response:
     """Set the default account for new workspaces."""
     if not _is_request_authenticated():
@@ -4335,6 +4495,11 @@ def create_desktop_client(
     app.add_url_rule("/_dev/styleguide", view_func=_handle_dev_styleguide)
 
     # Core routes
+    app.add_url_rule("/consent", view_func=_handle_consent_page)
+    app.add_url_rule("/consent", view_func=_handle_consent_submit, methods=["POST"])
+    app.add_url_rule("/_chrome/error-reporting", view_func=_handle_error_reporting_settings, methods=["POST"])
+    app.add_url_rule("/help", view_func=_handle_help_page)
+    app.add_url_rule("/help/report", view_func=_handle_help_report, methods=["POST"])
     app.add_url_rule("/welcome", view_func=_handle_welcome_page)
     app.add_url_rule("/login", view_func=_handle_login)
     app.add_url_rule("/authenticate", view_func=_handle_authenticate)
@@ -4343,6 +4508,7 @@ def create_desktop_client(
 
     # Account management routes
     app.add_url_rule("/accounts", view_func=_handle_accounts_page)
+    app.add_url_rule("/settings", view_func=_handle_settings_page)
     app.add_url_rule("/accounts/set-default", view_func=_handle_set_default_account, methods=["POST"])
     app.add_url_rule("/accounts/<user_id>/logout", view_func=_handle_account_logout, methods=["POST"])
 
