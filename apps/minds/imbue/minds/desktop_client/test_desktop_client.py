@@ -2157,7 +2157,7 @@ def test_landing_shows_consent_screen_after_login_when_unanswered(tmp_path: Path
 
 
 def test_welcome_continue_without_account_routes_through_consent(tmp_path: Path) -> None:
-    """"Continue without an account" sends the user to "/" so the consent screen is offered.
+    """ "Continue without an account" sends the user to "/" so the consent screen is offered.
 
     Reporting is not gated behind an Imbue account: the account-less skip path lands on "/", whose
     handler shows the "Help improve Minds" consent screen (when unanswered) before the create form.
