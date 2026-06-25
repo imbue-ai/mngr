@@ -6,6 +6,24 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `update_policy` field on the claude agent type that governs Claude Code's background auto-updater. `NEVER` sets `DISABLE_AUTOUPDATER=1` so the installed (optionally `version`-pinned) binary stays put; `AUTO` leaves the auto-updater enabled; `ASK` behaves like `AUTO` (claude has no interactive update flow). Defaults to `NEVER`.
+- Added: `mngr config assign` (and `mngr config get` recognising `key__assign`) — the new `__mngr_merge` `assign` directive (and its `key__assign` equivalent in plain mngr config) replaces a value without tripping the cross-scope narrowing guard, complementing `__extend` / `extend`.
+
+### Changed
+
+- Changed: **Behavior change.** Claude agents now disable Claude Code's auto-updater by default (local and remote). Previously mngr did not disable it on local agents — the per-agent config inherited your `~/.claude.json` `autoUpdates` value, so local agents typically auto-updated. Set `update_policy = "AUTO"` to opt back in. Ignored in `use_env_config_dir` (shared) mode, where mngr leaves your claude environment alone.
+- Changed: `settings_overrides` is now applied as a **config-consistent patch** folded onto the per-agent config-dir `settings.json`, replacing the previous deep-merge-by-default. A bare key assigns with the narrowing guard (errors if it would silently drop a non-empty sibling aggregate); `key__extend` merges (lists concatenate, sets union, dicts merge), and nesting `__extend` merges deeper. `key__assign` provides a per-key opt-out of the guard. `settings_overrides` also now accumulates across config scopes (user < project < local) and `parent_type` inheritance per-key, instead of a higher scope replacing the entire lower value.
+- Changed: `settings_overrides` now expresses merge intent with a Claude-compatible `__mngr_merge` map instead of the `__extend` / `__assign` key suffixes (which Claude Code does not understand and would surface as junk literal keys). Raw suffix keys are rejected inside `settings_overrides`. Declare merge intent in a single top-level `__mngr_merge` map keyed by dotted path (`"permissions.allow" = "extend"` or `"assign"`); on a narrowing, the error prints the exact `__mngr_merge` patch to add. mngr's own (non-`settings_overrides`) config is unchanged and still uses the suffixes.
+- Changed: Response-streaming snapshot watcher now captures the agent's tmux pane by the configured primary window name (`tmux.primary_window_name`, default `agent`) instead of the literal `:0` index, so response streaming works regardless of the user's tmux `base-index`.
+
+### Fixed
+
+- Fixed: mngr's Claude hooks no longer leak into "normal" (non-mngr) Claude config. mngr previously wrote its readiness/credential/permission hooks into the project's `.claude/settings.local.json`, which plain `claude` runs in that directory also read — so the hooks fired outside mngr where `$MNGR_AGENT_STATE_DIR` / `$MNGR_HOST_DIR` are unset, producing errors like `mkdir: cannot create directory '/events': Permission denied`. mngr now bakes all of its own hooks into the per-agent config-dir `settings.json` (`$MNGR_AGENT_STATE_DIR/plugin/claude/anthropic/settings.json`), the "user" settings layer Claude reads from `$CLAUDE_CONFIG_DIR`, which a plain `claude` run in the work dir never reads. The hooks are built fresh on every provision, so nothing accumulates and nothing lands in a file plain `claude` reads. Note: this stops *new* leaks; existing leaked hooks in old `settings.local.json` files must be cleaned up manually.
+- Fixed: `mngr create` no longer requires the project's `.claude/settings.local.json` to be gitignored across the board. That requirement now applies only when the `claude_subagent_proxy` plugin (PROXY mode) actually needs to rewrite user-defined Stop hooks in `settings.local.json` — enforced by that plugin at the point it writes.
+- Fixed: Cross-scope `settings_overrides` narrowing is now caught at config-load. A higher-scope bare key that replaced a non-empty aggregate set by a lower scope previously dropped the lower entries silently (the provision-time guard only caught drops of the home `settings.json` base, not of a lower config scope). Escapable via `allow_settings_key_assignment_narrowing = true`, `allow__extend`, or `allow__assign`; purely additive cross-scope overrides still load unchanged.
+
 ## [v0.2.17] - 2026-06-18
 
 ### Added

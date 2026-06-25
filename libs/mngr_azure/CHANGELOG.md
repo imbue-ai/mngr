@@ -6,6 +6,21 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Bare placement (`isolation=NONE`) — an Azure agent can now run directly on the VM's OS instead of in a Docker container. Because an Azure OS shutdown does not halt billing, the bare agent's idle `shutdown.sh` runs the ARM self-deallocate directly (the same call the container idle watcher uses), keeping the self-deallocate role assignment and skipping the host-side sentinel watcher. A running bare host is discoverable with default config (no `-S providers.azure.isolation=NONE` at connect time) via a `mngr-isolation` tag stamped at create.
+- Added: Required Azure Blob **state bucket** (private Storage account + container) as the offline store, replacing the VM tag mirror. A deallocated VM's full host record plus per-agent records now live in `mngrst<hash>` (overridable via `state_storage_account_name`) so `mngr list` / `mngr start` / `mngr event` work while stopped, without the prior tag mirror's silent 256-char `labels` drop. `mngr azure prepare` also grants the operator's own principal the `Storage Blob Data Contributor` role scoped to just the state account so the operator's offline reads/writes succeed (Azure splits control plane from data plane). `mngr azure cleanup` refuses while it is non-empty unless `--force`. The bucket is **required** — mngr raises an actionable error pointing at `mngr azure prepare` when absent.
+- Added: Offline `host_dir` (new `is_offline_host_dir_enabled` provider config field, on by default). A deallocated VM's `host_dir` is readable without SSH, so `mngr event` / `mngr transcript` work against a stopped agent. Capture is operator-driven at `mngr stop` (no VM managed identity needed for it). Limitation: capture happens only at `mngr stop` — a VM that idle-self-deallocates or crashes is not captured.
+
+### Changed
+
+- Changed: Curated `ProviderUnavailableError` help for an unresolvable Azure subscription now points at `az login` and the subscription setup steps.
+
+### Fixed
+
+- Fixed: `mngr start` of a deallocated Azure host now re-mirrors the resumed host record to the external (Blob bucket) store, so offline / `mngr list` reads no longer report a just-resumed Azure VM as STOPPED until the next mirroring write.
+- Fixed: `rename_host` now re-stamps the cheap `mngr-host-name` VM tag (that offline discovery reads), so a host renamed and then stopped lists under its new name rather than its old one. The re-stamp merges into the VM's existing tags, preserving the other index tags.
+
 ## [v0.1.1] - 2026-06-18
 
 ### Added

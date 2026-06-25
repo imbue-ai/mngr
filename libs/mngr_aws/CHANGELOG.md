@@ -6,6 +6,24 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Bare placement (`isolation=NONE`) — an AWS agent can now run directly on the EC2 VM's OS instead of in a Docker container. The idle agent self-stops the EC2 instance via `shutdown -P now` (relying on `InstanceInitiatedShutdownBehavior`), skipping the container-only sentinel + host-side systemd watcher. A running bare host is discoverable with default config (no `-S providers.aws.isolation=NONE` at connect time) via a `mngr-isolation` tag stamped at create; pre-existing instances default to container.
+- Added: Required, private, encrypted S3 **state bucket** as the offline store for AWS hosts, replacing the EC2 tag mirror. A stopped instance's full `VpsHostRecord` (config, IP, host keys) plus per-agent records live in `s3://mngr-state-<account>-<region>` (overridable via `state_bucket_name`) so `mngr list` / `mngr start` / `mngr event` work while stopped, without the prior tag-mirror's 256-char `labels` drop and 50-tag ceiling. `mngr aws prepare` creates the bucket (its primary job); `mngr aws cleanup` refuses while it is non-empty unless `--force`. The bucket is **required** with no tag-mirror fallback — mngr raises an actionable error pointing at `mngr aws prepare` when it is absent.
+- Added: Offline `host_dir` (new `is_offline_host_dir_enabled` provider config field, on by default). A stopped instance's `host_dir` is now readable without SSH, so `mngr event` / `mngr transcript` / `mngr file` work against a paused host. Capture is operator-driven at `mngr stop` (no instance IAM identity), and reads serve from the bucket. Limitation: capture happens only at `mngr stop` — a host that idle-self-poweroffs or crashes is not captured.
+
+### Changed
+
+- Changed: Collapsed the two AMI config knobs into one. `default_ami_by_region` is gone; `default_ami_id` now defaults to `None`, falling back to a pinned per-region default (Debian 12 amd64) when unset. Behavior is unchanged — only the configuration surface is simpler.
+- Changed: Curated `ProviderUnavailableError` help for missing AWS credentials now points at `aws configure` and the rest of the boto3 credential chain, instead of the generic "start Docker" guidance.
+- Changed: `mngr aws prepare` is now idempotent under a concurrent `prepare` race — a `BucketAlreadyOwnedByYou` is treated as a no-op (mngr still applies hardening config and reports it as not-created) rather than surfacing as an error.
+
+### Fixed
+
+- Fixed: `mngr destroy` of a stopped AWS host no longer leaks its EC2 instance. Destroying a host previously stopped via `mngr stop --stop-host` or idle self-stop now falls back to the offline path — resolving the stopped instance by its `mngr-host-id` tag and terminating it via `TerminateInstances` — and removes the state-bucket records, failing loudly if the instance could not be terminated.
+- Fixed: `mngr rename` now re-stamps the EC2 `Name` identity tag, so a renamed-then-stopped host lists under its new name in `mngr list` (previously the `Name` tag was stamped only at create).
+- Fixed: A partial S3 `DeleteObjects` failure (HTTP 200 with per-key failures in the response `Errors` array) now raises instead of being silently dropped, so a failed state / `host_dir` removal can't leave orphaned objects unnoticed.
+
 ## [v0.1.4] - 2026-06-18
 
 ### Changed
