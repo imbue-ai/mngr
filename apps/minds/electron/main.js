@@ -1884,9 +1884,11 @@ function getRunningMinds() {
   });
 }
 
-// POST /api/agents/<id>/stop-host (synchronous). Resolves true when the server
+// POST /api/v1/workspaces/<id>/stop (synchronous). Resolves true when the server
 // reports the stop succeeded (<400), false otherwise. Used by the single-row
-// landing Stop relay.
+// landing Stop relay. (The v1 route blocks until the host transition resolves,
+// same as the legacy /api/agents/<id>/stop-host it replaced; cookie auth is
+// accepted via useSessionCookies.)
 function postMindStop(agentId) {
   return new Promise((resolve) => {
     if (!agentId || !backendBaseUrl) {
@@ -1897,7 +1899,7 @@ function postMindStop(agentId) {
     let req;
     try {
       req = net.request({
-        url: `${backendBaseUrl}/api/agents/${encodeURIComponent(agentId)}/stop-host`,
+        url: `${backendBaseUrl}/api/v1/workspaces/${encodeURIComponent(agentId)}/stop`,
         method: 'POST',
         useSessionCookies: true,
       });

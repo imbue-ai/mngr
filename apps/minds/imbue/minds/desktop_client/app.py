@@ -49,7 +49,6 @@ from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
-from imbue.minds.desktop_client.backup_export import export_snapshot_zip
 from imbue.minds.desktop_client.backup_password_store import has_saved_backup_password
 from imbue.minds.desktop_client.backup_status import compute_backup_status_for_workspaces
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
@@ -60,8 +59,6 @@ from imbue.minds.desktop_client.destroying import delete_destroying
 from imbue.minds.desktop_client.destroying import is_host_still_active
 from imbue.minds.desktop_client.destroying import list_destroying
 from imbue.minds.desktop_client.destroying import read_destroying
-from imbue.minds.desktop_client.destroying import read_log_chunk
-from imbue.minds.desktop_client.destroying import start_destroy
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
@@ -90,7 +87,6 @@ from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import parse_request_event
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.request_handler import find_handler_for_event
-from imbue.minds.desktop_client.responses import make_file_response
 from imbue.minds.desktop_client.responses import make_html_response
 from imbue.minds.desktop_client.responses import make_redirect_response
 from imbue.minds.desktop_client.responses import make_response
@@ -143,7 +139,6 @@ from imbue.minds.desktop_client.workspace_create import persist_region_for_launc
 from imbue.minds.desktop_client.workspace_create import resolve_effective_region
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.envs.docker_cleanup import stop_active_env_state_container
-from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import InvalidJsonBodyError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.errors import MngrCommandTimeoutError
@@ -611,44 +606,6 @@ def _handle_backup_status_api() -> Response:
         for agent_id, status in status_by_agent_id.items()
     }
     return make_response(content=json.dumps(payload), media_type="application/json")
-
-
-def _handle_backup_export_api(
-    agent_id: str,
-) -> Response:
-    """Build + stream a zip of the workspace's latest snapshot (GET /api/backup-export/{agent_id}).
-
-    Produces the zip on the minds machine via ``restic dump --archive zip`` to a
-    /tmp file keyed by host id (so re-exports overwrite), then returns it.
-    """
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
-    backend_resolver = get_state().backend_resolver
-    paths: WorkspacePaths | None = get_state().api_v1_paths
-    if paths is None:
-        return make_response(
-            status_code=404, content='{"error": "No backups configured"}', media_type="application/json"
-        )
-    try:
-        typed_agent_id = AgentId(agent_id)
-    except ValueError:
-        return make_response(status_code=400, content='{"error": "Invalid agent id"}', media_type="application/json")
-    display_info = backend_resolver.get_agent_display_info(typed_agent_id)
-    # The zip file is keyed by host id (per the export contract); fall back to the
-    # agent id only if discovery has no display info for this agent.
-    host_id = display_info.host_id if display_info is not None else agent_id
-    download_label = display_info.agent_name if display_info is not None else agent_id
-    root_concurrency_group: ConcurrencyGroup | None = get_state().root_concurrency_group
-    try:
-        zip_path = export_snapshot_zip(
-            paths=paths, agent_id=typed_agent_id, host_id=host_id, parent_cg=root_concurrency_group
-        )
-    except BackupProvisioningError as e:
-        logger.warning("Backup export failed for {}: {}", agent_id, e)
-        return make_response(status_code=500, content=json.dumps({"error": str(e)}), media_type="application/json")
-    return make_file_response(
-        path=str(zip_path), media_type="application/zip", filename=f"{download_label}-backup.zip"
-    )
 
 
 # -- Agent creation route handlers --
@@ -1314,130 +1271,6 @@ def _is_host_still_active(agent_id: AgentId) -> bool:
         get_state().backend_resolver,
         get_state().api_v1_paths,
         agent_id,
-    )
-
-
-def _handle_destroy_agent_api(
-    agent_id: str,
-) -> Response:
-    """POST /api/destroy-agent/<agent_id>: spawn a detached destroy.
-
-    Resolves the workspace's host id from the in-memory backend resolver (host
-    id is immutable and already known for any workspace the user can see), then
-    spawns a detached destroy that tears down the *whole host*. Refuses with 409
-    if the host id can't be resolved -- rather than half-destroying or hiding a
-    host that is still running.
-
-    The workspace is *not* disassociated here: that happens only once the host
-    is confirmed gone (see :func:`_finalize_destroyed_workspace`), so a failed
-    teardown stays visible and retryable instead of becoming an invisible,
-    still-billing orphan.
-
-    Idempotent: if a destroy is already running for this agent, returns
-    200 with the existing record's status. Otherwise spawns the
-    detached subprocess and returns 202.
-
-    Returns ``redirect_url: "/"`` on success so the settings-page JS can
-    navigate to the landing page (where the destroying marker is visible).
-    """
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
-
-    paths: WorkspacePaths | None = get_state().api_v1_paths
-    if paths is None:
-        return make_response(
-            status_code=501, content='{"error": "Destroy not configured"}', media_type="application/json"
-        )
-
-    parsed_id = AgentId(agent_id)
-    backend_resolver: BackendResolverInterface = get_state().backend_resolver
-
-    # Idempotent: short-circuit if a destroy is already running.
-    existing = read_destroying(parsed_id, paths, is_host_still_active=_is_host_still_active(parsed_id))
-    if existing is not None and existing.status == DestroyingStatus.RUNNING:
-        return make_response(
-            status_code=200,
-            content=json.dumps({"agent_id": agent_id, "status": "running", "redirect_url": "/"}),
-            media_type="application/json",
-        )
-
-    # Resolve the immutable host id from discovery; a minds workspace teardown
-    # is a host teardown, and there is no safe single-agent fallback. If we
-    # can't determine the host, refuse rather than risk a partial destroy.
-    host_id = _resolve_host_id(backend_resolver, parsed_id)
-    if host_id is None:
-        logger.warning("Refusing to destroy {}: could not resolve its host id from discovery", agent_id)
-        return make_response(
-            status_code=409,
-            content=json.dumps(
-                {"error": "Could not determine the workspace's host yet. Please wait a moment and try again."}
-            ),
-            media_type="application/json",
-        )
-    start_destroy(parsed_id, paths, host_id)
-
-    return make_response(
-        status_code=202,
-        content=json.dumps({"agent_id": agent_id, "status": "running", "redirect_url": "/"}),
-        media_type="application/json",
-    )
-
-
-def _handle_destroying_status_api(
-    agent_id: str,
-) -> Response:
-    """GET /api/destroying/<agent_id>/status: live status of a destroy."""
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
-    paths: WorkspacePaths | None = get_state().api_v1_paths
-    if paths is None:
-        return make_response(status_code=404, content='{"error": "No record"}', media_type="application/json")
-    parsed_id = AgentId(agent_id)
-    record = read_destroying(parsed_id, paths, is_host_still_active=_is_host_still_active(parsed_id))
-    if record is None:
-        return make_response(status_code=404, content='{"error": "No record"}', media_type="application/json")
-    return make_response(
-        content=json.dumps(
-            {
-                "agent_id": agent_id,
-                "pid": record.pid,
-                "pid_alive": record.pid_alive,
-                "is_host_still_active": record.is_host_still_active,
-                "status": str(record.status).lower(),
-            }
-        ),
-        media_type="application/json",
-    )
-
-
-def _handle_destroying_log_api(
-    agent_id: str,
-) -> Response:
-    """GET /api/destroying/<agent_id>/log?after=<bytes>: tail the destroy log."""
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
-    paths: WorkspacePaths | None = get_state().api_v1_paths
-    if paths is None:
-        return make_response(status_code=404, content='{"error": "No record"}', media_type="application/json")
-    parsed_id = AgentId(agent_id)
-    after_str = request.args.get("after", "0")
-    try:
-        after = max(int(after_str), 0)
-    except ValueError:
-        after = 0
-    try:
-        content_bytes, next_offset = read_log_chunk(parsed_id, paths, after)
-    except FileNotFoundError:
-        return make_response(status_code=404, content='{"error": "No record"}', media_type="application/json")
-    return make_response(
-        content=json.dumps(
-            {
-                "bytes_read": len(content_bytes),
-                "next_offset": next_offset,
-                "content": content_bytes.decode("utf-8", errors="replace"),
-            }
-        ),
-        media_type="application/json",
     )
 
 
@@ -3981,17 +3814,15 @@ def create_desktop_client(
     app.add_url_rule("/create", view_func=_handle_create_page)
     app.add_url_rule("/create", view_func=_handle_create_form_submit, methods=["POST"])
     app.add_url_rule("/api/backup-status", view_func=_handle_backup_status_api)
-    app.add_url_rule("/api/backup-export/<agent_id>", view_func=_handle_backup_export_api)
     app.add_url_rule("/api/create-agent", view_func=_handle_create_agent_api, methods=["POST"])
     app.add_url_rule("/api/create-agent/<agent_id>/onboarding", view_func=_handle_onboarding_submit, methods=["POST"])
     app.add_url_rule("/api/create-agent/<agent_id>/status", view_func=_handle_creation_status_api)
     app.add_url_rule("/api/create-agent/<agent_id>/logs", view_func=_handle_creation_logs_sse)
     app.add_url_rule("/creating/<agent_id>", view_func=_handle_creating_page)
 
-    # Agent destruction routes
-    app.add_url_rule("/api/destroy-agent/<agent_id>", view_func=_handle_destroy_agent_api, methods=["POST"])
-    app.add_url_rule("/api/destroying/<agent_id>/status", view_func=_handle_destroying_status_api)
-    app.add_url_rule("/api/destroying/<agent_id>/log", view_func=_handle_destroying_log_api)
+    # Agent destruction routes. Destroy + status/log streaming are served by the
+    # versioned /api/v1/workspaces surface now; only the dismiss action (no v1
+    # equivalent) and the detail page remain here.
     app.add_url_rule("/api/destroying/<agent_id>/dismiss", view_func=_handle_destroying_dismiss_api, methods=["POST"])
     app.add_url_rule("/destroying/<agent_id>", view_func=_handle_destroying_page)
 

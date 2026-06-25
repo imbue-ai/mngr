@@ -1427,7 +1427,7 @@ async def amain() -> int:
 
             # Iter 12 (Cancel modal): real users click Destroy by accident or
             # change their mind. Verify the Cancel button dismisses the modal
-            # without firing any /api/destroy-agent call, leaving W2 alive.
+            # without firing any destroy call, leaving W2 alive.
             await win.click("#destroy-btn")
             await win.wait_for_selector("#destroy-confirm-btn", state="visible", timeout=5_000)
             await snap_page(win, "18b-w2-destroy-modal-opened")
@@ -1443,31 +1443,31 @@ async def amain() -> int:
             await win.wait_for_selector("#destroy-confirm-btn", state="visible", timeout=5_000)
             await snap_page(win, "18b3-w2-destroy-modal-reopened")
             await win.click("#destroy-confirm-btn")
-            # The confirm handler POSTs /api/destroy-agent then redirects to
-            # /; wait for the navigation, then snap the in-flight state.
+            # The confirm handler POSTs /api/v1/workspaces/<id>/destroy then
+            # redirects to /; wait for the navigation, then snap the in-flight state.
             await win.wait_for_url(origin + "/", timeout=30_000)
             await snap_page(win, "18c-w2-destroy-initiated")
 
-            # Poll /api/destroying/<id>/status until the host is actually gone
-            # (status 'done', or 404 once the record is cleaned up). Lima VM
+            # Poll /api/v1/workspaces/operations/<id> until the host is actually gone
+            # (status 'DONE', or 404 once the record is cleaned up). Lima VM
             # stop+delete typically takes 30-90s; 4-min budget gives comfortable
             # headroom.
             #
-            # 'failed' here is NOT terminal: the status is derived fresh per poll
+            # 'FAILED' here is NOT terminal: the status is derived fresh per poll
             # as pid-dead + is_host_still_active (see destroying.read_destroying).
             # The detached `mngr destroy` subprocess exits before the lima VM
             # finishes dropping out of discovery, so on a slow runner the status
-            # reads 'failed' transiently (subprocess gone, host not yet) before
-            # flipping to 'done' once the host is actually torn down. Treat it as
+            # reads 'FAILED' transiently (subprocess gone, host not yet) before
+            # flipping to 'DONE' once the host is actually torn down. Treat it as
             # "not done yet" and keep polling; a host that never tears down stays
-            # 'failed' until the deadline, which still surfaces a real
+            # 'FAILED' until the deadline, which still surfaces a real
             # silent-orphan teardown as a failure.
             destroy_deadline = time.time() + 240
             last_body: dict[str, Any] = {}
             while time.time() < destroy_deadline:
                 resp = await win.evaluate(
                     """async (aid) => {
-                        const r = await fetch('/api/destroying/' + aid + '/status');
+                        const r = await fetch('/api/v1/workspaces/operations/' + aid);
                         return {status: r.status, body: await r.text()};
                     }""",
                     w2_agent_id,
@@ -1478,7 +1478,7 @@ async def amain() -> int:
                 with contextlib.suppress(Exception):
                     last_body = json.loads(resp["body"])
                 state = last_body.get("status", "")
-                if state == "done":
+                if state == "DONE":
                     logger.info("[w2-destroy] DONE")
                     break
                 await asyncio.sleep(3)
@@ -1509,7 +1509,7 @@ async def amain() -> int:
 
             # 23. Cross-check with mngr CLI from the host: confirms W1 is in
             # mngr's canonical agent set and W2 is gone. A regression where
-            # /api/destroy-agent returns 200 but mngr's host_dir still
+            # the destroy returns success but mngr's host_dir still
             # records the agent would slip past the UI-driven home-page
             # tile check above (which scrapes the same discovery layer the
             # destroy handler does).
