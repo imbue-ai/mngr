@@ -32,6 +32,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.bootstrap import is_imbue_cloud_provider_enabled_for_account
 from imbue.minds.bootstrap import list_disabled_provider_names
@@ -2563,7 +2564,18 @@ def _displayable_pending_requests(
     request's host is discovered).
     """
     pending = inbox.get_pending_requests() if inbox else []
-    return [req for req in pending if backend_resolver.get_agent_display_info(AgentId(req.agent_id)) is not None]
+    displayable: list[RequestEvent] = []
+    for req in pending:
+        try:
+            agent_id = AgentId(req.agent_id)
+        except InvalidRandomIdError:
+            # A request with a malformed agent_id (not a valid 'agent-...' id) can't
+            # resolve to a real agent, so it isn't displayable. Skip it rather than let
+            # the AgentId() validation raise and take down the whole request panel.
+            continue
+        if backend_resolver.get_agent_display_info(agent_id) is not None:
+            displayable.append(req)
+    return displayable
 
 
 def _build_requests_payload(
