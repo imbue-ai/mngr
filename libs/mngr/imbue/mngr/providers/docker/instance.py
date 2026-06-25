@@ -1623,10 +1623,18 @@ kill -TERM 1
             container = self._find_container_by_host_id(host_id)
             if container is not None and self._is_container_running(container):
                 return HostState.UNAUTHENTICATED
-        except (docker.errors.DockerException, MngrError) as e:
+        except (
+            docker.errors.DockerException,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            MngrError,
+        ) as e:
             # The daemon was reachable during enumeration but dropped before this
-            # out-of-band check (e.g. a daemon restart). Keep the default offline
-            # derivation instead of breaking the offline fallback for this host.
+            # out-of-band check (e.g. a daemon restart). A transport-level drop
+            # surfaces as a requests ConnectionError/Timeout rather than a
+            # DockerException (see _list_containers), so both are caught here.
+            # Keep the default offline derivation instead of breaking the offline
+            # fallback for this host.
             logger.warning("Could not read docker container state for host {} during fallback: {}", host_id, e)
         return None
 
