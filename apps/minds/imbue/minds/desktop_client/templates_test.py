@@ -338,9 +338,7 @@ def test_render_create_form_defaults_docker_runtime_to_platform_value() -> None:
 def test_render_create_form_selects_specified_docker_runtime() -> None:
     # Pick the runtime that is NOT this platform's default so the "selection
     # honored over the default" assertion is meaningful on both macOS and Linux.
-    non_default = (
-        DockerRuntime.RUNSC if default_docker_runtime() is DockerRuntime.RUNC else DockerRuntime.RUNC
-    )
+    non_default = DockerRuntime.RUNSC if default_docker_runtime() is DockerRuntime.RUNC else DockerRuntime.RUNC
     html = render_create_form(docker_runtime=non_default)
     assert f'value="{non_default.value}" selected' in html
 
