@@ -282,31 +282,39 @@ def test_grant_with_invalid_credentials_also_invokes_auth_browser(tmp_path: Path
     assert len(auth_recording) == 1
 
 
-def test_grant_with_unknown_credentials_invokes_auth_browser(tmp_path: Path) -> None:
-    # services info exits 0 but with no recognized status -> UNKNOWN.
-    # No authOptions either, so the grant falls back to the legacy browser
-    # behaviour rather than refusing.
-    binary = tmp_path / "latchkey"
-    auth_recording = tmp_path / "auth_latchkey_report.jsonl"
-    binary.write_text(
-        "#!/usr/bin/env python3\n"
-        "import json, os, sys\n"
-        "argv = sys.argv[1:]\n"
-        "if argv[:2] == ['services', 'info']:\n"
-        "    print('not json')\n"
-        "    sys.exit(0)\n"
-        "elif argv[:2] == ['auth', 'browser']:\n"
-        f"    with open({str(auth_recording)!r}, 'a') as f:\n"
-        "        f.write(json.dumps({'argv': argv, 'env_LATCHKEY_DIRECTORY': os.environ.get('LATCHKEY_DIRECTORY', '')}) + '\\n')\n"
-        "    sys.exit(0)\n"
+def test_grant_with_unknown_credentials_proceeds_without_invoking_auth_browser(tmp_path: Path) -> None:
+    # UNKNOWN means latchkey can't vouch for the credential either way
+    # (a rawCurl credential it can't validate, or a catalog scope that is
+    # not a registered latchkey service at all, like the minds-internal
+    # scopes served by a gateway extension); the grant must proceed
+    # without prompting the user or invoking browser, regardless of
+    # advertised auth options.
+    handler = _build_handler(tmp_path, credential_status="unknown")
+
+    result = handler.grant(
+        request_event_id="evt-abc",
+        agent_id=AgentId(),
+        host_id=HostId(),
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
     )
-    binary.chmod(0o755)
-    handler = LatchkeyPermissionGrantHandler(
-        data_dir=tmp_path,
-        latchkey=Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary)),
-        services_catalog=_build_slack_services_catalog(),
-        mngr_message_sender=_message_sender(),
-        gateway_client=build_fake_gateway_client(),
+
+    assert result.outcome == GrantOutcome.GRANTED
+    # Browser flow must not fire: UNKNOWN is treated as "trust the
+    # caller", not "we need to (re-)authenticate".
+    assert _read_recording(tmp_path / "auth_latchkey_report.jsonl") == []
+
+
+def test_grant_with_unknown_credentials_and_set_only_auth_proceeds(tmp_path: Path) -> None:
+    # A service whose credential latchkey stores but cannot validate:
+    # ``credentialStatus=unknown`` with ``authOptions=["set"]`` (no
+    # browser flow). Treating UNKNOWN as needs-setup would return
+    # NEEDS_MANUAL_CREDENTIALS even though credentials are in place; the
+    # grant must succeed without any user-visible re-setup prompt.
+    handler = _build_handler(
+        tmp_path,
+        credential_status="unknown",
+        auth_options_json=json.dumps(["set"]),
     )
 
     result = handler.grant(
@@ -318,7 +326,56 @@ def test_grant_with_unknown_credentials_invokes_auth_browser(tmp_path: Path) -> 
     )
 
     assert result.outcome == GrantOutcome.GRANTED
-    assert len(_read_recording(auth_recording)) == 1
+    assert result.set_credentials_example is None
+    assert _read_recording(tmp_path / "auth_latchkey_report.jsonl") == []
+
+
+def test_render_detail_fragment_with_unknown_credentials_does_not_promise_browser(tmp_path: Path) -> None:
+    # The dialog's progress notice must match what ``grant()`` will
+    # actually do: UNKNOWN credential status proceeds straight to the
+    # grant (no ``latchkey auth browser``), so the fragment must show
+    # the generic notice, not the sign-in one. Empty auth options mirror
+    # the real degraded-UNKNOWN case (``services info`` fails for a
+    # non-latchkey scope) and hit the legacy "no auth options" fallback,
+    # which would falsely promise a browser under a plain not-VALID test.
+    handler = _build_handler(
+        tmp_path,
+        credential_status="unknown",
+        auth_options_json=json.dumps([]),
+    )
+    event = create_latchkey_predefined_permission_request_event(
+        agent_id=str(AgentId()),
+        scope="slack-api",
+        rationale="need to read a channel",
+    )
+
+    body = handler.render_request_detail_fragment(
+        req_event=event,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        mngr_forward_origin="",
+    )
+
+    assert "Granting permission..." in body
+    assert "Opening a browser window for you to sign in to" not in body
+
+
+def test_render_detail_fragment_with_missing_credentials_promises_browser(tmp_path: Path) -> None:
+    # MISSING credentials with a browser auth option still run
+    # ``latchkey auth browser`` on Approve, so the notice must say so.
+    handler = _build_handler(tmp_path, credential_status="missing")
+    event = create_latchkey_predefined_permission_request_event(
+        agent_id=str(AgentId()),
+        scope="slack-api",
+        rationale="need to read a channel",
+    )
+
+    body = handler.render_request_detail_fragment(
+        req_event=event,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        mngr_forward_origin="",
+    )
+
+    assert "Opening a browser window for you to sign in to" in body
 
 
 def test_grant_failed_browser_flow_stays_pending_without_denying(tmp_path: Path) -> None:
