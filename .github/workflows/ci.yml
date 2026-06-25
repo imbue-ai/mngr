@@ -567,9 +567,10 @@ jobs:
             echo "Snapshot script did not produce an image id" >&2
             exit 1
           fi
-          # Lightweight guard against the builder override silently not taking
-          # effect: the script prints this marker only after confirming the
-          # depot CLI is present and the builder is wired for the FCT build.
+          # Lightweight guard against the depot CLI silently being absent: the
+          # script prints this marker only after `depot --version` verified the
+          # CLI inside the sandbox (so the FCT build cannot quietly fall back to
+          # a local docker build because depot is missing).
           if ! grep -q "DEPOT_BUILDER_ENABLED_FOR_FCT_BUILD" snapshot-build.log; then
             echo "depot builder was not enabled for the FCT build; refusing to publish a non-depot snapshot" >&2
             exit 1
