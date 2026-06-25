@@ -7,6 +7,7 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.primitives import CreationId
 from imbue.mngr.primitives import AgentId
 
 _TEST_KEY = "test-minds-api-key"
@@ -97,5 +98,50 @@ def test_workspace_backups_reports_not_found_without_canonical_env(tmp_path: Pat
     client = _client_with_workspace(tmp_path, agent_id)
 
     response = client.get(f"/api/v1/workspaces/{agent_id}/backups", headers=_auth_header())
+
+    assert response.status_code == 404
+
+
+def test_create_workspace_without_agent_creator_returns_501(tmp_path: Path) -> None:
+    # The default test client has no agent_creator wired, so create is unavailable.
+    client = _client_with_workspace(tmp_path, AgentId())
+
+    response = client.post("/api/v1/workspaces", headers=_auth_header(), json={"git_url": "https://example/repo"})
+
+    assert response.status_code == 501
+
+
+def test_destroy_unknown_workspace_returns_404(tmp_path: Path) -> None:
+    client = _client_with_workspace(tmp_path, AgentId())
+    other_id = AgentId()
+
+    response = client.post(f"/api/v1/workspaces/{other_id}/destroy", headers=_auth_header())
+
+    assert response.status_code == 404
+
+
+def test_lifecycle_without_concurrency_group_returns_501(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/start", headers=_auth_header())
+
+    assert response.status_code == 501
+
+
+def test_operation_status_unknown_create_id_returns_404(tmp_path: Path) -> None:
+    client = _client_with_workspace(tmp_path, AgentId())
+    creation_id = CreationId()
+
+    response = client.get(f"/api/v1/workspaces/operations/{creation_id}", headers=_auth_header())
+
+    assert response.status_code == 404
+
+
+def test_operation_status_unknown_destroy_id_returns_404(tmp_path: Path) -> None:
+    client = _client_with_workspace(tmp_path, AgentId())
+    other_id = AgentId()
+
+    response = client.get(f"/api/v1/workspaces/operations/{other_id}", headers=_auth_header())
 
     assert response.status_code == 404

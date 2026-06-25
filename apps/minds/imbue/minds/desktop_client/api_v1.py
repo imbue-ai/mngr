@@ -23,9 +23,14 @@ from flask import Response
 from flask import request
 from loguru import logger
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroupError
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client import backup_status
+from imbue.minds.desktop_client import destroying
 from imbue.minds.desktop_client import workspace_version
+from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
+from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.api_key_auth import require_minds_api_key
 from imbue.minds.desktop_client.backup_export import BackupExportError
 from imbue.minds.desktop_client.backup_export import export_latest_snapshot_zip
@@ -35,9 +40,17 @@ from imbue.minds.desktop_client.notification import NotificationUrgency
 from imbue.minds.desktop_client.responses import make_file_response
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.state import get_state
+from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
 from imbue.minds.errors import BackupProvisioningError
+from imbue.minds.primitives import AIProvider
+from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import LaunchMode
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+
+# A blocking lifecycle (start/stop) call shells out to ``mngr`` and waits for
+# the host transition to resolve before returning the final state.
+_LIFECYCLE_TIMEOUT_SECONDS: float = 300.0
 
 
 def _json_response(data: dict[str, object], status_code: int = 200) -> Response:
@@ -255,6 +268,173 @@ def _handle_workspace_backup_export(agent_id: str, snapshot_id: str) -> Response
     )
 
 
+# -- Cross-workspace mutation routes (create / destroy / lifecycle) --
+
+
+@require_minds_api_key
+def _handle_create_workspace() -> Response:
+    """Create a new peer workspace; return an operation handle to poll.
+
+    Accepts a JSON body with ``git_url`` (required) and optional ``host_name``,
+    ``branch``, ``launch_mode`` (default ``DOCKER``), and ``ai_provider``
+    (default ``SUBSCRIPTION``). Returns ``202`` with an ``operation_id`` the
+    caller polls at ``/api/v1/workspaces/operations/<operation_id>``; the
+    canonical workspace id appears there once ``mngr create`` returns.
+
+    This covers the common "spawn a peer" case. Account/billing binding,
+    backup provisioning, and Cloudflare tunnel injection are not wired through
+    this lean path yet -- those still go through the desktop UI's create flow.
+    """
+    agent_creator: AgentCreator | None = get_state().agent_creator
+    if agent_creator is None:
+        return _json_error("Agent creation not configured", 501)
+
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return _json_error("Request body must be a JSON object", 400)
+    git_url = str(body.get("git_url", "")).strip()
+    if not git_url:
+        return _json_error("'git_url' is required", 400)
+    host_name = str(body.get("host_name", "")).strip()
+    branch = str(body.get("branch", "")).strip()
+    try:
+        launch_mode = LaunchMode(str(body.get("launch_mode", LaunchMode.DOCKER.value)))
+    except ValueError:
+        return _json_error(f"Invalid launch_mode: {body.get('launch_mode')!r}", 400)
+    try:
+        ai_provider = AIProvider(str(body.get("ai_provider", AIProvider.SUBSCRIPTION.value)))
+    except ValueError:
+        return _json_error(f"Invalid ai_provider: {body.get('ai_provider')!r}", 400)
+
+    creation_id = agent_creator.start_creation(
+        git_url,
+        host_name=host_name,
+        branch=branch,
+        launch_mode=launch_mode,
+        ai_provider=ai_provider,
+        original_minds_version=(branch or FALLBACK_BRANCH),
+    )
+    return _json_response({"operation_id": str(creation_id), "kind": "create"}, status_code=202)
+
+
+@require_minds_api_key
+def _handle_destroy_workspace(agent_id: str) -> Response:
+    """Destroy a workspace's host; return an operation handle to poll.
+
+    The workspace's backups and ``restic.env`` are retained, so its backups
+    stay listable/exportable after destruction.
+    """
+    parsed_id = AgentId(agent_id)
+    paths: WorkspacePaths | None = get_state().api_v1_paths
+    if paths is None:
+        return _json_error("Workspace management not configured", 501)
+    backend_resolver = get_state().backend_resolver
+    info = backend_resolver.get_agent_display_info(parsed_id)
+    if info is None:
+        return _json_error(f"Unknown workspace {agent_id}", 404)
+    try:
+        host_id = HostId(info.host_id)
+    except ValueError:
+        return _json_error(f"Cannot resolve a host to destroy for {agent_id}", 409)
+
+    destroying.start_destroy(parsed_id, paths, host_id, mngr_binary=get_state().mngr_binary)
+    return _json_response({"operation_id": str(parsed_id), "kind": "destroy"}, status_code=202)
+
+
+def _run_mngr_blocking(argv: list[str], parent_cg: ConcurrencyGroup) -> tuple[int, str]:
+    """Run an ``mngr`` command to completion; return ``(returncode, stderr)``."""
+    cg = parent_cg.make_concurrency_group(name="workspace-lifecycle")
+    with cg:
+        finished = cg.run_process_to_completion(argv, timeout=_LIFECYCLE_TIMEOUT_SECONDS, is_checked_after=False)
+    returncode = finished.returncode if finished.returncode is not None else 1
+    return returncode, finished.stderr
+
+
+@require_minds_api_key
+def _handle_workspace_lifecycle(agent_id: str, action: str) -> Response:
+    """Start or stop a workspace's host, blocking until the transition resolves."""
+    parsed_id = AgentId(agent_id)
+    parent_cg = get_state().root_concurrency_group
+    if parent_cg is None:
+        return _json_error("Workspace lifecycle not configured", 501)
+    backend_resolver = get_state().backend_resolver
+    if parsed_id not in backend_resolver.list_known_workspace_ids():
+        return _json_error(f"Unknown workspace {agent_id}", 404)
+
+    mngr_binary = get_state().mngr_binary
+    if action == "start":
+        argv = [mngr_binary, "start", str(parsed_id), "--quiet"]
+    else:
+        argv = [mngr_binary, "stop", str(parsed_id), "--stop-host", "--quiet"]
+    try:
+        returncode, stderr = _run_mngr_blocking(argv, parent_cg)
+    except (OSError, ConcurrencyGroupError) as e:
+        return _json_error(f"Could not run mngr {action}: {e}", 502)
+    if returncode != 0:
+        return _json_error(f"mngr {action} failed: {stderr.strip()}", 502)
+
+    info = backend_resolver.get_agent_display_info(parsed_id)
+    host_state = None
+    if info is not None:
+        try:
+            host_state = backend_resolver.get_host_state(HostId(info.host_id))
+        except ValueError:
+            host_state = None
+    return _json_response(
+        {
+            "agent_id": str(parsed_id),
+            "action": action,
+            "host_state": str(host_state) if host_state is not None else None,
+        }
+    )
+
+
+@require_minds_api_key
+def _handle_operation_status(operation_id: str) -> Response:
+    """Report the status of a create or destroy operation, keyed by its id.
+
+    Create operations are keyed by a ``creation-...`` id (from the create
+    route); destroy operations are keyed by the workspace's agent id.
+    """
+    if operation_id.startswith(f"{CreationId.PREFIX}-"):
+        agent_creator: AgentCreator | None = get_state().agent_creator
+        info = agent_creator.get_creation_info(CreationId(operation_id)) if agent_creator is not None else None
+        if info is None:
+            return _json_error(f"Unknown operation {operation_id}", 404)
+        return _json_response(
+            {
+                "operation_id": operation_id,
+                "kind": "create",
+                "status": str(info.status),
+                "is_done": info.status == AgentCreationStatus.DONE,
+                "agent_id": str(info.agent_id) if info.agent_id is not None else None,
+                "error": info.error,
+            }
+        )
+
+    paths: WorkspacePaths | None = get_state().api_v1_paths
+    if paths is None:
+        return _json_error(f"Unknown operation {operation_id}", 404)
+    parsed_id = AgentId(operation_id)
+    backend_resolver = get_state().backend_resolver
+    # The destroy is "still active" while the workspace remains in the active
+    # set (its host is not yet DESTROYED); that gates how the record's terminal
+    # status is derived (a still-present host means the destroy hasn't finished).
+    is_host_still_active = parsed_id in backend_resolver.list_active_workspace_ids()
+    record = destroying.read_destroying(parsed_id, paths, is_host_still_active)
+    if record is None:
+        return _json_error(f"Unknown operation {operation_id}", 404)
+    return _json_response(
+        {
+            "operation_id": operation_id,
+            "kind": "destroy",
+            "status": str(record.status),
+            "is_done": record.status == destroying.DestroyingStatus.DONE,
+            "agent_id": operation_id,
+        }
+    )
+
+
 # -- Blueprint factory --
 
 
@@ -276,6 +456,25 @@ def create_api_v1_blueprint() -> Blueprint:
         "/workspaces/<agent_id>/backups/<snapshot_id>/export",
         view_func=_handle_workspace_backup_export,
         methods=["POST"],
+    )
+
+    # Cross-workspace mutation (create / destroy / lifecycle) + operation polling.
+    blueprint.add_url_rule("/workspaces", view_func=_handle_create_workspace, methods=["POST"])
+    blueprint.add_url_rule("/workspaces/<agent_id>/destroy", view_func=_handle_destroy_workspace, methods=["POST"])
+    blueprint.add_url_rule(
+        "/workspaces/<agent_id>/start",
+        view_func=lambda agent_id: _handle_workspace_lifecycle(agent_id, "start"),
+        endpoint="workspace_start",
+        methods=["POST"],
+    )
+    blueprint.add_url_rule(
+        "/workspaces/<agent_id>/stop",
+        view_func=lambda agent_id: _handle_workspace_lifecycle(agent_id, "stop"),
+        endpoint="workspace_stop",
+        methods=["POST"],
+    )
+    blueprint.add_url_rule(
+        "/workspaces/operations/<operation_id>", view_func=_handle_operation_status, methods=["GET"]
     )
 
     return blueprint
