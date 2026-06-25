@@ -1177,6 +1177,8 @@ async def amain() -> int:
                 # Monotonic timestamp of the last kick.
                 last_kick_at = 0.0
                 first_approve_at = 0.0
+                # Throttle for the per-check live-delivery diagnostic.
+                last_deliv_diag_at = 0.0
                 approve_snaps = (
                     "07g-approve-stage0",
                     "07h-approve-stage1",
@@ -1193,6 +1195,22 @@ async def amain() -> int:
                         logger.info("PASS: canned body in reply")
                         await snap_page(win, "08-PASS-canned-body")
                         break
+
+                    # Per-check live-delivery diagnostic: correlate what the SSE
+                    # client has received (window.__sseDiag) with whether the
+                    # canned body is painted in the DOM `body`, so a failure shows
+                    # whether reports were delivered-but-not-painted vs never delivered.
+                    now_diag = time.monotonic()
+                    if now_diag - last_deliv_diag_at >= 10:
+                        last_deliv_diag_at = now_diag
+                        with contextlib.suppress(Exception):
+                            sse_now = await win.evaluate("JSON.stringify(window.__sseDiag || {})")
+                            logger.info(
+                                "[deliv] url={} canned_in_dom={} __sseDiag={}",
+                                win.url,
+                                CANNED_BODY.lower() in body.lower(),
+                                sse_now,
+                            )
 
                     if approval_stage < 3:
                         await _advance_approval(
