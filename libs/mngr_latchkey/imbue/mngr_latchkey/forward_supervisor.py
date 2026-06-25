@@ -132,6 +132,25 @@ def _resolve_or_none(path: Path) -> Path | None:
         return None
 
 
+def _is_forward_pid_for_directory(pid: int, latchkey_directory_resolved: Path) -> bool:
+    """Whether ``pid`` is a live ``mngr latchkey forward`` bound to the given resolved directory.
+
+    Re-reads the process's cmdline, so callers can re-confirm a PID immediately
+    before signalling it -- the process-table scan and the terminate are not
+    atomic, and a PID can be recycled in between. Mirrors the cmdline
+    re-verification :meth:`LatchkeyForwardSupervisor.stop` does before terminating
+    its recorded PID, so reaping never signals a recycled, unrelated process.
+    """
+    try:
+        cmdline = psutil.Process(pid).cmdline()
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        return False
+    if not _cmdline_looks_like_mngr_latchkey_forward(cmdline):
+        return False
+    cmd_dir = _forward_latchkey_directory(cmdline)
+    return cmd_dir is not None and _resolve_or_none(cmd_dir) == latchkey_directory_resolved
+
+
 def _iter_matching_forward_pids(latchkey_directory: Path) -> list[int]:
     """Return PIDs of every live ``mngr latchkey forward`` bound to ``latchkey_directory``.
 
@@ -144,20 +163,7 @@ def _iter_matching_forward_pids(latchkey_directory: Path) -> list[int]:
     target = _resolve_or_none(latchkey_directory)
     if target is None:
         return []
-    pids: list[int] = []
-    for proc in psutil.process_iter():
-        try:
-            cmdline = proc.cmdline()
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            continue
-        if not _cmdline_looks_like_mngr_latchkey_forward(cmdline):
-            continue
-        cmd_dir = _forward_latchkey_directory(cmdline)
-        if cmd_dir is None:
-            continue
-        if _resolve_or_none(cmd_dir) == target:
-            pids.append(proc.pid)
-    return pids
+    return [proc.pid for proc in psutil.process_iter() if _is_forward_pid_for_directory(proc.pid, target)]
 
 
 def _observe_child_pids(forward_pid: int) -> list[int]:
@@ -411,8 +417,16 @@ class LatchkeyForwardSupervisor(MutableModel):
         never touched. Best-effort: a duplicate that dies or is inaccessible
         mid-reap is simply skipped.
         """
+        target = _resolve_or_none(self.latchkey_directory)
+        if target is None:
+            return
         for pid in _iter_matching_forward_pids(self.latchkey_directory):
             if pid == keep_pid or pid == os.getpid():
+                continue
+            # The scan and the kill are not atomic; re-confirm the PID is still a
+            # forward for this directory right before signalling it, so a PID
+            # recycled since the scan is never terminated (mirrors stop()).
+            if not _is_forward_pid_for_directory(pid, target):
                 continue
             observe_pids = _observe_child_pids(pid)
             logger.info(

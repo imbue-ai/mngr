@@ -23,6 +23,7 @@ from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 from imbue.mngr_latchkey.forward_supervisor import _cmdline_looks_like_mngr_latchkey_forward
 from imbue.mngr_latchkey.forward_supervisor import _cmdline_looks_like_mngr_observe
 from imbue.mngr_latchkey.forward_supervisor import _forward_latchkey_directory
+from imbue.mngr_latchkey.forward_supervisor import _is_forward_pid_for_directory
 from imbue.mngr_latchkey.forward_supervisor import _observe_child_pids
 from imbue.mngr_latchkey.forward_supervisor import is_forward_info_alive
 from imbue.mngr_latchkey.store import LatchkeyForwardInfo
@@ -741,6 +742,27 @@ def test_observe_child_pids_finds_the_discovery_child(tmp_path: Path) -> None:
     finally:
         child.terminate()
         child.wait(timeout=5.0)
+
+
+def test_is_forward_pid_for_directory_matches_only_its_own_directory(tmp_path: Path) -> None:
+    """The pre-terminate re-check accepts a forward for its directory and rejects others.
+
+    This is the guard the reaper applies immediately before signalling each PID,
+    so a directory mismatch (or a recycled/dead PID) can never be terminated.
+    """
+    fake_binary = _make_fake_mngr_binary(tmp_path)
+    own_directory = tmp_path / f"own-{uuid4().hex}"
+    other_directory = tmp_path / f"other-{uuid4().hex}"
+    forward = _spawn_orphan_fake_forward(fake_binary, own_directory)
+    try:
+        assert _is_forward_pid_for_directory(forward.pid, own_directory.resolve())
+        # Same live PID, but a different directory must not match.
+        assert not _is_forward_pid_for_directory(forward.pid, other_directory.resolve())
+    finally:
+        _terminate_orphan(forward)
+    # A dead/exited PID never matches.
+    assert _wait_for_process_exit(forward.pid)
+    assert not _is_forward_pid_for_directory(forward.pid, own_directory.resolve())
 
 
 def test_ensure_running_reaps_unrecorded_duplicate_on_same_directory(tmp_path: Path) -> None:
