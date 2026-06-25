@@ -120,6 +120,7 @@ from imbue.minds.desktop_client.supertokens_routes import create_supertokens_blu
 from imbue.minds.desktop_client.supertokens_routes import signout_user_via_plugin
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
 from imbue.minds.desktop_client.templates import render_accounts_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
@@ -1119,6 +1120,7 @@ def _handle_create_form_submit() -> Response:
         on_created=on_created,
         backup_request=backup_request,
         color=color,
+        original_minds_version=(branch_or_tag or branch or FALLBACK_BRANCH),
     )
 
     creating_url = "/creating/{}".format(creation_id)
@@ -1333,6 +1335,7 @@ def _handle_create_agent_api() -> Response:
         on_created=_persist_region_on_created,
         backup_request=backup_request,
         color=color,
+        original_minds_version=(branch or FALLBACK_BRANCH),
     )
 
     # Apply any onboarding answers supplied inline by the API caller. Absent

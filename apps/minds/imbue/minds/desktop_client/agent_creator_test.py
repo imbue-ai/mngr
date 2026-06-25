@@ -199,6 +199,28 @@ def test_build_mngr_create_command_omits_color_label_when_unset() -> None:
     assert "color=" not in joined
 
 
+def test_build_mngr_create_command_stamps_original_minds_version_label() -> None:
+    """The resolved template ref is stamped as an immutable
+    ``original_minds_version`` label so the version API can report what
+    version the workspace was created at even when it is offline."""
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
+        host_name=HostName("hello"),
+        original_minds_version="minds-v0.3.3",
+    )
+    joined = " ".join(command)
+    assert "--label original_minds_version=minds-v0.3.3" in joined
+
+
+def test_build_mngr_create_command_omits_version_label_when_unset() -> None:
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
+        host_name=HostName("hello"),
+    )
+    joined = " ".join(command)
+    assert "original_minds_version=" not in joined
+
+
 def test_build_mngr_create_command_does_not_inject_minds_api_key() -> None:
     """The per-agent ``MINDS_API_KEY`` is gone.
 
