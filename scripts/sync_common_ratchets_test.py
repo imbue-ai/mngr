@@ -1,6 +1,8 @@
 import textwrap
 
+from scripts.changelog_projects import pyproject_projects
 from scripts.sync_common_ratchets import EXCLUDED_RATCHET_PROJECTS
+from scripts.sync_common_ratchets import REPO_ROOT
 from scripts.sync_common_ratchets import RatchetTemplate
 from scripts.sync_common_ratchets import _discover_check_functions
 from scripts.sync_common_ratchets import _extract_tests
@@ -9,10 +11,17 @@ from scripts.sync_common_ratchets import _insert_test
 from test_meta_ratchets import _EXCLUDED_PROJECTS
 
 
-def test_find_test_ratchet_files_finds_all_projects() -> None:
-    """Ensure the script discovers test_ratchets.py in every project."""
+def test_find_test_ratchet_files_covers_every_pyproject_project() -> None:
+    """The discovered test_ratchets.py files must correspond exactly to the (non-excluded)
+    pyproject projects, cross-checked against the independent ``pyproject_projects`` discovery.
+
+    This catches a project being added without a ratchet file, or one being dropped, rather than
+    merely asserting a hand-guessed lower bound on the file count.
+    """
     files = _find_test_ratchet_files()
-    assert len(files) >= 20, f"Expected at least 20 files, found {len(files)}"
+    discovered_projects = {f.relative_to(REPO_ROOT).parts[1] for f in files}
+    expected_projects = set(pyproject_projects(REPO_ROOT)) - EXCLUDED_RATCHET_PROJECTS
+    assert discovered_projects == expected_projects
     for f in files:
         assert f.name == "test_ratchets.py"
         assert f.exists()
@@ -130,7 +139,10 @@ def test_discover_check_functions_finds_all() -> None:
     """Verify the script discovers all check functions from standard_ratchet_checks.py."""
     templates = _discover_check_functions()
     names = {t.name for t in templates}
-    assert len(templates) >= 40, f"Expected at least 40 check functions, found {len(templates)}"
+    # Every discovered check must yield a uniquely-named test_prevent_* template under a real
+    # section (_discover_check_functions raises rather than emitting "Unknown").
+    assert templates
+    assert len(names) == len(templates)
     assert "test_prevent_todos" in names
     assert "test_prevent_bare_except" in names
     assert "test_prevent_code_in_init_files" in names
@@ -140,9 +152,10 @@ def test_discover_check_functions_finds_all() -> None:
 
 
 def test_script_reports_all_in_sync() -> None:
-    """Verify the script's discovery and parsing works on the real repo."""
+    """Verify the script's discovery and parsing works on the real repo: every discovered
+    test_ratchets.py must yield at least one extracted test."""
     files = _find_test_ratchet_files()
-    assert len(files) >= 20
+    assert files
     for f in files:
         tests = _extract_tests(f.read_text())
         assert len(tests) > 0, f"{f}: no tests extracted"

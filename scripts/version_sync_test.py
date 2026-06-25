@@ -9,7 +9,11 @@ from scripts.utils import verify_pin_consistency
 
 
 def test_publish_graph_is_closed() -> None:
-    """No publishable package may have a runtime dependency on an unpublished workspace package."""
+    """No publishable package may have a runtime dependency on an unpublished workspace package.
+
+    validate_package_graph() raises if the publish graph is not closed, so reaching the end without
+    raising is the pass condition; there is nothing else to assert.
+    """
     validate_package_graph()
 
 
