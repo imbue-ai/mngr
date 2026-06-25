@@ -51,8 +51,8 @@
   ("button-links", "Link-style buttons"),
   ("notices", "Notices"),
   ("cards", "Cards"),
+  ("preset-card", "Preset card"),
   ("page-container", "Page container"),
-  ("opt", "Onboarding option"),
   ("oauth-icons", "OAuth icons"),
   ("status-badges", "Status badges"),
   ("section-header", "Section header"),
@@ -676,11 +676,20 @@
           <Icon16 name="pause" />
           <code class="type-helper font-mono text-secondary">pause</code>
         </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="badge-check" />
+          <code class="type-helper font-mono text-secondary">badge-check</code>
+        </div>
+        <div class="flex flex-col items-start gap-1 w-16">
+          <Icon16 name="badge-check-filled" />
+          <code class="type-helper font-mono text-secondary">badge-check-filled</code>
+        </div>
       </div>
       <p class="mt-1 type-helper text-secondary">
         Icons inherit color from the parent via ``currentColor`` (most are
-        filled outlines; ``play`` is stroked). Sizes: ``sm`` (w-3.5), ``md``
-        (w-4, default), ``lg`` (w-5).
+        filled outlines; ``play`` is stroked; ``badge-check-filled`` is a solid
+        badge with the check knocked out). Sizes: ``sm`` (w-3.5), ``md`` (w-4,
+        default), ``lg`` (w-5).
       </p>
       <div class="mt-0.5 type-helper text-secondary font-mono">Icon16.jinja :: ICONS_16 in templates.py</div>
     </section>
@@ -989,6 +998,31 @@
       <div class="mt-1 type-helper text-secondary font-mono">Card.jinja :: .minds-card from app.css</div>
     </section>
 
+    {# Preset card (selectable "where to run" card) #}
+    <section id="preset-card" class="scroll-mt-8 mb-6">
+      <h2 class="type-heading text-primary mb-2">Preset card</h2>
+      <p class="type-helper text-secondary mb-2">
+        Selectable card used by the create page's "where to run" presets.
+        Selection is driven by ``aria-checked`` (styled with Tailwind
+        ``aria-checked:`` variants -- a 1px dashed neutral outline by default, a
+        2px solid accent outline (no fill tint) when selected); the outline grows
+        without shifting layout, eased by ``transition-all``. Hover lifts the
+        card up 1px with ``shadow-raised``; pressing settles it back down and
+        shrinks it to 0.99. One card per row is checked.
+      </p>
+      <div class="flex gap-4 items-stretch" role="radiogroup" aria-label="Preset card demo">
+        <PresetCard preset="demo-a" selected extra="flex-1">
+          <span class="type-heading text-primary">Selected</span>
+          <span class="type-body text-secondary">aria-checked="true" -- accent outline, no tint.</span>
+        </PresetCard>
+        <PresetCard preset="demo-b" extra="flex-1">
+          <span class="type-heading text-primary">Unselected</span>
+          <span class="type-body text-secondary">Dashed outline; lifts with a shadow + scale on hover.</span>
+        </PresetCard>
+      </div>
+      <div class="mt-1 type-helper text-secondary font-mono">PresetCard.jinja :: Tailwind aria-checked: variants + hover scale/shadow</div>
+    </section>
+
     {# Page container #}
     <section id="page-container" class="scroll-mt-8 mb-6">
       <h2 class="type-heading text-primary mb-2">Page container</h2>
@@ -1000,17 +1034,6 @@
         </PageContainer>
       </div>
       <div class="mt-1 type-helper text-secondary font-mono">PageContainer.jinja</div>
-    </section>
-
-    {# Opt (onboarding option card) #}
-    <section id="opt" class="scroll-mt-8 mb-6">
-      <h2 class="type-heading text-primary mb-2">Opt (onboarding option)</h2>
-      <div class="flex flex-col gap-2">
-        <Opt val="example-a" title="Example option" desc="Non-editable selectable card." />
-        <Opt val="example-b" title="Selected" desc="Marker for the chosen option." selected />
-        <Opt val="example-c" title="Editable" desc="Expands a textarea when selected." editable preset="prefilled text" placeholder="placeholder text" />
-      </div>
-      <div class="mt-1 type-helper text-secondary font-mono">Opt.jinja (.opt / .opt-selected from app.css)</div>
     </section>
 
     {# OAuth icons #}

@@ -96,10 +96,9 @@ class MngrMessageSender(MutableModel):
         """Send a message to ``target`` (an agent id or name); return whether it succeeded.
 
         ``target`` is matched by ``mngr message`` against agent ids and
-        names, so onboarding can address the bootstrap-created chat agent
-        by its host name before its canonical id is known. Returns ``True``
-        when the invocation exits 0; logs the failure and returns ``False``
-        otherwise so pollers can retry.
+        names, so a caller can address an agent by its host name before its
+        canonical id is known. Returns ``True`` when the invocation exits 0;
+        logs the failure and returns ``False`` otherwise so pollers can retry.
         """
         # ``-m`` and ``--`` are required: ``mngr message`` treats every
         # positional argument as an agent identifier (``nargs=-1``), so passing
