@@ -11,6 +11,7 @@ from sentry_sdk.types import Event
 from sentry_sdk.types import Hint
 
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
+from imbue.minds.utils.logging import install_exception_dedup_patcher
 from imbue.minds.utils.sentry.core import ErrorAttachmentsS3Uploader
 from imbue.minds.utils.sentry.core import MINDS_SENTRY_ENABLED_ENV_VAR
 from imbue.minds.utils.sentry.core import SENTRY_DSN_DEV
@@ -21,7 +22,6 @@ from imbue.minds.utils.sentry.core import _SENTRY_DSN_BY_ENVIRONMENT
 from imbue.minds.utils.sentry.core import _before_send_wrapper
 from imbue.minds.utils.sentry.core import is_sentry_enabled
 from imbue.minds.utils.sentry.core import resolve_sentry_environment
-from imbue.minds.utils.logging import install_exception_dedup_patcher
 from imbue.minds.utils.sentry.loguru_handler import should_record_sentry_event
 
 
