@@ -58,6 +58,60 @@ _COMMENT_KEY: Final[str] = "$comment"
 # The ``any.json`` catch-all is not a service and has no scope; skip it.
 _NON_SERVICE_FILES: Final[frozenset[str]] = frozenset({"any.json"})
 
+# Manually-curated catalog entries for scopes that are NOT detent built-in
+# services -- minds-internal scopes served by the gateway's own extensions
+# (their schemas live inline in each agent's permissions file; see
+# ``agent_setup.py``). Merged into the generated catalog so a regeneration
+# from detent does not drop them. Keyed by service name exactly as it appears
+# in ``services.json``.
+_MANUAL_SERVICE_ENTRIES: Final[Mapping[str, list[dict[str, object]]]] = {
+    "minds-workspaces": [
+        {
+            "scope": "minds-workspaces",
+            "display_name": "Minds workspaces",
+            "description": (
+                "Manage other minds workspaces and their backups through the minds desktop "
+                "client's cross-workspace API."
+            ),
+            "permissions": [
+                {
+                    "name": "minds-workspaces-read",
+                    "description": (
+                        "List workspaces and read a workspace's details, version history, and "
+                        "backup list (including watching the progress of create/destroy operations)."
+                    ),
+                },
+                {
+                    "name": "minds-workspaces-create",
+                    "description": (
+                        "Create a new peer workspace from any git URL, including cloud launches "
+                        "that consume compute and AI credits on your account."
+                    ),
+                },
+                {
+                    "name": "minds-workspaces-destroy",
+                    "description": "Permanently destroy a workspace and release its host (its backups are retained).",
+                },
+                {
+                    "name": "minds-workspaces-lifecycle",
+                    "description": "Start or stop a workspace's host.",
+                },
+                {
+                    "name": "minds-workspaces-backups-export",
+                    "description": "Download a workspace's backup snapshot as a zip archive.",
+                },
+                {
+                    "name": "minds-workspaces-ssh",
+                    "description": (
+                        "Open temporary SSH access into a workspace (inject a public key and "
+                        "broker a forwarding tunnel)."
+                    ),
+                },
+            ],
+        }
+    ],
+}
+
 # AWS is structurally ambiguous: every ``aws-*`` schema matches only on domain
 # and so looks like a scope, but detent treats only the top-level ``aws`` schema
 # as a scope and folds the service-specific ones in as permissions.
@@ -294,10 +348,15 @@ def build_services_catalog(builtin_schemas_directory: Path) -> dict[str, list[di
 
     # Emit services in curated order, serializing each entry to a plain dict.
     ordered_service_names = sorted(entries_by_service_name, key=_service_sort_key)
-    return {
+    catalog: dict[str, list[dict[str, object]]] = {
         service_name: [entry.model_dump() for entry in entries_by_service_name[service_name]]
         for service_name in ordered_service_names
     }
+    # Append the manually-curated minds-internal scope entries (not derived from
+    # detent), preserving them across regenerations.
+    for service_name, entries in _MANUAL_SERVICE_ENTRIES.items():
+        catalog[service_name] = list(entries)
+    return catalog
 
 
 def _write_catalog(catalog: Mapping[str, object], output_path: Path) -> None:

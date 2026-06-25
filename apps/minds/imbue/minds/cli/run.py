@@ -86,6 +86,7 @@ from imbue.minds.utils.sentry.core import setup_sentry
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
+from imbue.mngr_latchkey.agent_setup import ensure_minds_workspaces_schema_in_existing_host_files
 from imbue.mngr_latchkey.agent_setup import maybe_recover_host_permissions_for_agent
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import Latchkey
@@ -235,6 +236,22 @@ def run(
     )
     latchkey = _build_latchkey(data_directory=data_directory)
     latchkey.initialize()
+
+    # Backfill the ``minds-workspaces`` cross-workspace-API scope + named-
+    # permission schemas into any pre-existing per-host permissions file, so
+    # agents created before this scope shipped can have a user grant match.
+    # Must run before the gateway is restarted (below) so there is no race with
+    # the ``permissions.mjs`` extension. Best-effort: a disk error here leaves
+    # the capability disabled for pre-existing agents but lets minds start.
+    try:
+        workspaces_migrated = ensure_minds_workspaces_schema_in_existing_host_files(latchkey.plugin_data_dir)
+    except OSError as exc:
+        logger.warning("Could not backfill minds-workspaces schemas into existing per-host permissions files: {}", exc)
+    else:
+        if workspaces_migrated > 0:
+            logger.info(
+                "Injected minds-workspaces schema into {} existing per-host permissions file(s)", workspaces_migrated
+            )
 
     # Mint a fresh central minds API key for this process. The same
     # value is handed to the latchkey gateway's ``minds-api-proxy``

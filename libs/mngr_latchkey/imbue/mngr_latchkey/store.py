@@ -271,6 +271,28 @@ def permissions_path_for_host(data_dir: Path, host_id: HostId) -> Path:
     return data_dir / _HOSTS_DIR_NAME / str(host_id) / _PERMISSIONS_FILENAME
 
 
+def list_host_permissions_paths(data_dir: Path) -> list[Path]:
+    """Return every existing per-host permissions file under ``data_dir``.
+
+    Walks each ``<data_dir>/hosts/<host_id>/`` subdirectory and collects its
+    ``latchkey_permissions.json`` when present; host directories without one
+    (and stray non-directory entries) are skipped. Returns an empty list when
+    the hosts directory itself does not exist yet. Sorted so callers iterate
+    deterministically.
+    """
+    root = hosts_dir(data_dir)
+    if not root.is_dir():
+        return []
+    paths: list[Path] = []
+    for host_dir in root.iterdir():
+        if not host_dir.is_dir():
+            continue
+        path = host_dir / _PERMISSIONS_FILENAME
+        if path.is_file():
+            paths.append(path)
+    return sorted(paths)
+
+
 def default_permissions_path(data_dir: Path) -> Path:
     """Return the path to the shared gateway's default (deny-all) permissions file.
 
