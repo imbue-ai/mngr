@@ -99,17 +99,3 @@ class ModalVolume(BaseVolume):
     @_translate_transient_proxy_errors
     def write_files(self, file_contents_by_path: Mapping[str, bytes]) -> None:
         self.modal_volume.write_files(file_contents_by_path)
-
-    @_translate_transient_proxy_errors
-    def reload(self) -> None:
-        # Refresh this handle so reads see records committed by other mngr processes.
-        # The state volume is eventually-consistent across handles: a `mngr destroy`
-        # right after `mngr create` reads a stale view and misses the just-created
-        # agent unless it reloads first.
-        self.modal_volume.reload()
-
-    @_translate_transient_proxy_errors
-    def commit(self) -> None:
-        # Make a just-written record durable + visible to other handles immediately,
-        # instead of waiting for the volume's background flush.
-        self.modal_volume.commit()
