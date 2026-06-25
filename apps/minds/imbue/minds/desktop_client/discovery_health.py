@@ -19,10 +19,13 @@ fed from a background loop and the consumer's lifecycle watcher respectively:
   ``last_event_at >= last_full_snapshot_at`` always; keying off events means a
   producer that is alive and emitting incremental updates but slow to complete a
   full re-poll (e.g. one provider is down) reads as *healthy*, not stalled --
-  only a producer emitting literally nothing trips the watchdog. The watchdog
-  also treats a *dead supervisor* (``remediator.is_alive()`` is False) as a
-  stall regardless of timestamps, so a crashed supervisor is remediated at once
-  rather than after the stall timer. On a stall it ``bounce``\\ es once (SIGHUP
+  only a producer emitting literally nothing trips the watchdog. Once the
+  supervisor has been seen running at least once, the watchdog also treats a
+  *dead supervisor* (``remediator.is_alive()`` is False) as a stall regardless
+  of timestamps, so a crash mid-session is remediated at once rather than after
+  the stall timer. (The "seen running once" guard avoids racing startup, when
+  the supervisor is still being brought up on a background thread and would
+  momentarily read as dead.) On a stall it ``bounce``\\ es once (SIGHUP
   the observe child -- or, if the supervisor is dead, start it; gateway +
   reverse tunnels untouched), then issues repeated ``restart``\\ s (full
   supervisor restart -- fixes a wedged supervisor) on a capped exponential
@@ -203,6 +206,14 @@ class DiscoveryHealthWatchdog(MutableModel):
     # the cold-start case (no event has ever arrived, so there is no
     # ``last_event_at`` to age). Set on the first ``evaluate`` call.
     _started_at: datetime | None = PrivateAttr(default=None)
+    # Whether the supervisor has been seen alive at least once (sticky). The
+    # liveness probe only forces a stall AFTER this latches: at startup the
+    # supervisor is still being brought up on a background thread (a ``restart``
+    # that deletes then rewrites the on-disk record), so a not-yet-recorded
+    # supervisor reads as "dead" -- acting on that would race the startup thread
+    # and risk a duplicate spawn. Until the supervisor is first seen up, the
+    # freshness timer (with its own cold-start grace) governs instead.
+    _supervisor_seen_alive: bool = PrivateAttr(default=False)
     # Whether the one cheap ``bounce`` has run in the current stall episode.
     # Reset on recovery; ``restart`` is only tried after ``bounce``.
     _bounce_attempted: bool = PrivateAttr(default=False)
@@ -274,7 +285,14 @@ class DiscoveryHealthWatchdog(MutableModel):
                 return
             if self._started_at is None:
                 self._started_at = now
-            stalled = not supervisor_alive or self._is_stalled_locked(last_event_at, now)
+            if supervisor_alive:
+                self._supervisor_seen_alive = True
+            # Only honor a dead supervisor as an immediate stall once we've seen
+            # it up at least once; before that, the startup thread is still
+            # bringing it up and acting now would race it (see
+            # ``_supervisor_seen_alive``). Until then, fall back to freshness.
+            supervisor_dead = self._supervisor_seen_alive and not supervisor_alive
+            stalled = supervisor_dead or self._is_stalled_locked(last_event_at, now)
             if not stalled:
                 if self._health != DiscoveryHealth.HEALTHY:
                     self._health = DiscoveryHealth.HEALTHY
