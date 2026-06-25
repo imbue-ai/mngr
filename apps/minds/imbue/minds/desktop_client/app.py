@@ -137,7 +137,7 @@ from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
 from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
 from imbue.minds.desktop_client.workspace_create import build_backup_request_or_error
-from imbue.minds.desktop_client.workspace_create import build_on_created_callback
+from imbue.minds.desktop_client.workspace_create import build_create_on_created_callback
 from imbue.minds.desktop_client.workspace_create import default_region_for_provider_with_config
 from imbue.minds.desktop_client.workspace_create import persist_region_for_launch_mode
 from imbue.minds.desktop_client.workspace_create import resolve_effective_region
@@ -783,14 +783,11 @@ def _handle_create_form_submit() -> Response:
     # on a successful create, persist it as the provider's new last-used default.
     region = resolve_effective_region(launch_mode, submitted_region, minds_config, geo_cache)
 
-    # Build a post-creation callback that injects the tunnel token, then also
-    # persists the chosen region (fires only after a successful create).
-    base_on_created = build_on_created_callback(account_id)
-
-    def on_created(agent_id: AgentId) -> None:
-        if base_on_created is not None:
-            base_on_created(agent_id)
-        persist_region_for_launch_mode(minds_config, launch_mode, region)
+    # Build the composed post-creation callback (injects the tunnel token /
+    # associates the account, then persists the chosen region) -- the same
+    # helper the /api/v1/workspaces create route uses, so both front doors
+    # build the exact same thing. Fires only after a successful create.
+    on_created = build_create_on_created_callback(account_id, minds_config, launch_mode, region)
 
     # ``start_creation`` returns a CreationId (minds-internal handle for
     # tracking the in-flight create) -- the canonical AgentId only exists
