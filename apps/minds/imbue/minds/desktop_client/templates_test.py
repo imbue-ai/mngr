@@ -229,11 +229,18 @@ def test_render_create_form_has_default_values() -> None:
     assert "launch_mode" in html
 
 
-def test_render_create_form_omits_name_field() -> None:
-    # The workspace name is auto-generated server-side, so the form no longer
-    # has a name input.
+def test_render_create_form_has_optional_name_field() -> None:
+    # The advanced view exposes an explicit "Name" (host_name) field so a user
+    # can name the mind; left empty, the server auto-names it (mind-N).
     html = render_create_form()
-    assert 'name="host_name"' not in html
+    assert 'name="host_name"' in html
+
+
+def test_render_create_form_prefills_host_name() -> None:
+    # A submitted name survives a validation-error re-render.
+    html = render_create_form(host_name="my-mind")
+    assert 'name="host_name"' in html
+    assert 'value="my-mind"' in html
 
 
 def test_render_create_form_shows_preset_cards() -> None:

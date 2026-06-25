@@ -1,4 +1,4 @@
-{#def git_url, branch, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, backup_providers, selected_backup_provider, backup_encryption_methods, selected_backup_encryption_method, backup_api_key_env, has_saved_backup_password, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, selected_preset="remote", start_advanced=False, color="#0b292b" #}
+{#def git_url, branch, host_name, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, backup_providers, selected_backup_provider, backup_encryption_methods, selected_backup_encryption_method, backup_api_key_env, has_saved_backup_password, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, selected_preset="remote", start_advanced=False, color="#0b292b" #}
 {#
   Workspace creation form.
 
@@ -10,9 +10,10 @@
   directly. The advanced selects are always the source of truth on
   submit, so toggling between views never changes what gets POSTed.
 
-  The workspace name and color are chosen automatically (name server-side
-  via the shared coolname generator, color from the first unused palette
-  entry, carried in a hidden input), so neither is asked for here.
+  The color is chosen automatically (the first unused palette entry, carried
+  in a hidden input), so it is not asked for here. The workspace name defaults
+  to an auto-generated ``mind-N`` (server-side) but can be set explicitly via
+  the advanced view's ``Name`` field.
 
   ``selected_preset`` picks which card starts selected (and which
   preset's values the selects start on). ``start_advanced`` opens the
@@ -324,25 +325,24 @@
 
     {# Account picker + advanced-config toggle. Sits below the presets; visible
        in both views. The account drives whether the remote preset is available. #}
-    <div class="flex items-center justify-center gap-4 mt-8 type-helper">
+    <div class="flex items-center justify-between mt-8 type-helper">
       <select id="account_id" name="account_id"
-              class="max-w-[220px] type-helper text-tertiary bg-transparent border-0 rounded-md px-1 py-1 outline-none cursor-pointer hover:text-primary focus:outline-none focus:ring-0">
+              class="max-w-[220px] type-helper text-tertiary bg-transparent border-0 rounded-md px-1 py-1 -ml-1 outline-none cursor-pointer hover:text-primary focus:outline-none focus:ring-0">
         {% for acct in accounts %}
           <option value="{{ acct.user_id }}"{% if acct.user_id == default_account_id %} selected{% endif %}>{{ acct.email }}</option>
         {% endfor %}
         <option value=""{% if not default_account_id %} selected{% endif %}>No account (private project)</option>
       </select>
-      <span class="text-tertiary">&bull;</span>
       <span id="advanced-toggle-wrap">
         <Button variant="ghost" id="toggle-advanced"
                 extra="!p-0 !bg-transparent !type-helper !text-tertiary hover:!bg-transparent hover:!text-primary hover:underline whitespace-nowrap">
-          Advanced Configuration&hellip;
+          Advanced Configuration
         </Button>
       </span>
       <span id="simple-toggle-wrap" class="hidden">
         <Button variant="ghost" id="back-to-simple"
                 extra="!p-0 !bg-transparent !type-helper !text-tertiary hover:!bg-transparent hover:!text-primary hover:underline whitespace-nowrap">
-          &larr; Back to simple configuration
+          &uarr; Back to simple configuration
         </Button>
       </span>
     </div>
@@ -361,8 +361,22 @@
      <div class="mx-auto max-w-[560px] flex flex-col gap-4">
 
       <div>
-        <div class="flex items-center justify-between gap-3">
-          <FormLabel target="launch_mode" inline>Compute provider</FormLabel>
+        <FormLabel target="host_name">Name</FormLabel>
+        <p class="mb-1 type-helper text-tertiary">Leave empty to name it automatically</p>
+        <TextInput name="host_name" :value="host_name" placeholder="my-mind" id="host_name" />
+      </div>
+
+      <div>
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <FormLabel target="launch_mode" inline>Compute provider</FormLabel>
+            <p id="aws-credentials-note" class="hidden mt-1 type-helper text-tertiary">
+              AWS credentials are read from this machine's environment
+              (<code>AWS_ACCESS_KEY_ID</code> / <code>AWS_SECRET_ACCESS_KEY</code>,
+              or <code>AWS_PROFILE</code>, or <code>~/.aws/credentials</code>).
+              Pick a region below.
+            </p>
+          </div>
           <Select id="launch_mode" name="launch_mode" width="w-48">
             {% for mode in launch_modes %}
               <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}
@@ -371,12 +385,6 @@
           </Select>
         </div>
         <p id="launch-mode-account-error" class="hidden mt-1 type-helper text-warning text-right">imbue_cloud requires a selected account.</p>
-        <p id="aws-credentials-note" class="hidden mt-1 type-helper text-tertiary">
-          AWS credentials are read from this machine's environment
-          (<code>AWS_ACCESS_KEY_ID</code> / <code>AWS_SECRET_ACCESS_KEY</code>,
-          or <code>AWS_PROFILE</code>, or <code>~/.aws/credentials</code>).
-          Pick a region below.
-        </p>
       </div>
 
       <div>
@@ -447,12 +455,18 @@
       </div>
 
       <div id="region-row" class="hidden">
-        <div class="flex items-center justify-between gap-3">
-          <FormLabel target="region" inline>Region</FormLabel>
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <FormLabel target="region" inline>Region</FormLabel>
+            <p class="mt-1 type-helper text-tertiary">Where the machine is created. If a region is out of capacity, try another.</p>
+          </div>
           <Select id="region" name="region" width="w-48"></Select>
         </div>
-        <p class="mt-1 type-helper text-tertiary text-right">Where the machine is created. If a region is out of capacity, try another.</p>
       </div>
+
+      {# Dashed divider separating the provider / region selects above from the
+         repository / branch text inputs below. #}
+      <hr class="border-t border-dashed border-default my-2">
 
       <div>
         <FormLabel target="git_url">Repository</FormLabel>
@@ -482,10 +496,6 @@
             class="absolute top-3 right-3 z-10 inline-flex items-center justify-center w-8 h-8 rounded-md text-tertiary hover:text-primary hover:bg-fill-hover cursor-pointer">
       <Icon16 name="close" />
     </button>
-    <p class="type-body text-secondary mb-4 pr-6">
-      To run your mind on Imbue Cloud, sign in or create an Imbue account. You
-      can also close this and run it directly on your computer instead.
-    </p>
-    <auth.AuthForm :default_to_signup="True" />
+    <auth.AuthForm :default_to_signup="True" intro="To run your mind on Imbue Cloud, sign in or create an Imbue account. You can also close this and run it directly on your computer instead." />
   </Modal>
 </PageNarrowContainer>

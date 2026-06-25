@@ -1047,6 +1047,7 @@ def _handle_create_form_submit() -> Response:
         html_body = render_create_form(
             git_url=git_url,
             branch=branch,
+            host_name=host_name,
             launch_mode=launch_mode,
             ai_provider=ai_provider,
             accounts=accounts_list,

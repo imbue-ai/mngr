@@ -363,6 +363,7 @@ def resolve_create_host_name(submitted_host_name: str, existing_host_names: Coll
 def render_create_form(
     git_url: str = "",
     branch: str = "",
+    host_name: str = "",
     launch_mode: LaunchMode | None = None,
     ai_provider: AIProvider | None = None,
     backup_provider: BackupProvider | None = None,
@@ -408,12 +409,14 @@ def render_create_form(
     "enter a passphrase" field (no saved password yet) and a read-only
     "a saved password will be used" indicator.
 
-    The workspace name and color are chosen automatically (the name
-    server-side via ``resolve_create_host_name``, the color from the first
-    unused palette entry), so neither is asked for on the form. ``color`` is
-    the ``#rrggbb`` hex carried in the hidden ``color`` input the form POSTs;
-    it defaults to ``DEFAULT_WORKSPACE_COLOR`` so callers that don't care
-    about color (e.g. some tests) can omit it.
+    ``host_name`` is an optional explicit workspace name, exposed as a "Name"
+    field in the advanced view. When empty the name is chosen automatically
+    server-side (the next free ``mind-N`` via ``resolve_create_host_name``); a
+    submitted value is carried back here so it survives a validation-error
+    re-render. The color is always chosen automatically (the first unused
+    palette entry); ``color`` is the ``#rrggbb`` hex carried in the hidden
+    ``color`` input the form POSTs, defaulting to ``DEFAULT_WORKSPACE_COLOR`` so
+    callers that don't care about color (e.g. some tests) can omit it.
     """
     effective_url = git_url if git_url else _operator_workspace_default("MINDS_WORKSPACE_GIT_URL", _FALLBACK_GIT_URL)
     effective_branch = branch if branch else _operator_workspace_default("MINDS_WORKSPACE_BRANCH", FALLBACK_BRANCH)
@@ -450,6 +453,7 @@ def render_create_form(
         "pages.Create",
         git_url=effective_url,
         branch=effective_branch,
+        host_name=host_name,
         launch_modes=list(LaunchMode),
         selected_launch_mode=effective_launch_mode.value,
         ai_providers=list(AIProvider),
