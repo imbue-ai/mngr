@@ -1,5 +1,6 @@
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Final
 
 import pytest
@@ -7,6 +8,9 @@ import pytest
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.desktop_client import templates as _templates_module
 from imbue.minds.desktop_client.templates import CATALOG
+from imbue.minds.desktop_client.templates import DEFAULT_EXPECTED_CREATION_DURATION_SECONDS
+from imbue.minds.desktop_client.templates import expected_creation_duration_seconds
+from imbue.minds.desktop_client.templates import make_unique_host_name
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
@@ -18,6 +22,7 @@ from imbue.minds.desktop_client.templates import render_recovery_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
+from imbue.minds.desktop_client.templates import resolve_create_host_name
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR_NAME
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
@@ -218,16 +223,71 @@ def test_agent_id_accepts_valid_format() -> None:
 
 def test_render_create_form_has_default_values() -> None:
     html = render_create_form()
-    assert "assistant" in html
+    # The repository git URL still has a hardcoded fallback (in the advanced
+    # view); the compute provider select is present.
     assert "forever-claude-template" in html
-    assert "host_name" in html
     assert "launch_mode" in html
 
 
+def test_render_create_form_has_optional_name_field() -> None:
+    # The advanced view exposes an explicit "Name" (host_name) field so a user
+    # can name the mind; left empty, the server auto-names it (mind-N).
+    html = render_create_form()
+    assert 'name="host_name"' in html
+
+
+def test_render_create_form_prefills_host_name() -> None:
+    # A submitted name survives a validation-error re-render.
+    html = render_create_form(host_name="my-mind")
+    assert 'name="host_name"' in html
+    assert 'value="my-mind"' in html
+
+
+def test_render_create_form_shows_preset_cards() -> None:
+    html = render_create_form()
+    assert 'data-preset="remote"' in html
+    assert 'data-preset="local"' in html
+    assert "Imbue Cloud" in html
+    assert "Directly on your computer" in html
+    assert "Advanced Configuration" in html
+
+
+def test_render_create_form_opens_signin_modal_via_overlay_relay() -> None:
+    # Choosing Imbue Cloud while signed out opens the sign-in modal in the
+    # desktop client's shared overlay layer (so it covers the title bar), not an
+    # in-page dialog. The create page therefore no longer embeds the auth form
+    # or loads auth.js itself; it asks the Electron main process to open the
+    # /auth/signin-modal page via an allowlisted postMessage relay (falling back
+    # to navigating there directly in the browser).
+    html = render_create_form(accounts=[])
+    assert "minds:open-signin-modal" in html
+    assert "/auth/signin-modal" in html
+    # The auth form + its script now live in the overlay page, not here.
+    assert 'id="signin-modal"' not in html
+    assert 'id="signin-form"' not in html
+    assert "/_static/auth.js" not in html
+
+
+def test_render_create_form_has_account_picker_error_element() -> None:
+    # A signed-in user who selects Imbue Cloud but "No account" is shown a red
+    # account-picker error (toggled client-side); the element must be present.
+    html = render_create_form()
+    assert 'id="account-error"' in html
+    assert "text-important" in html
+
+
+def test_render_create_form_does_not_redirect_on_card_click() -> None:
+    # The old behavior redirected to the sign-in page on card click / used a
+    # "Sign in & create" submit label. Both are gone: card click only selects,
+    # and the button stays "Create".
+    html = render_create_form(accounts=[])
+    assert "SIGNIN_URL" not in html
+    assert "Sign in & create" not in html
+
+
 def test_render_create_form_prefills_values() -> None:
-    html = render_create_form(git_url="https://custom/repo", host_name="my-workspace", branch="feature/test")
+    html = render_create_form(git_url="https://custom/repo", branch="feature/test")
     assert "https://custom/repo" in html
-    assert "my-workspace" in html
     assert "feature/test" in html
 
 
@@ -237,12 +297,13 @@ def test_render_create_form_contains_all_launch_modes() -> None:
         assert mode.value.lower() in html
 
 
-def test_render_create_form_selects_lima_by_default_without_account() -> None:
-    # With no account selected the compute provider defaults to LIMA (the
-    # local self-served default); IMBUE_CLOUD is only the default when an
-    # account is present.
+def test_render_create_form_selects_imbue_cloud_compute_by_default() -> None:
+    # A fresh form defaults to the remote ("Imbue Cloud") preset regardless of
+    # whether an account is signed in, so the compute provider starts on
+    # IMBUE_CLOUD rather than the local LIMA default.
     html = render_create_form()
-    assert 'value="LIMA" selected' in html
+    assert 'value="IMBUE_CLOUD" selected' in html
+    assert 'value="LIMA" selected' not in html
 
 
 def test_render_create_form_selects_specified_launch_mode() -> None:
@@ -259,9 +320,20 @@ def test_render_create_form_contains_ai_provider_options() -> None:
         assert f'value="{provider.value}"' in html
 
 
-def test_render_create_form_defaults_ai_provider_to_subscription_without_account() -> None:
+def test_render_create_form_defaults_ai_provider_to_imbue_cloud() -> None:
+    # The remote preset is the default, so the AI provider starts on IMBUE_CLOUD
+    # rather than the local SUBSCRIPTION default.
     html = render_create_form()
+    assert 'value="SUBSCRIPTION" selected' not in html
+
+
+def test_render_create_form_local_preset_selects_lima_and_subscription() -> None:
+    # Selecting the local preset (e.g. a re-render of a LIMA submission) keeps
+    # the compute / AI providers on the local LIMA / SUBSCRIPTION defaults.
+    html = render_create_form(selected_preset="local")
+    assert 'value="LIMA" selected' in html
     assert 'value="SUBSCRIPTION" selected' in html
+    assert 'aria-checked="true"' in _preset_card_tag(html, "local")
 
 
 def test_render_create_form_omits_env_file_checkbox() -> None:
@@ -269,28 +341,85 @@ def test_render_create_form_omits_env_file_checkbox() -> None:
     assert "include_env_file" not in html
 
 
-def test_render_create_form_includes_color_picker_with_palette_swatches() -> None:
+def test_render_create_form_carries_color_in_hidden_input_without_swatches() -> None:
+    # The color is auto-chosen, so there is no visible palette picker; a hidden
+    # ``color`` input carries the selection through the POST.
     html = render_create_form()
-    # All palette swatches present.
-    for hex_value in WORKSPACE_PALETTE.values():
-        assert f'data-color="{hex_value}"' in html
-    # Hidden input named "color" carries the default selection.
     assert 'name="color"' in html
     assert f'value="{DEFAULT_WORKSPACE_COLOR}"' in html
+    # No visible swatches (the palette picker markup is gone).
+    assert "color-swatch" not in html
+    for hex_value in WORKSPACE_PALETTE.values():
+        assert f'data-color="{hex_value}"' not in html
 
 
-def test_render_create_form_marks_default_color_as_checked() -> None:
-    html = render_create_form()
-    # The default ``confusion`` swatch is the only one with aria-checked=true.
-    assert html.count('aria-checked="true"') == 1
-
-
-def test_render_create_form_pre_selects_provided_color() -> None:
+def test_render_create_form_carries_provided_color_in_hidden_input() -> None:
     html = render_create_form(color="#cecd0c")
-    # The hidden input + the matching swatch's aria-checked carry the
-    # picked color.
     assert 'value="#cecd0c"' in html
-    assert html.count('aria-checked="true"') == 1
+
+
+def _preset_card_tag(html: str, preset: str) -> str:
+    """Return the opening ``<button>`` tag for the given preset card.
+
+    Attribute order is whatever JinjaX's ``attrs.render`` emits, so callers
+    check attributes by membership within the tag rather than by position.
+    """
+    match = re.search(r'<button[^>]*data-preset="' + preset + r'"[^>]*>', html)
+    assert match is not None, f"no preset card for {preset!r}"
+    return match.group(0)
+
+
+def test_render_create_form_default_preset_is_remote_without_account() -> None:
+    # The remote ("Imbue Cloud") preset is the default even with no account
+    # signed in; a no-account user is nudged toward signing in via the card
+    # click, not by flipping the default to local.
+    html = render_create_form()
+    assert 'aria-checked="true"' in _preset_card_tag(html, "remote")
+    assert 'aria-checked="false"' in _preset_card_tag(html, "local")
+
+
+def test_render_create_form_default_preset_is_remote_with_account() -> None:
+    acct = SimpleNamespace(user_id="u-1", email="a@b.com")
+    html = render_create_form(accounts=[acct], default_account_id="u-1")
+    assert 'aria-checked="true"' in _preset_card_tag(html, "remote")
+    assert 'aria-checked="false"' in _preset_card_tag(html, "local")
+    # Selection styling is driven by the aria-checked Tailwind variant on the
+    # PresetCard, not a server-toggled class.
+    assert "aria-checked:outline-accent" in html
+
+
+def test_render_create_form_preset_cards_use_badge_check_icons() -> None:
+    # The feature checklists use the badge-check glyphs rather than a plain
+    # check: the remote (Imbue Cloud) card shows the *filled* badge
+    # (``badge-check-filled`` -- the lone evenodd-knockout glyph) in the accent
+    # (blue) color, and the local card the *unfilled* outline badge
+    # (``badge-check``) with no color class of its own, so it inherits the
+    # adjacent feature text's color. Both render at the native 16px (``w-4``),
+    # each nudged down 2px (``mt-0.5``) to sit on the text line. Icons render to
+    # raw path data, so scope each card's region and assert on the icon-span
+    # signature plus the glyph fingerprints.
+    html = render_create_form()
+    remote_region = html[html.index('data-preset="remote"') : html.index('data-preset="local"')]
+    local_region = html[html.index('data-preset="local"') : html.index('id="advanced-view"')]
+    # Remote: accent (blue) filled badge -- the only glyph with an evenodd
+    # knockout. ``shrink-0 mt-0.5`` pins the assertion to the icon span.
+    assert "text-accent shrink-0 mt-0.5" in remote_region
+    assert 'fill-rule="evenodd"' in remote_region
+    # Local: outline badge whose span carries only layout classes (no text-*),
+    # so it inherits the feature line's color. No filled-badge knockout.
+    assert 'class="shrink-0 mt-0.5"' in local_region
+    assert "text-secondary shrink-0 mt-0.5" not in local_region
+    assert "M14.0635 7.99966" in local_region
+    assert 'fill-rule="evenodd"' not in local_region
+    # Both badges render at the native 16px (md = w-4), not the small 14px (sm).
+    assert "w-3.5 h-3.5" not in remote_region + local_region
+    assert "w-4 h-4" in remote_region and "w-4 h-4" in local_region
+
+
+def test_render_create_form_start_advanced_opens_advanced_view() -> None:
+    # ``start_advanced`` drives the inline init so the advanced view shows first.
+    assert "showAdvanced(true)" in render_create_form(start_advanced=True)
+    assert "showAdvanced(false)" in render_create_form(start_advanced=False)
 
 
 def test_render_create_form_shows_error_message_when_supplied() -> None:
@@ -307,11 +436,9 @@ def test_render_create_form_honors_workspace_env_vars_when_opted_in(monkeypatch:
     """
     monkeypatch.setenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", "1")
     monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", "/local/fct/path")
-    monkeypatch.setenv("MINDS_WORKSPACE_NAME", "mindtest")
     monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
     html = render_create_form()
     assert "/local/fct/path" in html
-    assert "mindtest" in html
     assert "mngr/some-feature" in html
 
 
@@ -348,15 +475,12 @@ def test_render_create_form_ignores_workspace_env_vars_without_opt_in_on_shared_
     monkeypatch.delenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", raising=False)
     monkeypatch.setenv("MINDS_ROOT_NAME", "minds-staging")
     monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", "/local/fct/path")
-    monkeypatch.setenv("MINDS_WORKSPACE_NAME", "mindtest")
     monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
     html = render_create_form()
     assert "/local/fct/path" not in html
-    assert "mindtest" not in html
     assert "mngr/some-feature" not in html
-    # And the hardcoded fallbacks DO appear (form is still usable).
+    # And the hardcoded git-URL fallback DOES appear (form is still usable).
     assert "forever-claude-template" in html
-    assert "assistant" in html
 
 
 def test_render_create_form_ignores_workspace_env_vars_without_opt_in_on_dev_tier(
@@ -372,6 +496,82 @@ def test_render_create_form_ignores_workspace_env_vars_without_opt_in_on_dev_tie
     monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
     html = render_create_form()
     assert "mngr/some-feature" not in html
+
+
+def test_resolve_create_host_name_uses_submitted_value() -> None:
+    assert str(resolve_create_host_name("my-workspace")) == "my-workspace"
+
+
+def test_resolve_create_host_name_generates_mind_name_when_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    # No submitted name, no operator override, and no existing workspaces ->
+    # the first ``mind-N`` name.
+    monkeypatch.delenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", raising=False)
+    monkeypatch.delenv("MINDS_WORKSPACE_NAME", raising=False)
+    assert str(resolve_create_host_name("")) == "mind-1"
+
+
+def test_resolve_create_host_name_picks_next_free_mind_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The fallback skips names already in use across providers.
+    monkeypatch.delenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", raising=False)
+    monkeypatch.delenv("MINDS_WORKSPACE_NAME", raising=False)
+    assert str(resolve_create_host_name("", {"mind-1", "mind-2"})) == "mind-3"
+
+
+def test_resolve_create_host_name_honors_operator_override_when_opted_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", "1")
+    monkeypatch.setenv("MINDS_WORKSPACE_NAME", "mindtest")
+    assert str(resolve_create_host_name("")) == "mindtest"
+
+
+def test_resolve_create_host_name_operator_override_is_not_uniquified(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The operator override is used verbatim, even when it collides with an
+    # existing workspace -- a duplicate name errors at create time (like a typed
+    # name) rather than being silently renamed to ``mindtest-2``.
+    monkeypatch.setenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", "1")
+    monkeypatch.setenv("MINDS_WORKSPACE_NAME", "mindtest")
+    assert str(resolve_create_host_name("", {"mindtest"})) == "mindtest"
+    assert str(resolve_create_host_name("", {"mindtest", "mindtest-2"})) == "mindtest"
+
+
+def test_resolve_create_host_name_ignores_operator_override_without_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Without the opt-in, a stray MINDS_WORKSPACE_NAME is ignored and a
+    # ``mind-N`` name is generated instead.
+    monkeypatch.delenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", raising=False)
+    monkeypatch.setenv("MINDS_WORKSPACE_NAME", "mindtest")
+    assert str(resolve_create_host_name("")) == "mind-1"
+
+
+def test_make_unique_host_name_numbered_empty_is_one() -> None:
+    assert str(make_unique_host_name("mind", set(), always_number=True)) == "mind-1"
+
+
+def test_make_unique_host_name_numbered_increments_past_used() -> None:
+    assert str(make_unique_host_name("mind", {"mind-1", "mind-2", "mind-3"}, always_number=True)) == "mind-4"
+
+
+def test_make_unique_host_name_numbered_reuses_lowest_gap() -> None:
+    # A destroyed ``mind-2`` leaves a gap that is filled before climbing higher.
+    assert str(make_unique_host_name("mind", {"mind-1", "mind-3"}, always_number=True)) == "mind-2"
+
+
+def test_make_unique_host_name_numbered_ignores_non_canonical_suffixes() -> None:
+    # Names that merely start with ``mind-`` but are not a canonical positive
+    # integer (a coolname, a zero-padded number, ``mind-0``) do not take the
+    # ``mind-1`` slot, and unrelated names are ignored entirely.
+    existing = {"mind-foo", "mind-01", "mind-0", "brave-cool-otter", "mindful"}
+    assert str(make_unique_host_name("mind", existing, always_number=True)) == "mind-1"
+
+
+def test_make_unique_host_name_bare_when_free() -> None:
+    assert str(make_unique_host_name("mindtest", set())) == "mindtest"
+    assert str(make_unique_host_name("mindtest", {"other"})) == "mindtest"
+
+
+def test_make_unique_host_name_bare_then_numbered_from_two() -> None:
+    # When the bare base is taken, suffixes start at 2 (so the bare name reads
+    # as the "first").
+    assert str(make_unique_host_name("mindtest", {"mindtest"})) == "mindtest-2"
+    assert str(make_unique_host_name("mindtest", {"mindtest", "mindtest-2"})) == "mindtest-3"
 
 
 def test_render_login_page_shows_prompt() -> None:
@@ -691,7 +891,6 @@ def test_render_recovery_page_script_branches_on_dispatch_tier() -> None:
     )
     assert "dispatch_tier" in html
     for tier in (
-        "'workspace_misconfigured'",
         "'host_offline'",
         "'interface_unresponsive'",
         "'host_unresponsive'",
@@ -699,11 +898,8 @@ def test_render_recovery_page_script_branches_on_dispatch_tier() -> None:
     ):
         assert tier in html, f"recovery page JS missing branch for {tier}"
     # The shared landing places for each branch.
-    assert "renderMisconfigured" in html
     assert "renderUnresponsive" in html
     assert "renderBackendUnreachable" in html
-    assert "Workspace misconfigured" in html
-    assert "Try restart anyway" in html
 
 
 def test_render_recovery_page_backend_unreachable_offers_retry_not_restart() -> None:
@@ -784,33 +980,6 @@ def test_render_recovery_page_restart_failed_also_runs_probe() -> None:
     # The error-details DOM hook is rendered alongside the diagnostic.
     assert 'id="recovery-error"' in html
     assert 'id="recovery-debug-details"' in html
-
-
-def test_render_recovery_page_honors_misconfigured_before_autodispatch_short_circuit() -> None:
-    """The workspace_misconfigured tier must be honored on the restart_failed path.
-
-    A workspace whose services.toml lacks [services.system_interface] lands in
-    restart_failed once its undeclared interface fails to come back up, so the
-    page runs runProbe(false), which renders via applyHealth. If the
-    no-auto-dispatch short-circuit (``if (!autoDispatch) renderUnresponsive()``)
-    ran before the workspace_misconfigured check, that workspace would render a
-    misleading "unresponsive" page even though no restart can recover it. Assert
-    the misconfigured branch precedes the short-circuit inside applyHealth so the
-    restart_failed path still reaches renderMisconfigured().
-    """
-    html = render_recovery_page(
-        agent_id=_AGENT_A,
-        return_to="",
-        initial_status="restart_failed",
-        initial_error="boom",
-    )
-    probe_body = html[html.index("function applyHealth(") :]
-    misconfigured_pos = probe_body.index("'workspace_misconfigured'")
-    short_circuit_pos = probe_body.index("if (!autoDispatch)")
-    assert misconfigured_pos < short_circuit_pos, (
-        "the workspace_misconfigured branch must precede the !autoDispatch short-circuit "
-        "so a misconfigured workspace on the restart_failed path renders misconfigured"
-    )
 
 
 def test_render_recovery_page_promotes_button_above_troubleshooting() -> None:
@@ -1555,6 +1724,29 @@ def test_icon16_play_is_the_lone_stroked_glyph() -> None:
     assert "black" not in html
 
 
+def test_icon16_badge_check_renders_as_an_outline_glyph() -> None:
+    # ``badge-check`` (the unfilled badge on the local preset card) is a single
+    # currentColor fill outline like the rest of the set -- no hardcoded black,
+    # no evenodd knockout.
+    html = CATALOG.render("Icon16", name="badge-check")
+    assert 'viewBox="0 0 16 16"' in html
+    assert '<path d="M14.0635 7.99966' in html
+    assert "black" not in html
+    assert "fill-rule" not in html
+
+
+def test_icon16_badge_check_filled_is_a_solid_knockout_glyph() -> None:
+    # ``badge-check-filled`` (the blue badge on the remote preset card) is the
+    # lone solid glyph: a filled badge with the check knocked out via
+    # ``fill-rule="evenodd"``, so the cut-out shows the surface behind it. It
+    # still inherits currentColor from the shell (no hardcoded black).
+    html = CATALOG.render("Icon16", name="badge-check-filled")
+    assert 'viewBox="0 0 16 16"' in html
+    assert 'fill-rule="evenodd"' in html
+    assert 'clip-rule="evenodd"' in html
+    assert "black" not in html
+
+
 def test_icon16_settings_is_offset_into_the_16_grid() -> None:
     # ``settings`` is authored on a 15-unit grid, so it's nudged into the
     # 16-unit frame with a translate group.
@@ -1829,3 +2021,53 @@ def test_badge_class_and_id_pass_through() -> None:
     assert 'id="requests-badge"' in html
     assert "hidden" in html
     assert "absolute" in html
+
+
+def test_expected_duration_per_launch_mode() -> None:
+    assert expected_creation_duration_seconds(LaunchMode.DOCKER) == 30.0
+    assert expected_creation_duration_seconds(LaunchMode.IMBUE_CLOUD) == 30.0
+    assert expected_creation_duration_seconds(LaunchMode.LIMA) == 600.0
+    assert expected_creation_duration_seconds(LaunchMode.VULTR) == 300.0
+
+
+def test_expected_duration_covers_every_launch_mode() -> None:
+    # Every launch mode must resolve to a positive duration so the progress
+    # bar never divides by zero; unmapped modes fall back to the default.
+    for launch_mode in LaunchMode:
+        assert expected_creation_duration_seconds(launch_mode) > 0
+    assert DEFAULT_EXPECTED_CREATION_DURATION_SECONDS == 60.0
+
+
+def test_base_omits_sentry_bootstrap_when_frontend_reporting_is_off() -> None:
+    # Default shipped state (reporting disabled / placeholder DSNs): no page may
+    # pull in the Sentry browser bundle or its init.
+    html = render_login_page()
+    assert "sentry.browser.min.js" not in html
+    assert "sentry_init.js" not in html
+    assert "minds-sentry-config" not in html
+
+
+def test_base_emits_sentry_bootstrap_when_frontend_reporting_is_on() -> None:
+    # Rendered through a freshly built catalog whose Sentry global is overridden
+    # to return a payload. A fresh catalog is used (rather than mutating the
+    # shared CATALOG global) because reassigning a Jinja env global mid-process
+    # interacts with Jinja's template cache; in production the global never
+    # changes, so this is purely a test concern.
+    payload = {
+        "dsn": "https://key@o1.ingest.us.sentry.io/2",
+        "environment": "staging",
+        "release": "0.3.2",
+        "git_sha": "abc1234",
+    }
+    catalog = _templates_module._build_catalog()
+    # ty narrows the Jinja globals dict to a union of the seeded value types,
+    # which excludes an arbitrary ``() -> dict`` test stub; the assignment is
+    # fine at runtime (Jinja globals are untyped string-keyed values).
+    catalog.jinja_env.globals["frontend_sentry_browser_payload"] = lambda: payload  # ty: ignore[invalid-assignment]
+    html = catalog.render("pages.Login")
+    # Bundle + init load before the page's own scripts; config is passed as JSON.
+    assert '<script src="/_static/sentry.browser.min.js"></script>' in html
+    assert '<script src="/_static/sentry_init.js"></script>' in html
+    assert '<script type="application/json" id="minds-sentry-config">' in html
+    assert '"environment": "staging"' in html
+    assert '"dsn": "https://key@o1.ingest.us.sentry.io/2"' in html

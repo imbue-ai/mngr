@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-22
+
+Clarified the log message emitted when a subprocess is force-terminated. The old wording ("Aborting command (via sigterm to <pid>) due to signal...") was logged identically whether the command hit its own timeout or was cancelled by a requested shutdown, which made it easy to misread a routine cancellation as a timeout. It now states the reason explicitly -- either "it exceeded its <N>s timeout" or "a shutdown was requested (shutdown_event was set)". The command's argv is still deliberately omitted (this generic runner is used by callers that pass secrets in argv), so only the pid is logged.
+
+## 2026-06-19
+
+Added an optional `pass_fds` parameter to `ConcurrencyGroup.run_process_in_background`, `run_background`, and `run_local_command_modern_version`. It forwards to `subprocess.Popen(pass_fds=...)`, keeping the given file descriptors open in (and inheritable by) the spawned child. This lets callers hand an already-connected `socketpair` endpoint to a child process without a rendezvous file on disk. Defaults to empty, so existing behavior is unchanged.
+
 ## 2026-06-11
 
 Replaced a direct ValueError raise in concurrency group exception handling with a dedicated custom exception type.

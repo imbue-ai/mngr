@@ -4,6 +4,24 @@ Full, unedited changelog entries for the `mngr_opencode` project, consolidated n
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-19
+
+No production behavior change. The OpenCode agent-config merge test now exercises the unified overlay merge pipeline (`merge_models_via_overlay`) instead of the removed `AgentTypeConfig.merge_with` helper, so it locks in the same behavior: an override's `cli_args` and `config_overrides` replace the base. The merge-rejects-other-type test was dropped because that type guard now lives in the shared `merge_models_via_overlay` path (covered by mngr's own tests).
+
+Trimmed the README to user-relevant content (removed internal implementation details and roadmap notes) and tightened it for concision.
+
+Aligned the `OpenCodeAgentConfig` field descriptions (surfaced via `mngr config`/help) with the concise wording in the README options table.
+
+The config table now documents `command`, `check_installation`, `version`, `update_policy`, and `preserve_on_destroy` (`version` / `update_policy` had been dropped from the table).
+
+## 2026-06-18
+
+Added a `version` field to the opencode agent type that pins the installed opencode CLI: installation runs the opencode installer with `VERSION=<version>` and provisioning verifies the installed opencode matches, erroring on a mismatch.
+
+Added an `update_policy` field that governs opencode's startup auto-update. `NEVER` writes `"autoupdate": false` into the per-agent `opencode.json` so opencode does not update itself on launch; `AUTO` leaves auto-update enabled; `ASK` behaves like `AUTO`. When unset, it defaults to `NEVER` (auto-update disabled) -- set `AUTO` to re-enable it. An explicit `autoupdate` key in `config_overrides` always wins.
+
+Opencode agent lifecycle detection now targets the agent's primary tmux window by name (the configurable `tmux.primary_window_name`, default `agent`) instead of the literal `:0` index, so it works regardless of the user's tmux `base-index` setting. (The behavior comes from the shared base agent; the opencode lifecycle test was updated to name its primary window accordingly.)
+
 ## 2026-06-17
 
 The agent now declares the `HasSessionPreservationMixin` capability mixin: its `on_destroy` session-preservation step was extracted into a `preserve_session_state` method, so preserving session/transcript files on destroy is a code-detectable capability in the agent capability matrix rather than a hand-tracked fact. Behavior is unchanged.

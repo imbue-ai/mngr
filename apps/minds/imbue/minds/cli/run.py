@@ -33,8 +33,6 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.minds.bootstrap import env_name_from_root_name
-from imbue.minds.bootstrap import is_minds_root_name_set_to_active_env
 from imbue.minds.bootstrap import minds_data_dir_for
 from imbue.minds.bootstrap import reconcile_imbue_cloud_providers_from_sessions
 from imbue.minds.bootstrap import resolve_minds_root_name
@@ -83,7 +81,8 @@ from imbue.minds.primitives import OutputFormat
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.output import emit_event
-from imbue.minds.utils.sentry.core import SentryDeployEnvironment
+from imbue.minds.utils.sentry.core import is_sentry_enabled
+from imbue.minds.utils.sentry.core import resolve_sentry_environment
 from imbue.minds.utils.sentry.core import setup_sentry
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -197,15 +196,14 @@ def run(
     # The release id (desktop app version) and git sha come from the Electron
     # launcher via env vars, falling back to the in-repo package.json / "unknown"
     # for bare source runs (see imbue.minds.build_info).
-    if os.environ.get("MINDS_SENTRY_ENABLED", "").strip().lower() in ("1", "true", "yes"):
-        activated_env_name = env_name_from_root_name(root_name) if is_minds_root_name_set_to_active_env() else None
+    if is_sentry_enabled():
         is_sentry_s3_upload_enabled = os.environ.get("MINDS_SENTRY_S3_UPLOADS", "").strip().lower() in (
             "1",
             "true",
             "yes",
         )
         setup_sentry(
-            environment=SentryDeployEnvironment.from_minds_env_name(activated_env_name),
+            environment=resolve_sentry_environment(),
             release_id=resolve_release_id(),
             git_commit_sha=resolve_git_sha(),
             log_folder=paths.log_dir,

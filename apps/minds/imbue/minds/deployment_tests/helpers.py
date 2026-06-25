@@ -302,10 +302,10 @@ def load_ci_credentials_from_vault() -> dict[str, str]:
     missing: list[str] = []
     for key in ("NEON_ORG_ID", "NEON_API_TOKEN"):
         if not neon_kv.get(key):
-            missing.append(f"secrets/minds/ci/neon-admin.{key}")
+            missing.append(f"secrets/minds/ci/neon-admin/{key}")
     for key in ("SUPERTOKENS_CONNECTION_URI", "SUPERTOKENS_API_KEY"):
         if not st_kv.get(key):
-            missing.append(f"secrets/minds/ci/supertokens.{key}")
+            missing.append(f"secrets/minds/ci/supertokens/{key}")
     if missing:
         raise MindError("Vault is missing required ci-tier credentials for the round-trip test: " + ", ".join(missing))
     return {
