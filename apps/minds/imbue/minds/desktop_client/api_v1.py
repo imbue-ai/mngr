@@ -25,7 +25,6 @@ import json
 import os
 import queue
 import shlex
-import time
 from collections.abc import Callable
 from collections.abc import Iterator
 from datetime import datetime
@@ -543,9 +542,7 @@ def _stream_create_operation_logs(log_queue: "queue.Queue[str]") -> Iterator[str
     the desktop client is shutting down.
     """
     shutdown_event = get_state().shutdown_event
-    while True:
-        if shutdown_event.is_set():
-            return
+    while not shutdown_event.is_set():
         try:
             line = log_queue.get(block=True, timeout=1.0)
         except queue.Empty:
@@ -567,9 +564,7 @@ def _stream_destroy_operation_logs(agent_id: AgentId, paths: WorkspacePaths) -> 
     shutdown_event = get_state().shutdown_event
     backend_resolver = get_state().backend_resolver
     offset = 0
-    while True:
-        if shutdown_event.is_set():
-            return
+    while not shutdown_event.is_set():
         try:
             content_bytes, offset = destroying.read_log_chunk(agent_id, paths, offset)
         except FileNotFoundError:
@@ -589,7 +584,9 @@ def _stream_destroy_operation_logs(agent_id: AgentId, paths: WorkspacePaths) -> 
             yield _sse({"done": True, "status": str(record.status)})
             return
         yield ": keepalive\n\n"
-        time.sleep(_DESTROY_LOG_POLL_SECONDS)
+        # Wait out the poll interval on the shutdown event (not time.sleep) so a
+        # shutdown wakes us immediately and the loop stays responsive.
+        shutdown_event.wait(timeout=_DESTROY_LOG_POLL_SECONDS)
 
 
 @require_api_or_cookie_auth
