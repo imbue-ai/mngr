@@ -787,6 +787,32 @@ jobs:
                 grep -aE "\[diag-gen\].*forward=False" "$log" 2>/dev/null | tail -30
               ' 2>&1 | tail -180
               echo
+              echo "=== watcher poll-thread liveness ([diag-poll] heartbeat/crash + tracebacks, WHOLE log) ==="
+              "$LIMA" shell "$VM" -- sudo bash -c '
+                log=/var/log/supervisor/system_interface-stderr.log
+                echo "--- [diag-poll] CRASH lines (poll iteration threw) ---"
+                grep -aE "\[diag-poll\] CRASH" "$log" 2>/dev/null | tail -10
+                echo "--- last 40 [diag-poll] lines (heartbeat/sessions-changed; if it stops early the thread died) ---"
+                grep -aE "\[diag-poll\]" "$log" 2>/dev/null | tail -40
+                echo "--- Traceback blocks anywhere in stderr ---"
+                grep -aA25 "Traceback (most recent call last)" "$log" 2>/dev/null | tail -160
+              ' 2>&1 | tail -220
+              echo
+              echo "=== session rotation: claude_session_id_history + which session file holds the canned body ==="
+              "$LIMA" shell "$VM" -- sudo bash -c '
+                for h in $(find /mngr /root /home -maxdepth 9 -name claude_session_id_history 2>/dev/null | head -3); do
+                  echo "== history: $h =="; cat -n "$h" 2>/dev/null
+                done
+                echo "--- session .jsonl files (path + mtime) under projects dirs ---"
+                find /mngr /root /home -maxdepth 11 -path "*/projects/*" -name "*.jsonl" -printf "%TY-%Tm-%Td %TH:%TM:%TS  %p\n" 2>/dev/null | sort | tail -40
+                echo "--- session files containing the canned body (CI MOCK) + mtime ---"
+                for f in $(find /mngr /root /home -maxdepth 11 -path "*/projects/*" -name "*.jsonl" 2>/dev/null); do
+                  if grep -aq "CI MOCK" "$f" 2>/dev/null; then
+                    echo "HIT $(stat -c "%y" "$f" 2>/dev/null) $f"
+                  fi
+                done
+              ' 2>&1 | tail -90
+              echo
               echo "=== ps aux in VM ==="
               "$LIMA" shell "$VM" -- sudo ps auxf 2>&1 | grep -iE "bootstrap|system|web-server|uv run|tmux" | head -30
               echo
