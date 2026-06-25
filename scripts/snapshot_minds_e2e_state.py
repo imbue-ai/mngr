@@ -100,10 +100,15 @@ _CLAUDE_CODE_VERSION: Final[str] = "2.1.141"
 # depend on a depot.json being present in the FCT clone's working tree.
 _DEFAULT_DEPOT_PROJECT_ID: Final[str] = "fsjzltqvxq"
 
-# The depot CLI's default install location ($HOME/.depot/bin) baked into the
-# outer snapshot image. Kept on PATH (see the image's .env() below) so the mngr
-# docker provider's `depot build` resolves the binary without a runtime install.
-_DEPOT_BIN_DIR: Final[str] = "/root/.depot/bin"
+# Where the depot CLI is installed in the outer snapshot image. We install into
+# /usr/local/bin (already on the default PATH, where docker/node live) rather
+# than the installer's default $HOME/.depot/bin: in-sandbox commands run via
+# `bash -lc` (a login shell), and Debian's /etc/profile resets PATH to the
+# default, dropping ~/.depot/bin. (uv survives only because its installer adds a
+# profile snippet; the depot installer does not.) Installing into /usr/local/bin
+# keeps `depot` resolvable for both the preflight check and the mngr docker
+# provider's `depot build` subprocess.
+_DEPOT_INSTALL_DIR: Final[str] = "/usr/local/bin"
 
 # Greppable marker the build job asserts on to confirm the depot CLI verified
 # inside the sandbox before the FCT build. Emitted from this script (not from the
@@ -361,17 +366,17 @@ def _build_snapshot_image(staged_repo: Path) -> modal.Image:
         .run_commands(
             "curl -LsSf https://astral.sh/uv/install.sh | sh",
             f"curl -fsSL https://claude.ai/install.sh | bash -s {_CLAUDE_CODE_VERSION}",
-            "curl -fsSL https://depot.dev/install-cli.sh | sh",
+            # Install into /usr/local/bin (on the default login-shell PATH) so the
+            # binary resolves under `bash -lc`; see _DEPOT_INSTALL_DIR.
+            f"curl -fsSL https://depot.dev/install-cli.sh | env DEPOT_INSTALL_DIR={_DEPOT_INSTALL_DIR} sh",
         )
         .env(
             {
                 # Include the sbin dirs so start-dockerd.sh can find `ip`
                 # (/usr/sbin/ip) and `iptables-legacy` (/usr/sbin/iptables-legacy)
                 # when invoked via `bash -lc` -- Debian's /etc/profile won't
-                # restore the sbin paths if PATH is already set. The depot bin
-                # dir is appended so `depot build` resolves without a runtime
-                # install.
-                "PATH": f"/root/.local/bin:{_DEPOT_BIN_DIR}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                # restore the sbin paths if PATH is already set.
+                "PATH": "/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                 # Avoid `uv sync` symlink-mode bugs that have historically
                 # broken Modal snapshotting (see mngr Dockerfile).
                 "UV_LINK_MODE": "copy",
@@ -491,7 +496,7 @@ def _verify_depot_cli_in_sandbox(sandbox: modal.Sandbox) -> None:
         raise RuntimeError(
             "`depot --version` failed inside the sandbox -- the depot CLI is not on PATH, "
             "so the FCT build would silently fall back to a local docker build. "
-            f"Expected the binary baked into the image at {_DEPOT_BIN_DIR}."
+            f"Expected the binary baked into the image at {_DEPOT_INSTALL_DIR}/depot."
         )
     # Emit the marker from the script (not the in-sandbox command) so it lands in
     # the CI build log if and only if the verification above succeeded.
