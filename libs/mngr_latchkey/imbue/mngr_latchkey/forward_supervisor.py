@@ -87,21 +87,6 @@ def _cmdline_looks_like_mngr_latchkey_forward(cmdline: list[str]) -> bool:
     return "latchkey" in remainder and "forward" in remainder
 
 
-def _cmdline_looks_like_mngr_observe(cmdline: list[str]) -> bool:
-    """Check whether a process's ``cmdline`` is the ``mngr observe`` discovery child.
-
-    ``mngr latchkey forward`` spawns its discovery producer as
-    ``mngr observe --discovery-only --quiet`` (see
-    :class:`DiscoveryStreamConsumer`). ``--discovery-only`` is required so we
-    never match an unrelated ``mngr observe`` a user runs by hand. See
-    :func:`_mngr_argv_remainder` for the cmdline-shape normalization.
-    """
-    remainder = _mngr_argv_remainder(cmdline)
-    if remainder is None:
-        return False
-    return "observe" in remainder and "--discovery-only" in remainder
-
-
 def _forward_latchkey_directory(cmdline: list[str]) -> Path | None:
     """Extract the ``--latchkey-directory`` value from a forward's ``cmdline``.
 
@@ -166,26 +151,25 @@ def _iter_matching_forward_pids(latchkey_directory: Path) -> list[int]:
     return [proc.pid for proc in psutil.process_iter() if _is_forward_pid_for_directory(proc.pid, target)]
 
 
-def _observe_child_pids(forward_pid: int) -> list[int]:
-    """Return PIDs of the ``mngr observe`` discovery children under ``forward_pid``.
+def _descendant_pids(forward_pid: int) -> list[int]:
+    """Return PIDs of every descendant process under ``forward_pid``.
 
-    Captured *before* terminating a forward so a wedged forward that has to be
-    SIGKILLed (and therefore never runs its shutdown handler) does not leave its
-    observe child orphaned and still writing to the shared discovery events file.
+    A ``mngr latchkey forward`` owns several subprocesses -- its ``mngr observe``
+    discovery producer, the shared ``latchkey gateway``, and per-agent reverse
+    ``ssh`` tunnels. All of them are meant to die with the forward (a healthy
+    forward tears them down in its SIGTERM handler). These PIDs are captured
+    *before* the forward is terminated so a wedged forward that has to be
+    SIGKILLed -- and therefore never runs that handler -- does not leave any of
+    them orphaned (the discovery child would keep polluting the shared events
+    file; the gateway would keep holding its port; tunnels would linger).
+    Everything returned is a descendant of *this* forward, so reaping the whole
+    set never reaches an unrelated process.
     """
     try:
         children = psutil.Process(forward_pid).children(recursive=True)
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
         return []
-    pids: list[int] = []
-    for child in children:
-        try:
-            cmdline = child.cmdline()
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            continue
-        if _cmdline_looks_like_mngr_observe(cmdline):
-            pids.append(child.pid)
-    return pids
+    return [child.pid for child in children]
 
 
 def is_forward_info_alive(info: LatchkeyForwardInfo) -> bool:
@@ -409,13 +393,14 @@ class LatchkeyForwardSupervisor(MutableModel):
 
         Enforces the one-forward-per-latchkey-directory invariant the discovery
         pipeline depends on (``mngr latchkey forward``'s ``mngr observe`` is the
-        single producer for the shared events file). Each duplicate's observe
-        child is captured before the forward is signalled and terminated after,
-        so a wedged forward that must be SIGKILLed cannot leave its observe child
-        orphaned and still writing snapshots. Scoped by resolved
-        ``--latchkey-directory`` equality, so a sibling profile's supervisor is
-        never touched. Best-effort: a duplicate that dies or is inaccessible
-        mid-reap is simply skipped.
+        single producer for the shared events file). Each duplicate's descendant
+        processes (its ``mngr observe`` child, the ``latchkey gateway``, and
+        reverse ``ssh`` tunnels) are captured before the forward is signalled and
+        terminated after, so a wedged forward that must be SIGKILLed cannot leave
+        any of them orphaned. Scoped by resolved ``--latchkey-directory``
+        equality, so a sibling profile's supervisor is never touched.
+        Best-effort: a duplicate that dies or is inaccessible mid-reap is simply
+        skipped.
         """
         target = _resolve_or_none(self.latchkey_directory)
         if target is None:
@@ -428,15 +413,15 @@ class LatchkeyForwardSupervisor(MutableModel):
             # recycled since the scan is never terminated (mirrors stop()).
             if not _is_forward_pid_for_directory(pid, target):
                 continue
-            observe_pids = _observe_child_pids(pid)
+            descendant_pids = _descendant_pids(pid)
             logger.info(
                 "Reaping duplicate mngr latchkey forward (pid={}) bound to {}",
                 pid,
                 self.latchkey_directory,
             )
             _terminate_pid(pid)
-            for observe_pid in observe_pids:
-                _terminate_pid(observe_pid)
+            for descendant_pid in descendant_pids:
+                _terminate_pid(descendant_pid)
 
     def stop(self) -> None:
         """Terminate the supervisor and delete its record.

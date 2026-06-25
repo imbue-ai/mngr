@@ -21,10 +21,9 @@ import psutil
 
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 from imbue.mngr_latchkey.forward_supervisor import _cmdline_looks_like_mngr_latchkey_forward
-from imbue.mngr_latchkey.forward_supervisor import _cmdline_looks_like_mngr_observe
+from imbue.mngr_latchkey.forward_supervisor import _descendant_pids
 from imbue.mngr_latchkey.forward_supervisor import _forward_latchkey_directory
 from imbue.mngr_latchkey.forward_supervisor import _is_forward_pid_for_directory
-from imbue.mngr_latchkey.forward_supervisor import _observe_child_pids
 from imbue.mngr_latchkey.forward_supervisor import is_forward_info_alive
 from imbue.mngr_latchkey.store import LatchkeyForwardInfo
 from imbue.mngr_latchkey.store import delete_forward_info
@@ -658,21 +657,6 @@ def test_forward_latchkey_directory_parses_every_argv_shape() -> None:
     assert _forward_latchkey_directory(["mngr", "latchkey", "forward"]) is None
 
 
-def test_cmdline_matcher_accepts_mngr_observe_discovery_child() -> None:
-    assert _cmdline_looks_like_mngr_observe(["mngr", "observe", "--discovery-only", "--quiet"])
-    assert _cmdline_looks_like_mngr_observe(["/usr/local/bin/mngr", "observe", "--discovery-only"])
-    # proctitle-overwrite shape.
-    assert _cmdline_looks_like_mngr_observe(["mngr observe --discovery-only --quiet", "", ""])
-
-
-def test_cmdline_matcher_rejects_non_discovery_observe() -> None:
-    # A bare ``mngr observe`` a user runs by hand must not be treated as our child.
-    assert not _cmdline_looks_like_mngr_observe(["mngr", "observe"])
-    assert not _cmdline_looks_like_mngr_observe(["mngr", "latchkey", "forward"])
-    assert not _cmdline_looks_like_mngr_observe(["manager", "observe", "--discovery-only"])
-    assert not _cmdline_looks_like_mngr_observe([])
-
-
 # -- duplicate-forward reaping ----------------------------------------------
 
 
@@ -702,16 +686,11 @@ def _terminate_orphan(process: subprocess.Popen) -> None:
         process.wait(timeout=5.0)
 
 
-def _make_idle_mngr_observe_binary(tmp_path: Path) -> Path:
-    """Build a fake ``mngr`` that idles when invoked as ``observe``.
-
-    Lives in its own directory so its basename is ``mngr`` (the cmdline matcher
-    keys on a ``mngr``/``*/mngr`` argv token) without colliding with the forward
-    fake's ``mngr`` script in ``tmp_path``.
-    """
-    binary_dir = tmp_path / f"observe-bin-{uuid4().hex}"
+def _make_idle_binary(tmp_path: Path) -> Path:
+    """Build a tiny executable that idles until SIGTERM, for use as a child process."""
+    binary_dir = tmp_path / f"idle-bin-{uuid4().hex}"
     binary_dir.mkdir()
-    script = binary_dir / "mngr"
+    script = binary_dir / "idle"
     script.write_text(
         "#!/usr/bin/env python3\n"
         "import signal, sys\n"
@@ -722,26 +701,109 @@ def _make_idle_mngr_observe_binary(tmp_path: Path) -> Path:
     return script
 
 
-def test_observe_child_pids_finds_the_discovery_child(tmp_path: Path) -> None:
-    """``_observe_child_pids`` returns the ``mngr observe --discovery-only`` descendant.
+def test_descendant_pids_returns_all_children_not_just_observe(tmp_path: Path) -> None:
+    """``_descendant_pids`` returns every descendant, so the reaper kills the orphan's
+    ``latchkey gateway`` and reverse ``ssh`` tunnels too -- not only its ``mngr observe``
+    child -- when a wedged forward had to be SIGKILLed (and so never ran its teardown).
 
-    This is what lets the reaper kill an orphaned discovery producer even when
-    its parent forward had to be SIGKILLed (and so never ran its own teardown).
+    The child here is spawned with a non-``mngr observe`` argv (gateway-shaped) to pin
+    that the capture is by descendancy, not by cmdline matching.
     """
-    observe_binary = _make_idle_mngr_observe_binary(tmp_path)
-    child = subprocess.Popen(
-        [str(observe_binary), "observe", "--discovery-only", "--quiet"],
-        start_new_session=True,
-    )
+    idle_binary = _make_idle_binary(tmp_path)
+    child = subprocess.Popen([str(idle_binary), "gateway"], start_new_session=True)
     try:
         deadline = time.monotonic() + 5.0
         waiter = threading.Event()
-        while time.monotonic() < deadline and child.pid not in _observe_child_pids(os.getpid()):
+        while time.monotonic() < deadline and child.pid not in _descendant_pids(os.getpid()):
             waiter.wait(timeout=_POLL_INTERVAL_SECONDS)
-        assert child.pid in _observe_child_pids(os.getpid())
+        assert child.pid in _descendant_pids(os.getpid())
     finally:
         child.terminate()
         child.wait(timeout=5.0)
+
+
+def _make_fake_forward_spawning_child_binary(tmp_path: Path) -> Path:
+    """A fake ``mngr`` whose ``latchkey forward`` spawns a long-lived child and records its PID.
+
+    The child stands in for the forward's owned subprocesses (``mngr observe`` /
+    ``latchkey gateway`` / reverse ``ssh`` tunnels). The fake forward exits on
+    SIGTERM *without* killing the child, so the child survives unless the reaper
+    terminates it directly -- which is exactly the wedged-forward behavior under
+    test. The child PID is written to ``<plugin_dir>/child_pid.txt``.
+    """
+    script = tmp_path / "mngr"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, signal, subprocess, sys\n"
+        "from datetime import datetime, timezone\n"
+        "from pathlib import Path\n"
+        'if sys.argv[1:3] != ["latchkey", "forward"]:\n'
+        "    sys.exit(99)\n"
+        "latchkey_directory = None\n"
+        "args = sys.argv[3:]\n"
+        "for i, arg in enumerate(args):\n"
+        '    if arg == "--latchkey-directory" and i + 1 < len(args):\n'
+        "        latchkey_directory = Path(args[i + 1])\n"
+        "        break\n"
+        "if latchkey_directory is None:\n"
+        "    sys.exit(98)\n"
+        'plugin = latchkey_directory / "mngr_latchkey"\n'
+        "plugin.mkdir(parents=True, exist_ok=True)\n"
+        'child = subprocess.Popen(["sleep", "600"])\n'
+        '(plugin / "child_pid.txt").write_text(str(child.pid))\n'
+        '(plugin / "latchkey_forward.json").write_text(json.dumps({\n'
+        '    "pid": os.getpid(),\n'
+        '    "started_at": datetime.now(timezone.utc).isoformat(),\n'
+        '    "gateway_port": None,\n'
+        "}))\n"
+        # Exit on SIGTERM WITHOUT tearing down the child, so only the reaper's
+        # explicit descendant-termination can kill it.
+        "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n"
+        "signal.pause()\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def test_ensure_running_reaps_orphan_forwards_children_too(tmp_path: Path) -> None:
+    """Reaping a duplicate forward also terminates its descendant subprocesses.
+
+    The orphan fake spawns a long-lived child and exits on SIGTERM without killing
+    it, so the child survives only if the reaper terminates it directly -- mirroring
+    a wedged forward whose observe/gateway/tunnel children would otherwise be left
+    orphaned.
+    """
+    fake_binary = _make_fake_forward_spawning_child_binary(tmp_path)
+    latchkey_directory = tmp_path / f"latchkey-{uuid4().hex}"
+    orphan = _spawn_orphan_fake_forward(fake_binary, latchkey_directory)
+    supervisor: LatchkeyForwardSupervisor | None = None
+    info: LatchkeyForwardInfo | None = None
+    child_pid: int | None = None
+    try:
+        data_dir = plugin_data_dir(latchkey_directory)
+        _wait_for_forward_record(data_dir)
+        child_pid = int((data_dir / "child_pid.txt").read_text())
+        assert psutil.pid_exists(child_pid)
+        # Recreate the missing-record case so ensure_running reaps the orphan.
+        delete_forward_info(data_dir)
+        supervisor = LatchkeyForwardSupervisor(
+            mngr_binary=str(fake_binary),
+            latchkey_binary="/usr/bin/latchkey-unused",
+            latchkey_directory=latchkey_directory,
+        )
+        info = supervisor.ensure_running()
+        assert _wait_for_process_exit(orphan.pid), "duplicate forward was not reaped"
+        assert _wait_for_process_exit(child_pid), "the orphan forward's child was not reaped"
+    finally:
+        if supervisor is not None and info is not None:
+            supervisor.stop()
+            _wait_for_process_exit(info.pid)
+        _terminate_orphan(orphan)
+        if child_pid is not None:
+            try:
+                psutil.Process(child_pid).kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
 
 
 def test_is_forward_pid_for_directory_matches_only_its_own_directory(tmp_path: Path) -> None:
