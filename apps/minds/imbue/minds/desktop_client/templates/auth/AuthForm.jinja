@@ -1,4 +1,4 @@
-{#def default_to_signup #}
+{#def default_to_signup, intro="" #}
 {#
   The two-tab sign-up / sign-in form (email/password + OAuth), shared by the
   standalone auth page (``auth.SignupSignin``) and the in-page sign-in modal on
@@ -7,11 +7,15 @@
   / ``data-oauth`` links). ``default_to_signup`` picks which tab is visible on
   first paint; the inline links flip between them client-side.
 
+  ``intro`` is optional explanatory copy (used by the sign-in modal to explain
+  why the user is being asked to sign in). When set it replaces each tab's
+  subheading; when unset the standalone auth page shows its subheading instead.
+
   Because auth.js binds by id, this form must appear at most once per page.
 #}
 <div id="signup-tab" class="{% if not default_to_signup %}hidden{% endif %}">
   <h1 class="type-heading-lg text-primary mb-2">Create account</h1>
-  <p class="text-secondary mb-6">Sign up to enable sharing</p>
+  {% if intro %}<p class="type-body text-primary mb-6">{{ intro }}</p>{% else %}<p class="text-secondary mb-6">Sign up to enable sharing</p>{% endif %}
   <Notice variant="error" id="signup-error" class="hidden"></Notice>
   <form id="signup-form">
     <div class="mb-4">
@@ -38,7 +42,7 @@
 
 <div id="signin-tab" class="{% if default_to_signup %}hidden{% endif %}">
   <h1 class="type-heading-lg text-primary mb-2">Sign in</h1>
-  <p class="text-secondary mb-6">Sign in to your Imbue account</p>
+  {% if intro %}<p class="type-body text-primary mb-6">{{ intro }}</p>{% else %}<p class="text-secondary mb-6">Sign in to your Imbue account</p>{% endif %}
   <Notice variant="error" id="signin-error" class="hidden"></Notice>
   <form id="signin-form">
     <div class="mb-4">
