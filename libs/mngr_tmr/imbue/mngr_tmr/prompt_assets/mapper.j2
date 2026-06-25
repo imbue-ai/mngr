@@ -14,12 +14,11 @@ beyond this task. If you cannot determine what is wrong, report no changes.
 
 # If the test succeeds - or after you fixed a failing test
 
-A test exists to verify two things, and nothing more: the claims its tutorial
-block makes, and that the commands it runs actually do something. That fixes the
-test's natural size. A passing test already at that size needs no change: leaving
-the changes object empty is a correct, good outcome, NOT a failure. Do not add
-assertions or steps merely to be thorough -- thoroughness with nothing to verify
-is just brittleness.
+A test should match the tutorial block it corresponds to as closely as possible.
+That fixes the test's natural size. A passing test already at that size needs no
+change: leaving the changes object empty is a correct, good outcome, NOT a
+failure. Do not add assertions or steps merely to be thorough -- thoroughness
+with nothing to verify is just brittleness.
 
 Bring the test to its natural size by checking it in BOTH directions:
 
