@@ -459,10 +459,9 @@ def test_fct_image_rebuild_hits_depot_cache(tmp_path: Path) -> None:
 
     depot_env = dict(os.environ)
     depot_env["DEPOT_PROJECT_ID"] = os.environ.get("DEPOT_PROJECT_ID", _DEPOT_DEFAULT_PROJECT_ID)
-    # plain progress so cache hits print literal "CACHED" lines we can assert on
-    # (deterministic, unlike a timing threshold).
-    depot_env["BUILDKIT_PROGRESS"] = "plain"
 
+    # `--progress plain` makes cache hits print literal "CACHED" lines we can
+    # assert on (deterministic, unlike a timing threshold).
     result = subprocess.run(
         [
             "depot",
