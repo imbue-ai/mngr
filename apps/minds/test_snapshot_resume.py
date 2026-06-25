@@ -183,7 +183,7 @@ def _run_minds_in_container_probe(container_name: str) -> dict:
     via ``mngr exec``) straight into the container via ``docker exec``, then
     parses the documented sentinel + single-JSON-line contract. The payload
     carries ``curl_status`` (system_interface health), ``inner_port``,
-    ``services_toml_declares_system_interface``, etc.
+    ``applications_toml_declares_system_interface``, etc.
     """
     result = _exec_in_container(
         container_name, f"cd /code && {build_probe_shell_command()}", timeout=_PROBE_TIMEOUT_SECONDS

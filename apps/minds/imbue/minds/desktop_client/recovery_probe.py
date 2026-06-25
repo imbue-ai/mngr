@@ -24,13 +24,13 @@ restart rather than auto-dispatching surgical.
 
 import base64
 import json
-import re
 import shlex
 import socket
 from enum import Enum
 from functools import cache
 from pathlib import Path
 from typing import Final
+from urllib.parse import urlparse
 
 from loguru import logger
 from pydantic import Field
@@ -139,7 +139,7 @@ class DispatchTier(str, Enum):
     """
 
     WORKSPACE_MISCONFIGURED = "workspace_misconfigured"
-    """services.toml lacks [services.system_interface] -- a restart won't help."""
+    """runtime/applications.toml has no system_interface entry -- a restart won't help."""
 
     BACKEND_UNREACHABLE = "backend_unreachable"
     """The provider/backend hosting this workspace can't be reached, or refused us
@@ -191,7 +191,7 @@ class HostHealthResponse(FrozenModel):
 _QUESTION_CONTAINER_RUNNING: Final[str] = "Is the workspace's container running?"
 _QUESTION_SERVICES_AGENT_REGISTERED: Final[str] = "Is the system-services agent registered?"
 _QUESTION_CAN_RUN_COMMANDS_INSIDE: Final[str] = "Can we run a command inside the container?"
-_QUESTION_SERVICES_TOML_DECLARES: Final[str] = "Does services.toml declare [services.system_interface]?"
+_QUESTION_SERVICES_TOML_DECLARES: Final[str] = "Is system_interface registered in runtime/applications.toml?"
 _QUESTION_PORT_LISTENING: Final[str] = "Is anything listening on the system-interface inner port?"
 _QUESTION_CURL_OK: Final[str] = "Does the inner web server answer GET / inside the container?"
 _QUESTION_PLUGIN_RESOLVER: Final[str] = "Has the system interface registered with the plugin resolver?"
@@ -213,9 +213,9 @@ class _InContainerProbe(FrozenModel):
     raw_stdout: str = Field(default="")
     tmux_ls: str | None = Field(default=None)
     tmux_error: str | None = Field(default=None)
-    services_toml_declares_system_interface: bool | None = Field(default=None)
-    services_toml_path: str = Field(default="/code/services.toml")
-    services_toml_error: str | None = Field(default=None)
+    applications_toml_declares_system_interface: bool | None = Field(default=None)
+    applications_toml_path: str = Field(default="/code/runtime/applications.toml")
+    applications_toml_error: str | None = Field(default=None)
     inner_port: int | None = Field(default=None)
     port_listener: str | None = Field(default=None)
     port_listener_error: str | None = Field(default=None)
@@ -258,11 +258,11 @@ def _parse_in_container_probe(stdout: str | None) -> _InContainerProbe:
         raw_stdout=stdout,
         tmux_ls=_coerce_optional_str(payload.get("tmux_ls")),
         tmux_error=_coerce_optional_str(payload.get("tmux_error")),
-        services_toml_declares_system_interface=_coerce_optional_bool(
-            payload.get("services_toml_declares_system_interface")
+        applications_toml_declares_system_interface=_coerce_optional_bool(
+            payload.get("applications_toml_declares_system_interface")
         ),
-        services_toml_path=str(payload.get("services_toml_path") or "/code/services.toml"),
-        services_toml_error=_coerce_optional_str(payload.get("services_toml_error")),
+        applications_toml_path=str(payload.get("applications_toml_path") or "/code/runtime/applications.toml"),
+        applications_toml_error=_coerce_optional_str(payload.get("applications_toml_error")),
         inner_port=_coerce_optional_int(payload.get("inner_port")),
         port_listener=_coerce_optional_str(payload.get("port_listener")),
         port_listener_error=_coerce_optional_str(payload.get("port_listener_error")),
@@ -389,37 +389,39 @@ def _build_can_run_commands_probe(in_container: _InContainerProbe, mngr_exec_com
     )
 
 
-def _services_toml_inner_command(services_toml_path: str) -> str:
+def _applications_toml_inner_command(applications_toml_path: str) -> str:
     """In-container check that prints ``declared`` or ``MISSING``.
 
-    Mirrors the inline probe script's ``isinstance(si, dict)`` test. The body
-    uses only double quotes so it survives the single-quoted ``-c`` wrapper,
-    which in turn survives ``shlex.join`` quoting for ``mngr exec``.
+    Mirrors the inline probe script's scan of the ``applications`` array-of-tables
+    for an entry named ``system_interface``. The body uses only double quotes so
+    it survives the single-quoted ``-c`` wrapper, which in turn survives
+    ``shlex.join`` quoting for ``mngr exec``.
     """
     body = (
         "import tomllib; "
-        f'd = tomllib.load(open("{services_toml_path}", "rb")); '
-        'print("declared" if isinstance(d.get("services", {}).get("system_interface"), dict) else "MISSING")'
+        f'd = tomllib.load(open("{applications_toml_path}", "rb")); '
+        'print("declared" if any(a.get("name") == "system_interface" '
+        'for a in d.get("applications", [])) else "MISSING")'
     )
     return f"python3 -c '{body}'"
 
 
-def _build_services_toml_probe(
+def _build_applications_toml_probe(
     in_container: _InContainerProbe,
     mngr_binary: str,
     services_agent_id: AgentId | None,
 ) -> Probe:
-    """Probe 4: does services.toml declare [services.system_interface]?"""
+    """Probe 4: is system_interface registered in runtime/applications.toml?"""
     command = _mngr_exec_command(
-        mngr_binary, services_agent_id, _services_toml_inner_command(in_container.services_toml_path)
+        mngr_binary, services_agent_id, _applications_toml_inner_command(in_container.applications_toml_path)
     )
     if not in_container.sentinel_seen:
         output, answer = "(in-container probe did not run)", ProbeAnswer.UNKNOWN
-    elif in_container.services_toml_error is not None:
-        output, answer = f"error: {in_container.services_toml_error}", ProbeAnswer.UNKNOWN
-    elif in_container.services_toml_declares_system_interface is True:
+    elif in_container.applications_toml_error is not None:
+        output, answer = f"error: {in_container.applications_toml_error}", ProbeAnswer.UNKNOWN
+    elif in_container.applications_toml_declares_system_interface is True:
         output, answer = "declared", ProbeAnswer.YES
-    elif in_container.services_toml_declares_system_interface is False:
+    elif in_container.applications_toml_declares_system_interface is False:
         output, answer = "MISSING", ProbeAnswer.NO
     else:
         output, answer = "(no declaration data returned)", ProbeAnswer.UNKNOWN
@@ -467,7 +469,7 @@ def _build_port_listening_probe(
     if not in_container.sentinel_seen:
         output, answer = "(in-container probe did not run)", ProbeAnswer.UNKNOWN
     elif port is None:
-        output, answer = "(could not parse inner port from services.toml command)", ProbeAnswer.UNKNOWN
+        output, answer = "(could not parse inner port from applications.toml url)", ProbeAnswer.UNKNOWN
     elif in_container.port_listener_error is not None:
         output, answer = f"error: {in_container.port_listener_error}", ProbeAnswer.UNKNOWN
     elif (in_container.port_listener or "").strip():
@@ -500,7 +502,7 @@ def _build_curl_probe(
     if not in_container.sentinel_seen:
         output, answer = "(in-container probe did not run)", ProbeAnswer.UNKNOWN
     elif port is None:
-        output, answer = "(could not parse inner port from services.toml command)", ProbeAnswer.UNKNOWN
+        output, answer = "(could not parse inner port from applications.toml url)", ProbeAnswer.UNKNOWN
     elif in_container.curl_error is not None:
         output, answer = f"error: {in_container.curl_error}", ProbeAnswer.NO
     elif in_container.curl_status == "200":
@@ -549,8 +551,8 @@ def _classify_dispatch_tier(
       login all land here): the user-facing impact is identical -- show the
       provider's own message, offer Retry, and wait for it to recover.
     * WORKSPACE_MISCONFIGURED beats the remaining tiers: a missing
-      [services.system_interface] block means no restart will help, so don't
-      bury that behind any transport / container check.
+      system_interface entry in runtime/applications.toml means no restart will
+      help, so don't bury that behind any transport / container check.
     * HOST_OFFLINE when the container is offline: nothing live to interrupt, so
       a host restart can run unattended.
     * INTERFACE_UNRESPONSIVE when both container and exec are healthy: the
@@ -610,7 +612,7 @@ def build_host_health_response(
         _build_container_running_probe(host_state),
         _build_services_agent_registered_probe(services_agent_id),
         _build_can_run_commands_probe(in_container, exec_cmd),
-        _build_services_toml_probe(in_container, mngr_binary, services_agent_id),
+        _build_applications_toml_probe(in_container, mngr_binary, services_agent_id),
         _build_port_listening_probe(in_container, mngr_binary, services_agent_id),
         _build_curl_probe(in_container, mngr_binary, services_agent_id),
         _build_plugin_resolver_probe(plugin_resolver_services),
@@ -625,22 +627,17 @@ def build_host_health_response(
     )
 
 
-# Regex used in tests that need to assert on the embedded inner-port parse.
-_INNER_PORT_REGEX: Final[re.Pattern[str]] = re.compile(r"--url\s+\S+://[^:]+:(\d+)")
-
-
-def parse_inner_port_from_command(command: str) -> int | None:
+def parse_inner_port_from_url(url: str) -> int | None:
     """Mirror of the inner-port parser the inline Python script uses.
 
-    Exposed for unit tests so the regex and the in-container behavior can
-    be pinned in one place; the in-container script duplicates the regex
-    because it can't import this module.
+    The in-container probe reads each ``system_interface`` entry's ``url`` from
+    ``/code/runtime/applications.toml`` and takes the port component of that URL
+    (e.g. ``http://localhost:8000`` -> 8000). Exposed for unit tests so the parse
+    behavior can be pinned in one place; the in-container script duplicates the
+    logic because it can't import this module.
     """
-    match = _INNER_PORT_REGEX.search(command)
-    if match is None:
-        return None
     try:
-        return int(match.group(1))
+        return urlparse(url).port
     except ValueError:
         return None
 
@@ -678,7 +675,7 @@ def parse_listening_sockets(proc_net_tcp_text: str, port: int) -> list[str]:
 
     Mirror of the inline probe script's scan, exposed for unit tests; the
     in-container script duplicates this logic because it can't import this
-    module (same arrangement as ``parse_inner_port_from_command``). The
+    module (same arrangement as ``parse_inner_port_from_url``). The
     header row is skipped naturally because its state column is the literal
     ``st`` rather than a hex state code.
     """

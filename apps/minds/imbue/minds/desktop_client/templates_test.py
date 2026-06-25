@@ -789,8 +789,8 @@ def test_render_recovery_page_restart_failed_also_runs_probe() -> None:
 def test_render_recovery_page_honors_misconfigured_before_autodispatch_short_circuit() -> None:
     """The workspace_misconfigured tier must be honored on the restart_failed path.
 
-    A workspace whose services.toml lacks [services.system_interface] lands in
-    restart_failed once its undeclared interface fails to come back up, so the
+    A workspace whose runtime/applications.toml lacks a system_interface entry
+    lands in restart_failed once its unregistered interface fails to come back up, so the
     page runs runProbe(false), which renders via applyHealth. If the
     no-auto-dispatch short-circuit (``if (!autoDispatch) renderUnresponsive()``)
     ran before the workspace_misconfigured check, that workspace would render a

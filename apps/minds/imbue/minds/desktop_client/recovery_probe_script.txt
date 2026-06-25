@@ -1,14 +1,14 @@
 import json
-import re
 import socket
 import subprocess
+from urllib.parse import urlparse
 
 result = {
     "tmux_ls": None,
     "tmux_error": None,
-    "services_toml_declares_system_interface": None,
-    "services_toml_path": "/code/services.toml",
-    "services_toml_error": None,
+    "applications_toml_declares_system_interface": None,
+    "applications_toml_path": "/code/runtime/applications.toml",
+    "applications_toml_error": None,
     "inner_port": None,
     "port_listener": None,
     "port_listener_error": None,
@@ -26,21 +26,25 @@ except Exception as e:
 
 try:
     import tomllib
-    with open("/code/services.toml", "rb") as fh:
+    with open("/code/runtime/applications.toml", "rb") as fh:
         data = tomllib.load(fh)
-    services = data.get("services", {})
-    si = services.get("system_interface")
-    result["services_toml_declares_system_interface"] = isinstance(si, dict)
-    if isinstance(si, dict):
-        cmd = si.get("command", "") or ""
-        m = re.search(r"--url\s+\S+://[^:]+:(\d+)", cmd)
-        if m:
-            try:
-                result["inner_port"] = int(m.group(1))
-            except ValueError:
-                pass
+    applications = data.get("applications", [])
+    si = None
+    for entry in applications:
+        if isinstance(entry, dict) and entry.get("name") == "system_interface":
+            si = entry
+            break
+    result["applications_toml_declares_system_interface"] = si is not None
+    if si is not None:
+        url = si.get("url", "") or ""
+        try:
+            port = urlparse(url).port
+        except ValueError:
+            port = None
+        if port is not None:
+            result["inner_port"] = int(port)
 except Exception as e:
-    result["services_toml_error"] = repr(e)
+    result["applications_toml_error"] = repr(e)
 
 # The agent container image ships no iproute2, so "ss" is absent and a
 # subprocess.run(["ss", ...]) raises FileNotFoundError. Scan /proc/net/tcp{,6}

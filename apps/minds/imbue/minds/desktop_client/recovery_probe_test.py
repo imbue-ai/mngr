@@ -10,7 +10,7 @@ from imbue.minds.desktop_client.recovery_probe import Probe
 from imbue.minds.desktop_client.recovery_probe import ProbeAnswer
 from imbue.minds.desktop_client.recovery_probe import build_host_health_response
 from imbue.minds.desktop_client.recovery_probe import build_probe_argv
-from imbue.minds.desktop_client.recovery_probe import parse_inner_port_from_command
+from imbue.minds.desktop_client.recovery_probe import parse_inner_port_from_url
 from imbue.minds.desktop_client.recovery_probe import parse_listening_sockets
 from imbue.mngr.primitives import AgentId
 
@@ -64,16 +64,15 @@ def _probe_for(response: HostHealthResponse, question_fragment: str) -> Probe:
     raise AssertionError(f"no probe matched fragment {question_fragment!r}")
 
 
-# --- inner-port regex -----------------------------------------------------
+# --- inner-port parse -----------------------------------------------------
 
 
-def test_parse_inner_port_matches_forward_port_command() -> None:
-    cmd = "python3 scripts/forward_port.py --url http://localhost:8000 --name system_interface && system-interface"
-    assert parse_inner_port_from_command(cmd) == 8000
+def test_parse_inner_port_matches_applications_toml_url() -> None:
+    assert parse_inner_port_from_url("http://localhost:8000") == 8000
 
 
-def test_parse_inner_port_returns_none_when_command_lacks_url_flag() -> None:
-    assert parse_inner_port_from_command("system-interface") is None
+def test_parse_inner_port_returns_none_when_url_lacks_port() -> None:
+    assert parse_inner_port_from_url("http://localhost") is None
 
 
 # --- build_probe_argv -----------------------------------------------------
@@ -131,29 +130,29 @@ def test_can_run_commands_probe_no_when_sentinel_absent() -> None:
 
 
 def test_can_run_commands_probe_yes_when_sentinel_present() -> None:
-    response = _response(in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": True}))
+    response = _response(in_container_stdout=_probe_stdout({"applications_toml_declares_system_interface": True}))
     assert _answer(response, "run a command") == ProbeAnswer.YES
 
 
 def test_services_toml_probe_no_when_declaration_missing() -> None:
-    response = _response(in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": False}))
-    assert _answer(response, "services.toml") == ProbeAnswer.NO
+    response = _response(in_container_stdout=_probe_stdout({"applications_toml_declares_system_interface": False}))
+    assert _answer(response, "applications.toml") == ProbeAnswer.NO
 
 
 def test_services_toml_probe_yes_when_declaration_present() -> None:
-    response = _response(in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": True}))
-    assert _answer(response, "services.toml") == ProbeAnswer.YES
+    response = _response(in_container_stdout=_probe_stdout({"applications_toml_declares_system_interface": True}))
+    assert _answer(response, "applications.toml") == ProbeAnswer.YES
 
 
 def test_services_toml_probe_unknown_when_probe_did_not_run() -> None:
     response = _response(in_container_stdout=None)
-    assert _answer(response, "services.toml") == ProbeAnswer.UNKNOWN
+    assert _answer(response, "applications.toml") == ProbeAnswer.UNKNOWN
 
 
 def test_curl_probe_yes_for_200() -> None:
     response = _response(
         in_container_stdout=_probe_stdout(
-            {"services_toml_declares_system_interface": True, "inner_port": 8000, "curl_status": "200"}
+            {"applications_toml_declares_system_interface": True, "inner_port": 8000, "curl_status": "200"}
         )
     )
     assert _answer(response, "GET /") == ProbeAnswer.YES
@@ -162,7 +161,7 @@ def test_curl_probe_yes_for_200() -> None:
 def test_curl_probe_no_for_non_200() -> None:
     response = _response(
         in_container_stdout=_probe_stdout(
-            {"services_toml_declares_system_interface": True, "inner_port": 8000, "curl_status": "502"}
+            {"applications_toml_declares_system_interface": True, "inner_port": 8000, "curl_status": "502"}
         )
     )
     assert _answer(response, "GET /") == ProbeAnswer.NO
@@ -172,7 +171,7 @@ def test_port_listener_probe_yes_when_listener_present() -> None:
     response = _response(
         in_container_stdout=_probe_stdout(
             {
-                "services_toml_declares_system_interface": True,
+                "applications_toml_declares_system_interface": True,
                 "inner_port": 8000,
                 "port_listener": "LISTEN 0.0.0.0:8000\nLISTEN ::1:8000",
             }
@@ -183,7 +182,7 @@ def test_port_listener_probe_yes_when_listener_present() -> None:
 
 def test_plugin_resolver_probe_yes_when_services_registered() -> None:
     response = _response(
-        in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": True}),
+        in_container_stdout=_probe_stdout({"applications_toml_declares_system_interface": True}),
         plugin_resolver_services={"system_interface": "http://127.0.0.1:9100"},
     )
     probe = _probe_for(response, "registered with the plugin resolver")
@@ -192,7 +191,7 @@ def test_plugin_resolver_probe_yes_when_services_registered() -> None:
 
 
 def test_plugin_resolver_probe_no_when_no_services_registered() -> None:
-    response = _response(in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": True}))
+    response = _response(in_container_stdout=_probe_stdout({"applications_toml_declares_system_interface": True}))
     assert _answer(response, "registered with the plugin resolver") == ProbeAnswer.NO
 
 
@@ -203,7 +202,7 @@ def test_dispatch_tier_interface_unresponsive_when_container_running_and_exec_wo
     response = _response(
         host_state="RUNNING",
         in_container_stdout=_probe_stdout(
-            {"services_toml_declares_system_interface": True, "inner_port": 8000, "curl_status": "502"}
+            {"applications_toml_declares_system_interface": True, "inner_port": 8000, "curl_status": "502"}
         ),
     )
     assert response.dispatch_tier == DispatchTier.INTERFACE_UNRESPONSIVE
@@ -226,10 +225,10 @@ def test_dispatch_tier_host_unresponsive_when_container_running_but_exec_dead() 
 
 
 def test_dispatch_tier_misconfigured_beats_other_signals() -> None:
-    """A missing [services.system_interface] block dominates: no restart will help."""
+    """A missing system_interface registration dominates: no restart will help."""
     response = _response(
         host_state="RUNNING",
-        in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": False}),
+        in_container_stdout=_probe_stdout({"applications_toml_declares_system_interface": False}),
         plugin_resolver_services={"system_interface": "http://127.0.0.1:9100"},
     )
     assert response.dispatch_tier == DispatchTier.WORKSPACE_MISCONFIGURED
@@ -311,14 +310,14 @@ def _inner_python_body(command: str) -> str | None:
 def test_python_probe_commands_are_well_formed_and_runnable() -> None:
     """Every ``python3 -c`` probe command must unwrap and compile as Python.
 
-    Guards against quote-nesting bugs (the original services.toml command
-    nested single quotes inside a single-quoted ``-c`` body) and against the
+    Guards against quote-nesting bugs (the applications.toml command nests
+    single quotes inside a single-quoted ``-c`` body) and against the
     ``mngr exec`` wrapper mangling the inner script. compile() validates the
     inner body's syntax without executing it.
     """
     response = _response(
         in_container_stdout=_probe_stdout(
-            {"services_toml_declares_system_interface": True, "inner_port": 8000, "curl_status": "200"}
+            {"applications_toml_declares_system_interface": True, "inner_port": 8000, "curl_status": "200"}
         )
     )
     checked: list[tuple[str, str]] = []
@@ -341,7 +340,7 @@ def test_python_probe_commands_are_well_formed_and_runnable() -> None:
 
 def _healthy_probe_stdout(**overrides: object) -> str:
     payload: dict[str, object] = {
-        "services_toml_declares_system_interface": True,
+        "applications_toml_declares_system_interface": True,
         "inner_port": 8000,
         "curl_status": "200",
         "port_listener": "LISTEN 0.0.0.0:8000",
@@ -364,7 +363,7 @@ def test_services_agent_probe_outputs_the_resolved_agent_id() -> None:
 
 
 def test_can_run_commands_output_is_the_raw_exec_stdout() -> None:
-    stdout = _probe_stdout({"services_toml_declares_system_interface": True})
+    stdout = _probe_stdout({"applications_toml_declares_system_interface": True})
     response = _response(in_container_stdout=stdout, mngr_exec_command="mngr exec agent-x 'echo hi' --quiet")
     probe = _probe_for(response, "run a command")
     assert probe.command == "mngr exec agent-x 'echo hi' --quiet"
@@ -374,15 +373,15 @@ def test_can_run_commands_output_is_the_raw_exec_stdout() -> None:
 
 def test_services_toml_command_is_mngr_exec_and_output_is_declared() -> None:
     response = _response(in_container_stdout=_healthy_probe_stdout())
-    probe = _probe_for(response, "services.toml")
+    probe = _probe_for(response, "applications.toml")
     assert probe.command.startswith(f"mngr exec {_SERVICES_AGENT_ID} ")
     assert "python3 -c" in probe.command
     assert probe.output == "declared"
 
 
 def test_services_toml_output_is_missing_when_not_declared() -> None:
-    response = _response(in_container_stdout=_healthy_probe_stdout(services_toml_declares_system_interface=False))
-    assert _probe_for(response, "services.toml").output == "MISSING"
+    response = _response(in_container_stdout=_healthy_probe_stdout(applications_toml_declares_system_interface=False))
+    assert _probe_for(response, "applications.toml").output == "MISSING"
 
 
 def test_curl_output_is_bare_status_code() -> None:
