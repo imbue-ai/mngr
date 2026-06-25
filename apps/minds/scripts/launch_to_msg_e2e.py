@@ -1294,6 +1294,12 @@ async def amain() -> int:
                         sse_meta = await chat.evaluate("JSON.stringify(window.__sseDiagMeta || {})")
                         logger.error("[diag] window.__sseDiagMeta at freeze: {}", sse_meta)
                     with contextlib.suppress(Exception):
+                        chat_diag = await chat.evaluate("JSON.stringify(window.__chatDiag || {})")
+                        logger.error("[diag] window.__chatDiag at freeze: {}", chat_diag)
+                    with contextlib.suppress(Exception):
+                        chat_scroll = await chat.evaluate("JSON.stringify(window.__chatScrollDiag || {})")
+                        logger.error("[diag] window.__chatScrollDiag at freeze: {}", chat_scroll)
+                    with contextlib.suppress(Exception):
                         full = await chat.evaluate("document.body.innerText")
                         logger.error("[diag] FULL chat body before reload ({} chars):\n{}", len(full), full[:4000])
                     reload_found = None
