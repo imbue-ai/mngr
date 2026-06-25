@@ -773,6 +773,20 @@ jobs:
               echo "=== SSE fan-out timeline ([diag-sse] register/unregister/broadcast, whole log) ==="
               "$LIMA" shell "$VM" -- sudo bash -c 'grep -aE "\[diag-sse\]|GET /api/agents/[^ ]*/(events|stream)" /var/log/supervisor/system_interface-stderr.log 2>/dev/null' 2>&1 | tail -160
               echo
+              echo "=== SSE delivery correlation (broadcast vs generator-got vs forwarded) ==="
+              "$LIMA" shell "$VM" -- sudo bash -c '
+                log=/var/log/supervisor/system_interface-stderr.log
+                grep -aoE "\[diag-sse\] BROADCAST agent=[^ ]+ event_id=[^ ]+" "$log" 2>/dev/null | sed -E "s/.*event_id=//" | grep -v "^None$" | sort -u > /tmp/bcast_ids
+                grep -aoE "\[diag-gen\] agent=[^ ]+ got event_id=[^ ]+" "$log" 2>/dev/null | sed -E "s/.*event_id=//" | grep -v "^None$" | sort -u > /tmp/got_ids
+                echo "counts: distinct_broadcast=$(wc -l </tmp/bcast_ids) distinct_generator_got=$(wc -l </tmp/got_ids)"
+                echo "--- broadcast but NEVER reached any generator (queue-not-drained suspects) ---"
+                comm -23 /tmp/bcast_ids /tmp/got_ids | head -60
+                echo "--- last 50 [diag-gen] lines (got + forward decision) ---"
+                grep -aE "\[diag-gen\]" "$log" 2>/dev/null | tail -50
+                echo "--- last 30 generator forward=False (filter-dropped) lines ---"
+                grep -aE "\[diag-gen\].*forward=False" "$log" 2>/dev/null | tail -30
+              ' 2>&1 | tail -180
+              echo
               echo "=== ps aux in VM ==="
               "$LIMA" shell "$VM" -- sudo ps auxf 2>&1 | grep -iE "bootstrap|system|web-server|uv run|tmux" | head -30
               echo
