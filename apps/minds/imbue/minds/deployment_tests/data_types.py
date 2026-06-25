@@ -73,6 +73,10 @@ class FctTemplateRef(FrozenModel):
         """
         if self.worktree_path is not None:
             return str(self.worktree_path)
+        # All three fields are individually optional because this type models two distinct
+        # modes (local worktree vs pushed-branch ref), but the orchestrator always populates
+        # at least one mode -- an invariant the type system cannot express. Assert it here so
+        # an unpopulated ref crashes loudly rather than falling back to a bogus "None#None" arg.
         assert self.test_branch is not None and self.test_remote is not None, (
             "FctTemplateRef has neither a local worktree path nor a pushed branch ref; "
             "the orchestrator should always populate at least one."

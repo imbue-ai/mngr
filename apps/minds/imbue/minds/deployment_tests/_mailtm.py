@@ -12,12 +12,9 @@ This module is private (``_mailtm``) -- the public entrypoint is the
 
 import re
 import time
-from datetime import datetime
-from datetime import timezone
 from typing import Final
 
 import httpx
-from loguru import logger
 from pydantic import PrivateAttr
 from pydantic import SecretStr
 
@@ -44,8 +41,6 @@ class _MailtmMessage(FrozenModel):
 
     id: NonEmptyStr
     to_addresses: tuple[str, ...]
-    subject: str
-    created_at: datetime
 
 
 class MailtmInbox(MutableModel):
@@ -133,21 +128,22 @@ class MailtmInbox(MutableModel):
             )
             response.raise_for_status()
             for raw in response.json().get("hydra:member", []):
+                # Skip entries with no id (malformed per mail.tm's schema) or already seen.
+                # Dropping an entry here is harmless: the outer loop keeps polling until the
+                # email arrives or the timeout fires, so a transient bad entry just delays a
+                # match rather than producing a wrong result.
                 message_id = raw.get("id")
                 if not message_id or message_id in self._seen_message_ids:
                     continue
                 to_addresses = tuple(addr.get("address", "") for addr in raw.get("to", []) if addr.get("address"))
                 if str(self.address) not in to_addresses:
                     continue
+                # A missing subject defaults to "" which can never contain the filter substring,
+                # so the message is correctly skipped rather than spuriously matched.
                 subject = raw.get("subject", "")
                 if subject_substring.lower() not in subject.lower():
                     continue
-                return _MailtmMessage(
-                    id=NonEmptyStr(message_id),
-                    to_addresses=to_addresses,
-                    subject=subject,
-                    created_at=_parse_iso_timestamp(raw.get("createdAt", "")),
-                )
+                return _MailtmMessage(id=NonEmptyStr(message_id), to_addresses=to_addresses)
         return None
 
     def _fetch_message_body(self, message_id: str) -> str:
@@ -158,6 +154,11 @@ class MailtmInbox(MutableModel):
             )
             response.raise_for_status()
             data = response.json()
+        # ``text``/``html`` may be absent or null on a message; coerce to empty so the
+        # concatenation below is well-typed. An empty body intentionally falls through to the
+        # caller (wait_for_*), whose regex then raises a MailtmFetchError reporting "no
+        # recognizable token/code" -- which is the correct outcome for a body we could not
+        # extract anything useful from.
         text = data.get("text") or ""
         html = data.get("html") or []
         if isinstance(html, list):
@@ -177,14 +178,3 @@ def make_signup_address(account_address: MailtmAddress, suffix: str) -> SignupEm
         raise InvalidMailtmAddressError(f"mail.tm account address {account_address!r} is malformed: missing '@'.")
     local, _, domain = str(account_address).partition("@")
     return SignupEmailAddress(f"{local}+{suffix}@{domain}")
-
-
-def _parse_iso_timestamp(raw: str) -> datetime:
-    """Parse mail.tm's ISO timestamps; falls back to ``epoch`` on unparseable input."""
-    if not raw:
-        return datetime.fromtimestamp(0, tz=timezone.utc)
-    try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        logger.warning("Unparseable mail.tm timestamp {!r}; falling back to epoch.", raw)
-        return datetime.fromtimestamp(0, tz=timezone.utc)

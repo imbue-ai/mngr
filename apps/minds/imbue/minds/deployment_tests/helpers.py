@@ -188,11 +188,22 @@ def sweep_stale_users(
             resp.raise_for_status()
             data = resp.json()
             for raw_user in data.get("users", []):
+                # SuperTokens' list-users response shape varies across CDI versions: newer cores
+                # wrap each entry as ``{"recipeId": ..., "user": {...}}`` while older ones return
+                # the user dict bare. Accept either. Likewise the user id is ``id`` on the
+                # emailpassword user object but ``recipeUserId`` on some account-linking shapes.
+                # This sweep is best-effort cleanup, so tolerating both shapes is preferable to
+                # crashing the session-autouse fixture on a version we did not anticipate.
                 user_info = raw_user.get("user", raw_user)
                 emails: list[str] = user_info.get("emails", [])
                 user_id = user_info.get("id") or user_info.get("recipeUserId")
-                time_joined = user_info.get("timeJoined", 0)
-                if not user_id or not emails or time_joined > cutoff_ms:
+                # A missing timeJoined means we cannot establish the user's age, so we must
+                # NOT delete it: the age cutoff exists precisely to avoid deleting a concurrent
+                # run's freshly-created user. Bias an unknown age toward "too new to delete"
+                # (skip) rather than the old ``get(..., 0)`` which treated it as epoch-old and
+                # would have authorized deletion.
+                time_joined = user_info.get("timeJoined")
+                if not user_id or not emails or time_joined is None or time_joined > cutoff_ms:
                     continue
                 if not any(email_pattern.match(email) for email in emails):
                     continue
@@ -258,7 +269,12 @@ def neon_project_exists(*, name: DevEnvName, org_id: str, api_token: SecretStr) 
         resp = client.get(url, headers=headers)
         resp.raise_for_status()
     payload = resp.json()
-    raw_projects = payload.get("projects", [])
+    # Index ``projects`` directly rather than defaulting to ``[]``: a 200 from Neon's
+    # list-projects endpoint always carries the key (possibly an empty list). Coercing a
+    # missing key to ``[]`` would make this return False, which would silently let the
+    # post-destroy ``not neon_project_exists(...)`` assertion pass even if a project leaked.
+    # A surprising response shape should crash here, not be read as "no projects".
+    raw_projects = payload["projects"]
     matches = [p for p in raw_projects if p.get("name") == project_name]
     return len(matches) > 0
 
@@ -278,7 +294,11 @@ def supertokens_app_exists(*, name: DevEnvName, core_base_url: str, api_key: Sec
     if resp.status_code == 200:
         return True
     body = resp.text.lower()
-    if resp.status_code in (401, 404) or "app does not exist" in body or "not found" in body:
+    # Only treat 401/404 or the specific SuperTokens "app does not exist" error as absence.
+    # A generic "not found" substring is too broad -- an unrelated 404 (a misrouted proxy
+    # response, an error mentioning some other missing resource) would be misread as "app
+    # absent" and could mask a real state in the deploy/destroy round-trip assertions.
+    if resp.status_code in (401, 404) or "app does not exist" in body:
         return False
     raise MindError(
         f"SuperTokens probe for app {str(name)!r} returned an unexpected response: "
