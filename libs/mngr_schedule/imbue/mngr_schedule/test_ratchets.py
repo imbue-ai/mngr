@@ -160,7 +160,7 @@ def test_prevent_init_docstrings() -> None:
 
 @pytest.mark.timeout(10)
 def test_prevent_args_in_docstrings() -> None:
-    rc.check_args_in_docstrings(_DIR, snapshot(1))
+    rc.check_args_in_docstrings(_DIR, snapshot(0))
 
 
 @pytest.mark.timeout(10)
@@ -217,11 +217,11 @@ def test_prevent_unittest_mock_imports() -> None:
 
 
 def test_prevent_monkeypatch_setattr() -> None:
-    rc.check_monkeypatch_setattr(_DIR, snapshot(1))
+    rc.check_monkeypatch_setattr(_DIR, snapshot(0))
 
 
 def test_prevent_test_container_classes() -> None:
-    rc.check_test_container_classes(_DIR, snapshot(2))
+    rc.check_test_container_classes(_DIR, snapshot(0))
 
 
 def test_prevent_pytest_mark_integration() -> None:

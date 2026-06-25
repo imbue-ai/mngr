@@ -87,8 +87,30 @@ def test_load_env_file_unquotes_values(tmp_path: Path, monkeypatch: pytest.Monke
     assert os.environ["SINGLE_QUOTED"] == "single"
 
 
-def test_load_env_file_noop_when_file_missing(tmp_path: Path) -> None:
-    """load_env_file should do nothing when the file does not exist."""
+def test_load_env_file_noop_when_file_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """load_env_file should leave os.environ untouched when the file does not exist."""
     env_file = tmp_path / "nonexistent.env"
 
+    monkeypatch.setenv("SENTINEL_KEY", "sentinel_value")
+    keys_before = set(os.environ.keys())
+
+    result = load_env_file(env_file)
+
+    assert result is None
+    assert os.environ["SENTINEL_KEY"] == "sentinel_value"
+    assert set(os.environ.keys()) == keys_before
+
+
+def test_load_env_file_skips_valueless_lines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """load_env_file should skip bare keys with no '=' (python-dotenv parses these as None)."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("VALUELESS_KEY\nREAL_KEY=x\n")
+
+    # Ensure the valueless key is absent beforehand, and register both for cleanup.
+    monkeypatch.delenv("VALUELESS_KEY", raising=False)
+    monkeypatch.setenv("REAL_KEY", "")
+
     load_env_file(env_file)
+
+    assert "VALUELESS_KEY" not in os.environ
+    assert os.environ["REAL_KEY"] == "x"
