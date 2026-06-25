@@ -208,14 +208,15 @@ the right project's consolidated files.
    JSON object with that stderr content in `notes`.
 
 11. Merge the PR immediately -- this automation no longer waits for a
-   human reviewer; the accuracy review in step 8 is the gate. Squash-merge
-   and delete the branch: `gh pr merge "$PR_URL" --squash --delete-branch`.
-   Squashing collapses the consolidation commit plus any accuracy-review
-   correction commits into a single commit on `main`. If `gh pr merge`
-   exits non-zero, read its stderr; if the error is something you can fix
-   (e.g. a transient failure worth one retry) then retry once, otherwise
-   emit a `failed` JSON object with the merge error in `notes` (include the
-   PR URL so the half-finished run can be merged by hand).
+   human reviewer; the accuracy review in step 8 is the gate. Merge and
+   delete the branch: `gh pr merge "$PR_URL" --merge --delete-branch`. The
+   repo only permits merge commits (squash and rebase are disabled), so the
+   consolidation commit plus any accuracy-review correction commits land
+   under a single merge commit on `main`. If `gh pr merge` exits non-zero,
+   read its stderr; if the error is something you can fix (e.g. a transient
+   failure worth one retry) then retry once, otherwise emit a `failed` JSON
+   object with the merge error in `notes` (include the PR URL so the
+   half-finished run can be merged by hand).
 
 12. Emit your final JSON object: `{"status": "done", "pr_url":
     "<PR_URL>"}`, substituting the PR URL from step 10. Reaching this step
