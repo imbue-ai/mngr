@@ -3,6 +3,7 @@ from imbue.minds.desktop_client.templates_auth import render_check_email_page
 from imbue.minds.desktop_client.templates_auth import render_forgot_password_page
 from imbue.minds.desktop_client.templates_auth import render_oauth_close_page
 from imbue.minds.desktop_client.templates_auth import render_settings_page
+from imbue.minds.desktop_client.templates_auth import render_signin_modal_page
 
 
 def test_render_auth_page_defaults_to_signup() -> None:
@@ -45,6 +46,31 @@ def test_render_auth_page_includes_toggle_links() -> None:
     html = render_auth_page()
     assert "Already have an account?" in html
     assert "Don&#39;t have an account?" in html or "Don't have an account?" in html
+
+
+def test_render_signin_modal_page_embeds_auth_form_in_overlay() -> None:
+    # The sign-in modal page is loaded into the shared modal WebContentsView (the
+    # overlay layer that also hosts the inbox), so it is a full transparent-body
+    # page with a dim backdrop wrapping the shared auth form. It loads auth.js and
+    # routes post-auth navigations to the create screen via the auth-nav hooks.
+    html = render_signin_modal_page()
+    assert 'id="signin-modal-backdrop"' in html
+    assert "bg-transparent" in html
+    assert 'id="signin-form"' in html
+    assert 'id="signup-form"' in html
+    assert "/_static/auth.js" in html
+    assert "MINDS_AUTH_NAV" in html
+    assert "/create" in html
+    # Close affordance (the shared DialogCloseButton wired to the dismiss hook).
+    assert "dismissSigninModal()" in html
+
+
+def test_render_signin_modal_page_shows_imbue_cloud_intro() -> None:
+    # The intro copy explains why signing in is required (Imbue Cloud needs an
+    # account) and that closing the modal falls back to running locally.
+    html = render_signin_modal_page()
+    assert "run your mind on Imbue Cloud" in html
+    assert "run it directly on your computer" in html
 
 
 def test_render_check_email_page() -> None:

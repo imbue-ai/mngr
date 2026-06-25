@@ -10,35 +10,42 @@
     return returnTo ? '/post-login?return_to=' + encodeURIComponent(returnTo) : '/post-login';
   }
 
-  // What to do after a successful sign-in / OAuth. The standalone auth page
-  // navigates to /post-login. When this form is hosted inside the create
-  // page's sign-in modal, the page sets ``window.MINDS_AUTH_RELOAD_ON_SUCCESS``
-  // so we just reload the create screen in place -- the reloaded page sees the
-  // now-signed-in account and the user clicks "Create" again.
+  // How to perform a post-auth navigation. The standalone auth page just
+  // navigates this page (window.location). When this form is hosted in the
+  // create screen's sign-in modal -- its own WebContentsView in the desktop
+  // client's overlay layer -- the host page sets ``window.MINDS_AUTH_NAV`` to
+  // route the navigation to the content view *behind* the modal and dismiss the
+  // overlay; reloading this page would only reload the overlay.
+  function authNavigate(url) {
+    if (typeof window.MINDS_AUTH_NAV === 'function') window.MINDS_AUTH_NAV(url);
+    else window.location.href = url;
+  }
+
+  // What to do after a successful sign-in / OAuth. The sign-in modal sets
+  // ``window.MINDS_AUTH_RETURN_TO`` to the create screen so the user lands back
+  // there signed in (and clicks "Create" again); the standalone auth page has
+  // no such hint and goes through /post-login (which may carry its own
+  // ?return_to=).
   function onAuthSuccess() {
-    if (window.MINDS_AUTH_RELOAD_ON_SUCCESS) {
-      window.location.reload();
-      return;
-    }
-    window.location.href = postLoginUrl();
+    authNavigate(window.MINDS_AUTH_RETURN_TO || postLoginUrl());
   }
 
   // Where to return after an email-verification round-trip (sign-up, or
   // sign-in of an unverified account). The standalone auth page honors its
-  // ``?return_to=`` query param; the in-page create modal (reload mode) returns
-  // to the page hosting it (e.g. /create) so the user lands back in the create
-  // flow rather than on the accounts page. The path is carried through
-  // /auth/check-email -> /post-login, which re-validates it as a safe path.
+  // ``?return_to=`` query param; the sign-in modal sets
+  // ``window.MINDS_AUTH_RETURN_TO`` (e.g. /create) so the user lands back in
+  // the create flow rather than on the accounts page. The path is carried
+  // through /auth/check-email -> /post-login, which re-validates it as a safe
+  // path.
   function verificationReturnTo() {
     var q = new URLSearchParams(window.location.search).get('return_to');
     if (q) return q;
-    if (window.MINDS_AUTH_RELOAD_ON_SUCCESS) return window.location.pathname;
-    return null;
+    return window.MINDS_AUTH_RETURN_TO || null;
   }
 
   function goToCheckEmail() {
     var rt = verificationReturnTo();
-    window.location.href = '/auth/check-email' + (rt ? '?return_to=' + encodeURIComponent(rt) : '');
+    authNavigate('/auth/check-email' + (rt ? '?return_to=' + encodeURIComponent(rt) : ''));
   }
 
   function showTab(tab) {

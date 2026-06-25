@@ -22,14 +22,15 @@
 #}
 {% set _default_restic_env = "# see docs linked above for available options\n# for example:\nRESTIC_REPOSITORY=s3:s3.amazonaws.com/<bucket_name>\nAWS_ACCESS_KEY_ID=\nAWS_SECRET_ACCESS_KEY=\n" %}
 {% set _scripts %}
-<script src="/_static/auth.js" defer></script>
 <script>
   (function() {
-    // The sign-in modal below reuses the shared auth form + auth.js. Tell
-    // auth.js to reload this create screen after a successful sign-in (instead
-    // of navigating to /post-login), so the user returns here signed in and
-    // presses "Create" again.
-    window.MINDS_AUTH_RELOAD_ON_SUCCESS = true;
+    // The remote (Imbue Cloud) preset needs an Imbue account. When a signed-out
+    // user presses "Create" with it selected, open the shared sign-in modal in
+    // the desktop client's overlay layer (covering the whole window, title bar
+    // included) via an allowlisted postMessage relayed to the Electron main
+    // process. In the browser (no shell) navigate to the standalone sign-in
+    // page instead.
+    var isElectronShell = navigator.userAgent.indexOf('Electron') !== -1;
 
     var form = document.getElementById('create-form');
     var simpleView = document.getElementById('simple-view');
@@ -62,7 +63,6 @@
     var regionRow = document.getElementById('region-row');
     var regionSelect = document.getElementById('region');
     var presetCards = document.querySelectorAll('[data-preset]');
-    var signinModal = document.getElementById('signin-modal');
     var accountError = document.getElementById('account-error');
     var REGION_OPTIONS = {{ region_options_by_launch_mode | tojson }};
     var REGION_SELECTED = {{ region_selected_by_launch_mode | tojson }};
@@ -113,11 +113,13 @@
     }
 
     function openSigninModal() {
-      if (signinModal) signinModal.classList.remove('hidden');
-    }
-
-    function closeSigninModal() {
-      if (signinModal) signinModal.classList.add('hidden');
+      if (isElectronShell) {
+        // Relayed to the main process (content-relay-preload.js), which opens
+        // the shared modal WebContentsView loaded with /auth/signin-modal.
+        window.postMessage({ type: 'minds:open-signin-modal' }, '*');
+      } else {
+        window.location.href = '/auth/signin-modal';
+      }
     }
 
     function showAccountError() {
@@ -165,18 +167,9 @@
     toggleAdvanced.addEventListener('click', function () { showAdvanced(true); });
     backToSimple.addEventListener('click', function () { showAdvanced(false); });
 
-    if (signinModal) {
-      signinModal.addEventListener('click', function (e) {
-        // Dismiss on a backdrop click or the close button.
-        if (e.target === signinModal || (e.target.closest && e.target.closest('[data-close-signin-modal]'))) {
-          closeSigninModal();
-        }
-      });
-    }
-
     form.addEventListener('submit', function (e) {
       // Imbue Cloud needs an account. If none is selected, don't submit:
-      //  - signed out -> open the in-page sign-in modal.
+      //  - signed out -> open the sign-in modal (overlay layer).
       //  - signed in  -> surface the account-picker error, but only now (on a
       //    Create attempt) -- not proactively as the user clicks between
       //    presets, which is too distracting.
@@ -485,17 +478,4 @@
       <ButtonSubmit form="create-form" id="create-submit" extra="w-80">Create</ButtonSubmit>
     </div>
   </form>
-
-  {# Sign-in modal: shown when a signed-out user presses "Create" with the Imbue
-     Cloud preset selected. Reuses the shared auth form; on a successful sign-in
-     auth.js reloads this screen (window.MINDS_AUTH_RELOAD_ON_SUCCESS) so the
-     user returns signed in and presses Create again. Closing it leaves them on
-     the picker to run locally instead. #}
-  <Modal id="signin-modal" card_extra="relative text-left">
-    <button type="button" aria-label="Close" data-close-signin-modal
-            class="absolute top-3 right-3 z-10 inline-flex items-center justify-center w-8 h-8 rounded-md text-tertiary hover:text-primary hover:bg-fill-hover cursor-pointer">
-      <Icon16 name="close" />
-    </button>
-    <auth.AuthForm :default_to_signup="True" intro="To run your mind on Imbue Cloud, sign in or create an Imbue account. You can also close this and run it directly on your computer instead." />
-  </Modal>
 </PageNarrowContainer>

@@ -1655,6 +1655,17 @@ def test_auth_page_with_return_to_shows_back_link_and_explainer(tmp_path: Path) 
     assert "run your mind on Imbue Cloud" in response.text
 
 
+def test_auth_signin_modal_page_renders_overlay_with_auth_form(tmp_path: Path) -> None:
+    """GET /auth/signin-modal serves the overlay sign-in page (transparent
+    backdrop + the shared auth form) loaded into the shared modal view."""
+    client = _create_test_client_with_auth_routes(tmp_path)
+    response = client.get("/auth/signin-modal")
+    assert response.status_code == 200
+    assert 'id="signin-modal-backdrop"' in response.text
+    assert 'id="signin-form"' in response.text
+    assert "run your mind on Imbue Cloud" in response.text
+
+
 def test_auth_page_ignores_unsafe_return_to(tmp_path: Path) -> None:
     """An off-origin return_to is dropped: no back link to it, no explainer."""
     client = _create_test_client_with_auth_routes(tmp_path)

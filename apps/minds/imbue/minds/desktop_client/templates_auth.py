@@ -34,6 +34,25 @@ def render_auth_page(
     )
 
 
+# Copy shown above the sign-in modal's tabs explaining why the user is being
+# asked to sign in (the create screen needs an Imbue account for Imbue Cloud).
+_SIGNIN_MODAL_INTRO: str = (
+    "To run your mind on Imbue Cloud, sign in or create an Imbue account. "
+    "You can also close this and run it directly on your computer instead."
+)
+
+
+def render_signin_modal_page() -> str:
+    """Render the sign-in modal page served by ``GET /auth/signin-modal``.
+
+    Loaded into the desktop client's shared modal WebContentsView (the same
+    overlay layer as the inbox) so it covers the whole window, including the
+    title bar, when a signed-out user presses "Create" with the Imbue Cloud
+    preset selected on the create screen.
+    """
+    return CATALOG.render("pages.SigninModal", intro=_SIGNIN_MODAL_INTRO)
+
+
 def render_check_email_page(email: str) -> str:
     """Render the 'check your email for verification' page."""
     return CATALOG.render("auth.CheckEmail", email=email)

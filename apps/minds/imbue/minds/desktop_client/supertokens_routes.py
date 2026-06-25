@@ -41,6 +41,7 @@ from imbue.minds.desktop_client.templates_auth import render_auth_page
 from imbue.minds.desktop_client.templates_auth import render_check_email_page
 from imbue.minds.desktop_client.templates_auth import render_forgot_password_page
 from imbue.minds.desktop_client.templates_auth import render_settings_page
+from imbue.minds.desktop_client.templates_auth import render_signin_modal_page
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.utils.output import emit_event
 from imbue.mngr_latchkey.core import LatchkeyError
@@ -469,6 +470,16 @@ def _handle_resend_verification_api() -> Response:
     return _json_response({"status": "OK"})
 
 
+def _handle_signin_modal_page() -> Response:
+    """Render the sign-in modal page (``GET /auth/signin-modal``).
+
+    Served into the desktop client's shared modal WebContentsView (the overlay
+    layer that also hosts the inbox) so the create screen's sign-in prompt
+    covers the whole window, including the title bar.
+    """
+    return make_html_response(render_signin_modal_page())
+
+
 def _handle_check_email_page() -> Response:
     """Render the 'check your email' page."""
     session_store = _get_session_store()
@@ -745,6 +756,7 @@ def create_supertokens_blueprint() -> Blueprint:
     blueprint.add_url_rule("/api/status", view_func=_handle_status_api, methods=["GET"])
     blueprint.add_url_rule("/api/email-verified", view_func=_handle_email_verified_api, methods=["GET"])
     blueprint.add_url_rule("/api/resend-verification", view_func=_handle_resend_verification_api, methods=["POST"])
+    blueprint.add_url_rule("/signin-modal", view_func=_handle_signin_modal_page, methods=["GET"])
     blueprint.add_url_rule("/check-email", view_func=_handle_check_email_page, methods=["GET"])
     blueprint.add_url_rule("/oauth/<provider_id>", view_func=_handle_oauth_redirect, methods=["GET"])
     blueprint.add_url_rule("/oauth/status/<flow_id>", view_func=_handle_oauth_status, methods=["GET"])

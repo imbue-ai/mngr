@@ -963,6 +963,18 @@ function inboxUrlFor(query) {
   return backendBaseUrl + '/inbox' + (query || '');
 }
 
+function signinModalUrlFor() {
+  if (!backendBaseUrl) return null;
+  return backendBaseUrl + '/auth/signin-modal';
+}
+
+function openSigninModal(bundle) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  const url = signinModalUrlFor();
+  if (!url) return;
+  openModal(bundle, url);
+}
+
 function isInboxModalOpen(bundle) {
   if (!bundle || !bundle.modalVisible) return false;
   if (!bundle.modalUrl) return false;
@@ -2758,6 +2770,16 @@ ipcMain.on('open-request-modal', (event, requestId) => {
   if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) return;
   const sender = getBundleFromEvent(event);
   if (sender) openInbox(sender, '?selected=' + encodeURIComponent(requestId));
+});
+
+// Open the sign-in modal in the shared overlay on behalf of the (otherwise
+// unprivileged) workspace content view -- the create screen posts an
+// allowlisted `minds:open-signin-modal` when a signed-out user presses
+// "Create" with the Imbue Cloud preset selected. No payload to validate; the
+// URL is a fixed server route.
+ipcMain.on('open-signin-modal', (event) => {
+  const sender = getBundleFromEvent(event);
+  if (sender) openSigninModal(sender);
 });
 
 ipcMain.on('close-modal', (event) => {

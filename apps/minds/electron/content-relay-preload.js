@@ -37,6 +37,13 @@ window.addEventListener('message', (event) => {
     ipcRenderer.send('open-request-modal', requestId);
     return;
   }
+  // Create-screen sign-in: open the shared modal overlay loaded with the
+  // sign-in page (so it covers the whole window, including the title bar).
+  // No payload -- the main process builds the fixed `/auth/signin-modal` URL.
+  if (data.type === 'minds:open-signin-modal') {
+    ipcRenderer.send('open-signin-modal');
+    return;
+  }
   // Landing-page Stop button: ask the main process to show a native
   // confirmation dialog and (on confirm) issue the host stop itself.
   if (data.type === 'minds:confirm-stop-mind') {
