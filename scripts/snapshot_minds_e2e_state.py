@@ -387,6 +387,15 @@ def _build_snapshot_image(staged_repo: Path) -> modal.Image:
                 "PLAYWRIGHT_BROWSERS_PATH": "/opt/ms-playwright",
             }
         )
+        # Install Playwright + chromium BEFORE copying the repo. It depends only
+        # on the playwright version (not on any repo source), so placing it ahead
+        # of the per-commit `COPY` keeps this ~24s step cached across commits
+        # instead of re-running every build. `--no-project` lets uv build the
+        # ephemeral playwright env without a project in the (empty) cwd; the
+        # browser lands in PLAYWRIGHT_BROWSERS_PATH (set above).
+        .run_commands(
+            "uv run --no-project --with playwright python -m playwright install --with-deps chromium",
+        )
         # Mount the staged (frozen) mngr checkout, then bake `uv sync` +
         # pnpm install into the image so the sandbox boots ready to run
         # the e2e workflow. The exclusion buckets above already filtered
@@ -399,7 +408,6 @@ def _build_snapshot_image(staged_repo: Path) -> modal.Image:
         .workdir("/code/mngr")
         .run_commands(
             "cd /code/mngr && uv sync --all-packages",
-            "cd /code/mngr && uv run --with playwright python -m playwright install --with-deps chromium",
             "cd /code/mngr/apps/minds && pnpm install --frozen-lockfile",
             # Build the Tailwind stylesheet (app.min.css). It is gitignored and
             # is normally produced by `pnpm start`'s prestart hook; running the
@@ -696,7 +704,14 @@ def main() -> None:
                         image=image,
                         app=app,
                         timeout=_SANDBOX_TIMEOUT_SECONDS,
-                        cpu=4.0,
+                        # The in-sandbox FCT docker build (the create-workspace
+                        # phase, the single biggest chunk of wall-clock) is
+                        # CPU-bound (uv sync + npm build inside the container), so
+                        # give the producer sandbox more cores. Memory stays 8 GiB
+                        # -- the resumed test sandbox (offload-modal-minds-snapshot
+                        # .toml) keeps 8 GiB, and snapshot resume only needs the
+                        # filesystem, not matching CPU.
+                        cpu=8.0,
                         memory=8 * 1024,
                         # Inject the depot credentials + builder override (when enabled)
                         # so the in-sandbox `mngr create` builds the FCT container via
