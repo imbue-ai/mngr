@@ -8,6 +8,7 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 
+import pytest
 from loguru import logger
 
 from imbue.imbue_common.logging import _build_flat_log_dict
@@ -51,15 +52,26 @@ def capture_logs() -> Iterator[LogCapture]:
         logger.remove(handler_id)
 
 
-def test_setup_logging_does_not_raise() -> None:
-    """setup_logging should configure logging without raising."""
-    setup_logging()
+def test_setup_logging_filters_messages_below_configured_level(capsys: pytest.CaptureFixture[str]) -> None:
+    """setup_logging should install a stderr sink that emits at/above the level and drops below it."""
+    setup_logging(level="WARNING")
+
+    logger.info("info_message_should_be_filtered")
+    logger.warning("warning_message_should_appear")
+
+    captured = capsys.readouterr()
+    assert "warning_message_should_appear" in captured.err
+    assert "info_message_should_be_filtered" not in captured.err
 
 
-def test_setup_logging_with_custom_level() -> None:
-    """setup_logging should accept custom log levels."""
-    setup_logging(level="DEBUG")
-    setup_logging(level="info")
+def test_setup_logging_normalizes_lowercase_level(capsys: pytest.CaptureFixture[str]) -> None:
+    """setup_logging should upper-case the level string so a lowercase 'debug' enables debug output."""
+    setup_logging(level="debug")
+
+    logger.debug("debug_message_should_appear")
+
+    captured = capsys.readouterr()
+    assert "debug_message_should_appear" in captured.err
 
 
 # =============================================================================

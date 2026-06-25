@@ -1,4 +1,6 @@
+import subprocess
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
@@ -94,18 +96,28 @@ def test_detect_branch_ignores_empty_github_head_ref(monkeypatch: pytest.MonkeyP
     assert detect_branch() == "main"
 
 
-def test_detect_branch_falls_back_to_git(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_detect_branch_falls_back_to_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("GITHUB_HEAD_REF", raising=False)
     monkeypatch.delenv("GITHUB_REF_NAME", raising=False)
 
-    branch = detect_branch()
+    # Create a real git repo on a uniquely-named branch and detect from inside it,
+    # so the fallback is exercised deterministically rather than depending on the
+    # ambient checkout (which may be in detached HEAD). An initial commit is needed
+    # so that `git rev-parse --abbrev-ref HEAD` resolves the branch (it fails on an
+    # unborn branch).
+    branch_name = "detect-branch-" + uuid4().hex
+    subprocess.run(["git", "init", "-b", branch_name], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "init"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    monkeypatch.chdir(tmp_path)
 
-    # In most environments (local dev, CI with proper checkout), git can
-    # determine the branch. In some CI configurations (detached HEAD, isolated
-    # HOME), git rev-parse may fail and return None. Both are valid outcomes --
-    # the important thing is that detect_branch doesn't crash.
-    if branch is not None:
-        assert len(branch) > 0
+    assert detect_branch() == branch_name
 
 
 # -- resolve_active_profile ---------------------------------------------------

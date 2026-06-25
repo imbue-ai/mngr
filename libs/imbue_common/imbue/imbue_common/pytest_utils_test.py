@@ -1,43 +1,29 @@
 import pytest
 
 from imbue.imbue_common.pytest_utils import inline_snapshot_is_updating
+from imbue.imbue_common.pytest_utils import is_updating_for_inline_snapshot_flags
 
 
-def test_demonstrate_inline_snapshot_detection_works(request: pytest.FixtureRequest) -> None:
-    """Demonstrates that inline_snapshot_is_updating() correctly detects the flags.
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        (None, False),
+        ("", False),
+        ("create", True),
+        ("fix", True),
+        ("report", False),
+        ("update", False),
+        ("report,create,update", True),
+        ("report,fix", True),
+        ("report,update", False),
+    ],
+)
+def test_is_updating_for_inline_snapshot_flags_detects_create_and_fix(flags: str | None, expected: bool) -> None:
+    """Only the 'create' and 'fix' flags (alone or among others) mean snapshots are being written."""
+    assert is_updating_for_inline_snapshot_flags(flags) is expected
 
-    This is a demo test that shows the function working. Run it manually with
-    different flags to see the detection in action:
 
-    - Normal mode:
-      uv run pytest libs/imbue_common/imbue/imbue_common/pytest_utils_demo_test.py -n 0 -s --no-cov
-
-    - Create mode:
-      uv run pytest libs/imbue_common/imbue/imbue_common/pytest_utils_demo_test.py -n 0 -s --no-cov --inline-snapshot=create
-
-    - Fix mode:
-      uv run pytest libs/imbue_common/imbue/imbue_common/pytest_utils_demo_test.py -n 0 -s --no-cov --inline-snapshot=fix
-
-    - Multiple flags:
-      uv run pytest libs/imbue_common/imbue/imbue_common/pytest_utils_demo_test.py -n 0 -s --no-cov --inline-snapshot=report,create,update
-
-    Expected output:
-    - Normal: returns False
-    - Create/Fix: returns True
-    - Multiple with create or fix: returns True
-    - Multiple without create or fix: returns False
-    """
-    config = request.config
-    is_updating = inline_snapshot_is_updating(config)
-
-    print(f"\ninline_snapshot_is_updating() returned: {is_updating}")
-    print(f"config.option.inline_snapshot = {getattr(config.option, 'inline_snapshot', None)}")
-
-    if is_updating:
-        print("  -> Detected: Running in create or fix mode")
-        result = "updating"
-    else:
-        print("  -> Detected: Running in normal validation mode")
-        result = "normal"
-
-    assert result in ["updating", "normal"]
+def test_inline_snapshot_is_updating_reads_inline_snapshot_config_option(request: pytest.FixtureRequest) -> None:
+    """The public wrapper pulls the flag value off config.option.inline_snapshot and delegates."""
+    expected = is_updating_for_inline_snapshot_flags(request.config.option.inline_snapshot)
+    assert inline_snapshot_is_updating(request.config) is expected
