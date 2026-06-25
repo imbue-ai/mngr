@@ -58,16 +58,16 @@
       </p>
 
       <div class="flex flex-col gap-4 mb-8">
-        <label class="flex items-start gap-3 cursor-pointer">
-          <input type="checkbox" id="consent-report" class="mt-1 shrink-0"
+        <label class="flex items-center gap-3 cursor-pointer">
+          <input type="checkbox" id="consent-report" class="shrink-0"
                  {% if report_unexpected_errors %}checked{% endif %}>
           <span>
             <span class="type-body text-primary font-semibold">Report unexpected errors</span>
             <span class="block type-helper text-tertiary">Send a report to Imbue when something goes wrong.</span>
           </span>
         </label>
-        <label id="consent-logs-row" class="flex items-start gap-3 cursor-pointer hidden">
-          <input type="checkbox" id="consent-logs" class="mt-1 shrink-0"
+        <label id="consent-logs-row" class="flex items-center gap-3 cursor-pointer hidden">
+          <input type="checkbox" id="consent-logs" class="shrink-0"
                  {% if include_logs %}checked{% endif %}>
           <span>
             <span class="type-body text-primary font-semibold">Include logs</span>
