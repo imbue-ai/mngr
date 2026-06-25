@@ -52,6 +52,15 @@ def test_build_agent_prompt_anchors_to_tutorial_and_allows_deletion() -> None:
     assert "leave the changes object empty" in prompt
 
 
+def test_build_agent_prompt_verifies_command_and_flag_effects() -> None:
+    """Forward coverage is driven by both the tutorial block and the effect the
+    command/flag implies (the no-op golden rule, and per-flag differentiation).
+    """
+    prompt = build_test_agent_prompt("t::t", ())
+    assert "no-op" in prompt
+    assert "--bar=lorem" in prompt
+
+
 def test_build_agent_prompt_has_fixme_channel() -> None:
     """Mappers must be able to flag cross-cutting setup blockers as FIXME(tmr)."""
     prompt = build_test_agent_prompt("t::t", ())

@@ -14,28 +14,45 @@ beyond this task. If you cannot determine what is wrong, report no changes.
 
 # If the test succeeds - or after you fixed a failing test
 
-A test exists to verify the claims its tutorial block makes -- nothing more.
-"What matters" for this test is fixed by the block, so the test has a natural
-size. A passing test already at that size needs no change: leaving the changes
-object empty is a correct, good outcome, NOT a failure. Do not add assertions or
-steps merely to be thorough -- thoroughness without a claim to verify is just
-brittleness.
+A test exists to verify two things, and nothing more: the claims its tutorial
+block makes, and that the commands it runs actually do something. That fixes the
+test's natural size. A passing test already at that size needs no change: leaving
+the changes object empty is a correct, good outcome, NOT a failure. Do not add
+assertions or steps merely to be thorough -- thoroughness with nothing to verify
+is just brittleness.
 
 Bring the test to its natural size by checking it in BOTH directions:
 
-- Forward (coverage): is every claim the block makes actually verified? Observe
-  the real effect of commands, the way a human would when debugging
-  interactively (files, git status, command output). If the block creates an
-  agent in a directory, verify it is running there (e.g. `mngr exec $agent pwd`),
-  not merely that the command exited 0. If a claim is unverified, add an
-  assertion for it.
+- Forward (coverage): is everything that should be verified actually verified?
+  Two sources drive this:
 
-- Backward (trace): does every assertion trace back to a claim the block makes?
-  An assertion that checks something the block does not demonstrate is
-  gold-plating -- it adds brittleness without verifying documented behavior.
-  REMOVE it. This matters most on simple commands (e.g. help/flag output): that
-  the command succeeds and mentions the key thing is enough; do not accumulate
-  assertions on incidental wording.
+  1. What the tutorial block explicitly mentions. This is a hard requirement.
+     Observe the real effect the way a human would when debugging interactively
+     (files, git status, command output). If the block creates an agent in a
+     directory, verify it is running there (e.g. `mngr exec $agent pwd`), not
+     merely that the command exited 0.
+
+  2. What effect the command itself implies, even when the block does not spell
+     it out:
+     - Command level: running `mngr foo` must do *something* -- either a
+       real-world side effect you can observe, or something in its output. Do
+       just enough verification to show that effect exists. Golden rule: the
+       assertion should pass for this particular command, but FAIL if the command
+       were not run, or were replaced by a no-op.
+     - Flag level: `mngr foo ... --bar=lorem` must do something *different* from
+       the same command without `--bar=lorem`. Verify that difference, by the
+       same golden rule.
+     - Occasionally you want to verify the *absence* of an effect: establish a
+       baseline before the command and check it has not moved afterwards (e.g. a
+       file that did not exist still does not). This can be genuinely tricky --
+       do not spend too much effort on it when it is.
+
+- Backward (trace): does every assertion trace back to one of those two sources
+  -- a tutorial claim, or a command/flag effect? An assertion that serves neither
+  is gold-plating: it adds brittleness without verifying documented or implied
+  behavior. REMOVE it. This matters most on simple commands (e.g. help/flag
+  output): that the command succeeds and its output shows the key effect is
+  enough; do not accumulate assertions on incidental wording.
 
 Removing or simplifying an over-fitted assertion is a real improvement, exactly
 as valuable as adding a missing one -- both are recorded under "IMPROVE_TEST".
