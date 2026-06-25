@@ -20,7 +20,7 @@ Each workspace runs its own system interface (the `system-interface` CLI, source
 
 Inside each agent's Docker container:
 - **Claude Code** runs as the main agent process in tmux window 0
-- A **bootstrap service manager** watches `services.toml` and manages background services in tmux windows
+- The **bootstrap** (`uv run bootstrap`) runs first-boot setup and then execs `supervisord -n`, which supervises the background services declared as `[program:*]` sections in `supervisord.conf` (logs under `/var/log/supervisor`)
 - Services register their ports via `scripts/forward_port.py` into `runtime/applications.toml`
 - An **app watcher** service monitors `applications.toml`, reconciles with the Cloudflare forwarding API, and writes service events to `events/services/events.jsonl`
 - A **cloudflared** service watches `runtime/secrets` for a tunnel token and manages the Cloudflare tunnel

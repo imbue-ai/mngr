@@ -78,19 +78,21 @@ if ! command -v vault >/dev/null 2>&1; then
     exit 1
 fi
 
-# Echo secrets/<$1> key <$2>, or exit non-zero. pipefail propagates a failed
-# `vault kv get` (e.g. not logged in); `jq -e` with the `// "" | select` guard
-# exits non-zero when the key is absent or empty. The value is never printed.
+# Echo the value of the split-layout secret at secrets/<$1>/<$2>, or exit
+# non-zero. Secrets use the split layout: each key is its own leaf at
+# `<service>/<KEY>` holding a single `value` field. pipefail propagates a
+# failed `vault kv get` (e.g. not logged in); `jq -e` with the `// "" | select`
+# guard exits non-zero when the value is absent or empty. The value is never printed.
 read_vault_secret() {
-    vault kv get -format=json -mount=secrets "$1" | jq -er --arg k "$2" '.data.data[$k] // "" | select(. != "")'
+    vault kv get -format=json -mount=secrets "$1/$2" | jq -er '.data.data.value // "" | select(. != "")'
 }
 
 if ! GH_TOKEN=$(read_vault_secret mngr/dev/github GH_TOKEN); then
-    echo "Error: could not read GH_TOKEN from secrets/mngr/dev/github. Run 'vault login -method=oidc' and confirm the entry exists." >&2
+    echo "Error: could not read GH_TOKEN from secrets/mngr/dev/github/GH_TOKEN. Run 'vault login -method=oidc' and confirm the entry exists." >&2
     exit 1
 fi
 if ! ANTHROPIC_API_KEY=$(read_vault_secret mngr/dev/anthropic ANTHROPIC_API_KEY); then
-    echo "Error: could not read ANTHROPIC_API_KEY from secrets/mngr/dev/anthropic. Run 'vault login -method=oidc' and confirm the entry exists." >&2
+    echo "Error: could not read ANTHROPIC_API_KEY from secrets/mngr/dev/anthropic/ANTHROPIC_API_KEY. Run 'vault login -method=oidc' and confirm the entry exists." >&2
     exit 1
 fi
 export GH_TOKEN ANTHROPIC_API_KEY

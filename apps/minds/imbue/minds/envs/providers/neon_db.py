@@ -290,7 +290,7 @@ def _format_multi_match_message(
     lines.append("")
     lines.append("Delete one specific project:")
     lines.append(
-        "  NEON_TOKEN=$(vault kv get -format=json secrets/minds/<tier>/neon-admin | jq -r .data.data.NEON_API_TOKEN)"
+        "  NEON_TOKEN=$(vault kv get -format=json secrets/minds/<tier>/neon-admin/NEON_API_TOKEN | jq -r .data.data.value)"
     )
     lines.append(
         '  curl -X DELETE -H "Authorization: Bearer $NEON_TOKEN" "https://console.neon.tech/api/v2/projects/<project-id>"'
@@ -298,7 +298,7 @@ def _format_multi_match_message(
     lines.append("")
     lines.append(f"Nuke every project named {project_name!r} (use only if you want to start clean):")
     lines.append(
-        "  NEON_TOKEN=$(vault kv get -format=json secrets/minds/<tier>/neon-admin | jq -r .data.data.NEON_API_TOKEN)"
+        "  NEON_TOKEN=$(vault kv get -format=json secrets/minds/<tier>/neon-admin/NEON_API_TOKEN | jq -r .data.data.value)"
     )
     lines.append(f"  for PID in {' '.join(p.id for p in by_age)}; do")
     lines.append(

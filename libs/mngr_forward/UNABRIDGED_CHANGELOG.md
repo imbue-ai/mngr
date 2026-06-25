@@ -4,6 +4,25 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-23
+
+The websocket forward path now emits a `system_interface_backend_failure` envelope when the backend connection fails (unresolved target, SSH-tunnel setup failure, refused host-loopback dial, or a connect-time backend-websocket failure), matching what the HTTP/SSE paths already did. Previously only HTTP failures emitted this envelope, so a consumer like minds could go blind to a dead system interface whose only live channel was a websocket: an already-loaded SPA whose backend died would silently retry its websocket forever, never enrolling the agent as a recovery probe suspect, so the recovery redirect never fired and the user was stranded on a frozen workspace. The websocket path now feeds the same recovery signal as HTTP.
+
+## 2026-06-22
+
+Added a `mngr forward --on-error {abort,continue}` flag (default `abort`). Under
+`continue`, the `--no-observe` startup snapshot tolerates an
+unauthenticated/unreachable provider: it runs `mngr list --on-error continue` and
+forwards the agents the healthy providers reported instead of failing to start.
+The flag affects only `--no-observe`; the observe and `--observe-via-file` modes
+already tolerate provider errors and are unchanged.
+
+## 2026-06-19
+
+Removed the now-vestigial `ForwardPluginConfig.merge_with` override; the config merge is routed through the overlay pipeline, which reproduces the same assign-by-default semantics. No user-visible behavior change.
+
+Trimmed the README to user-relevant content and tightened it for concision.
+
 ## 2026-06-11
 
 Hardened reverse SSH tunnel teardown so a half-dead connection no longer orphans the forwarded port on the remote sshd (which made the next run's port forward request get denied):

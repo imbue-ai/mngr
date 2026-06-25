@@ -4,6 +4,29 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-22
+
+An unauthenticated Vultr provider now errors instead of silently reporting zero agents.
+
+Previously, with no API key configured, the Vultr provider printed an ad-hoc `WARNING: Vultr API key not configured, skipping VPS discovery` and returned an empty listing (exit 0). It now raises the shared `ProviderNotAuthorizedError` at construction, so an enabled-but-unauthenticated Vultr provider is reported consistently with the other cloud providers (one consistent error line in `mngr list`, contributing a non-zero exit) rather than vanishing. The bespoke warning print has been removed.
+
+## 2026-06-19
+
+Updated imports for the `mngr_vps_docker` -> `mngr_vps` package rename: the VPS
+provider is no longer Docker-only, so the package and its shape-agnostic base
+classes dropped "Docker" from their names (`VpsDockerProvider` -> `VpsProvider`,
+`VpsDockerProviderConfig` -> `VpsProviderConfig`, `VpsDockerHostRecord` ->
+`VpsHostRecord`, `VpsDockerHostStore` -> `VpsHostStore`, `VpsDockerError` ->
+`VpsError`). Import-only change; no behavior difference.
+
+Updated the VPS build-arg parsing imports to point at the new `imbue.mngr_vps.build_args` module (moved out of `imbue.mngr_vps.instance`). Import-only change; no behavior difference.
+
+Trimmed the README to user-relevant content and tightened it for concision.
+
+Aligned the config field descriptions with the README table so the `Vultr-specific configuration` table and the Pydantic `Field(description=...)` strings match.
+
+Corrected the create example to use the provider-prefixed `--vultr-region` / `--vultr-plan` build-arg flags.
+
 ## 2026-06-16
 
 ## Vultr provider
