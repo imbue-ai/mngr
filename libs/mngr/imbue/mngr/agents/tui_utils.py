@@ -59,6 +59,11 @@ def _check_paste_content(pane_content: str, message: str) -> bool:
 
     probe_length = min(60, len(normalized_msg))
     if probe_length == 0:
+        # The message has no alphanumeric characters to fuzzy-match against the
+        # pane (e.g. it is empty or only punctuation/whitespace). There is
+        # nothing to confirm by content, so report the paste as visible -- the
+        # bracketed "[Pasted text " indicator check above already covers the
+        # case where tmux did paste such a message.
         return True
     probe = normalized_msg[-probe_length:]
     return probe in normalized_pane

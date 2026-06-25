@@ -76,12 +76,13 @@ def test_base_agent_get_command(
     assert command == CommandString("echo hello")
 
 
+@pytest.mark.allow_warnings
 def test_base_agent_get_command_default_bash(
     local_provider: LocalProviderInstance,
     temp_mngr_ctx: MngrContext,
     temp_work_dir: Path,
 ) -> None:
-    """Test that get_command returns 'bash' when no command is set."""
+    """Test that get_command falls back to 'bash' (and warns) when no command is set."""
     agent = _create_test_agent(local_provider, temp_mngr_ctx, "test-no-cmd", temp_work_dir)
 
     # Write data.json without command
@@ -219,6 +220,36 @@ def test_base_agent_get_reported_start_time_none(
     start_time = agent.get_reported_start_time()
 
     assert start_time is None
+
+
+def test_base_agent_get_reported_start_time_parses_valid(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_work_dir: Path,
+) -> None:
+    """A well-formed reported start_time file is parsed into a datetime."""
+    agent = _create_test_agent(local_provider, temp_mngr_ctx, "test-valid-start", temp_work_dir)
+    expected = datetime(2026, 6, 5, 12, 30, 0, tzinfo=timezone.utc)
+    status_path = agent._get_agent_dir() / "status" / "start_time"
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(expected.isoformat())
+
+    assert agent.get_reported_start_time() == expected
+
+
+@pytest.mark.allow_warnings
+def test_base_agent_get_reported_start_time_malformed_returns_none(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_work_dir: Path,
+) -> None:
+    """A corrupt reported start_time falls back to None rather than raising."""
+    agent = _create_test_agent(local_provider, temp_mngr_ctx, "test-bad-start", temp_work_dir)
+    status_path = agent._get_agent_dir() / "status" / "start_time"
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text("not-a-timestamp")
+
+    assert agent.get_reported_start_time() is None
 
 
 def test_base_agent_get_reported_activity_time_none(

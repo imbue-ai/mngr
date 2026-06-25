@@ -164,7 +164,16 @@ class BaseAgent(AgentInterface[AgentConfigT]):
     def get_command(self) -> CommandString:
         data = self._read_data()
         cmd = data.get("command")
-        return CommandString(cmd) if cmd else CommandString("bash")
+        if not cmd:
+            # A normally-created agent always has "command" written to data.json
+            # at creation, so a missing/empty value means the data is absent or
+            # corrupt. We fall back to "bash" to keep the non-optional contract,
+            # but this fabricated value flows into both the user-facing command
+            # display and lifecycle process-name detection, so log loudly rather
+            # than silently masking the bad state.
+            logger.warning("Agent {} has no command in {}; falling back to 'bash'", self.name, self._get_data_path())
+            return CommandString("bash")
+        return CommandString(cmd)
 
     def set_command(self, command: CommandString) -> None:
         data = self._read_data()
@@ -258,8 +267,16 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             logger.trace("Determined agent {} lifecycle state: {}", self.name, state)
             return state
         except HostConnectionError:
-            logger.trace("Determined agent {} lifecycle state: STOPPED (host connection error)", self.name)
-            return AgentLifecycleState.STOPPED
+            # The host became unreachable while we were probing it, so we could
+            # not actually determine the agent's state. We deliberately do NOT
+            # report STOPPED: a normally-stopped agent on a reachable host is
+            # detected via the tmux-empty path above, and the host-state logic
+            # itself never equates "unreachable" with "stopped" (an unreachable
+            # host with no recorded stop_reason is CRASHED, not STOPPED). UNKNOWN
+            # is the honest answer; the host's own get_state() carries the
+            # authoritative stopped/crashed verdict from recorded data.
+            logger.trace("Determined agent {} lifecycle state: UNKNOWN (host connection error)", self.name)
+            return AgentLifecycleState.UNKNOWN
 
     def _build_lifecycle_probe_command(self) -> str:
         """Build the command that probes the agent's primary window for lifecycle state."""
@@ -435,8 +452,16 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         status_path = self._get_agent_dir() / "status" / "start_time"
         try:
             content = self.host.read_text_file(status_path).strip()
-            return datetime.fromisoformat(content)
         except FileNotFoundError:
+            return None
+        try:
+            return datetime.fromisoformat(content)
+        except ValueError:
+            # The reported start_time file is written by the running agent, so a
+            # malformed timestamp is corrupt *reported* (non-config) input: per
+            # the style guide we fall back to "unknown" but log loudly rather
+            # than crashing a read path (e.g. `mngr list`) on a bad value.
+            logger.warning("Agent {} has a malformed reported start_time {!r} at {}", self.name, content, status_path)
             return None
 
     # =========================================================================
@@ -513,11 +538,20 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         plugin_dir = self._get_agent_dir() / "plugin" / plugin_name
         try:
             result = self.host.execute_idempotent_command(f"ls -1 '{plugin_dir}'", timeout_seconds=5.0)
-            if result.success:
-                return [f.strip() for f in result.stdout.split("\n") if f.strip()]
+        except (OSError, HostConnectionError) as e:
+            # A failed listing is not the same as an empty directory: the host
+            # was unreachable, so we genuinely do not know which files exist.
+            # Log loudly rather than masking the failure as "no files reported".
+            logger.warning("Failed to list plugin files for agent {} (plugin {}): {}", self.name, plugin_name, e)
             return []
-        except (OSError, HostConnectionError):
-            return []
+        if result.success:
+            return [f.strip() for f in result.stdout.split("\n") if f.strip()]
+        # A non-zero `ls` here is overwhelmingly the routine case where the
+        # plugin directory has not been created yet (the plugin reported
+        # nothing), which is a legitimate empty result; surface anything else
+        # (e.g. a permissions error) at debug since the empty-dir case is normal.
+        logger.debug("ls of plugin dir {} returned non-zero: {}", plugin_dir, result.stderr.strip())
+        return []
 
     # =========================================================================
     # Environment
