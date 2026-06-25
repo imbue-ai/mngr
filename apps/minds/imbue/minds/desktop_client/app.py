@@ -62,9 +62,9 @@ from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
 from imbue.minds.desktop_client.destroying import DestroyingStatus
 from imbue.minds.desktop_client.destroying import delete_destroying
+from imbue.minds.desktop_client.destroying import is_host_still_active
 from imbue.minds.desktop_client.destroying import list_destroying
 from imbue.minds.desktop_client.destroying import read_destroying
-from imbue.minds.desktop_client.destroying import read_host_id
 from imbue.minds.desktop_client.destroying import read_log_chunk
 from imbue.minds.desktop_client.destroying import start_destroy
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
@@ -1580,7 +1580,7 @@ def _resolve_destroying_for_landing(
 
     Returns ``{agent_id_str: "running" | "failed"}`` for any in-flight or
     failed destroy. A destroy is DONE only once the whole *host* is gone (not
-    just the workspace agent -- see :func:`_host_still_active`); on DONE we
+    just the workspace agent -- see :func:`destroying.is_host_still_active`); on DONE we
     disassociate the workspace from its account and delete the record, so the
     row vanishes on the next refresh. A FAILED destroy stays associated and
     visible so the user can retry rather than being left with an invisible,
@@ -1592,7 +1592,7 @@ def _resolve_destroying_for_landing(
     """
     if paths is None:
         return {}
-    records = list_destroying(paths, lambda aid: _host_still_active(backend_resolver, paths, aid))
+    records = list_destroying(paths, lambda aid: is_host_still_active(backend_resolver, paths, aid))
     marker: dict[str, str] = {}
     for agent_id, record in records.items():
         if record.status == DestroyingStatus.DONE:
@@ -1621,33 +1621,9 @@ def _finalize_destroyed_workspace(
     delete_destroying(agent_id, paths)
 
 
-def _host_still_active(
-    backend_resolver: BackendResolverInterface,
-    paths: WorkspacePaths | None,
-    agent_id: AgentId,
-) -> bool:
-    """Whether the workspace's host is still up (not just the workspace agent).
-
-    True if the workspace agent is still in ``list_active_workspace_ids()`` OR
-    its recorded host has not yet reached ``DESTROYED``. A detached destroy is
-    only DONE once this is False -- otherwise a destroy that tore down only the
-    workspace agent while ``system-services`` kept the host alive would falsely
-    read as DONE. See ``destroying.read_destroying``.
-    """
-    if agent_id in backend_resolver.list_active_workspace_ids():
-        return True
-    if paths is None:
-        return False
-    host_id = read_host_id(agent_id, paths)
-    if host_id is None:
-        return False
-    state = backend_resolver.get_host_state(host_id)
-    return state is not None and state is not HostState.DESTROYED
-
-
 def _is_host_still_active(agent_id: AgentId) -> bool:
-    """Request-scoped wrapper around :func:`_host_still_active`."""
-    return _host_still_active(
+    """Request-scoped wrapper around :func:`destroying.is_host_still_active`."""
+    return is_host_still_active(
         get_state().backend_resolver,
         get_state().api_v1_paths,
         agent_id,
@@ -1804,7 +1780,7 @@ def _handle_destroying_page(
         return make_response(status_code=404, content="No record")
     parsed_id = AgentId(agent_id)
     record = read_destroying(
-        parsed_id, paths, is_host_still_active=_host_still_active(backend_resolver, paths, parsed_id)
+        parsed_id, paths, is_host_still_active=is_host_still_active(backend_resolver, paths, parsed_id)
     )
     if record is None:
         return make_response(status_code=404, content="No record")
@@ -2426,7 +2402,7 @@ def _destroying_agent_ids(paths: WorkspacePaths | None, backend_resolver: Backen
     """
     if paths is None:
         return []
-    records = list_destroying(paths, lambda aid: _host_still_active(backend_resolver, paths, aid))
+    records = list_destroying(paths, lambda aid: is_host_still_active(backend_resolver, paths, aid))
     return [str(agent_id) for agent_id, record in records.items() if record.status != DestroyingStatus.DONE]
 
 
