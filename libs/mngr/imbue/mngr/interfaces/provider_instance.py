@@ -344,6 +344,43 @@ class ProviderInstanceInterface(MutableModel, ABC):
         return True
 
     @property
+    def transfers_work_dir_repo_via_bundle(self) -> bool:
+        """Whether the work-dir repo is moved into a new host via a git bundle over the control plane.
+
+        Default False: every provider transfers the work-dir repo by ``git push``
+        over its existing host transport (SSH, or a same-machine local path). A
+        provider whose push transport is unreliable for a freshly-booted host --
+        Modal's per-sandbox unencrypted-port tunnel drops large pushes on a fresh
+        sandbox -- overrides this to True. When True, ``Host._git_push_to_target``
+        delegates the ref transfer to :meth:`transfer_work_dir_repo_bundle`, which
+        moves the repo bytes over the provider's healthy control plane instead.
+        This single flag scopes the bundle path to that one provider; no other
+        provider is affected, and the surrounding bare-init / checkout / config
+        steps of the transfer run unchanged for everyone.
+        """
+        return False
+
+    def transfer_work_dir_repo_bundle(
+        self,
+        host: "HostInterface",
+        source_host: OnlineHostInterface,
+        source_path: Path,
+        target_path: Path,
+    ) -> None:
+        """Transfer the work-dir git repo into ``host`` via a git bundle over the control plane.
+
+        Only providers that return True from
+        :attr:`transfers_work_dir_repo_via_bundle` implement this; it substitutes
+        for the ``git push`` step of the work-dir transfer. The target bare repo
+        at ``target_path/.git`` already exists (the caller initialized it), so an
+        implementation must populate it with the same refs a mirror push would
+        (branches and tags), after which the caller's checkout/config steps run
+        unchanged. The default raises, so a non-overriding provider never reaches
+        a half-defined path.
+        """
+        raise MngrError("provider does not support bundle work-dir transfer")
+
+    @property
     @abstractmethod
     def supports_mutable_tags(self) -> bool:
         """Whether this provider supports modifying tags after host creation.

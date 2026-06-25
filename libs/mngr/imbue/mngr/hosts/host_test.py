@@ -410,6 +410,120 @@ def test_destroy_agent_continues_cleanup_when_on_destroy_raises(
 
 
 # =========================================================================
+# Tests for the work-dir repo transfer seam (transfers_work_dir_repo_via_bundle)
+# =========================================================================
+
+
+class _BundleTransferLocalProviderInstance(LocalProviderInstance):
+    """Local provider that opts into the bundle transfer and records the delegated call."""
+
+    bundle_call_count: int = 0
+    last_bundle_args: tuple[object, ...] | None = None
+
+    @property
+    def transfers_work_dir_repo_via_bundle(self) -> bool:
+        return True
+
+    def transfer_work_dir_repo_bundle(
+        self,
+        host: Any,
+        source_host: OnlineHostInterface,
+        source_path: Path,
+        target_path: Path,
+    ) -> None:
+        self.bundle_call_count += 1
+        self.last_bundle_args = (host, source_host, source_path, target_path)
+
+
+class _RecordingLocalProviderInstance(LocalProviderInstance):
+    """Default-seam local provider that records whether the bundle method was reached."""
+
+    bundle_call_count: int = 0
+
+    def transfer_work_dir_repo_bundle(
+        self,
+        host: Any,
+        source_host: OnlineHostInterface,
+        source_path: Path,
+        target_path: Path,
+    ) -> None:
+        self.bundle_call_count += 1
+
+
+def test_git_push_to_target_diverts_to_bundle_when_provider_opts_in(
+    temp_host_dir: Path,
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """When the provider opts into bundle transfer, the push method delegates and skips git push."""
+    provider = _BundleTransferLocalProviderInstance(
+        name=ProviderInstanceName("local"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+    host = provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+
+    source_path = tmp_path / "source"
+    source_path.mkdir()
+    target_path = tmp_path / "target"
+    target_path.mkdir()
+
+    host._git_push_to_target(host, source_path, target_path)
+
+    assert provider.bundle_call_count == 1
+    assert provider.last_bundle_args is not None
+    delegated_host, delegated_source_host, delegated_source_path, delegated_target_path = provider.last_bundle_args
+    assert delegated_host is host
+    assert delegated_source_host is host
+    assert delegated_source_path == source_path
+    assert delegated_target_path == target_path
+    # The target's .git was never created by a push -- the bundle method owns that step.
+    assert not (target_path / ".git").exists()
+
+
+def test_git_push_to_target_does_not_call_bundle_by_default(
+    temp_host_dir: Path,
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """A default provider (flag False) never reaches the bundle method; it runs the git push path."""
+    provider = _RecordingLocalProviderInstance(
+        name=ProviderInstanceName("local"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+    assert provider.transfers_work_dir_repo_via_bundle is False
+
+    host = provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+
+    # Build a real local git repo as the source so the same-machine git push succeeds.
+    source_path = tmp_path / "source"
+    source_path.mkdir()
+    cg = temp_mngr_ctx.concurrency_group
+    cg.run_process_to_completion(["git", "init", "-b", "main", str(source_path)])
+    cg.run_process_to_completion(["git", "-C", str(source_path), "config", "user.email", "test@example.com"])
+    cg.run_process_to_completion(["git", "-C", str(source_path), "config", "user.name", "Test User"])
+    (source_path / "file.txt").write_text("hello\n")
+    cg.run_process_to_completion(["git", "-C", str(source_path), "add", "file.txt"])
+    cg.run_process_to_completion(["git", "-C", str(source_path), "commit", "-m", "initial"])
+
+    target_path = tmp_path / "target"
+    target_path.mkdir()
+    cg.run_process_to_completion(["git", "init", "--bare", str(target_path / ".git")])
+
+    host._git_push_to_target(host, source_path, target_path)
+
+    # The bundle method was never called, and the git push populated the target bare repo.
+    assert provider.bundle_call_count == 0
+    result = cg.run_process_to_completion(
+        ["git", "--git-dir", str(target_path / ".git"), "rev-parse", "refs/heads/main"],
+    )
+    assert result.stdout.strip()
+
+
+# =========================================================================
 # Tests for get_created_branch_name
 # =========================================================================
 

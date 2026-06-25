@@ -1,0 +1,1 @@
+`SandboxInterface` gains `copy_from_local(local_path, remote_path)` to upload a local file into a sandbox over the Modal control plane (wraps `Sandbox.filesystem.copy_from_local`). Implemented in `DirectSandbox` against the real SDK and in `FakeSandbox` via a local file copy for offline tests.

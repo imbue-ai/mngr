@@ -185,6 +185,11 @@ class SandboxInterface(MutableModel, ABC):
         """Terminate this sandbox."""
         ...
 
+    @abstractmethod
+    def copy_from_local(self, local_path: Path, remote_path: str) -> None:
+        """Upload a local file into the sandbox over the Modal control plane (mirrors Sandbox.filesystem.copy_from_local)."""
+        ...
+
 
 class AppInterface(MutableModel, ABC):
     """A Modal app that scopes sandboxes and resources (mirrors modal.App)."""

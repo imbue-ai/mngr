@@ -10,7 +10,9 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+from pydantic import PrivateAttr
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.errors import HostNameConflictError
@@ -18,6 +20,8 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ModalAuthError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import SnapshotRecord
+from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -49,6 +53,7 @@ from imbue.modal_proxy.errors import ModalProxyAuthError
 from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.interface import AppInterface
+from imbue.modal_proxy.interface import SandboxInterface
 from imbue.modal_proxy.testing import FakeModalInterface
 from imbue.modal_proxy.testing import FakeSandbox
 
@@ -268,6 +273,129 @@ def test_modal_provider_supports_volumes(modal_provider: ModalProviderInstance) 
 def test_modal_provider_supports_mutable_tags(modal_provider: ModalProviderInstance) -> None:
     """Modal provider supports mutable tags via Modal's sandbox.set_tags() API."""
     assert modal_provider.supports_mutable_tags is True
+
+
+def test_modal_provider_transfers_work_dir_repo_via_bundle(modal_provider: ModalProviderInstance) -> None:
+    """Modal opts into the bundle work-dir transfer (the per-sandbox tunnel is flaky on fresh boots)."""
+    assert modal_provider.transfers_work_dir_repo_via_bundle is True
+
+
+class _InjectedSandboxModalProviderInstance(ModalProviderInstance):
+    """Test subclass that returns an injected sandbox from _find_sandbox_by_host_id (no Modal API)."""
+
+    _injected_sandbox: SandboxInterface | None = PrivateAttr(default=None)
+
+    def _find_sandbox_by_host_id(
+        self, host_id: HostId, timeout: float = 5.0, poll_interval: float = 1.0
+    ) -> SandboxInterface | None:
+        return self._injected_sandbox
+
+
+def _make_real_local_git_repo(repo_dir: Path, cg: ConcurrencyGroup, branch: str = "main") -> None:
+    """Initialize a small real git repo with one commit on ``branch``."""
+    cg.run_process_to_completion(["git", "init", "-b", branch, str(repo_dir)])
+    cg.run_process_to_completion(["git", "-C", str(repo_dir), "config", "user.email", "test@example.com"])
+    cg.run_process_to_completion(["git", "-C", str(repo_dir), "config", "user.name", "Test User"])
+    (repo_dir / "file.txt").write_text("hello\n")
+    cg.run_process_to_completion(["git", "-C", str(repo_dir), "add", "file.txt"])
+    cg.run_process_to_completion(["git", "-C", str(repo_dir), "commit", "-m", "initial"])
+
+
+def _make_bundle_provider(
+    temp_mngr_ctx: MngrContext, mngr_test_id: str, sandbox: SandboxInterface | None
+) -> _InjectedSandboxModalProviderInstance:
+    app_name = f"{MODAL_TEST_APP_PREFIX}{mngr_test_id}"
+    provider = _make_modal_provider_with_mocks(
+        temp_mngr_ctx, app_name, _InjectedSandboxModalProviderInstance, "modal-test-bundle"
+    )
+    provider._injected_sandbox = sandbox
+    return provider
+
+
+def test_transfer_work_dir_repo_bundle_uploads_and_fetches(
+    temp_mngr_ctx: MngrContext, mngr_test_id: str, tmp_path: Path
+) -> None:
+    """The bundle transfer builds a bundle, uploads it, and runs the reconstruction fetch on the sandbox."""
+    source_path = tmp_path / "source"
+    source_path.mkdir()
+    _make_real_local_git_repo(source_path, temp_mngr_ctx.concurrency_group)
+
+    target_path = Path("/mngr/code")
+
+    mock_sandbox = MagicMock(spec=SandboxInterface)
+    mock_proc = MagicMock()
+    mock_proc.get_stdout.return_value.read.return_value = ""
+    mock_proc.wait.return_value = 0
+    mock_sandbox.exec.return_value = mock_proc
+
+    provider = _make_bundle_provider(temp_mngr_ctx, mngr_test_id, mock_sandbox)
+
+    host = MagicMock(spec=HostInterface)
+    host.id = HostId.generate()
+    source_host = MagicMock(spec=OnlineHostInterface)
+
+    provider.transfer_work_dir_repo_bundle(host, source_host, source_path, target_path)
+
+    # The bundle is uploaded exactly once to the fixed remote path.
+    assert mock_sandbox.copy_from_local.call_count == 1
+    upload_args = mock_sandbox.copy_from_local.call_args.args
+    assert str(upload_args[0]).endswith(".bundle")
+    assert upload_args[1] == "/tmp/mngr-workdir.bundle"
+
+    # The reconstruction fetch runs via sh -c and references the bundle, the target .git, the refspecs, and cleanup.
+    exec_args = mock_sandbox.exec.call_args.args
+    assert exec_args[0] == "sh"
+    assert exec_args[1] == "-c"
+    fetch_cmd = exec_args[2]
+    assert "git --git-dir=" in fetch_cmd
+    assert str(target_path / ".git") in fetch_cmd
+    assert "fetch" in fetch_cmd
+    assert "/tmp/mngr-workdir.bundle" in fetch_cmd
+    assert "refs/heads/*:refs/heads/*" in fetch_cmd
+    assert "refs/tags/*:refs/tags/*" in fetch_cmd
+    assert "rm -f" in fetch_cmd
+
+
+def test_transfer_work_dir_repo_bundle_raises_on_fetch_failure(
+    temp_mngr_ctx: MngrContext, mngr_test_id: str, tmp_path: Path
+) -> None:
+    """A non-zero fetch exit code raises MngrError carrying the sandbox stdout."""
+    source_path = tmp_path / "source"
+    source_path.mkdir()
+    _make_real_local_git_repo(source_path, temp_mngr_ctx.concurrency_group)
+
+    mock_sandbox = MagicMock(spec=SandboxInterface)
+    mock_proc = MagicMock()
+    mock_proc.get_stdout.return_value.read.return_value = "fatal: bad object"
+    mock_proc.wait.return_value = 1
+    mock_sandbox.exec.return_value = mock_proc
+
+    provider = _make_bundle_provider(temp_mngr_ctx, mngr_test_id, mock_sandbox)
+
+    host = MagicMock(spec=HostInterface)
+    host.id = HostId.generate()
+    source_host = MagicMock(spec=OnlineHostInterface)
+
+    with pytest.raises(MngrError, match="fatal: bad object"):
+        provider.transfer_work_dir_repo_bundle(host, source_host, source_path, Path("/mngr/code"))
+
+
+def test_transfer_work_dir_repo_bundle_raises_when_sandbox_missing(
+    temp_mngr_ctx: MngrContext, mngr_test_id: str, tmp_path: Path
+) -> None:
+    """A missing sandbox raises MngrError instead of proceeding."""
+    source_path = tmp_path / "source"
+    source_path.mkdir()
+    _make_real_local_git_repo(source_path, temp_mngr_ctx.concurrency_group)
+
+    provider = _make_bundle_provider(temp_mngr_ctx, mngr_test_id, None)
+
+    host = MagicMock(spec=HostInterface)
+    host.id = HostId.generate()
+    source_host = MagicMock(spec=OnlineHostInterface)
+
+    with pytest.raises(MngrError, match="Could not find sandbox"):
+        provider.transfer_work_dir_repo_bundle(host, source_host, source_path, Path("/mngr/code"))
 
 
 def test_get_host_volume_name_uses_config_prefix(modal_provider: ModalProviderInstance) -> None:

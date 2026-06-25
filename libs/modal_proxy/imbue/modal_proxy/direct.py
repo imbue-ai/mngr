@@ -411,6 +411,10 @@ class DirectSandbox(SandboxInterface):
     def terminate(self) -> None:
         self.sandbox.terminate()
 
+    @_translate_exceptions
+    def copy_from_local(self, local_path: Path, remote_path: str) -> None:
+        self.sandbox.filesystem.copy_from_local(str(local_path), remote_path)
+
 
 class DirectApp(AppInterface):
     """Wraps a modal.App."""

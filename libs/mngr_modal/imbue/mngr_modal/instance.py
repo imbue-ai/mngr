@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import tempfile
 import threading
 import uuid
@@ -27,6 +28,7 @@ from pydantic import ValidationError
 from pyinfra.api import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import info_span
@@ -464,6 +466,83 @@ class ModalProviderInstance(BaseProviderInstance):
         # destroy/start resolution must re-read a running host's agents live (the same
         # source `mngr list` reads). This opts Modal into api/discover's reconciliation.
         return False
+
+    @property
+    def transfers_work_dir_repo_via_bundle(self) -> bool:
+        # Modal exposes the sandbox's sshd over a per-sandbox unencrypted-port tunnel
+        # (sandbox.tunnels() -> a raw TCP host:port). That tunnel reliably drops a
+        # large `git push` mid-transfer on a freshly-booted sandbox, while the Modal
+        # control plane (used by exec and the filesystem API) stays healthy. So we move
+        # the work-dir repo as a git bundle over the control plane instead of pushing
+        # it over the flaky tunnel.
+        return True
+
+    def transfer_work_dir_repo_bundle(
+        self,
+        host: HostInterface,
+        source_host: OnlineHostInterface,
+        source_path: Path,
+        target_path: Path,
+    ) -> None:
+        """Move the work-dir git repo into the sandbox via a git bundle over the control plane.
+
+        Substitutes for the flaky `git push` over the per-sandbox tunnel: build a git
+        bundle of the source repo locally, upload it into the sandbox over the Modal
+        control plane (sandbox.copy_from_local), then `git fetch` from the bundle into
+        the bare repo the caller already created at ``target_path/.git``. The bundle is
+        built with ``--branches --tags`` and the fetch uses the heads/tags refspecs, so
+        the resulting ref namespace (branches + tags, no remote-tracking refs) is identical
+        to a mirror push (GIT_MIRROR_PUSH_REFSPECS); the caller's checkout and config steps
+        then run unchanged.
+        """
+        # The bundle is built from source_path on THIS (orchestrator) machine, so the
+        # source repo must live here. minds always creates from the local laptop, so this
+        # holds; a remote-source -> Modal create is unsupported by this path (the git-push
+        # path it replaces relayed such transfers). Fail explicitly rather than bundling a
+        # path that does not exist locally.
+        if not source_host.is_local:
+            raise MngrError(
+                "Modal work-dir bundle transfer requires a local source host "
+                "(the bundle is built on this machine); remote-source Modal creates are not supported."
+            )
+
+        sandbox = self._find_sandbox_by_host_id(host.id)
+        if sandbox is None:
+            raise MngrError(f"Could not find sandbox for host {host.id} to transfer work-dir repo")
+
+        remote_bundle = "/tmp/mngr-workdir.bundle"
+        target_git_dir = str(target_path / ".git")
+
+        with tempfile.TemporaryDirectory(prefix="mngr-workdir-bundle-") as temp_dir:
+            bundle_path = os.path.join(temp_dir, "workdir.bundle")
+            with log_span("Building git bundle of work-dir repo", source=str(source_path)):
+                try:
+                    # `git bundle create` takes rev-list args, not push refspecs:
+                    # --branches --tags selects exactly refs/heads/* and refs/tags/*
+                    # (no remote-tracking refs), matching GIT_MIRROR_PUSH_REFSPECS semantics.
+                    self.mngr_ctx.concurrency_group.run_process_to_completion(
+                        ["git", "-C", str(source_path), "bundle", "create", bundle_path, "--branches", "--tags"],
+                    )
+                except ProcessError as e:
+                    raise MngrError(f"Failed to build git bundle of work-dir repo: {e}") from e
+
+            with log_span("Uploading git bundle to sandbox over control plane", remote=remote_bundle):
+                sandbox.copy_from_local(Path(bundle_path), remote_bundle)
+
+            with log_span("Reconstructing work-dir repo from git bundle on sandbox"):
+                fetch_cmd = (
+                    f"git --git-dir={shlex.quote(target_git_dir)} fetch --prune --force "
+                    f"{shlex.quote(remote_bundle)} refs/heads/*:refs/heads/* refs/tags/*:refs/tags/* "
+                    f"&& rm -f {shlex.quote(remote_bundle)}"
+                )
+                proc = sandbox.exec("sh", "-c", fetch_cmd)
+                stdout = proc.get_stdout().read()
+                exit_code = proc.wait()
+                if exit_code != 0:
+                    raise MngrError(
+                        f"Failed to reconstruct work-dir repo from git bundle on sandbox "
+                        f"(exit code {exit_code}): {stdout}"
+                    )
 
     @property
     def app_name(self) -> str:

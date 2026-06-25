@@ -28,6 +28,7 @@ from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -40,6 +41,8 @@ from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import UserId
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
+from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.listing_utils import parse_optional_float
 from imbue.mngr.providers.listing_utils import parse_optional_int
 from imbue.mngr.utils.testing import SHARED_MODAL_ENV_NAME_VAR
@@ -2849,3 +2852,70 @@ def test_build_listing_script_uses_host_dir() -> None:
     script = build_listing_collection_script("/custom/host/dir", "test-prefix-")
     assert "/custom/host/dir" in script
     assert "test-prefix-" in script
+
+
+# ---------------------------------------------------------------------------
+# Bundle work-dir transfer (tunnel-bypass) end-to-end against FakeSandbox
+# ---------------------------------------------------------------------------
+
+
+def test_transfer_work_dir_repo_bundle_reconstructs_repo_offline(
+    testing_provider: ModalProviderInstance,
+    testing_modal: FakeModalInterface,
+    tmp_path: Path,
+) -> None:
+    """The full bundle -> control-plane upload -> fetch flow reconstructs the repo on a FakeSandbox.
+
+    FakeSandbox runs commands locally and copy_from_local writes a real file, so this exercises
+    the exact code path the Modal control-plane transfer uses, just offline. The target ends up
+    with the source's branch and tag refs in its bare repo -- the same end state a mirror push
+    would produce -- after which the caller's checkout/config steps would run unchanged.
+    """
+    cg = testing_provider.mngr_ctx.concurrency_group
+
+    # Build a real local source repo with a commit on a non-default branch plus a tag.
+    source_path = tmp_path / "source"
+    source_path.mkdir()
+    cg.run_process_to_completion(["git", "init", "-b", "feature", str(source_path)])
+    cg.run_process_to_completion(["git", "-C", str(source_path), "config", "user.email", "test@example.com"])
+    cg.run_process_to_completion(["git", "-C", str(source_path), "config", "user.name", "Test User"])
+    (source_path / "file.txt").write_text("contents\n")
+    cg.run_process_to_completion(["git", "-C", str(source_path), "add", "file.txt"])
+    cg.run_process_to_completion(["git", "-C", str(source_path), "commit", "-m", "initial"])
+    cg.run_process_to_completion(["git", "-C", str(source_path), "tag", "v1"])
+
+    # The caller (_transfer_git_repo) initializes the bare target repo before the push step.
+    target_path = tmp_path / "target"
+    target_path.mkdir()
+    cg.run_process_to_completion(["git", "init", "--bare", str(target_path / ".git")])
+
+    # Use a real local online host as both the target host and source host (the bundle is built
+    # from source_path on disk, so source_host is only a contract argument). The FakeSandbox is
+    # cached under the local host's id so _find_sandbox_by_host_id resolves it.
+    local_host_dir = tmp_path / "local_host_dir"
+    local_host_dir.mkdir()
+    local_provider = LocalProviderInstance(
+        name=ProviderInstanceName("local"),
+        host_dir=local_host_dir,
+        mngr_ctx=testing_provider.mngr_ctx,
+    )
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, OnlineHostInterface)
+    sandbox = make_sandbox_with_tags(testing_modal, host.id, "bundle-host")
+    testing_provider._cache_sandbox(host.id, HostName("bundle-host"), sandbox)
+
+    testing_provider.transfer_work_dir_repo_bundle(host, host, source_path, target_path)
+
+    # The target bare repo now holds exactly the source's branch and tag (no remote-tracking refs).
+    branch = cg.run_process_to_completion(
+        ["git", "--git-dir", str(target_path / ".git"), "rev-parse", "refs/heads/feature"],
+    )
+    tag = cg.run_process_to_completion(
+        ["git", "--git-dir", str(target_path / ".git"), "rev-parse", "refs/tags/v1"],
+    )
+    assert branch.stdout.strip()
+    assert tag.stdout.strip()
+    refs = cg.run_process_to_completion(
+        ["git", "--git-dir", str(target_path / ".git"), "for-each-ref", "--format=%(refname)"],
+    )
+    assert "refs/remotes/" not in refs.stdout
