@@ -704,14 +704,14 @@ def main() -> None:
                         image=image,
                         app=app,
                         timeout=_SANDBOX_TIMEOUT_SECONDS,
-                        # The in-sandbox FCT docker build (the create-workspace
-                        # phase, the single biggest chunk of wall-clock) is
-                        # CPU-bound (uv sync + npm build inside the container), so
-                        # give the producer sandbox more cores. Memory stays 8 GiB
-                        # -- the resumed test sandbox (offload-modal-minds-snapshot
-                        # .toml) keeps 8 GiB, and snapshot resume only needs the
-                        # filesystem, not matching CPU.
-                        cpu=8.0,
+                        # 4 CPUs. We tried 8 to speed the in-sandbox FCT docker
+                        # build (the create-workspace phase, the biggest chunk of
+                        # wall-clock), but it did not help -- that build is
+                        # network/IO-bound (downloading apt/uv/npm packages), not
+                        # CPU-bound, so the extra cores were wasted cost. Memory
+                        # stays 8 GiB to match the resumed test sandbox
+                        # (offload-modal-minds-snapshot.toml).
+                        cpu=4.0,
                         memory=8 * 1024,
                         # Inject the depot credentials + builder override (when enabled)
                         # so the in-sandbox `mngr create` builds the FCT container via
