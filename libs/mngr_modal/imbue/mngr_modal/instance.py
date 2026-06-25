@@ -459,6 +459,13 @@ class ModalProviderInstance(BaseProviderInstance):
         return True
 
     @property
+    def discovers_agents_from_live_host(self) -> bool:
+        # Modal derives discovery from a state volume that can lag a running host, so
+        # destroy/start resolution must re-read a running host's agents live (the same
+        # source `mngr list` reads). This opts Modal into api/discover's reconciliation.
+        return False
+
+    @property
     def app_name(self) -> str:
         """Get the Modal app name from the modal_app manager."""
         return self.modal_app.app_name

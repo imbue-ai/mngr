@@ -331,6 +331,19 @@ class ProviderInstanceInterface(MutableModel, ABC):
         ...
 
     @property
+    def discovers_agents_from_live_host(self) -> bool:
+        """Whether ``discover_hosts_and_agents`` already enumerates each host's agents live.
+
+        Default True: base discovery SSHes into each host, so its agent list already
+        reflects the live host. A provider that derives discovery from a cheap cached
+        source instead -- Modal reads agent records from a state volume that can lag a
+        still-running host -- overrides this to False, marking it for the live-agent
+        reconciliation in ``api/discover.py``. This single flag scopes that
+        reconciliation to Modal; no other provider is affected.
+        """
+        return True
+
+    @property
     @abstractmethod
     def supports_mutable_tags(self) -> bool:
         """Whether this provider supports modifying tags after host creation.

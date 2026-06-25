@@ -11,14 +11,18 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discovery_events import resolve_provider_names_for_identifiers
 from imbue.mngr.api.providers import get_all_provider_instances
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import HostConnectionError
+from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import ProviderDiscoveryError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.utils.thread_cleanup import mngr_executor
@@ -147,6 +151,76 @@ def _all_identifiers_found(
     return not remaining
 
 
+def _reconcile_running_hosts_with_live_agents(
+    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]],
+    providers: list[BaseProviderInstance],
+    identifiers: Sequence[str],
+) -> None:
+    """Replace a RUNNING host's discovered agents with the live set read from the host.
+
+    Some providers (Modal) derive discovery from a cheap cached source (a state
+    volume) that can lag a still-running host, so a live agent may be absent from
+    the discovery results even though ``mngr list`` -- which reads the running host
+    live over SSH -- shows it. Without this, resolution raises "agent not found"
+    for an agent that is plainly alive, so e.g. ``mngr destroy`` of a running host
+    silently no-ops. This does the same live read ``mngr list`` already does, but
+    only for RUNNING hosts that are still missing a requested identifier, so the
+    common all-found path (and any provider whose discovery is already live) pays
+    nothing. An unreachable host is left with its existing refs rather than failing
+    the whole resolve.
+    """
+    remaining = set(identifiers)
+    for agent_refs in agents_by_host.values():
+        for agent_ref in agent_refs:
+            remaining.discard(str(agent_ref.agent_id))
+            remaining.discard(str(agent_ref.agent_name))
+    if not remaining:
+        return
+    provider_by_name = {provider.name: provider for provider in providers}
+    for host_ref in list(agents_by_host):
+        if not remaining:
+            return
+        if host_ref.host_state is not HostState.RUNNING:
+            continue
+        provider = provider_by_name.get(host_ref.provider_name)
+        # Scoped to providers whose discovery is NOT already live: Modal reads agents
+        # from a cached state volume that can lag a running host, so only it needs the
+        # live re-read. Every other provider discovers agents live already and is
+        # deliberately left untouched here (``discovers_agents_from_live_host`` True).
+        if provider is None or provider.discovers_agents_from_live_host:
+            continue
+        try:
+            host = provider.get_host(host_ref.host_id)
+            if not isinstance(host, OnlineHostInterface):
+                continue
+            try:
+                live_agents = host.discover_agents()
+            finally:
+                host.disconnect()
+        except (HostConnectionError, HostNotFoundError) as exc:
+            logger.debug("Skipped live agent read for running host {}: {}", host_ref.host_id, exc)
+            continue
+        agents_by_host[host_ref] = live_agents
+        for agent_ref in live_agents:
+            remaining.discard(str(agent_ref.agent_id))
+            remaining.discard(str(agent_ref.agent_name))
+
+
+def _reconciled(
+    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]],
+    providers: list[BaseProviderInstance],
+    agent_identifiers: Sequence[str] | None,
+) -> tuple[dict[DiscoveredHost, list[DiscoveredAgent]], list[BaseProviderInstance]]:
+    """Reconcile a not-yet-found identifier against live running hosts, then return.
+
+    A no-op when no identifiers were requested or all are already found, so the
+    extra live read only happens on a genuine miss.
+    """
+    if agent_identifiers is not None and not _all_identifiers_found(agent_identifiers, agents_by_host):
+        _reconcile_running_hosts_with_live_agents(agents_by_host, providers, agent_identifiers)
+    return agents_by_host, providers
+
+
 @log_call
 def discover_hosts_and_agents(
     mngr_ctx: MngrContext,
@@ -171,13 +245,15 @@ def discover_hosts_and_agents(
         # When the caller already specified providers, or no identifiers given,
         # or safe mode is enabled, skip the optimization
         if provider_names is not None or agent_identifiers is None or mngr_ctx.is_full_discovery:
-            return _run_discovery(mngr_ctx, provider_names, include_destroyed, reset_caches)
+            agents_by_host, providers = _run_discovery(mngr_ctx, provider_names, include_destroyed, reset_caches)
+            return _reconciled(agents_by_host, providers, agent_identifiers)
 
         # Try to resolve identifiers to provider names from the event stream
         resolved_providers = resolve_provider_names_for_identifiers(mngr_ctx, agent_identifiers)
         if resolved_providers is None:
             logger.trace("Could not resolve agent identifiers from event stream, doing full scan")
-            return _run_discovery(mngr_ctx, None, include_destroyed, reset_caches)
+            agents_by_host, providers = _run_discovery(mngr_ctx, None, include_destroyed, reset_caches)
+            return _reconciled(agents_by_host, providers, agent_identifiers)
 
         logger.trace(
             "Resolved agent identifiers to providers: {}",
@@ -194,7 +270,8 @@ def discover_hosts_and_agents(
         # Fall back to a full scan. Provider instances are cached so this
         # does not leak resources even though get_all_provider_instances is called again.
         logger.debug("Event stream was stale (not all identifiers found), falling back to full scan")
-        return _run_discovery(mngr_ctx, None, include_destroyed, reset_caches)
+        agents_by_host, providers = _run_discovery(mngr_ctx, None, include_destroyed, reset_caches)
+        return _reconciled(agents_by_host, providers, agent_identifiers)
 
 
 def discover_by_address(
