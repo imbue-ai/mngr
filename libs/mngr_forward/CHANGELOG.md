@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `mngr forward --on-error {abort,continue}` flag (default `abort`). Under `continue`, the `--no-observe` startup snapshot tolerates an unauthenticated/unreachable provider — it runs `mngr list --on-error continue` and forwards agents from the healthy providers instead of failing to start. The observe and `--observe-via-file` modes already tolerate provider errors.
+
 ## [v0.1.6] - 2026-06-18
 
 ## [v0.1.5] - 2026-06-16

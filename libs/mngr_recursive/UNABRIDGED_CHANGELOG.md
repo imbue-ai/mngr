@@ -4,6 +4,10 @@ Full, unedited changelog entries for the `mngr_recursive` project, consolidated 
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-19
+
+Removed the now-vestigial `RecursivePluginConfig.merge_with` override; the config merge is routed through the overlay pipeline, which reproduces the same assign-by-default semantics. No user-visible behavior change.
+
 ## 2026-06-12
 
 Internal: routed the agent state-dir path construction through the shared `get_agent_state_dir_path` helper (now in `imbue.mngr.hosts.common`). No behavior change.

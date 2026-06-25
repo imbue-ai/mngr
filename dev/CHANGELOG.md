@@ -4,6 +4,58 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-06-22
+
+### Added
+
+- Added: Design blueprints for handling unauthenticated providers consistently (`blueprint/consistent-provider-auth-failures/`), robust minds-list provider-error handling (`blueprint/robust-minds-list-provider-errors/`), the minds desktop client's FastAPI→Flask migration (`blueprint/minds-flask-migration/`), migrating the Minds app's system interface off asyncio (`blueprint/remove-system-interface-asyncio/`), and unifying the `mngr start` host lock with the cooperative host lock (`blueprint/unify-remote-host-lock/`).
+
+### Changed
+
+- Changed: Renamed the `just minds-tailwind` recipe to `just minds-css`. It now compiles the minds desktop client's Tailwind v4 stylesheet (`static/app.css` → minified `static/app.min.css`) via the pinned `@tailwindcss/cli`, instead of fetching the Tailwind Play CDN JS bundle. `.gitignore` updated to track the new compiled artifact in place of the retired `tailwind.js`.
+- Changed: The `forward-system-interface` justfile recipe now resolves an agent's id with `mngr list --on-error continue`, so an unauthenticated/unreachable provider no longer aborts the lookup of a local agent.
+
+## 2026-06-21
+
+### Added
+
+- Added: Design blueprints for the sshd / agent restart-robustness work (`blueprint/sshd-restart-robustness/`) and for sharing a bare-metal slice box across developer environments (`blueprint/share-bare-metal-across-dev-envs/`).
+
+## 2026-06-20
+
+### Removed
+
+- Removed: The `bake-pool-host-{dev,prod}` justfile recipes (they baked OVH classic VPS pool hosts, now deprecated). Pool hosts are baked as bare-metal slices via the `bake-slice-{dev,prod}` recipes; `list-pool-hosts` and `destroy-pool-host` are unchanged and still cover legacy OVH VPS rows. The `minds-justfile` and `minds-dev-workflow` skill docs were updated to match.
+
+## 2026-06-19
+
+### Added
+
+- Added: Design specs for the bare-provider architecture (`specs/bare-providers/spec.md` + `concise.md` + `extraction_design.md`), introducing a substrate-x-realizer architecture (a `HostRealizer` seam injected like the existing `VpsClient`) so "with Docker" vs "without Docker" becomes a reusable axis rather than a per-cloud class matrix, with a staged rollout that later folds local/docker/lima/ssh into the same grid. Also added `specs/uncertainties.md`.
+- Added: Cross-provider specs reviewing and prescribing the shared shape for all nine `mngr` provider plugins — `specs/provider-uniformity-review.md` (descriptive current state with a ranked findings table, six lifecycle matrices, error-classification and snapshot matrices, build-args table, recommendations), `specs/provider-shape.md` (prescriptive contract: user contract, capability-flag honesty, shared defaults, lifecycle override hooks, error classification, operator commands, test requirements, anti-patterns, implementer checklist), and `specs/implementing-a-provider.md` (dev walkthrough for adding a new provider plugin, with a Common Gotchas section). Vendored `specs/provider-release-tests.md` (the shared release-test harness proposal, condensed to a remaining-gaps tracker since it has landed).
+- Added: Blueprint plan `blueprint/remote-mind-recovery/` for extending minds' workspace-recovery flow to remote (Imbue Cloud) minds.
+- Added: `google-cloud-storage>=2.18` runtime dependency at the repo root, used by the GCP provider's new offline `host_dir` GCS state bucket. Recorded in `uv.lock`; declared in `libs/mngr_gcp/pyproject.toml`.
+- Added: Registered the new `overlay` workspace library in the root `pyproject.toml` (`[tool.uv.sources]` workspace source plus `--cov=imbue.overlay` in the shared coverage flags so the library is measured in the offload combined-coverage gate).
+
+### Changed
+
+- Changed: `make_cli_docs.py` now also generates the provider/agent config tables in each plugin README from the Pydantic field descriptions (the source of truth, also shown by `mngr config`), spliced between markers and verified by the docs `--check` gate so the tables can no longer drift from the code. The `regenerate-cli-docs` pre-commit hook now runs `make_cli_docs.py --check` (non-mutating, covering every generated file) instead of regenerating in place and diffing only the mngr command docs, and its trigger now includes the provider/agent `config.py` / `plugin.py` sources and generated provider READMEs.
+- Changed: Root pytest coverage config tracks the renamed `imbue.mngr_vps` package (was `imbue.mngr_vps_docker`).
+- Changed: Documented Vault setup for pool/slice bakes in the `minds-dev-workflow` skill — bakes need an interactive `vault login -method=oidc`, the minds wrappers auto-apply the imbue HCP `VAULT_ADDR`/`VAULT_NAMESPACE` defaults, and raw `vault`/`mngr imbue_cloud admin` commands need those two exported.
+- Changed: Removed a monorepo-development-only paragraph from the top-level README so the published PyPI README stays focused on user-relevant content.
+
+## 2026-06-18
+
+### Added
+
+- Added: New `identify-suspicious-edge-cases` Claude skill that flags over-broad exception catches, fallback `else` branches, defensive guards, and unnecessary `| None` types under a given path.
+- Added: Design spec `specs/provider-state-bucket/` for giving the AWS and Azure providers a cloud object-storage bucket (S3 / Azure Blob) that holds mngr control-plane state, so a stopped instance's host record, agent metadata, and `host_dir` are all readable offline without hitting the EC2/VM tag-value limit. GCP is intentionally out of scope (its per-instance metadata is sufficient).
+- Added: `moto[s3]` in the root dev dependency group, for in-memory S3 unit tests of the new AWS state bucket.
+
+### Changed
+
+- Changed: The `identify-*` skills (`identify-doc-code-disagreements`, `identify-inconsistencies`, `identify-outdated-docstrings`, `identify-style-issues`) now accept a `target_path` argument instead of a bare library name. You can scope them to a whole library (`libs/mngr` or just `mngr`) or to any subdirectory within one. Each skill resolves the scan scope and its containing library, gathers the containing library's context, and writes findings to the containing library's `_tasks/` folder.
+
 ## 2026-06-17
 
 ### Added

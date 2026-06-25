@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-19
+
+Clarified the README's one-line description of the library's purpose.
+
 ## 2026-06-11
 
 Fixed a bug in the `PREVENT_BUILTIN_EXCEPTION_RAISES` ratchet regex: a trailing `\b` after the opening paren meant it only matched raises whose first argument started with a word character (e.g. `raise OSError(msg)`), missing the common `raise ValueError("literal")` and `raise OSError()` forms. The ratchet now also excludes test files (consistent with tests legitimately raising built-in exceptions to simulate error conditions). Replaced the direct `ValueError` raises in the constrained `primitives` types and the `RegexPattern` validator with dedicated `InvalidPrimitiveValueError` / `InvalidRegexPatternError` exception types.

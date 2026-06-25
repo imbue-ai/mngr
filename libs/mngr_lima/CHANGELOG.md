@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: Lima VM provisioning now also installs `flock` (the `util-linux` package), since `flock` now backs mngr's unified cross-actor host lock and the in-host idle-shutdown watcher. Already present on standard Debian images, so this only installs it on minimal/custom images.
+
 ## [v0.1.10] - 2026-06-18
 
 ## [v0.1.9] - 2026-06-16

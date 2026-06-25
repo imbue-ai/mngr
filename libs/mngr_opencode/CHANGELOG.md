@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: Adoption no longer requires the `sqlite3` command-line tool on the destination host. The agent's `opencode.db` is now assembled entirely on a local staging copy via Python's bundled SQLite — the first source db is copied in, each subsequent `--adopt` (and the `--from` clone) is merged in, and every adopted session is rebound to the new agent's work dir, all locally — and the finished db is copied onto the (possibly remote) host once at the end. A `--from` clone whose source lives on a remote host has that source db pulled across first.
+
 ## [v0.2.17] - 2026-06-18
 
 ### Added

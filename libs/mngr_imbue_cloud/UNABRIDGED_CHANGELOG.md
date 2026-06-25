@@ -4,6 +4,73 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-22
+
+Fixed host lock reporting for imbue_cloud pool hosts: a host's lock status is now derived from a real flock held-probe rather than the lock file's presence. The lock file now persists after release, so the previous mtime-based check would have reported every previously-locked host as permanently locked.
+
+## 2026-06-21
+
+Multiple developer environments can now safely share a single bare-metal slice box.
+
+Each slice's lima instance and data-disk names are now stamped with the owning environment (`mngr-slice-<env>-<host-hex>`); `admin pool create --backend slice` takes a new `--slice-env-name` for this. Legacy un-stamped slices keep working and are never touched.
+
+Slice baking now derives free-slot capacity from the box's real occupancy (every env's slices plus any legacy ones) instead of the per-env database, so independent envs cannot collectively over-subscribe a box.
+
+Each slice carve now reserves its slot and host ports under a brief box-wide lock (it creates the instance without booting via `limactl create`, then boots it after releasing the lock), so concurrent bakes from different envs never collide on capacity or ports.
+
+The post-bake orphan reaper now only ever deletes the active env's own stamped slices -- never another env's slices or legacy un-stamped ones.
+
+Added `admin pool teardown-slices`, which tears down every unleased slice VM recorded in the pool DB (used by `minds env destroy` so a destroyed env doesn't leak its baked pool slices on shared boxes).
+
+## 2026-06-20
+
+Deprecated baking new OVH classic VPS pool hosts in `mngr imbue_cloud admin pool create`. The `--backend` default is now `slice` (bare-metal slices); passing `--backend ovh_vps` fails fast with a deprecation error pointing at `--backend slice`. Existing OVH VPS pool hosts are unaffected and can still be listed and destroyed (`admin pool list` / `admin pool destroy`, the connector's release + cleanup paths), so this is a deprecation, not a removal.
+
+## 2026-06-19
+
+Fixed a bug where restarting a stopped `imbue_cloud` (leased pool) mind left it in a broken, unrecoverable state. The subsequent `mngr start` SSH into the container failed ("Start step of host restart failed"), leaving the mind dead and UI-unrecoverable even though its data was intact on the volume.
+
+There were two parts to the fix:
+
+- `ImbueCloudProvider.get_host` previously returned an online host unconditionally, without checking whether the inner container was actually running. Because `mngr start` only re-starts a host when `get_host` reports it offline, the start command skipped `start_host` entirely and SSHed straight into the dead container. `get_host` now probes the container's running state over the outer root SSH (mirroring `VpsDockerProvider.get_host`) and returns an offline host when the container is stopped, so `mngr start` routes through `start_host`.
+
+- `start_host` previously did a bare `docker start` and returned. But the in-container sshd is launched via `docker exec` (the container's command is just a sleep), so it does not survive a stop/start — the container came back with no sshd, and the per-host authorized key and host key may not have persisted either. `start_host` now re-bootstraps the container's SSH over the outer root SSH (which works independently of the container's sshd): it relaunches sshd, re-seeds the per-host authorized key (in case `/root` did not persist), waits for sshd to accept connections, and re-scans and re-records the served host key (reconciling any host-key change so strict host-key checking succeeds). This mirrors what the local docker and vps-docker providers already do on restart.
+
+Together, a stopped leased mind can now be brought back to life.
+
+`mngr list` discovery now reports a transport-level failure reaching the Imbue Cloud connector (connection refused, DNS failure, timeout -- the flaky-network / connector-down case) as a typed `ProviderUnavailableError` rather than a bare httpx error. Auth and account-configuration problems keep their own error types. This lets the minds recovery flow tell "the provider is unreachable, so a restart can't help -- just retry" apart from "your workspace can't be reached for another reason".
+
+Updated imports for the `mngr_vps_docker` -> `mngr_vps` package rename: the VPS
+provider is no longer Docker-only, so the package and its shape-agnostic base
+classes dropped "Docker" from their names (`VpsDockerProvider` -> `VpsProvider`,
+`VpsDockerProviderConfig` -> `VpsProviderConfig`, `VpsDockerHostRecord` ->
+`VpsHostRecord`, `VpsDockerHostStore` -> `VpsHostStore`, `VpsDockerError` ->
+`VpsError`). Import-only change; no behavior difference.
+
+Updated the VPS build-arg parsing imports to point at the new `imbue.mngr_vps.build_args` module (moved out of `imbue.mngr_vps.instance`). Import-only change; no behavior difference.
+
+Updated the slice provider's `_create_host_object` / `_wait_for_container_sshd` /
+`_on_certified_host_data_updated` overrides to match the base's new per-host
+realizer threading (the base now resolves an existing host's realizer from its
+placement rather than the create-time config). imbue_cloud is container-only, so
+it threads the realizer through unchanged; no behavior difference.
+
+Fixed two `imbue_cloud` provider unit tests that broke on `main` after recent merges, so they once again match the production code:
+
+- The `start_host` regression test (and `start_host`'s own docstring) still required an authorized-keys re-seed and a host-key re-scan, but those steps were deliberately removed because a `docker stop`/`docker start` preserves the container filesystem (only the sshd *process*, launched via `docker exec`, needs relaunching). The test and docstring now assert/describe just the sshd relaunch.
+
+- The `get_host` test stub returned a boolean for the `docker inspect` running-state probe, but the probe now reads `{{.State.Status}}` and compares it against the shared `is_running_container_state` rule. The stub now returns a container status string, so a running leased container correctly resolves to an online host.
+
+Trimmed the README to user-relevant content and tightened it for concision.
+
+Corrected the connector-URL precedence (there is no baked-in default; it comes from the `connector_url` config or the env var, else raises) and the `hosts release` argument (a host-db-id, not a lease-id).
+
+## 2026-06-18
+
+`mngr imbue_cloud admin pool list` (and the `minds pool list` wrapper) now emits every `pool_hosts` column. It previously printed a hand-maintained 10-column subset that omitted `region`, `backend_kind`, and the slice identifiers (`bare_metal_server_id`, `lima_instance_name`, `lima_disk_name`), as well as `host_name`, `vps_instance_id`, and the SSH ports -- so a baked slice host showed up looking like a region-less OVH VPS. The SELECT and the emitted JSON keys are now both driven by a single column list, with a regression test asserting it stays in lockstep with the schema.
+
+Agent lifecycle detection now targets the agent's primary tmux window by name (the configurable `tmux.primary_window_name`, default `agent`) instead of the literal `:0` index, so it works regardless of the user's tmux `base-index` setting.
+
 ## 2026-06-17
 
 `mngr imbue_cloud admin pool destroy` is now backend-aware, mirroring the `--backend` branch in `pool create`. Previously it only knew the OVH-VPS teardown path: cancel the OVH VPS, then drop the row. Run against a bare-metal `slice` row it would try to cancel a non-existent OVH VPS (404) and, with `--skip-vps-cancel`, drop the row while leaving the slice's lima VM running on the box -- stranding a slot indefinitely (no cron reaps slice-VM orphans; only a subsequent bake does).

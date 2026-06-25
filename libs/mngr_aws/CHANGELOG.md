@@ -6,6 +6,23 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Bare placement (`isolation=NONE`) for AWS hosts — agents now run directly on the EC2 VM (no Docker container), with idle self-stop driven by `shutdown -P now` plus EC2's `InstanceInitiatedShutdownBehavior`. Bare-placement release tests included.
+- Added: Per-instance `mngr-isolation` tag stamped at create, so a running bare host is discoverable and reachable with the default provider config (`mngr conn`/`list`/`stop`/`start`/`destroy` no longer need `-S providers.<name>.isolation=NONE`).
+- Added: AWS release suite now runs the shared provider release harness's Trip 1 (full lifecycle, container + bare), Trip 2 (idle auto-shutdown contract), Trip 3 (snapshot-survives-destroy, asserting AWS's documented non-portability), and Trip 4 (error classification — `mngr create` with unresolvable credentials surfaces `ProviderUnavailableError` with curated `aws configure` help; `--vps-*` build arg rejected with the migration hint).
+
+### Changed
+
+- Changed: Collapsed the AWS provider's two AMI config knobs into one: `default_ami_by_region` is gone, and `default_ami_id` defaults to `None`, falling back to a pinned per-region default (Debian 12 amd64) when unset.
+- Changed: A missing/unresolvable AWS session now raises the shared `ProviderNotAuthorizedError` (still a `ProviderUnavailableError`), so `mngr list` surfaces it as one consistent error line and a non-zero exit instead of an ad-hoc message.
+- Changed: `mngr rename` now re-stamps the EC2 `Name` identity tag (read by offline discovery), so a renamed-then-stopped host lists under its new name in `mngr list`. Previously the `Name` tag was stamped only at create.
+- Changed: Updated for the `mngr_vps_docker` → `mngr_vps` package and class rename (`VpsDockerProvider` → `VpsProvider`, etc.). Import-only.
+
+### Fixed
+
+- Fixed: `start_host` for a bare host no longer fails reading the host record through the Docker volume; it resolves the store through the realizer (the fixed root-disk path for bare).
+
 ## [v0.1.4] - 2026-06-18
 
 ### Changed

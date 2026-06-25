@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-21
+
+The hourly pool-host cleanup cron now also audits each bare-metal box's lima slices against the pool database, scoped to this deployment's own environment (via `MINDS_ENV_NAME`).
+
+It logs two kinds of divergence: a slice stamped for this env that is present on a box but has no database row, and a database row whose VM has vanished from its box. The audit is alert-only -- it never auto-deletes (a row-less stamped slice is usually a bake mid-flight, and this cron runs independently of bakes, so deleting here could race a live bake). Actual orphan reaping stays with the bake-time reaper. Other environments' slices and legacy un-stamped slices are never inspected, so the audit is safe on a box shared by multiple dev environments.
+
 ## 2026-06-15
 
 OVH bare-metal slices support:

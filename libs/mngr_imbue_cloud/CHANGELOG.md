@@ -6,6 +6,25 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Multiple developer environments can now safely share a single bare-metal slice box. Each slice's lima instance and data-disk names are stamped with the owning env (`mngr-slice-<env>-<host-hex>`); `admin pool create --backend slice --slice-env-name <env>` plumbs this through. Slice baking derives free-slot capacity from the box's real occupancy across every env, and concurrent bakes from different envs reserve their slots under a brief box-wide lock so they cannot collide on capacity or ports. The post-bake orphan reaper only ever deletes the active env's own stamped slices. Legacy un-stamped slices keep working.
+- Added: `mngr imbue_cloud admin pool teardown-slices` tears down every unleased slice VM recorded in the pool DB, so a destroyed env doesn't leak its baked pool slices on shared boxes.
+
+### Changed
+
+- Changed: A transport-level failure reaching the Imbue Cloud connector (connection refused, DNS, timeout — the connector-down case) is now reported by discovery as a typed `ProviderUnavailableError` rather than a bare httpx error, so the minds recovery flow can tell "the provider is unreachable, retry" apart from "your workspace can't be reached for another reason". Auth and account-configuration problems keep their own error types.
+- Changed: Updated for the `mngr_vps_docker` → `mngr_vps` package and class rename. Import-only.
+
+### Deprecated
+
+- Deprecated: Baking new OVH classic VPS pool hosts in `mngr imbue_cloud admin pool create`. The `--backend` default is now `slice` (bare-metal slices); passing `--backend ovh_vps` fails fast with a deprecation error pointing at `--backend slice`. Existing OVH VPS pool hosts can still be listed and destroyed.
+
+### Fixed
+
+- Fixed: Restarting a stopped `imbue_cloud` (leased pool) mind left it in a broken, unrecoverable state. The desktop client now self-heals: `get_host` probes the inner container's running state over the outer root SSH and returns an offline host when the container is stopped (so `mngr start` routes through `start_host` instead of skipping it), and `start_host` re-bootstraps the container's SSH over the outer root SSH (relaunches sshd, re-seeds the per-host authorized key, re-records the served host key) instead of doing a bare `docker start` that came back with no sshd.
+- Fixed: Host lock reporting now derives a pool host's lock status from a real `flock` held-probe rather than the lock file's presence (the lock file now persists after release).
+
 ## [v0.1.6] - 2026-06-18
 
 ### Added
