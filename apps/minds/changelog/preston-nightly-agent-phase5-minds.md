@@ -1,0 +1,3 @@
+Workspaces that the nightly Caretaker agent creates now announce themselves: their sidebar tab gently pulses in the workspace accent color until you open it for the first time, then stops for good (tracked per device). Hand-made workspaces and your day-1 chat tab never pulse -- only agents the Caretaker scheduler auto-creates (labeled `auto_created` / `caretaker`).
+
+The create form now captures your browser's local timezone and stores it on the new workspace, so the workspace's scheduler runs nightly tasks (like the Caretaker's 3 AM run) in your local time rather than the host clock. If the timezone can't be determined it falls back to the host clock, so nothing breaks.

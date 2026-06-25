@@ -410,6 +410,61 @@ def test_build_workspace_list_does_not_mark_stale_for_unrelated_provider_error()
     assert "is_stale" not in workspaces[0]
 
 
+# -- _build_workspace_list new-tab (blink) marking --
+#
+# The Caretaker scheduler creates its agent with ``auto_created=true`` +
+# ``caretaker=true``; the desktop client blinks any such tab until the user
+# opens it (the seen-tracking lives client-side in JS). _build_workspace_list
+# emits ``is_new`` iff the agent carries a truthy auto-created marker.
+
+
+def _build_one_workspace_with_labels(extra_labels: dict[str, str]) -> dict[str, str]:
+    """Build the single-workspace listing entry for an agent carrying ``extra_labels``."""
+    resolver = MngrCliBackendResolver()
+    agent = _make_workspace_agent("docker", extra_labels=extra_labels)
+    resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))
+    workspaces = _build_workspace_list(resolver)
+    assert len(workspaces) == 1
+    return workspaces[0]
+
+
+def test_build_workspace_list_does_not_mark_new_for_ordinary_workspace() -> None:
+    """A hand-made workspace (no auto-created marker) never blinks."""
+    entry = _build_one_workspace_with_labels({})
+    assert "is_new" not in entry
+
+
+@pytest.mark.parametrize(
+    "marker_labels",
+    [
+        {"auto_created": "true"},
+        {"caretaker": "true"},
+        {"auto_created": "true", "caretaker": "true"},
+        # Any truthy value counts, not just the literal "true".
+        {"auto_created": "1"},
+    ],
+)
+def test_build_workspace_list_marks_new_for_auto_created_agent(marker_labels: dict[str, str]) -> None:
+    """An agent carrying a truthy ``auto_created`` / ``caretaker`` label blinks."""
+    entry = _build_one_workspace_with_labels(marker_labels)
+    assert entry["is_new"] == "true"
+
+
+@pytest.mark.parametrize(
+    "marker_labels",
+    [
+        {"auto_created": "false"},
+        {"caretaker": "0"},
+        {"auto_created": ""},
+        {"caretaker": "no"},
+    ],
+)
+def test_build_workspace_list_does_not_mark_new_for_falsey_marker(marker_labels: dict[str, str]) -> None:
+    """An explicitly falsey marker (e.g. ``auto_created=false``) must not blink."""
+    entry = _build_one_workspace_with_labels(marker_labels)
+    assert "is_new" not in entry
+
+
 # -- _build_workspace_list color emission --
 #
 # These assert the SSE workspaces payload carries the stored color.

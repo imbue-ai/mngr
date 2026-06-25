@@ -7,6 +7,7 @@ suite (``libs/mngr_imbue_cloud``) covers the lease + adopt path; this
 file covers minds' command-building and helpers.
 """
 
+import base64
 import queue
 import subprocess
 import threading
@@ -34,6 +35,7 @@ from imbue.minds.desktop_client.agent_creator import _is_local_path
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_text
 from imbue.minds.desktop_client.agent_creator import _rsync_worktree_over_clone
+from imbue.minds.desktop_client.agent_creator import build_timezone_write_script
 from imbue.minds.desktop_client.agent_creator import checkout_branch
 from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
@@ -197,6 +199,20 @@ def test_build_mngr_create_command_omits_color_label_when_unset() -> None:
     )
     joined = " ".join(command)
     assert "color=" not in joined
+
+
+def test_build_timezone_write_script_targets_the_scheduler_tz_file() -> None:
+    """The post-create write targets the frozen scheduler tz path and base64-decodes the value."""
+    script = build_timezone_write_script("America/New_York")
+    # Writes to the contract-frozen path, relative to the agent work_dir.
+    assert "runtime/scheduler/timezone" in script
+    # Creates the parent dir and base64-decodes (so arbitrary content survives
+    # the mngr exec single-arg shell round-trip).
+    assert "mkdir -p" in script
+    assert "base64 -d" in script
+    # The encoded payload round-trips back to the tz name plus a trailing newline.
+    encoded = script.split("printf %s '", 1)[1].split("'", 1)[0]
+    assert base64.b64decode(encoded).decode("utf-8") == "America/New_York\n"
 
 
 def test_build_mngr_create_command_does_not_inject_minds_api_key() -> None:

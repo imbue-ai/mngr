@@ -386,6 +386,36 @@ def test_get_workspace_color_returns_none_for_unknown_agent() -> None:
     assert resolver.get_workspace_color(AgentId.generate()) is None
 
 
+# -- get_agent_labels tests -------------------------------------------
+#
+# get_agent_labels is the label-read behind the blinking-new-tab affordance:
+# _build_workspace_list reads it to spot the Caretaker scheduler's
+# ``auto_created`` / ``caretaker`` markers.
+
+
+def test_get_agent_labels_returns_full_label_mapping() -> None:
+    """Every label on the agent (the workspace markers plus extras) is returned."""
+    resolver, agent = _resolver_with_workspace_agent(extra_labels={"auto_created": "true", "caretaker": "true"})
+    labels = resolver.get_agent_labels(agent)
+    assert labels["workspace"] == "true"
+    assert labels["is_primary"] == "true"
+    assert labels["auto_created"] == "true"
+    assert labels["caretaker"] == "true"
+
+
+def test_get_agent_labels_returns_empty_dict_for_unknown_agent() -> None:
+    resolver = MngrCliBackendResolver()
+    assert resolver.get_agent_labels(AgentId.generate()) == {}
+
+
+def test_get_agent_labels_returns_a_copy_not_the_live_labels() -> None:
+    """Mutating the returned dict must not corrupt the resolver's cached labels."""
+    resolver, agent = _resolver_with_workspace_agent(extra_labels={"auto_created": "true"})
+    labels = resolver.get_agent_labels(agent)
+    labels["auto_created"] = "tampered"
+    assert resolver.get_agent_labels(agent)["auto_created"] == "true"
+
+
 def test_set_workspace_color_locally_updates_the_cached_label() -> None:
     """Optimistic write: after a successful CLI mngr label write, the
     resolver's cached snapshot is updated in place so the next SSE

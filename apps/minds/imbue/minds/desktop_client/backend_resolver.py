@@ -175,6 +175,19 @@ class BackendResolverInterface(MutableModel, ABC):
         """
         return None
 
+    def get_agent_labels(self, agent_id: AgentId) -> dict[str, str]:
+        """Return the full label mapping for an agent, or an empty dict.
+
+        Mirrors :meth:`get_workspace_color`'s iteration over discovered
+        agents but exposes every label rather than one. Callers use it to
+        read the ``auto_created`` / ``caretaker`` markers that drive the
+        blinking-new-tab affordance.
+
+        Default implementation returns an empty mapping. Subclasses with
+        access to agent labels should override this.
+        """
+        return {}
+
     def get_system_services_agent_id(self, workspace_agent_id: AgentId) -> AgentId | None:
         """Return the ``system-services`` agent id that shares the workspace agent's host.
 
@@ -847,6 +860,14 @@ class MngrCliBackendResolver(BackendResolverInterface):
                         return DEFAULT_WORKSPACE_COLOR
                     return normalized
             return None
+
+    def get_agent_labels(self, agent_id: AgentId) -> dict[str, str]:
+        """Return the agent's full label mapping (a copy), or an empty dict if unknown."""
+        with self._lock:
+            for agent in self._agents_result.discovered_agents:
+                if agent.agent_id == agent_id:
+                    return dict(agent.labels)
+            return {}
 
     def set_workspace_color_locally(self, agent_id: AgentId, color_hex: str) -> bool:
         """Optimistically update the cached ``color`` label for an agent.

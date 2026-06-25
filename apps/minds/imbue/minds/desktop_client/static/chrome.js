@@ -111,6 +111,11 @@
   }
 
   function selectWorkspace(agentId) {
+    // Opening a workspace clears its new-tab pulse for good on this client.
+    // Mark it seen and re-render so the row stops pulsing immediately.
+    if (window.mindsSeenWorkspaces && window.mindsSeenWorkspaces.markSeen(agentId)) {
+      renderWorkspaces(lastWorkspaces);
+    }
     navigateContent(mngrForwardOrigin + '/goto/' + agentId + '/');
     closeSidebar();
   }
@@ -454,6 +459,7 @@
         var row = window.mindsSidebarRow.buildRow(w, {
           isCurrent: w.id === currentTitleAgentId,
           withOpenNew: false,
+          isSeen: !window.mindsSeenWorkspaces || window.mindsSeenWorkspaces.has(w.id),
         });
         row.addEventListener('click', function (e) {
           if (e.target.closest('[data-open-settings]')) {
@@ -537,6 +543,12 @@
       if (data.type === 'workspaces') {
         lastWorkspaces = data.workspaces || [];
         rememberWorkspaceAccents(lastWorkspaces);
+        // On a brand-new client, treat every workspace already present at
+        // first sight as "seen" so pre-existing tabs (incl. the day-1 chat
+        // tab) never blink. Idempotent: only the first tick ever seeds.
+        if (window.mindsSeenWorkspaces) {
+          window.mindsSeenWorkspaces.seedIfFresh(lastWorkspaces.map(function (w) { return w.id; }));
+        }
         renderWorkspaces(lastWorkspaces);
         // Replay the most recent ``applyTitleAccent`` call now that the
         // cache has fresh data. Catches two cases:

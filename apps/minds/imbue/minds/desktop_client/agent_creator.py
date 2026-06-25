@@ -9,10 +9,12 @@ Callers can poll creation status via get_creation_info() or stream logs
 via get_log_queue().
 """
 
+import base64
 import json
 import os
 import queue
 import re
+import shlex
 import shutil
 import tempfile
 import threading
@@ -513,6 +515,35 @@ _FAST_MODE_PREVENT: Final[str] = "prevent"
 # human-formatted error text) to fall back to the slow path. Kept in sync with
 # ``imbue.mngr_imbue_cloud.errors.FastPathUnavailableError``.
 _FAST_PATH_UNAVAILABLE_ERROR_CLASS: Final[str] = "FastPathUnavailableError"
+
+# Repo-root-relative path the scheduler service reads to resolve "3 AM" in the
+# user's local timezone (frozen by the caretaker-scheduler contract). Written
+# once, right after create, from the desktop client's browser IANA tz. The
+# scheduler falls back to the host clock when this file is absent.
+_SCHEDULER_TIMEZONE_REMOTE_PATH: Final[str] = "runtime/scheduler/timezone"
+
+# Per-attempt timeout for the post-create ``mngr exec`` that writes the
+# timezone file, and the bounded retry budget / wait for a slow host whose
+# ``mngr exec`` briefly races the agent's reachability after create returns.
+_TIMEZONE_WRITE_EXEC_TIMEOUT_SECONDS: Final[float] = 30.0
+_TIMEZONE_WRITE_RETRY_BUDGET_SECONDS: Final[float] = 120.0
+_TIMEZONE_WRITE_RETRY_WAIT_SECONDS: Final[float] = 5.0
+
+
+def build_timezone_write_script(timezone_name: str) -> str:
+    """Build the remote bash that writes ``timezone_name`` to the scheduler tz file.
+
+    The name is base64-encoded so it survives ``mngr exec``'s single
+    command-string argument intact (the base64 alphabet has no
+    shell-significant characters, so single-quoting it is safe). Writes a
+    single trailing-newline-terminated line, creating the parent dir.
+    """
+    encoded = base64.b64encode(f"{timezone_name}\n".encode()).decode("ascii")
+    parent_dir = os.path.dirname(_SCHEDULER_TIMEZONE_REMOTE_PATH) or "."
+    return (
+        f"set -e; mkdir -p {shlex.quote(parent_dir)}; "
+        f"printf %s '{encoded}' | base64 -d > {shlex.quote(_SCHEDULER_TIMEZONE_REMOTE_PATH)}"
+    )
 
 
 def _build_mngr_create_command(
@@ -1263,6 +1294,7 @@ class AgentCreator(MutableModel):
         on_created: Callable[[AgentId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
+        timezone: str = "",
     ) -> CreationId:
         """Start creating an agent from a git URL or local path in a background thread.
 
@@ -1334,6 +1366,7 @@ class AgentCreator(MutableModel):
                 on_created,
                 backup_request,
                 color,
+                timezone,
             ),
             daemon=True,
             name="agent-creator-{}".format(creation_id),
@@ -1395,6 +1428,7 @@ class AgentCreator(MutableModel):
         on_created: Callable[[AgentId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
+        timezone: str = "",
     ) -> None:
         """Background thread that resolves the repo source and creates an mngr agent.
 
@@ -1704,6 +1738,22 @@ class AgentCreator(MutableModel):
                 if on_created is not None:
                     on_created(canonical_id)
 
+                # Capture the user's local timezone for the scheduler service
+                # on a detached thread. A slow host's ``mngr exec`` can still
+                # race the agent's reachability just after create returns, so
+                # this is retried within a bounded budget and is non-fatal --
+                # the scheduler falls back to the host clock if the file never
+                # lands. Skipped (no thread) when the client sent no timezone.
+                if timezone.strip():
+                    self.root_concurrency_group.start_new_thread(
+                        target=self._write_scheduler_timezone,
+                        kwargs={"agent_id": canonical_id, "timezone": timezone.strip()},
+                        name=f"timezone-write-{canonical_id}",
+                        # is_checked=False so a failing optional write never
+                        # poisons the root CG; failures are logged only.
+                        is_checked=False,
+                    )
+
                 # Configure restic backups asynchronously on a detached
                 # thread (mirrors the Cloudflare tunnel-token path): bucket
                 # creation + injection is a multi-second round-trip we don't
@@ -1838,6 +1888,46 @@ class AgentCreator(MutableModel):
                     urgency=NotificationUrgency.NORMAL,
                 ),
                 agent_display_name=str(agent_id)[:8],
+            )
+
+    def _write_scheduler_timezone(self, *, agent_id: AgentId, timezone: str) -> None:
+        """Detached-thread entry point: write the user's tz to the scheduler tz file.
+
+        Writes ``runtime/scheduler/timezone`` (one line) on the new agent's
+        host via ``mngr exec`` so the scheduler service resolves "3 AM" in the
+        user's local time. The host can briefly be unreachable for ``mngr
+        exec`` right after create returns, so transient failures are retried
+        within a bounded budget. Best-effort and non-fatal to the workspace:
+        if it never lands, the scheduler falls back to the host clock.
+        """
+        script = build_timezone_write_script(timezone)
+        try:
+            for attempt in Retrying(
+                retry=retry_if_exception_type((MngrCommandError, OSError)),
+                stop=stop_after_delay(_TIMEZONE_WRITE_RETRY_BUDGET_SECONDS),
+                wait=wait_fixed(_TIMEZONE_WRITE_RETRY_WAIT_SECONDS),
+                reraise=True,
+            ):
+                with attempt:
+                    cg = self.root_concurrency_group.make_concurrency_group(name=f"timezone-write-{agent_id}")
+                    with cg:
+                        result = cg.run_process_to_completion(
+                            command=[MNGR_BINARY, "exec", str(agent_id), script],
+                            timeout=_TIMEZONE_WRITE_EXEC_TIMEOUT_SECONDS,
+                            is_checked_after=False,
+                        )
+                    if result.returncode != 0:
+                        raise MngrCommandError(
+                            f"mngr exec to write timezone for agent {agent_id} exited {result.returncode}: "
+                            f"{result.stderr.strip() or result.stdout.strip()}"
+                        )
+            logger.debug("Wrote scheduler timezone {!r} to agent {}", timezone, agent_id)
+        except (MngrCommandError, OSError) as exc:
+            logger.opt(exception=exc).warning(
+                "Failed to write scheduler timezone for agent {} after {:.0f}s of retries; "
+                "the scheduler will fall back to the host clock",
+                agent_id,
+                _TIMEZONE_WRITE_RETRY_BUDGET_SECONDS,
             )
 
     def _build_redirect_url(self, agent_id: AgentId) -> str:

@@ -13,18 +13,20 @@
 //
 // Usage:
 //   var row = window.mindsSidebarRow.buildRow(workspace,
-//               { isCurrent: bool, withOpenNew: bool });
+//               { isCurrent: bool, withOpenNew: bool, isSeen: bool });
 //   var btn = window.mindsSidebarRow.buildSettingsBtn(agentId);
 //   var btn = window.mindsSidebarRow.buildOpenNewBtn(agentId);
 //   var btn = window.mindsSidebarRow.buildIconButton(title, pathSvg,
 //                                                    dataAttr, agentId, sizeClass);
 //
-// ``workspace`` is { id, name, accent?, is_stale? }. ``withOpenNew`` adds
-// the "open in new window" arrow (Electron only -- browser mode has no
+// ``workspace`` is { id, name, accent?, is_stale?, is_new? }. ``withOpenNew``
+// adds the "open in new window" arrow (Electron only -- browser mode has no
 // multi-window concept and passes false). Both action icons are always
 // visible. ``isCurrent`` marks the row selected (highlighted background).
-// Event wiring (click / context-menu) is the caller's job -- this builds
-// DOM only.
+// ``isSeen`` suppresses the new-tab pulse for a workspace the user has
+// already opened on this client (see seen_workspaces.js): a row only pulses
+// while ``is_new`` AND not ``isSeen``. Event wiring (click / context-menu) is
+// the caller's job -- this builds DOM only.
 (function () {
   function buildIconButton(title, pathSvg, dataAttr, agentId, sizeClass) {
     var btn = document.createElement('button');
@@ -66,6 +68,7 @@
     var opts = options || {};
     var isCurrent = !!opts.isCurrent;
     var withOpenNew = !!opts.withOpenNew;
+    var isSeen = !!opts.isSeen;
 
     // No outer margin: row-to-row spacing is the parent container's flex
     // ``gap``, keeping this element positioning-free and composable.
@@ -74,6 +77,13 @@
       'sidebar-item group flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer type-body text-primary'
       + (isCurrent ? ' is-current bg-fill-active' : ' hover:bg-fill-hover');
     row.setAttribute('data-agent-id', workspace.id);
+
+    // New tab the Caretaker scheduler auto-created: pulse the accent dot
+    // until the user opens it (``is_new`` from the server, not yet seen by
+    // this client). ``.sidebar-new`` drives the keyframe animation in app.css.
+    if (workspace.is_new && !isSeen) {
+      row.classList.add('sidebar-new');
+    }
 
     var dot = document.createElement('span');
     dot.className = 'sidebar-dot w-2.5 h-2.5 rounded-full shrink-0';

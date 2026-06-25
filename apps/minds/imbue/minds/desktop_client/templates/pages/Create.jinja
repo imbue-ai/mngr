@@ -36,6 +36,16 @@
       }
     });
 
+    // Capture the browser's IANA timezone into the hidden input the form
+    // POSTs, so the new workspace's scheduler service runs nightly tasks in
+    // the user's local time. Best-effort: if Intl is unavailable the field
+    // stays empty and the server falls back to the host clock.
+    try {
+      var tzInput = document.getElementById('create-timezone-input');
+      var resolved = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (tzInput && resolved) tzInput.value = resolved;
+    } catch (e) {}
+
     // Color picker: palette-only (no custom hex on create). Clicking a
     // swatch updates the hidden ``color`` input the form POSTs, and
     // flips aria-checked so the visual selection ring (driven by an
@@ -248,6 +258,11 @@
 {% endset %}
 <PageNarrowContainer title="Create workspace" padding="form" max_width="max-w-[520px]" scripts={{ _scripts }}>
   <form id="create-form" action="/create" method="post">
+
+      {# The browser's IANA timezone, filled in by the page script below, so the
+         workspace's scheduler service runs nightly tasks in the user's local
+         time. Absent / unrecognized values fall back to the host clock. #}
+      <input type="hidden" name="timezone" id="create-timezone-input" value="">
 
       <div class="flex items-center justify-between gap-4 mb-4">
         <h1 class="type-label text-secondary">Create workspace</h1>

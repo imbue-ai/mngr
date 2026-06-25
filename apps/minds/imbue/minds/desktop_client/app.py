@@ -16,6 +16,8 @@ from typing import Any
 from typing import Final
 from typing import assert_never
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfoNotFoundError
 
 import httpx
 from flask import Flask
@@ -410,6 +412,29 @@ def _is_workspace_provider_errored(info: AgentDisplayInfo | None, errored_provid
     return info is not None and info.provider_name is not None and info.provider_name in errored_provider_names
 
 
+# Label values mngr never validates, so a present marker label might carry
+# any string; treat these (case-insensitive) as "not set" so an explicit
+# ``auto_created=false`` doesn't blink. Anything else present counts as set.
+_FALSEY_LABEL_VALUES: Final[frozenset[str]] = frozenset({"", "false", "0", "no", "off"})
+
+# Labels the Caretaker scheduler attaches to an auto-created agent (frozen by
+# the caretaker-scheduler contract). Either being truthy blinks the tab.
+_AUTO_CREATED_LABEL_NAMES: Final[tuple[str, ...]] = ("auto_created", "caretaker")
+
+
+def _is_auto_created_workspace(labels: Mapping[str, str]) -> bool:
+    """True when the agent carries a truthy ``auto_created`` / ``caretaker`` label.
+
+    Drives the blinking-new-tab affordance: only agents the Caretaker
+    scheduler auto-creates blink until first opened. A label counts as set
+    when present with any value outside :data:`_FALSEY_LABEL_VALUES`.
+    """
+    return any(
+        name in labels and labels[name].strip().lower() not in _FALSEY_LABEL_VALUES
+        for name in _AUTO_CREATED_LABEL_NAMES
+    )
+
+
 def _resolved_workspace_color(backend_resolver: BackendResolverInterface, agent_id: AgentId) -> str:
     """The workspace's stored color hex, or the default for label-less workspaces.
 
@@ -441,6 +466,30 @@ def _color_for_new_workspace(raw_color: object) -> str:
     if stripped:
         logger.warning("Ignoring malformed create-request color {!r}; using the default workspace color.", stripped)
     return DEFAULT_WORKSPACE_COLOR
+
+
+def _validate_create_timezone(raw_timezone: object) -> str:
+    """Validate a create request's submitted IANA timezone, or return ``""``.
+
+    The create form/API carries the browser's
+    ``Intl.DateTimeFormat().resolvedOptions().timeZone`` so the scheduler
+    can run "3 AM" in the user's local time. A missing or unrecognized
+    value is treated as "unknown" (returns ``""``) rather than rejecting
+    the create -- the scheduler falls back to the host clock. Validating
+    against the system tz database here also keeps anything unexpected from
+    reaching the ``mngr exec`` write.
+    """
+    stripped = str(raw_timezone).strip() if raw_timezone is not None else ""
+    if not stripped:
+        return ""
+    try:
+        ZoneInfo(stripped)
+    except (ZoneInfoNotFoundError, ValueError):
+        logger.warning(
+            "Ignoring unrecognized create-request timezone {!r}; scheduler will use the host clock.", stripped
+        )
+        return ""
+    return stripped
 
 
 def _suggested_create_color(backend_resolver: BackendResolverInterface) -> str:
@@ -994,6 +1043,7 @@ def _handle_create_form_submit() -> Response:
     account_id = str(form.get("account_id", "")).strip()
     anthropic_api_key = str(form.get("anthropic_api_key", "")).strip()
     color = _color_for_new_workspace(form.get("color", ""))
+    client_timezone = _validate_create_timezone(form.get("timezone", ""))
     try:
         backup_provider = BackupProvider(str(form.get("backup_provider", BackupProvider.CONFIGURE_LATER.value)))
     except ValueError:
@@ -1126,6 +1176,7 @@ def _handle_create_form_submit() -> Response:
         on_created=on_created,
         backup_request=backup_request,
         color=color,
+        timezone=client_timezone,
     )
 
     creating_url = "/creating/{}".format(creation_id)
@@ -1225,6 +1276,7 @@ def _handle_create_agent_api() -> Response:
     account_id = str(body.get("account_id", "")).strip()
     submitted_region = str(body.get("region", "")).strip()
     color = _color_for_new_workspace(body.get("color", ""))
+    client_timezone = _validate_create_timezone(body.get("timezone", ""))
     if not git_url:
         return make_response(
             status_code=400,
@@ -1340,6 +1392,7 @@ def _handle_create_agent_api() -> Response:
         on_created=_persist_region_on_created,
         backup_request=backup_request,
         color=color,
+        timezone=client_timezone,
     )
 
     # Apply any onboarding answers supplied inline by the API caller. Absent
@@ -2557,6 +2610,11 @@ def _build_workspace_list(
         # unverified rather than confirmed healthy.
         if _is_workspace_provider_errored(info, errored_provider_names):
             entry["is_stale"] = "true"
+        # Blink the tab for agents the Caretaker scheduler auto-created
+        # (label ``auto_created`` / ``caretaker``) until the client marks
+        # them seen; hand-made workspaces and the day-1 chat tab never blink.
+        if _is_auto_created_workspace(backend_resolver.get_agent_labels(aid)):
+            entry["is_new"] = "true"
         liveness = liveness_by_agent_id.get(str(aid))
         if liveness is not None:
             entry["supports_shutdown"] = "true"
