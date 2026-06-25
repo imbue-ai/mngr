@@ -167,3 +167,29 @@ def test_establish_ssh_requires_bearer(tmp_path: Path) -> None:
     response = client.post(f"/api/v1/workspaces/{agent_id}/ssh", json={})
 
     assert response.status_code == 401
+
+
+def test_operation_logs_unknown_create_id_returns_404(tmp_path: Path) -> None:
+    client = _client_with_workspace(tmp_path, AgentId())
+    creation_id = CreationId()
+
+    response = client.get(f"/api/v1/workspaces/operations/{creation_id}/logs", headers=_auth_header())
+
+    assert response.status_code == 404
+
+
+def test_operation_logs_unknown_destroy_id_returns_404(tmp_path: Path) -> None:
+    client = _client_with_workspace(tmp_path, AgentId())
+    other_id = AgentId()
+
+    response = client.get(f"/api/v1/workspaces/operations/{other_id}/logs", headers=_auth_header())
+
+    assert response.status_code == 404
+
+
+def test_operation_logs_requires_bearer(tmp_path: Path) -> None:
+    client = _client_with_workspace(tmp_path, AgentId())
+
+    response = client.get(f"/api/v1/workspaces/operations/{CreationId()}/logs")
+
+    assert response.status_code == 401

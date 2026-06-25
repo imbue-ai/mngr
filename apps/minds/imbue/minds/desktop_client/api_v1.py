@@ -17,7 +17,10 @@ on the caller's host".
 """
 
 import json
+import queue
 import shlex
+import time
+from collections.abc import Iterator
 from datetime import datetime
 from datetime import timezone
 
@@ -35,6 +38,7 @@ from imbue.minds.desktop_client import workspace_ssh
 from imbue.minds.desktop_client import workspace_version
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
 from imbue.minds.desktop_client.api_key_auth import require_minds_api_key
 from imbue.minds.desktop_client.backup_export import BackupExportError
 from imbue.minds.desktop_client.backup_export import export_snapshot_zip
@@ -43,6 +47,7 @@ from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
 from imbue.minds.desktop_client.responses import make_file_response
 from imbue.minds.desktop_client.responses import make_response
+from imbue.minds.desktop_client.responses import make_streaming_response
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
 from imbue.minds.errors import BackupProvisioningError
@@ -55,6 +60,11 @@ from imbue.mngr.primitives import HostId
 # A blocking lifecycle (start/stop) call shells out to ``mngr`` and waits for
 # the host transition to resolve before returning the final state.
 _LIFECYCLE_TIMEOUT_SECONDS: float = 300.0
+
+# SSE event-stream headers (disable proxy/browser buffering so events flush live).
+_SSE_HEADERS: dict[str, str] = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+# Poll cadence for tailing a destroy operation's on-disk log.
+_DESTROY_LOG_POLL_SECONDS: float = 1.0
 
 
 def _json_response(data: dict[str, object], status_code: int = 200) -> Response:
@@ -442,6 +452,97 @@ def _handle_operation_status(operation_id: str) -> Response:
     )
 
 
+def _sse(payload: dict[str, object]) -> str:
+    """Format one server-sent-event ``data:`` frame."""
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+def _stream_create_operation_logs(log_queue: "queue.Queue[str]") -> Iterator[str]:
+    """Yield SSE frames draining a create operation's in-memory log queue.
+
+    Emits one ``{"log": ...}`` frame per line, a keepalive while idle, and a
+    final ``{"done": true}`` frame when the sentinel arrives. Exits promptly if
+    the desktop client is shutting down.
+    """
+    shutdown_event = get_state().shutdown_event
+    while True:
+        if shutdown_event.is_set():
+            return
+        try:
+            line = log_queue.get(block=True, timeout=1.0)
+        except queue.Empty:
+            yield ": keepalive\n\n"
+            continue
+        if line == LOG_SENTINEL:
+            yield _sse({"done": True})
+            return
+        yield _sse({"log": line})
+
+
+def _stream_destroy_operation_logs(agent_id: AgentId, paths: WorkspacePaths) -> Iterator[str]:
+    """Yield SSE frames tailing a destroy operation's on-disk log to completion.
+
+    Polls the log file from the last offset, emitting new content as ``{"log":
+    ...}`` frames, and stops once the destroy record reaches a terminal status
+    (with a final ``{"done": true}`` frame). Exits promptly on shutdown.
+    """
+    shutdown_event = get_state().shutdown_event
+    backend_resolver = get_state().backend_resolver
+    offset = 0
+    while True:
+        if shutdown_event.is_set():
+            return
+        try:
+            content_bytes, offset = destroying.read_log_chunk(agent_id, paths, offset)
+        except FileNotFoundError:
+            content_bytes = b""
+        if content_bytes:
+            yield _sse({"log": content_bytes.decode("utf-8", errors="replace")})
+        is_host_still_active = destroying.is_host_still_active(backend_resolver, paths, agent_id)
+        record = destroying.read_destroying(agent_id, paths, is_host_still_active)
+        if record is not None and record.status != destroying.DestroyingStatus.RUNNING:
+            # Flush any final bytes written between the last read and termination.
+            try:
+                tail_bytes, offset = destroying.read_log_chunk(agent_id, paths, offset)
+            except FileNotFoundError:
+                tail_bytes = b""
+            if tail_bytes:
+                yield _sse({"log": tail_bytes.decode("utf-8", errors="replace")})
+            yield _sse({"done": True, "status": str(record.status)})
+            return
+        yield ": keepalive\n\n"
+        time.sleep(_DESTROY_LOG_POLL_SECONDS)
+
+
+@require_minds_api_key
+def _handle_operation_logs(operation_id: str) -> Response:
+    """Stream a create or destroy operation's logs as server-sent events.
+
+    Create operations (``creation-...`` id) stream the in-memory creation log;
+    destroy operations (workspace agent id) tail the detached destroy
+    subprocess's on-disk log until the host is gone.
+    """
+    if operation_id.startswith(f"{CreationId.PREFIX}-"):
+        agent_creator: AgentCreator | None = get_state().agent_creator
+        log_queue = agent_creator.get_log_queue(CreationId(operation_id)) if agent_creator is not None else None
+        if log_queue is None:
+            return _json_error(f"Unknown operation {operation_id}", 404)
+        return make_streaming_response(
+            _stream_create_operation_logs(log_queue), media_type="text/event-stream", headers=_SSE_HEADERS
+        )
+
+    paths: WorkspacePaths | None = get_state().api_v1_paths
+    if paths is None:
+        return _json_error(f"Unknown operation {operation_id}", 404)
+    parsed_id = AgentId(operation_id)
+    is_host_still_active = destroying.is_host_still_active(get_state().backend_resolver, paths, parsed_id)
+    if destroying.read_destroying(parsed_id, paths, is_host_still_active) is None:
+        return _json_error(f"Unknown operation {operation_id}", 404)
+    return make_streaming_response(
+        _stream_destroy_operation_logs(parsed_id, paths), media_type="text/event-stream", headers=_SSE_HEADERS
+    )
+
+
 # -- SSH access route --
 
 
@@ -564,6 +665,9 @@ def create_api_v1_blueprint() -> Blueprint:
     )
     blueprint.add_url_rule(
         "/workspaces/operations/<operation_id>", view_func=_handle_operation_status, methods=["GET"]
+    )
+    blueprint.add_url_rule(
+        "/workspaces/operations/<operation_id>/logs", view_func=_handle_operation_logs, methods=["GET"]
     )
 
     # SSH access (establish): inject a public key + return connection info.
