@@ -7,7 +7,7 @@ A "workspace" is a persistent mngr agent created from a template repository. The
 The template repository (e.g. [forever-claude-template](https://github.com/imbue-ai/forever-claude-template)) contains:
 
 - `.mngr/settings.toml` -- mngr configuration: agent types, create templates, environment variables
-- `services.toml` -- background services managed by the bootstrap service manager
+- `supervisord.conf` -- background services, each a `[program:*]` section supervised by supervisord
 - `Dockerfile` -- container image definition
 - `CLAUDE.md` -- instructions for the Claude agent
 - `skills/` -- slash commands available to the agent
@@ -17,24 +17,36 @@ The template repository (e.g. [forever-claude-template](https://github.com/imbue
 
 ## Key files
 
-### services.toml
+### supervisord.conf
 
-Defines background services that run in tmux windows:
+Declares the background services as `[program:*]` sections that supervisord
+starts and supervises (logs under `/var/log/supervisor`). The bootstrap runs
+first-boot setup and then execs `supervisord -n -c supervisord.conf`:
 
-```toml
-[services.web]
-command = "python3 scripts/forward_port.py --url http://localhost:8000 --name web && system-interface"
+```ini
+[program:system_interface]
+command=bash -c "python3 scripts/forward_port.py --url http://localhost:8000 --name system_interface && system-interface"
+directory=/mngr/code
+autostart=true
+autorestart=true
 
-[services.terminal]
-command = "bash scripts/run_ttyd.sh"
+[program:terminal]
+command=bash scripts/run_ttyd.sh
+directory=/mngr/code
+autostart=true
+autorestart=true
 
-[services.cloudflared]
-command = "uv run cloudflare-tunnel"
-restart = "on-failure"
+[program:cloudflared]
+command=uv run cloudflare-tunnel
+directory=/mngr/code
+autostart=true
+autorestart=true
 
-[services.app-watcher]
-command = "uv run app-watcher"
-restart = "on-failure"
+[program:app-watcher]
+command=uv run app-watcher
+directory=/mngr/code
+autostart=true
+autorestart=true
 ```
 
 ### runtime/applications.toml
