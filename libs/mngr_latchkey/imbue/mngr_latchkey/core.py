@@ -888,55 +888,6 @@ class Latchkey(MutableModel):
             set_credentials_example=_parse_set_credentials_example(payload, service_name),
         )
 
-    def auth_list(self) -> frozenset[str]:
-        """Run ``latchkey auth list`` and return the set of registered service names.
-
-        ``latchkey auth list`` emits a JSON object keyed by service name for
-        every service that has a registered client and/or stored credentials
-        (e.g. ``{"google-gmail": {"credentialType": "oauth", ...}}``). We only
-        need the key set: a service appears here once a client has been
-        registered (via ``auth prepare`` or ``auth browser-prepare``), which
-        is how callers distinguish "already set up" from "needs preparation".
-
-        Mirrors :meth:`services_info`'s degradation contract: any failure
-        (process error, non-zero exit, malformed/non-object JSON) yields an
-        empty set so callers treat the service as not yet registered rather
-        than crashing.
-        """
-        env = _build_env_with_latchkey_directory(self.latchkey_directory, encryption_key=self._load_encryption_key())
-        command = [self.latchkey_binary, "auth", "list"]
-        cg = ConcurrencyGroup(name="latchkey-auth-list")
-        try:
-            with cg:
-                result = cg.run_process_to_completion(
-                    command=command,
-                    timeout=_SERVICES_INFO_TIMEOUT_SECONDS,
-                    is_checked_after=False,
-                    env=env,
-                )
-        except ConcurrencyExceptionGroup as group:
-            # As in ``services_info``: a missing/unexecutable binary degrades
-            # to "nothing registered" rather than raising. Anything that isn't
-            # a process-setup failure is re-raised so real bugs still surface.
-            if not group.only_exception_is_instance_of(ProcessSetupError):
-                raise
-            logger.warning("latchkey auth list failed to start: {}", group)
-            return frozenset()
-        if result.returncode != 0:
-            logger.warning("latchkey auth list exited {}: {}", result.returncode, result.stderr.strip())
-            return frozenset()
-        try:
-            payload = json.loads(result.stdout)
-        except json.JSONDecodeError as e:
-            logger.warning("Could not parse 'latchkey auth list' output as JSON: {}", e)
-            return frozenset()
-        if not isinstance(payload, dict):
-            logger.warning("'latchkey auth list' returned non-object JSON")
-            return frozenset()
-        # JSON object keys are always strings; ``str`` keeps the type checker
-        # happy without changing any value.
-        return frozenset(str(service_name) for service_name in payload)
-
     # -- Interactive auth ----------------------------------------------------
 
     def auth_browser(self, service_name: str) -> tuple[bool, str]:
@@ -947,16 +898,36 @@ class Latchkey(MutableModel):
         returns ``(False, message)`` where ``message`` carries the latchkey
         stderr (or stdout, or a generic fallback).
 
-        Some latchkey services require a one-off ``latchkey auth
-        browser-prepare <service>`` step before the regular browser sign-in
-        flow can run;. In such a case, we transparently run ``auth
-        browser-prepare`` and retry ``auth browser`` once.
+        A service has no registered OAuth client until one is prepared, and
+        until then the bare sign-in fails asking the caller to run ``latchkey
+        auth browser-prepare <service>`` first. That error is the signal that
+        nothing is registered yet, and it drives two recovery paths:
+
+        * For a Minds Google OAuth service (:data:`MINDS_GOOGLE_OAUTH_SERVICES`),
+          register the Minds-provided client and retry, so the user signs in
+          against the Minds consent screen instead of self-provisioning their
+          own Google Cloud project (see
+          :meth:`_authenticate_with_minds_google_client`).
+
+        * Otherwise -- or if that Minds attempt fails -- run the self-setup
+          ``auth browser-prepare`` step and retry the sign-in once.
+
+        Attempting the bare sign-in first, rather than probing which client is
+        registered up front, keeps the common already-registered case to a
+        single latchkey call.
         """
         is_success, detail = self.auth_browser_login(service_name)
         if is_success:
             return True, ""
         if "latchkey auth browser-prepare" not in detail.lower():
             return False, detail
+        # No client is registered yet (that is exactly what the browser-prepare
+        # hint means). For a Minds Google OAuth service, prefer the Minds client
+        # before offering the user the self-setup flow.
+        if service_name in MINDS_GOOGLE_OAUTH_SERVICES:
+            is_minds_success, minds_detail = self._authenticate_with_minds_google_client(service_name)
+            if is_minds_success:
+                return True, minds_detail
         logger.info(
             "latchkey auth browser {} reports preparation required; running 'auth browser-prepare' and retrying",
             service_name,
@@ -969,6 +940,37 @@ class Latchkey(MutableModel):
         if not is_prepared:
             return False, prepare_detail
         return self.auth_browser_login(service_name)
+
+    def _authenticate_with_minds_google_client(self, service_name: str) -> tuple[bool, str]:
+        """Register the Minds Google OAuth client and retry the bare sign-in.
+
+        Reached from :meth:`auth_browser` for a service in
+        :data:`MINDS_GOOGLE_OAUTH_SERVICES` whose bare sign-in just reported
+        that no client is registered yet. Registers the Minds-provided client
+        via :meth:`auth_prepare` (so the user signs in against the Minds
+        consent screen) and retries :meth:`auth_browser_login`.
+
+        Clears the service only when the registration succeeded but the
+        subsequent sign-in failed. That clear discards the client this method
+        just registered -- never a user's own client, because a pre-existing
+        client would not have produced the browser-prepare hint that routes
+        here -- so the caller's self-setup ``auth browser-prepare`` starts from
+        a clean slate. Returns ``(is_success, detail)``.
+        """
+        is_prepared, prepare_detail = self.auth_prepare(
+            service_name,
+            MINDS_GOOGLE_OAUTH_CLIENT_ID,
+            MINDS_GOOGLE_OAUTH_CLIENT_SECRET,
+        )
+        if not is_prepared:
+            return False, prepare_detail
+        is_success, login_detail = self.auth_browser_login(service_name)
+        if is_success:
+            return True, login_detail
+        # The Minds client we just registered did not yield a working sign-in;
+        # clear it so the self-setup fallback's browser-prepare can run.
+        self.auth_clear(service_name)
+        return False, login_detail
 
     def auth_browser_login(self, service_name: str) -> tuple[bool, str]:
         """Run a single ``latchkey auth browser <service>`` with no preparation fallback.

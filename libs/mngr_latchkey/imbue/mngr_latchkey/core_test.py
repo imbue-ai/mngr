@@ -29,6 +29,8 @@ from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
 from imbue.mngr_latchkey.core import LatchkeyNotInitializedError
 from imbue.mngr_latchkey.core import LatchkeyVersionError
+from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_CLIENT_ID
+from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_CLIENT_SECRET
 from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_SERVICES
 from imbue.mngr_latchkey.core import _log_gateway_output_line
 from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
@@ -1652,7 +1654,7 @@ def test_auth_browser_does_not_retry_on_unrelated_failure(tmp_path: Path) -> Non
     assert argv_calls == [["auth", "browser", "slack"]]
 
 
-# -- auth_browser_login / auth_prepare / auth_list --
+# -- auth_browser_login / auth_prepare / auth_clear --
 
 
 def test_auth_browser_login_reports_success_on_zero_exit(tmp_path: Path) -> None:
@@ -1728,64 +1730,174 @@ def test_auth_clear_invokes_clear_with_yes_flag(tmp_path: Path) -> None:
     assert argv_calls == [["auth", "clear", "-y", "google-sheets"]]
 
 
-def _make_auth_list_binary(tmp_path: Path, *, payload: str, exit_code: int = 0) -> Path:
-    """Build a fake latchkey CLI that emits ``auth list`` output verbatim."""
+# -- auth_browser Minds Google OAuth client preference --
+
+
+def _make_google_oauth_binary(
+    tmp_path: Path,
+    *,
+    is_client_preregistered: bool = False,
+    does_minds_prepare_succeed: bool = True,
+    does_minds_login_succeed: bool = True,
+    does_preregistered_login_succeed: bool = True,
+    does_self_setup_prepare_succeed: bool = True,
+) -> Path:
+    """Build a fake latchkey CLI that models the google OAuth client lifecycle.
+
+    A marker file records which client is registered: ``auth prepare`` writes
+    ``minds``, ``auth browser-prepare`` writes ``self-setup``, ``auth clear``
+    removes it, and an optional pre-existing client starts as ``preregistered``.
+    ``auth browser`` fails asking for ``browser-prepare`` when nothing is
+    registered, and otherwise succeeds or fails per the registered client's
+    configured outcome. Every invocation appends its argv to the shared
+    recording report.
+    """
     script = tmp_path / "latchkey"
+    report_path = tmp_path / "latchkey_report.jsonl"
+    marker_path = tmp_path / "client_marker"
+    if is_client_preregistered:
+        marker_path.write_text("preregistered")
     script.write_text(
         "#!/usr/bin/env python3\n"
-        "import sys\n"
-        "if sys.argv[1:3] != ['auth', 'list']:\n"
-        "    print('unexpected args:', sys.argv, file=sys.stderr)\n"
-        "    sys.exit(99)\n"
-        f"print({payload!r})\n"
-        f"sys.exit({exit_code})\n"
+        "import json, os, sys\n"
+        "argv = sys.argv[1:]\n"
+        f"report_path = {str(report_path)!r}\n"
+        f"marker_path = {str(marker_path)!r}\n"
+        "with open(report_path, 'a') as handle:\n"
+        "    handle.write(json.dumps({'argv': argv}) + '\\n')\n"
+        "marker = open(marker_path).read() if os.path.exists(marker_path) else ''\n"
+        "if argv[:2] == ['auth', 'prepare']:\n"
+        f"    if {does_minds_prepare_succeed}:\n"
+        "        open(marker_path, 'w').write('minds')\n"
+        "        sys.exit(0)\n"
+        "    sys.stderr.write('minds prepare failed')\n"
+        "    sys.exit(1)\n"
+        "if argv[:2] == ['auth', 'browser-prepare']:\n"
+        f"    if {does_self_setup_prepare_succeed}:\n"
+        "        open(marker_path, 'w').write('self-setup')\n"
+        "        sys.exit(0)\n"
+        "    sys.stderr.write('self-setup prepare failed')\n"
+        "    sys.exit(1)\n"
+        "if argv[:2] == ['auth', 'clear']:\n"
+        "    if os.path.exists(marker_path):\n"
+        "        os.remove(marker_path)\n"
+        "    sys.exit(0)\n"
+        "if argv[:2] == ['auth', 'browser']:\n"
+        "    service = argv[2] if len(argv) > 2 else '<svc>'\n"
+        "    if marker == '':\n"
+        "        sys.stderr.write(\n"
+        "            'Error: Service ' + service + ' requires preparation first. '\n"
+        '            "Run \'latchkey auth browser-prepare " + service + "\' before logging in.\\n"\n'
+        "        )\n"
+        "        sys.exit(1)\n"
+        f"    if marker == 'minds' and not {does_minds_login_succeed}:\n"
+        "        sys.stderr.write('minds consent declined')\n"
+        "        sys.exit(1)\n"
+        f"    if marker == 'preregistered' and not {does_preregistered_login_succeed}:\n"
+        "        sys.stderr.write('token expired')\n"
+        "        sys.exit(1)\n"
+        "    sys.exit(0)\n"
+        "sys.exit(2)\n"
     )
     script.chmod(0o755)
     return script
 
 
-def test_auth_list_returns_registered_service_names(tmp_path: Path) -> None:
-    payload = json.dumps(
-        {
-            "google-gmail": {"credentialType": "oauth", "credentialStatus": "missing"},
-            "slack": {"credentialType": "curl", "credentialStatus": "valid"},
-        }
+def _read_argv_calls(tmp_path: Path) -> list[object]:
+    return [record["argv"] for record in _read_recording_report(tmp_path)]
+
+
+# The exact ``auth prepare`` invocation we expect for the Minds-provided client.
+_MINDS_PREPARE_ARGV = [
+    "auth",
+    "prepare",
+    "google-gmail",
+    json.dumps({"clientId": MINDS_GOOGLE_OAUTH_CLIENT_ID, "clientSecret": MINDS_GOOGLE_OAUTH_CLIENT_SECRET}),
+]
+
+
+def test_auth_browser_google_registers_minds_client_then_signs_in(tmp_path: Path) -> None:
+    """No client registered: register the Minds client and sign in; no clear, no self-setup."""
+    binary = _make_google_oauth_binary(tmp_path)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    is_success, detail = latchkey.auth_browser("google-gmail")
+
+    assert is_success is True
+    assert detail == ""
+    assert _read_argv_calls(tmp_path) == [
+        ["auth", "browser", "google-gmail"],
+        _MINDS_PREPARE_ARGV,
+        ["auth", "browser", "google-gmail"],
+    ]
+
+
+def test_auth_browser_google_minds_sign_in_failure_clears_then_self_setup(tmp_path: Path) -> None:
+    """Minds client registers but its sign-in fails: clear it, then the self-setup flow succeeds."""
+    binary = _make_google_oauth_binary(tmp_path, does_minds_login_succeed=False)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    is_success, _detail = latchkey.auth_browser("google-gmail")
+
+    assert is_success is True
+    # The clear sits between the failed Minds sign-in and the self-setup
+    # browser-prepare, so the self-setup flow starts from a clean slate.
+    assert _read_argv_calls(tmp_path) == [
+        ["auth", "browser", "google-gmail"],
+        _MINDS_PREPARE_ARGV,
+        ["auth", "browser", "google-gmail"],
+        ["auth", "clear", "-y", "google-gmail"],
+        ["auth", "browser-prepare", "google-gmail"],
+        ["auth", "browser", "google-gmail"],
+    ]
+
+
+def test_auth_browser_google_minds_prepare_failure_falls_through_without_clearing(tmp_path: Path) -> None:
+    """If registering the Minds client fails, skip the sign-in and the clear and go to self-setup."""
+    binary = _make_google_oauth_binary(tmp_path, does_minds_prepare_succeed=False)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    is_success, _detail = latchkey.auth_browser("google-gmail")
+
+    assert is_success is True
+    argv_calls = _read_argv_calls(tmp_path)
+    assert argv_calls == [
+        ["auth", "browser", "google-gmail"],
+        _MINDS_PREPARE_ARGV,
+        ["auth", "browser-prepare", "google-gmail"],
+        ["auth", "browser", "google-gmail"],
+    ]
+    # We never registered our client, so nothing of ours is cleared.
+    assert ["auth", "clear", "-y", "google-gmail"] not in argv_calls
+
+
+def test_auth_browser_google_already_registered_signs_in_with_one_call(tmp_path: Path) -> None:
+    """A pre-existing working client signs in with a single call: no prepare, no clear."""
+    binary = _make_google_oauth_binary(tmp_path, is_client_preregistered=True)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    is_success, detail = latchkey.auth_browser("google-gmail")
+
+    assert is_success is True
+    assert detail == ""
+    assert _read_argv_calls(tmp_path) == [["auth", "browser", "google-gmail"]]
+
+
+def test_auth_browser_google_existing_client_failure_is_never_cleared(tmp_path: Path) -> None:
+    """A registered client that is not ours, whose sign-in fails, is returned as-is and never cleared."""
+    binary = _make_google_oauth_binary(
+        tmp_path,
+        is_client_preregistered=True,
+        does_preregistered_login_succeed=False,
     )
-    binary = _make_auth_list_binary(tmp_path, payload=payload)
     latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
 
-    assert latchkey.auth_list() == frozenset({"google-gmail", "slack"})
+    is_success, detail = latchkey.auth_browser("google-gmail")
 
-
-def test_auth_list_returns_empty_set_when_nothing_registered(tmp_path: Path) -> None:
-    binary = _make_auth_list_binary(tmp_path, payload="{}")
-    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
-
-    assert latchkey.auth_list() == frozenset()
-
-
-def test_auth_list_returns_empty_on_non_zero_exit(tmp_path: Path) -> None:
-    binary = _make_auth_list_binary(tmp_path, payload="{}", exit_code=1)
-    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
-
-    assert latchkey.auth_list() == frozenset()
-
-
-def test_auth_list_returns_empty_when_binary_does_not_exist(tmp_path: Path) -> None:
-    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(tmp_path / "does-not-exist"))
-
-    assert latchkey.auth_list() == frozenset()
-
-
-def test_auth_list_returns_empty_on_malformed_json(tmp_path: Path) -> None:
-    binary = _make_auth_list_binary(tmp_path, payload="not json{{{")
-    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
-
-    assert latchkey.auth_list() == frozenset()
-
-
-def test_auth_list_returns_empty_on_non_object_json(tmp_path: Path) -> None:
-    binary = _make_auth_list_binary(tmp_path, payload=json.dumps(["google-gmail"]))
-    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
-
-    assert latchkey.auth_list() == frozenset()
+    assert is_success is False
+    assert detail == "token expired"
+    argv_calls = _read_argv_calls(tmp_path)
+    # The pre-existing client is preserved: no prepare and no clear, because we
+    # only ever touch a client we registered ourselves.
+    assert argv_calls == [["auth", "browser", "google-gmail"]]
+    assert ["auth", "clear", "-y", "google-gmail"] not in argv_calls
