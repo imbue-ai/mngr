@@ -787,6 +787,15 @@ def _drive_create_flow(
     page.goto(f"{backend_origin}/create", wait_until="domcontentloaded")
     page.wait_for_selector("#create-form", state="attached", timeout=10_000)
 
+    # The form defaults to the "Imbue Cloud" preset (cloud compute / AI / backup)
+    # for everyone, including signed-out users. Submitting with a cloud provider
+    # but no account opens the sign-in modal instead of creating. When this run
+    # has no account, pick the "local" preset card first so the AI / backup
+    # providers are the non-cloud set (the compute mode is overridden below);
+    # account-based modes pass ``account_label`` and keep the cloud defaults.
+    if account_label is None:
+        page.click('[data-preset="local"]')
+
     # The repo field, the workspace-name field, and the compute-provider
     # controls all live in the create form's advanced configuration view,
     # which is collapsed by default. Open it via the single "Advanced
