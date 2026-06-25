@@ -19,7 +19,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Unauthenticated Azure now raises the shared `ProviderNotAuthorizedError` at construction (still a `ProviderUnavailableError`), with eager credential validation via a management-scope token request — instead of `DefaultAzureCredential` failing lazily on the first real API call.
 - Changed: Azure cleanup refusal when VMs still exist now raises the unified `ManagedResourcesExistError` (previously `AzureProviderError`), matching the message used by the other clouds.
 - Changed: `allowed_ssh_cidrs` is now typed `ScalarStrTuple` (matching AWS), so a higher-precedence config layer that sets it replaces the whole list rather than being flagged as narrowing; the config key and default are unchanged.
-- Changed: Host-side systemd unit names changed from per-provider (`mngr-azure-idle-watcher` / `mngr-azure-host-dir-sync`) to the shared `mngr-idle-watcher` / `mngr-host-dir-sync`.
+- Changed: Host-side idle-watcher systemd unit renamed from `mngr-azure-idle-watcher` to the shared `mngr-idle-watcher` as the idle-watcher install lifted into the shared `OfflineCapableVpsProvider`.
 
 ### Fixed
 

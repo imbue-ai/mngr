@@ -20,7 +20,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Collapsed the AWS AMI config knobs — `default_ami_by_region` removed; `default_ami_id` now defaults to `None` and uses the pinned per-region default (`DEFAULT_AMI_BY_REGION`, Debian 12 amd64) when unset. Resolution behavior is unchanged.
 - Changed: AWS missing-credential help text now points at `aws configure` and the rest of the boto3 credential chain instead of generic "start Docker" guidance.
 - Changed: AWS cleanup refusal when instances still exist now raises the unified `ManagedResourcesExistError` so the message matches the other clouds.
-- Changed: Host-side systemd unit names changed from per-provider (`mngr-aws-idle-watcher` / `mngr-aws-host-dir-sync`) to the shared `mngr-idle-watcher` / `mngr-host-dir-sync` as the idle-watcher and host_dir-sync install lifted into the shared `OfflineCapableVpsProvider`.
+- Changed: Host-side idle-watcher systemd unit renamed from `mngr-aws-idle-watcher` to the shared `mngr-idle-watcher` as the idle-watcher install lifted into the shared `OfflineCapableVpsProvider`.
 
 ### Fixed
 
