@@ -2144,29 +2144,24 @@ async function promptMindShutdown() {
 
 function fetchInitialChromeState(timeoutMs = 25000) {
   // Drives one round-trip to /_chrome/events (SSE) to learn auth status and the
-  // workspace list, and -- crucially -- WAITS for discovery to complete its first
-  // full sweep before resolving. Returns:
-  //   { authenticated: true, workspaces: [...], hasAccounts, discoveryComplete: true }
-  //                                                 once a fresh discovery snapshot lands
-  //   { authenticated: true, ..., discoveryComplete: false }
-  //                                                 on timeout with a partial snapshot seen
+  // workspace list, resolving on the first ``workspaces`` snapshot. Returns:
+  //   { authenticated: true, workspaces: [...], hasAccounts, restorableWorkspaceIds }
+  //                                                 on the first workspaces snapshot
   //   { authenticated: false }                      when the backend says auth_required
-  //   null                                          on timeout with nothing seen / network error
+  //   null                                          on timeout (no snapshot) / network error
   //
-  // Why wait for ``discovery_complete``: the connect-time ``workspaces`` snapshot
-  // is the empty/partial cold-start state (discovery polls providers over a few
-  // seconds), so resolving on it would restore windows -- and paint the landing
-  // page -- against an incomplete list, dropping workspaces that simply hadn't
-  // been discovered yet. Holding the loading screen until the first fresh full
-  // snapshot makes both the restore list and the landing page complete.
+  // We resolve on the first snapshot even though discovery may still be mid-sweep
+  // (providers enumerate at different speeds): window restore filters against
+  // ``restorableWorkspaceIds`` -- the live workspaces UNION the persisted last-good
+  // topology -- so a workspace that hasn't been re-discovered yet is still kept,
+  // and a window is never dropped just because the snapshot is partial.
   //
-  // The timeout must comfortably exceed the connect-time snapshot's slowest
-  // blocking step (the backend computes ``has_accounts`` -- a cold ``mngr
-  // imbue_cloud auth list`` subprocess, ~5s on first call -- before the first
-  // ``workspaces`` event) PLUS one discovery poll for the first full snapshot.
-  // On timeout we resolve with whatever partial snapshot we saw (``discoveryComplete:
-  // false``), and the restore path then declines to drop windows on absence so a
-  // slow/stalled discovery never costs the user a window.
+  // The timeout only fires when NO snapshot arrives at all. It must comfortably
+  // exceed the connect-time snapshot's slowest blocking step: the backend computes
+  // ``has_accounts`` (a cold ``mngr imbue_cloud auth list`` subprocess, ~5s on
+  // first call) before emitting the first ``workspaces`` event. A timeout shorter
+  // than that returns ``null``, which the startup path treats as unauthenticated
+  // and routes to /welcome -- bouncing an already-signed-in user.
   return new Promise((resolve) => {
     if (!backendBaseUrl) {
       resolve(null);
@@ -2174,9 +2169,6 @@ function fetchInitialChromeState(timeoutMs = 25000) {
     }
     let done = false;
     let req;
-    // Most recent ``workspaces`` payload seen, used as the timeout fallback when
-    // ``discovery_complete`` never arrives.
-    let latestWorkspaces = null;
     const finish = (value) => {
       if (done) return;
       done = true;
@@ -2185,19 +2177,7 @@ function fetchInitialChromeState(timeoutMs = 25000) {
       }
       resolve(value);
     };
-    const timer = setTimeout(() => {
-      if (latestWorkspaces) {
-        finish({
-          authenticated: true,
-          workspaces: latestWorkspaces.workspaces,
-          hasAccounts: latestWorkspaces.hasAccounts,
-          discoveryComplete: false,
-          restorableWorkspaceIds: latestWorkspaces.restorableWorkspaceIds,
-        });
-      } else {
-        finish(null);
-      }
-    }, timeoutMs);
+    const timer = setTimeout(() => finish(null), timeoutMs);
     try {
       req = net.request({
         url: backendBaseUrl + '/_chrome/events',
@@ -2229,28 +2209,16 @@ function fetchInitialChromeState(timeoutMs = 25000) {
           try {
             const parsed = JSON.parse(payload);
             if (parsed.type === 'workspaces' && Array.isArray(parsed.workspaces)) {
-              // Remember the latest snapshot for the timeout fallback, but only
-              // resolve once discovery reports a completed full sweep -- the first
-              // (cold-start) snapshot is typically empty/partial.
-              const restorableWorkspaceIds = Array.isArray(parsed.restorable_workspace_ids)
-                ? parsed.restorable_workspace_ids.map(String)
-                : [];
-              latestWorkspaces = {
+              clearTimeout(timer);
+              finish({
+                authenticated: true,
                 workspaces: parsed.workspaces,
                 hasAccounts: !!parsed.has_accounts,
-                restorableWorkspaceIds,
-              };
-              if (parsed.discovery_complete === true) {
-                clearTimeout(timer);
-                finish({
-                  authenticated: true,
-                  workspaces: parsed.workspaces,
-                  hasAccounts: !!parsed.has_accounts,
-                  discoveryComplete: true,
-                  restorableWorkspaceIds,
-                });
-                return;
-              }
+                restorableWorkspaceIds: Array.isArray(parsed.restorable_workspace_ids)
+                  ? parsed.restorable_workspace_ids.map(String)
+                  : [],
+              });
+              return;
             }
             if (parsed.type === 'auth_required') {
               clearTimeout(timer);
@@ -2631,10 +2599,6 @@ async function startBackendWithRetry() {
 
       const chromeState = await fetchInitialChromeState();
       const authenticated = chromeState && chromeState.authenticated;
-      // Whether the workspace list we got reflects a completed discovery sweep.
-      // On the timeout-fallback path it's false (we only saw a partial snapshot),
-      // which makes us decline to drop windows on absence below.
-      const discoveryComplete = !!(chromeState && chromeState.discoveryComplete);
 
       if (authenticated && chromeState.workspaces) {
         workspaceList = chromeState.workspaces.map((w) => ({
@@ -2644,16 +2608,18 @@ async function startBackendWithRetry() {
         }));
       }
 
-      // Only filter restored windows once discovery has completed (else ``null``
-      // keeps every saved window). The filter set is the backend's *restorable*
-      // workspace ids -- live workspaces UNION the persisted last-good topology --
-      // not just the live list. The last-good entries keep a window whose
-      // workspace exists but a slow provider hasn't re-listed yet this session
-      // (e.g. local docker lagging the cloud provider on cold start). Absence from
-      // an incomplete live snapshot is not evidence a workspace was destroyed; the
-      // live discovery flow navigates genuinely-destroyed workspaces away later.
+      // Filter restored windows against the backend's *restorable* workspace ids
+      // -- live workspaces UNION the persisted last-good topology -- rather than
+      // the live list alone. The last-good entries keep a window whose workspace
+      // exists but a slow provider hasn't re-listed yet this session (e.g. local
+      // docker lagging the cloud provider on cold start); absence from an
+      // incomplete live snapshot is not evidence a workspace was destroyed (the
+      // live discovery flow navigates genuinely-destroyed workspaces away later).
+      // When nothing is known yet (empty live AND empty last-good -- first launch,
+      // or a wiped topology), pass ``null`` to keep every saved window rather than
+      // drop them all against an empty set.
       const restorableWorkspaceIds = (authenticated && chromeState.restorableWorkspaceIds) || [];
-      const knownAgentIdsSet = (authenticated && discoveryComplete)
+      const knownAgentIdsSet = restorableWorkspaceIds.length > 0
         ? new Set(restorableWorkspaceIds.map(String))
         : null;
       const restorable = authenticated
