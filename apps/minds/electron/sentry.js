@@ -102,6 +102,18 @@ function initSentry() {
     dsn,
     environment,
     release: fixupReleaseId(releaseId),
+    // Drop the native-crash (Crashpad) integration in dev. Its
+    // `crashReporter.start()` spawns a `chrome_crashpad_handler` that inherits
+    // the Electron process's stderr and outlives the app on quit. Under
+    // `just minds-start` that stderr is a socketpair `concurrently` reads to
+    // prefix `[electron]` output; because the orphaned handler never closes it,
+    // `concurrently` never sees EOF, its kill-others never fires, and the dev
+    // launcher hangs after every quit. Packaged builds aren't wrapped in
+    // `concurrently`, so they keep native-crash minidump reporting.
+    integrations: (defaults) =>
+      paths.isDev()
+        ? defaults.filter((integration) => integration.name !== 'SentryMinidump')
+        : defaults,
     // Error reporting only -- no performance tracing (matches the backend).
     tracesSampleRate: 0,
     // Keep PII out of reports, matching the backend's send_default_pii=False.
