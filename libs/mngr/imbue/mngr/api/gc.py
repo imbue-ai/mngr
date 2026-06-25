@@ -362,21 +362,23 @@ def _gc_single_host(
                         #  there's a risk of getting into a screwy situation here--if we delete this right as
                         #  someone else starts it, you might have a host that is running but is untracked
                         #  This can be easily fixed by adding some host-id-keyed locking at the provider level (which both create/start/delete would acquire)
-                        # delete_host raises a CleanupFailedGroup when the host's
-                        # records were deleted but a resource was left behind. Record
-                        # the leak and continue the sweep (the host record is gone, so
-                        # it still counts as deleted) rather than letting one host's
-                        # leak abort GC. Mirrors the online-destroy path below.
+                        # delete_host raises a CleanupFailedGroup when a resource
+                        # was left behind; the host record is still deleted, so it
+                        # counts as deleted and we continue the sweep rather than
+                        # letting one host's leak abort GC. The destroyed event is
+                        # emitted only on a clean delete (the else). Mirrors the
+                        # online-destroy path below.
                         try:
                             provider.delete_host(host)
                         except CleanupFailedGroup as group:
                             with results_lock:
                                 result.failures.extend(group.failures)
-                        emit_host_destroyed(
-                            mngr_ctx.config,
-                            host_ref.host_id,
-                            [ref.agent_id for ref in agent_refs],
-                        )
+                        else:
+                            emit_host_destroyed(
+                                mngr_ctx.config,
+                                host_ref.host_id,
+                                [ref.agent_id for ref in agent_refs],
+                            )
                     with results_lock:
                         result.machines_deleted.append(host_ref)
             # no matter what we're done--the rest of the logic only applies to online hosts
