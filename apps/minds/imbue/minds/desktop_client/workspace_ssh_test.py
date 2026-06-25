@@ -76,3 +76,19 @@ def test_prune_expired_grant_lines_preserves_user_managed_keys() -> None:
 
 def test_prune_expired_grant_lines_empty_content_stays_empty() -> None:
     assert prune_expired_grant_lines("", now=_NOW) == ""
+
+
+def test_prune_expired_grant_lines_drops_grant_with_corrupt_expiry() -> None:
+    # A minds-owned grant whose ``expires=`` marker is unparseable is treated as
+    # expired (the epoch sentinel) and dropped. ``now`` is timezone-aware, so the
+    # sentinel must be aware too, or the comparison would raise TypeError.
+    live = build_authorized_keys_line(
+        public_key=_KEY, requester_workspace_id="new", expires_at=_NOW + timedelta(hours=1)
+    )
+    corrupt = f"{_KEY} minds-ssh-grant requester=old expires=not-a-timestamp"
+    content = f"{corrupt}\n{live}\n"
+
+    pruned = prune_expired_grant_lines(content, now=_NOW)
+
+    assert "requester=old" not in pruned
+    assert "requester=new" in pruned

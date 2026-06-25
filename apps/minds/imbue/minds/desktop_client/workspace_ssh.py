@@ -20,6 +20,7 @@ tunnel for that remote->local case is not yet implemented (see the route).
 
 from datetime import datetime
 from datetime import timedelta
+from datetime import timezone
 
 from pydantic import Field
 
@@ -77,7 +78,8 @@ def _parse_grant_expiry(line: str) -> datetime | None:
 
     Lines without our marker (keys the user added by hand) return None and are
     never pruned. A marker with an unparseable expiry is treated as expired
-    (returns the epoch) so a corrupt grant doesn't linger forever.
+    (returns the epoch) so a corrupt grant doesn't linger forever. The epoch
+    sentinel is timezone-aware so it compares cleanly against an aware ``now``.
     """
     if _GRANT_MARKER not in line:
         return None
@@ -87,8 +89,8 @@ def _parse_grant_expiry(line: str) -> datetime | None:
             try:
                 return datetime.fromisoformat(raw)
             except ValueError:
-                return datetime.fromtimestamp(0, tz=None)
-    return datetime.fromtimestamp(0, tz=None)
+                return datetime.fromtimestamp(0, tz=timezone.utc)
+    return datetime.fromtimestamp(0, tz=timezone.utc)
 
 
 def prune_expired_grant_lines(authorized_keys_content: str, *, now: datetime) -> str:
