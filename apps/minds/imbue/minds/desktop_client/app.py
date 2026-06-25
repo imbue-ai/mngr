@@ -2552,7 +2552,7 @@ def _build_requests_payload(
 #   - a ``claude``-type agent with the user-chosen name -- runs the user's
 #     Claude conversation.
 #   - a ``main``-type agent always named ``system-services`` -- runs the
-#     bootstrap service manager, which spawns the system interface.
+#     bootstrap, which execs supervisord, which supervises the system interface.
 # The restart endpoints are invoked with the user agent's id; the recovery
 # flow restarts the *system-services* agent (which shares the user agent's
 # host), so it resolves that agent through the backend resolver.
@@ -2597,8 +2597,8 @@ _DISCOVERY_FRESHNESS_THRESHOLD_SECONDS: Final[float] = 3 * DISCOVERY_STREAM_POLL
 # How long we wait for the system interface to answer again after a restart,
 # split by tier. A surgical (in-place) restart leaves the container running, so
 # the interface should answer again quickly. A host restart cold-boots the
-# container (restore-from-snapshot + the bootstrap service manager spawning the
-# system interface), which legitimately takes longer. Initial agent-creation
+# container (restore-from-snapshot + the bootstrap execing supervisord, which
+# spawns the system interface), which legitimately takes longer. Initial agent-creation
 # readiness waiting keeps its own, much longer, timeout.
 _SURGICAL_STARTUP_WAIT_SECONDS: Final[float] = 15.0
 _HOST_RESTART_STARTUP_WAIT_SECONDS: Final[float] = 30.0

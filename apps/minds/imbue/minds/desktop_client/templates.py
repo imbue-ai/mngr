@@ -885,21 +885,6 @@ _RECOVERY_SCRIPT: Final[str] = """\
           hostBtn.classList.remove('secondary');
           show(hostBtn, true);
         }
-        // New tier: services.toml is missing [services.system_interface]. A
-        // restart cannot recover this; the user has to fix the file. Provide
-        // a secondary "Try restart anyway" affordance for completeness.
-        function renderMisconfigured() {
-          titleEl.textContent = 'Workspace misconfigured';
-          messageEl.textContent =
-            "This workspace's services.toml is missing the [services.system_interface] entry, "
-            + 'so the system interface cannot be started. A restart is unlikely to help -- '
-            + 'fix services.toml first. See the diagnostics below for details.';
-          show(spinnerEl, false);
-          show(errorEl, false);
-          hostBtn.textContent = 'Try restart anyway';
-          hostBtn.classList.add('secondary');
-          show(hostBtn, true);
-        }
         function renderDispatchError() {
           titleEl.textContent = 'Workspace unresponsive';
           messageEl.textContent = 'Could not start the restart. Check your connection and try again.';
@@ -968,18 +953,6 @@ _RECOVERY_SCRIPT: Final[str] = """\
           latestHealth = data || null;
           renderDebugMenu(latestHealth);
           var tier = data && data.dispatch_tier;
-          // A missing [services.system_interface] block means no restart can
-          // recover the workspace, so honor this tier on every entry path --
-          // including restart_failed, which is exactly the state a misconfigured
-          // workspace lands in once its undeclared interface fails to come back
-          // up. This must precede the no-auto-dispatch short-circuit below;
-          // renderMisconfigured() dispatches nothing (it only renders, with a
-          // "Try restart anyway" affordance), so it is safe regardless of
-          // autoDispatch.
-          if (tier === 'workspace_misconfigured') {
-            renderMisconfigured();
-            return;
-          }
           // A backend-unreachable outcome short-circuits before any restart
           // dispatch on EVERY entry path: no restart can or should fire while the
           // backend is unreachable or rejecting us. Render-only, and arm the

@@ -33,8 +33,8 @@ from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 SERVICES_EVENT_SOURCE_NAME: Final[str] = "services"
 REQUESTS_EVENT_SOURCE_NAME: Final[str] = "requests"
 
-# Every minds workspace runs a constant-named ``main``-type agent that owns
-# the bootstrap service manager (and thus the system interface). This is the
+# Every minds workspace runs a constant-named ``main``-type agent whose
+# bootstrap execs supervisord (and thus owns the system interface). This is the
 # canonical definition of that name; ``agent_creator._DEFAULT_AGENT_NAME``
 # is the ``AgentName``-typed form built from it.
 SYSTEM_SERVICES_AGENT_NAME: Final[str] = "system-services"
