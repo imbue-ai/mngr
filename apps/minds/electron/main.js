@@ -3,7 +3,7 @@ const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
 const paths = require('./paths');
-const { initSentry } = require('./sentry');
+const { initSentry, captureManualReport } = require('./sentry');
 const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 
@@ -1164,7 +1164,17 @@ function openHomeInNewWindow() {
 
 // -- Error / retry flow --
 
-function showErrorInAllWindows(message, details, actionLabel) {
+// The most recent error takeover's message/details, captured so the shell's
+// "Report a bug" button can file a one-shot Sentry report of the on-screen error
+// when the backend is down (and thus the normal /help flow is unreachable).
+let lastErrorTakeover = null;
+
+// ``canUseBackendReport`` is true only when the Python backend is still up (e.g. the
+// discovery-pipeline-stall takeover): there the shell's report button opens the full
+// /help modal. For a crashed/never-started backend it is false, and the report button
+// falls back to a one-shot main-process Sentry report (see the report-error IPC handler).
+function showErrorInAllWindows(message, details, actionLabel, canUseBackendReport = false) {
+  lastErrorTakeover = { message, details };
   for (const bundle of bundles) {
     if (bundle.window.isDestroyed()) continue;
     bundle.isErrorState = true;
@@ -1184,11 +1194,11 @@ function showErrorInAllWindows(message, details, actionLabel) {
         bundle.chromeView.webContents.loadFile(path.join(__dirname, 'shell.html'));
         bundle.chromeView.webContents.once('did-finish-load', () => {
           if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
-            bundle.chromeView.webContents.send('error-details', { message, details, actionLabel });
+            bundle.chromeView.webContents.send('error-details', { message, details, actionLabel, canUseBackendReport });
           }
         });
       } else {
-        bundle.chromeView.webContents.send('error-details', { message, details, actionLabel });
+        bundle.chromeView.webContents.send('error-details', { message, details, actionLabel, canUseBackendReport });
       }
     }
   }
@@ -1611,6 +1621,9 @@ function handleChromeSSEEvent(evt) {
         "Minds has disconnected from your workspaces and can't automatically reconnect. Restart the app to recover. Your data has not been lost.",
         null,
         'Restart Minds',
+        // The Python backend is still up in this takeover (only the discovery pipeline
+        // stalled), so the shell's report button can use the full /help modal.
+        true,
       );
     }
   }
@@ -2821,6 +2834,23 @@ ipcMain.on('toggle-help', (event, agentId) => {
   toggleHelp(getBundleFromEvent(event), agentId);
 });
 
+// One-shot bug report from the full-app error takeover (shell.html), used when the
+// Python backend is down and its /help flow is unreachable. Reports the on-screen
+// error via the always-initialized main-process Sentry and returns the event id so
+// the shell can show it. ``invoke`` (not ``send``) so the renderer gets the id back.
+ipcMain.handle('report-error', () => {
+  try {
+    const eventId = captureManualReport({
+      message: lastErrorTakeover ? lastErrorTakeover.message : null,
+      details: lastErrorTakeover ? lastErrorTakeover.details : null,
+    });
+    return { ok: Boolean(eventId), eventId: eventId || null };
+  } catch (err) {
+    console.error('[report-error] failed to capture manual report:', err && err.message);
+    return { ok: false, eventId: null };
+  }
+});
+
 ipcMain.on('open-workspace-in-new-window', (event, agentId) => {
   if (!agentId) return;
   openOrFocusWorkspace(agentId, workspaceUrlForAgent(agentId));
@@ -2849,6 +2879,16 @@ ipcMain.on('open-request-modal', (event, requestId) => {
   if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) return;
   const sender = getBundleFromEvent(event);
   if (sender) openInbox(sender, '?selected=' + encodeURIComponent(requestId));
+});
+
+// Open the get-help / report-a-bug modal on behalf of the (otherwise
+// unprivileged) content view -- used by error pages like the workspace-recovery
+// page. Only content-relay-preload.js can emit this channel, and only for an
+// allowlisted `minds:open-help` postMessage. The agent id is re-validated here
+// (never trust the renderer) before being packed into the help URL.
+ipcMain.on('open-help', (event, agentId) => {
+  const scopedAgentId = typeof agentId === 'string' && /^agent-[a-f0-9]{1,64}$/i.test(agentId) ? agentId : '';
+  openHelp(getBundleFromEvent(event), scopedAgentId);
 });
 
 ipcMain.on('close-modal', (event) => {

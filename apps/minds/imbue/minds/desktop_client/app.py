@@ -463,9 +463,10 @@ def _suggested_create_color(backend_resolver: BackendResolverInterface) -> str:
 def _maybe_consent_screen() -> Response | None:
     """Return the error-reporting consent screen if it still needs answering, else None.
 
-    The screen is shown on first launch (and once after upgrading from a build that predates it),
-    ahead of welcome/login, until the user answers it via POST /consent. When config is unavailable
-    (e.g. minimal test apps) there is nothing to gate on, so this is a no-op.
+    The screen is shown once per machine -- on first launch, and once more after upgrading from a
+    build that predates it -- after the user has authenticated and before the landing content, until
+    they answer it via POST /consent. Callers are responsible for gating this on authentication. When
+    config is unavailable (e.g. minimal test apps) there is nothing to gate on, so this is a no-op.
     """
     minds_config: MindsConfig | None = get_state().minds_config
     if minds_config is None or minds_config.get_error_reporting_consent_given():
@@ -479,10 +480,13 @@ def _maybe_consent_screen() -> Response | None:
 
 
 def _handle_consent_page() -> Response:
-    """Render the first-launch error-reporting consent screen (GET /consent).
+    """Render the error-reporting consent screen (GET /consent).
 
-    If consent was already answered, redirect home so the screen never reappears.
+    The consent screen sits just after login, so an unauthenticated request is bounced to the login
+    page. If consent was already answered, redirect home so the screen never reappears.
     """
+    if not _is_request_authenticated():
+        return make_response(status_code=302, headers={"Location": "/login"})
     consent_response = _maybe_consent_screen()
     if consent_response is not None:
         return consent_response
@@ -492,9 +496,11 @@ def _handle_consent_page() -> Response:
 def _handle_consent_submit() -> Response:
     """Record the consent-screen choices and mark consent as answered (POST /consent).
 
-    Pre-auth (the consent screen precedes login), so this carries no authentication guard. "Include
-    logs" is only persisted as on when reporting is also on, matching the screen's coupling.
+    The consent screen sits just after login, so this requires authentication. "Include logs" is only
+    persisted as on when reporting is also on, matching the screen's coupling.
     """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
     body = request.get_json(silent=True, force=True)
     if not isinstance(body, dict):
         return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
@@ -565,7 +571,7 @@ def _handle_help_report() -> Response:
         )
 
     state = get_state()
-    sent = submit_bug_report_from_body(
+    event_id = submit_bug_report_from_body(
         body=body,
         session_store=state.session_store,
         backend_resolver=state.backend_resolver,
@@ -574,7 +580,7 @@ def _handle_help_report() -> Response:
     )
     return make_response(
         status_code=200,
-        content=json.dumps({"ok": True, "sent": sent}),
+        content=json.dumps({"ok": True, "event_id": event_id}),
         media_type="application/json",
     )
 
@@ -589,15 +595,16 @@ def _handle_welcome_page() -> Response:
 
 
 def _handle_landing_page() -> Response:
-    # The first-launch error-reporting consent screen sits ahead of welcome/login: while the user
-    # has not answered it, show it here (the Electron content view and browser both load "/" first).
-    consent_response = _maybe_consent_screen()
-    if consent_response is not None:
-        return consent_response
-
     if not _is_request_authenticated():
         html = render_login_page()
         return make_html_response(content=html)
+
+    # The error-reporting consent screen sits just after login: once the user is authenticated but
+    # has not yet answered it, show it here before the landing content (the Electron content view and
+    # browser both load "/" first, and _handle_post_login_redirect routes here while it is unanswered).
+    consent_response = _maybe_consent_screen()
+    if consent_response is not None:
+        return consent_response
 
     backend_resolver = get_state().backend_resolver
     all_agent_ids = backend_resolver.list_active_workspace_ids()
@@ -687,6 +694,12 @@ def _handle_post_login_redirect() -> Response:
     """
     if not _is_request_authenticated():
         return make_response(status_code=302, headers={"Location": "/login"})
+    # The error-reporting consent screen sits just after login. While it is unanswered, send the user
+    # to "/" (the landing handler shows the consent screen there) rather than straight to /accounts,
+    # so a returning user with workspaces still sees it once before reaching the account page.
+    minds_config: MindsConfig | None = get_state().minds_config
+    if minds_config is not None and not minds_config.get_error_reporting_consent_given():
+        return make_response(status_code=302, headers={"Location": "/"})
     backend_resolver = get_state().backend_resolver
     has_any_workspace = bool(backend_resolver.list_active_workspace_ids())
     destination = "/accounts" if has_any_workspace else "/"
@@ -3583,10 +3596,14 @@ def _handle_accounts_page() -> Response:
     enabled_by_user_id = {
         str(account.user_id): is_imbue_cloud_provider_enabled_for_account(str(account.email)) for account in accounts
     }
+    report_unexpected_errors = minds_config.get_report_unexpected_errors() if minds_config else False
+    include_error_logs = minds_config.get_include_error_logs() if minds_config else False
     html = render_accounts_page(
         accounts=accounts,
         default_account_id=default_account_id,
         enabled_by_user_id=enabled_by_user_id,
+        report_unexpected_errors=report_unexpected_errors,
+        include_error_logs=include_error_logs,
     )
     return make_html_response(content=html)
 

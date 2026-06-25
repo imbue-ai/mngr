@@ -913,7 +913,7 @@ def submit_manual_bug_report(
     report: Mapping[str, Any],
     include_logs: bool,
     logs_folder: Path | None,
-) -> bool:
+) -> str | None:
     """Synthesize and send a user-submitted bug report as a Sentry event.
 
     Unlike automatic error reporting, this is an explicit user action: the event is tagged
@@ -925,12 +925,13 @@ def submit_manual_bug_report(
     same S3-attachment mechanism as automatic errors (a no-op in environments without an S3 bucket).
     No traceback is collected (a manual report has no meaningful one).
 
-    Returns True if the event was handed to Sentry, False if Sentry is not active.
+    Returns the Sentry event id (a 32-char hex string the user can quote when following up), or None
+    if Sentry is not active or the event was dropped before sending.
     """
     client = sentry_sdk.get_client()
     if not client.is_active():
         logger.info("Sentry is not active; manual bug report was not sent")
-        return False
+        return None
 
     # Build ``extra`` as a local dict (also referenced by the event) so log-attachment URLs can be
     # added without re-subscripting the loosely-typed Event TypedDict.
@@ -958,5 +959,4 @@ def submit_manual_bug_report(
             for callback in callbacks:
                 callback()
 
-    sentry_sdk.capture_event(event)
-    return True
+    return sentry_sdk.capture_event(event)

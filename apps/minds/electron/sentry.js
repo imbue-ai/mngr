@@ -106,7 +106,15 @@ function initSentry() {
     sendDefaultPii: false,
     // Gate automatic sends on the user's live setting: drop every event while
     // reporting is disabled (matches the backend's _AutomaticReportingGate).
-    beforeSend: (event) => (isErrorReportingEnabled() ? event : null),
+    // A manually-submitted bug report is an explicit user action, so it always
+    // sends regardless of the setting -- mirroring the Python backend's
+    // MANUALLY_SUBMITTED_TAG bypass in imbue/minds/utils/sentry/core.py.
+    beforeSend: (event) => {
+      if (event.tags && event.tags.manually_submitted === 'true') {
+        return event;
+      }
+      return isErrorReportingEnabled() ? event : null;
+    },
   });
   Sentry.setTag('git_sha', gitSha);
   console.log(
@@ -115,4 +123,26 @@ function initSentry() {
   );
 }
 
-module.exports = { initSentry, isErrorReportingEnabled, resolveEnvironment, fixupReleaseId };
+/**
+ * Capture a user-initiated bug report from the Electron main process and return its event id.
+ *
+ * Used by the full-app error takeover (shell.html): when the Python backend has crashed its normal
+ * /help report flow is unreachable, but this main-process Sentry is always initialized, so the user
+ * can still file a one-shot report of the on-screen error. The event is tagged ``manually_submitted``
+ * so the ``beforeSend`` gate always lets it through, even when automatic reporting is off (an explicit
+ * user action). Note this reports to the JavaScript Sentry project, not the Python backend's project.
+ *
+ * Returns the Sentry event id (a 32-char hex string the user can quote), or null if Sentry dropped it.
+ */
+function captureManualReport({ message, details }) {
+  return (
+    Sentry.captureEvent({
+      message: message || 'Minds app error (manual report)',
+      level: 'error',
+      tags: { manually_submitted: 'true' },
+      extra: { details: details || '' },
+    }) || null
+  );
+}
+
+module.exports = { initSentry, isErrorReportingEnabled, resolveEnvironment, fixupReleaseId, captureManualReport };

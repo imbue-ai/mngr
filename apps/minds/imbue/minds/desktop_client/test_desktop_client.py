@@ -1726,6 +1726,21 @@ def test_accounts_page_shows_logged_in_accounts(tmp_path: Path) -> None:
     assert "test@example.com" in response.text
 
 
+def test_accounts_page_hosts_error_reporting_toggles(tmp_path: Path) -> None:
+    """The manage-accounts page hosts the per-machine error-reporting toggles, seeded from config."""
+    MindsConfig(data_dir=tmp_path).set_report_unexpected_errors(True)
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.get("/accounts")
+    assert response.status_code == 200
+    assert "Report unexpected errors" in response.text
+    report_input = response.text.split('id="report-errors-toggle"')[1].split(">")[0]
+    assert "checked" in report_input
+    # With reporting on, the include-logs row is revealed (not ``hidden``).
+    logs_row = response.text.split('id="include-logs-row"')[1].split(">")[0]
+    assert "hidden" not in logs_row
+
+
 def test_workspace_settings_page_requires_auth(tmp_path: Path) -> None:
     """The workspace settings page requires authentication."""
     client, _ = _create_test_client_with_stores(tmp_path)
@@ -2067,19 +2082,55 @@ def test_auto_open_toggle(tmp_path: Path) -> None:
 # -- error-reporting consent + settings tests --
 
 
-def test_landing_shows_consent_screen_before_login_on_first_launch(tmp_path: Path) -> None:
-    """On first launch (consent not yet answered), "/" shows the consent screen ahead of login."""
+def test_landing_shows_login_not_consent_when_unauthenticated(tmp_path: Path) -> None:
+    """The consent screen sits after login: an unauthenticated "/" shows the login prompt, not consent."""
     client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "Help improve Minds" not in response.text
+    assert "Login" in response.text
+
+
+def test_landing_shows_consent_screen_after_login_when_unanswered(tmp_path: Path) -> None:
+    """Once authenticated, "/" shows the consent screen until it is answered."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
     response = client.get("/")
     assert response.status_code == 200
     assert "Help improve Minds" in response.text
     assert "Report unexpected errors" in response.text
-    # The login prompt must not be shown yet: consent precedes login.
-    assert "Login" not in response.text
+
+
+def test_consent_page_requires_auth(tmp_path: Path) -> None:
+    """GET /consent bounces an unauthenticated request to the login page."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/consent")
+    assert response.status_code == 302
+    assert response.headers["location"] == "/login"
+
+
+def test_consent_submit_requires_auth(tmp_path: Path) -> None:
+    """POST /consent rejects an unauthenticated request and persists nothing."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.post("/consent", json={"report_unexpected_errors": True, "include_logs": True})
+    assert response.status_code == 403
+    assert MindsConfig(data_dir=tmp_path).get_error_reporting_consent_given() is False
+
+
+def test_post_login_routes_to_landing_while_consent_unanswered(tmp_path: Path) -> None:
+    """While consent is unanswered, post-login routes to "/" (which shows consent), not /accounts."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-test-123", email="test@example.com")
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+    response = client.get("/post-login", follow_redirects=False)
+    assert response.status_code == 302
+    assert response.headers["location"] == "/"
 
 
 def test_consent_submit_records_choices_and_unblocks_landing(tmp_path: Path) -> None:
-    client, _ = _create_test_client_with_stores(tmp_path)
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
     response = client.post("/consent", json={"report_unexpected_errors": True, "include_logs": True})
     assert response.status_code == 200
 
@@ -2088,15 +2139,15 @@ def test_consent_submit_records_choices_and_unblocks_landing(tmp_path: Path) -> 
     assert config.get_report_unexpected_errors() is True
     assert config.get_include_error_logs() is True
 
-    # With consent answered, "/" no longer shows the consent screen (falls through to login).
+    # With consent answered, the authenticated "/" no longer shows the consent screen.
     landing = client.get("/")
     assert "Help improve Minds" not in landing.text
-    assert "Login" in landing.text
 
 
 def test_consent_submit_does_not_persist_logs_without_reporting(tmp_path: Path) -> None:
     """ "Include logs" is only meaningful with reporting on, so it is not persisted otherwise."""
-    client, _ = _create_test_client_with_stores(tmp_path)
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
     response = client.post("/consent", json={"report_unexpected_errors": False, "include_logs": True})
     assert response.status_code == 200
 
@@ -2162,6 +2213,21 @@ def test_help_page_shows_include_logs_checkbox_when_setting_off(tmp_path: Path) 
     assert 'id="help-include-logs"' in response.text
 
 
+def test_help_page_shows_checkboxes_inline_and_report_id_affordance(tmp_path: Path) -> None:
+    """The diagnostics checkboxes are top-level (no Advanced disclosure) and the confirmation can show
+    a copyable report ID."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/help")
+    assert response.status_code == 200
+    # Checkboxes are rendered directly, not hidden behind an Advanced <details> disclosure.
+    assert "<details" not in response.text
+    assert 'id="help-app-diagnostics"' in response.text
+    assert 'id="help-remote-access"' in response.text
+    # The confirmation hosts a copyable report-ID slot populated from the response's event_id.
+    assert 'id="help-event-id"' in response.text
+    assert 'id="help-copy-id-btn"' in response.text
+
+
 def test_help_report_requires_description(tmp_path: Path) -> None:
     client, _ = _create_test_client_with_stores(tmp_path)
     response = client.post("/help/report", json={"description": "  "})
@@ -2169,8 +2235,8 @@ def test_help_report_requires_description(tmp_path: Path) -> None:
 
 
 def test_help_report_accepts_a_description(tmp_path: Path) -> None:
-    # Sentry is not initialized in tests, so the report is collected and the route returns ok with
-    # sent=False (nothing was actually transmitted). This exercises the full collect path end to end.
+    # Sentry is not initialized in tests, so the report is collected and the route returns ok with a
+    # null event_id (nothing was actually transmitted). This exercises the full collect path end to end.
     client, _ = _create_test_client_with_stores(tmp_path)
     response = client.post(
         "/help/report",
@@ -2179,7 +2245,7 @@ def test_help_report_accepts_a_description(tmp_path: Path) -> None:
     assert response.status_code == 200
     body = response.get_json()
     assert body["ok"] is True
-    assert body["sent"] is False
+    assert body["event_id"] is None
 
 
 def test_served_page_omits_frontend_sentry_when_reporting_off(tmp_path: Path) -> None:
@@ -2432,6 +2498,10 @@ def test_recovery_page_renders_for_authenticated_user(tmp_path: Path) -> None:
     # reports the container reachable.
     assert "Restart workspace" in response.text
     assert "restart-system-interface" in response.text
+    # The recovery page offers an in-page report button that opens the get-help modal
+    # via the ``minds:open-help`` relay message.
+    assert 'id="recovery-report-btn"' in response.text
+    assert "minds:open-help" in response.text
 
 
 def test_recovery_page_drops_open_redirect_return_to(tmp_path: Path) -> None:

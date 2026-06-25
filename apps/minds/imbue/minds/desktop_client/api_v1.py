@@ -178,14 +178,14 @@ def _handle_bug_report(agent_id: str) -> Response:
         return _json_error("'description' field is required and must be a non-empty string", 400)
 
     state = get_state()
-    sent = submit_bug_report_from_body(
+    event_id = submit_bug_report_from_body(
         body={**body, "workspace_agent_id": agent_id},
         session_store=state.session_store,
         backend_resolver=state.backend_resolver,
         minds_config=state.minds_config,
         paths=state.api_v1_paths,
     )
-    return _json_response({"ok": True, "sent": sent})
+    return _json_response({"ok": True, "event_id": event_id})
 
 
 # -- Blueprint factory --

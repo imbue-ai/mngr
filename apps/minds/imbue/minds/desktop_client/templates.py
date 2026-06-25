@@ -778,6 +778,22 @@ _RECOVERY_STYLE: Final[str] = """\
       #copy-ssh-btn { margin-left: 8px; }
       #copy-diagnostics-btn:hover,
       #copy-ssh-btn:hover { background: #f4f4f5; }
+
+      /* A quiet "Report a problem" link under the primary action, always visible
+         so the user can open the bug-report modal from any recovery state. Kept
+         de-emphasized (text-only) so it never competes with the restart/retry
+         button above it. */
+      #recovery-report-btn {
+        margin-top: 12px;
+        align-self: center;
+        background: none;
+        border: 0;
+        color: #71717a;
+        font-size: 0.8125rem;
+        text-decoration: underline;
+        cursor: pointer;
+      }
+      #recovery-report-btn:hover { color: #3f3f46; }
 """
 
 # The recovery page's behavior. It drives the shared loading card (toggling
@@ -1069,6 +1085,18 @@ _RECOVERY_SCRIPT: Final[str] = """\
         if (copyBtn) {
           copyBtn.addEventListener('click', copyDiagnostics);
         }
+        var reportBtn = document.getElementById('recovery-report-btn');
+        if (reportBtn) {
+          reportBtn.addEventListener('click', function () {
+            // Ask the shell to open the get-help / report-a-bug modal, scoped to this
+            // workspace. ``window.parent`` works for both runtimes: in Electron this page
+            // is top-level so parent === self and the content-relay preload (which listens
+            // on window) forwards it to the main process as an overlay; in browser mode the
+            // page is in the chrome iframe, so parent is the chrome shell, which navigates
+            // the content frame to /help.
+            window.parent.postMessage({ type: 'minds:open-help', agentId: agentId }, '*');
+          });
+        }
         if (copySshBtn) {
           copySshBtn.addEventListener('click', function () {
             var cmd = copySshBtn.getAttribute('data-ssh-command') || '';
@@ -1165,6 +1193,7 @@ def render_recovery_page(
         '      <p id="recovery-provider-reason" class="recovery-provider-reason hidden"></p>\n'
         '      <button id="recovery-host-btn" class="hidden">Restart workspace</button>\n'
         '      <button id="recovery-retry-btn" class="hidden">Retry</button>\n'
+        '      <button type="button" id="recovery-report-btn">Report a problem</button>\n'
         '      <div class="recovery-troubleshooting">\n'
         '        <p class="recovery-troubleshooting-label">Troubleshooting</p>\n'
         + error_block
@@ -1388,6 +1417,8 @@ def render_accounts_page(
     accounts: Sequence[object],
     default_account_id: str | None = None,
     enabled_by_user_id: Mapping[str, bool] | None = None,
+    report_unexpected_errors: bool = False,
+    include_error_logs: bool = False,
 ) -> str:
     """Render the manage accounts page.
 
@@ -1396,10 +1427,17 @@ def render_accounts_page(
     The template renders a "Signed out" indicator when an account is
     present (still in sessions.json) but the user disabled the block
     via the providers panel.
+
+    ``report_unexpected_errors`` / ``include_error_logs`` seed the per-machine
+    error-reporting toggles hosted on this page (the same settings the
+    first-launch consent screen records). They are global to the machine, not
+    account-scoped.
     """
     return CATALOG.render(
         "pages.Accounts",
         accounts=accounts,
         default_account_id=default_account_id or "",
         enabled_by_user_id=dict(enabled_by_user_id or {}),
+        report_unexpected_errors=report_unexpected_errors,
+        include_error_logs=include_error_logs,
     )

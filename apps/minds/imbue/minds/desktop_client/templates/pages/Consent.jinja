@@ -1,11 +1,11 @@
 {#def report_unexpected_errors=false, include_logs=false #}
 {#
-  First-launch error-reporting consent screen. Shown ahead of welcome/login while
-  MindsConfig.error_reporting_consent_given is False. The two toggles mirror the
-  persistent settings on the account settings page; "Include logs" is only revealed
+  Error-reporting consent screen. Shown just after login (the user is authenticated)
+  while MindsConfig.error_reporting_consent_given is False. The two toggles mirror the
+  persistent settings on the manage-accounts page; "Include logs" is only revealed
   once "Report unexpected errors" is enabled. "Continue" records the choices and flips
   the consent-given flag (POST /consent), then reloads the app, which now proceeds past
-  this screen to welcome/login.
+  this screen to the landing content.
 #}
 {% set _scripts %}
 <script>

@@ -67,51 +67,14 @@ def test_render_settings_page() -> None:
         user_id="abc123",
         provider="google",
         user_id_prefix="a1b2c3d4e5f67890",
-        report_unexpected_errors=False,
-        include_error_logs=False,
     )
     assert "user@example.com" in html
     assert "Test User" in html
     assert "google" in html
     assert "a1b2c3d4e5f67890" in html
     assert "Sign out" in html
-    assert "Report unexpected errors" in html
-
-
-def test_render_settings_page_reflects_error_reporting_toggles() -> None:
-    # When reporting is on, the report toggle is checked and the include-logs row is visible (not
-    # ``hidden``); the include-logs box reflects its own state.
-    html = render_settings_page(
-        email="user@example.com",
-        display_name=None,
-        user_id="abc123",
-        provider="email",
-        user_id_prefix="a1b2c3d4e5f67890",
-        report_unexpected_errors=True,
-        include_error_logs=True,
-    )
-    report_input = html.split('id="report-errors-toggle"')[1].split(">")[0]
-    assert "checked" in report_input
-    logs_row = html.split('id="include-logs-row"')[1].split(">")[0]
-    assert "hidden" not in logs_row
-    logs_input = html.split('id="include-logs-toggle"')[1].split(">")[0]
-    assert "checked" in logs_input
-
-
-def test_render_settings_page_hides_logs_row_when_reporting_off() -> None:
-    html = render_settings_page(
-        email="user@example.com",
-        display_name=None,
-        user_id="abc123",
-        provider="email",
-        user_id_prefix="a1b2c3d4e5f67890",
-        report_unexpected_errors=False,
-        include_error_logs=False,
-    )
-    report_input = html.split('id="report-errors-toggle"')[1].split(">")[0]
-    assert "checked" not in report_input
-    logs_row = html.split('id="include-logs-row"')[1].split(">")[0]
-    assert "hidden" in logs_row
+    # The error-reporting toggles moved to the manage-accounts page; they no longer live here.
+    assert "Report unexpected errors" not in html
 
 
 def test_render_settings_page_email_provider_shows_password_link() -> None:
@@ -121,8 +84,6 @@ def test_render_settings_page_email_provider_shows_password_link() -> None:
         user_id="abc123",
         provider="email",
         user_id_prefix="a1b2c3d4e5f67890",
-        report_unexpected_errors=False,
-        include_error_logs=False,
     )
     assert "Change password" in html
 
@@ -134,7 +95,5 @@ def test_render_settings_page_oauth_provider_hides_password_link() -> None:
         user_id="abc123",
         provider="github",
         user_id_prefix="a1b2c3d4e5f67890",
-        report_unexpected_errors=False,
-        include_error_logs=False,
     )
     assert "Change password" not in html

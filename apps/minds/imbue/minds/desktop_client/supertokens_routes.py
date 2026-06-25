@@ -700,10 +700,6 @@ def _handle_settings_page() -> Response:
         logger.warning("Auth backend unreachable during settings page load: {}", exc)
         provider = "email"
 
-    minds_config: MindsConfig | None = get_state().minds_config
-    report_unexpected_errors = minds_config.get_report_unexpected_errors() if minds_config else False
-    include_error_logs = minds_config.get_include_error_logs() if minds_config else False
-
     return make_html_response(
         render_settings_page(
             email=user_info.email,
@@ -711,8 +707,6 @@ def _handle_settings_page() -> Response:
             user_id=str(user_info.user_id),
             provider=provider,
             user_id_prefix=str(user_info.user_id_prefix),
-            report_unexpected_errors=report_unexpected_errors,
-            include_error_logs=include_error_logs,
         )
     )
 

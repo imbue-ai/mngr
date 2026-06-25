@@ -145,8 +145,12 @@ def submit_bug_report(
     backend_resolver: BackendResolverInterface | None,
     data_dir: Path | None,
     logs_folder: Path | None,
-) -> bool:
-    """Collect the report and submit it to Sentry. Returns whether Sentry accepted the event."""
+) -> str | None:
+    """Collect the report and submit it to Sentry.
+
+    Returns the Sentry event id the user can quote when following up, or None when Sentry is inactive
+    (e.g. dev/tests) or the event was dropped before sending.
+    """
     report = build_bug_report(
         description=description,
         include_app_diagnostics=include_app_diagnostics,
@@ -172,13 +176,15 @@ def submit_bug_report_from_body(
     backend_resolver: BackendResolverInterface | None,
     minds_config: MindsConfig | None,
     paths: WorkspacePaths | None,
-) -> bool:
+) -> str | None:
     """Parse a help-form / API request body and submit the resulting bug report.
 
     Shared by the local ``POST /help/report`` handler and the ``/api/v1`` bug-report route so both
     interpret the same fields identically. Logs are included when the persistent ``include_error_logs``
     setting is on OR the request opted in for this one report (the form surfaces that checkbox only when
     the setting is off). The caller is responsible for validating that a description is present.
+
+    Returns the Sentry event id (or None when Sentry is inactive / the event was dropped).
     """
     include_logs_setting = minds_config.get_include_error_logs() if minds_config is not None else False
     include_logs = include_logs_setting or bool(body.get("include_logs", False))

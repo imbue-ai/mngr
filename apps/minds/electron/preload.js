@@ -51,6 +51,12 @@ contextBridge.exposeInMainWorld('minds', {
   // report to that workspace; it is packed into the help page URL by main.
   toggleHelp: (agentId) => ipcRenderer.send('toggle-help', agentId),
 
+  // One-shot bug report from the full-app error takeover (shell.html) when the
+  // backend is down and the normal /help flow is unreachable. Reports the
+  // on-screen error via the main-process Sentry. Resolves to
+  // ``{ ok, eventId }`` so the shell can show the copyable report id.
+  reportError: () => ipcRenderer.invoke('report-error'),
+
   // Modal overlay close (used by the inbox shell and any one-off dialogs)
   closeModal: () => ipcRenderer.send('close-modal'),
 

@@ -216,7 +216,7 @@ def test_submit_manual_bug_report_sends_tagged_event_even_when_reporting_disable
     )
     with isolation_scope() as scope:
         scope.set_client(client)
-        sent = submit_manual_bug_report(
+        event_id = submit_manual_bug_report(
             title="[bug report] boom",
             report={"description": "boom", "remote_access_requested": False},
             include_logs=False,
@@ -224,7 +224,8 @@ def test_submit_manual_bug_report_sends_tagged_event_even_when_reporting_disable
         )
         client.flush()
 
-    assert sent is True
+    # The event id is returned so the user can quote it; capture_event yields a 32-char hex string.
+    assert isinstance(event_id, str) and len(event_id) == 32
     assert len(captured_events) == 1
     event = captured_events[0]
     # ``Event`` types tags/extra loosely (object), so narrow before subscripting.
@@ -234,11 +235,11 @@ def test_submit_manual_bug_report_sends_tagged_event_even_when_reporting_disable
     assert extra["bug_report"]["description"] == "boom"
 
 
-def test_submit_manual_bug_report_returns_false_when_sentry_inactive() -> None:
-    # With no active Sentry client (the default in tests), the submit is a no-op that reports failure
-    # rather than raising.
+def test_submit_manual_bug_report_returns_none_when_sentry_inactive() -> None:
+    # With no active Sentry client (the default in tests), the submit is a no-op that returns None
+    # (no event id) rather than raising.
     assert (
-        submit_manual_bug_report(title="t", report={"description": "d"}, include_logs=False, logs_folder=None) is False
+        submit_manual_bug_report(title="t", report={"description": "d"}, include_logs=False, logs_folder=None) is None
     )
 
 

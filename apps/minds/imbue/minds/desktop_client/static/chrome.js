@@ -425,10 +425,21 @@
       if (!frame || e.source !== frame.contentWindow) return;
       var data = e.data;
       if (!data || typeof data !== 'object') return;
-      if (data.type !== 'minds:open-request-modal') return;
-      var requestId = data.requestId;
-      if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) return;
-      navigateContent('/inbox?selected=' + encodeURIComponent(requestId));
+      if (data.type === 'minds:open-request-modal') {
+        var requestId = data.requestId;
+        if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) return;
+        navigateContent('/inbox?selected=' + encodeURIComponent(requestId));
+        return;
+      }
+      // Error pages (e.g. the recovery page) ask to open the get-help / report-a-bug
+      // modal. There's no overlay in browser mode, so navigate the content frame to
+      // /help, scoped to the workspace when the page supplied a valid agent id.
+      if (data.type === 'minds:open-help') {
+        var agentId = data.agentId;
+        var scoped = typeof agentId === 'string' && /^agent-[a-f0-9]{1,64}$/i.test(agentId) ? agentId : '';
+        navigateContent('/help' + (scoped ? '?workspace=' + encodeURIComponent(scoped) : ''));
+        return;
+      }
     });
   }
 

@@ -47,13 +47,10 @@ def render_settings_page(
     user_id: str,
     provider: str,
     user_id_prefix: str,
-    report_unexpected_errors: bool,
-    include_error_logs: bool,
 ) -> str:
     """Render the account settings page.
 
-    ``report_unexpected_errors`` / ``include_error_logs`` seed the per-machine error-reporting
-    toggles (the same settings the first-launch consent screen records).
+    The per-machine error-reporting toggles live on the manage-accounts page (/accounts), not here.
     """
     return CATALOG.render(
         "auth.Settings",
@@ -62,6 +59,4 @@ def render_settings_page(
         user_id=user_id,
         provider=provider,
         user_id_prefix=user_id_prefix,
-        report_unexpected_errors=report_unexpected_errors,
-        include_error_logs=include_error_logs,
     )
