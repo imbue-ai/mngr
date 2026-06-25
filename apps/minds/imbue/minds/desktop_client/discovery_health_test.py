@@ -41,14 +41,12 @@ class _Clock:
 class _FakeRemediator(ProducerRemediator):
     """Records remediation calls instead of touching a real supervisor.
 
-    ``alive`` is what :meth:`is_alive` reports (a dead supervisor is a stall the
-    watchdog acts on at once). ``fail_restart``, when True, makes ``restart``
-    raise after recording the call -- mirroring a real supervisor restart that
-    fails, which the watchdog must treat as "did not help" (retry), not give up.
+    ``fail_restart``, when True, makes ``restart`` raise after recording the
+    call -- mirroring a real supervisor restart that fails, which the watchdog
+    must treat as "did not help" (retry), not give up.
     """
 
     calls: list[str] = Field(default_factory=list)
-    alive: bool = Field(default=True)
     fail_restart: bool = Field(default=False)
 
     def bounce(self) -> None:
@@ -58,9 +56,6 @@ class _FakeRemediator(ProducerRemediator):
         self.calls.append("restart")
         if self.fail_restart:
             raise LatchkeyError("simulated supervisor restart failure")
-
-    def is_alive(self) -> bool:
-        return self.alive
 
 
 def _make_watchdog(
@@ -122,69 +117,6 @@ def test_stall_enters_reconnecting_and_bounces_immediately() -> None:
     assert watchdog.get_health() is DiscoveryHealth.RECONNECTING
     assert remediator.calls == ["bounce"]
     assert transitions == [DiscoveryHealth.RECONNECTING]
-
-
-def test_dead_supervisor_triggers_immediate_remediation_once_seen_alive() -> None:
-    # Once the supervisor has been seen up, a later crash is a stall regardless
-    # of event freshness: the watchdog remediates at once rather than waiting out
-    # the 35s threshold.
-    clock = _Clock(_T0)
-    remediator = _FakeRemediator(alive=True)
-    watchdog, transitions = _make_watchdog(clock, remediator)
-
-    # First tick: supervisor up + fresh event -> healthy, and "seen alive" latches.
-    watchdog.evaluate(_T0)
-    assert watchdog.get_health() is DiscoveryHealth.HEALTHY
-    assert remediator.calls == []
-
-    # Supervisor crashes; even with a still-fresh event, remediate immediately.
-    remediator.alive = False
-    watchdog.evaluate(clock())
-    assert watchdog.get_health() is DiscoveryHealth.RECONNECTING
-    assert remediator.calls == ["bounce"]
-    assert transitions == [DiscoveryHealth.RECONNECTING]
-
-
-def test_dead_supervisor_during_startup_defers_to_freshness_grace() -> None:
-    # During startup the supervisor is still being brought up on a background
-    # thread, so is_alive() can read False before its on-disk record is written.
-    # The watchdog must NOT treat that as an immediate stall (which would race
-    # the startup thread and risk a duplicate spawn): until the supervisor is
-    # first seen up, only the freshness timer governs.
-    clock = _Clock(_T0)
-    remediator = _FakeRemediator(alive=False)
-    watchdog, _transitions = _make_watchdog(clock, remediator)
-
-    # No event yet and the supervisor not yet up, but within the cold-start
-    # grace: stays healthy, no remediation despite is_alive() being False.
-    watchdog.evaluate(None)
-    assert watchdog.get_health() is DiscoveryHealth.HEALTHY
-    assert remediator.calls == []
-
-    # It comes up before the grace expires: the latch arms and all stays calm.
-    remediator.alive = True
-    clock.advance(5)
-    watchdog.evaluate(clock())
-    assert watchdog.get_health() is DiscoveryHealth.HEALTHY
-    assert remediator.calls == []
-
-
-def test_supervisor_that_never_comes_up_still_remediates_via_freshness_grace() -> None:
-    # Even if the supervisor is never seen alive (so the liveness trigger stays
-    # suppressed), a producer delivering no events past the cold-start grace is
-    # still remediated -- by the freshness backstop, not the liveness trigger.
-    clock = _Clock(_T0)
-    remediator = _FakeRemediator(alive=False)
-    watchdog, _transitions = _make_watchdog(clock, remediator)
-
-    # Anchor the baseline, within grace.
-    watchdog.evaluate(None)
-    assert remediator.calls == []
-    clock.advance(40)
-    # Past grace -> the freshness backstop kicks off remediation.
-    watchdog.evaluate(None)
-    assert watchdog.get_health() is DiscoveryHealth.RECONNECTING
-    assert remediator.calls == ["bounce"]
 
 
 def test_remediation_bounces_then_restarts_on_growing_backoff_forever() -> None:

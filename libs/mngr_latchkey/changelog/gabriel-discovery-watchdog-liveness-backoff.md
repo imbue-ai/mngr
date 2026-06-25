@@ -1,1 +1,0 @@
-Added: `LatchkeyForwardSupervisor.is_running()`, a best-effort, lock-free liveness probe that reports whether a live `mngr latchkey forward` supervisor is currently running (the on-disk record's PID is alive and its cmdline still matches). Embedders such as the minds discovery-health watchdog use it to tell a dead supervisor (needs a restart) from a live one (leave it be).
