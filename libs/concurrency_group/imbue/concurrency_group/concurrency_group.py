@@ -308,6 +308,11 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
         ancestor_exception = self._maybe_get_closest_ancestor_exception()
         if ancestor_exception is not None:
             if not isinstance(ancestor_exception, Exception):
+                # A non-Exception BaseException ancestor (e.g. KeyboardInterrupt/SystemExit) means
+                # the whole process is being torn down, so we honor the interrupt immediately. The
+                # local strand failures gathered above are intentionally abandoned here: there is no
+                # caller left to surface them to once the interrupt propagates. (`_exit`, by
+                # contrast, is the final teardown point and so preserves siblings via __context__.)
                 raise ancestor_exception
             exceptions.append(AncestorConcurrentFailure(ancestor_exception))
         if len(exceptions) > 0:
@@ -614,6 +619,8 @@ def _deduplicate_exceptions(exceptions: tuple[Exception, ...]) -> tuple[Exceptio
         if len(with_traceback) > 0:
             deduplicated_process_errors.append(with_traceback[0])
         else:
+            # No error in this bucket carries a traceback (none was raised before being collected).
+            # The duplicates are equivalent for reporting purposes, so any representative will do.
             deduplicated_process_errors.append(bucket[0])
     return tuple(other_exceptions + deduplicated_process_errors)
 

@@ -88,13 +88,11 @@ class RunningProcess:
             stderr = self.read_stderr()
             raise TimeoutExpired(self._command, timeout if timeout is not None else 0.0, stdout, stderr)
         result = self.poll()
-        if result is None:
-            raise ProcessSetupError(
-                command=tuple(self._command),
-                stdout="",
-                stderr="Process exited before being started!",
-                is_output_already_logged=True,
-            )
+        # The thread is no longer alive here (the is_alive guard above would have raised
+        # TimeoutExpired otherwise), so poll() either returns the completed return code or raises
+        # ProcessInvariantError -- it cannot return None. The assert documents that and narrows the
+        # type from `int | None` to `int` for the return below.
+        assert result is not None
         if self._is_checked:
             self.check()
         return result
