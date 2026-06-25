@@ -10,7 +10,6 @@ from imbue.concurrency_group.local_process import RunningProcess
 from imbue.mngr.api.observe import get_agent_states_events_path
 from imbue.mngr.api.observe import get_default_events_base_dir
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.utils.polling import wait_for
 from imbue.mngr_notifications.config import NotificationsPluginConfig
 from imbue.mngr_notifications.mock_notifier_test import RecordingNotifier
 from imbue.mngr_notifications.watcher import _get_file_size
@@ -272,50 +271,5 @@ def test_watch_exits_when_observe_process_dies_no_stderr(temp_mngr_ctx: MngrCont
     assert len(notifier.calls) == 0
 
 
-@pytest.mark.timeout(30)
-def test_watch_processes_events_then_stops(temp_mngr_ctx: MngrContext) -> None:
-    """Watcher reads new events when file grows and stops when stop_event is set."""
-    events_path = get_agent_states_events_path(get_default_events_base_dir(temp_mngr_ctx.config))
-    events_path.parent.mkdir(parents=True, exist_ok=True)
-
-    notifier = RecordingNotifier()
-    stop_event = threading.Event()
-    ready_event = threading.Event()
-
-    # Write an event before starting
-    event = _make_state_change_event(agent_name="pre-agent")
-    events_path.write_text(event + "\n")
-
-    watcher_thread = threading.Thread(
-        target=watch_for_waiting_agents,
-        kwargs={
-            "mngr_ctx": temp_mngr_ctx,
-            "plugin_config": NotificationsPluginConfig(),
-            "notifier": notifier,
-            "stop_event": stop_event,
-            "ready_event": ready_event,
-        },
-    )
-    watcher_thread.start()
-
-    try:
-        # Wait for the watcher to capture its initial file offset before writing
-        assert ready_event.wait(timeout=5), "Watcher did not become ready"
-
-        # Append a new event after the watcher starts
-        with events_path.open("a") as f:
-            f.write(_make_state_change_event(agent_name="new-agent") + "\n")
-
-        # Wait for the watcher to pick it up
-        wait_for(
-            lambda: len(notifier.calls) > 0,
-            timeout=10,
-            poll_interval=0.1,
-            error_message="Watcher did not send notification for new event",
-        )
-
-        assert len(notifier.calls) >= 1
-        assert "new-agent" in notifier.calls[0][1]
-    finally:
-        stop_event.set()
-        watcher_thread.join(timeout=10)
+# The end-to-end "watcher tails a growing file and stops on stop_event" flow (including
+# initial-offset handling) lives in test_notify.py, the integration-test home for it.
