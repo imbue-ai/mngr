@@ -1,3 +1,6 @@
+import os
+import signal
+import stat
 import subprocess
 from pathlib import Path
 from typing import cast
@@ -110,13 +113,64 @@ def test_sync_git_state_performs_pull_when_agent_is_ahead(pair_ctx: SyncTestCont
 # =============================================================================
 
 
-def test_pair_files_raises_when_unison_not_installed_and_mocked(
+def _make_executable_stub(directory: Path, name: str) -> None:
+    """Create an executable no-op stub named ``name`` in ``directory``.
+
+    Used to make a binary genuinely discoverable on PATH (so ``shutil.which``
+    runs for real) without faking ``shutil.which`` itself.
+    """
+    stub = directory / name
+    stub.write_text("#!/bin/sh\nexit 0\n")
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def _make_path_excluding_binaries(directory: Path, excluded: set[str]) -> str:
+    """Populate ``directory`` with symlinks to every binary currently on PATH except ``excluded``.
+
+    Returns a PATH value pointing only at ``directory``. This makes the excluded
+    binaries genuinely undiscoverable by the real ``shutil.which`` while keeping
+    every other tool the test harness needs (e.g. ``tmux`` for teardown, ``git``)
+    available -- so we exercise the real dependency-resolution path rather than
+    faking ``shutil.which``. Earlier PATH entries win, mirroring lookup order.
+    """
+    linked: set[str] = set()
+    for path_entry in os.environ.get("PATH", "").split(os.pathsep):
+        entry_dir = Path(path_entry)
+        if not entry_dir.is_dir():
+            continue
+        for binary in entry_dir.iterdir():
+            name = binary.name
+            if name in excluded or name in linked:
+                continue
+            try:
+                if binary.is_dir() or not os.access(binary, os.X_OK):
+                    continue
+            except OSError:
+                # Some system binaries cannot be stat'd by this user; skip them.
+                continue
+            linked.add(name)
+            (directory / name).symlink_to(binary)
+    return str(directory)
+
+
+def test_pair_files_raises_when_unison_not_installed(
     pair_ctx: SyncTestContext,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     cg: ConcurrencyGroup,
 ) -> None:
-    """Test that pair_files raises BinaryNotInstalledError when unison is not available."""
-    monkeypatch.setattr("shutil.which", lambda _binary: None)
+    """Test that pair_files raises BinaryNotInstalledError when unison is not available.
+
+    Points PATH at a directory exposing every binary except unison/unison-fsmonitor,
+    so the real ``shutil.which`` genuinely cannot find unison -- exercising the
+    actual dependency-resolution path rather than monkeypatching ``shutil.which``.
+    """
+    path_without_unison = tmp_path / "bin_without_unison"
+    path_without_unison.mkdir()
+    monkeypatch.setenv(
+        "PATH",
+        _make_path_excluding_binaries(path_without_unison, {"unison", "unison-fsmonitor"}),
+    )
 
     with pytest.raises(BinaryNotInstalledError):
         with pair_files(
@@ -141,8 +195,14 @@ def test_pair_files_raises_when_git_required_but_not_present(
     cg: ConcurrencyGroup,
 ) -> None:
     """Test that pair_files raises MngrError when git is required but directories are not repos."""
-    # Make all system dependency checks (unison, etc.) pass so we reach the git check
-    monkeypatch.setattr("shutil.which", lambda binary: "/tmp/fake/path/" + binary)
+    # Make the unison binaries genuinely discoverable (via real stubs on PATH) so the
+    # dependency check passes and we reach the git check, while keeping the real `git`
+    # binary available by retaining the existing PATH entries.
+    stub_bin_dir = tmp_path / "stub_bin"
+    stub_bin_dir.mkdir()
+    _make_executable_stub(stub_bin_dir, "unison")
+    _make_executable_stub(stub_bin_dir, "unison-fsmonitor")
+    monkeypatch.setenv("PATH", f"{stub_bin_dir}{os.pathsep}{os.environ['PATH']}")
 
     source_dir = tmp_path / "source"
     target_dir = tmp_path / "target"
@@ -361,15 +421,14 @@ def test_unison_syncer_syncs_file_changes(tmp_path: Path, cg: ConcurrencyGroup) 
 
 
 @pytest.mark.unison
-@pytest.mark.flaky
 def test_unison_syncer_syncs_symlinks(tmp_path: Path, cg: ConcurrencyGroup) -> None:
     """Test that UnisonSyncer correctly syncs symlinks.
 
-    Marked flaky because the ``wait_for`` only waits for the symlink to appear in
-    ``target``, but the very next assertion checks that the symlink's target file
-    ``real_file.txt`` also exists. Unison gives no ordering guarantee between two
-    unrelated files in a single sync sweep, so the symlink can land in ``target``
-    before its real file does.
+    Unison gives no ordering guarantee between the symlink and its target file
+    within a single sync sweep, so the ``wait_for`` condition requires *both*
+    ``link_to_file.txt`` (as a symlink) and ``real_file.txt`` to be present
+    before asserting -- otherwise the test could observe the symlink before its
+    real file lands.
     """
     source = tmp_path / "source"
     target = tmp_path / "target"
@@ -391,10 +450,11 @@ def test_unison_syncer_syncs_symlinks(tmp_path: Path, cg: ConcurrencyGroup) -> N
     try:
         syncer.start()
 
-        # Wait for sync to complete
+        # Wait until both the symlink and its real target have synced. Waiting on
+        # the symlink alone races with its target landing in a later sweep.
         wait_for(
-            lambda: (target / "link_to_file.txt").exists(),
-            error_message="Symlink was not synced within timeout",
+            lambda: (target / "link_to_file.txt").is_symlink() and (target / "real_file.txt").exists(),
+            error_message="Symlink and its target were not both synced within timeout",
         )
 
         # Both files should exist in target
@@ -475,12 +535,18 @@ def test_unison_syncer_handles_process_crash(tmp_path: Path, cg: ConcurrencyGrou
         assert syncer._running_process is not None
 
         # Kill the unison process forcefully via SIGKILL (simulating a crash).
-        # Use pkill to find the actual unison process by its unique tmp_path args,
-        # since RunningProcess doesn't expose the underlying PID directly.
-        subprocess.run(
-            ["pkill", "-KILL", "-f", f"unison {source} {target}"],
+        # RunningProcess doesn't expose the underlying PID, so locate the specific
+        # process(es) by their unique tmp_path arguments with pgrep, verify we found
+        # at least one, and SIGKILL those exact PIDs -- never a broad pkill pattern.
+        pgrep_result = subprocess.run(
+            ["pgrep", "-f", f"unison {source} {target}"],
             capture_output=True,
+            text=True,
         )
+        unison_pids = [int(line) for line in pgrep_result.stdout.split()]
+        assert unison_pids, "Expected to find the running unison process to kill"
+        for pid in unison_pids:
+            os.kill(pid, signal.SIGKILL)
 
         # is_running should eventually become False
         wait_for(
