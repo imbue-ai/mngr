@@ -130,7 +130,7 @@ def _run_tunnel_setup(
 ) -> None:
     """Create a Cloudflare tunnel via the plugin and inject its token into the agent.
 
-    Runs on a detached thread scheduled by ``OnCreatedCallbackFactory`` on
+    Runs on a detached thread scheduled by ``OnCreatedCallback`` on
     the desktop client's root ``ConcurrencyGroup``. Failures are logged via
     loguru and surfaced to the user via ``notification_dispatcher``.
 
@@ -180,7 +180,7 @@ def _notify_tunnel_failure(
     )
 
 
-class OnCreatedCallbackFactory(MutableModel):
+class OnCreatedCallback(MutableModel):
     """Callable that records the workspace<->account association and schedules Cloudflare tunnel setup.
 
     ``__call__`` is the single hook that runs once the inner ``mngr create``
@@ -274,7 +274,7 @@ class CreateOnCreatedCallback(MutableModel):
     and out of the route handlers.
     """
 
-    base_callback: OnCreatedCallbackFactory | None = Field(
+    base_callback: OnCreatedCallback | None = Field(
         frozen=True,
         default=None,
         description="Tunnel/account-association callback, or None when no account is selected.",
@@ -308,7 +308,7 @@ def build_create_on_created_callback(
 
 def build_on_created_callback(
     account_id: str,
-) -> OnCreatedCallbackFactory | None:
+) -> OnCreatedCallback | None:
     """Build a callback that injects the tunnel token after agent creation.
 
     Returns None if no account is selected (nothing to inject).
@@ -330,7 +330,7 @@ def build_on_created_callback(
     ):
         return None
 
-    return OnCreatedCallbackFactory(
+    return OnCreatedCallback(
         session_store=session_store,
         imbue_cloud_cli=imbue_cloud_cli,
         root_concurrency_group=root_concurrency_group,
