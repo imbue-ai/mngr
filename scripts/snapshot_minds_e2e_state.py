@@ -399,6 +399,15 @@ def _build_snapshot_image(staged_repo: Path) -> modal.Image:
             "cd /code/mngr && uv sync --all-packages",
             "cd /code/mngr && uv run --with playwright python -m playwright install --with-deps chromium",
             "cd /code/mngr/apps/minds && pnpm install --frozen-lockfile",
+            # Build the Tailwind stylesheet (app.min.css). It is gitignored and
+            # is normally produced by `pnpm start`'s prestart hook; running the
+            # app straight from source (as the e2e runner does) never triggers
+            # that, so without this step app.min.css 404s in the renderer. The
+            # `.hidden` class lives in that stylesheet, and the onboarding driver
+            # detects a screen advancing via `wait_for_selector(state="hidden")`,
+            # so a missing stylesheet makes every onboarding screen look stuck.
+            # Mirrors the "Build Tailwind CSS" step in the test-docker-electron CI job.
+            "cd /code/mngr/apps/minds && pnpm run build:css",
             # /app -> /code/mngr symlink so offload's --override-image-id
             # path works: offload v0.9.7's create_from_image hardcodes
             # workdir="/app" when booting a sandbox from a supplied image,
