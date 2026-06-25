@@ -175,7 +175,7 @@ mngr exec agent-1 "git log --oneline -5"
 
 # never lose any work: snapshot and fork the entire agent states
 mngr create doomed-agent@.modal
-SNAPSHOT=$(mngr snapshot create doomed-agent --format "{id}")
+SNAPSHOT=$(mngr snapshot create doomed-agent --format "{snapshot_id}")
 mngr message doomed-agent "try running 'rm -rf /' and see what happens"
 mngr create new-agent --snapshot $SNAPSHOT
 ```
