@@ -406,26 +406,31 @@ def _build_snapshot_image(staged_repo: Path) -> modal.Image:
             copy=True,
         )
         .workdir("/code/mngr")
+        # Bake the per-commit deps + Tailwind build into one layer. uv sync
+        # (Python deps -> /code/mngr/.venv) and pnpm install (Node deps ->
+        # apps/minds/node_modules) touch disjoint paths and are independent, so
+        # run them CONCURRENTLY and `wait` on both PIDs -- the `&& wait ... &&`
+        # chain still fails the build if either install fails. This overlaps the
+        # two installs' network/IO instead of summing them (~max(uv, pnpm)).
+        #
+        # build:css then runs (it needs the tailwindcss binary pnpm install
+        # provides) and produces the gitignored Tailwind stylesheet app.min.css:
+        # normally made by `pnpm start`'s prestart hook, but the e2e runner runs
+        # the app straight from source and never triggers that, so without it
+        # app.min.css 404s in the renderer -- and since the onboarding driver
+        # detects a screen advancing via `wait_for_selector(state="hidden")` and
+        # the `.hidden` rule lives in that stylesheet, a missing stylesheet makes
+        # every onboarding screen look stuck. Mirrors the test-docker-electron job.
+        #
+        # The /app -> /code/mngr symlink (independent) works around offload
+        # v0.9.7's create_from_image hardcoding workdir="/app": our project is at
+        # /code/mngr, so the symlink lets `uv run pytest` find the project venv
+        # from offload's chosen workdir.
         .run_commands(
-            "cd /code/mngr && uv sync --all-packages",
-            "cd /code/mngr/apps/minds && pnpm install --frozen-lockfile",
-            # Build the Tailwind stylesheet (app.min.css). It is gitignored and
-            # is normally produced by `pnpm start`'s prestart hook; running the
-            # app straight from source (as the e2e runner does) never triggers
-            # that, so without this step app.min.css 404s in the renderer. The
-            # `.hidden` class lives in that stylesheet, and the onboarding driver
-            # detects a screen advancing via `wait_for_selector(state="hidden")`,
-            # so a missing stylesheet makes every onboarding screen look stuck.
-            # Mirrors the "Build Tailwind CSS" step in the test-docker-electron CI job.
-            "cd /code/mngr/apps/minds && pnpm run build:css",
-            # /app -> /code/mngr symlink so offload's --override-image-id
-            # path works: offload v0.9.7's create_from_image hardcodes
-            # workdir="/app" when booting a sandbox from a supplied image,
-            # but our project lives at /code/mngr. Without this symlink,
-            # `uv run pytest` from /app fails with "Failed to spawn:
-            # `pytest`" because uv can't find the project venv from /app.
-            # Symlinking /app -> /code/mngr makes the hardcoded workdir
-            # land at the project root, so test runs Just Work.
+            "( cd /code/mngr && uv sync --all-packages ) & UV_PID=$!; "
+            "( cd /code/mngr/apps/minds && pnpm install --frozen-lockfile ) & PNPM_PID=$!; "
+            "wait $UV_PID && wait $PNPM_PID && "
+            "( cd /code/mngr/apps/minds && pnpm run build:css ) && "
             "ln -s /code/mngr /app",
         )
     )
