@@ -1,11 +1,7 @@
 """Tests for plugin CLI options hook."""
 
-from collections.abc import Generator
 from collections.abc import Mapping
-from collections.abc import Sequence
-from contextlib import contextmanager
 from typing import Any
-from typing import Callable
 
 import click
 import pluggy
@@ -14,46 +10,14 @@ from click_option_group import GroupedOption
 from click_option_group import OptionGroup
 from click_option_group import optgroup
 
-import imbue.mngr.main
 from imbue.mngr import hookimpl
-from imbue.mngr.cli.common_opts import TCommand
 from imbue.mngr.cli.common_opts import _apply_plugin_option_overrides
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.main import apply_plugin_cli_options
-from imbue.mngr.main import reset_plugin_manager
-from imbue.mngr.plugins import hookspecs
 from imbue.mngr.plugins.hookspecs import OptionStackItem
-
-
-@contextmanager
-def _plugin_manager_with_plugins(
-    plugins: Sequence[Any],
-) -> Generator[pluggy.PluginManager, None, None]:
-    """Create a plugin manager with registered plugins, restoring state on exit."""
-    reset_plugin_manager()
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    for plugin in plugins:
-        pm.register(plugin)
-
-    old_pm = imbue.mngr.main._plugin_manager_container["pm"]
-    imbue.mngr.main._plugin_manager_container["pm"] = pm
-
-    try:
-        yield pm
-    finally:
-        imbue.mngr.main._plugin_manager_container["pm"] = old_pm
-
-
-@contextmanager
-def _plugin_manager_with_plugin(
-    plugin: Any,
-) -> Generator[pluggy.PluginManager, None, None]:
-    """Create a plugin manager with a single plugin, restoring state on exit."""
-    with _plugin_manager_with_plugins([plugin]) as pm:
-        yield pm
+from imbue.mngr.plugins.testing import plugin_manager_installed
 
 
 class _PluginWithStringOption:
@@ -133,7 +97,7 @@ class _PluginWithMultipleOptions:
 
 def test_apply_plugin_cli_options_adds_string_option() -> None:
     """Test that apply_plugin_cli_options adds a string option from a plugin."""
-    with _plugin_manager_with_plugin(_PluginWithStringOption()):
+    with plugin_manager_installed([_PluginWithStringOption()]):
 
         @click.command()
         def test_cmd() -> None:
@@ -153,7 +117,7 @@ def test_apply_plugin_cli_options_adds_string_option() -> None:
 
 def test_apply_plugin_cli_options_adds_flag_option() -> None:
     """Test that apply_plugin_cli_options adds a flag option from a plugin."""
-    with _plugin_manager_with_plugin(_PluginWithFlagOption()):
+    with plugin_manager_installed([_PluginWithFlagOption()]):
 
         @click.command()
         def test_cmd() -> None:
@@ -173,7 +137,7 @@ def test_apply_plugin_cli_options_adds_flag_option() -> None:
 
 def test_apply_plugin_cli_options_adds_multiple_options() -> None:
     """Test that apply_plugin_cli_options adds multiple options from a plugin."""
-    with _plugin_manager_with_plugin(_PluginWithMultipleOptions()):
+    with plugin_manager_installed([_PluginWithMultipleOptions()]):
 
         @click.command()
         def test_cmd() -> None:
@@ -198,7 +162,7 @@ def test_apply_plugin_cli_options_adds_multiple_options() -> None:
 
 def test_apply_plugin_cli_options_no_options_for_unknown_command() -> None:
     """Test that apply_plugin_cli_options does nothing for unknown commands."""
-    with _plugin_manager_with_plugin(_PluginWithStringOption()):
+    with plugin_manager_installed([_PluginWithStringOption()]):
 
         @click.command()
         def test_cmd() -> None:
@@ -211,24 +175,11 @@ def test_apply_plugin_cli_options_no_options_for_unknown_command() -> None:
         assert len(test_cmd.params) == initial_param_count
 
 
-def test_with_plugin_cli_options_decorator() -> None:
-    """Test the with_plugin_cli_options decorator."""
-    with _plugin_manager_with_plugin(_PluginWithStringOption()):
-
-        @with_plugin_cli_options("create")
-        @click.command()
-        def decorated_cmd() -> None:
-            pass
-
-        param_names = [p.name for p in decorated_cmd.params]
-        assert "test_plugin_option" in param_names
-
-
 def test_plugin_options_are_parsed_correctly() -> None:
     """Test that plugin options are correctly parsed when the command is invoked."""
     captured_value: str | None = None
 
-    with _plugin_manager_with_plugin(_PluginWithStringOption()):
+    with plugin_manager_installed([_PluginWithStringOption()]):
 
         @click.command()
         @click.pass_context
@@ -249,7 +200,7 @@ def test_plugin_flag_option_default_false() -> None:
     """Test that plugin flag options default to False when not specified."""
     captured_value: bool | None = None
 
-    with _plugin_manager_with_plugin(_PluginWithFlagOption()):
+    with plugin_manager_installed([_PluginWithFlagOption()]):
 
         @click.command()
         @click.pass_context
@@ -270,7 +221,7 @@ def test_plugin_flag_option_set_to_true() -> None:
     """Test that plugin flag options are True when specified."""
     captured_value: bool | None = None
 
-    with _plugin_manager_with_plugin(_PluginWithFlagOption()):
+    with plugin_manager_installed([_PluginWithFlagOption()]):
 
         @click.command()
         @click.pass_context
@@ -290,7 +241,7 @@ def test_plugin_flag_option_set_to_true() -> None:
 def test_multiple_plugins_can_add_options() -> None:
     """Test that multiple plugins can add options to the same command in different groups."""
     plugins = [_PluginWithStringOption(), _PluginWithMultipleOptions()]
-    with _plugin_manager_with_plugins(plugins):
+    with plugin_manager_installed(plugins):
 
         @click.command()
         def test_cmd() -> None:
@@ -315,7 +266,7 @@ def test_multiple_plugins_can_add_options() -> None:
 
 def test_apply_plugin_cli_options_with_no_name() -> None:
     """Test that apply_plugin_cli_options handles commands with no name."""
-    with _plugin_manager_with_plugin(_PluginWithStringOption()):
+    with plugin_manager_installed([_PluginWithStringOption()]):
 
         @click.command(name=None)
         def test_cmd() -> None:
@@ -434,7 +385,7 @@ def test_option_stack_item_to_grouped_option() -> None:
 
 def test_plugin_creates_title_fake_option_for_new_group() -> None:
     """Test that applying plugin options creates a title fake option for the group."""
-    with _plugin_manager_with_plugin(_PluginWithStringOption()):
+    with plugin_manager_installed([_PluginWithStringOption()]):
 
         @click.command()
         def test_cmd() -> None:
@@ -472,7 +423,7 @@ class _PluginAddingToExistingGroup:
 
 def test_plugin_adds_options_to_existing_group() -> None:
     """Test that a plugin can add options to an existing option group."""
-    with _plugin_manager_with_plugin(_PluginAddingToExistingGroup()):
+    with plugin_manager_installed([_PluginAddingToExistingGroup()]):
 
         @click.command()
         @optgroup.group("Behavior")
@@ -532,7 +483,7 @@ class _PluginB:
 def test_multiple_plugins_can_add_to_same_new_group() -> None:
     """Test that multiple plugins can add options to the same new group."""
     plugins = [_PluginA(), _PluginB()]
-    with _plugin_manager_with_plugins(plugins):
+    with plugin_manager_installed(plugins):
 
         @click.command()
         def test_cmd() -> None:
@@ -551,7 +502,7 @@ def test_multiple_plugins_can_add_to_same_new_group() -> None:
 
 def test_plugin_options_show_in_help_with_group_header() -> None:
     """Test that plugin options appear in help output under their group header."""
-    with _plugin_manager_with_plugin(_PluginWithStringOption()):
+    with plugin_manager_installed([_PluginWithStringOption()]):
 
         @click.command()
         def test_cmd(**kwargs: Any) -> None:
@@ -643,7 +594,7 @@ class _DummyCommandClass:
 
 def test_override_command_options_modifies_params_in_place() -> None:
     """Test that override_command_options modifies params dict in place."""
-    with _plugin_manager_with_plugin(_PluginOverridingOption()) as pm:
+    with plugin_manager_installed([_PluginOverridingOption()]) as pm:
         params = {"my_option": "original_value", "other_option": "unchanged"}
 
         pm.hook.override_command_options(
@@ -658,7 +609,7 @@ def test_override_command_options_modifies_params_in_place() -> None:
 
 def test_override_command_options_only_applies_to_matching_command() -> None:
     """Test that override_command_options only applies to the specified command."""
-    with _plugin_manager_with_plugin(_PluginOverridingOption()) as pm:
+    with plugin_manager_installed([_PluginOverridingOption()]) as pm:
         params = {"my_option": "original_value"}
 
         pm.hook.override_command_options(
@@ -673,7 +624,7 @@ def test_override_command_options_only_applies_to_matching_command() -> None:
 def test_override_command_options_chains_multiple_plugins() -> None:
     """Test that multiple plugins can chain their modifications."""
     plugins = [_PluginOverrideChainA(), _PluginOverrideChainB()]
-    with _plugin_manager_with_plugins(plugins) as pm:
+    with plugin_manager_installed(plugins) as pm:
         params: dict[str, Any] = {}
 
         pm.hook.override_command_options(
@@ -689,7 +640,7 @@ def test_override_command_options_chains_multiple_plugins() -> None:
 
 def test_override_command_options_receives_command_class() -> None:
     """Test that plugins receive the command_class and can use it."""
-    with _plugin_manager_with_plugin(_PluginUsingCommandClass()) as pm:
+    with plugin_manager_installed([_PluginUsingCommandClass()]) as pm:
         params: dict[str, Any] = {}
 
         pm.hook.override_command_options(
@@ -704,18 +655,13 @@ def test_override_command_options_receives_command_class() -> None:
 
 def test_apply_plugin_option_overrides_function() -> None:
     """Test the _apply_plugin_option_overrides helper function."""
-    with _plugin_manager_with_plugin(_PluginOverridingOption()) as pm:
+    with plugin_manager_installed([_PluginOverridingOption()]) as pm:
         params = {"my_option": "original_value", "other_option": "unchanged"}
 
         _apply_plugin_option_overrides(pm, "test_override", _DummyCommandClass, params)
 
         assert params["my_option"] == "overridden_value"
         assert params["other_option"] == "unchanged"
-
-
-def with_plugin_cli_options(command_name: str) -> Callable[[TCommand], TCommand]:
-    """Decorator to apply plugin-registered CLI options to a click command."""
-    return lambda cmd: apply_plugin_cli_options(cmd, command_name=command_name)
 
 
 # =============================================================================
@@ -727,7 +673,7 @@ def test_setup_command_context_does_not_crash_with_plugin_params(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """setup_command_context should not crash when plugin-registered options are in ctx.params."""
-    with _plugin_manager_with_plugin(_PluginWithStringOption()) as pm:
+    with plugin_manager_installed([_PluginWithStringOption()]) as pm:
         captured_plugin_params: dict[str, Any] = {}
 
         @click.command("test-create")
@@ -756,7 +702,7 @@ def test_setup_command_context_stores_plugin_params_in_ctx_meta(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """setup_command_context should store plugin params in ctx.meta['plugin_cli_params']."""
-    with _plugin_manager_with_plugin(_PluginWithMultipleOptions()) as pm:
+    with plugin_manager_installed([_PluginWithMultipleOptions()]) as pm:
         captured_plugin_params: dict[str, Any] = {}
 
         @click.command("test-create")
