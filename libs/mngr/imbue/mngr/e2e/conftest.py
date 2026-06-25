@@ -17,7 +17,6 @@ from uuid import uuid4
 
 import pluggy
 import pytest
-import tomlkit
 from loguru import logger
 
 from imbue.mngr.api.connect import CONNECT_COMMAND_ACTIVE_ENV_VAR
@@ -27,6 +26,7 @@ from imbue.mngr.config.data_types import USER_ID_FILENAME
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_modal.backend import MODAL_NAME_MAX_LENGTH
 from imbue.mngr_modal.backend import truncate_modal_name
+from imbue.mngr_modal.testing import load_active_modal_credentials
 from imbue.skitwright.data_types import CommandResult
 from imbue.skitwright.data_types import OutputLine
 from imbue.skitwright.data_types import OutputSource
@@ -395,10 +395,15 @@ def _read_asciinema_pids(test_output_dir: Path) -> list[int]:
     """Read all asciinema PIDs from .pid files in the given directory."""
     pids: list[int] = []
     for pid_file in test_output_dir.glob("*.pid"):
+        # Best-effort during teardown: a pid file can be empty/partial (the
+        # connect script writes it non-atomically via `echo $! > ...`, so we may
+        # read it mid-write -> ValueError) or unreadable (OSError). Skipping such
+        # a file means we cannot SIGINT that recorder, so log it rather than
+        # silently leaking the process.
         try:
             pids.append(int(pid_file.read_text().strip()))
-        except (ValueError, OSError):
-            pass
+        except (ValueError, OSError) as exc:
+            logger.debug("Skipping unreadable asciinema pid file {}: {!r}", pid_file, exc)
     return pids
 
 
@@ -409,7 +414,10 @@ def _is_pid_alive(pid: int) -> bool:
         return True
     except ProcessLookupError:
         return False
-    except OSError:
+    except PermissionError:
+        # EPERM: the process exists but is owned by another user, so we cannot
+        # signal it. It is still alive, hence return True. Any other OSError is
+        # unexpected here and is deliberately left to propagate (crash loudly).
         return True
 
 
@@ -455,12 +463,19 @@ def _stop_asciinema_processes(test_output_dir: Path) -> None:
     if not pids:
         return
 
-    # Send SIGINT so asciinema flushes the recording and exits
+    # Send SIGINT so asciinema flushes the recording and exits. The pids were
+    # read just above, so a recorder may have already exited in between
+    # (ProcessLookupError); signaling is best-effort during teardown, so an
+    # already-gone process is the expected case and safely ignored.
     for pid in pids:
         try:
             os.kill(pid, signal.SIGINT)
-        except (ProcessLookupError, OSError):
+        except ProcessLookupError:
             pass
+        except OSError as exc:
+            # Any other failure to signal means we may leak this recorder, so
+            # surface it (best-effort: still don't raise out of teardown).
+            logger.debug("Failed to SIGINT asciinema pid {}: {!r}", pid, exc)
 
     # Wait for all processes to terminate
     all_exited = poll_until(
@@ -537,7 +552,10 @@ def _delete_modal_environment(environment_name: str, env: dict[str, str], cwd: P
             logger.warning("Failed to delete Modal environment {}: {}", environment_name, result.stderr.strip())
         else:
             logger.info("Deleted Modal environment: {}", environment_name)
-    except (FileNotFoundError, OSError) as exc:
+    # run_command returns exit_code 124 on timeout rather than raising (handled
+    # above), so the only thing this guards is a Popen-spawn OSError. OSError
+    # already covers FileNotFoundError, so we do not list it separately.
+    except OSError as exc:
         logger.warning("Error deleting Modal environment {}: {}", environment_name, exc)
 
 
@@ -579,18 +597,15 @@ _REAL_HOME = Path.home()
 def _load_modal_credentials(env: dict[str, str]) -> None:
     """Load Modal credentials from ~/.modal.toml into the env dict.
 
-    Mirrors the logic in mngr_modal's conftest, which uses monkeypatch for
-    in-process tests. E2e subprocesses need the vars set explicitly since
-    monkeypatch doesn't propagate to child processes.
+    Shares the parsing with mngr_modal's conftest (which sets the same vars via
+    monkeypatch for in-process tests) through load_active_modal_credentials.
+    E2e subprocesses need the vars set explicitly since monkeypatch doesn't
+    propagate to child processes.
     """
-    modal_toml_path = _REAL_HOME / ".modal.toml"
-    if not modal_toml_path.exists():
+    credentials = load_active_modal_credentials(_REAL_HOME / ".modal.toml")
+    if credentials is None:
         return
-    for value in tomlkit.loads(modal_toml_path.read_text()).values():
-        if isinstance(value, dict) and value.get("active", ""):
-            env["MODAL_TOKEN_ID"] = value.get("token_id", "")
-            env["MODAL_TOKEN_SECRET"] = value.get("token_secret", "")
-            break
+    env["MODAL_TOKEN_ID"], env["MODAL_TOKEN_SECRET"] = credentials
 
 
 @pytest.fixture
@@ -659,8 +674,12 @@ def e2e(
     # subprocess) and delete (below) agree without either side re-deriving it.
     test_modal_env_name = truncate_modal_name(f"{test_prefix}{test_user_id}", max_length=MODAL_NAME_MAX_LENGTH)
 
-    # Add the e2e bin directory to PATH so the connect script is available
-    env["PATH"] = f"{_BIN_DIR}:{env.get('PATH', '')}"
+    # Add the e2e bin directory to PATH so the connect script is available.
+    # env is a copy of os.environ, where PATH is always present, so index it
+    # directly: a truly missing PATH should crash here rather than silently
+    # build a PATH containing only the bin dir (which would make mngr/tmux/etc.
+    # unfindable and fail later with a confusing error).
+    env["PATH"] = f"{_BIN_DIR}:{env['PATH']}"
 
     # Configure connect_command for create/start.
     # Remote providers (Modal, Docker) are left enabled so that e2e tests

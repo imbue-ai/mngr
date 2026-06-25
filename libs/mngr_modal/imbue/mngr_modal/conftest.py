@@ -13,7 +13,6 @@ import modal
 import modal.exception
 import pluggy
 import pytest
-import toml
 from loguru import logger
 from modal.environments import delete_environment
 
@@ -47,6 +46,7 @@ from imbue.mngr_modal.backend import STATE_VOLUME_SUFFIX
 from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.constants import MODAL_TEST_APP_PREFIX
 from imbue.mngr_modal.instance import ModalProviderInstance
+from imbue.mngr_modal.testing import load_active_modal_credentials
 from imbue.mngr_modal.testing import make_testing_modal_interface
 from imbue.mngr_modal.testing import make_testing_provider
 from imbue.modal_proxy.testing import FakeModalInterface
@@ -390,13 +390,10 @@ def _load_modal_test_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     (e.g. mngr_claude) pull this in via pytest_plugins without it clobbering
     their base HOME isolation.
     """
-    if not _REAL_MODAL_TOML_PATH.exists():
-        return
-    for value in toml.load(_REAL_MODAL_TOML_PATH).values():
-        if value.get("active", ""):
-            monkeypatch.setenv("MODAL_TOKEN_ID", value.get("token_id", ""))
-            monkeypatch.setenv("MODAL_TOKEN_SECRET", value.get("token_secret", ""))
-            break
+    credentials = load_active_modal_credentials(_REAL_MODAL_TOML_PATH)
+    if credentials is not None:
+        monkeypatch.setenv("MODAL_TOKEN_ID", credentials[0])
+        monkeypatch.setenv("MODAL_TOKEN_SECRET", credentials[1])
 
 
 @pytest.fixture(scope="session")
