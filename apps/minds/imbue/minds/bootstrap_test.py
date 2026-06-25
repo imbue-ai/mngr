@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import tomllib
@@ -12,10 +13,13 @@ from imbue.minds.bootstrap import MINDS_ROOT_NAME_PATTERN
 from imbue.minds.bootstrap import _ensure_mngr_settings
 from imbue.minds.bootstrap import apply_bootstrap
 from imbue.minds.bootstrap import env_name_from_root_name
+from imbue.minds.bootstrap import is_imbue_cloud_provider_enabled_for_account
 from imbue.minds.bootstrap import is_minds_root_name_set_to_active_env
+from imbue.minds.bootstrap import list_disabled_provider_names
 from imbue.minds.bootstrap import minds_data_dir_for
 from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.bootstrap import mngr_prefix_for
+from imbue.minds.bootstrap import reconcile_imbue_cloud_providers_from_sessions
 from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.bootstrap import root_name_for_env_name
 from imbue.minds.bootstrap import set_imbue_cloud_provider_for_account
@@ -542,3 +546,81 @@ def test_set_imbue_cloud_provider_for_account_repairs_missing_default_block_on_r
     parsed = tomllib.loads(settings_path.read_text())
     assert parsed["providers"]["imbue_cloud"] == {"backend": "imbue_cloud", "is_enabled": False}
     assert parsed["plugins"]["recursive"]["enabled"] is False
+
+
+def _write_accounts_index(settings_path: Path, content: str) -> Path:
+    """Seed the plugin's accounts.json next to ``settings_path``'s profile dir."""
+    accounts_path = settings_path.parent / "providers" / "imbue_cloud" / "sessions" / "accounts.json"
+    accounts_path.parent.mkdir(parents=True, exist_ok=True)
+    accounts_path.write_text(content)
+    return accounts_path
+
+
+def test_reconcile_registers_provider_for_valid_account(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    _write_accounts_index(settings_path, json.dumps({"entries": [{"email": "alice@example.com", "user_id": "u1"}]}))
+    reconcile_imbue_cloud_providers_from_sessions(_FAKE_CONNECTOR_URL, root_name="minds-dev-tname")
+    parsed = tomllib.loads(settings_path.read_text())
+    assert "imbue_cloud_alice-example-com" in parsed["providers"]
+
+
+def test_reconcile_skips_malformed_index_shape_without_raising(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A decoded-but-wrong-shape accounts index is skipped (and warned), not crashed.
+
+    The plugin always writes ``{"entries": [...]}``; a dict without an
+    ``entries`` list means schema drift. Reconciliation must not raise and
+    must not invent any per-account provider blocks.
+    """
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    _write_accounts_index(settings_path, json.dumps({"unexpected": "shape"}))
+    reconcile_imbue_cloud_providers_from_sessions(_FAKE_CONNECTOR_URL, root_name="minds-dev-tname")
+    parsed = tomllib.loads(settings_path.read_text())
+    assert not any(name.startswith("imbue_cloud_") for name in parsed.get("providers", {}))
+
+
+def test_reconcile_skips_malformed_entries_but_registers_valid_ones(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Individual malformed entries are skipped without blocking the valid ones."""
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    _write_accounts_index(
+        settings_path,
+        json.dumps(
+            {
+                "entries": [
+                    {"no_email": "x"},
+                    {"email": ""},
+                    "not-a-dict",
+                    {"email": "bob@example.com", "user_id": "u2"},
+                ]
+            }
+        ),
+    )
+    reconcile_imbue_cloud_providers_from_sessions(_FAKE_CONNECTOR_URL, root_name="minds-dev-tname")
+    parsed = tomllib.loads(settings_path.read_text())
+    assert "imbue_cloud_bob-example-com" in parsed["providers"]
+
+
+def test_is_provider_enabled_reflects_disabled_block(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    set_imbue_cloud_provider_for_account(
+        "alice@example.com", connector_url=_FAKE_CONNECTOR_URL, root_name="minds-dev-tname"
+    )
+    set_provider_is_enabled("imbue_cloud_alice-example-com", False, root_name="minds-dev-tname")
+    assert is_imbue_cloud_provider_enabled_for_account("alice@example.com", root_name="minds-dev-tname") is False
+
+
+def test_list_disabled_provider_names_returns_disabled_set(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    set_imbue_cloud_provider_for_account(
+        "alice@example.com", connector_url=_FAKE_CONNECTOR_URL, root_name="minds-dev-tname"
+    )
+    set_provider_is_enabled("imbue_cloud_alice-example-com", False, root_name="minds-dev-tname")
+    # Sorted, and includes the default ``imbue_cloud`` suppression block that
+    # ``_ensure_mngr_settings`` writes with ``is_enabled = false``.
+    assert list_disabled_provider_names(root_name="minds-dev-tname") == [
+        "imbue_cloud",
+        "imbue_cloud_alice-example-com",
+    ]
