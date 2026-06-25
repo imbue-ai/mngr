@@ -140,8 +140,8 @@ latchkey 2.8.0 features:
 ## Minds API access through the gateway
 
 Minds itself exposes a small REST API on the desktop-client bare
-origin (`/api/v1/...`: agent notifications, Telegram bot setup, the
-WebDAV file-sharing mount). Agents reach it through the same latchkey
+origin (`/api/v1/...`: agent notifications and the WebDAV
+file-sharing mount). Agents reach it through the same latchkey
 gateway they use for every other outbound HTTP call, via the bundled
 `minds-api-proxy` extension at `/minds-api-proxy/api/v1/...`. There is
 no per-agent reverse SSH tunnel for the Minds API anymore.
@@ -161,7 +161,7 @@ Per-agent isolation comes from the latchkey gateway's permissions
 file. The agent baseline grants every agent one shared call --
 `POST /minds-api-proxy/api/v1/agents/<...>/notifications` -- so any
 workspace the desktop client created can always notify the user. For
-the other routes (Telegram setup, future `/api/v1/agents/<id>/*` endpoints,
+the other routes (future `/api/v1/agents/<id>/*` endpoints,
 the WebDAV mount), agent creation installs a *per-agent* rule + inline
 schemas in the host's permissions file: the scope schema
 `minds-api-self-<agent_id>` mirrors `latchkey-self.invalid` and the
