@@ -1,0 +1,1 @@
+Added a design blueprint (`blueprint/gateway-agent-id-validation/`) documenting the decision to reject a malformed permission-request `agent_id` at the latchkey gateway (the agent's HTTP tool call) instead of only guarding against it defensively on the consumer side.

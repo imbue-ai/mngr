@@ -4,6 +4,110 @@ Full, unedited changelog entries consolidated nightly from individual files in t
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-23
+
+SSH host keys are now unique per host (inherited from the shared VPS provider): each host gets its own VPS/VM-root and container sshd host keypair at create time rather than sharing one keypair across every host the provider instance created. Pause/resume of hosts created before this change still works via a fallback to the legacy provider-global key.
+
+## 2026-06-22
+
+Report an unauthenticated GCP provider consistently with the other cloud providers.
+
+A missing/unresolvable ADC credential or project now raises the shared `ProviderNotAuthorizedError` (still a `ProviderUnavailableError`, so read paths treat it as unavailable). In `mngr list` this surfaces as one consistent error line and a non-zero exit.
+
+## 2026-06-21
+
+- GCP hosts inherit the shared VPS host-setup fix that registers the gVisor
+  (runsc) runtime with `--overlay2=none`, so an agent container's writable layer
+  persists across a `docker stop`/`start` or host reboot instead of being lost to
+  the default per-sandbox overlay.
+
+## 2026-06-19
+
+The GCP provider's `project_id` config field now defaults to `None` instead of `""`, making "unset" explicit and matching the other optional identifier fields (`default_region`, `default_zone`, `service_account_email`). Resolution behavior is unchanged: an unset `project_id` still falls back to the project Application Default Credentials resolves from the environment.
+
+Updated imports for the `mngr_vps_docker` -> `mngr_vps` package rename: the VPS
+provider is no longer Docker-only, so the package and its shape-agnostic base
+classes dropped "Docker" from their names (`VpsDockerProvider` -> `VpsProvider`,
+`VpsDockerProviderConfig` -> `VpsProviderConfig`, `VpsDockerHostRecord` ->
+`VpsHostRecord`, `VpsDockerHostStore` -> `VpsHostStore`, `VpsDockerError` ->
+`VpsError`). Import-only change; no behavior difference.
+
+
+Enabled bare placement (`isolation=NONE`): the idle agent runs `shutdown -P now`
+as the VM's root, which on GCE stops the instance, so the container-only sentinel +
+host-side systemd watcher is skipped for bare.
+
+Added bare-placement (`isolation=NONE`) release tests, and fixed a resume bug they
+caught: `start_host` read the host record via the Docker volume, which a bare host
+does not have, so it now resolves the store through the realizer.
+
+``stop_host`` / ``start_host`` moved to the shared base ``OfflineCapableVpsProvider``; GCP now supplies only the GCE ``_pause_cloud_instance`` / ``_resume_cloud_instance`` hooks. Behavior-preserving.
+
+Moved mngr host identity (host id and created-at) out of GCE *labels* and into instance *metadata*, joining the host name and per-agent records already kept there. Only ``mngr-provider`` remains a label, because it is the server-side ``instances.list`` discovery filter. Host id is now stored verbatim and created-at as an ISO-8601 timestamp (no more GCE-charset lowercasing / ``%Y-%m-%dt%H-%M-%S`` encoding). Backward-incompatibility: a GCE instance created before this change carries its host id / created-at only in labels, so an *already-running* pre-upgrade host will no longer resolve by id for offline discovery / ``mngr start`` and its reconstructed created-at falls back to now(); destroy and recreate such hosts (online hosts reachable over SSH are unaffected -- they resolve via the on-volume records).
+
+The idle-watcher install (in-container sentinel `shutdown.sh` plus the host-side systemd `.path`/`.service`) and the best-effort `_on_host_finalized` step runner moved to the shared `OfflineCapableVpsProvider`. GCP now supplies only the `GCE instance` display name; its `.service` body is the shared default `shutdown -P now` (a GCE guest poweroff stops the instance) and it does not sync host_dir to an object store, so it inherits the no-op sync gate and installs no sync daemon. The host-side idle-watcher systemd unit name changed from `mngr-gcp-idle-watcher` to the shared `mngr-idle-watcher`. Behavior-preserving otherwise.
+
+Updated the VPS build-arg parsing imports to point at the new `imbue.mngr_vps.build_args` module (moved out of `imbue.mngr_vps.instance`). Import-only change; no behavior difference.
+
+Updated the `OfflineCapableVpsProvider` import to the new `imbue.mngr_vps.instance_offline` module (split out of `imbue.mngr_vps.instance`). Import-only change; no behavior difference.
+
+`GcpProvider` now extends the new shared `KeyValueMirrorVpsProvider`, which owns the offline read-side reconstruction over a key-value mirror (previously duplicated between GCP's metadata code and the AWS/Azure tag code). GCP supplies only the metadata-map hook (`_offline_kv_map`) and the host-name key (`_host_name_key`); the per-agent metadata *write* side (the single `setMetadata` round-trip) is unchanged, and GCP inherits no object-store/bucket machinery. The GCP-local `_agent_metadata_items` / `_agent_metadata_value` / `_persisted_agent_dicts_from_instance` / host/created-at reconstruction helpers collapse into the shared base. Behavior-preserving.
+
+`mngr gcp prepare` / `cleanup` now resolve their `[providers.<name>]` block and refuse-on-existing-instances via the shared `mngr_vps.cli_helpers`, and `GcpProviderConfig` lifts `allowed_ssh_cidrs` into a shared config base (it keeps its own `associate_external_ip`, which GCP names differently from AWS/Azure's `associate_public_ip`) instead of carrying GCP-local copies. The cleanup refusal when instances still exist now raises the unified `ManagedResourcesExistError` (previously `GcpError`) so the message matches the other clouds. `allowed_ssh_cidrs` is now typed `ScalarStrTuple` (matching AWS) rather than a plain tuple, so a higher-precedence config layer that sets it replaces the whole list rather than being flagged as narrowing; the config key and default are unchanged.
+
+Further internal dedup against the shared offline layer (no user-visible behavior change): `_list_provider_vps_hostnames` is now inherited from the shared `KeyValueMirrorVpsProvider` (cached listing -> non-empty `main_ip`), and `_create_vps_instance` uses the new shared `_require_parsed` helper in place of its hand-written `match`/type-narrowing guard. GCP still inherits no bucket/tag-store machinery.
+
+Corrected the README "Implementation details" to match the label-vs-metadata move: only `mngr-provider` is a GCE label; `mngr-host-id` (incl. the stopped-host lookup for `mngr start`), `mngr-host-name`, and `mngr-created-at` live in instance metadata.
+
+Integrated the `mngr/volumes` offline-store simplification (commit `f8bb5c0a5`): the per-agent instance-tag mirror is removed in favor of a single uniform external `HostStateStore` per provider -- AWS/Azure use their object-storage state bucket as the sole offline store (a stopped host's offline metadata now requires the bucket; the provider's `_state_store` raises an actionable `missing_state_bucket_error` pointing at `mngr <cloud> prepare` when the bucket is absent), and GCP uses a lossless instance-metadata-backed store (full host record + one JSON value per agent). AWS/Azure/GCP now extend `OfflineCapableVpsProvider` directly. This supersedes the earlier-on-this-branch tag-mirror dedup (the lifted `TagHostStateStore` / `KeyValueMirrorVpsProvider` / `TagMirrorVpsProvider` are gone); the realizer architecture, the systemd-unit hardening, and the cli/config/state-bucket dedup are retained. No behavior change for container hosts beyond the offline-metadata-requires-bucket consequence noted above.
+
+Bugfix: a running bare (`isolation=NONE`) host is now discoverable and reachable
+with the default provider config -- `mngr conn`/`list`/`stop`/`start`/`destroy`
+no longer need `-S providers.<name>.isolation=NONE` at connect time. GCE instances
+now carry a `mngr-isolation` value in instance metadata (where GCP keeps mngr
+identity; GCE labels are too restricted), stamped at create, so discovery reads
+the host's placement from the cloud API without SSH and probes it with the
+matching realizer. Pre-existing instances have no marker and default to container,
+preserving prior behavior.
+
+Bugfix: renaming a host now re-stamps the `mngr-host-name` instance metadata (the
+cheap identity tag offline discovery reads), not just the host record. Previously
+this metadata was written only at create, so a host that was renamed and then
+stopped still listed under its old name in offline discovery; it now lists under
+its new name.
+
+Internal dedup (no behavior change): GCP host-name recovery from instance metadata
+now calls the shared `host_name_from_prefixed_value` helper instead of a private copy
+of the strip-prefix / host-id fallback logic.
+
+Added offline ``host_dir`` support for the GCP provider, matching the AWS / Azure shape. A stopped GCE instance's ``host_dir`` is now readable without starting it (so ``mngr event`` / ``mngr transcript`` / ``mngr file`` work against it), captured operator-side at ``mngr stop`` and uploaded to a Google Cloud Storage state bucket. Host + agent records still live in GCE instance metadata (where they already fit comfortably and need no prepare step).
+
+``mngr gcp prepare`` now also creates a GCS state bucket (named ``mngr-state-<project_id>`` by default, configurable via ``[providers.gcp] state_bucket_name``). ``mngr gcp cleanup`` now deletes that bucket alongside the firewall rule, with a new ``--force`` flag that opts into deleting it even when it still holds offline host state from hosts no longer present as instances.
+
+New config fields on ``GcpProviderConfig``: ``state_bucket_name`` (overrides the derived name) and ``is_offline_host_dir_enabled`` (default on; set to ``False`` to turn the feature off without removing the bucket).
+
+The shared provider release harness's Trip 1 opt-in offline-host_dir step (gated by ``MNGR_RELEASE_TEST_OFFLINE_HOST_DIR=1``) now runs against GCP too, asserting that a stopped host's marker file is served from the offline mirror via ``mngr file get`` without resuming the host.
+
+Trimmed the README to user-relevant content (removed internal implementation details, release-test instructions, and roadmap notes) and tightened it for concision.
+
+Aligned the GCP provider config field descriptions (surfaced via `mngr config`/help) with the README's "GCP-specific configuration" table, and corrected the `auto_shutdown_seconds` README row (the VM halts via `shutdown -P`, it does not self-delete).
+
+Fact-checked the README against the `mngr_vps` base module and the nullable `project_id` default.
+
+Added `test_provider_release_trip1` to the GCP release suite: a single-boot full-lifecycle trip (create, exec, stop, real `--stop-host`, start, persistence, snapshot, out-of-band kill, gc, backend-clean) parametrized over container and bare isolation, built on the shared provider release harness. Also added `test_provider_release_trip3` (snapshot survives destroy); on GCP the docker-commit snapshot is not portable, so the trip asserts that documented divergence (the snapshot is gone after destroy).
+
+Retired the old per-step GCP lifecycle release tests now that the trips supersede them: `test_provider_lifecycle_create_exec_and_destroy`, `test_provider_lifecycle_create_stop_start_destroy`, and `test_bare_provider_lifecycle_create_exec_and_destroy`. The bare-shape check the bare test owned (the agent shell is the VM's own root -- `/var/lib/mngr-host` present, no `/.dockerenv`) now runs inside Trip 1 for the NONE-isolation parametrization.
+
+Also added `test_provider_release_trip4` (error classification): a no-boot CLI trip asserting `mngr create` with unresolvable GCP ADC surfaces the contract `ProviderUnavailableError`, and that a `--vps-*` build arg is rejected with the migration hint. This PR also fixes the GCP missing-credential help text to point at `gcloud auth application-default login` (and the project/ADC setup) instead of the generic "start Docker" guidance; the trip asserts that curated help.
+
+Also added `test_provider_release_trip2` (idle auto-shutdown contract), parametrized over container and bare isolation: it creates an idle host, polls until the GCE instance is TERMINATED (billing stops, disk preserved), then resumes via `mngr start` and asserts a pre-shutdown marker survived.
+
+## 2026-06-18
+
+GCP's offline host/agent store now holds the *full* host record instead of a lossy field subset: a stopped GCE instance's `mngr list` / `mngr start` reconstructs the complete record (config, IP, host keys), matching the AWS/Azure behavior, rather than the previous minimal label-only reconstruction. The full `VpsDockerHostRecord` JSON is stored in the `mngr-host-state` instance-metadata value and each agent record in a single `mngr-agent-<id>` metadata value, replacing the per-field `mngr-agent-<id>-<name|type|labels>` layout and the `mngr-created-at`-label reconstruction. GCE instance metadata is large and permissive enough (256 KB per value, 512 KB per instance) to hold these records, so GCP needs no separate object-storage bucket.
+
+GCP's offline store is now exposed through the same `HostStateStore` interface as the AWS/Azure object-storage buckets (a `_GceMetadataHostStateStore`), so its offline read/write/discovery paths are shared with the other providers.
+
 ## 2026-06-17
 
 Added native GCE stop/start lifecycle (idle-pause + resume) for GCP hosts: `mngr stop` now stops the GCE instance (preserving the boot disk so a paused agent costs only disk storage) and `mngr start` resumes it, reading back the fresh external IP and rebinding known_hosts. Stopped instances stay discoverable -- their host name and per-agent records are mirrored into instance metadata, and labels carry the host id / created-at -- so `mngr list` and `mngr start <agent>` keep working while a host is TERMINATED or mid-stop. An in-container idle watcher self-stops the instance via a host-side systemd path/service unit.
