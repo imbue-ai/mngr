@@ -499,50 +499,27 @@ jobs:
   # switch in case Modal vm_runtime capacity ever wedges the merge queue.
   build-minds-snapshot:
     runs-on: ubuntu-latest
-    # Skip on fork PRs: GitHub does not grant `id-token: write` to fork PRs, so
-    # they cannot authenticate to Vault for the depot token. Same-repo branches
-    # and pushes to main run normally.
+    # Skip on fork PRs to mirror the test job (which authenticates to Vault and
+    # so cannot run on fork PRs). Same-repo branches and pushes to main run
+    # normally.
     if: >-
       vars.DISABLE_MINDS_SNAPSHOT_CI != 'true' &&
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository)
-    # The GitHub Environment whose claim the minds_ci_build_gh Vault role is
-    # bound to; it gates which workflows can mint the depot token.
-    environment: minds-ci-build
     permissions:
       contents: read
-      # Required so the export-secrets action can mint an OIDC token for Vault.
-      id-token: write
     # Exposes the freshly-built snapshot image id to the dependent test job.
     outputs:
       image_id: ${{ steps.snapshot.outputs.image_id }}
     env:
       MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-      # Which builder the in-sandbox FCT container build uses. Defaults to the
-      # faster `docker` (local build, no image transfer). Set the repo variable
-      # MINDS_SNAPSHOT_BUILDER to `depot` to use depot.dev instead -- depot's
-      # remote cache is real but `depot build --load` must export+download the
-      # whole image back into the sandbox daemon, which measured ~2.5 min slower
-      # end-to-end for this ephemeral build-then-run-locally job.
-      BUILDER: ${{ vars.MINDS_SNAPSHOT_BUILDER || 'docker' }}
 
     steps:
       # The snapshot script rsyncs the checked-out working tree into the
       # Modal image (it excludes .git), so a default shallow single-ref
       # checkout is all it needs -- no history deepening required.
       - uses: actions/checkout@v6
-
-      # Fetch the depot token from Vault via GitHub OIDC (only when building with
-      # depot). Injects DEPOT_TOKEN into the job environment (masked in logs);
-      # the snapshot script forwards it into the Modal sandbox.
-      - name: Fetch depot token from Vault
-        if: env.BUILDER == 'depot'
-        uses: ./.github/actions/export-secrets
-        with:
-          role: minds_ci_build_gh
-          secrets: |
-            minds/ci/depot/DEPOT_TOKEN
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -561,25 +538,17 @@ jobs:
         id: snapshot
         # The script builds the vm_runtime image, drives the real Electron
         # workspace-creation flow inside it (building the FCT agent container
-        # with the selected builder), docker-stops the container for a clean
+        # with the local docker builder), docker-stops the container for a clean
         # state, snapshots the filesystem, and writes the bare image id to the
         # --image-id-output file for this job's output. It prints a per-phase
-        # timing summary (grep PHASE_TIMING) so build-vs-depot timing is visible.
+        # timing summary (grep PHASE_TIMING) so the build's wall-clock is visible.
         # No Job-A retry by design: a build failure should surface.
         run: |
           set -euo pipefail
-          uv run python scripts/snapshot_minds_e2e_state.py --builder "$BUILDER" --image-id-output snapshot-image-id.txt 2>&1 | tee snapshot-build.log
+          uv run python scripts/snapshot_minds_e2e_state.py --image-id-output snapshot-image-id.txt 2>&1 | tee snapshot-build.log
           IMAGE_ID="$(cat snapshot-image-id.txt)"
           if [ -z "$IMAGE_ID" ]; then
             echo "Snapshot script did not produce an image id" >&2
-            exit 1
-          fi
-          # When building with depot, guard against the depot CLI silently being
-          # absent: the script prints this marker only after `depot --version`
-          # verified the CLI inside the sandbox (so the FCT build cannot quietly
-          # fall back to a local docker build because depot is missing).
-          if [ "$BUILDER" = "depot" ] && ! grep -q "DEPOT_BUILDER_ENABLED_FOR_FCT_BUILD" snapshot-build.log; then
-            echo "depot builder was not enabled for the FCT build; refusing to publish a non-depot snapshot" >&2
             exit 1
           fi
           echo "image_id=$IMAGE_ID" >> "$GITHUB_OUTPUT"
@@ -604,7 +573,7 @@ jobs:
     # bound to; gates which workflows can mint the test secrets.
     environment: minds-ci-test
     # `checks: write` is required by the report-flaky-aware-tests composite
-    # action. `id-token: write` lets the export-secrets action mint an OIDC
+    # action. `id-token: write` lets the use-vault-secrets action mint an OIDC
     # token for Vault. No `contents: write` here: this job boots from the
     # prebuilt snapshot image via --override-image-id and never builds or
     # caches an offload checkpoint, so it has no image-cache git notes to push.
@@ -615,10 +584,6 @@ jobs:
     env:
       MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-      # Mirrors the build job: selects which builder an in-test FCT rebuild uses.
-      # Forwarded into the offload sandbox; the depot cache-hit test only runs
-      # when this is `depot`.
-      MINDS_SNAPSHOT_BUILDER: ${{ vars.MINDS_SNAPSHOT_BUILDER || 'docker' }}
 
     steps:
       - uses: actions/checkout@v6
@@ -626,21 +591,11 @@ jobs:
       # The Anthropic key (for live checks) is always needed; masked in the logs
       # and forwarded into the offload sandbox by the just recipe below.
       - name: Fetch Anthropic key from Vault
-        uses: ./.github/actions/export-secrets
+        uses: imbue-ai/use-vault-secrets@2375c28b61513dadebebdce845c109a01777a197
         with:
           role: minds_ci_test_gh
           secrets: |
             minds/ci/litellm/ANTHROPIC_API_KEY
-
-      # The depot token is only needed when an in-test rebuild uses depot (so the
-      # depot cache-hit test can run). Skipped in the default docker mode.
-      - name: Fetch depot token from Vault
-        if: env.MINDS_SNAPSHOT_BUILDER == 'depot'
-        uses: ./.github/actions/export-secrets
-        with:
-          role: minds_ci_test_gh
-          secrets: |
-            minds/ci/depot/DEPOT_TOKEN
 
       - name: Set up Python
         uses: actions/setup-python@v6

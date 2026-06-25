@@ -142,26 +142,18 @@ test-offload-minds-snapshot snapshot_image_id args="":
     fi
     just _generate-dockerignore
     trap "rm -f .dockerignore" EXIT
-    # Forward credentials into the offload sandbox. MINDS_SNAPSHOT_BUILDER is
-    # always forwarded so the depot cache-hit test knows whether to run (it only
-    # runs in depot mode). Depot creds + the builder override are forwarded only
-    # in depot mode and only when a token is present; the Anthropic key whenever
-    # present. Secret values are masked in CI logs by the Vault export-secrets
-    # action even though offload --trace echoes args.
-    DEPOT_ENV_ARGS=(--env "MINDS_SNAPSHOT_BUILDER=${MINDS_SNAPSHOT_BUILDER:-docker}")
-    if [ "${MINDS_SNAPSHOT_BUILDER:-docker}" = "depot" ] && [ -n "${DEPOT_TOKEN:-}" ]; then
-        DEPOT_ENV_ARGS+=(--env "DEPOT_TOKEN=${DEPOT_TOKEN}")
-        DEPOT_ENV_ARGS+=(--env "DEPOT_PROJECT_ID=${DEPOT_PROJECT_ID:-fsjzltqvxq}")
-        DEPOT_ENV_ARGS+=(--env "MNGR__PROVIDERS__DOCKER__BUILDER=DEPOT")
-    fi
+    # Forward the Anthropic key (for the suite's live checks) into the offload
+    # sandbox when present. Its value is masked in CI logs by the Vault
+    # use-vault-secrets action even though offload --trace echoes args.
+    EXTRA_ENV_ARGS=()
     if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-        DEPOT_ENV_ARGS+=(--env "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}")
+        EXTRA_ENV_ARGS+=(--env "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}")
     fi
     offload -c offload-modal-minds-snapshot.toml run --trace \
         --override-image-id "{{snapshot_image_id}}" \
         --env "GITHUB_HEAD_REF=${GITHUB_HEAD_REF:-}" \
         --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" \
-        ${DEPOT_ENV_ARGS[@]+"${DEPOT_ENV_ARGS[@]}"} {{args}} || [[ $? -eq 2 ]]
+        ${EXTRA_ENV_ARGS[@]+"${EXTRA_ENV_ARGS[@]}"} {{args}} || [[ $? -eq 2 ]]
 
     # Copy results to the main worktree so new worktrees inherit baselines via COPY mode.
     MAIN_WORKTREE=$(git worktree list --porcelain | head -1 | sed 's/^worktree //')

@@ -66,7 +66,6 @@ would re-derive on every run.
 
 import argparse
 import contextlib
-import os
 import shlex
 import subprocess
 import sys
@@ -96,30 +95,6 @@ _RUNC_VERSION: Final[str] = "v1.3.0"
 _NODE_VERSION: Final[str] = "24.15.0"
 _PNPM_VERSION: Final[str] = "10.33.4"
 _CLAUDE_CODE_VERSION: Final[str] = "2.1.141"
-
-# The depot project id for the mngr monorepo (matches the repo-root depot.json).
-# Passed to the in-sandbox FCT build as DEPOT_PROJECT_ID so the build does not
-# depend on a depot.json being present in the FCT clone's working tree.
-_DEFAULT_DEPOT_PROJECT_ID: Final[str] = "fsjzltqvxq"
-
-# Where the depot CLI is installed in the outer snapshot image. We install into
-# /usr/local/bin (already on the default PATH, where docker/node live) rather
-# than the installer's default $HOME/.depot/bin: in-sandbox commands run via
-# `bash -lc` (a login shell), and Debian's /etc/profile resets PATH to the
-# default, dropping ~/.depot/bin. (uv survives only because its installer adds a
-# profile snippet; the depot installer does not.) Installing into /usr/local/bin
-# keeps `depot` resolvable for both the preflight check and the mngr docker
-# provider's `depot build` subprocess.
-_DEPOT_INSTALL_DIR: Final[str] = "/usr/local/bin"
-
-# Greppable marker the build job asserts on to confirm the depot CLI verified
-# inside the sandbox before the FCT build. Emitted from this script (not from the
-# in-sandbox command) only after `depot --version` actually succeeds, so the CI
-# grep is a real signal rather than matching a command preview. The actual proof
-# that depot's cache is used lives in the stage-2 cache-hit test
-# (test_fct_image_rebuild_hits_depot_cache); this marker only guards against the
-# depot CLI silently being absent in the build job.
-_DEPOT_ENABLED_MARKER: Final[str] = "DEPOT_BUILDER_ENABLED_FOR_FCT_BUILD"
 
 # In-sandbox entrypoint that invokes the shared e2e workspace runner the
 # pytest test also uses, but without the test's mngr-destroy cleanup. The
@@ -361,16 +336,9 @@ def _build_snapshot_image(staged_repo: Path) -> modal.Image:
             f"npm install -g pnpm@{_PNPM_VERSION}",
         )
         # uv + claude code, matching the versions the mngr Dockerfile pins.
-        # depot CLI: baked into the outer image (Modal-cached) so it is on PATH
-        # the instant the sandbox boots -- the mngr docker provider's depot path
-        # execs `depot` but does not install it. Building the FCT agent container
-        # via depot.dev reuses depot's shared remote layer cache across CI runs.
         .run_commands(
             "curl -LsSf https://astral.sh/uv/install.sh | sh",
             f"curl -fsSL https://claude.ai/install.sh | bash -s {_CLAUDE_CODE_VERSION}",
-            # Install into /usr/local/bin (on the default login-shell PATH) so the
-            # binary resolves under `bash -lc`; see _DEPOT_INSTALL_DIR.
-            f"curl -fsSL https://depot.dev/install-cli.sh | env DEPOT_INSTALL_DIR={_DEPOT_INSTALL_DIR} sh",
         )
         .env(
             {
@@ -502,31 +470,6 @@ def _start_dockerd(sandbox: modal.Sandbox) -> None:
         )
 
 
-def _verify_depot_cli_in_sandbox(sandbox: modal.Sandbox) -> None:
-    """Confirm the depot CLI resolves on PATH inside the sandbox before building.
-
-    Fails loudly (rather than silently falling back to a local docker build)
-    if the depot binary baked into the image is missing or unrunnable. Emits the
-    greppable enabled-marker the build job asserts on -- but only after the CLI
-    has actually verified, so the marker cannot leak from a command preview.
-    """
-    verify_rc = _exec_in_sandbox(
-        sandbox,
-        "depot --version",
-        description="verify depot CLI is available",
-        timeout_seconds=60,
-    )
-    if verify_rc != 0:
-        raise RuntimeError(
-            "`depot --version` failed inside the sandbox -- the depot CLI is not on PATH, "
-            "so the FCT build would silently fall back to a local docker build. "
-            f"Expected the binary baked into the image at {_DEPOT_INSTALL_DIR}/depot."
-        )
-    # Emit the marker from the script (not the in-sandbox command) so it lands in
-    # the CI build log if and only if the verification above succeeded.
-    print(_DEPOT_ENABLED_MARKER, flush=True)
-
-
 def _create_workspace_in_sandbox(sandbox: modal.Sandbox) -> None:
     """Drive the Electron flow inside the sandbox via the shared runner.
 
@@ -620,61 +563,7 @@ def _parse_args() -> argparse.Namespace:
             "scraping it out of stdout."
         ),
     )
-    parser.add_argument(
-        "--builder",
-        choices=("docker", "depot"),
-        default="docker",
-        help=(
-            "Which builder the in-sandbox FCT container build should use. "
-            "'docker' (default) builds locally in the sandbox -- fastest for this "
-            "ephemeral build-then-run-locally flow, since nothing is transferred. "
-            "'depot' uses depot.dev's remote builder (shared layer cache, no Docker "
-            "Hub pull limits) but must `--load` the built image back into the local "
-            "daemon, whose export+download cost outweighs the cache savings here "
-            "(measured ~2.5 min slower end-to-end). 'depot' requires DEPOT_TOKEN in "
-            "the environment and fails loudly if it is missing."
-        ),
-    )
     return parser.parse_args()
-
-
-def _resolve_depot_secret(builder: str) -> modal.Secret | None:
-    """Return a Modal Secret that enables the depot builder, or None for docker.
-
-    For ``builder == "docker"`` (the default), returns None so the in-sandbox
-    ``mngr create`` uses the local docker builder. For ``builder == "depot"``,
-    reads DEPOT_TOKEN from the environment (injected by the Vault export-secrets
-    step in CI) and returns a Secret carrying the token, the project id, and the
-    docker-provider builder override; raises if the token is missing.
-    """
-    if builder == "docker":
-        print("Building the in-sandbox FCT container with the local docker builder.", flush=True)
-        return None
-    depot_token = os.environ.get("DEPOT_TOKEN")
-    if not depot_token:
-        raise RuntimeError(
-            "--builder depot was set but DEPOT_TOKEN is not in the environment. "
-            "In CI this means the Vault export-secrets step did not inject the "
-            "depot token (check the minds_ci_build_gh role and the minds-ci-build "
-            "GitHub Environment)."
-        )
-    depot_project_id = os.environ.get("DEPOT_PROJECT_ID", _DEFAULT_DEPOT_PROJECT_ID)
-    print(
-        f"Enabling the depot builder for the in-sandbox FCT build (project {depot_project_id}).",
-        flush=True,
-    )
-    # These env vars are injected into every sandbox process; the e2e workspace
-    # runner copies os.environ into the Electron child (which forwards it to the
-    # spawned `mngr create`), so the docker provider sees builder=DEPOT plus the
-    # depot credentials. The token is passed to the depot CLI as process env,
-    # never as a docker build arg, so it is not baked into the FCT image.
-    return modal.Secret.from_dict(
-        {
-            "DEPOT_TOKEN": depot_token,
-            "DEPOT_PROJECT_ID": depot_project_id,
-            "MNGR__PROVIDERS__DOCKER__BUILDER": "DEPOT",
-        }
-    )
 
 
 def main() -> None:
@@ -686,11 +575,6 @@ def main() -> None:
     # step broke -- useless in CI. enable_output() is what turns that into
     # the actual build transcript.
     with modal.enable_output():
-        # Resolve depot enablement up front so --builder depot fails fast (before
-        # we pay for staging + image build) if its token is missing.
-        depot_secret = _resolve_depot_secret(args.builder)
-        is_depot_enabled = depot_secret is not None
-
         try:
             with _timed_phase("build image + create sandbox"):
                 # Stage the repo into a temp dir BEFORE building the image so the
@@ -718,10 +602,6 @@ def main() -> None:
                         # (offload-modal-minds-snapshot.toml).
                         cpu=4.0,
                         memory=8 * 1024,
-                        # Inject the depot credentials + builder override (when enabled)
-                        # so the in-sandbox `mngr create` builds the FCT container via
-                        # depot. Empty list = the default docker builder.
-                        secrets=[depot_secret] if depot_secret is not None else [],
                         # The whole point of this script: opt in to Modal's VM runtime so
                         # Docker-in-sandbox state survives snapshot_filesystem(). vm_runtime
                         # is now generally available on Modal. We still scope it to this
@@ -731,29 +611,25 @@ def main() -> None:
                         experimental_options={"vm_runtime": True},
                     )
 
-            _run_sandbox_workflow(sandbox, args, is_depot_enabled=is_depot_enabled)
+            _run_sandbox_workflow(sandbox, args)
         finally:
             _print_phase_timing_summary()
 
 
-def _run_sandbox_workflow(sandbox: modal.Sandbox, args: argparse.Namespace, *, is_depot_enabled: bool) -> None:
+def _run_sandbox_workflow(sandbox: modal.Sandbox, args: argparse.Namespace) -> None:
     """Bring up dockerd, optionally create the workspace, snapshot, clean up."""
     try:
         print(f"Sandbox {sandbox.object_id} created.", flush=True)
         with _timed_phase("start dockerd"):
             _start_dockerd(sandbox)
-        # When depot is enabled, confirm the CLI resolves before the build so a
-        # missing binary fails loudly instead of silently building locally.
-        if is_depot_enabled:
-            _verify_depot_cli_in_sandbox(sandbox)
         if args.skip_workspace_creation:
             print(
                 "--skip-workspace-creation set; snapshotting without a workspace agent.",
                 flush=True,
             )
         else:
-            # This phase contains the FCT container build (depot or docker), so its
-            # duration is the headline number for the depot-vs-docker comparison.
+            # This phase contains the local docker FCT container build, so its
+            # duration is the headline number in the per-phase timing summary.
             with _timed_phase("create workspace (incl. FCT container build)"):
                 _create_workspace_in_sandbox(sandbox)
         with _timed_phase("snapshot filesystem"):

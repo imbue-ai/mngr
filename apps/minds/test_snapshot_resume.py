@@ -18,17 +18,14 @@ of sandbox.
 """
 
 import json
-import os
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Final
-from uuid import uuid4
 
 import pytest
 
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.minds.desktop_client.e2e_workspace_runner import resolve_fct_path
 from imbue.minds.desktop_client.recovery_probe import PROBE_SENTINEL
 from imbue.minds.desktop_client.recovery_probe import build_probe_shell_command
 
@@ -65,15 +62,6 @@ _ALIVE_AGENT_STATES: Final[frozenset[str]] = frozenset(
 # mirror this set in a ``case`` statement (they run inside ``docker exec`` and
 # cannot reference this constant).
 _SERVED_HTTP_STATUS_CODES: Final[frozenset[str]] = frozenset({"200", "301", "302", "307", "401"})
-
-# Name of the FCT agent-container Dockerfile (at the FCT repo root).
-_FCT_DOCKERFILE_NAME: Final[str] = "Dockerfile"
-# The mngr monorepo's depot project id (matches the repo-root depot.json), used
-# when DEPOT_PROJECT_ID is not forwarded into the sandbox.
-_DEPOT_DEFAULT_PROJECT_ID: Final[str] = "fsjzltqvxq"
-# depot reuses cached layers, so a rebuild is fast; still allow generous time
-# for the context upload + remote cache resolution.
-_DEPOT_BUILD_TIMEOUT_SECONDS: Final[int] = 600
 
 
 class _ResumedWorkspace(FrozenModel):
@@ -425,79 +413,4 @@ def test_minds_recovery_restores_dead_system_interface() -> None:
     recovered_probe = _run_minds_in_container_probe(container_name)
     assert recovered_probe.get("curl_status") in _SERVED_HTTP_STATUS_CODES, (
         f"minds recovery probe still reports system_interface unhealthy after restart; probe={recovered_probe!r}"
-    )
-
-
-# @pytest.mark.docker: `depot build` shells out to the local docker daemon (it
-# loads/inspects via docker under the hood), which the pytest resource guard
-# intercepts -- so this test must carry the docker mark like the others, even
-# though it invokes `depot` directly rather than `docker`.
-@pytest.mark.minds_snapshot_resume
-@pytest.mark.docker
-@pytest.mark.timeout(_DEPOT_BUILD_TIMEOUT_SECONDS + 60)
-def test_fct_image_rebuild_hits_depot_cache(tmp_path: Path) -> None:
-    """A fresh FCT image build via depot reuses the layer cache from the build stage.
-
-    The snapshot build stage (``scripts/snapshot_minds_e2e_state.py``) builds
-    the FCT agent container via depot.dev, populating depot's shared remote
-    cache for the project. This test rebuilds the same FCT image -- same FCT
-    ``main``, same ``Dockerfile`` -- directly through the depot CLI and asserts
-    that depot reports at least one ``CACHED`` layer. That proves both that the
-    depot rebuild path works inside a snapshot-resumed sandbox and that the
-    build stage's cache is reachable (reused) on rebuild. (We assert on cache
-    reuse rather than on a specific set of "heavy" layers because matching
-    individual layers from depot's plain-progress output would couple the test
-    to the Dockerfile's exact step ordering and depot's log format.)
-
-    The build is cache-only (no ``--load``): we assert on the build graph, not
-    an exported image, so no live agent or Claude turn is involved. Only runs in
-    depot mode: the snapshot build defaults to the local docker builder (faster
-    for this flow), so depot is exercised only when ``MINDS_SNAPSHOT_BUILDER`` is
-    ``depot`` -- in which case CI injects ``DEPOT_TOKEN`` from Vault and forwards
-    it plus the builder mode into the sandbox.
-    """
-    if os.environ.get("MINDS_SNAPSHOT_BUILDER", "docker") != "depot":
-        pytest.skip("snapshot built with the docker builder; the depot cache-hit check only runs in depot mode.")
-    if not os.environ.get("DEPOT_TOKEN"):
-        pytest.skip("DEPOT_TOKEN not set; the depot cache-hit check only runs with the CI-injected token.")
-
-    # Clone FCT (same fallback chain the build stage uses, so both build the
-    # same context and share depot's cache).
-    fct_path = resolve_fct_path(tmp_path)
-    assert (fct_path / _FCT_DOCKERFILE_NAME).is_file(), (
-        f"FCT checkout at {fct_path} has no {_FCT_DOCKERFILE_NAME}; cannot exercise the depot rebuild."
-    )
-
-    depot_env = dict(os.environ)
-    depot_env["DEPOT_PROJECT_ID"] = os.environ.get("DEPOT_PROJECT_ID", _DEPOT_DEFAULT_PROJECT_ID)
-
-    # `--progress plain` makes cache hits print literal "CACHED" lines we can
-    # assert on (deterministic, unlike a timing threshold).
-    result = subprocess.run(
-        [
-            "depot",
-            "build",
-            "--progress",
-            "plain",
-            "-t",
-            f"fct-depot-cache-check-{uuid4().hex}",
-            "--file",
-            _FCT_DOCKERFILE_NAME,
-            ".",
-        ],
-        cwd=fct_path,
-        env=depot_env,
-        capture_output=True,
-        text=True,
-        timeout=_DEPOT_BUILD_TIMEOUT_SECONDS,
-    )
-    combined_output = result.stdout + result.stderr
-    assert result.returncode == 0, (
-        f"`depot build` of the FCT image failed (rc={result.returncode}). depot CLI/token wiring "
-        f"is broken in the snapshot sandbox.\n{combined_output}"
-    )
-    assert "CACHED" in combined_output, (
-        "Expected depot to report CACHED layers when rebuilding the FCT image -- the build stage "
-        "should have populated depot's remote cache for the same FCT context. None seen, so the "
-        f"rebuild did not reuse depot's cache.\n{combined_output}"
     )
