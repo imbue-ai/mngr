@@ -24,7 +24,6 @@ from flask import abort
 from flask import request
 from loguru import logger
 from pydantic import Field
-from pydantic import SecretStr
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.dispatcher import DispatcherMiddleware
 
@@ -52,10 +51,6 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backup_export import export_snapshot_zip
 from imbue.minds.desktop_client.backup_password_store import has_saved_backup_password
-from imbue.minds.desktop_client.backup_password_store import read_saved_backup_password
-from imbue.minds.desktop_client.backup_password_store import save_backup_password_if_absent
-from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
-from imbue.minds.desktop_client.backup_provisioning import env_text_defines_restic_password
 from imbue.minds.desktop_client.backup_status import compute_backup_status_for_workspaces
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
@@ -78,8 +73,6 @@ from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_ag
 from imbue.minds.desktop_client.mind_liveness import get_shutdown_capable_workspace_agent_ids
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
-from imbue.minds.desktop_client.notification import NotificationRequest
-from imbue.minds.desktop_client.notification import NotificationUrgency
 from imbue.minds.desktop_client.onboarding import OnboardingAnswers
 from imbue.minds.desktop_client.onboarding import OnboardingApplier
 from imbue.minds.desktop_client.provider_display import friendly_provider_label
@@ -90,9 +83,7 @@ from imbue.minds.desktop_client.region_preference import AWS_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import GeoLocationCache
 from imbue.minds.desktop_client.region_preference import IMBUE_CLOUD_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import VULTR_PROVIDER_KEY
-from imbue.minds.desktop_client.region_preference import default_region_for_provider
 from imbue.minds.desktop_client.region_preference import known_regions_for_provider
-from imbue.minds.desktop_client.region_preference import resolve_default_region
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestType
@@ -141,16 +132,19 @@ from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates import status_text_for
 from imbue.minds.desktop_client.tunnel_token_injection import clear_tunnel_token_from_agent
-from imbue.minds.desktop_client.tunnel_token_injection import inject_tunnel_token_into_agent
 from imbue.minds.desktop_client.webdav import create_webdav_app
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
 from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
+from imbue.minds.desktop_client.workspace_create import build_backup_request_or_error
+from imbue.minds.desktop_client.workspace_create import build_on_created_callback
+from imbue.minds.desktop_client.workspace_create import default_region_for_provider_with_config
+from imbue.minds.desktop_client.workspace_create import persist_region_for_launch_mode
+from imbue.minds.desktop_client.workspace_create import resolve_effective_region
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.envs.docker_cleanup import stop_active_env_state_container
 from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import InvalidJsonBodyError
-from imbue.minds.errors import MindsConfigError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.errors import MngrCommandTimeoutError
 from imbue.minds.primitives import AIProvider
@@ -559,36 +553,6 @@ def _handle_post_login_redirect() -> Response:
     return make_response(status_code=302, headers={"Location": destination})
 
 
-def _region_provider_key_for_launch_mode(launch_mode: LaunchMode) -> str | None:
-    """Map a compute launch mode to its region-config provider key, or None if region-less.
-
-    Only ``IMBUE_CLOUD``, ``VULTR``, and ``AWS`` place a host in a chosen
-    region; ``DOCKER`` / ``LIMA`` run locally and have no region.
-    """
-    if launch_mode is LaunchMode.IMBUE_CLOUD:
-        return IMBUE_CLOUD_PROVIDER_KEY
-    if launch_mode is LaunchMode.VULTR:
-        return VULTR_PROVIDER_KEY
-    if launch_mode is LaunchMode.AWS:
-        return AWS_PROVIDER_KEY
-    return None
-
-
-def _default_region_for_provider_with_config(
-    provider_key: str,
-    minds_config: MindsConfig | None,
-    geo_cache: GeoLocationCache | None,
-) -> str:
-    """Resolve the default region to pre-select for a provider (config -> geo -> hardcoded)."""
-    configured = minds_config.get_region(provider_key) if minds_config is not None else None
-    if geo_cache is not None:
-        return resolve_default_region(provider_key, configured, geo_cache)
-    # No geo cache (e.g. tests): the stored value if it's a known region, else the hardcoded default.
-    if configured and configured in known_regions_for_provider(provider_key):
-        return configured
-    return default_region_for_provider(provider_key)
-
-
 def _build_region_form_context(
     minds_config: MindsConfig | None,
     geo_cache: GeoLocationCache | None,
@@ -607,51 +571,10 @@ def _build_region_form_context(
         (LaunchMode.AWS, AWS_PROVIDER_KEY),
     ):
         options_by_launch_mode[launch_mode.value] = list(known_regions_for_provider(provider_key))
-        selected_by_launch_mode[launch_mode.value] = _default_region_for_provider_with_config(
+        selected_by_launch_mode[launch_mode.value] = default_region_for_provider_with_config(
             provider_key, minds_config, geo_cache
         )
     return options_by_launch_mode, selected_by_launch_mode
-
-
-def _resolve_effective_region(
-    launch_mode: LaunchMode,
-    submitted_region: str,
-    minds_config: MindsConfig | None,
-    geo_cache: GeoLocationCache | None,
-) -> str:
-    """Resolve the region to actually create in for a submitted create request.
-
-    Honors the user's submitted value when it's a known region for the provider;
-    otherwise falls back to the same default precedence the form uses. Returns
-    "" for region-less providers (DOCKER / LIMA).
-    """
-    provider_key = _region_provider_key_for_launch_mode(launch_mode)
-    if provider_key is None:
-        return ""
-    if submitted_region and submitted_region in known_regions_for_provider(provider_key):
-        return submitted_region
-    return _default_region_for_provider_with_config(provider_key, minds_config, geo_cache)
-
-
-def _persist_region_for_launch_mode(
-    minds_config: MindsConfig | None,
-    launch_mode: LaunchMode,
-    region: str,
-) -> None:
-    """Persist the chosen region as the provider's new last-used default. Best-effort."""
-    provider_key = _region_provider_key_for_launch_mode(launch_mode)
-    if minds_config is None or provider_key is None or not region:
-        return
-    # Best-effort: this runs inside the ``on_created`` callback, which the agent
-    # creator invokes inside a try/except that marks the create FAILED on any
-    # raised exception. A region-persist failure must never flip an
-    # already-successful create. ``set_region`` -> ``_write_raw`` can raise a bare
-    # ``OSError`` (disk full / permission) in addition to ``MindsConfigError``, so
-    # swallow both at debug level.
-    try:
-        minds_config.set_region(provider_key, region)
-    except (MindsConfigError, OSError) as exc:
-        logger.debug("Failed to persist region {} for provider {}: {}", region, provider_key, exc)
 
 
 def _handle_backup_status_api() -> Response:
@@ -729,239 +652,6 @@ def _handle_backup_export_api(
 
 
 # -- Agent creation route handlers --
-
-
-def _run_tunnel_setup(
-    agent_id: AgentId,
-    imbue_cloud_cli: ImbueCloudCli,
-    account_email: str,
-    notification_dispatcher: NotificationDispatcher,
-    agent_display_name: str,
-) -> None:
-    """Create a Cloudflare tunnel via the plugin and inject its token into the agent.
-
-    Runs on a detached thread scheduled by ``_OnCreatedCallbackFactory`` on
-    the desktop client's root ``ConcurrencyGroup``. Failures are logged via
-    loguru and surfaced to the user via ``notification_dispatcher``.
-
-    The plugin owns all tunnel state (token, services, auth policy);
-    minds keeps no local cache. ``create_tunnel`` is idempotent on the
-    connector side, so re-injecting on every agent (re)creation just
-    delivers the existing token rather than rotating.
-    """
-    try:
-        info = imbue_cloud_cli.create_tunnel(account=account_email, agent_id=str(agent_id))
-    except ImbueCloudCliError as exc:
-        logger.warning("Failed to create tunnel for {}: {}", agent_id, exc)
-        _notify_tunnel_failure(
-            notification_dispatcher=notification_dispatcher,
-            agent_display_name=agent_display_name,
-            error_message=str(exc),
-        )
-        return
-    if info.token is None:
-        logger.warning("Tunnel created for {} but no token returned", agent_id)
-        return
-    inject_tunnel_token_into_agent(agent_id, info.token.get_secret_value())
-    logger.debug("Injected tunnel token into agent {}", agent_id)
-
-
-def _notify_tunnel_failure(
-    notification_dispatcher: NotificationDispatcher,
-    agent_display_name: str,
-    error_message: str,
-) -> None:
-    """Dispatch an OS notification for a tunnel-setup failure (no rate limit).
-
-    ``NotificationDispatcher.dispatch`` spawns its own background thread or
-    subprocess per channel and swallows channel-specific errors internally,
-    so a top-level ``except`` wrapper here would only mask genuine bugs.
-    """
-    notification_dispatcher.dispatch(
-        NotificationRequest(
-            title="Tunnel setup failed",
-            message=(
-                f"Couldn't set up the Cloudflare tunnel for '{agent_display_name}'. "
-                f"Sharing may be unavailable. Error: {error_message}"
-            ),
-            urgency=NotificationUrgency.NORMAL,
-        ),
-        agent_display_name=agent_display_name,
-    )
-
-
-class _OnCreatedCallbackFactory(MutableModel):
-    """Callable that records the workspace<->account association and schedules Cloudflare tunnel setup.
-
-    ``__call__`` is the single hook that runs once the inner ``mngr create``
-    has returned the canonical ``AgentId`` -- before this refactor minds
-    pre-generated an id and associated it with the account synchronously
-    in the route handler, but for imbue_cloud agents that pre-generated
-    id is fictional (the lease forces it back to the pool host's pre-baked
-    id), so the association ended up keyed under a phantom row. We now
-    do the ``associate_workspace`` call here, where ``agent_id`` is
-    guaranteed canonical.
-
-    The tunnel-setup work is scheduled on a detached thread on the root
-    ``ConcurrencyGroup`` so the agent-creation thread can flip status to
-    ``DONE`` without waiting on a multi-second Cloudflare round-trip.
-    """
-
-    session_store: MultiAccountSessionStore = Field(frozen=True, description="Session store for account lookup")
-    imbue_cloud_cli: ImbueCloudCli = Field(
-        frozen=True,
-        description="CLI wrapper for `mngr imbue_cloud tunnels create`.",
-    )
-    root_concurrency_group: ConcurrencyGroup = Field(
-        frozen=True,
-        description="Root group on which the detached tunnel task is scheduled.",
-    )
-    notification_dispatcher: NotificationDispatcher = Field(
-        frozen=True,
-        description="Dispatcher for surfacing tunnel-setup failures as OS notifications.",
-    )
-    backend_resolver: BackendResolverInterface = Field(
-        frozen=True,
-        description=(
-            "Backend resolver pinged via notify_change() after the association write so the "
-            "chrome SSE workspace list refreshes its 'account' field without waiting for the "
-            "next 30s discovery heartbeat."
-        ),
-    )
-    account_id: str = Field(
-        frozen=True,
-        default="",
-        description=(
-            "Account that owns this workspace. Empty when no account is selected (private "
-            "workspace), in which case no association is recorded and no tunnel is set up."
-        ),
-    )
-
-    def __call__(self, agent_id: AgentId) -> None:
-        if not self.account_id:
-            return
-        # Bind the workspace to the account using the canonical agent id --
-        # this is what later ``get_account_for_workspace`` lookups (e.g. for
-        # the destruction handler) expect to find.
-        self.session_store.associate_workspace(self.account_id, str(agent_id))
-        # Wake the chrome SSE so the workspace tile picks up its new
-        # 'account' field immediately. Without this, the chrome shows
-        # the workspace as unassociated until the next discovery cycle
-        # (~30s+) writes an unrelated change.
-        if isinstance(self.backend_resolver, MngrCliBackendResolver):
-            self.backend_resolver.notify_change()
-        account = self.session_store.get_account_for_workspace(str(agent_id))
-        if account is None:
-            # The account vanished between selection and now (logout?). The
-            # association above is still in place; we just skip the tunnel.
-            return
-        # ``_build_on_created_callback`` doesn't have easy access to the
-        # user-chosen name at this point (see ``backend_resolver``), so fall
-        # back to the short form of the agent id for the notification copy.
-        agent_display_name = str(agent_id)[:8]
-        self.root_concurrency_group.start_new_thread(
-            target=_run_tunnel_setup,
-            kwargs={
-                "agent_id": agent_id,
-                "imbue_cloud_cli": self.imbue_cloud_cli,
-                "account_email": str(account.email),
-                "notification_dispatcher": self.notification_dispatcher,
-                "agent_display_name": agent_display_name,
-            },
-            name=f"tunnel-setup-{agent_id}",
-            # is_checked=False so that a failing tunnel task does not poison
-            # the root CG for unrelated strands; failures are surfaced via
-            # notifications + loguru from within ``_run_tunnel_setup``.
-            is_checked=False,
-        )
-
-
-def _build_on_created_callback(
-    account_id: str,
-) -> _OnCreatedCallbackFactory | None:
-    """Build a callback that injects the tunnel token after agent creation.
-
-    Returns None if no account is selected (nothing to inject).
-    """
-    if not account_id:
-        return None
-
-    session_store: MultiAccountSessionStore | None = get_state().session_store
-    imbue_cloud_cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
-    root_concurrency_group: ConcurrencyGroup | None = get_state().root_concurrency_group
-    notification_dispatcher: NotificationDispatcher | None = get_state().notification_dispatcher
-    backend_resolver: BackendResolverInterface = get_state().backend_resolver
-
-    if (
-        session_store is None
-        or imbue_cloud_cli is None
-        or root_concurrency_group is None
-        or notification_dispatcher is None
-    ):
-        return None
-
-    return _OnCreatedCallbackFactory(
-        session_store=session_store,
-        imbue_cloud_cli=imbue_cloud_cli,
-        root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
-        backend_resolver=backend_resolver,
-        account_id=account_id,
-    )
-
-
-def _build_backup_request_or_error(
-    *,
-    backup_provider: BackupProvider,
-    encryption_method: BackupEncryptionMethod,
-    typed_master_password: str,
-    is_save_password: bool,
-    api_key_env: str,
-    account_email: str,
-    paths: WorkspacePaths,
-) -> tuple[BackupSetupRequest | None, str | None]:
-    """Resolve form backup inputs into a ``BackupSetupRequest`` or an error message.
-
-    Reads / first-time-saves the shared master password as a side effect.
-    Returns ``(request, None)`` on success or ``(None, message)`` for a
-    validation error the caller should re-render on the form.
-    """
-    if backup_provider is BackupProvider.CONFIGURE_LATER:
-        return BackupSetupRequest(backup_provider=BackupProvider.CONFIGURE_LATER), None
-    if backup_provider is BackupProvider.IMBUE_CLOUD and not account_email:
-        return None, (
-            "imbue_cloud backups require a selected account. Choose an account or pick a different backup provider."
-        )
-    # The user never sets the repository password: minds initializes the repo
-    # and assigns each workspace its own random RESTIC_PASSWORD, so reject it
-    # if a user puts one in the api_key env block.
-    if backup_provider is BackupProvider.API_KEY and env_text_defines_restic_password(api_key_env):
-        return None, (
-            "Don't set RESTIC_PASSWORD in the backup env -- minds assigns each workspace its own random "
-            "repository password. Provide RESTIC_REPOSITORY and any backend credentials only."
-        )
-    # The master password (or empty, for no_password) is used only to
-    # initialize the repo from the minds machine; it never enters the workspace.
-    master_password: SecretStr | None = None
-    if encryption_method is BackupEncryptionMethod.MASTER_PASSWORD:
-        saved_password = read_saved_backup_password(paths)
-        if saved_password is not None:
-            master_password = SecretStr(saved_password)
-        elif typed_master_password:
-            master_password = SecretStr(typed_master_password)
-            if is_save_password:
-                save_backup_password_if_absent(paths, typed_master_password)
-        else:
-            return None, "Enter a backup master password, or set the encryption method to 'no password'."
-    return (
-        BackupSetupRequest(
-            backup_provider=backup_provider,
-            master_password=master_password,
-            api_key_env_text=api_key_env if backup_provider is BackupProvider.API_KEY else "",
-            account_email=account_email,
-        ),
-        None,
-    )
 
 
 def _handle_create_form_submit() -> Response:
@@ -1073,7 +763,7 @@ def _handle_create_form_submit() -> Response:
 
     # Resolve the backup configuration (reads / first-time-saves the shared
     # master password as a side effect) before kicking off creation.
-    backup_request, backup_error = _build_backup_request_or_error(
+    backup_request, backup_error = build_backup_request_or_error(
         backup_provider=backup_provider,
         encryption_method=backup_encryption_method,
         typed_master_password=backup_master_password,
@@ -1091,16 +781,16 @@ def _handle_create_form_submit() -> Response:
 
     # Resolve the explicit region the user chose (or the resolved default) and,
     # on a successful create, persist it as the provider's new last-used default.
-    region = _resolve_effective_region(launch_mode, submitted_region, minds_config, geo_cache)
+    region = resolve_effective_region(launch_mode, submitted_region, minds_config, geo_cache)
 
     # Build a post-creation callback that injects the tunnel token, then also
     # persists the chosen region (fires only after a successful create).
-    base_on_created = _build_on_created_callback(account_id)
+    base_on_created = build_on_created_callback(account_id)
 
     def on_created(agent_id: AgentId) -> None:
         if base_on_created is not None:
             base_on_created(agent_id)
-        _persist_region_for_launch_mode(minds_config, launch_mode, region)
+        persist_region_for_launch_mode(minds_config, launch_mode, region)
 
     # ``start_creation`` returns a CreationId (minds-internal handle for
     # tracking the in-flight create) -- the canonical AgentId only exists
@@ -1299,7 +989,7 @@ def _handle_create_agent_api() -> Response:
                 media_type="application/json",
             )
 
-    backup_request, backup_error = _build_backup_request_or_error(
+    backup_request, backup_error = build_backup_request_or_error(
         backup_provider=backup_provider,
         encryption_method=backup_encryption_method,
         typed_master_password=backup_master_password,
@@ -1318,10 +1008,10 @@ def _handle_create_agent_api() -> Response:
     # Resolve the explicit region (or its default) and persist it on success.
     minds_config: MindsConfig | None = get_state().minds_config
     geo_cache: GeoLocationCache | None = get_state().geo_location_cache
-    region = _resolve_effective_region(launch_mode, submitted_region, minds_config, geo_cache)
+    region = resolve_effective_region(launch_mode, submitted_region, minds_config, geo_cache)
 
     def _persist_region_on_created(agent_id: AgentId) -> None:
-        _persist_region_for_launch_mode(minds_config, launch_mode, region)
+        persist_region_for_launch_mode(minds_config, launch_mode, region)
 
     creation_id = agent_creator.start_creation(
         git_url,

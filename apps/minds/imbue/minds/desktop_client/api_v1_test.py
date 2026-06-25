@@ -209,6 +209,45 @@ def test_create_workspace_requires_api_key_for_api_key_provider(
     assert "anthropic_api_key" in json.loads(response.data)["error"]
 
 
+def test_create_workspace_rejects_invalid_backup_provider(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    # A malformed backup_provider must fail validation up front (400), before
+    # any background creation is started.
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group, notification_dispatcher)
+
+    response = client.post(
+        "/api/v1/workspaces",
+        headers=_auth_header(),
+        json={"git_url": "https://example/repo", "backup_provider": "NOT_A_PROVIDER"},
+    )
+
+    assert response.status_code == 400
+    assert "backup_provider" in json.loads(response.data)["error"]
+
+
+def test_create_workspace_rejects_imbue_cloud_backup_without_account(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    # imbue_cloud *backups* (independent of the compute/AI provider) need an
+    # account; without one the shared backup-request builder rejects it with a
+    # 400 that mentions the account, before any background creation starts.
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group, notification_dispatcher)
+
+    response = client.post(
+        "/api/v1/workspaces",
+        headers=_auth_header(),
+        json={"git_url": "https://example/repo", "backup_provider": "IMBUE_CLOUD"},
+    )
+
+    assert response.status_code == 400
+    assert "account" in json.loads(response.data)["error"].lower()
+
+
 def test_destroy_unknown_workspace_returns_404(tmp_path: Path) -> None:
     client = _client_with_workspace(tmp_path, AgentId())
     other_id = AgentId()

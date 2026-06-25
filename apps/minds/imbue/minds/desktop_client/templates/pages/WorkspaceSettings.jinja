@@ -43,7 +43,7 @@
       // settings-page navigation, and the landing page renders a
       // "Destroying..." marker on the row from on-disk state. No more
       // polling here.
-      fetch('/api/destroy-agent/' + agentId, { method: 'POST' })
+      fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/destroy', { method: 'POST' })
         .then(function(resp) {
           if (resp.ok) {
             window.location.href = '/';

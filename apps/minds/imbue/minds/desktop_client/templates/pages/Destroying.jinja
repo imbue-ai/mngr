@@ -1,8 +1,9 @@
 {#def agent_id, agent_name, pid, status #}
 {#
   Detail page for an in-flight or recently-completed destroy. Polls
-  /api/destroying/<agent_id>/{status,log} to keep its log tail and status
-  badge up to date; once status flips to "done" it redirects to /.
+  /api/v1/workspaces/operations/<agent_id> for status and streams its log over
+  SSE from .../operations/<agent_id>/logs; once status flips to "done" it
+  redirects to /.
 #}
 {% set _scripts %}
 <script src="/_static/destroying.js" defer></script>

@@ -62,8 +62,13 @@ from imbue.minds.desktop_client.responses import make_streaming_response
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
+from imbue.minds.desktop_client.workspace_create import build_backup_request_or_error
+from imbue.minds.desktop_client.workspace_create import build_create_on_created_callback
+from imbue.minds.desktop_client.workspace_create import resolve_effective_region
 from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.primitives import AIProvider
+from imbue.minds.primitives import BackupEncryptionMethod
+from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.mngr.primitives import AgentId
@@ -349,9 +354,14 @@ def _handle_create_workspace() -> Response:
     caller polls at ``/api/v1/workspaces/operations/<operation_id>``; the
     canonical workspace id appears there once ``mngr create`` returns.
 
-    Backup provisioning and Cloudflare tunnel injection are not wired through
-    this path yet (they depend on the desktop UI's create orchestration); a
-    peer created here has neither until configured through the UI.
+    Backup provisioning and Cloudflare tunnel injection match the desktop UI's
+    create flow: the optional ``backup_*`` fields (``backup_provider``,
+    ``backup_encryption_method``, ``backup_master_password``,
+    ``backup_save_password``, ``backup_api_key_env``) build the same restic
+    setup request, and -- when an ``account_id`` is given -- the same
+    post-creation callback associates the peer with the account and injects a
+    Cloudflare tunnel token. Both reuse the shared helpers in
+    ``workspace_create`` so the two front doors stay in lockstep.
     """
     agent_creator: AgentCreator | None = get_state().agent_creator
     if agent_creator is None:
@@ -373,9 +383,22 @@ def _handle_create_workspace() -> Response:
         ai_provider = AIProvider(str(body.get("ai_provider", AIProvider.SUBSCRIPTION.value)))
     except ValueError:
         return _json_error(f"Invalid ai_provider: {body.get('ai_provider')!r}", 400)
+    try:
+        backup_provider = BackupProvider(str(body.get("backup_provider", BackupProvider.CONFIGURE_LATER.value)))
+    except ValueError:
+        return _json_error(f"Invalid backup_provider: {body.get('backup_provider')!r}", 400)
+    try:
+        backup_encryption_method = BackupEncryptionMethod(
+            str(body.get("backup_encryption_method", BackupEncryptionMethod.NO_PASSWORD.value))
+        )
+    except ValueError:
+        return _json_error(f"Invalid backup_encryption_method: {body.get('backup_encryption_method')!r}", 400)
+    backup_master_password = str(body.get("backup_master_password", ""))
+    is_save_backup_password = bool(body.get("backup_save_password", False))
+    backup_api_key_env = str(body.get("backup_api_key_env", ""))
     account_id = str(body.get("account_id", "")).strip()
     anthropic_api_key = str(body.get("anthropic_api_key", "")).strip()
-    region = str(body.get("region", "")).strip()
+    submitted_region = str(body.get("region", "")).strip()
 
     # Mirror the UI's create-form validation so misconfiguration fails fast here
     # rather than deep in the background creation thread.
@@ -394,6 +417,28 @@ def _handle_create_workspace() -> Response:
         if session_store is not None:
             account_email = session_store.get_account_email(account_id) or ""
 
+    # Build the same restic setup request the create form builds (reads / saves
+    # the shared master password as a side effect). Fail fast on a bad config.
+    backup_request, backup_error = build_backup_request_or_error(
+        backup_provider=backup_provider,
+        encryption_method=backup_encryption_method,
+        typed_master_password=backup_master_password,
+        is_save_password=is_save_backup_password,
+        api_key_env=backup_api_key_env,
+        account_email=account_email,
+        paths=agent_creator.paths,
+    )
+    if backup_error is not None:
+        return _json_error(backup_error, 400)
+
+    # Resolve the effective region (honoring a valid submitted value, else the
+    # provider default) and, on a successful create, build the post-creation
+    # callback that injects the Cloudflare tunnel token + associates the account
+    # and persists the chosen region -- exactly as the create form does.
+    minds_config = get_state().minds_config
+    region = resolve_effective_region(launch_mode, submitted_region, minds_config, get_state().geo_location_cache)
+    on_created = build_create_on_created_callback(account_id, minds_config, launch_mode, region)
+
     creation_id = agent_creator.start_creation(
         git_url,
         host_name=host_name,
@@ -403,6 +448,8 @@ def _handle_create_workspace() -> Response:
         account_email=account_email,
         region=region,
         anthropic_api_key=anthropic_api_key,
+        on_created=on_created,
+        backup_request=backup_request,
         original_minds_version=(branch or FALLBACK_BRANCH),
     )
     return _json_response({"operation_id": str(creation_id), "kind": "create"}, status_code=202)

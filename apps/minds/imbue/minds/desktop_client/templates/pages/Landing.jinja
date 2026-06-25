@@ -167,7 +167,7 @@
       applyMindLiveness(agentId, 'STARTING');
       // The endpoint is synchronous: it resolves only once the host has actually
       // started (or failed), so a non-ok response is a real failure to revert.
-      fetch('/api/agents/' + encodeURIComponent(agentId) + '/start-host', { method: 'POST' })
+      fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/start', { method: 'POST' })
         .then(function (response) {
           if (response.ok) {
             applyAuthoritativeMindLiveness(agentId, 'RUNNING');
@@ -203,7 +203,7 @@
       if (!ok) return;
       pendingMindActionByAgent[agentId] = 'STOPPED';
       applyMindLiveness(agentId, 'STOPPING');
-      fetch('/api/agents/' + encodeURIComponent(agentId) + '/stop-host', { method: 'POST' })
+      fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/stop', { method: 'POST' })
         .then(function (response) {
           if (response.ok) {
             applyAuthoritativeMindLiveness(agentId, 'STOPPED');
@@ -444,7 +444,21 @@
         link.style.pointerEvents = '';
         link.removeAttribute('data-exporting');
       }
-      fetch('/api/backup-export/' + encodeURIComponent(agentId)).then(function (resp) {
+      // v1 export is per-snapshot, so first list the workspace's snapshots and
+      // pick the most recent one (matching the old latest-snapshot export),
+      // then POST to export it as a zip.
+      fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backups').then(function (resp) {
+        if (!resp.ok) throw new Error('listing backups failed: ' + resp.status);
+        return resp.json();
+      }).then(function (data) {
+        var snapshots = (data && data.snapshots) || [];
+        if (snapshots.length === 0) throw new Error('no snapshots to export');
+        var latest = snapshots.reduce(function (a, b) {
+          return Date.parse(b.time) >= Date.parse(a.time) ? b : a;
+        });
+        return fetch('/api/v1/workspaces/' + encodeURIComponent(agentId)
+          + '/backups/' + encodeURIComponent(latest.snapshot_id) + '/export', { method: 'POST' });
+      }).then(function (resp) {
         if (!resp.ok) throw new Error('export failed: ' + resp.status);
         var disp = resp.headers.get('Content-Disposition') || '';
         var match = /filename="?([^"]+)"?/.exec(disp);
