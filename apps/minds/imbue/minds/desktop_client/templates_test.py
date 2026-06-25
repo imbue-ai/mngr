@@ -736,9 +736,11 @@ def test_render_sidebar_page_contains_workspace_list() -> None:
     # SidebarBottom.jinja is rendered inside the floating menu in both
     # Chrome.jinja (browser mode) and Sidebar.jinja (the sidebar page loaded
     # into the shared modal WebContentsView in Electron). It carries the
-    # "New workspace" CTA and the "Manage account(s)" / "Log in" entry; the
-    # label is updated dynamically by sidebar.js from /auth/api/status.
+    # "New workspace" CTA, the "Settings" entry, and the "Manage account(s)" /
+    # "Log in" entry; the label is updated dynamically by sidebar.js from
+    # /auth/api/status.
     assert 'id="sidebar-new-workspace"' in html
+    assert 'id="sidebar-settings"' in html
     assert 'id="sidebar-account"' in html
     assert 'id="sidebar-account-label"' in html
 
@@ -2039,8 +2041,8 @@ def test_expected_duration_covers_every_launch_mode() -> None:
 
 
 def test_base_omits_sentry_bootstrap_when_frontend_reporting_is_off() -> None:
-    # Default shipped state (reporting disabled / placeholder DSNs): no page may
-    # pull in the Sentry browser bundle or its init.
+    # Rendered outside any Flask app context, so the catalog global resolves no MindsConfig and
+    # defaults to reporting disabled: no page may pull in the Sentry browser bundle or its init.
     html = render_login_page()
     assert "sentry.browser.min.js" not in html
     assert "sentry_init.js" not in html
