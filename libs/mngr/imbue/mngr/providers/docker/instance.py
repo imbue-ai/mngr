@@ -1620,9 +1620,9 @@ kill -TERM 1
                         )
                     )
 
-            self._host_store.delete_host_record(host_id)
-            self._container_cache_by_id.pop(host_id, None)
-            self._evict_cached_host(host_id)
+        self._host_store.delete_host_record(host_id)
+        self._container_cache_by_id.pop(host_id, None)
+        self._evict_cached_host(host_id)
 
     def on_connection_error(self, host_id: HostId) -> None:
         """Clear all caches for a host on connection error."""
