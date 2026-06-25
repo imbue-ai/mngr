@@ -142,14 +142,14 @@ test-offload-minds-snapshot snapshot_image_id args="":
     fi
     just _generate-dockerignore
     trap "rm -f .dockerignore" EXIT
-    # Forward depot + Anthropic credentials into the offload sandbox only when
-    # present (CI injects them from Vault). DEPOT_TOKEN gates the depot args so
-    # local runs without a token still work; the builder override lets any
-    # in-sandbox mngr docker rebuild use depot, and the cache-hit test reads
-    # DEPOT_TOKEN/DEPOT_PROJECT_ID directly. Secret values are masked in CI logs
-    # by the Vault export-secrets action even though offload --trace echoes args.
-    DEPOT_ENV_ARGS=()
-    if [ -n "${DEPOT_TOKEN:-}" ]; then
+    # Forward credentials into the offload sandbox. MINDS_SNAPSHOT_BUILDER is
+    # always forwarded so the depot cache-hit test knows whether to run (it only
+    # runs in depot mode). Depot creds + the builder override are forwarded only
+    # in depot mode and only when a token is present; the Anthropic key whenever
+    # present. Secret values are masked in CI logs by the Vault export-secrets
+    # action even though offload --trace echoes args.
+    DEPOT_ENV_ARGS=(--env "MINDS_SNAPSHOT_BUILDER=${MINDS_SNAPSHOT_BUILDER:-docker}")
+    if [ "${MINDS_SNAPSHOT_BUILDER:-docker}" = "depot" ] && [ -n "${DEPOT_TOKEN:-}" ]; then
         DEPOT_ENV_ARGS+=(--env "DEPOT_TOKEN=${DEPOT_TOKEN}")
         DEPOT_ENV_ARGS+=(--env "DEPOT_PROJECT_ID=${DEPOT_PROJECT_ID:-fsjzltqvxq}")
         DEPOT_ENV_ARGS+=(--env "MNGR__PROVIDERS__DOCKER__BUILDER=DEPOT")

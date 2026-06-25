@@ -1,5 +1,7 @@
 Integrated Vault-backed secrets into the minds snapshot CI jobs and switched the in-sandbox forever-claude-template (FCT) agent-container build to depot.dev for faster, layer-cached builds.
 
+- The minds snapshot build now uses the local **docker** builder by default for the in-sandbox forever-claude-template container, and `scripts/snapshot_minds_e2e_state.py` prints a per-phase timing summary (`PHASE_TIMING ...`). Measurements showed depot.dev was ~2.5 min slower end-to-end for this job (depot's remote cache helps the build, but `depot build --load` must export and download the whole image back into the ephemeral sandbox's docker daemon, which a local build avoids). Set the `MINDS_SNAPSHOT_BUILDER` repo variable to `depot` to switch back (the depot path, Vault role, and cache-hit test are all retained and gated on that mode).
+
 - The snapshot image build now compiles the minds Tailwind stylesheet (`pnpm run build:css`) before driving the Electron workspace-creation flow; the gitignored `app.min.css` is otherwise absent in the image and its missing `.hidden` rule made the onboarding flow appear stuck, failing the build.
 
 - Added a local `.github/actions/export-secrets` composite action (vendored from the private `imbue-ai/vault` repo): since this repo is public and the vault repo is private, GitHub cannot resolve the cross-repo `imbue-ai/vault/.github/actions/export-secrets@main` action, so the backing script is vendored and invoked locally.

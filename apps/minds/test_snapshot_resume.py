@@ -450,11 +450,14 @@ def test_fct_image_rebuild_hits_depot_cache(tmp_path: Path) -> None:
     to the Dockerfile's exact step ordering and depot's log format.)
 
     The build is cache-only (no ``--load``): we assert on the build graph, not
-    an exported image, so no live agent or Claude turn is involved. Skipped when
-    ``DEPOT_TOKEN`` is absent (e.g. a local snapshot run without the
-    Vault-injected token); CI's test job injects it via export-secrets and the
-    ``test-offload-minds-snapshot`` recipe forwards it into the sandbox.
+    an exported image, so no live agent or Claude turn is involved. Only runs in
+    depot mode: the snapshot build defaults to the local docker builder (faster
+    for this flow), so depot is exercised only when ``MINDS_SNAPSHOT_BUILDER`` is
+    ``depot`` -- in which case CI injects ``DEPOT_TOKEN`` from Vault and forwards
+    it plus the builder mode into the sandbox.
     """
+    if os.environ.get("MINDS_SNAPSHOT_BUILDER", "docker") != "depot":
+        pytest.skip("snapshot built with the docker builder; the depot cache-hit check only runs in depot mode.")
     if not os.environ.get("DEPOT_TOKEN"):
         pytest.skip("DEPOT_TOKEN not set; the depot cache-hit check only runs with the CI-injected token.")
 

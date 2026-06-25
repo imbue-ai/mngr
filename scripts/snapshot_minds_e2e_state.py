@@ -65,6 +65,7 @@ would re-derive on every run.
 """
 
 import argparse
+import contextlib
 import os
 import shlex
 import subprocess
@@ -72,6 +73,7 @@ import sys
 import tempfile
 import textwrap
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Final
 
@@ -547,6 +549,33 @@ def _snapshot_sandbox(sandbox: modal.Sandbox) -> str:
     return image_id
 
 
+# Accumulates (phase_name, seconds) so the run can print a timing summary at the
+# end -- the snapshot build is the slowest CI job, so per-phase timings make it
+# obvious where the wall-clock goes (image build, workspace creation, snapshot).
+_PHASE_TIMINGS: Final[list[tuple[str, float]]] = []
+
+
+@contextlib.contextmanager
+def _timed_phase(name: str) -> "Iterator[None]":
+    started_at = time.monotonic()
+    print(f"=== PHASE START: {name} ===", flush=True)
+    try:
+        yield
+    finally:
+        elapsed_seconds = time.monotonic() - started_at
+        _PHASE_TIMINGS.append((name, elapsed_seconds))
+        print(f"=== PHASE END: {name} took {elapsed_seconds:.1f}s ===", flush=True)
+
+
+def _print_phase_timing_summary() -> None:
+    """Print a one-line-per-phase timing summary (greppable as PHASE_TIMING)."""
+    print("\n=== Phase timing summary ===", flush=True)
+    for name, elapsed_seconds in _PHASE_TIMINGS:
+        print(f"PHASE_TIMING {name}: {elapsed_seconds:.1f}s", flush=True)
+    total_seconds = sum(seconds for _, seconds in _PHASE_TIMINGS)
+    print(f"PHASE_TIMING total (instrumented phases): {total_seconds:.1f}s", flush=True)
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -579,44 +608,43 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--require-depot",
-        action="store_true",
+        "--builder",
+        choices=("docker", "depot"),
+        default="docker",
         help=(
-            "Require the in-sandbox FCT container build to use the depot.dev "
-            "remote builder: fail if DEPOT_TOKEN is not set in the environment. "
-            "Without this flag, depot is used only when DEPOT_TOKEN happens to "
-            "be present; otherwise the build falls back to the default docker "
-            "builder. CI's build job passes this so a broken depot/vault setup "
-            "surfaces loudly instead of silently building (and caching) nothing."
+            "Which builder the in-sandbox FCT container build should use. "
+            "'docker' (default) builds locally in the sandbox -- fastest for this "
+            "ephemeral build-then-run-locally flow, since nothing is transferred. "
+            "'depot' uses depot.dev's remote builder (shared layer cache, no Docker "
+            "Hub pull limits) but must `--load` the built image back into the local "
+            "daemon, whose export+download cost outweighs the cache savings here "
+            "(measured ~2.5 min slower end-to-end). 'depot' requires DEPOT_TOKEN in "
+            "the environment and fails loudly if it is missing."
         ),
     )
     return parser.parse_args()
 
 
-def _resolve_depot_secret(is_depot_required: bool) -> modal.Secret | None:
-    """Return a Modal Secret that enables the depot builder, or None.
+def _resolve_depot_secret(builder: str) -> modal.Secret | None:
+    """Return a Modal Secret that enables the depot builder, or None for docker.
 
-    Reads DEPOT_TOKEN from the environment (injected by the Vault export-secrets
-    step in CI). When present, returns a Secret carrying the token, the project
-    id, and the docker-provider builder override so the in-sandbox ``mngr
-    create`` builds the FCT container via ``depot build``. When absent, returns
-    None (the build uses the default docker builder) -- unless depot was
-    required, in which case it raises.
+    For ``builder == "docker"`` (the default), returns None so the in-sandbox
+    ``mngr create`` uses the local docker builder. For ``builder == "depot"``,
+    reads DEPOT_TOKEN from the environment (injected by the Vault export-secrets
+    step in CI) and returns a Secret carrying the token, the project id, and the
+    docker-provider builder override; raises if the token is missing.
     """
+    if builder == "docker":
+        print("Building the in-sandbox FCT container with the local docker builder.", flush=True)
+        return None
     depot_token = os.environ.get("DEPOT_TOKEN")
     if not depot_token:
-        if is_depot_required:
-            raise RuntimeError(
-                "--require-depot was set but DEPOT_TOKEN is not in the environment. "
-                "In CI this means the Vault export-secrets step did not inject the "
-                "depot token (check the minds_ci_build_gh role and the minds-ci-build "
-                "GitHub Environment)."
-            )
-        print(
-            "DEPOT_TOKEN not set; the in-sandbox FCT build will use the default docker builder.",
-            flush=True,
+        raise RuntimeError(
+            "--builder depot was set but DEPOT_TOKEN is not in the environment. "
+            "In CI this means the Vault export-secrets step did not inject the "
+            "depot token (check the minds_ci_build_gh role and the minds-ci-build "
+            "GitHub Environment)."
         )
-        return None
     depot_project_id = os.environ.get("DEPOT_PROJECT_ID", _DEFAULT_DEPOT_PROJECT_ID)
     print(
         f"Enabling the depot builder for the in-sandbox FCT build (project {depot_project_id}).",
@@ -650,47 +678,53 @@ def main() -> None:
         # the whole image-build phase; we clean it up after Sandbox.create
         # returns (Modal has already materialized the image at that point,
         # so the staged copy is no longer referenced).
-        with tempfile.TemporaryDirectory(prefix="mngr-snapshot-stage-") as staging_dir_str:
-            staging_dir = Path(staging_dir_str)
-            staged_repo = _stage_repo_to_temp_dir(staging_dir)
+        # Resolve depot enablement up front so --builder depot fails fast (before
+        # we pay for staging + image build) if its token is missing.
+        depot_secret = _resolve_depot_secret(args.builder)
+        is_depot_enabled = depot_secret is not None
 
-            image = _build_snapshot_image(staged_repo)
-            app = modal.App.lookup(args.app_name, create_if_missing=True)
+        try:
+            with _timed_phase("build image + create sandbox"):
+                # Stage the repo into a temp dir BEFORE building the image so the
+                # Modal upload reads from a frozen tree.
+                with tempfile.TemporaryDirectory(prefix="mngr-snapshot-stage-") as staging_dir_str:
+                    staging_dir = Path(staging_dir_str)
+                    staged_repo = _stage_repo_to_temp_dir(staging_dir)
 
-            # Resolve depot enablement before sandbox creation so the depot
-            # credentials + builder override are injected as sandbox env (and so
-            # --require-depot fails fast, before we pay for a sandbox).
-            depot_secret = _resolve_depot_secret(args.require_depot)
-            is_depot_enabled = depot_secret is not None
+                    image = _build_snapshot_image(staged_repo)
+                    app = modal.App.lookup(args.app_name, create_if_missing=True)
 
-            print(f"Creating sandbox in app {args.app_name!r} with vm_runtime=True", flush=True)
-            sandbox = modal.Sandbox.create(
-                image=image,
-                app=app,
-                timeout=_SANDBOX_TIMEOUT_SECONDS,
-                cpu=4.0,
-                memory=8 * 1024,
-                # Inject the depot credentials + builder override (when enabled)
-                # so the in-sandbox `mngr create` builds the FCT container via
-                # depot. Empty list = the default docker builder.
-                secrets=[depot_secret] if depot_secret is not None else [],
-                # The whole point of this script: opt in to Modal's VM runtime so
-                # Docker-in-sandbox state survives snapshot_filesystem(). vm_runtime
-                # is now generally available on Modal. We still scope it to this
-                # snapshot workflow rather than flipping the general mngr_modal
-                # provider over to it, since the rest of mngr does not need a true
-                # VM and we don't want to change that behavior as a side effect.
-                experimental_options={"vm_runtime": True},
-            )
+                    print(f"Creating sandbox in app {args.app_name!r} with vm_runtime=True", flush=True)
+                    sandbox = modal.Sandbox.create(
+                        image=image,
+                        app=app,
+                        timeout=_SANDBOX_TIMEOUT_SECONDS,
+                        cpu=4.0,
+                        memory=8 * 1024,
+                        # Inject the depot credentials + builder override (when enabled)
+                        # so the in-sandbox `mngr create` builds the FCT container via
+                        # depot. Empty list = the default docker builder.
+                        secrets=[depot_secret] if depot_secret is not None else [],
+                        # The whole point of this script: opt in to Modal's VM runtime so
+                        # Docker-in-sandbox state survives snapshot_filesystem(). vm_runtime
+                        # is now generally available on Modal. We still scope it to this
+                        # snapshot workflow rather than flipping the general mngr_modal
+                        # provider over to it, since the rest of mngr does not need a true
+                        # VM and we don't want to change that behavior as a side effect.
+                        experimental_options={"vm_runtime": True},
+                    )
 
-        _run_sandbox_workflow(sandbox, args, is_depot_enabled=is_depot_enabled)
+            _run_sandbox_workflow(sandbox, args, is_depot_enabled=is_depot_enabled)
+        finally:
+            _print_phase_timing_summary()
 
 
 def _run_sandbox_workflow(sandbox: modal.Sandbox, args: argparse.Namespace, *, is_depot_enabled: bool) -> None:
     """Bring up dockerd, optionally create the workspace, snapshot, clean up."""
     try:
         print(f"Sandbox {sandbox.object_id} created.", flush=True)
-        _start_dockerd(sandbox)
+        with _timed_phase("start dockerd"):
+            _start_dockerd(sandbox)
         # When depot is enabled, confirm the CLI resolves before the build so a
         # missing binary fails loudly instead of silently building locally.
         if is_depot_enabled:
@@ -701,8 +735,12 @@ def _run_sandbox_workflow(sandbox: modal.Sandbox, args: argparse.Namespace, *, i
                 flush=True,
             )
         else:
-            _create_workspace_in_sandbox(sandbox)
-        snapshot_image_id = _snapshot_sandbox(sandbox)
+            # This phase contains the FCT container build (depot or docker), so its
+            # duration is the headline number for the depot-vs-docker comparison.
+            with _timed_phase("create workspace (incl. FCT container build)"):
+                _create_workspace_in_sandbox(sandbox)
+        with _timed_phase("snapshot filesystem"):
+            snapshot_image_id = _snapshot_sandbox(sandbox)
         # Write the bare image id for CI consumption before printing the
         # human-facing hint, so a downstream job can read it from a known
         # path. Done inside the try so the file only appears when the
