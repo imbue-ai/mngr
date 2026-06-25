@@ -8,8 +8,8 @@
 
     - default: a 1px dashed neutral outline (``outline-1 outline-dashed
       outline-strong``);
-    - selected: a 2px solid accent (blue) outline + a faint accent tint, via
-      the ``aria-checked:`` variants (so the JS only toggles the attribute, no
+    - selected: a 2px solid accent (blue) outline (no fill tint), via the
+      ``aria-checked:`` variants (so the JS only toggles the attribute, no
       class bookkeeping);
     - hover: lifts up 1px (``-translate-y-px``) with ``shadow-raised``;
       pressing settles it back down (``active:translate-y-0``) and scales to
@@ -36,7 +36,7 @@
   Any other HTML attribute (id=, data-*, aria-label=) flows through via
   JinjaX's ``attrs`` passthrough.
 #}
-{%- set _base = "flex flex-col gap-2 p-4 text-left cursor-pointer rounded-lg bg-surface-primary outline-1 outline-dashed outline-strong transition-all duration-150 ease-out hover:-translate-y-px hover:shadow-raised active:translate-y-0 active:scale-[0.99] aria-checked:outline-2 aria-checked:outline-solid aria-checked:outline-accent aria-checked:bg-accent/5" -%}
+{%- set _base = "flex flex-col gap-2 p-4 text-left cursor-pointer rounded-lg bg-surface-primary outline-1 outline-dashed outline-strong transition-all duration-150 ease-out hover:-translate-y-px hover:shadow-raised active:translate-y-0 active:scale-[0.99] aria-checked:outline-2 aria-checked:outline-solid aria-checked:outline-accent" -%}
 <button {{ attrs.render(
   type="button",
   role="radio",

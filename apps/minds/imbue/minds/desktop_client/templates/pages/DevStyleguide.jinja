@@ -1005,7 +1005,7 @@
         Selectable card used by the create page's "where to run" presets.
         Selection is driven by ``aria-checked`` (styled with Tailwind
         ``aria-checked:`` variants -- a 1px dashed neutral outline by default, a
-        2px solid accent outline + faint tint when selected); the outline grows
+        2px solid accent outline (no fill tint) when selected); the outline grows
         without shifting layout, eased by ``transition-all``. Hover lifts the
         card up 1px with ``shadow-raised``; pressing settles it back down and
         shrinks it to 0.99. One card per row is checked.
@@ -1013,7 +1013,7 @@
       <div class="flex gap-4 items-stretch" role="radiogroup" aria-label="Preset card demo">
         <PresetCard preset="demo-a" selected extra="flex-1">
           <span class="type-heading text-primary">Selected</span>
-          <span class="type-body text-secondary">aria-checked="true" -- accent outline + tint.</span>
+          <span class="type-body text-secondary">aria-checked="true" -- accent outline, no tint.</span>
         </PresetCard>
         <PresetCard preset="demo-b" extra="flex-1">
           <span class="type-heading text-primary">Unselected</span>
