@@ -10,7 +10,7 @@ from imbue.minds.desktop_client import templates as _templates_module
 from imbue.minds.desktop_client.templates import CATALOG
 from imbue.minds.desktop_client.templates import DEFAULT_EXPECTED_CREATION_DURATION_SECONDS
 from imbue.minds.desktop_client.templates import expected_creation_duration_seconds
-from imbue.minds.desktop_client.templates import pick_next_mind_host_name
+from imbue.minds.desktop_client.templates import make_unique_host_name
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
@@ -376,7 +376,7 @@ def test_render_create_form_default_preset_is_remote_with_account() -> None:
     assert 'aria-checked="false"' in _preset_card_tag(html, "local")
     # Selection styling is driven by the aria-checked Tailwind variant on the
     # PresetCard, not a server-toggled class.
-    assert "aria-checked:border-accent" in html
+    assert "aria-checked:outline-accent" in html
 
 
 def test_render_create_form_start_advanced_opens_advanced_view() -> None:
@@ -486,6 +486,15 @@ def test_resolve_create_host_name_honors_operator_override_when_opted_in(monkeyp
     assert str(resolve_create_host_name("")) == "mindtest"
 
 
+def test_resolve_create_host_name_uniquifies_operator_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    # In dev the pinned name is shared by every create; once it is taken, the
+    # override is uniquified instead of colliding and failing.
+    monkeypatch.setenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", "1")
+    monkeypatch.setenv("MINDS_WORKSPACE_NAME", "mindtest")
+    assert str(resolve_create_host_name("", {"mindtest"})) == "mindtest-2"
+    assert str(resolve_create_host_name("", {"mindtest", "mindtest-2"})) == "mindtest-3"
+
+
 def test_resolve_create_host_name_ignores_operator_override_without_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
     # Without the opt-in, a stray MINDS_WORKSPACE_NAME is ignored and a
     # ``mind-N`` name is generated instead.
@@ -494,25 +503,37 @@ def test_resolve_create_host_name_ignores_operator_override_without_opt_in(monke
     assert str(resolve_create_host_name("")) == "mind-1"
 
 
-def test_pick_next_mind_host_name_empty_is_one() -> None:
-    assert str(pick_next_mind_host_name(set())) == "mind-1"
+def test_make_unique_host_name_numbered_empty_is_one() -> None:
+    assert str(make_unique_host_name("mind", set(), always_number=True)) == "mind-1"
 
 
-def test_pick_next_mind_host_name_increments_past_used() -> None:
-    assert str(pick_next_mind_host_name({"mind-1", "mind-2", "mind-3"})) == "mind-4"
+def test_make_unique_host_name_numbered_increments_past_used() -> None:
+    assert str(make_unique_host_name("mind", {"mind-1", "mind-2", "mind-3"}, always_number=True)) == "mind-4"
 
 
-def test_pick_next_mind_host_name_reuses_lowest_gap() -> None:
+def test_make_unique_host_name_numbered_reuses_lowest_gap() -> None:
     # A destroyed ``mind-2`` leaves a gap that is filled before climbing higher.
-    assert str(pick_next_mind_host_name({"mind-1", "mind-3"})) == "mind-2"
+    assert str(make_unique_host_name("mind", {"mind-1", "mind-3"}, always_number=True)) == "mind-2"
 
 
-def test_pick_next_mind_host_name_ignores_non_numeric_and_padded_suffixes() -> None:
+def test_make_unique_host_name_numbered_ignores_non_canonical_suffixes() -> None:
     # Names that merely start with ``mind-`` but are not a canonical positive
-    # integer (a coolname, a zero-padded number, ``mind-0``) do not count as
-    # taking a slot, and unrelated names are ignored entirely.
+    # integer (a coolname, a zero-padded number, ``mind-0``) do not take the
+    # ``mind-1`` slot, and unrelated names are ignored entirely.
     existing = {"mind-foo", "mind-01", "mind-0", "brave-cool-otter", "mindful"}
-    assert str(pick_next_mind_host_name(existing)) == "mind-1"
+    assert str(make_unique_host_name("mind", existing, always_number=True)) == "mind-1"
+
+
+def test_make_unique_host_name_bare_when_free() -> None:
+    assert str(make_unique_host_name("mindtest", set())) == "mindtest"
+    assert str(make_unique_host_name("mindtest", {"other"})) == "mindtest"
+
+
+def test_make_unique_host_name_bare_then_numbered_from_two() -> None:
+    # When the bare base is taken, suffixes start at 2 (so the bare name reads
+    # as the "first").
+    assert str(make_unique_host_name("mindtest", {"mindtest"})) == "mindtest-2"
+    assert str(make_unique_host_name("mindtest", {"mindtest", "mindtest-2"})) == "mindtest-3"
 
 
 def test_render_login_page_shows_prompt() -> None:

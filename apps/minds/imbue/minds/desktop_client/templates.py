@@ -289,36 +289,39 @@ def _operator_workspace_default(env_var: str, fallback: str) -> str:
     return os.environ.get(env_var, fallback)
 
 
-# Prefix for auto-generated workspace host names: ``mind-1``, ``mind-2``, ...
-_AUTO_HOST_NAME_PREFIX: Final[str] = "mind-"
+# Base for auto-generated workspace host names. The generic default is never
+# used bare -- it is always numbered (``mind-1``, ``mind-2``, ...). An operator
+# override is used bare when free, then numbered (``mindtest``, ``mindtest-2``).
+_DEFAULT_HOST_NAME_BASE: Final[str] = "mind"
 
 
 @pure
-def pick_next_mind_host_name(existing_host_names: Collection[str]) -> HostName:
-    """Pick the next ``mind-N`` host name not already in ``existing_host_names``.
+def make_unique_host_name(base: str, existing_host_names: Collection[str], *, always_number: bool = False) -> HostName:
+    """Return a host name derived from ``base`` that avoids ``existing_host_names``.
 
     ``existing_host_names`` is the set of host names already in use across every
-    provider (the create handler gathers it from the discovery snapshot). This
-    scans it for names shaped ``mind-<positive int>`` and returns ``mind-N`` for
-    the smallest positive ``N`` that is free -- so a gap left by a destroyed
+    provider (the create handler gathers it from the discovery snapshot).
+
+    With ``always_number`` False, ``base`` is returned as-is when free, else the
+    smallest free ``base-2``, ``base-3``, ... -- so an operator override pins a
+    readable name (``mindtest``) yet repeated dev creates that all share it don't
+    collide (``mindtest-2``, ``mindtest-3``, ...).
+
+    With ``always_number`` True, ``base`` is never used bare: the smallest free
+    ``base-1``, ``base-2``, ... is returned. This is the generic default's
+    scheme, which has no bare ``mind`` form; a gap left by a destroyed
     ``mind-2`` is reused before climbing to ``mind-4``.
 
-    Only canonical, non-zero-padded positive integers count as taken; a name
-    that merely starts with ``mind-`` but whose suffix is not such an integer
-    (e.g. ``mind-foo`` or ``mind-01``) does not participate, since the generator
-    never produces those forms.
+    Raises ``InvalidName`` if the chosen name is not a valid ``HostName`` (i.e.
+    ``base`` itself is invalid); appending ``-N`` to a valid base stays valid.
     """
-    used_numbers: set[int] = set()
-    for name in existing_host_names:
-        if not name.startswith(_AUTO_HOST_NAME_PREFIX):
-            continue
-        suffix = name[len(_AUTO_HOST_NAME_PREFIX) :]
-        if suffix.isdigit() and not suffix.startswith("0"):
-            used_numbers.add(int(suffix))
-    n = 1
-    while n in used_numbers:
+    existing = set(existing_host_names)
+    if not always_number and base not in existing:
+        return HostName(base)
+    n = 1 if always_number else 2
+    while f"{base}-{n}" in existing:
         n += 1
-    return HostName(f"{_AUTO_HOST_NAME_PREFIX}{n}")
+    return HostName(f"{base}-{n}")
 
 
 def resolve_create_host_name(submitted_host_name: str, existing_host_names: Collection[str] = ()) -> HostName:
@@ -327,12 +330,17 @@ def resolve_create_host_name(submitted_host_name: str, existing_host_names: Coll
     The create form no longer asks for a name; it is chosen automatically.
     Resolution order:
 
-    1. the user-submitted name, if any (validated as a ``HostName``);
-    2. the operator override ``MINDS_WORKSPACE_NAME``, honored only under
-       the explicit opt-in (see ``_operator_workspace_default``) -- this is
-       how ``just minds-start`` / the e2e runner pin a known name;
-    3. the next free ``mind-N`` name, where ``N`` is the smallest positive
-       integer whose ``mind-N`` is not already in ``existing_host_names``.
+    1. the user-submitted name, if any, used verbatim (validated as a
+       ``HostName``) -- an explicit collision is the API's 409 to reject, not
+       ours to silently rename;
+    2. the operator override ``MINDS_WORKSPACE_NAME``, honored only under the
+       explicit opt-in (see ``_operator_workspace_default``) -- this is how
+       ``just minds-start`` / the e2e runner pin a known name. It is uniquified
+       against ``existing_host_names`` so repeated dev creates that all share
+       the one pinned name don't collide and fail (``mindtest`` then
+       ``mindtest-2``, ...);
+    3. the next free ``mind-N`` name (smallest positive ``N`` whose ``mind-N``
+       is not already in ``existing_host_names``).
 
     Raises ``InvalidName`` if a non-empty submitted or operator name is not
     a valid host name; the generated fallback is always valid.
@@ -341,8 +349,8 @@ def resolve_create_host_name(submitted_host_name: str, existing_host_names: Coll
         return HostName(submitted_host_name)
     operator_name = _operator_workspace_default("MINDS_WORKSPACE_NAME", "")
     if operator_name:
-        return HostName(operator_name)
-    return pick_next_mind_host_name(existing_host_names)
+        return make_unique_host_name(operator_name, existing_host_names)
+    return make_unique_host_name(_DEFAULT_HOST_NAME_BASE, existing_host_names, always_number=True)
 
 
 @pure
