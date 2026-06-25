@@ -103,7 +103,8 @@ def test_fresh_event_stays_healthy_even_when_full_snapshot_is_stale() -> None:
     watchdog, transitions = _make_watchdog(clock, remediator)
 
     clock.advance(120)
-    watchdog.evaluate(clock())  # event is fresh (now), regardless of snapshot age
+    # The event is fresh (now), regardless of how old the full snapshot is.
+    watchdog.evaluate(clock())
 
     assert watchdog.get_health() is DiscoveryHealth.HEALTHY
     assert remediator.calls == []
@@ -176,10 +177,12 @@ def test_supervisor_that_never_comes_up_still_remediates_via_freshness_grace() -
     remediator = _FakeRemediator(alive=False)
     watchdog, _transitions = _make_watchdog(clock, remediator)
 
-    watchdog.evaluate(None)  # anchor the baseline, within grace
+    # Anchor the baseline, within grace.
+    watchdog.evaluate(None)
     assert remediator.calls == []
     clock.advance(40)
-    watchdog.evaluate(None)  # past grace -> freshness backstop kicks off remediation
+    # Past grace -> the freshness backstop kicks off remediation.
+    watchdog.evaluate(None)
     assert watchdog.get_health() is DiscoveryHealth.RECONNECTING
     assert remediator.calls == ["bounce"]
 
@@ -224,7 +227,8 @@ def test_failed_restart_does_not_block_and_keeps_retrying() -> None:
     watchdog, transitions = _make_watchdog(clock, remediator)
 
     clock.advance(40)
-    watchdog.evaluate(_T0)  # bounce
+    # First stalled evaluate enters RECONNECTING and bounces.
+    watchdog.evaluate(_T0)
     assert remediator.calls == ["bounce"]
 
     # The restart runs and raises. A failed restart is just another "did not
@@ -249,7 +253,8 @@ def test_recovery_mid_remediation_returns_to_healthy_and_resets() -> None:
     watchdog, transitions = _make_watchdog(clock, remediator)
 
     clock.advance(40)
-    watchdog.evaluate(_T0)  # bounce, RECONNECTING
+    # Enter RECONNECTING and bounce.
+    watchdog.evaluate(_T0)
     assert watchdog.get_health() is DiscoveryHealth.RECONNECTING
 
     # A fresh event (stamped at the current time) restores health and resets the
@@ -351,11 +356,14 @@ def test_cold_start_that_never_recovers_keeps_retrying_without_blocking() -> Non
     # reaches a terminal BLOCKED (only consumer death does that).
     watchdog.evaluate(None)
     clock.advance(40)
-    watchdog.evaluate(None)  # bounce
+    # bounce
+    watchdog.evaluate(None)
     clock.advance(_REMEDIATION_WAIT_SECONDS)
-    watchdog.evaluate(None)  # restart #1 (15s wait)
+    # first restart, after the 15s base wait
+    watchdog.evaluate(None)
     clock.advance(2 * _REMEDIATION_WAIT_SECONDS)
-    watchdog.evaluate(None)  # restart #2 (30s wait)
+    # second restart, after the doubled 30s wait
+    watchdog.evaluate(None)
 
     assert remediator.calls == ["bounce", "restart", "restart"]
     assert watchdog.get_health() is DiscoveryHealth.RECONNECTING
