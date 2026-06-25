@@ -5,6 +5,9 @@
   accounts get a "Change password" link to the forgot-password flow. Every
   variant has a Sign out button that POSTs to /auth/api/signout and
   redirects home.
+
+  The per-machine error-reporting toggles live on the app-level Settings page
+  (/settings), not here.
 #}
 {% set _scripts %}
 <script>
@@ -35,6 +38,7 @@
     <span class="type-body text-secondary">User ID prefix</span>
     <span class="text-primary font-mono type-label">{{ user_id_prefix }}</span>
   </div>
+
   <div class="mt-6 flex flex-col gap-2">
     {% if provider == 'email' %}
       <ButtonLink href="/auth/forgot-password" variant="secondary" size="lg" block>Change password</ButtonLink>
