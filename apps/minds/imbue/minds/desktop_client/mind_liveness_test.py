@@ -9,9 +9,9 @@ from imbue.minds.desktop_client.mind_liveness import classify_host_state
 from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
 from imbue.minds.desktop_client.mind_liveness import get_resume_capable_workspace_agent_ids
 from imbue.minds.desktop_client.mind_liveness import get_shutdown_capable_workspace_agent_ids
-from imbue.minds.desktop_client.mind_liveness import provider_backend_suppresses_recovery_auto_restart
 from imbue.minds.desktop_client.mind_liveness import provider_backend_supports_resume
 from imbue.minds.desktop_client.mind_liveness import provider_backend_supports_shutdown
+from imbue.minds.desktop_client.mind_liveness import provider_backend_suppresses_recovery_auto_restart
 from imbue.minds.desktop_client.mind_liveness import resolve_agent_backend
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import make_discovered_provider
