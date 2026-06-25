@@ -1,0 +1,43 @@
+# Diagnostic (issue #2223): measure whether offload's two serial test-discovery
+# passes (`all` + `flaky` groups) would go faster run in PARALLEL, on the real
+# GHA runner (same class as test-offload). Discovery is `pytest --collect-only`
+# which a Modal probe showed is ~93% CPU-bound and single-threaded, so on a
+# 4-vCPU runner two passes should overlap. This confirms it end-to-end.
+#
+# TEMPORARY -- delete before merging the #2223 work.
+name: discovery-ab
+on:
+  push:
+    branches: [mngr/instrument-pytest-phase-timing]
+  workflow_dispatch:
+
+jobs:
+  discovery-ab:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+      - name: Install Python dependencies
+        run: uv sync --all-packages
+      - name: Discovery serial-vs-parallel A/B
+        run: |
+          set -uo pipefail
+          ALL="not acceptance and not release and not flaky and not sdk_live and not minds_deployment and not minds_services and not minds_snapshot_resume"
+          FLAKY="flaky and not acceptance and not release and not sdk_live and not minds_deployment and not minds_services and not minds_snapshot_resume"
+          co() { uv run pytest --collect-only -q -m "$1" >/dev/null 2>&1; }
+          drop() { sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches' 2>/dev/null || echo "(drop_caches unavailable)"; }
+          echo "nproc=$(nproc)"
+          echo "::group::warmup"; co "$ALL"; co "$FLAKY"; echo "::endgroup::"
+          # Warm disk -> isolates the CPU-bound parallelization question.
+          echo "=== WARM SERIAL (all; flaky) ===";          time ( co "$ALL"; co "$FLAKY" )
+          echo "=== WARM PARALLEL (all & flaky & wait) ==="; time ( co "$ALL" & co "$FLAKY" & wait )
+          # Cold disk (drop page cache) -> mimics a fresh runner's first discovery.
+          drop; echo "=== COLD SERIAL ===";   time ( co "$ALL"; co "$FLAKY" )
+          drop; echo "=== COLD PARALLEL ==="; time ( co "$ALL" & co "$FLAKY" & wait )
