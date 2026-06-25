@@ -764,6 +764,9 @@ jobs:
               echo "=== curl web-server (port 8080) from VM ==="
               "$LIMA" shell "$VM" -- curl -s -m 5 -o /dev/null -w 'http_code=%{http_code} time=%{time_total}\n' http://localhost:8080/ 2>&1 | head -2
               echo
+              echo "=== /diag/threads (all thread stacks -- shows WHERE the watcher poll thread is blocked) ==="
+              "$LIMA" shell "$VM" -- curl -s -m 8 http://localhost:8000/diag/threads 2>&1 | tail -200
+              echo
               echo "=== HANG WATCHDOG thread dump (diag branch writes /tmp/system_interface_hang_dump.txt) ==="
               "$LIMA" shell "$VM" -- sudo cat /tmp/system_interface_hang_dump.txt 2>&1 | tail -200
               echo
