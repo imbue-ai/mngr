@@ -34,6 +34,7 @@ from imbue.mngr_latchkey.core import _log_gateway_output_line
 from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.discovery import _LatchkeyStateChangeHandler
+from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
 from imbue.mngr_latchkey.remote_gateway import RemoteGatewayError
 from imbue.mngr_latchkey.remote_gateway import local_credentials_path
 from imbue.mngr_latchkey.store import admin_permissions_path
@@ -1238,7 +1239,9 @@ def _make_fake_latchkey_binary_with_ensure_browser_counter(tmp_path: Path, count
         "    sys.exit(0)\n"
         'if sys.argv[1] == "ensure-browser":\n'
         "    counter_path = os.environ['FAKE_LATCHKEY_COUNTER']\n"
-        "    open(counter_path, 'a').write('1\\n')\n"
+        # Record the encryption key the child was spawned with so the test can
+        # confirm it was injected (otherwise Latchkey would consult the keychain).
+        "    open(counter_path, 'a').write(os.environ.get('LATCHKEY_ENCRYPTION_KEY', '') + '\\n')\n"
         "    sys.exit(0)\n"
         'if sys.argv[1:3] == ["gateway", "create-jwt"]:\n'
         "    args = [a for a in sys.argv[3:] if not a.startswith('--')]\n"
@@ -1273,6 +1276,8 @@ def _wait_for_counter(counter_path: Path, expected: int, timeout: float = 5.0) -
 def test_ensure_browser_runs_once_on_first_spawn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     counter_path = tmp_path / "ensure_browser_counter"
     monkeypatch.setenv("FAKE_LATCHKEY_COUNTER", str(counter_path))
+    # Clear any operator-set key so the per-directory key is the one injected.
+    monkeypatch.delenv("LATCHKEY_ENCRYPTION_KEY", raising=False)
     fake_binary = _make_fake_latchkey_binary_with_ensure_browser_counter(tmp_path, counter_path)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
@@ -1285,6 +1290,11 @@ def test_ensure_browser_runs_once_on_first_spawn(tmp_path: Path, monkeypatch: py
         assert _wait_for_counter(counter_path, expected=1) == 1
         # And a log file for ensure-browser got written in the minds data dir.
         assert ensure_browser_log_path(manager.plugin_data_dir).is_file()
+        # The ensure-browser child must have been handed the per-directory
+        # encryption key, so Latchkey never falls through to the system
+        # keychain (which on macOS pops a keychain access dialog).
+        ensure_browser_keys = counter_path.read_text().splitlines()
+        assert ensure_browser_keys == [load_or_create_encryption_key(tmp_path).get_secret_value()]
         manager.stop_gateway()
 
 

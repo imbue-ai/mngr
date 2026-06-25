@@ -17,6 +17,7 @@
     "test:e2e": "playwright test --config=test/e2e/playwright.config.js"
   },
   "dependencies": {
+    "@sentry/electron": "^7.13.0",
     "@todesktop/runtime": "^1.6.0",
     "latchkey": "^2.19.1"
   },

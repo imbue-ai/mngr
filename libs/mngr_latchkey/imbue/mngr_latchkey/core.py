@@ -48,6 +48,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr_latchkey._spawn import spawn_detached_latchkey_ensure_browser
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
+from imbue.mngr_latchkey.encryption_key import inject_encryption_key_into_env
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import default_permissions_path
@@ -323,20 +324,6 @@ def _parse_set_credentials_example(payload: Mapping[str, object], service_name: 
     return raw_example
 
 
-def _inject_encryption_key(env: dict[str, str], encryption_key: SecretStr | None) -> None:
-    """Set ``LATCHKEY_ENCRYPTION_KEY`` in ``env`` from the per-env key.
-
-    Operator's shell ``LATCHKEY_ENCRYPTION_KEY`` always wins (it's
-    already in ``env`` via ``dict(os.environ)``); the per-env key only
-    fills it in when the operator hasn't set one globally.
-    """
-    if encryption_key is None:
-        return
-    if env.get("LATCHKEY_ENCRYPTION_KEY"):
-        return
-    env["LATCHKEY_ENCRYPTION_KEY"] = encryption_key.get_secret_value()
-
-
 def _build_local_latchkey_env(
     latchkey_directory: Path | None,
     *,
@@ -354,7 +341,7 @@ def _build_local_latchkey_env(
     env.pop("LATCHKEY_GATEWAY", None)
     if latchkey_directory is not None:
         env["LATCHKEY_DIRECTORY"] = str(latchkey_directory)
-    _inject_encryption_key(env, encryption_key)
+    inject_encryption_key_into_env(env, encryption_key)
     return env
 
 
@@ -373,7 +360,7 @@ def _build_env_with_latchkey_directory(
     env = dict(os.environ)
     if latchkey_directory is not None:
         env["LATCHKEY_DIRECTORY"] = str(latchkey_directory)
-    _inject_encryption_key(env, encryption_key)
+    inject_encryption_key_into_env(env, encryption_key)
     return env
 
 
@@ -404,7 +391,7 @@ def _build_gateway_env(
     env["LATCHKEY_PERMISSIONS_CONFIG"] = str(permissions_config_path)
     env["LATCHKEY_GATEWAY_LISTEN_PASSWORD"] = listen_password
     env[_ENV_EXTENSION_PERMISSIONS_ROOT] = str(extension_permissions_root)
-    _inject_encryption_key(env, encryption_key)
+    inject_encryption_key_into_env(env, encryption_key)
     return env
 
 
@@ -1256,6 +1243,7 @@ class Latchkey(MutableModel):
                 latchkey_binary=self.latchkey_binary,
                 log_path=log_path,
                 latchkey_directory=self.latchkey_directory,
+                encryption_key=self._load_encryption_key(),
             )
         except OSError as e:
             logger.warning("Failed to spawn ``latchkey ensure-browser``: {}", e)

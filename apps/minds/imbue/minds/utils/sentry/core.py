@@ -40,6 +40,9 @@ from traceback_with_variables import Format
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.bootstrap import env_name_from_root_name
+from imbue.minds.bootstrap import is_minds_root_name_set_to_active_env
+from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.utils.sentry.loguru_handler import SENTRY_LOG_FORMAT
 from imbue.minds.utils.sentry.loguru_handler import SentryBreadcrumbHandler
 from imbue.minds.utils.sentry.loguru_handler import SentryEventHandler
@@ -112,6 +115,35 @@ _SENTRY_DSN_BY_ENVIRONMENT: Mapping["SentryDeployEnvironment", str] = {
     SentryDeployEnvironment.STAGING: SENTRY_DSN_STAGING,
     SentryDeployEnvironment.DEVELOPMENT: SENTRY_DSN_DEV,
 }
+
+
+# Sentry (backend *and* frontend) is off by default and only turned on when this
+# env var is truthy. The Electron launcher / operator opts in explicitly; until
+# then nothing is sent to Sentry from either the Python backend or the web UI.
+MINDS_SENTRY_ENABLED_ENV_VAR = "MINDS_SENTRY_ENABLED"
+_SENTRY_ENABLED_TRUTHY_VALUES = ("1", "true", "yes")
+
+
+def is_sentry_enabled() -> bool:
+    """Whether error reporting is opted in via ``MINDS_SENTRY_ENABLED``.
+
+    Shared by the Python backend (``minds run``) and the web-UI frontend config
+    so both honor the same single opt-in switch.
+    """
+    return os.environ.get(MINDS_SENTRY_ENABLED_ENV_VAR, "").strip().lower() in _SENTRY_ENABLED_TRUTHY_VALUES
+
+
+def resolve_sentry_environment() -> "SentryDeployEnvironment":
+    """Select the Sentry environment from the activated minds env in the process env.
+
+    ``production``/``staging`` map to their own targets; everything else (dev-*,
+    ci-*, or no activated env) falls back to ``development``. Shared by the
+    backend and the frontend so both report under the same environment.
+    """
+    activated_env_name = (
+        env_name_from_root_name(resolve_minds_root_name()) if is_minds_root_name_set_to_active_env() else None
+    )
+    return SentryDeployEnvironment.from_minds_env_name(activated_env_name)
 
 
 class SentryEventRejected(Exception):
@@ -485,7 +517,7 @@ def _before_send_wrapper(
         raise
 
 
-def _fixup_release_id(release_id: str) -> str:
+def fixup_release_id(release_id: str) -> str:
     """
     For pre-release release candidate versions, Sentry requires the release ID to be in the semver format.
 
@@ -556,7 +588,7 @@ def setup_sentry(
         max_value_length=10_000,
         add_full_stack=True,
         before_send=before_send,
-        release=_fixup_release_id(release_id),
+        release=fixup_release_id(release_id),
         # default is 100; can't make it too large because total event size must be <1MB
         max_breadcrumbs=100,
         # if the locals is very large, sentry gets to be quite slow to log errors if this is enabled.
