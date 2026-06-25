@@ -4,6 +4,137 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-24
+
+Removed the minds app's `postinstall` CSS-compile hook (it broke ToDesktop's `--prod` cloud install). To cover the one path that compiled CSS only as an install side-effect -- the `minds_electron` end-to-end test, which launches `electron main.js` directly rather than through `pnpm start` -- the CSS build is now wired in explicitly: a "Build Tailwind CSS for the e2e app" step in the CI e2e job, and a `minds-css` dependency on the `just minds-test-electron` recipe.
+
+`scripts/install.sh` now runs `mngr config wizard` as a final step to populate common user-scope configuration (e.g. whether to isolate the Claude config dir for local agents). Like the other steps, it prompts before changing anything and is safe to re-run.
+
+`scripts/push_vault_from_file.py` now writes each declared key as its own single-`value` leaf at `secrets/minds/<tier>/<service>/<KEY>` (the new "split" Vault secret layout) instead of a single flat KV entry with many fields.
+
+Added `scripts/remove_old_flat_vault_secrets.py`, a one-off cleanup tool that deletes the old flat per-service Vault entries for a tier (`secrets/minds/<tier>/<service>`) once they have been mirrored into the split layout. It refuses to delete any entry whose split mirror is missing or whose keys/values disagree, defaults to a dry-run, and requires `--yes` to actually delete.
+
+`scripts/changelog_deploy.sh` now reads its `GH_TOKEN` / `ANTHROPIC_API_KEY` from the split layout (`secrets/mngr/dev/github/GH_TOKEN` and `secrets/mngr/dev/anthropic/ANTHROPIC_API_KEY`, value under `.data.data.value`) instead of the old flat entries.
+
+## 2026-06-23
+
+Added the discovery-health-watchdog design doc (`blueprint/discovery-health-watchdog/plan-discovery-health-watchdog.md`): an app-global watchdog that detects a stalled or dead workspace-discovery pipeline (via snapshot-freshness age for a producer stall and the consumer's unexpected-exit signal), self-heals it with a cheap-to-heavy producer re-kick ladder (supervisor bounce, then restart), and surfaces a terminal app-level "blocked" recovery screen when self-healing is exhausted.
+
+Updated the remote-mind-recovery blueprint (`blueprint/remote-mind-recovery/plan-remote-mind-recovery.md`): collapsed the recovery page's redundant second sampler of host/provider state onto the passive discovery resolver, then revised the post-outage handling. Rather than a transient `REACHABILITY_UNCONFIRMED` recovery tier plus a client-side convergence loop, the redirect to the recovery page is now gated on fresh discovery, so the recovery page always classifies from trustworthy state. A further revision section collapses the two backend-unreachable tiers (`PROVIDER_UNAVAILABLE` / `WORKSPACE_UNREACHABLE`) into a single `BACKEND_UNREACHABLE` tier.
+
+Add the `traceback-with-variables` dependency to the workspace (used by the minds Sentry integration to format tracebacks with local variables), which updates the root `uv.lock`.
+
+Added a `just minds-start-cloud` recipe for launching the minds desktop client in dev mode to test the `imbue_cloud` provider against pre-baked pool slices.
+
+Unlike `just minds-start` (which targets local Lima/Docker dev and forces local-worktree create-form defaults), `minds-start-cloud` leaves the form's shipped fallbacks in place -- the canonical forever-claude-template remote plus `FALLBACK_BRANCH` -- so an `imbue_cloud` create matches and fast-path leases a slice baked at that tag instead of dropping to the slow rebuild path. It also skips the live-mngr to `vendor/mngr/` rsync, which is irrelevant to an already-baked pool slice.
+
+Added a `just backfill-pool-host-keys` recipe that wraps `minds pool backfill-host-keys` for the activated minds env -- the one-time SSH host-key backfill to run once per tier after deploying the host-key-pinning connector.
+
+Consolidated the docs describing how FCT's `vendor/mngr` is kept in sync, so the `git archive` (release) vs `rsync` (dev/bake) mechanisms are explained in one canonical place (`apps/minds/docs/vendor-mngr-sync.md`) instead of being re-described in each skill.
+
+Trimmed the duplicated rsync-form explanation out of the `minds-dev-workflow` skill and pointed the `minds-justfile` skill's `sync-vendor-mngr` entry at the canonical doc. Also corrected the `minds-dev-workflow` skill's "Editable installs" note to attribute `uv tool install -e` to `scripts/build_workspace.sh` (which the Dockerfile invokes) rather than the Dockerfile directly, and to name the actual mngr install target (`vendor/mngr/libs/mngr`).
+
+Added the implementation plan `blueprint/pin-imbue-cloud-host-keys/` for removing trust-on-first-use (TOFU) from the imbue_cloud pool flow by pinning all SSH host keys.
+
+Added an optional `fct` argument to the `just minds-start` recipe, letting you point a launch at a specific forever-claude-template worktree (the directory synced into `vendor/mngr/` and exported as `MINDS_WORKSPACE_GIT_URL`) instead of the fixed `.external_worktrees/forever-claude-template`. An absolute path is used as-is; a relative one is resolved against the mngr root. Omitting it keeps the previous default, so existing invocations are unchanged.
+
+Rewrote the `release-minds` skill to be a thin pointer to `apps/minds/docs/release.md`, the canonical release runbook, instead of describing its own (now-obsolete) release flow.
+
+The old skill assumed a `~/project/minds_prod` clone and a long-lived `minds_v<version>` release branch, and walked through a manual `vendor/mngr` sync — none of which matches the documented process (release from `main` via two PRs, `just sync-vendor-mngr`, and `minds-v<version>` tags on both repos). The skill now resolves the target version from its args and defers entirely to the runbook, so the release process is maintained in exactly one place.
+
+## 2026-06-22
+
+Renamed the `just minds-tailwind` recipe to `just minds-css`: it now compiles the minds desktop client's Tailwind v4 stylesheet (`static/app.css` -> minified `static/app.min.css`) via the pinned `@tailwindcss/cli`, instead of fetching the Tailwind Play CDN JS bundle. The `.gitignore` entry tracks the new compiled artifact (`app.min.css`) in place of the retired `tailwind.js`.
+
+- Added the design blueprint for handling unauthenticated providers consistently
+  under `blueprint/consistent-provider-auth-failures/`.
+
+- The `forward-system-interface` justfile recipe now resolves an agent's id with
+  `mngr list --on-error continue`, so an unauthenticated/unreachable provider no
+  longer aborts the lookup of a local agent.
+
+- Added the design blueprint for robust provider-error handling across minds
+  discovery and `mngr list` callers under
+  `blueprint/robust-minds-list-provider-errors/`.
+
+Added an implementation blueprint for the minds desktop client's FastAPI-to-Flask migration under `blueprint/minds-flask-migration/`.
+
+Added a `blueprint/` planning document (`blueprint/remove-system-interface-asyncio/`) capturing the implementation plan for migrating the Minds app's system interface off asyncio (FastAPI -> Flask + flask-sock, served by a threaded Werkzeug HTTP/1.1 server). The migration itself is implemented in the `forever-claude-template` repo, not in this monorepo.
+
+Added the design plan document for unifying the `mngr start` host lock with the cooperative host lock (`blueprint/unify-remote-host-lock/`). No runtime or tooling behavior changes at the repo-root level.
+
+## 2026-06-21
+
+- Added the design blueprint for the sshd / agent restart-robustness work under
+  `blueprint/sshd-restart-robustness/`.
+
+Added the implementation plan for sharing a bare-metal slice box across developer environments under `blueprint/share-bare-metal-across-dev-envs/`.
+
+## 2026-06-20
+
+Removed the `bake-pool-host-{dev,prod}` justfile recipes (they baked OVH classic VPS pool hosts, now deprecated). Pool hosts are baked as bare-metal slices via the `bake-slice-{dev,prod}` recipes; `list-pool-hosts` and `destroy-pool-host` are unchanged and still cover legacy OVH VPS rows. The `minds-justfile` and `minds-dev-workflow` skill docs were updated to match (slice bakes are the documented path; OVH VPS baking is marked deprecated).
+
+## 2026-06-19
+
+Added a design doc for extending minds' workspace-recovery flow to remote (Imbue Cloud) minds: a blueprint plan under `blueprint/remote-mind-recovery/`. No build/tooling behavior change.
+
+Added `specs/bare-providers/` (spec.md + concise.md): a design proposal for
+running agents directly on a cloud VM with no Docker container, as a second
+config-selected shape of the aws/gcp/azure providers. Introduces a
+substrate-x-realizer architecture (a `HostRealizer` seam injected like the existing
+`VpsClient`) so "with Docker" vs "without Docker" becomes a reusable axis rather
+than a per-cloud class matrix, with a staged rollout that later folds
+local/docker/lima/ssh into the same grid. Also adds `specs/uncertainties.md` noting
+that the bare mode supersedes the "single mode of operation" framing in
+`specs/vps-docker-provider/spec.md`, and `specs/bare-providers/extraction_design.md`
+giving the implementation-level `HostRealizer` seam contract, state-ownership
+split, host-record evolution, and per-method migration for Stage 1.
+
+Updated the root pytest coverage config to track the renamed `imbue.mngr_vps`
+package (was `imbue.mngr_vps_docker`).
+
+Registered the new `overlay` workspace library in the root `pyproject.toml`: added it as a `[tool.uv.sources]` workspace source, and added `--cov=imbue.overlay` to the shared coverage flags so the library is measured in the offload combined-coverage gate (and the `test_top_level_cov_flags_are_union_of_subproject_cov_flags` meta-ratchet stays satisfied).
+
+Added a new runtime dependency at the repo root (recorded in ``uv.lock``): ``google-cloud-storage>=2.18``, used by the GCP provider's new offline ``host_dir`` GCS state bucket. No top-level config or build tooling changes; the dependency is declared in ``libs/mngr_gcp/pyproject.toml`` and propagates to the lockfile.
+
+Removed a monorepo-development-only paragraph (the `~/.local/bin` pre-commit shim note) from the top-level README so the published PyPI README stays focused on user-relevant content.
+
+`make_cli_docs.py` now also generates the provider/agent config tables in each plugin README from the Pydantic field descriptions (the source of truth, also shown by `mngr config`), spliced between markers and verified by the docs `--check` gate so the tables can no longer drift from the code.
+
+The `regenerate-cli-docs` pre-commit hook now runs `make_cli_docs.py --check` (non-mutating, covering every generated file) instead of regenerating in place and diffing only the mngr command docs, and its trigger now includes the provider/agent `config.py` / `plugin.py` sources and generated provider READMEs. Previously, drift in the generated provider README tables could slip past the hook.
+
+The provider/agent config tables are rendered entirely from the model: each table only names its config class and which inherited base fields to also surface, and the field names, defaults, and descriptions are derived automatically (a small per-field override covers non-literal defaults like "gcloud/ADC default"). A field added to a config model now appears in its table automatically, so it can't silently vanish.
+
+Vendored `specs/provider-release-tests.md` (the common provider release-test suite proposal, originally authored in PR #2142) into the tree so the new provider release harness ships alongside the design doc its docstrings cite as the source of truth for the trip definitions and the still-owed future trips.
+
+## Provider specs: cross-provider review + prescriptive shape doc, accurate against current code
+
+Added a set of provider specs under `specs/` covering all nine `mngr` provider plugins (modal, aws, azure, gcp, vultr, ovh, lima, docker, ssh), then brought them into agreement with the `mngr/bare-providers` merge and verified every claim and citation against the current code. Common to all: the package/class rename (`mngr_vps_docker` -> `mngr_vps`, `VpsDockerProvider` -> `VpsProvider`, `VpsDockerHostRecord` -> `VpsHostRecord`, `VpsDockerHostStore` -> `VpsHostStore`, `VpsDockerError` -> `VpsError`, `MinimalVpsDockerProvider` -> `MinimalVpsProvider`) and the realizer/isolation architecture (a `HostRealizer` seam with `DockerRealizer` for `isolation=CONTAINER` and `BareRealizer` for `isolation=NONE`, selected by config). Citations are file+symbol (no line numbers, which rot on every refactor).
+
+- `specs/provider-uniformity-review.md` (descriptive current state): cross-provider review with a ranked findings table, six lifecycle matrices (create / stop / stop --stop-host / start / destroy / cleanup), a `CleanupFailedGroup` adoption matrix, defaults table, tag/label conventions, error-classification table, snapshot matrix, build-args table, test-coverage gaps, and a recommendations punch list. Re-ranked the findings (the `--stop-host` leak, Azure auto-shutdown billing, idle self-stop, and stopped-host visibility are now resolved for the cloud trio, open only for Vultr/OVH) and added an isolation/realizer section and the state-bucket discovery story. Corrected against current code: machine stop/start is layered via the base `OfflineCapableVpsProvider` plus per-cloud `_pause_cloud_instance`/`_resume_cloud_instance` hooks (no subclass `stop_host` overrides); curated `ProviderUnavailableError` help text is uniform across AWS/GCP/Azure and Modal raises `ProviderUnavailableError` on missing creds (both former findings resolved); dropped the removed agent-tag-mirror subsystem (`TagMirrorVpsProvider`, per-agent EC2 tags, agent caps) in favor of the required state bucket; `supports_snapshots` is realizer-class-derived (`isinstance(_realizer, SnapshotCapableRealizer)`); cloud-trio release coverage is the shared `run_provider_release_trip{1..4}` harness over CONTAINER and bare.
+
+- `specs/provider-shape.md` (prescriptive contract): what an `mngr` provider OUGHT to look like -- user contract (including the N-agents-per-host invariant), capability-flag honesty, shared defaults (security/CIDR, idle, auto-shutdown, resources, regions, sizes, images, tags, keys, exposure), lifecycle override hooks, error classification, operator commands, test requirements, anti-patterns, taxonomy table, implementer checklist, and open design questions (MUST/SHOULD/MAY). Incorporated the realizer/isolation contract (bare isolation requires a real machine stop/start lifecycle or must reject `isolation=NONE` via `BareIsolationNotSupportedError`; bare placements are not snapshot-capable). Corrected against current code: all three clouds extend `OfflineCapableVpsProvider` directly (the removed agent-tag-mirror subsystem and `TagMirrorVpsProvider` are gone); offline reconstruction is backed by an external `HostStateStore` (required state bucket on AWS/Azure, GCE metadata on GCP) with no agent cap; the cloud-trio `allowed_ssh_cidrs` default is uniformly open `("0.0.0.0/0",)` with a warning (key-only SSH is the control; no AWS-vs-trio posture mismatch); curated `ProviderUnavailableError` help text is uniform across the trio. Split the anti-patterns into resolved (Azure auto-shutdown billing, `--stop-host` leave-VM-running on GCP/Azure, stopped-host discovery dropping providers, AWS/GCP default help text, Modal wrong-error-class on missing creds) and still-real (SSH `supports_shutdown_hosts` lie, `supports_volumes` True-but-`[]`, snapshot-arg no-op, Docker `0.0.0.0:22`, Modal underscore tags).
+
+- `specs/implementing-a-provider.md` (dev guide): walkthrough for adding a new provider plugin, organized around user-visible behaviors, plus a Common Gotchas section. Added the realizer-seam and isolation-mode guidance and refreshed the stop/start, capability-flag, N-agents, and cost-safety sections. Corrected against current code: the realizer factory is `_realizer_for_isolation` (not `_build_realizer`); all three clouds extend `OfflineCapableVpsProvider` directly (no `TagMirrorVpsProvider`); machine stop/start is via the `_pause_cloud_instance`/`_resume_cloud_instance` hooks; the idle-watcher machinery (`_create_shutdown_script`/`_install_idle_watcher`) lives in the base, not the AWS/Azure backends; `supports_snapshots` is realizer-class-derived; Modal/AWS/GCP credential errors are now contract-compliant; dropped the removed per-agent EC2 tag mirror and its agent cap.
+
+- `specs/provider-release-tests.md` (release-test proposal): originally proposed a common release-test suite of five multi-step "trips" (full lifecycle + sketchy kill + GC; second-agent-on-same-host; idle auto-shutdown; snapshot-survives-destroy; error classification). Since that proposal has landed, condensed the doc to a remaining-gaps tracker: the shared `run_provider_release_trip{1..4}` harness and the AWS/GCP/Azure coverage (parametrized over container and bare isolation) are cited as implemented, and the doc retains only the confirmed-open gaps (Vultr/OVH and Lima/Docker/SSH not on the harness, the N-agents Trip 1b, a standalone offline-host_dir trip, `supports_volumes` honesty, `--snapshot`-at-create on the VPS family, and the container-ingress probe).
+
+- `specs/cleanup-error-aggregation.md`: cite/naming refresh only (the core model is unchanged) -- VPS-family container teardown now lives behind `DockerRealizer.teardown_placement`, the already-gone helper is `is_vps_resource_already_gone`, and the provider count was corrected; left the separate local-docker `DockerHostStore` path untouched.
+
+- Documented Vault setup for pool/slice bakes in the `minds-dev-workflow` skill: bakes need an interactive `vault login -method=oidc`, the minds wrappers auto-apply the imbue HCP `VAULT_ADDR`/`VAULT_NAMESPACE` defaults (from `vault_reader.py`) so they work with just the token, and raw `vault`/`mngr imbue_cloud admin` commands need those two exported (a `127.0.0.1:8200` "connection refused" means a missing address, not a logged-out session).
+
+## 2026-06-18
+
+The `identify-*` skills (`identify-doc-code-disagreements`, `identify-inconsistencies`, `identify-outdated-docstrings`, `identify-style-issues`) now accept a `target_path` argument instead of a bare library name. You can scope them to a whole library (`libs/mngr` or just `mngr`) or to any subdirectory within one (e.g. `libs/mngr/imbue/mngr/cli`). Each skill resolves the scan scope and its containing library, gathers the containing library's context, and writes findings to the containing library's `_tasks/` folder.
+
+Added a new `identify-suspicious-edge-cases` skill that flags over-broad exception catches, fallback `else` branches, defensive guards, and unnecessary `| None` types under a given path.
+
+Add a design spec (`specs/provider-state-bucket/`) for giving the AWS and Azure providers a cloud object-storage bucket (S3 / Azure Blob) that holds mngr control-plane state, so a stopped instance's host record, agent metadata, and `host_dir` are all readable offline without hitting the 256-char EC2/VM tag-value limit.
+
+The spec covers: `prepare`/`cleanup` creating and tearing down the bucket plus a best-effort bucket-write identity (AWS IAM instance profile / Azure managed identity, provisioned when the `is_offline_host_dir_enabled` provider config field is on); moving the per-agent tag mirror into the bucket via the existing `persist_agent_data` / `list_persisted_agent_data_for_host` hooks; and an on-by-default `host_dir` offline volume backed by an on-box sync daemon (instance-push) read back through `get_volume_for_host()` -> `OfflineHostWithVolume`. GCP is intentionally out of scope (its per-instance metadata allowance is sufficient).
+
+Added `moto[s3]` to the root dev dependency group for in-memory S3 unit tests of the new AWS state bucket.
+
 ## 2026-06-17
 
 Added a design doc (`specs/agent-plugin-parity/capability-mixins.md`) proposing a code-derived agent capability taxonomy: capability mixins plus a registry that generates the parity matrix from the agent classes, replacing the hand-maintained table and guarding against doc/code drift.

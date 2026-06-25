@@ -1,3 +1,0 @@
-The `identify-*` skills (`identify-doc-code-disagreements`, `identify-inconsistencies`, `identify-outdated-docstrings`, `identify-style-issues`) now accept a `target_path` argument instead of a bare library name. You can scope them to a whole library (`libs/mngr` or just `mngr`) or to any subdirectory within one (e.g. `libs/mngr/imbue/mngr/cli`). Each skill resolves the scan scope and its containing library, gathers the containing library's context, and writes findings to the containing library's `_tasks/` folder.
-
-Added a new `identify-suspicious-edge-cases` skill that flags over-broad exception catches, fallback `else` branches, defensive guards, and unnecessary `| None` types under a given path.

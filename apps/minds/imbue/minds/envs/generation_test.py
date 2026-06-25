@@ -24,6 +24,9 @@ from imbue.minds.envs.primitives import VaultReadError
 def _make_fake_vault_binary(
     tmp_path: Path,
     *,
+    list_stdout: str = '["MINDS_TIER_GENERATION_ID"]',
+    list_exit_code: int = 0,
+    list_stderr: str = "",
     get_stdout: str = "",
     get_exit_code: int = 0,
     get_stderr: str = "",
@@ -36,13 +39,19 @@ def _make_fake_vault_binary(
 
     Records every invocation to ``<tmp_path>/_calls.log`` so tests can
     assert on the argv. Each subcommand has its own canned stdout /
-    stderr / exit-code knob (``get_*`` for ``kv get``, ``put_*`` for
-    ``kv put``, ``delete_*`` for ``kv metadata delete``).
+    stderr / exit-code knob (``list_*`` for ``kv list``, ``get_*`` for
+    ``kv get``, ``put_*`` for ``kv put``, ``delete_*`` for ``kv metadata
+    delete``). The split-secret layout means a read is a ``kv list`` of the
+    service directory followed by a ``kv get`` per child leaf.
     """
+    list_stdout_path = tmp_path / "_list_stdout.txt"
+    list_stderr_path = tmp_path / "_list_stderr.txt"
     get_stdout_path = tmp_path / "_get_stdout.txt"
     get_stderr_path = tmp_path / "_get_stderr.txt"
     put_stderr_path = tmp_path / "_put_stderr.txt"
     delete_stderr_path = tmp_path / "_delete_stderr.txt"
+    list_stdout_path.write_text(list_stdout)
+    list_stderr_path.write_text(list_stderr)
     get_stdout_path.write_text(get_stdout)
     get_stderr_path.write_text(get_stderr)
     put_stderr_path.write_text(put_stderr)
@@ -53,7 +62,11 @@ def _make_fake_vault_binary(
     script.write_text(
         "#!/usr/bin/env bash\n"
         f'echo "$@" >> {log_path}\n'
-        'if [[ "$1" == "kv" && "$2" == "get" ]]; then\n'
+        'if [[ "$1" == "kv" && "$2" == "list" ]]; then\n'
+        f"  cat {list_stdout_path}\n"
+        f"  cat {list_stderr_path} >&2\n"
+        f"  exit {list_exit_code}\n"
+        'elif [[ "$1" == "kv" && "$2" == "get" ]]; then\n'
         f"  cat {get_stdout_path}\n"
         f"  cat {get_stderr_path} >&2\n"
         f"  exit {get_exit_code}\n"
@@ -82,13 +95,13 @@ def _root_cg() -> "Iterator[ConcurrencyGroup]":
         yield cg
 
 
-def _kv_get_payload(*, generation_id: str | None) -> str:
-    inner = {GENERATION_ID_KEY: generation_id} if generation_id is not None else {}
+def _leaf_get_payload(*, value: str | None) -> str:
+    inner = {"value": value} if value is not None else {}
     return json.dumps({"data": {"data": inner}})
 
 
 def test_read_generation_id_returns_value_when_present(tmp_path: Path, _root_cg: ConcurrencyGroup) -> None:
-    fake = _make_fake_vault_binary(tmp_path, get_stdout=_kv_get_payload(generation_id="gen-abc"))
+    fake = _make_fake_vault_binary(tmp_path, get_stdout=_leaf_get_payload(value="gen-abc"))
     result = read_generation_id(
         "secrets/minds/staging",
         parent_concurrency_group=_root_cg,
@@ -98,11 +111,12 @@ def test_read_generation_id_returns_value_when_present(tmp_path: Path, _root_cg:
 
 
 def test_read_generation_id_returns_none_when_entry_missing(tmp_path: Path, _root_cg: ConcurrencyGroup) -> None:
+    # The whole generation directory is absent -> `kv list` exits 2.
     fake = _make_fake_vault_binary(
         tmp_path,
-        get_stdout="",
-        get_exit_code=2,
-        get_stderr="No value found at secrets/data/minds/staging/generation",
+        list_stdout="{}",
+        list_exit_code=2,
+        list_stderr="No value found at secrets/metadata/minds/staging/generation",
     )
     assert (
         read_generation_id(
@@ -117,8 +131,8 @@ def test_read_generation_id_returns_none_when_entry_missing(tmp_path: Path, _roo
 def test_read_generation_id_returns_none_when_key_absent_from_entry(
     tmp_path: Path, _root_cg: ConcurrencyGroup
 ) -> None:
-    # The entry exists but has no MINDS_TIER_GENERATION_ID key.
-    fake = _make_fake_vault_binary(tmp_path, get_stdout=_kv_get_payload(generation_id=None))
+    # The directory exists but has no MINDS_TIER_GENERATION_ID leaf.
+    fake = _make_fake_vault_binary(tmp_path, list_stdout="[]")
     assert (
         read_generation_id(
             "secrets/minds/staging",
@@ -130,10 +144,12 @@ def test_read_generation_id_returns_none_when_key_absent_from_entry(
 
 
 def test_read_generation_id_propagates_unexpected_vault_error(tmp_path: Path, _root_cg: ConcurrencyGroup) -> None:
+    # A non-not-found failure (exit 1) on the list must propagate, not be
+    # swallowed as "absent".
     fake = _make_fake_vault_binary(
         tmp_path,
-        get_exit_code=2,
-        get_stderr="permission denied",
+        list_exit_code=1,
+        list_stderr="permission denied",
     )
     with pytest.raises(VaultReadError, match="permission denied"):
         read_generation_id(
@@ -146,7 +162,7 @@ def test_read_generation_id_propagates_unexpected_vault_error(tmp_path: Path, _r
 def test_ensure_generation_id_returns_existing_value_without_writing(
     tmp_path: Path, _root_cg: ConcurrencyGroup
 ) -> None:
-    fake = _make_fake_vault_binary(tmp_path, get_stdout=_kv_get_payload(generation_id="already-there"))
+    fake = _make_fake_vault_binary(tmp_path, get_stdout=_leaf_get_payload(value="already-there"))
     result = ensure_generation_id(
         "secrets/minds/staging",
         parent_concurrency_group=_root_cg,
@@ -160,8 +176,9 @@ def test_ensure_generation_id_returns_existing_value_without_writing(
 def test_ensure_generation_id_mints_and_writes_when_missing(tmp_path: Path, _root_cg: ConcurrencyGroup) -> None:
     fake = _make_fake_vault_binary(
         tmp_path,
-        get_exit_code=2,
-        get_stderr="No value found at secrets/data/minds/staging/generation",
+        list_stdout="{}",
+        list_exit_code=2,
+        list_stderr="No value found at secrets/metadata/minds/staging/generation",
     )
     result = ensure_generation_id(
         "secrets/minds/staging",
@@ -172,14 +189,18 @@ def test_ensure_generation_id_mints_and_writes_when_missing(tmp_path: Path, _roo
     assert re.fullmatch(r"[0-9a-f]{32}", result)
     calls = (tmp_path / "_calls.log").read_text()
     assert "kv put" in calls
-    assert f"{GENERATION_ID_KEY}={result}" in calls
+    # The generation id is now written as the `value` field of the
+    # `.../generation/MINDS_TIER_GENERATION_ID` leaf.
+    assert f"minds/staging/generation/{GENERATION_ID_KEY} value={result}" in calls
 
 
 def test_delete_generation_id_is_idempotent_on_missing_entry(tmp_path: Path, _root_cg: ConcurrencyGroup) -> None:
+    # The whole directory is gone -> `kv list` exits 2 -> nothing to delete.
     fake = _make_fake_vault_binary(
         tmp_path,
-        delete_exit_code=2,
-        delete_stderr="No value found at secrets/metadata/minds/staging/generation",
+        list_stdout="{}",
+        list_exit_code=2,
+        list_stderr="No value found at secrets/metadata/minds/staging/generation",
     )
     # Should not raise -- "not found" is treated as success.
     delete_generation_id(

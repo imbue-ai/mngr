@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-19
+
+Rewrote the README to be self-contained and user-facing, removing internal mngr references.
+
 ## 2026-06-15
 
 Fixed a flake where looking up a Modal function immediately after deploying it could fail with `NotFoundError`. The post-deploy lookup (`DirectFunction.get_web_url`) now retries with backoff on `NotFoundError`, riding through the brief deploy-then-lookup propagation delay instead of failing immediately.

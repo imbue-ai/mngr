@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: `[plugins.kanpan]`'s six dict fields (`commands`, `data_sources`, `shell_commands`, `columns`, `on_before_refresh`, `on_after_refresh`) no longer auto-union across config scopes (user < project < local). A higher-precedence scope assigns by default and raises the standard flag-gated settings-narrowing error when it would drop a lower-scope key. Use `__extend` to merge additively, or `key__assign` / `allow_settings_key_assignment_narrowing = true` to opt out of the guard. Purely additive cross-scope overrides still load unchanged.
+
 ## [v0.2.17] - 2026-06-18
 
 ## [v0.2.16] - 2026-06-16

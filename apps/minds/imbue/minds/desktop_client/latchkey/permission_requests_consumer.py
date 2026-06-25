@@ -175,16 +175,29 @@ class PermissionRequestsConsumer(MutableModel):
                 for streamed in self.gateway_client.iter_permission_requests():
                     if self._stop_event.is_set():
                         return
-                    event = streamed_request_to_event(streamed)
-                    # If ``on_request`` raises, the exception propagates
-                    # out through ``_run`` and is reported by
-                    # ``ObservableThread``'s top-level exception handler.
-                    # We intentionally do *not* catch broadly here: a
-                    # buggy callback should be loud rather than
-                    # silently dropped, and the consumer's reconnect
-                    # loop would only re-issue the same delivery on a
-                    # new stream.
-                    self.on_request(event)
+                    try:
+                        event = streamed_request_to_event(streamed)
+                        self.on_request(event)
+                    except Exception as e:
+                        # A single request the consumer cannot process must never
+                        # take down this thread: it is the request inbox's source
+                        # of truth, so an uncaught error here silently stops EVERY
+                        # future permission request -- for any agent or service --
+                        # from reaching the UI until restart (and re-crashes on the
+                        # same record on each reconnect). Log the failure with its
+                        # traceback and skip just this request. The gateway
+                        # validates request bodies up front (see
+                        # permission_requests.mjs), so this broad catch is a
+                        # defense-in-depth backstop for malformed/legacy records,
+                        # not the primary guard.
+                        logger.opt(exception=e).error(
+                            "Skipping a permission request the consumer could not process "
+                            "(request_id={}, agent_id={}): {}",
+                            streamed.request_id,
+                            streamed.agent_id,
+                            e,
+                        )
+                        continue
                     # Reset backoff after a successful delivery.
                     delay = _RECONNECT_MIN_DELAY_SECONDS
             except LatchkeyGatewayClientError as e:
