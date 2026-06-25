@@ -19,7 +19,7 @@
   "dependencies": {
     "@sentry/electron": "^7.13.0",
     "@todesktop/runtime": "^1.6.0",
-    "latchkey": "^2.17.2"
+    "latchkey": "^2.19.1"
   },
   "devDependencies": {
     "@tailwindcss/cli": "4.2.1",
