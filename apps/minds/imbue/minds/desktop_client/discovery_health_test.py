@@ -359,3 +359,29 @@ def test_cold_start_that_never_recovers_keeps_retrying_without_blocking() -> Non
 
     assert remediator.calls == ["bounce", "restart", "restart"]
     assert watchdog.get_health() is DiscoveryHealth.RECONNECTING
+
+
+def test_backoff_holds_at_cap_without_overflow_after_many_restarts() -> None:
+    # The watchdog retries forever, so the restart counter grows without bound.
+    # The backoff must hold at the cap and never overflow ``2.0 ** count`` (which
+    # raises OverflowError at count 1024 -- it is uncaught and would kill the
+    # watchdog thread). Drive the counter well past that threshold and assert the
+    # backoff stays at the cap and a stalled evaluate keeps remediating cleanly.
+    clock = _Clock(_T0)
+    remediator = _FakeRemediator()
+    watchdog, _transitions = _make_watchdog(clock, remediator)
+
+    watchdog._restart_count = 5000
+    watchdog._bounce_attempted = True
+    watchdog._last_remediation_at = clock()
+
+    # The current backoff is the cap, computed without overflowing the power.
+    assert watchdog._current_backoff_seconds() == _MAX_BACKOFF_SECONDS
+
+    # Once the cap elapses, a still-stalled evaluate fires another restart rather
+    # than raising; the counter advances and the backoff still holds at the cap.
+    clock.advance(_MAX_BACKOFF_SECONDS)
+    watchdog.evaluate(_T0)
+    assert remediator.calls == ["restart"]
+    assert watchdog.get_health() is DiscoveryHealth.RECONNECTING
+    assert watchdog._current_backoff_seconds() == _MAX_BACKOFF_SECONDS

@@ -60,6 +60,7 @@ State changes fire registered on-change callbacks, invoked outside the internal
 lock so they may take the FastAPI app's own locks without deadlocking.
 """
 
+import math
 import threading
 from abc import ABC
 from abc import abstractmethod
@@ -356,11 +357,26 @@ class DiscoveryHealthWatchdog(MutableModel):
         """Whether the current restart-backoff interval has elapsed (must hold ``_lock``)."""
         if self._last_remediation_at is None:
             return True
-        backoff = min(
-            self.remediation_wait_seconds * (2.0**self._restart_count),
+        backoff = self._current_backoff_seconds()
+        return (now - self._last_remediation_at).total_seconds() >= backoff
+
+    def _current_backoff_seconds(self) -> float:
+        """Current restart backoff: ``remediation_wait_seconds * 2 ** _restart_count`` capped at the ceiling.
+
+        The watchdog retries forever, so ``_restart_count`` grows without bound;
+        clamp the exponent before doubling so the power can never overflow once
+        the cap is already reached (``2.0 ** 1024`` raises ``OverflowError``).
+        Clamping leaves the observed schedule unchanged because any exponent at
+        or above the clamp already exceeds the cap.
+        """
+        if self.remediation_wait_seconds <= 0.0:
+            return self.max_remediation_backoff_seconds
+        exponent_at_cap = math.ceil(math.log2(self.max_remediation_backoff_seconds / self.remediation_wait_seconds))
+        capped_exponent = min(self._restart_count, max(exponent_at_cap, 0))
+        return min(
+            self.remediation_wait_seconds * (2.0**capped_exponent),
             self.max_remediation_backoff_seconds,
         )
-        return (now - self._last_remediation_at).total_seconds() >= backoff
 
     def _set_blocked(self) -> bool:
         """Force the terminal ``BLOCKED`` tier; return True if this call transitioned it."""
