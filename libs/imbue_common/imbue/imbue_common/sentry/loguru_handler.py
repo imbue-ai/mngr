@@ -40,7 +40,7 @@ from sentry_sdk.utils import current_stacktrace
 from sentry_sdk.utils import event_from_exception
 from sentry_sdk.utils import to_string
 
-from imbue.minds.utils.sentry.s3_uploader import EXTRAS_UPLOADED_FILES_KEY
+from imbue.imbue_common.sentry.s3_uploader import EXTRAS_UPLOADED_FILES_KEY
 
 # for formatting the log message. we don't want the timestamp/level because sentry already tracks that,
 # and it messes up event grouping since this string becomes the event title.

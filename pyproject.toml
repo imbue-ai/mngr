@@ -183,6 +183,11 @@ omit = [
     "*/utils/plugin_testing.py",
     "*/conftest_hooks.py",
     "*/ratchet_testing/*",
+    # Shared Sentry error-reporting machinery is mostly runtime integration glue
+    # (live sentry_sdk wiring, the custom HTTP transport's network paths, the
+    # threaded S3 uploader); its pure logic is unit-tested and the whole thing is
+    # exercised end-to-end by the processes that call setup_sentry.
+    "*/imbue_common/sentry/*",
     # Modal provider plugin requires network access for testing
     "libs/mngr_modal/imbue/mngr_modal/*",
     # Docker provider requires a Docker daemon for testing

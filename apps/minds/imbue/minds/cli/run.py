@@ -82,6 +82,8 @@ from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.output import emit_event
 from imbue.minds.utils.sentry.core import is_sentry_enabled
+from imbue.minds.utils.sentry.core import is_sentry_s3_upload_enabled
+from imbue.minds.utils.sentry.core import resolve_latchkey_forward_sentry_env
 from imbue.minds.utils.sentry.core import resolve_sentry_environment
 from imbue.minds.utils.sentry.core import setup_sentry
 from imbue.mngr.primitives import AgentId
@@ -197,17 +199,12 @@ def run(
     # launcher via env vars, falling back to the in-repo package.json / "unknown"
     # for bare source runs (see imbue.minds.build_info).
     if is_sentry_enabled():
-        is_sentry_s3_upload_enabled = os.environ.get("MINDS_SENTRY_S3_UPLOADS", "").strip().lower() in (
-            "1",
-            "true",
-            "yes",
-        )
         setup_sentry(
             environment=resolve_sentry_environment(),
             release_id=resolve_release_id(),
             git_commit_sha=resolve_git_sha(),
             log_folder=paths.log_dir,
-            is_s3_upload_enabled=is_sentry_s3_upload_enabled,
+            is_s3_upload_enabled=is_sentry_s3_upload_enabled(),
         )
     else:
         logger.info("Sentry is disabled (set MINDS_SENTRY_ENABLED=1 to enable error reporting).")
@@ -281,6 +278,9 @@ def run(
         extra_env={
             MINDS_API_PROXY_URL_ENV_VAR: f"http://127.0.0.1:{port}",
             MINDS_API_PROXY_KEY_ENV_VAR: minds_api_key,
+            # Publish minds' Sentry settings so the detached daemon inherits the
+            # opt-in + environment while reading only its own MNGR_LATCHKEY_* vars.
+            **resolve_latchkey_forward_sentry_env(),
         },
     )
 

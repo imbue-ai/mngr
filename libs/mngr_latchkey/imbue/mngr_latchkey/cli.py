@@ -36,6 +36,7 @@ from pydantic import ConfigDict
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.sentry.core import flush_sentry_on_shutdown
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -59,6 +60,7 @@ from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.discovery_stream import DiscoveryStreamConsumer
 from imbue.mngr_latchkey.forward_supervisor import is_forward_info_alive
+from imbue.mngr_latchkey.sentry import setup_forward_sentry
 from imbue.mngr_latchkey.store import LatchkeyForwardInfo
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import delete_forward_info
@@ -494,6 +496,13 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
     # dropping the gateway or any reverse tunnels.
     latchkey = _build_initialized_latchkey(mngr_ctx, opts.latchkey_directory, opts.latchkey_binary)
 
+    # Initialize Sentry for this long-running daemon now that ``setup_command_context``
+    # has wired up the loguru sinks and the latchkey paths are known. Off unless opted
+    # in via ``MNGR_LATCHKEY_SENTRY_*`` env vars (published by the minds desktop client,
+    # derived from its own Sentry settings). The daemon's structured + raw logs live
+    # flat in the plugin data dir, so that is the folder Sentry attaches log files from.
+    setup_forward_sentry(log_folder=latchkey.plugin_data_dir)
+
     # Refuse to start if another forward is already alive for this
     # latchkey directory; two forwards would fight over the same
     # reverse tunnels and produce a confusing stream of failures.
@@ -595,6 +604,10 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
         except LatchkeyError as e:
             logger.warning("Failed to stop shared Latchkey gateway during shutdown: {}", e)
         delete_forward_info(latchkey.plugin_data_dir)
+        # Flush any errors captured late in the session (no-op when Sentry was
+        # never set up). Kept last so a wedged Sentry/S3 endpoint cannot delay
+        # the gateway/tunnel teardown above.
+        flush_sentry_on_shutdown()
 
 
 class _ShutdownSignalHandler(FrozenModel):

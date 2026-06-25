@@ -16,12 +16,15 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
 ]
 dependencies = [
+    "boto3>=1.34",
     "click>=8.0",
     "cowsay-python>=1.0.2",
     "httpx>=0.27",
     "loguru>=0.7",
     "pydantic>=2.0",
+    "sentry-sdk>=2.59.0",
     "tenacity>=8.0",
+    "traceback-with-variables>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -71,6 +74,14 @@ omit = [
   # Test infrastructure modules are exercised by tests that use them
   "*/conftest_hooks.py",
   "*/ratchet_testing/*",
+  # The Sentry error-reporting machinery is mostly runtime integration glue
+  # (the live ``sentry_sdk.init`` wiring, the custom HTTP transport's network
+  # paths, and the threaded background S3 uploader) that needs a real Sentry
+  # client / network to exercise. Its pure logic (rate limiter, before_send
+  # chain, log-attachment grouping, env/DSN mapping) is unit-tested in the
+  # corresponding ``*_test.py`` files and exercised end-to-end by the minds
+  # and ``mngr latchkey forward`` processes that call ``setup_sentry``.
+  "*/imbue_common/sentry/*",
 ]
 
 [tool.inline-snapshot]
