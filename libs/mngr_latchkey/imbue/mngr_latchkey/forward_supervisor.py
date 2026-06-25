@@ -84,6 +84,110 @@ def _cmdline_looks_like_mngr_latchkey_forward(cmdline: list[str]) -> bool:
     return "latchkey" in remainder and "forward" in remainder
 
 
+def _cmdline_looks_like_mngr_observe(cmdline: list[str]) -> bool:
+    """Check whether a process's ``cmdline`` is the ``mngr observe`` discovery child.
+
+    ``mngr latchkey forward`` spawns its discovery producer as
+    ``mngr observe --discovery-only --quiet`` (see
+    :class:`DiscoveryStreamConsumer`). Token normalization mirrors
+    :func:`_cmdline_looks_like_mngr_latchkey_forward` so the proctitle-overwrite
+    shape is recognized too. ``--discovery-only`` is required so we never match
+    an unrelated ``mngr observe`` a user runs by hand.
+    """
+    tokens = " ".join(cmdline).split()
+    if not tokens:
+        return False
+    mngr_idx: int | None = None
+    for idx, arg in enumerate(tokens):
+        if arg == "mngr" or arg.endswith("/mngr"):
+            mngr_idx = idx
+            break
+    if mngr_idx is None:
+        return False
+    remainder = tokens[mngr_idx + 1 :]
+    return "observe" in remainder and "--discovery-only" in remainder
+
+
+def _forward_latchkey_directory(cmdline: list[str]) -> Path | None:
+    """Extract the ``--latchkey-directory`` value from a forward's ``cmdline``.
+
+    Returns the path the forward was launched against, or ``None`` when the flag
+    is absent. Used to scope duplicate-reaping to a single latchkey directory so
+    a supervisor for one profile never signals a forward for another (e.g.
+    ``.minds`` vs ``.minds-staging``). Token normalization matches
+    :func:`_cmdline_looks_like_mngr_latchkey_forward`, so it does not survive a
+    latchkey directory containing whitespace -- an accepted limitation shared by
+    that matcher (real latchkey directories never contain spaces).
+    """
+    tokens = " ".join(cmdline).split()
+    for idx, tok in enumerate(tokens):
+        if tok == "--latchkey-directory":
+            if idx + 1 < len(tokens):
+                return Path(tokens[idx + 1])
+            return None
+        if tok.startswith("--latchkey-directory="):
+            return Path(tok.split("=", 1)[1])
+    return None
+
+
+def _resolve_or_none(path: Path) -> Path | None:
+    """Resolve ``path`` for comparison, returning ``None`` if it cannot be resolved."""
+    try:
+        return path.resolve()
+    except OSError:
+        return None
+
+
+def _iter_matching_forward_pids(latchkey_directory: Path) -> list[int]:
+    """Return PIDs of every live ``mngr latchkey forward`` bound to ``latchkey_directory``.
+
+    Scans the process table for processes whose cmdline both looks like our
+    forward and carries a ``--latchkey-directory`` that resolves to the same
+    path. The resolved-path equality is the safety boundary: only forwards for
+    *this* latchkey directory are ever returned, so reaping cannot reach a
+    sibling profile's supervisor.
+    """
+    target = _resolve_or_none(latchkey_directory)
+    if target is None:
+        return []
+    pids: list[int] = []
+    for proc in psutil.process_iter():
+        try:
+            cmdline = proc.cmdline()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+        if not _cmdline_looks_like_mngr_latchkey_forward(cmdline):
+            continue
+        cmd_dir = _forward_latchkey_directory(cmdline)
+        if cmd_dir is None:
+            continue
+        if _resolve_or_none(cmd_dir) == target:
+            pids.append(proc.pid)
+    return pids
+
+
+def _observe_child_pids(forward_pid: int) -> list[int]:
+    """Return PIDs of the ``mngr observe`` discovery children under ``forward_pid``.
+
+    Captured *before* terminating a forward so a wedged forward that has to be
+    SIGKILLed (and therefore never runs its shutdown handler) does not leave its
+    observe child orphaned and still writing to the shared discovery events file.
+    """
+    try:
+        children = psutil.Process(forward_pid).children(recursive=True)
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        return []
+    pids: list[int] = []
+    for child in children:
+        try:
+            cmdline = child.cmdline()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+        if _cmdline_looks_like_mngr_observe(cmdline):
+            pids.append(child.pid)
+    return pids
+
+
 def is_forward_info_alive(info: LatchkeyForwardInfo) -> bool:
     """Verify that an info still corresponds to a running supervisor.
 
@@ -225,6 +329,15 @@ class LatchkeyForwardSupervisor(MutableModel):
           record is deleted and a fresh supervisor is spawned.
         * If no record exists, a fresh supervisor is spawned.
 
+        In every case, exactly one forward is left running for this
+        latchkey directory: any *other* ``mngr latchkey forward`` bound to
+        the same directory (a duplicate left by a prior or concurrent
+        embedder instance -- the cause of multiple discovery producers
+        racing on the shared events file) is reaped, along with its
+        ``mngr observe`` child. Only a forward matching the live on-disk
+        record is ever adopted; an unrecorded orphan is replaced rather
+        than adopted, since it may be running stale code or config.
+
         The on-disk record is written by the spawned forward process
         itself (in :func:`_forward_command`), not by this method. The
         returned :class:`LatchkeyForwardInfo` is therefore an
@@ -239,12 +352,11 @@ class LatchkeyForwardSupervisor(MutableModel):
         record_path = plugin_dir / "latchkey_forward.json"
         with self._lock:
             existing = load_forward_info(plugin_dir)
-            if existing is None:
-                logger.info(
-                    "No existing mngr latchkey forward record at {}; spawning a fresh supervisor",
-                    record_path,
-                )
-            elif is_forward_info_alive(existing):
+            if existing is not None and is_forward_info_alive(existing):
+                # Keep the recorded supervisor; reap any other forward bound
+                # to this latchkey directory (duplicates left by prior
+                # instances) so a single discovery observer survives.
+                self._reap_duplicate_forwards(keep_pid=existing.pid)
                 logger.info(
                     "Adopted existing mngr latchkey forward supervisor (pid={}, record={})",
                     existing.pid,
@@ -252,6 +364,11 @@ class LatchkeyForwardSupervisor(MutableModel):
                 )
                 self._last_known_pid = existing.pid
                 return existing
+            if existing is None:
+                logger.info(
+                    "No existing mngr latchkey forward record at {}; spawning a fresh supervisor",
+                    record_path,
+                )
             else:
                 logger.info(
                     "Discarding stale mngr latchkey forward record (pid={}, record={}); spawning fresh",
@@ -259,6 +376,13 @@ class LatchkeyForwardSupervisor(MutableModel):
                     record_path,
                 )
                 delete_forward_info(plugin_dir)
+
+            # Reap every forward bound to this latchkey directory before
+            # spawning. We have no live record to adopt, so any forward still
+            # running here is an unrecorded orphan that may carry stale code or
+            # config (the duplicate-producer root cause); replace it with a
+            # fresh child running the current binary rather than adopting it.
+            self._reap_duplicate_forwards(keep_pid=None)
 
             log_path = forward_log_path(plugin_dir)
             with log_span(
@@ -279,6 +403,32 @@ class LatchkeyForwardSupervisor(MutableModel):
 
             self._last_known_pid = pid
             return LatchkeyForwardInfo(pid=pid, started_at=datetime.now(timezone.utc))
+
+    def _reap_duplicate_forwards(self, keep_pid: int | None) -> None:
+        """Terminate every ``mngr latchkey forward`` for this directory except ``keep_pid``.
+
+        Enforces the one-forward-per-latchkey-directory invariant the discovery
+        pipeline depends on (``mngr latchkey forward``'s ``mngr observe`` is the
+        single producer for the shared events file). Each duplicate's observe
+        child is captured before the forward is signalled and terminated after,
+        so a wedged forward that must be SIGKILLed cannot leave its observe child
+        orphaned and still writing snapshots. Scoped by resolved
+        ``--latchkey-directory`` equality, so a sibling profile's supervisor is
+        never touched. Best-effort: a duplicate that dies or is inaccessible
+        mid-reap is simply skipped.
+        """
+        for pid in _iter_matching_forward_pids(self.latchkey_directory):
+            if pid == keep_pid or pid == os.getpid():
+                continue
+            observe_pids = _observe_child_pids(pid)
+            logger.info(
+                "Reaping duplicate mngr latchkey forward (pid={}) bound to {}",
+                pid,
+                self.latchkey_directory,
+            )
+            _terminate_pid(pid)
+            for observe_pid in observe_pids:
+                _terminate_pid(observe_pid)
 
     def stop(self) -> None:
         """Terminate the supervisor and delete its record.
