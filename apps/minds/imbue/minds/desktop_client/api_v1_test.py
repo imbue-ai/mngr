@@ -3,12 +3,16 @@ from pathlib import Path
 
 from flask.testing import FlaskClient
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.primitives import CreationId
 from imbue.mngr.primitives import AgentId
 
@@ -35,6 +39,37 @@ def _client_with_workspace(tmp_path: Path, agent_id: AgentId) -> FlaskClient:
 
 def _auth_header() -> dict[str, str]:
     return {"Authorization": f"Bearer {_TEST_KEY}"}
+
+
+def _client_with_agent_creator(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> FlaskClient:
+    """Build a test client whose ``/api/v1`` create route has an ``AgentCreator`` wired.
+
+    The create route returns 501 when no ``AgentCreator`` is configured (before
+    any input validation runs), so reaching the validation branches requires a
+    real creator. The invalid-input tests below assert on the 400 responses,
+    which return before ``start_creation`` is ever called, so no background
+    creation (subprocess / network) is started.
+    """
+    resolver = StaticBackendResolver(url_by_agent_and_service={})
+    agent_creator = AgentCreator(
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
+    )
+    app = create_desktop_client(
+        auth_store=FileAuthStore(data_directory=tmp_path / "auth"),
+        backend_resolver=resolver,
+        http_client=None,
+        agent_creator=agent_creator,
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        minds_api_key=_TEST_KEY,
+    )
+    return app.test_client()
 
 
 def test_list_workspaces_returns_known_workspaces(tmp_path: Path) -> None:
@@ -134,6 +169,44 @@ def test_create_workspace_without_agent_creator_returns_501(tmp_path: Path) -> N
     response = client.post("/api/v1/workspaces", headers=_auth_header(), json={"git_url": "https://example/repo"})
 
     assert response.status_code == 501
+
+
+def test_create_workspace_requires_account_id_for_imbue_cloud(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    # An IMBUE_CLOUD launch_mode without an account_id must fail validation up
+    # front (400), not defer the failure into the background creation thread.
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group, notification_dispatcher)
+
+    response = client.post(
+        "/api/v1/workspaces",
+        headers=_auth_header(),
+        json={"git_url": "https://example/repo", "launch_mode": "IMBUE_CLOUD"},
+    )
+
+    assert response.status_code == 400
+    assert "account_id" in json.loads(response.data)["error"]
+
+
+def test_create_workspace_requires_api_key_for_api_key_provider(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    # An API_KEY ai_provider without an anthropic_api_key must fail validation
+    # up front (400).
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group, notification_dispatcher)
+
+    response = client.post(
+        "/api/v1/workspaces",
+        headers=_auth_header(),
+        json={"git_url": "https://example/repo", "ai_provider": "API_KEY"},
+    )
+
+    assert response.status_code == 400
+    assert "anthropic_api_key" in json.loads(response.data)["error"]
 
 
 def test_destroy_unknown_workspace_returns_404(tmp_path: Path) -> None:
