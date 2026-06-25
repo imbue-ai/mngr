@@ -111,7 +111,7 @@
     var REGION_OPTIONS = {{ region_options_by_launch_mode | tojson }};
     var REGION_SELECTED = {{ region_selected_by_launch_mode | tojson }};
 
-    var COMPUTE_LABELS = {IMBUE_CLOUD: 'Imbue Cloud', DOCKER: 'Docker', LIMA: 'Lima', VULTR: 'Vultr', AWS: 'AWS'};
+    var COMPUTE_LABELS = {IMBUE_CLOUD: 'Imbue Cloud', DOCKER: 'Docker', DOCKER_NIXOS: 'Docker/NixOS', LIMA: 'Lima', VULTR: 'Vultr', AWS: 'AWS'};
     var AI_LABELS = {IMBUE_CLOUD: 'Imbue Cloud', API_KEY: 'your Anthropic API key', SUBSCRIPTION: 'your Claude subscription'};
     var BACKUP_LABELS = {IMBUE_CLOUD: 'Imbue Cloud', API_KEY: 'your own storage', CONFIGURE_LATER: 'off for now'};
 
@@ -294,7 +294,7 @@
             <Select id="launch_mode" name="launch_mode" width="w-48">
               {% for mode in launch_modes %}
                 <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}
-                        {% if mode.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{{ mode.value | lower }}</option>
+                        {% if mode.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{% if mode.value == 'DOCKER_NIXOS' %}docker/nixos{% else %}{{ mode.value | lower }}{% endif %}</option>
               {% endfor %}
             </Select>
           </div>

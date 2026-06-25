@@ -21,6 +21,7 @@ def test_region_provider_key_maps_only_region_bearing_modes() -> None:
     assert _region_provider_key_for_launch_mode(LaunchMode.VULTR) == "vultr"
     assert _region_provider_key_for_launch_mode(LaunchMode.AWS) == "aws"
     assert _region_provider_key_for_launch_mode(LaunchMode.DOCKER) is None
+    assert _region_provider_key_for_launch_mode(LaunchMode.DOCKER_NIXOS) is None
     assert _region_provider_key_for_launch_mode(LaunchMode.LIMA) is None
 
 
@@ -44,6 +45,7 @@ def test_resolve_effective_region_prefers_stored_value_when_no_submission(tmp_pa
 
 def test_resolve_effective_region_is_empty_for_region_less_provider(tmp_path: Path) -> None:
     assert _resolve_effective_region(LaunchMode.DOCKER, "US-WEST-OR", _config(tmp_path), GeoLocationCache()) == ""
+    assert _resolve_effective_region(LaunchMode.DOCKER_NIXOS, "US-WEST-OR", _config(tmp_path), GeoLocationCache()) == ""
 
 
 def test_build_region_form_context_covers_all_region_bearing_providers(tmp_path: Path) -> None:

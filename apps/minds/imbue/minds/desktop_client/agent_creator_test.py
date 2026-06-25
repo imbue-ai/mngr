@@ -211,6 +211,7 @@ def test_build_mngr_create_command_does_not_inject_minds_api_key() -> None:
     """
     for mode, account in (
         (LaunchMode.DOCKER, None),
+        (LaunchMode.DOCKER_NIXOS, None),
         (LaunchMode.LIMA, None),
         (LaunchMode.VULTR, None),
         (LaunchMode.IMBUE_CLOUD, "alice@imbue.com"),
@@ -326,6 +327,21 @@ def test_build_mngr_create_command_ignores_region_for_docker() -> None:
     assert "region=" not in joined and "vultr-region" not in joined
 
 
+def test_build_mngr_create_command_docker_nixos_uses_nix_template() -> None:
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER_NIXOS,
+        host_name=HostName("hello"),
+        region="US-WEST-OR",
+    )
+    joined = " ".join(command)
+    assert "system-services@hello.docker" in command
+    assert "region=" not in joined and "vultr-region" not in joined
+    template_args = [
+        command[i + 1] for i, arg in enumerate(command) if arg == "--template" and i + 1 < len(command)
+    ]
+    assert template_args == ["main", "docker-nixos"]
+
+
 def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
     """Empty / ``None`` ``latchkey_env`` opts the host out of latchkey wiring entirely."""
     for latchkey_env in (None, {}):
@@ -339,7 +355,7 @@ def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
         assert "LATCHKEY_DISABLE_COUNTING" not in joined
 
 
-@pytest.mark.parametrize("launch_mode", [LaunchMode.DOCKER, LaunchMode.LIMA, LaunchMode.VULTR])
+@pytest.mark.parametrize("launch_mode", [LaunchMode.DOCKER, LaunchMode.DOCKER_NIXOS, LaunchMode.LIMA, LaunchMode.VULTR])
 def test_build_mngr_create_command_non_imbue_cloud_passes_new_host_without_reuse(
     launch_mode: LaunchMode,
 ) -> None:
@@ -425,6 +441,7 @@ def test_build_mngr_create_command_never_inlines_secret_env_flags() -> None:
     ``--pass-(host-)env`` flags or secret values for any compute mode."""
     for mode, account in (
         (LaunchMode.DOCKER, None),
+        (LaunchMode.DOCKER_NIXOS, None),
         (LaunchMode.LIMA, None),
         (LaunchMode.VULTR, None),
         (LaunchMode.IMBUE_CLOUD, "alice@imbue.com"),
