@@ -454,7 +454,8 @@ def _handle_establish_ssh(agent_id: str) -> Response:
     Only *remote* targets (reachable from anywhere) are supported: a local
     (Docker/Lima) target has no externally reachable address, so brokering a
     forwarding tunnel for the remote->local case is not yet implemented and the
-    route returns 501. The target must be online; a stopped target returns 409.
+    route returns 501. The target must be online; authorizing the key on a
+    stopped target fails at the ``mngr exec`` step and returns 502.
     """
     parsed_id = AgentId(agent_id)
     backend_resolver = get_state().backend_resolver
