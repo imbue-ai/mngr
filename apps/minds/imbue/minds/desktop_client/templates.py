@@ -34,6 +34,7 @@ from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
+from imbue.minds.utils.sentry.frontend import frontend_sentry_browser_payload
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_forward.loading_page import render_loading_page
 
@@ -167,6 +168,10 @@ def _build_catalog() -> Catalog:
             "INPUT_BASE": _INPUT_BASE,
             "ICONS_16": _ICONS_16,
             "ICONS_12": _ICONS_12,
+            # Resolved per render so the page only boots the frontend Sentry SDK
+            # when reporting is enabled (returns None otherwise). See
+            # imbue/minds/utils/sentry/frontend.py and Base.jinja.
+            "frontend_sentry_browser_payload": frontend_sentry_browser_payload,
         },
     )
     catalog.add_folder(str(TEMPLATE_DIR))
