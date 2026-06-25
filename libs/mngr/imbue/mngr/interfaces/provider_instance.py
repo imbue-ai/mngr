@@ -702,9 +702,14 @@ class ProviderInstanceInterface(MutableModel, ABC):
 
     @abstractmethod
     def list_volumes(self) -> list[VolumeInfo]:
-        """List all volumes managed by this provider.
+        """Return the volumes that this provider instance considers its own.
 
-        Returns volumes with mngr- prefix in name or with mngr-managed tags.
+        How a volume is recognised as managed by this provider is an
+        implementation detail (e.g. a name prefix on the underlying volume,
+        a tag, or a layout under an internal state volume).
+
+        Returns an empty list when there are no managed volumes, including
+        when this provider does not support volumes (see ``supports_volumes``).
         """
         ...
 

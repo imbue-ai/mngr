@@ -73,17 +73,15 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         command_override: CommandString | None,
         initial_message: str | None = None,
     ) -> CommandString:
-        """Assemble the full command to execute for this agent.
+        """Assemble the command line used to start this agent.
 
-        ``initial_message`` is the ``CreateAgentOptions.initial_message`` value
-        (the content of ``--message`` / ``--message-file``) threaded through
-        so agent types that bake the prompt into the command line (e.g.
-        streaming headless agents that ``cat`` a staged prompt file) can make
-        that decision without reading ``data.json`` -- at assembly time,
-        inside ``Host.create_agent_state``, ``data.json`` has not been
-        written yet.
+        ``agent_args`` are extra arguments to append to the command.
+        ``command_override`` replaces the default command when set.
+        ``initial_message`` may be incorporated into the returned command by
+        agent types that consume the first user message at startup (e.g.
+        headless agents that read a staged prompt file).
 
-        May raise NoCommandDefinedError if no command is defined.
+        Raises NoCommandDefinedError if no command can be assembled.
         """
         ...
 

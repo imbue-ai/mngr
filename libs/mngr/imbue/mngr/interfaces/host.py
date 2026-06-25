@@ -681,13 +681,17 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
         extra_args: str | None = None,
         exclude_git: bool = False,
     ) -> None:
-        """Copy a directory from source_host:source_path to self:target_path using rsync.
+        """Copy a directory tree from ``source_host:source_path`` to ``self:target_path``.
 
-        Handles all combinations of local/remote source and target:
-        - Local to local
-        - Local to remote (push via SSH)
-        - Remote to local (pull via SSH)
-        - Remote to remote (via local temp directory as intermediary)
+        Works regardless of whether either end is local or remote; the choice of
+        transport is up to the implementation (e.g. ``rsync`` over SSH, with a
+        laptop-side temp directory staging remote-to-remote copies).
+
+        ``extra_args`` is passed through to the underlying transport command, so
+        the accepted syntax tracks whichever tool the implementation invokes.
+        ``exclude_git`` omits ``.git`` directories from the copy.
+
+        Raises ``MngrError`` if the copy does not complete successfully.
         """
         ...
 
