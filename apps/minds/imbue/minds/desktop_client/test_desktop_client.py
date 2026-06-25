@@ -46,7 +46,6 @@ from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
-from imbue.minds.desktop_client.pending_create import PendingCreateParams
 from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -56,13 +55,9 @@ from imbue.minds.desktop_client.request_events import create_latchkey_predefined
 from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.responses import make_response
-from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
-from imbue.minds.primitives import AIProvider
-from imbue.minds.primitives import BackupEncryptionMethod
-from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
@@ -81,7 +76,6 @@ def _create_test_desktop_client(
     backend_resolver: BackendResolverInterface,
     http_client: httpx.Client | None,
     agent_creator: AgentCreator | None = None,
-    session_store: MultiAccountSessionStore | None = None,
 ) -> tuple[FlaskClient, FileAuthStore]:
     """Create a desktop client with the given backend resolver."""
     auth_dir = tmp_path / "auth"
@@ -92,7 +86,6 @@ def _create_test_desktop_client(
         backend_resolver=backend_resolver,
         http_client=http_client,
         agent_creator=agent_creator,
-        session_store=session_store,
     )
     client = app.test_client()
 
@@ -595,7 +588,6 @@ def test_creating_page_returns_501_without_agent_creator(tmp_path: Path) -> None
 def _create_test_server_with_agent_creator(
     tmp_path: Path,
     backend_resolver: BackendResolverInterface | None = None,
-    session_store: MultiAccountSessionStore | None = None,
 ) -> tuple[FlaskClient, FileAuthStore, AgentCreator]:
     """Create a desktop client with an agent creator for testing.
 
@@ -626,7 +618,6 @@ def _create_test_server_with_agent_creator(
         backend_resolver=backend_resolver,
         http_client=None,
         agent_creator=agent_creator,
-        session_store=session_store,
     )
     _authenticate_client(client=client, auth_store=auth_store)
     return client, auth_store, agent_creator
@@ -1177,19 +1168,12 @@ def test_create_form_does_not_show_env_file_checkbox(tmp_path: Path) -> None:
     assert "include_env_file" not in response.text
 
 
-# The sign-in redirect the create handler issues for a signed-out remote
-# (Imbue Cloud) submit: ``return_to`` resumes the stashed create after sign-in,
-# ``back_to`` returns to the picker. Matches ``_REMOTE_SIGNIN_REDIRECT_URL``.
-_EXPECTED_REMOTE_SIGNIN_LOCATION = "/auth/signup?return_to=%2Fcreate%2Fresume&back_to=%2Fcreate"
+def test_create_form_submit_redirects_imbue_cloud_compute_without_account_to_signin(tmp_path: Path) -> None:
+    """IMBUE_CLOUD compute without any account routes into the sign-in/up flow.
 
-
-def test_create_form_submit_imbue_cloud_compute_without_account_stashes_and_redirects(tmp_path: Path) -> None:
-    """IMBUE_CLOUD compute without any account stashes the selections and signs in.
-
-    With no signed-in account at all, the remote compute path is unusable yet,
-    so rather than re-rendering an error the server stashes the submitted
-    selections and sends the user to sign in; ``/create/resume`` then creates
-    the workspace with those selections once they are signed in.
+    With no signed-in account at all, the remote compute path is unusable, so
+    rather than re-rendering an error the server sends the user to sign up (with
+    a link back to the picker).
     """
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
@@ -1204,16 +1188,11 @@ def test_create_form_submit_imbue_cloud_compute_without_account_stashes_and_redi
         follow_redirects=False,
     )
     assert response.status_code == 303
-    assert response.headers["location"] == _EXPECTED_REMOTE_SIGNIN_LOCATION
-    # The selections are stashed for the post-sign-in resume.
-    stashed = get_state(client.application).pending_create
-    assert stashed is not None
-    assert stashed.git_url == "file:///nonexistent-repo"
-    assert stashed.launch_mode is LaunchMode.IMBUE_CLOUD
+    assert response.headers["location"] == "/auth/signup?return_to=%2Fcreate"
 
 
-def test_create_form_submit_imbue_cloud_ai_without_account_stashes_and_redirects(tmp_path: Path) -> None:
-    """IMBUE_CLOUD AI provider without any account stashes the selections and signs in."""
+def test_create_form_submit_redirects_imbue_cloud_ai_without_account_to_signin(tmp_path: Path) -> None:
+    """IMBUE_CLOUD AI provider without any account routes into the sign-in/up flow."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
     response = client.post(
@@ -1227,109 +1206,7 @@ def test_create_form_submit_imbue_cloud_ai_without_account_stashes_and_redirects
         follow_redirects=False,
     )
     assert response.status_code == 303
-    assert response.headers["location"] == _EXPECTED_REMOTE_SIGNIN_LOCATION
-    stashed = get_state(client.application).pending_create
-    assert stashed is not None
-    assert stashed.ai_provider is AIProvider.IMBUE_CLOUD
-
-
-def _make_stashed_create_params(launch_mode: LaunchMode, ai_provider: AIProvider) -> PendingCreateParams:
-    """A PendingCreateParams as the create handler would stash before sign-in."""
-    return PendingCreateParams(
-        git_url="file:///nonexistent-repo",
-        resolved_host_name="mind-1",
-        branch="",
-        launch_mode=launch_mode,
-        ai_provider=ai_provider,
-        anthropic_api_key="",
-        color="#0b292b",
-        backup_provider=BackupProvider.CONFIGURE_LATER,
-        backup_encryption_method=BackupEncryptionMethod.NO_PASSWORD,
-        backup_master_password="",
-        is_save_backup_password=False,
-        backup_api_key_env="",
-        submitted_region="",
-    )
-
-
-def test_create_resume_starts_creation_with_stashed_selections(tmp_path: Path) -> None:
-    """A signed-in user with a stashed create resumes it: creation starts, stash clears.
-
-    Simulates the signed-out remote submit having stashed selections, then a
-    successful sign-in landing on /create/resume. The just-signed-in account is
-    attached and creation starts with the stashed selections (here a light
-    DOCKER/SUBSCRIPTION build, so the resume plumbing -- stash -> account ->
-    start_creation -> /creating -- is exercised without the imbue_cloud CLI).
-    """
-    cli = make_fake_imbue_cloud_cli()
-    cli.add_account(user_id="user-1", email="a@b.com")
-    session_store = make_session_store_for_test(tmp_path, cli=cli)
-    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path, session_store=session_store)
-    get_state(client.application).pending_create = _make_stashed_create_params(
-        LaunchMode.DOCKER, AIProvider.SUBSCRIPTION
-    )
-
-    response = client.get("/create/resume", follow_redirects=False)
-
-    assert response.status_code == 303
-    assert response.headers["location"].startswith("/creating/")
-    # The stash is consumed so a later sign-in can't re-trigger the same create.
-    assert get_state(client.application).pending_create is None
-    agent_creator.wait_for_all()
-
-
-def test_create_resume_without_stash_redirects_to_picker(tmp_path: Path) -> None:
-    """GET /create/resume with nothing stashed falls back to the create picker."""
-    cli = make_fake_imbue_cloud_cli()
-    cli.add_account(user_id="user-1", email="a@b.com")
-    session_store = make_session_store_for_test(tmp_path, cli=cli)
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path, session_store=session_store)
-
-    response = client.get("/create/resume", follow_redirects=False)
-
-    assert response.status_code == 302
-    assert response.headers["location"] == "/create"
-
-
-def test_create_resume_without_account_redirects_to_picker(tmp_path: Path) -> None:
-    """A stashed create with no signed-in account to attach falls back to the picker."""
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
-    get_state(client.application).pending_create = _make_stashed_create_params(
-        LaunchMode.IMBUE_CLOUD, AIProvider.IMBUE_CLOUD
-    )
-
-    response = client.get("/create/resume", follow_redirects=False)
-
-    assert response.status_code == 302
-    assert response.headers["location"] == "/create"
-    # The stash is left intact (the picker visit clears it) rather than consumed.
-    assert get_state(client.application).pending_create is not None
-
-
-def test_create_page_clears_stashed_create(tmp_path: Path) -> None:
-    """Visiting the picker abandons a create stashed for a pending sign-in."""
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
-    get_state(client.application).pending_create = _make_stashed_create_params(
-        LaunchMode.IMBUE_CLOUD, AIProvider.IMBUE_CLOUD
-    )
-
-    response = client.get("/create")
-
-    assert response.status_code == 200
-    assert get_state(client.application).pending_create is None
-
-
-def test_post_login_resumes_stashed_create_without_return_to(tmp_path: Path) -> None:
-    """A stashed create resumes after sign-in even when the return_to was lost."""
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
-    get_state(client.application).pending_create = _make_stashed_create_params(
-        LaunchMode.IMBUE_CLOUD, AIProvider.IMBUE_CLOUD
-    )
-
-    response = client.get("/post-login", follow_redirects=False)
-
-    assert response.status_code == 302
-    assert response.headers["location"] == "/create/resume"
+    assert response.headers["location"] == "/auth/signup?return_to=%2Fcreate"
 
 
 def test_create_form_submit_rejects_api_key_provider_without_key(tmp_path: Path) -> None:
@@ -1776,23 +1653,6 @@ def test_auth_page_with_return_to_shows_back_link_and_explainer(tmp_path: Path) 
     assert 'href="/create"' in response.text
     # Default explainer banner (no explicit message supplied).
     assert "run your mind on Imbue Cloud" in response.text
-
-
-def test_auth_page_back_to_overrides_return_to_for_back_link(tmp_path: Path) -> None:
-    """The back link points at back_to (the picker) while return_to resumes the create.
-
-    The signed-out remote submit sends ``return_to=/create/resume`` (to resume
-    after sign-in) and ``back_to=/create`` (so "back" returns to the picker to
-    switch to the local preset). The back link must use back_to, not return_to.
-    """
-    client = _create_test_client_with_auth_routes(tmp_path)
-    response = client.get("/auth/signup", query_string={"return_to": "/create/resume", "back_to": "/create"})
-    assert response.status_code == 200
-    assert "Back to mind setup" in response.text
-    assert 'id="auth-back-link"' in response.text
-    assert 'href="/create"' in response.text
-    # The back link does not point at the resume endpoint.
-    assert 'href="/create/resume"' not in response.text
 
 
 def test_auth_page_ignores_unsafe_return_to(tmp_path: Path) -> None:

@@ -33,7 +33,6 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
-from imbue.minds.desktop_client.pending_create import PendingCreateParams
 from imbue.minds.desktop_client.region_preference import GeoLocationCache
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
@@ -121,10 +120,6 @@ class DesktopClientState(MutableModel):
     )
     permission_requests_consumer: PermissionRequestsConsumer | None = Field(
         default=None, description="Streaming permission-requests consumer (wired post-construction)"
-    )
-    pending_create: PendingCreateParams | None = Field(
-        default=None,
-        description="A create-form submission stashed while the user signs in, resumed by /create/resume",
     )
     shutdown_event: threading.Event = Field(
         default_factory=threading.Event, description="Cross-thread flag SSE handlers poll to exit on shutdown"

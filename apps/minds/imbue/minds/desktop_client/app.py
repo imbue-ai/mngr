@@ -4,7 +4,6 @@ import queue
 import shlex
 import threading
 import time
-from collections.abc import Callable
 from collections.abc import Collection
 from collections.abc import Iterator
 from collections.abc import Mapping
@@ -16,7 +15,6 @@ from pathlib import Path
 from typing import Any
 from typing import Final
 from typing import assert_never
-from urllib.parse import urlencode
 from urllib.parse import urlparse
 
 import httpx
@@ -78,7 +76,6 @@ from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
-from imbue.minds.desktop_client.pending_create import PendingCreateParams
 from imbue.minds.desktop_client.provider_display import friendly_provider_label
 from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
 from imbue.minds.desktop_client.recovery_probe import build_host_health_response
@@ -567,10 +564,8 @@ def _handle_post_login_redirect() -> Response:
 
     All sign-in paths (email/password, OAuth, post-email-verification) funnel
     here. A ``?return_to=`` query param (a safe same-origin path, e.g.
-    ``/create/resume`` when the user came from the create page to enable the
-    remote preset) wins when present. Failing that, a create stashed before
-    sign-in is resumed (covers paths that drop the return_to, e.g. an
-    email-verification round-trip). Otherwise a user who already has workspaces
+    ``/create`` when the user came from the create page to enable the remote
+    preset) wins when present. Otherwise a user who already has workspaces
     goes to the account-management page (the prior behavior); a user with none
     goes to ``/`` -- which renders the create form -- so first-time users land
     on the new-workspace screen instead of the account page.
@@ -580,11 +575,6 @@ def _handle_post_login_redirect() -> Response:
     return_to = safe_local_redirect_path(request.args.get("return_to"))
     if return_to is not None:
         return make_response(status_code=302, headers={"Location": return_to})
-    # A create stashed before sign-in should still resume once the user is
-    # signed in, even when the return_to was lost along the way. ``/create/resume``
-    # re-validates the stash + account, so a stale stash just bounces to /create.
-    if get_state().pending_create is not None:
-        return make_response(status_code=302, headers={"Location": _CREATE_RESUME_PATH})
     backend_resolver = get_state().backend_resolver
     has_any_workspace = bool(backend_resolver.list_active_workspace_ids())
     destination = "/accounts" if has_any_workspace else "/"
@@ -996,19 +986,13 @@ def _build_backup_request_or_error(
     )
 
 
-_CREATE_PICKER_PATH: Final[str] = "/create"
-_CREATE_RESUME_PATH: Final[str] = "/create/resume"
-
-# Where the create handler sends a signed-out user who chose the remote (Imbue
-# Cloud) preset and pressed "Create": into the sign-up/sign-in flow, having
-# stashed their selections. ``return_to`` lands a successful sign-in on
-# ``/create/resume``, which starts the stashed creation with those selections.
-# ``back_to`` gives the auth page a back link to the picker so the user can
-# switch to the local preset instead of signing in. Both are safe same-origin
-# paths the auth and post-login handlers re-validate.
-_REMOTE_SIGNIN_REDIRECT_URL: Final[str] = "/auth/signup?" + urlencode(
-    {"return_to": _CREATE_RESUME_PATH, "back_to": _CREATE_PICKER_PATH}
-)
+# Where the create page sends a user who chose the remote (Imbue Cloud)
+# preset without any signed-in account: into the sign-up/sign-in flow with a
+# link back to the picker. ``return_to=%2Fcreate`` is the URL-encoded
+# ``/create`` -- the client builds the same target via
+# ``encodeURIComponent('/create')`` in Create.jinja, and ``_handle_auth_page``
+# only honors a safe same-origin path.
+_REMOTE_SIGNIN_REDIRECT_URL: Final[str] = "/auth/signup?return_to=%2Fcreate"
 
 
 def _handle_create_form_submit() -> Response:
@@ -1098,83 +1082,31 @@ def _handle_create_form_submit() -> Response:
     except InvalidName as exc:
         return _re_render_with_error(str(exc))
 
-    params = PendingCreateParams(
-        git_url=git_url,
-        resolved_host_name=str(resolved_host_name),
-        branch=branch,
-        launch_mode=launch_mode,
-        ai_provider=ai_provider,
-        anthropic_api_key=anthropic_api_key,
-        color=color,
-        backup_provider=backup_provider,
-        backup_encryption_method=backup_encryption_method,
-        backup_master_password=backup_master_password,
-        is_save_backup_password=is_save_backup_password,
-        backup_api_key_env=backup_api_key_env,
-        submitted_region=submitted_region,
-    )
-
     is_imbue_cloud_compute = launch_mode is LaunchMode.IMBUE_CLOUD
     is_imbue_cloud_ai = ai_provider is AIProvider.IMBUE_CLOUD
     if not account_id and (is_imbue_cloud_compute or is_imbue_cloud_ai):
-        # The remote (Imbue Cloud) preset requires an account. When accounts
-        # exist but none is selected, re-render asking the user to pick one.
-        # With no account at all, we cannot create yet: stash the selections and
-        # send the user to sign in. ``/create/resume`` then starts creation with
-        # these exact selections once they are signed in -- so they keep their
-        # choices and don't have to re-submit. The auth page also offers a link
-        # back to the picker (``back_to``) for switching to the local preset.
+        # The remote (Imbue Cloud) presets require an account. With no account
+        # at all, the compute path is unusable, so route into the sign-in/up
+        # flow (the client does this on card-select; this is the no-JS
+        # backstop) with a link back to the picker. When accounts exist but
+        # none is selected, re-render asking the user to pick one.
         has_any_account = bool(session_store_inst.list_accounts()) if session_store_inst is not None else False
         if not has_any_account:
-            get_state().pending_create = params
             return make_response(status_code=303, headers={"Location": _REMOTE_SIGNIN_REDIRECT_URL})
         return _re_render_with_error(
             "imbue_cloud requires an account. Select an account or pick a different "
             "option for both the compute and AI providers."
         )
 
-    return _build_and_start_creation(
-        params=params,
-        account_id=account_id,
-        agent_creator=agent_creator,
-        on_error=_re_render_with_error,
-    )
-
-
-def _build_and_start_creation(
-    *,
-    params: PendingCreateParams,
-    account_id: str,
-    agent_creator: AgentCreator,
-    on_error: Callable[[str], Response],
-) -> Response:
-    """Resolve account/backup/region for ``params`` and kick off creation.
-
-    Shared by the direct submit path (``_handle_create_form_submit``) and the
-    post-sign-in resume path (``_handle_create_resume``), so both build the
-    workspace identically. Returns a 303 to the creating page on success, or
-    ``on_error(message)`` for a recoverable validation problem (missing API
-    key, backup misconfiguration).
-    """
-    session_store_inst: MultiAccountSessionStore | None = get_state().session_store
-    minds_config: MindsConfig | None = get_state().minds_config
-    geo_cache: GeoLocationCache | None = get_state().geo_location_cache
-
-    launch_mode = params.launch_mode
-    ai_provider = params.ai_provider
-    backup_provider = params.backup_provider
-    is_imbue_cloud_compute = launch_mode is LaunchMode.IMBUE_CLOUD
-    is_imbue_cloud_ai = ai_provider is AIProvider.IMBUE_CLOUD
-    is_imbue_cloud_backup = backup_provider is BackupProvider.IMBUE_CLOUD
-
-    if ai_provider is AIProvider.API_KEY and not params.anthropic_api_key:
-        return on_error("An Anthropic API key is required when AI provider is set to api_key.")
+    if ai_provider is AIProvider.API_KEY and not anthropic_api_key:
+        return _re_render_with_error("An Anthropic API key is required when AI provider is set to api_key.")
 
     # Resolve the account email when needed (imbue_cloud compute, AI, or
     # backup). The mngr_imbue_cloud plugin owns the SuperTokens session and
     # is responsible for fetching a fresh access token at the time of each
     # subprocess invocation, so minds only needs to know which account to
     # ask for.
+    is_imbue_cloud_backup = backup_provider is BackupProvider.IMBUE_CLOUD
     account_email = ""
     if (
         account_id
@@ -1187,25 +1119,23 @@ def _build_and_start_creation(
     # master password as a side effect) before kicking off creation.
     backup_request, backup_error = _build_backup_request_or_error(
         backup_provider=backup_provider,
-        encryption_method=params.backup_encryption_method,
-        typed_master_password=params.backup_master_password,
-        is_save_password=params.is_save_backup_password,
-        api_key_env=params.backup_api_key_env,
+        encryption_method=backup_encryption_method,
+        typed_master_password=backup_master_password,
+        is_save_password=is_save_backup_password,
+        api_key_env=backup_api_key_env,
         account_email=account_email,
         paths=agent_creator.paths,
     )
     if backup_error is not None:
-        return on_error(backup_error)
+        return _re_render_with_error(backup_error)
 
-    branch_or_tag = params.branch
+    branch_or_tag = branch
     if is_imbue_cloud_compute and not branch_or_tag:
-        branch_or_tag = resolve_template_version(
-            params.git_url, params.branch, parent_cg=agent_creator.root_concurrency_group
-        )
+        branch_or_tag = resolve_template_version(git_url, branch, parent_cg=agent_creator.root_concurrency_group)
 
     # Resolve the explicit region the user chose (or the resolved default) and,
     # on a successful create, persist it as the provider's new last-used default.
-    region = _resolve_effective_region(launch_mode, params.submitted_region, minds_config, geo_cache)
+    region = _resolve_effective_region(launch_mode, submitted_region, minds_config, geo_cache)
 
     # Build a post-creation callback that injects the tunnel token, then also
     # persists the chosen region (fires only after a successful create).
@@ -1222,109 +1152,28 @@ def _build_and_start_creation(
     # done from the on_created callback (which fires post-canonical-id) so
     # the association is keyed under the right id.
     creation_id = agent_creator.start_creation(
-        params.git_url,
-        host_name=HostName(params.resolved_host_name),
-        branch=params.branch,
+        git_url,
+        host_name=resolved_host_name,
+        branch=branch,
         launch_mode=launch_mode,
         ai_provider=ai_provider,
         account_email=account_email,
         branch_or_tag=branch_or_tag,
         region=region,
-        anthropic_api_key=params.anthropic_api_key,
+        anthropic_api_key=anthropic_api_key,
         on_created=on_created,
         backup_request=backup_request,
-        color=params.color,
+        color=color,
     )
 
     creating_url = "/creating/{}".format(creation_id)
     return make_response(status_code=303, headers={"Location": creating_url})
 
 
-def _resolve_resume_account_id() -> str:
-    """Pick the account to attach to a create resumed after sign-in.
-
-    Prefer the configured default account when it still maps to a signed-in
-    account; otherwise fall back to the first signed-in account. Returns ``""``
-    when no account is available (so the resume cannot proceed).
-    """
-    session_store_inst: MultiAccountSessionStore | None = get_state().session_store
-    if session_store_inst is None:
-        return ""
-    accounts = session_store_inst.list_accounts()
-    if not accounts:
-        return ""
-    minds_config: MindsConfig | None = get_state().minds_config
-    default_account_id = minds_config.get_default_account_id() if minds_config is not None else None
-    account_ids = {acct.user_id for acct in accounts}
-    if default_account_id and default_account_id in account_ids:
-        return default_account_id
-    return accounts[0].user_id
-
-
-def _resume_create_error_response(message: str) -> Response:
-    """Render the create picker with an error when a resumed create can't start.
-
-    Reached only for the rare recoverable failure while resuming (e.g. a backup
-    misconfiguration); the common remote-preset resume has none.
-    """
-    session_store_inst: MultiAccountSessionStore | None = get_state().session_store
-    minds_config: MindsConfig | None = get_state().minds_config
-    geo_cache: GeoLocationCache | None = get_state().geo_location_cache
-    accounts_list = session_store_inst.list_accounts() if session_store_inst else []
-    region_options, region_selected = _build_region_form_context(minds_config, geo_cache)
-    html_body = render_create_form(
-        accounts=accounts_list,
-        region_options_by_launch_mode=region_options,
-        region_selected_by_launch_mode=region_selected,
-        error_message=message,
-        start_advanced=True,
-    )
-    return make_html_response(content=html_body, status_code=400)
-
-
-def _handle_create_resume() -> Response:
-    """Resume a create stashed before sign-in (GET /create/resume).
-
-    A signed-out user who chose the remote (Imbue Cloud) preset and pressed
-    "Create" has their selections stashed and is sent to sign in; a successful
-    sign-in returns here. We attach the just-signed-in account and start
-    creation with those selections, landing the user on the creating page. If
-    nothing is stashed (e.g. the page was opened directly) or no account is
-    available, fall back to the create picker.
-    """
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content="Not authenticated")
-    agent_creator: AgentCreator | None = get_state().agent_creator
-    if agent_creator is None:
-        return make_response(status_code=501, content="Agent creation not configured")
-    params = get_state().pending_create
-    if params is None:
-        return make_response(status_code=302, headers={"Location": _CREATE_PICKER_PATH})
-    account_id = _resolve_resume_account_id()
-    if not account_id:
-        # Signed in but no account is available to attach (unexpected). Send the
-        # user back to the picker rather than starting an unusable remote create.
-        return make_response(status_code=302, headers={"Location": _CREATE_PICKER_PATH})
-    # Consume the stash before starting so a transient failure can't re-trigger
-    # the same resume on a later sign-in.
-    get_state().pending_create = None
-    return _build_and_start_creation(
-        params=params,
-        account_id=account_id,
-        agent_creator=agent_creator,
-        on_error=_resume_create_error_response,
-    )
-
-
 def _handle_create_page() -> Response:
     """Show the create form page (GET /create)."""
     if not _is_request_authenticated():
         return make_response(status_code=403, content="Not authenticated")
-
-    # A fresh visit to the picker abandons any create stashed for a pending
-    # sign-in (e.g. the user took the auth page's "back" link to switch to the
-    # local preset), so a later unrelated sign-in can't resume a stale create.
-    get_state().pending_create = None
 
     backend_resolver = get_state().backend_resolver
     git_url = request.args.get("git_url", "")
@@ -4472,7 +4321,6 @@ def create_desktop_client(
     # Agent creation routes
     app.add_url_rule("/create", view_func=_handle_create_page)
     app.add_url_rule("/create", view_func=_handle_create_form_submit, methods=["POST"])
-    app.add_url_rule("/create/resume", view_func=_handle_create_resume)
     app.add_url_rule("/api/backup-status", view_func=_handle_backup_status_api)
     app.add_url_rule("/api/backup-export/<agent_id>", view_func=_handle_backup_export_api)
     app.add_url_rule("/api/create-agent", view_func=_handle_create_agent_api, methods=["POST"])

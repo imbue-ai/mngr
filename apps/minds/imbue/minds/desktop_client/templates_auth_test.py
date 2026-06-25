@@ -25,19 +25,9 @@ def test_render_auth_page_includes_message() -> None:
 
 
 def test_render_auth_page_with_return_to_shows_back_link() -> None:
-    # With no explicit back_to, the back link falls back to return_to.
     html = render_auth_page(return_to="/create")
     assert "Back to mind setup" in html
     assert 'href="/create"' in html
-
-
-def test_render_auth_page_back_to_overrides_return_to_for_back_link() -> None:
-    # The back link uses back_to (the picker), distinct from return_to (which
-    # resumes the create after sign-in).
-    html = render_auth_page(return_to="/create/resume", back_to="/create")
-    assert "Back to mind setup" in html
-    assert 'href="/create"' in html
-    assert 'href="/create/resume"' not in html
 
 
 def test_render_auth_page_without_return_to_has_no_back_link() -> None:

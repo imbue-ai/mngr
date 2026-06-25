@@ -10,7 +10,7 @@ Reworked the "create a mind" screen into a simpler two-step flow. Instead of a n
 
 The workspace name and color are now chosen automatically -- the name as the next free `mind-N` (the smallest `N` not already used by an existing workspace across any provider, so a gap left by a destroyed `mind-2` is reused before climbing to `mind-4`) and the color as the first unused palette entry -- so neither is asked for on the create screen.
 
-Choosing the Imbue Cloud (remote) preset while signed out no longer bounces you to the sign-in page the instant you click the card. Clicking a card just selects it; signing in is deferred to the "Create" button, which reads "Sign in & create" when you are signed out and have picked Imbue Cloud. Pressing it takes you to the sign-in / sign-up flow (with an explainer about what running on Imbue Cloud needs), and once you sign in the mind is created automatically with the selections you already made -- you no longer land back on the form to re-submit. The sign-in page keeps a one-click "Back to mind setup" link so you can return to the picker and switch to the local "Directly on your computer" option instead. (Picking the local preset still needs no account at all.)
+Choosing the Imbue Cloud (remote) option without a signed-in account now takes you into the sign-in / sign-up flow, with an explainer about what running on Imbue Cloud needs and a one-click link back to the picker; after signing in you land back on the create screen.
 
 The "Imbue Cloud" (remote) card is now selected by default on the create screen for everyone, including users without an account -- previously a user without an account landed with the local "Directly on your computer" card preselected.
 

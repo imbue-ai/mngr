@@ -295,18 +295,13 @@ def _handle_auth_page() -> Response:
     was redirected here to sign in).
 
     An optional ``?return_to=`` query parameter (a same-origin path, e.g.
-    ``/create/resume``) is forwarded to ``/post-login`` so a successful
-    sign-in returns there. When it is present without an explicit message, a
-    default explainer banner about the remote compute path is shown.
-
-    An optional ``?back_to=`` query parameter (a same-origin path, e.g.
-    ``/create``) is the target of the page's back link, kept distinct from
-    ``return_to`` so "back" can return to the picker while a successful
-    sign-in resumes creation. It falls back to ``return_to`` when omitted.
+    ``/create``) adds a back link to the page and is forwarded to
+    ``/post-login`` so a successful sign-in returns there. When it is
+    present without an explicit message, a default explainer banner about
+    the remote compute path is shown.
     """
     default_to_signup = request.path.rstrip("/").endswith("/signup")
     return_to = safe_local_redirect_path(request.args.get("return_to"))
-    back_to = safe_local_redirect_path(request.args.get("back_to"))
     message = request.args.get("message")
     if message is None and return_to is not None:
         message = _REMOTE_SIGNIN_EXPLAINER
@@ -315,7 +310,6 @@ def _handle_auth_page() -> Response:
             default_to_signup=default_to_signup,
             message=message,
             return_to=return_to,
-            back_to=back_to,
         )
     )
 
