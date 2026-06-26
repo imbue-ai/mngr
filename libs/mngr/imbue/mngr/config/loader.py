@@ -865,6 +865,11 @@ def _parse_agent_types(
                 "installed. Otherwise the agent type name or one of the field names may be "
                 "misspelled."
             )
+        # Resolve deprecated/renamed keys to their canonical fields before parsing, so
+        # the canonical field is set at the source (and survives later config-layer and
+        # parent_type overlay merges). The base implementation is a no-op; agent-type
+        # config classes override it for their own renamed keys.
+        raw_config = config_class.normalize_deprecated_raw_config(raw_config)
         cleaned_config = _drop_unknown_fields(
             raw_config,
             config_class,

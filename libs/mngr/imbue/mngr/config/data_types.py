@@ -206,6 +206,21 @@ class AgentTypeConfig(FrozenModel):
             return split_cli_args_string(value) if value else ()
         return tuple(value)
 
+    @classmethod
+    def normalize_deprecated_raw_config(cls, raw_config: dict[str, Any]) -> dict[str, Any]:
+        """Resolve a config block's deprecated/renamed keys to their canonical fields.
+
+        Called by the config loader on each agent-type block (still keyed by the raw,
+        user-written field names) before it is parsed into this class, so a renamed key
+        becomes its canonical field at the source -- in ``model_fields_set`` from the very
+        first ``model_construct`` -- and therefore survives every later config-layer and
+        ``parent_type`` overlay merge (which propagate only set fields and otherwise let a
+        defaulted field resurface and shadow a deprecated alias). The base implementation
+        is a no-op; subclasses override it to normalize their own deprecated keys. Must not
+        mutate the input; return a new dict if anything changes.
+        """
+        return raw_config
+
 
 class ProviderInstanceConfig(FrozenModel):
     """Defines a custom provider instance."""

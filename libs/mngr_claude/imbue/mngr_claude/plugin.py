@@ -24,7 +24,6 @@ from typing import Final
 import click
 from loguru import logger
 from pydantic import Field
-from pydantic import model_validator
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessSetupError
@@ -362,29 +361,28 @@ class ClaudeAgentConfig(AgentTypeConfig):
         "not provisioned or run.",
     )
 
-    @model_validator(mode="after")
-    def _pin_isolate_from_deprecated_alias(self) -> "ClaudeAgentConfig":
-        """Pin ``isolate_local_config_dir`` to the deprecated alias's inverse at the
-        first (faithful) validation, so a later serialize/reparse round-trip cannot
-        manufacture a false contradiction.
+    @classmethod
+    def normalize_deprecated_raw_config(cls, raw_config: dict[str, Any]) -> dict[str, Any]:
+        """Resolve the deprecated ``use_env_config_dir`` alias to ``isolate_local_config_dir``.
 
-        ``use_env_config_dir`` is the inverse of ``isolate_local_config_dir``. When only
-        the alias is set, ``isolate_local_config_dir`` still holds its default, so a
-        ``model_dump()`` -> ``model_validate()`` round-trip (e.g. when an agent object is
-        constructed in-host) materializes that default into ``model_fields_set`` --
-        which ``resolve_isolate_local_config_dir`` would then misread as a user-set
-        contradiction. Resolving the alias to a concrete ``isolate_local_config_dir``
-        value here -- while ``model_fields_set`` still reflects only what the user wrote
-        -- keeps the two fields consistent across any later round-trip. A genuine
-        contradiction (``isolate_local_config_dir`` explicitly set to the same value as
-        the alias) leaves the key already in ``model_fields_set``, so it is untouched and
-        still rejected by ``resolve_isolate_local_config_dir``. The model is frozen, so
-        the resolved value is written with ``object.__setattr__`` (the value, not its
-        set-ness, is what later reads depend on).
+        ``use_env_config_dir`` is the inverse of ``isolate_local_config_dir``
+        (``use_env_config_dir=true`` == ``isolate_local_config_dir=false``). The loader
+        calls this on each ``[agent_types.<name>]`` block before parsing, so when only the
+        alias is set the canonical ``isolate_local_config_dir`` is written into the raw
+        config -- and is therefore in ``model_fields_set`` from the first ``model_construct``,
+        surviving every later config-layer and ``parent_type`` overlay merge (a full
+        ``model_dump`` of the base would otherwise let the ``isolate_local_config_dir``
+        default resurface and shadow the alias, producing a spurious contradiction).
+
+        The alias is kept in the returned config (not dropped) so the one-time deprecation
+        warning at provisioning still fires. When the user wrote *both* keys, the alias is
+        left to defer to the explicit ``isolate_local_config_dir``: a genuine contradiction
+        (both set to the same, non-inverse value) is still rejected later by
+        ``resolve_isolate_local_config_dir``.
         """
-        if self.use_env_config_dir is not None and "isolate_local_config_dir" not in self.model_fields_set:
-            object.__setattr__(self, "isolate_local_config_dir", not self.use_env_config_dir)
-        return self
+        if "use_env_config_dir" not in raw_config or "isolate_local_config_dir" in raw_config:
+            return raw_config
+        return {**raw_config, "isolate_local_config_dir": not raw_config["use_env_config_dir"]}
 
     def resolve_isolate_local_config_dir(self) -> bool:
         """Return the effective ``isolate_local_config_dir``, reconciling the deprecated alias.
@@ -393,10 +391,11 @@ class ClaudeAgentConfig(AgentTypeConfig):
         (``use_env_config_dir=true`` == ``isolate_local_config_dir=false``). When only
         the deprecated key is set, its inverse is used. When both are set they must be
         consistent inverses; setting them to the same value (e.g. both ``true``) is
-        contradictory and raises. ``_pin_isolate_from_deprecated_alias`` resolves the
-        alias-only case to a concrete value at validation time, so the ``model_fields_set``
-        check below fires only for a genuine user-written contradiction (both keys set to
-        the same value) and not for a default materialized by a round-trip. The deprecation
+        contradictory and raises. ``normalize_deprecated_raw_config`` resolves the
+        alias-only case to a concrete ``isolate_local_config_dir`` at config-load time, so
+        the ``model_fields_set`` check below fires only for a genuine user-written
+        contradiction (both keys set to the same value) and never for a default
+        materialized by a serialize/reparse round-trip or config merge. The deprecation
         warning is emitted separately (once, at provisioning time) rather than here, since
         this is called on every access.
         """

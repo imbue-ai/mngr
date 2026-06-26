@@ -2900,44 +2900,43 @@ def test_resolve_isolate_raises_on_contradictory_dual_spec() -> None:
         config.resolve_isolate_local_config_dir()
 
 
-def test_resolve_isolate_survives_serialize_reparse_roundtrip_with_alias_only() -> None:
-    """An alias-only config keeps resolving once it is serialized and reparsed.
+def test_normalize_deprecated_raw_config_resolves_alias_to_isolate() -> None:
+    """The loader hook resolves the deprecated ``use_env_config_dir`` alias into the
+    canonical ``isolate_local_config_dir`` (its inverse) at config-load time.
 
-    Reproduces the in-host ``mngr create`` regression: the config loader builds the
-    agent-type config with ``model_construct`` (validators bypassed, so only
-    ``use_env_config_dir`` is in ``model_fields_set``), and later the config is
-    revalidated (e.g. when the agent object is constructed). Before the fix, that
-    round-trip materialized the default ``isolate_local_config_dir`` into
-    ``model_fields_set``, which ``resolve_isolate_local_config_dir`` then misread as a
-    user-set contradiction and rejected -- hanging mind creation on "waiting for initial
-    chat agent". After the fix, the alias is pinned at the first (faithful) validation,
-    so the round-trip stays consistent and resolves to shared mode.
+    Writing the inverse into the raw config is what fixes the in-host ``mngr create``
+    regression (mind creation hanging on "waiting for initial chat agent"): the resolved
+    value is then in ``model_fields_set`` from the first ``model_construct``, so it
+    survives the config-layer and ``parent_type`` overlay merges and the agent-construction
+    reparse -- none of which can resurface the ``isolate_local_config_dir`` default and
+    make ``resolve_isolate_local_config_dir`` misread it as a contradiction. The alias is
+    kept (not dropped) so the provisioning-time deprecation warning still fires.
     """
-    # model_construct mirrors the loader: validators are skipped, so the deprecated alias
-    # is the only field the user "set", exactly as a [agent_types.claude] block would yield.
-    constructed = ClaudeAgentConfig.model_construct(use_env_config_dir=True, check_installation=False)
-    # Revalidating the instance runs the model validator while model_fields_set is still
-    # faithful (the loader's final MngrConfig.model_validate does this), pinning the alias.
-    revalidated = ClaudeAgentConfig.model_validate(constructed)
-    # A full-dump reparse mirrors the agent-construction round-trip that triggered the bug.
-    roundtripped = ClaudeAgentConfig.model_validate(revalidated.model_dump())
-    assert roundtripped.resolve_isolate_local_config_dir() is False
+    assert ClaudeAgentConfig.normalize_deprecated_raw_config({"use_env_config_dir": True}) == {
+        "use_env_config_dir": True,
+        "isolate_local_config_dir": False,
+    }
+    assert ClaudeAgentConfig.normalize_deprecated_raw_config({"use_env_config_dir": False}) == {
+        "use_env_config_dir": False,
+        "isolate_local_config_dir": True,
+    }
+    # No deprecated key: passed through untouched.
+    assert ClaudeAgentConfig.normalize_deprecated_raw_config({"isolate_local_config_dir": False}) == {
+        "isolate_local_config_dir": False,
+    }
 
 
-def test_resolve_isolate_still_rejects_contradiction_through_roundtrip() -> None:
-    """A genuine hand-written contradiction is still rejected after a serialize/reparse.
-
-    The user faithfully set both keys to the same (non-inverse) value, so
-    ``isolate_local_config_dir`` is in ``model_fields_set`` from the start and the
-    alias-pinning leaves it untouched; the contradiction survives the round-trip and is
-    still raised.
-    """
-    constructed = ClaudeAgentConfig.model_construct(
-        isolate_local_config_dir=True, use_env_config_dir=True, check_installation=False
+def test_normalize_deprecated_raw_config_defers_to_explicit_isolate() -> None:
+    """When the user wrote *both* keys, the hook leaves them untouched, so a genuine
+    hand-written contradiction (both set to the same, non-inverse value) is still rejected
+    by ``resolve_isolate_local_config_dir`` rather than silently resolved."""
+    raw = {"use_env_config_dir": True, "isolate_local_config_dir": True}
+    assert ClaudeAgentConfig.normalize_deprecated_raw_config(raw) == raw
+    config = ClaudeAgentConfig.model_validate(
+        ClaudeAgentConfig.model_construct(check_installation=False, **raw).model_dump()
     )
-    roundtripped = ClaudeAgentConfig.model_validate(ClaudeAgentConfig.model_validate(constructed).model_dump())
     with pytest.raises(ConfigError, match="Contradictory"):
-        roundtripped.resolve_isolate_local_config_dir()
+        config.resolve_isolate_local_config_dir()
 
 
 def test_on_before_provisioning_warns_when_use_env_config_dir_is_set(
