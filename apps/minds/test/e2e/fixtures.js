@@ -82,6 +82,20 @@ const test = base.test.extend({
       }
     }
 
+    // Teardown: a graceful Playwright `app.close()` quits via the same path as
+    // Cmd-Q, which -- when local minds are running, or the liveness probe is
+    // slow -- pops the interactive "Shut down running minds?" prompt. That is a
+    // *native* Electron dialog (electron/main.js), which a headless test cannot
+    // click, so teardown blocks until the test timeout and the worker is
+    // force-killed. SIGTERM is routed through the same shutdown chain but
+    // flagged headless (`isHeadlessQuit`), so it skips the dialog -- the same
+    // path `just minds-stop` uses. Send it, then let `app.close()` reap the
+    // now-exiting process.
+    try {
+      app.process().kill('SIGTERM');
+    } catch (e) {
+      console.error('[fixture] SIGTERM to minds app failed:', e.message);
+    }
     await app.close();
   },
 });

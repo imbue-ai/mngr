@@ -748,6 +748,20 @@ async def _create_workspace_and_first_message(
                 logger.info("[{}] creation status: (none) -> {}", label, state)
             last_status = state
             phase_started_at = now
+            if not state:
+                # An empty status means the /status body had no "status" field:
+                # 403 "Not authenticated", 404 "Unknown agent creation", or the
+                # page auto-navigated to the workspace on DONE (so the fetch hit
+                # the wrong origin). Log the raw response + current URL to tell
+                # these apart.
+                with contextlib.suppress(Exception):
+                    logger.warning(
+                        "[{}]   empty-status detail: http={} url={} body={!r}",
+                        label,
+                        stat.get("status"),
+                        win.url,
+                        (stat.get("body") or "")[:160],
+                    )
         if state == "DONE":
             phase_durations[state] = round(time.monotonic() - phase_started_at, 2)
             done_redirect_url = payload.get("redirect_url", "")
