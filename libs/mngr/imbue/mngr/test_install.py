@@ -16,7 +16,8 @@ from imbue.mngr.conftest import MinimalInstallEnv
 @pytest.mark.release
 @pytest.mark.timeout(60)
 def test_help(minimal_install_env: MinimalInstallEnv) -> None:
-    """mngr --help works in a fresh install."""
+    """In a fresh install, `mngr --help` exits 0 and prints the usage banner along with the
+    core subcommands (`create`, `list`), proving the CLI entry point and command tree load."""
     result = minimal_install_env.run_mngr(["--help"])
 
     assert result.returncode == 0, (
@@ -30,7 +31,8 @@ def test_help(minimal_install_env: MinimalInstallEnv) -> None:
 @pytest.mark.release
 @pytest.mark.timeout(60)
 def test_create_help(minimal_install_env: MinimalInstallEnv) -> None:
-    """mngr create --help works in a fresh install."""
+    """In a fresh install, `mngr create --help` exits 0 and documents the `--type` and
+    `--no-connect` options, proving the create subcommand and its flags are wired up."""
     result = minimal_install_env.run_mngr(["create", "--help"])
 
     assert result.returncode == 0, (
@@ -43,7 +45,8 @@ def test_create_help(minimal_install_env: MinimalInstallEnv) -> None:
 @pytest.mark.release
 @pytest.mark.timeout(60)
 def test_list(minimal_install_env: MinimalInstallEnv) -> None:
-    """mngr list works in a fresh install and returns no agents."""
+    """In a fresh install with no agents, `mngr list` exits 0 and reports "No agents found",
+    proving the command runs end-to-end against an empty state rather than crashing."""
     result = minimal_install_env.run_mngr(["list"])
 
     assert result.returncode == 0, (
@@ -55,7 +58,9 @@ def test_list(minimal_install_env: MinimalInstallEnv) -> None:
 @pytest.mark.release
 @pytest.mark.timeout(60)
 def test_list_json(minimal_install_env: MinimalInstallEnv) -> None:
-    """mngr list --format json returns valid JSON in a fresh install."""
+    """In a fresh install, `mngr list --format json` exits 0 and emits parseable JSON whose
+    `agents` and `errors` arrays are both empty, proving the JSON formatter produces a
+    well-formed, machine-readable payload for the empty state."""
     result = minimal_install_env.run_mngr(["list", "--format", "json"])
 
     assert result.returncode == 0, (
@@ -91,7 +96,8 @@ def test_no_eager_plugin_imports(minimal_install_env: MinimalInstallEnv) -> None
 @pytest.mark.release
 @pytest.mark.timeout(60)
 def test_plugin_list_in_fresh_install(minimal_install_env: MinimalInstallEnv) -> None:
-    """mngr plugin list works in a fresh install with no optional plugins."""
+    """In a fresh install with no optional plugins installed, `mngr plugin list` exits 0,
+    proving the plugin-discovery path handles the empty case without erroring."""
     result = minimal_install_env.run_mngr(["plugin", "list"])
 
     assert result.returncode == 0, (
@@ -102,7 +108,8 @@ def test_plugin_list_in_fresh_install(minimal_install_env: MinimalInstallEnv) ->
 @pytest.mark.release
 @pytest.mark.timeout(60)
 def test_plugin_help_in_fresh_install(minimal_install_env: MinimalInstallEnv) -> None:
-    """mngr plugin --help works in a fresh install."""
+    """In a fresh install, `mngr plugin --help` exits 0 and documents the `list`, `enable`,
+    and `disable` subcommands, proving the plugin command group is fully registered."""
     result = minimal_install_env.run_mngr(["plugin", "--help"])
 
     assert result.returncode == 0, (
@@ -116,7 +123,8 @@ def test_plugin_help_in_fresh_install(minimal_install_env: MinimalInstallEnv) ->
 @pytest.mark.release
 @pytest.mark.timeout(60)
 def test_config_get_in_fresh_install(minimal_install_env: MinimalInstallEnv) -> None:
-    """mngr config get returns a default value in a fresh install."""
+    """In a fresh install with no settings file, `mngr config get headless` exits 0,
+    proving config lookup of a known key falls back to its default without erroring."""
     result = minimal_install_env.run_mngr(["config", "get", "headless"])
 
     assert result.returncode == 0, (
@@ -127,7 +135,8 @@ def test_config_get_in_fresh_install(minimal_install_env: MinimalInstallEnv) -> 
 @pytest.mark.release
 @pytest.mark.timeout(60)
 def test_config_set_roundtrip_in_fresh_install(minimal_install_env: MinimalInstallEnv) -> None:
-    """mngr config set then config get returns the set value in a fresh install."""
+    """In a fresh install, `mngr config set headless true` persists the value so a subsequent
+    `mngr config get headless` reads back "true", proving config writes round-trip to disk."""
     set_result = minimal_install_env.run_mngr(["config", "set", "headless", "true"])
     assert set_result.returncode == 0, (
         f"mngr config set failed (exit {set_result.returncode}):\nstdout: {set_result.stdout}\nstderr: {set_result.stderr}"

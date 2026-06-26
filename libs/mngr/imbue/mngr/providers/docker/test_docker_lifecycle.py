@@ -579,7 +579,11 @@ def test_discover_hosts_excludes_destroyed_by_default(
 @pytest.mark.release
 @pytest.mark.docker_sdk
 def test_create_host_with_bad_image_fails(docker_provider: DockerProviderInstance) -> None:
-    """Verify create_host with a nonexistent image raises MngrError and saves a failed record."""
+    """create_host with a nonexistent image must raise MngrError, not silently succeed or hang.
+
+    The pytest.raises asserts the failed image pull is surfaced as an MngrError;
+    it would fail if create_host swallowed the error and returned a host.
+    """
     with pytest.raises(MngrError):
         docker_provider.create_host(
             HostName("test-bad-image"),
