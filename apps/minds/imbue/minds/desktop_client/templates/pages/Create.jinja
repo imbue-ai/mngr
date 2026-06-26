@@ -149,6 +149,12 @@
     var hostNameState = HOST_NAME_OK;
     var hostNameDebounce = null;
     var hostNameCheckSeq = 0;
+    // The availability key (name + provider scope) a HOST_NAME_TAKEN was computed
+    // for. A 'taken' verdict only blocks submit while the current inputs still
+    // produce this exact key; once the user edits the name or switches
+    // provider/account/region it is stale and must not fail-close a name/scope it
+    // was never checked against.
+    var hostNameTakenKey = null;
 
     function hostNameFormatError(value) {
       // Friendly message for the first broken rule, or '' if valid. Empty is
@@ -192,11 +198,13 @@
       var formatError = hostNameFormatError(value);
       if (formatError) {
         hostNameState = HOST_NAME_INVALID;
+        hostNameTakenKey = null;
         showHostNameError(formatError);
         return;
       }
       if (value === '') {
         hostNameState = HOST_NAME_OK;
+        hostNameTakenKey = null;
         clearHostNameError();
         return;
       }
@@ -204,18 +212,24 @@
       // optimistically treat the name as ok so a fast Create isn't blocked (the
       // rare race falls back to the server's own create-time conflict check).
       hostNameState = HOST_NAME_OK;
+      hostNameTakenKey = null;
       clearHostNameError();
+      var url = hostNameAvailabilityUrl(value);
       var seq = ++hostNameCheckSeq;
-      fetch(hostNameAvailabilityUrl(value), { headers: { 'Accept': 'application/json' } })
+      fetch(url, { headers: { 'Accept': 'application/json' } })
         .then(function (resp) { return resp.ok ? resp.json() : null; })
         .then(function (data) {
           // Ignore a stale response superseded by a newer keystroke/change.
           if (seq !== hostNameCheckSeq) return;
           if (data && data.available === false) {
             hostNameState = HOST_NAME_TAKEN;
+            // Remember exactly which name/scope is taken so a later edit doesn't
+            // leave this verdict blocking a different name (see submit handler).
+            hostNameTakenKey = url;
             showHostNameError('That name is already taken. Pick a different one.');
           } else {
             hostNameState = HOST_NAME_OK;
+            hostNameTakenKey = null;
             clearHostNameError();
           }
         })
@@ -280,9 +294,9 @@
       // conflict check backstops that rare race. This synchronous check owns the
       // *format* dimension: it must also clear a stale 'invalid' from a prior
       // keystroke (the debounced validateHostName may not have re-run yet), or a
-      // name the user just corrected would be wrongly blocked. It leaves a
-      // 'taken' state alone, since availability is the separate, backstopped one.
-      var nameFormatError = hostNameFormatError(hostNameInput.value.trim());
+      // name the user just corrected would be wrongly blocked.
+      var trimmedName = hostNameInput.value.trim();
+      var nameFormatError = hostNameFormatError(trimmedName);
       if (nameFormatError) {
         hostNameState = HOST_NAME_INVALID;
         showHostNameError(nameFormatError);
@@ -290,7 +304,14 @@
         hostNameState = HOST_NAME_OK;
         clearHostNameError();
       }
-      if (hostNameState === HOST_NAME_INVALID || hostNameState === HOST_NAME_TAKEN) {
+      // A 'taken' verdict only blocks the exact name/scope it was computed for.
+      // If the user has since edited the name (or switched provider/account/region)
+      // the verdict is stale -- the debounced re-check may not have run yet -- so it
+      // must not fail-close a name that was never checked; we fall through to
+      // optimistic-allow and let the server's create-time conflict check backstop.
+      var nameStillTaken =
+        hostNameState === HOST_NAME_TAKEN && hostNameTakenKey === hostNameAvailabilityUrl(trimmedName);
+      if (hostNameState === HOST_NAME_INVALID || nameStillTaken) {
         e.preventDefault();
         showAdvanced(true);
         hostNameInput.focus();
