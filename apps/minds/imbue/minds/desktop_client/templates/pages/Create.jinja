@@ -239,6 +239,10 @@
       markPresetSelected(name);
       applyPreset(name);
       update();
+      // applyPreset sets launchSelect.value (and may change the account) directly,
+      // which does not fire a 'change' event, so re-run the availability check
+      // explicitly to re-scope "taken" to the preset's provider/account.
+      scheduleHostNameValidation();
     }
 
     for (var i = 0; i < presetCards.length; i++) {
