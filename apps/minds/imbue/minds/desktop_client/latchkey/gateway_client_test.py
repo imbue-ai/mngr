@@ -240,7 +240,9 @@ def test_approve_permission_request_sends_override_body() -> None:
         "evt-abc",
         override_body={"permissions": ["minds-workspaces-destroy"], "target_workspace_id": "agent-" + "1" * 32},
     )
-    assert json.loads(captured["content"]) == {
+    ws_body = captured["content"]
+    assert isinstance(ws_body, bytes)
+    assert json.loads(ws_body) == {
         "permissions": ["minds-workspaces-destroy"],
         "target_workspace_id": "agent-" + "1" * 32,
     }
