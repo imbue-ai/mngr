@@ -82,16 +82,14 @@ const test = base.test.extend({
       }
     }
 
-    // Teardown: a graceful Playwright `app.close()` quits via the same path as
-    // Cmd-Q, which -- when local minds are running, or the liveness probe is
-    // slow -- pops the interactive "Shut down running minds?" prompt: a *native*
-    // Electron dialog (electron/main.js) a headless test cannot click, so it
-    // blocks until the test timeout. SIGTERM is routed through the same shutdown
-    // chain but flagged headless (`isHeadlessQuit`), skipping the dialog (the
-    // `just minds-stop` path). But the headless shutdown itself can still hang
-    // (e.g. backend teardown waiting on a host that never comes up), so bound
-    // it: SIGTERM, wait briefly for a clean exit, else SIGKILL, then reap the
-    // Playwright connection with a hard cap so the worker can never wedge.
+    // Teardown. A graceful Playwright `app.close()` quits via the Cmd-Q path,
+    // which -- when local minds are running or the liveness probe is slow --
+    // pops the interactive "Shut down running minds?" prompt: a *native* Electron
+    // dialog (electron/main.js) a headless test cannot click. SIGTERM is routed
+    // through the same shutdown chain but flagged headless (`isHeadlessQuit`),
+    // skipping the dialog (the `just minds-stop` path). Bound it (SIGTERM, brief
+    // wait, else SIGKILL) so a hung backend shutdown can't wedge teardown.
+    const { execSync } = require('child_process');
     const proc = app.process();
     try {
       proc.kill('SIGTERM');
@@ -113,10 +111,35 @@ const test = base.test.extend({
         console.error('[fixture] SIGKILL failed:', e.message);
       }
     }
+    // The app spawns detached helpers that outlive the main process: the minds
+    // python backend, a `mngr latchkey forward` supervisor (its own process
+    // group, so a group-kill misses it), and the crashpad handler. Reparented to
+    // launchd, they keep the worker's inherited stdio sockets open, so the
+    // Playwright worker never exits ("worker did not exit ... force-killed it" ->
+    // nonzero exit -> the macos_launch job fails even though the test passed).
+    // Reap them by command pattern. (macos-launch runs on an ephemeral GHA Mac,
+    // so a broad minds-scoped pkill is safe.)
+    try {
+      execSync('pkill -9 -if "minds\\.app|/\\.minds/|mngr latchkey|mngr observe|Minds/Crashpad" 2>/dev/null || true', {
+        stdio: 'ignore',
+      });
+    } catch (e) {
+      /* best effort */
+    }
     await Promise.race([
       app.close().catch(() => {}),
       new Promise((resolve) => setTimeout(resolve, 30000)),
     ]);
+    // Even after reaping, Playwright's stdout/stderr forwarding leaves this
+    // worker's stdio socket handles ref'd, which alone keeps the event loop
+    // alive past teardown. Unref them so the worker exits cleanly rather than
+    // being force-killed.
+    try {
+      process.stdout.unref();
+      process.stderr.unref();
+    } catch (e) {
+      /* best effort */
+    }
   },
 });
 
