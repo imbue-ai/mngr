@@ -28,10 +28,14 @@ def _list_plugins(e2e: E2eSession, command: str) -> list[dict[str, str]]:
 
 @pytest.mark.release
 def test_plugin_list_shows_installed(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # list all available plugins
         mngr plugin list
-    """)
+
+    Scope: `mngr plugin list` exits 0 and renders the default-field table whose
+    headers (NAME, VERSION, DESCRIPTION, ENABLED) are produced by the CLI itself,
+    listing the core plugins that always ship in the `imbue` package (claude, modal).
+    """
     result = e2e.run("mngr plugin list", comment="List all installed plugins")
     expect(result).to_succeed()
     # The listing renders a table whose columns come from the default fields
@@ -47,10 +51,15 @@ def test_plugin_list_shows_installed(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.timeout(60)
 def test_plugin_list_active(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # list only active plugins
         mngr plugin list --active
-    """)
+
+    Scope: `--active` lists ONLY enabled plugins -- disabling a real plugin drops
+    it from the `--active` listing while the unfiltered list still reports it as
+    enabled=false. The bare command succeeds and `--active` never includes a
+    disabled plugin.
+    """
     # The bare command from the tutorial block must succeed.
     expect(e2e.run("mngr plugin list --active", comment="list only active plugins")).to_succeed()
 
@@ -80,10 +89,15 @@ def test_plugin_list_active(e2e: E2eSession) -> None:
 # e2e test needs a higher budget like the other subprocess-driven e2e tests.
 @pytest.mark.timeout(60)
 def test_plugin_add_by_name(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # add a plugin by name (from the registry)
         mngr plugin add my-plugin
-    """)
+
+    Scope: `mngr plugin add` mutates the uv tool installation, but the test env
+    runs mngr from a project venv (not a `uv tool install`), so the command exits
+    non-zero with a controlled "Aborted" on its output and no Python traceback,
+    rather than crashing.
+    """
     # `mngr plugin add` mutates the uv tool installation, but the test env runs
     # mngr from a project venv (not a `uv tool install`), so the command exits
     # cleanly with a controlled AbortError -- a non-zero exit and an "Aborted"
@@ -97,10 +111,14 @@ def test_plugin_add_by_name(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_plugin_add_by_path(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # add a plugin from a local path
         mngr plugin add --path /path/to/my-plugin
-    """)
+
+    Scope: `--path` is a recognized option (no "No such option"), so the command
+    fails with a clean abort (exit code 1, "Aborted", no traceback) -- not a click
+    usage error (exit code 2) -- because the given path does not exist.
+    """
     result = e2e.run("mngr plugin add --path /path/to/my-plugin", comment="add a plugin from a local path")
     # `--path` is a recognized option, so the command must fail with a clean
     # abort (exit code 1) -- not a click usage error (exit code 2, which would
@@ -115,10 +133,15 @@ def test_plugin_add_by_path(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_plugin_add_by_git(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # add a plugin from a git repository
         mngr plugin add --git https://github.com/user/mngr-plugin.git
-    """)
+
+    Scope: `--git` is accepted as a source specifier (no "No such option"), and
+    the non-existent repo drives the command to a clean, intentional AbortError
+    path -- exit code 1 with an "Aborted" message -- not a click usage error or an
+    uncaught traceback.
+    """
     # The git URL points at a non-existent repo, so the command always fails --
     # either at install time ("Failed to install plugin packages: ...") or, in an
     # environment where mngr is not managed by `uv tool`, at the receipt check.
@@ -140,10 +163,14 @@ def test_plugin_add_by_git(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_plugin_remove(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # remove a plugin
         mngr plugin remove my-plugin
-    """)
+
+    Scope: `my-plugin` is not an installed plugin, so removal fails *cleanly* --
+    a user-facing "Aborted" error, never a bare Python traceback -- regardless of
+    the precise reason (mngr not installed via uv tool, or not a declared plugin).
+    """
     # `my-plugin` is not an installed plugin, so removal must fail. Whatever the
     # precise reason (mngr not installed via uv tool, or the package not being a
     # declared plugin), the command must fail *cleanly* -- a user-facing
@@ -157,14 +184,15 @@ def test_plugin_remove(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_plugin_remove_rejects_invalid_name(e2e: E2eSession) -> None:
-    # Unhappy path for the `mngr plugin remove` block: an unparseable package
-    # name is rejected up front with a clear argument-validation error, before
-    # any installation state is consulted (so this holds regardless of how mngr
-    # itself was installed).
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # remove a plugin
         mngr plugin remove my-plugin
-    """)
+
+    Scope: the unhappy path of the same `mngr plugin remove` block. An unparseable
+    package name is rejected up front with a clear "Invalid package name"
+    argument-validation error, before any installation state is consulted (so this
+    holds regardless of how mngr itself was installed).
+    """
     result = e2e.run(
         "mngr plugin remove 'not a valid name'",
         comment="remove a plugin with an invalid package name",
@@ -175,10 +203,15 @@ def test_plugin_remove_rejects_invalid_name(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_plugin_enable_project_scope(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # enable a plugin at the project scope
         mngr plugin enable my-plugin --scope project
-    """)
+
+    Scope: enabling is a soft pre-configuration that succeeds even for a plugin
+    that is not installed yet -- it prints "Enabled plugin 'my-plugin' in project",
+    warns the plugin is "not currently registered", and persists enabled=true in
+    the project settings.toml whose path it prints.
+    """
     result = e2e.run(
         "mngr plugin enable my-plugin --scope project",
         comment="enable a plugin at the project scope",
@@ -203,10 +236,15 @@ def test_plugin_enable_project_scope(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.timeout(60)
 def test_plugin_disable_user_scope(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # disable a plugin at the user scope
         mngr plugin disable my-plugin --scope user
-    """)
+
+    Scope: disabling is a soft operation that persists the setting even for a
+    plugin not yet installed -- it prints "Disabled plugin 'my-plugin' in user",
+    warns the plugin is "not currently registered", and writes the user-scope
+    config so `mngr config get` reads the value back as false.
+    """
     result = e2e.run(
         "mngr plugin disable my-plugin --scope user",
         comment="disable a plugin at the user scope",
@@ -229,10 +267,15 @@ def test_plugin_disable_user_scope(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_plugin_list_fields(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # list plugins with specific fields
         mngr plugin list --fields "name,version,enabled"
-    """)
+
+    Scope: `--fields "name,version,enabled"` shows only the requested columns in
+    the requested order (NAME VERSION ENABLED), omits unrequested fields
+    (DESCRIPTION), and renders real values -- the built-in `claude` plugin is
+    present and the `enabled` column shows a true boolean, not the `-` placeholder.
+    """
     result = e2e.run(
         'mngr plugin list --fields "name,version,enabled"',
         comment="list plugins with specific fields",
