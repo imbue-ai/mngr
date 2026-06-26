@@ -9,6 +9,10 @@
   A "Signed out" indicator surfaces when an account is present (still
   in sessions.json) but the user disabled the block via the providers
   panel.
+
+  The per-machine error-reporting toggles live on the dedicated Settings
+  page (reachable from the sidebar), not here -- they are global to the
+  machine and independent of which accounts are signed in.
 #}
 <Base title="Manage Accounts">
   <PageContainer>
@@ -57,6 +61,7 @@
     <div class="mt-4">
       <ButtonLink href="/auth/login" variant="primary">Add account</ButtonLink>
     </div>
+
     <div class="mt-4"><Link href="/" extra="type-helper">&larr; Back to projects</Link></div>
   </PageContainer>
 </Base>

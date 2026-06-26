@@ -1,4 +1,6 @@
+import sys
 from pathlib import Path
+from typing import cast
 
 import pytest
 import sentry_sdk
@@ -12,15 +14,18 @@ from sentry_sdk.types import Hint
 
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.utils.sentry.core import ErrorAttachmentsS3Uploader
-from imbue.minds.utils.sentry.core import MINDS_SENTRY_ENABLED_ENV_VAR
+from imbue.minds.utils.sentry.core import MANUALLY_SUBMITTED_TAG
 from imbue.minds.utils.sentry.core import SENTRY_DSN_DEV
 from imbue.minds.utils.sentry.core import SENTRY_DSN_PRODUCTION
 from imbue.minds.utils.sentry.core import SENTRY_DSN_STAGING
 from imbue.minds.utils.sentry.core import SentryDeployEnvironment
 from imbue.minds.utils.sentry.core import _SENTRY_DSN_BY_ENVIRONMENT
 from imbue.minds.utils.sentry.core import _before_send_wrapper
-from imbue.minds.utils.sentry.core import is_sentry_enabled
+from imbue.minds.utils.sentry.core import _drop_interrupt_events
+from imbue.minds.utils.sentry.core import _make_automatic_reporting_gate
+from imbue.minds.utils.sentry.core import add_extra_info_hook
 from imbue.minds.utils.sentry.core import resolve_sentry_environment
+from imbue.minds.utils.sentry.core import submit_manual_bug_report
 from imbue.minds.utils.sentry.loguru_handler import should_record_sentry_event
 
 
@@ -32,23 +37,6 @@ def test_from_minds_env_name_maps_production_and_staging() -> None:
 @pytest.mark.parametrize("env_name", ["dev-josh-1", "ci-ephemeral", "", "Production", "STAGING", None])
 def test_from_minds_env_name_defaults_to_development(env_name: str | None) -> None:
     assert SentryDeployEnvironment.from_minds_env_name(env_name) is SentryDeployEnvironment.DEVELOPMENT
-
-
-@pytest.mark.parametrize("raw_value", ["1", "true", "TRUE", "yes", " Yes "])
-def test_is_sentry_enabled_accepts_truthy_values(monkeypatch: pytest.MonkeyPatch, raw_value: str) -> None:
-    monkeypatch.setenv(MINDS_SENTRY_ENABLED_ENV_VAR, raw_value)
-    assert is_sentry_enabled() is True
-
-
-@pytest.mark.parametrize("raw_value", ["0", "false", "no", ""])
-def test_is_sentry_enabled_rejects_other_values(monkeypatch: pytest.MonkeyPatch, raw_value: str) -> None:
-    monkeypatch.setenv(MINDS_SENTRY_ENABLED_ENV_VAR, raw_value)
-    assert is_sentry_enabled() is False
-
-
-def test_is_sentry_enabled_defaults_to_false_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(MINDS_SENTRY_ENABLED_ENV_VAR, raising=False)
-    assert is_sentry_enabled() is False
 
 
 @pytest.mark.parametrize(
@@ -166,6 +154,133 @@ def test_before_send_failure_reporting_does_not_recurse() -> None:
         sentry_sdk.capture_event({"message": "trigger"})
 
     assert call_count == 2
+
+
+def test_automatic_reporting_gate_drops_automatic_events_when_disabled() -> None:
+    gate = _make_automatic_reporting_gate(lambda: False)
+    assert gate({"message": "boom"}, {}) is None
+
+
+def test_automatic_reporting_gate_passes_automatic_events_when_enabled() -> None:
+    gate = _make_automatic_reporting_gate(lambda: True)
+    event: Event = {"message": "boom"}
+    assert gate(event, {}) is event
+
+
+def test_automatic_reporting_gate_always_passes_manual_reports_even_when_disabled() -> None:
+    # A manual bug report is an explicit user action and must be sent regardless of the automatic
+    # reporting setting.
+    gate = _make_automatic_reporting_gate(lambda: False)
+    event: Event = {"message": "bug", "tags": {MANUALLY_SUBMITTED_TAG: "true"}}
+    assert gate(event, {}) is event
+
+
+def _hint_for_raised(exception: BaseException) -> Hint:
+    """Build a before_send ``Hint`` carrying real ``exc_info`` for ``exception`` (raised to get a traceback)."""
+    # Catch the exact type raised (covers KeyboardInterrupt / SystemExit, which are not Exception
+    # subclasses) without catching the whole BaseException hierarchy.
+    try:
+        raise exception
+    except type(exception):
+        return cast(Hint, {"exc_info": sys.exc_info()})
+
+
+def test_drop_interrupt_events_drops_keyboard_interrupt() -> None:
+    # KeyboardInterrupt (Ctrl-C) reaches Sentry via the SDK's excepthook/threading integrations,
+    # bypassing the loguru handler's own filter -- before_send must drop it since it is not a real fault.
+    assert _drop_interrupt_events({"message": "x"}, _hint_for_raised(KeyboardInterrupt())) is None
+
+
+@pytest.mark.parametrize("clean_exit", [SystemExit(), SystemExit(0), SystemExit(None), SystemExit(False)])
+def test_drop_interrupt_events_drops_clean_system_exit(clean_exit: SystemExit) -> None:
+    # A clean SystemExit (code None/0) is normal teardown, not an error.
+    assert _drop_interrupt_events({"message": "x"}, _hint_for_raised(clean_exit)) is None
+
+
+@pytest.mark.parametrize("fatal_exit", [SystemExit(1), SystemExit("boom")])
+def test_drop_interrupt_events_keeps_nonzero_system_exit(fatal_exit: SystemExit) -> None:
+    # A non-zero / message-bearing SystemExit is a genuine fatal-exit signal and must still report,
+    # so a real error during shutdown is not silently swallowed.
+    event: Event = {"message": "x"}
+    assert _drop_interrupt_events(event, _hint_for_raised(fatal_exit)) is event
+
+
+def test_drop_interrupt_events_keeps_ordinary_exception_and_eventless_hints() -> None:
+    # Ordinary exceptions (the common case) and events without exc_info pass straight through.
+    event: Event = {"message": "x"}
+    assert _drop_interrupt_events(event, _hint_for_raised(ValueError("real error"))) is event
+    assert _drop_interrupt_events(event, cast(Hint, {})) is event
+    assert _drop_interrupt_events(event, cast(Hint, {"exc_info": (None, None, None)})) is event
+
+
+def test_add_extra_info_hook_skips_attachments_when_log_inclusion_disabled() -> None:
+    # With log inclusion off, no upload callbacks are prepared and no uploaded-files extras are added,
+    # but the lightweight ``platform`` extra is still attached.
+    event: Event = {"extra": {}}
+    result_event, _hint, callbacks = add_extra_info_hook(event, {}, is_log_inclusion_enabled=lambda: False)
+    assert callbacks == ()
+    assert "platform" in result_event["extra"]
+    assert not any(key.startswith("uploaded_files") for key in result_event["extra"])
+
+
+def test_add_extra_info_hook_collects_traceback_when_log_inclusion_enabled() -> None:
+    # With log inclusion on and no scope-configured log folder, the only attachment prepared is the
+    # synthesized-traceback upload (one callback). Callbacks are partials, so nothing is uploaded here.
+    event: Event = {"extra": {}}
+    _result_event, _hint, callbacks = add_extra_info_hook(event, {}, is_log_inclusion_enabled=lambda: True)
+    assert len(callbacks) == 1
+
+
+def test_submit_manual_bug_report_sends_tagged_event_even_when_reporting_disabled() -> None:
+    # A manual bug report is an explicit user action: it must reach Sentry even when the automatic
+    # reporting gate is set to drop events, and it must carry the manual tag and the report payload.
+    captured_events: list[Event] = []
+
+    class _CapturingTransport(Transport):
+        def capture_envelope(self, envelope: Envelope) -> None:
+            event = envelope.get_event()
+            if event is not None:
+                captured_events.append(event)
+
+    gate = _make_automatic_reporting_gate(lambda: False)
+
+    def before_send(event: Event, hint: Hint) -> Event | None:
+        return _before_send_wrapper(event, hint, [gate])
+
+    client = Client(
+        dsn="https://public@example.com/1",
+        before_send=before_send,
+        transport=_CapturingTransport(),
+        default_integrations=False,
+        auto_enabling_integrations=False,
+    )
+    with isolation_scope() as scope:
+        scope.set_client(client)
+        event_id = submit_manual_bug_report(
+            title="[bug report] boom",
+            report={"description": "boom", "remote_access_requested": False},
+            include_logs=False,
+            logs_folder=None,
+        )
+        client.flush()
+
+    # The event id is returned so the user can quote it; capture_event yields a 32-char hex string.
+    assert isinstance(event_id, str) and len(event_id) == 32
+    assert len(captured_events) == 1
+    event = captured_events[0]
+    # ``Event`` types tags/extra loosely (object), so narrow before subscripting.
+    tags = cast(dict, event["tags"])
+    assert tags["manually_submitted"] == "true"
+    extra = cast(dict, event["extra"])
+    assert extra["bug_report"]["description"] == "boom"
+
+
+def test_submit_manual_bug_report_returns_none_when_sentry_inactive() -> None:
+    # With no active Sentry client (the default in tests), the submit is a no-op that returns None
+    # (no event id) rather than raising.
+    assert (
+        submit_manual_bug_report(title="t", report={"description": "d"}, include_logs=False, logs_folder=None) is None
+    )
 
 
 def test_collect_external_attachments_without_logs_folder_only_uploads_traceback() -> None:

@@ -1,0 +1,82 @@
+{#def report_unexpected_errors=false, include_logs=false #}
+{#
+  Error-reporting consent screen. Shown just after login (the user is authenticated)
+  while MindsConfig.error_reporting_consent_given is False. The two toggles mirror the
+  persistent settings on the dedicated Settings page; "Include logs" is only revealed
+  once "Report unexpected errors" is enabled. "Continue" records the choices and flips
+  the consent-given flag (POST /consent), then reloads the app, which now proceeds past
+  this screen to the landing content.
+#}
+{% set _scripts %}
+<script>
+  (function() {
+    var reportToggle = document.getElementById('consent-report');
+    var logsRow = document.getElementById('consent-logs-row');
+    var logsToggle = document.getElementById('consent-logs');
+    var continueBtn = document.getElementById('consent-continue');
+
+    // "Include logs" is only meaningful when reporting is on, so reveal it with the
+    // report toggle and clear it when reporting is turned back off.
+    function syncLogsVisibility() {
+      if (reportToggle.checked) {
+        logsRow.classList.remove('hidden');
+      } else {
+        logsRow.classList.add('hidden');
+        logsToggle.checked = false;
+      }
+    }
+    reportToggle.addEventListener('change', syncLogsVisibility);
+    syncLogsVisibility();
+
+    continueBtn.addEventListener('click', function() {
+      continueBtn.disabled = true;
+      fetch('/consent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          report_unexpected_errors: reportToggle.checked,
+          include_logs: logsToggle.checked,
+        }),
+      }).then(function() {
+        window.location.href = '/';
+      }).catch(function() {
+        // Even if persisting failed, move on; the consent flag stays unset so the
+        // screen will simply reappear on the next launch.
+        window.location.href = '/';
+      });
+    });
+  })();
+</script>
+{% endset %}
+<Base title="Error reporting" scripts={{ _scripts }}>
+  <div class="min-h-screen flex items-center justify-center">
+    <div class="max-w-md w-full px-6">
+      <h1 class="type-heading-lg text-primary mb-2">Help improve Minds</h1>
+      <p class="text-secondary type-body mb-6">
+        Minds can report unexpected errors to Imbue so we can find and fix problems faster. You can
+        change these choices any time in Settings.
+      </p>
+
+      <div class="flex flex-col gap-4 mb-8">
+        <label class="flex items-center gap-3 cursor-pointer">
+          <input type="checkbox" id="consent-report" class="shrink-0"
+                 {% if report_unexpected_errors %}checked{% endif %}>
+          <span>
+            <span class="type-body text-primary font-semibold">Report unexpected errors</span>
+            <span class="block type-helper text-tertiary">Send a report to Imbue when something goes wrong.</span>
+          </span>
+        </label>
+        <label id="consent-logs-row" class="flex items-center gap-3 cursor-pointer hidden">
+          <input type="checkbox" id="consent-logs" class="shrink-0"
+                 {% if include_logs %}checked{% endif %}>
+          <span>
+            <span class="type-body text-primary font-semibold">Include logs</span>
+            <span class="block type-helper text-tertiary">Attach recent log files to help diagnose the problem.</span>
+          </span>
+        </label>
+      </div>
+
+      <Button variant="primary" block id="consent-continue">Continue</Button>
+    </div>
+  </div>
+</Base>

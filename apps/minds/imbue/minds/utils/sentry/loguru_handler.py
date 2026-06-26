@@ -9,7 +9,6 @@ The changes so far (could be out of date):
 - adds `add_extra_info_hook` to the event handler, with a watchdog to make sure it doesn't slow things down
 """
 
-import asyncio
 import enum
 import logging
 from concurrent.futures import Future
@@ -185,10 +184,10 @@ class SentryEventHandler(_BaseHandler):
         if not self._can_record(record):
             return
 
-        # Filter out KeyboardInterrupt and CancelledError exceptions from being logged to Sentry
+        # Filter out KeyboardInterrupt exceptions from being logged to Sentry
         if record.exc_info and record.exc_info[0] is not None:
             exc_type = record.exc_info[0]
-            if exc_type is KeyboardInterrupt or exc_type is asyncio.CancelledError:
+            if exc_type is KeyboardInterrupt:
                 return
 
         client = sentry_sdk.get_client()

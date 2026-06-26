@@ -46,6 +46,24 @@ contextBridge.exposeInMainWorld('minds', {
   // Inbox modal (formerly the right-side requests panel)
   toggleInbox: () => ipcRenderer.send('toggle-inbox'),
 
+  // Get-help modal (report a bug). ``agentId`` is the currently-displayed
+  // workspace id (or '' on a general screen) so the help page can scope its
+  // report to that workspace; it is packed into the help page URL by main.
+  toggleHelp: (agentId) => ipcRenderer.send('toggle-help', agentId),
+
+  // One-shot bug report from the full-app error takeover (shell.html) when the
+  // backend is down and the normal /help flow is unreachable. Reports the
+  // on-screen error via the main-process Sentry. ``includeLogs`` is the
+  // takeover's per-report "Include recent logs" opt-in (the persistent
+  // include-logs setting is OR'd in by main). Resolves to ``{ ok, eventId }``
+  // so the shell can show the copyable report id.
+  reportError: (includeLogs) => ipcRenderer.invoke('report-error', { includeLogs }),
+
+  // Whether the persistent ``include_error_logs`` setting is on, so the takeover
+  // can decide whether to offer its per-report "Include recent logs" checkbox
+  // (shown only when the setting is off; when on, logs are always attached).
+  getLogInclusionSetting: () => ipcRenderer.invoke('get-log-inclusion-setting'),
+
   // Modal overlay close (used by the inbox shell and any one-off dialogs)
   closeModal: () => ipcRenderer.send('close-modal'),
 
