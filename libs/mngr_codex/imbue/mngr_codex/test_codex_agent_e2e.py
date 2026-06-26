@@ -139,4 +139,15 @@ class _CodexReleaseProfile(AgentReleaseProfile):
 @pytest.mark.rsync
 @pytest.mark.timeout(900)
 def test_codex_agent_full_lifecycle(tmp_path: Path) -> None:
+    """Drive the real ``codex`` CLI through mngr's full agent release lifecycle and assert
+    each stage genuinely happened (not merely that commands exited 0).
+
+    Runs the shared arc in ``run_agent_release_lifecycle`` against the ``_CodexReleaseProfile``:
+    create the agent, wait for it to reach WAITING, send a message, read back the transcript
+    (which must contain the agent's reply and the forced bash tool call surfaced as a nested
+    assistant tool_call), stop and restart to confirm the session resumes, then destroy. The
+    final leg adopts the just-preserved native codex session by its root id in a fresh worktree
+    and requires the new agent to recall a pre-destroy secret -- which only passes if the rollout
+    store truly resumed, so it would fail if resume/adopt were a no-op.
+    """
     run_agent_release_lifecycle(_CodexReleaseProfile(), tmp_path)

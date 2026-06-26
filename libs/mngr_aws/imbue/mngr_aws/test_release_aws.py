@@ -318,6 +318,14 @@ def test_provider_release_trip1(
     aws_release_client: AwsVpsClient,
     _aws_release_test_security_group_prepared: None,
 ) -> None:
+    """Trip 1 on AWS: the full create -> lifecycle -> sketchy-kill -> gc arc against real EC2.
+
+    Provisions a real instance via ``mngr create``, then asserts the EC2 resource exists and is
+    discoverable by name, shows RUNNING in ``mngr list``, round-trips a marker file over ``mngr
+    exec``, survives stop/start (host_dir readable offline from the S3 state bucket), and is
+    reaped by gc after a sketchy out-of-band kill. Run for both the Docker-container and bare
+    (``NONE``) isolation shapes. A no-op or broken provider lifecycle fails the relevant step.
+    """
     run_provider_release_trip1(
         _AwsReleaseProfile(client=aws_release_client, isolation=isolation), tmp_path, temp_git_repo
     )
@@ -332,6 +340,14 @@ def test_provider_release_trip2(
     aws_release_client: AwsVpsClient,
     _aws_release_test_security_group_prepared: None,
 ) -> None:
+    """Trip 2 on AWS: the idle auto-shutdown contract against real EC2.
+
+    Creates an idle host (``terminate_on_shutdown = false`` so the watcher's poweroff lands the
+    instance in EC2's resumable ``stopped`` state, not terminated), polls the EC2 API until the
+    instance genuinely stops (billing actually halts), then asserts ``mngr start`` resumes it and
+    a marker written before shutdown survives the restart. Run for both isolation shapes. Fails if
+    the instance never stops or the marker is lost on resume.
+    """
     run_provider_release_trip2(
         _AwsReleaseProfile(client=aws_release_client, isolation=isolation), tmp_path, temp_git_repo
     )
@@ -346,6 +362,14 @@ def test_provider_release_trip3(
     aws_release_client: AwsVpsClient,
     _aws_release_test_security_group_prepared: None,
 ) -> None:
+    """Trip 3 on AWS: snapshot portability across destroy against real EC2.
+
+    For the container shape, snapshots are non-portable (``docker commit`` lives on the VPS disk),
+    so the trip asserts the documented divergence -- the snapshot record is gone after ``mngr
+    destroy`` -- which flips loudly the moment AWS snapshots become portable; for the bare shape
+    the trip skips (no snapshots). Either way the assertion fails if the post-destroy snapshot
+    state stops matching the declared capability.
+    """
     run_provider_release_trip3(
         _AwsReleaseProfile(client=aws_release_client, isolation=isolation), tmp_path, temp_git_repo
     )
@@ -356,6 +380,14 @@ def test_provider_release_trip4(
     temp_git_repo: Path,
     aws_release_client: AwsVpsClient,
 ) -> None:
+    """Trip 4 on AWS: the no-boot CLI error-classification contract.
+
+    Asserts that with AWS credentials made unresolvable ``mngr create`` fails with the contract
+    ``ProviderUnavailableError`` and AWS's curated ``aws configure`` help (``has_curated_unavailable_help``),
+    and that a dropped ``--vps-*`` build-arg prefix fails synchronously with the migration hint --
+    all before any EC2 call, so the test costs no compute. Fails if either failure mode is
+    misclassified or the curated help text regresses.
+    """
     # No-boot CLI error-classification trip: not parametrized over isolation (the error paths are
     # isolation-agnostic) and no ``rsync`` mark (it never provisions a host).
     run_provider_release_trip4(
@@ -386,6 +418,12 @@ def aws_release_client() -> AwsVpsClient:
 
 
 def test_api_client_list_instances_does_not_error(aws_release_client: AwsVpsClient) -> None:
+    """Smoke test that ``AwsVpsClient.list_instances`` completes a real read-only EC2 call.
+
+    Proves the client authenticates and the DescribeInstances request round-trips against live
+    AWS, returning a list. A broken session, region, or request shape would raise instead of
+    returning, so the assertion fails on any real-network regression.
+    """
     instances = aws_release_client.list_instances()
     assert isinstance(instances, list)
 

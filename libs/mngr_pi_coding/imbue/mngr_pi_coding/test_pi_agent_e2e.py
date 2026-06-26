@@ -130,4 +130,15 @@ class _PiReleaseProfile(AgentReleaseProfile):
 @pytest.mark.rsync
 @pytest.mark.timeout(1500)
 def test_pi_agent_full_lifecycle(tmp_path: Path) -> None:
+    """Drive a real pi agent through the full mngr lifecycle and assert each stage produced its effect.
+
+    Runs the shared agent release arc against the real ``mngr`` CLI, the real ``pi`` binary, and a
+    real model: create -> WAITING, send a message -> RUNNING (observing the RUNNING marker), capture
+    the transcript (which must carry a forced bash tool_result and reported token usage), stop/start
+    to resume, adopt the preserved native pi session, and destroy. The assertions inside
+    ``run_agent_release_lifecycle`` fail if any stage is a no-op -- e.g. the agent never reaches
+    WAITING, the message yields no RUNNING transition, the transcript lacks the tool_result or usage,
+    or resume/adopt loses the preserved session -- so passing proves pi's plumbing actually drove the
+    lifecycle end to end.
+    """
     run_agent_release_lifecycle(_PiReleaseProfile(), tmp_path)

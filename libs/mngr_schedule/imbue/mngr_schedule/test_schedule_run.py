@@ -31,7 +31,15 @@ _ENABLED_PLUGINS = frozenset({"schedule", "modal"})
 @pytest.mark.release
 @pytest.mark.timeout(900)
 def test_schedule_run_and_remove_modal_trigger() -> None:
-    """Test the full schedule lifecycle: add, list, run, verify, remove."""
+    """Exercise the full Modal schedule lifecycle: add, list, run, verify, remove.
+
+    The load-bearing assertions distinguish real behavior from a no-op: after
+    `add` the trigger must appear in `schedule list`; `schedule run` must echo
+    "hello-from-schedule-run" back through stdout, which only happens if the
+    headless command actually executed inside the Modal container (not merely
+    that the CLI exited 0); and after `remove` the trigger must disappear from
+    `schedule list`.
+    """
     trigger_name = "test-schedule-run"
     env = build_subprocess_env()
     disable_args = build_disable_plugin_args(_ENABLED_PLUGINS)

@@ -162,4 +162,16 @@ class _ClaudeReleaseProfile(AgentReleaseProfile):
 @pytest.mark.rsync
 @pytest.mark.timeout(1500)
 def test_claude_agent_full_lifecycle(tmp_path: Path) -> None:
+    """Drive a real claude agent through the full shared release arc and assert it behaves.
+
+    Runs create -> WAITING -> message -> RUNNING -> transcript -> stop/start resume ->
+    destroy -> adopt-from-preserved -> recall against the real ``claude`` binary and a real
+    (haiku) model. The load-bearing checks (in ``run_agent_release_lifecycle``) fail unless
+    claude genuinely ran: it must reach WAITING, flip the RUNNING marker on a forced bash
+    tool call, report token usage, and -- after the agent is destroyed -- a fresh agent in a
+    new worktree that adopts the preserved session JSONL must recall the pre-destroy secret,
+    proving the native session store resumes and cross-cwd re-filing works. A no-op or broken
+    lifecycle (agent never runs, marker never flips, or adoption fails to resume) fails these
+    assertions rather than passing silently.
+    """
     run_agent_release_lifecycle(_ClaudeReleaseProfile(), tmp_path)

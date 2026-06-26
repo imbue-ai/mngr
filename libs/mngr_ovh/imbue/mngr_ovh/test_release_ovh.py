@@ -113,6 +113,14 @@ class TestOvhProviderLifecycle:
 
     @pytest.mark.rsync
     def test_create_exec_and_destroy(self, ovh_test_settings_dir: Path) -> None:
+        """Creating an agent on OVH provisions a usable VPS reachable via the mngr CLI.
+
+        Asserts that `mngr create --provider ovh` succeeds, then that `exec` runs a
+        command on the live VPS and returns its stdout ("hello-from-ovh"), that the
+        host build context was actually uploaded (the `/mngr` host_dir exists), and
+        that `list` reports the agent on the `ovh` backend. These would fail if create
+        silently no-op'd, the VPS were unreachable, or the build context never synced.
+        """
         agent_name = f"test-ovh-{int(time.time()) % 100000}"
 
         # Create (uses rsync to upload the build context to the VPS)
@@ -148,6 +156,14 @@ class TestOvhProviderLifecycle:
 
     @pytest.mark.rsync
     def test_create_stop_start_destroy(self, ovh_test_settings_dir: Path) -> None:
+        """An OVH agent survives a stop/start cycle and remains executable afterwards.
+
+        Asserts that `mngr stop` succeeds while `list` still reports the stopped agent,
+        that `mngr start` brings the VPS back, and that a post-restart `exec` runs on
+        the live VPS and returns its stdout ("alive-after-restart"). These would fail
+        if stop destroyed/dropped the agent, start failed to resume the VPS, or the
+        restarted host could no longer execute commands.
+        """
         agent_name = f"test-ovh-ss-{int(time.time()) % 100000}"
 
         result = _run_mngr(
@@ -186,5 +202,11 @@ class TestOvhVpsClient:
     """Read-only smoke tests against the live OVH API."""
 
     def test_list_instances_does_not_error(self) -> None:
+        """Listing VPS instances against the live OVH API authenticates and returns a list.
+
+        Asserts that an authenticated `OvhVpsClient.list_instances()` call against the
+        real API returns a `list`. This would fail if credential resolution were broken,
+        the API call raised, or the client returned a non-list payload.
+        """
         client = _build_client()
         assert isinstance(client.list_instances(), list)
