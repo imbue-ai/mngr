@@ -2177,9 +2177,9 @@ def create_desktop_client(
     app.add_url_rule("/create", view_func=_handle_create_page)
     app.add_url_rule("/creating/<agent_id>", view_func=_handle_creating_page)
 
-    # Agent destruction routes. Destroy + status/log streaming are served by the
-    # versioned /api/v1/workspaces surface now; only the dismiss action (no v1
-    # equivalent) and the detail page remain here.
+    # Agent destruction routes. Destroy, status/log streaming, and dismiss
+    # (DELETE /api/v1/workspaces/operations/<id>) are all served by the versioned
+    # /api/v1/workspaces surface now; only the detail page remains here.
     app.add_url_rule("/destroying/<agent_id>", view_func=_handle_destroying_page)
 
     # Workspace-recovery page. The host-health probe and the restart actions it
