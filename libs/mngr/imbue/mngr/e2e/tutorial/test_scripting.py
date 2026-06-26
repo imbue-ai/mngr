@@ -14,10 +14,14 @@ from imbue.skitwright.expect import expect
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
 def test_create_headless_no_connect_message(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # run in headless mode (no interactive prompts)
         mngr create my-task --headless --no-connect --message "Do the thing"
-    """)
+
+    Scope: a headless create combining `--headless`, `--no-connect`, and
+    `--message` runs non-interactively, exits 0, and the created agent appears
+    in `mngr list`.
+    """
     expect(
         e2e.run(
             'mngr create my-task --headless --no-connect --type command --no-ensure-clean --message "Do the thing" -- sleep 101000',
@@ -35,10 +39,14 @@ def test_create_headless_no_connect_message(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_config_set_headless_globally(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # or set headless globally
         mngr config set headless true
-    """)
+
+    Scope: `mngr config set headless true` writes to the default (project) scope
+    config file, reports "Set headless = true in project", and persists the
+    value as a real boolean True (not the string "true").
+    """
     # The default scope is project, so "globally" here means project-wide (it
     # applies to every invocation in this repo), as opposed to the per-command
     # --headless flag. Locate the project config file before writing it -- the
@@ -62,18 +70,18 @@ def test_config_set_headless_globally(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_config_set_rejects_unknown_key(e2e: E2eSession) -> None:
-    """Unhappy path for the same `mngr config set` command: unknown keys are rejected.
-
-    `mngr config set` validates the resulting config before writing the file, so
-    an unknown key fails with a non-zero exit and the config file is left
-    unchanged. (Note that the value's *type* is not validated -- e.g.
-    `set headless notabool` is accepted -- because validation goes through
-    `model_construct`, which only rejects unknown fields.)
-    """
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # or set headless globally
         mngr config set headless true
-    """)
+
+    Scope: the unhappy path of the same `mngr config set` block. `mngr config
+    set` validates the resulting config before writing, so an unknown key fails
+    with a non-zero exit and stderr "Unknown configuration fields", and the
+    config file is left byte-for-byte unchanged (the rejected key never reaches
+    disk). The value's *type* is not validated -- e.g. `set headless notabool`
+    is accepted -- because validation goes through `model_construct`, which only
+    rejects unknown fields.
+    """
     # The e2e fixture pre-seeds the project config file with the pytest opt-in
     # key, so the file already exists. Capture its contents before the rejected
     # write so we can prove the write left the file untouched.
@@ -100,10 +108,14 @@ def test_config_set_rejects_unknown_key(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(300)
 def test_create_reuse_and_message(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # idempotent creation: reuse an existing agent if it already exists
         mngr create worker --reuse --provider modal --no-connect && mngr message worker -m "Process the queue"
-    """)
+
+    Scope: idempotent `mngr create --reuse` chained with `mngr message` -- the
+    `--reuse` create and the subsequent message to the same agent both succeed,
+    so the chained command exits 0.
+    """
     expect(
         e2e.run(
             "mngr create worker --reuse --provider modal --no-connect --no-ensure-clean --type command -- sleep 101200"
@@ -117,10 +129,14 @@ def test_create_reuse_and_message(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.timeout(180)
 def test_get_json_into_var(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # get JSON output for parsing in scripts
         AGENT_INFO=$(mngr list --format json)
-    """)
+
+    Scope: capturing `mngr list --format json` via command substitution into a
+    shell variable yields a non-empty JSON document (the agents/errors object),
+    so a script can parse the output -- the captured character count is non-zero.
+    """
     # `mngr list` queries enabled remote providers (Modal), so it can take well
     # over the 10s global pytest timeout; override that marker and give the
     # subprocess matching headroom.
@@ -158,12 +174,19 @@ def test_get_json_into_var(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.timeout(120)
 def test_observe_discovery_pipe_python(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # use discovery stream for streaming results into other tools
         mngr observe --discovery-only | while read -r line; do
           echo "$line" | python -c "import sys, json; d=json.load(sys.stdin); print(d.get('name', 'unknown'))"
         done
-    """)
+
+    Scope: piping `mngr observe --discovery-only` JSONL into a python one-liner.
+    Each emitted event is valid JSON the loop parses with json.load; the raw
+    stream carries DISCOVERY_FULL events, and since no event has a top-level
+    "name", the "unknown" fallback prints for every event -- confirming the
+    snapshot flowed end to end through the pipe (observe -> JSONL -> python),
+    not merely that the timeout-wrapped command exited 0.
+    """
     # Warm the discovery cache first. `mngr list` runs an unfiltered listing,
     # which writes a full discovery snapshot to disk; that lets the `observe`
     # below emit the cached snapshot instantly on its fast path instead of
@@ -193,7 +216,7 @@ def test_observe_discovery_pipe_python(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.timeout(180)
 def test_usage_wait_and_create(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block(r"""
+    r"""Tutorial block:
         # `mngr usage wait` blocks until a CEL predicate over the current usage snapshot
         # evaluates true, then exits 0 (exit 2 on --timeout). Compose it with `mngr create`
         # to opportunistically spawn work when you're near the end of a rate-limit window
@@ -204,7 +227,12 @@ def test_usage_wait_and_create(e2e: E2eSession) -> None:
         # the `mngr usage wait --help` page for the full field list.
         mngr usage wait --until 'five_hour.elapsed_percentage > 75 && five_hour.used_percentage < 50' \
           && mngr create chore@.modal --no-connect --message "Find and fix an issue in the codebase."
-    """)
+
+    Scope: a usage-gated create. With no usage sources and `--timeout 1`, the CEL
+    predicate never matches, so `mngr usage wait` exits 2 (its timeout path) with
+    "Timed out" on stdout, short-circuiting the `&&` so the chained `mngr create`
+    is skipped -- no `chore` agent is created.
+    """
     # In a fresh isolated env there are no usage sources, so the predicate can
     # never match; use --timeout 1 so usage wait gives up after its first poll
     # and exits 2 (EXIT_CODE_TIMEOUT). The chained `mngr create` must then be

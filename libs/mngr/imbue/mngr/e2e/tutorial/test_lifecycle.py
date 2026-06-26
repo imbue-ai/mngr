@@ -35,10 +35,14 @@ def _create_named_agents(e2e: E2eSession, names_and_sleeps: list[tuple[str, int]
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
 def test_start_idempotent(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # start a stopped agent. Is idempotent, so is safe to call even if already running.
         mngr start my-task
-    """)
+
+    Scope: the idempotence the block advertises -- `mngr start` on an
+    already-running agent succeeds rather than erroring, and does not tear the
+    agent down (it stays reachable, with exec landing in worktrees/my-task).
+    """
     _create_my_task(e2e, 100500)
     # Starting an already-running agent is idempotent: it succeeds rather than erroring.
     expect(e2e.run("mngr start my-task", comment="start a stopped agent (idempotent)")).to_succeed()
@@ -54,13 +58,14 @@ def test_start_idempotent(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
 def test_start_stopped_agent(e2e: E2eSession) -> None:
-    # Happy path counterpart to test_start_idempotent: the tutorial block's primary
-    # case is starting an agent that is actually stopped, so stop a running agent and
-    # bring it back up.
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # start a stopped agent. Is idempotent, so is safe to call even if already running.
         mngr start my-task
-    """)
+
+    Scope: the primary case of the block (happy-path counterpart to
+    test_start_idempotent) -- starting an agent that is actually stopped brings
+    it back up (reports "Started agent: my-task") and makes it reachable again.
+    """
     _create_my_task(e2e, 100513)
     expect(e2e.run("mngr stop my-task", comment="stop the running agent").stdout).to_contain("Stopped agent: my-task")
     started = e2e.run("mngr start my-task", comment="start the now-stopped agent")
@@ -79,10 +84,15 @@ def test_start_stopped_agent(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_start_connect(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # start a stopped agent and immediately connect to it
         mngr start my-task --connect
-    """)
+
+    Scope: the `--connect` flag, which makes `mngr start` also run the configured
+    connect_command after starting the stopped agent. The e2e harness's
+    connect_command writes an "<agent>.pid" file, so its presence proves the
+    start-then-connect path ran (a plain start would not write it).
+    """
     _create_my_task(e2e, 100501)
     expect(e2e.run("mngr start my-task --connect", comment="start and immediately connect")).to_succeed()
     # --connect runs the configured connect_command. The e2e harness's
@@ -103,10 +113,14 @@ def test_start_connect(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 def test_start_multiple_agents(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # start multiple agents at once
         mngr start agent-1 agent-2 agent-3
-    """)
+
+    Scope: a single `mngr start` invocation addressing several named agents at
+    once -- it succeeds and its output names every one of the three agents
+    (not just the first).
+    """
     _create_named_agents(e2e, [("agent-1", 100502), ("agent-2", 100503), ("agent-3", 100504)])
     result = e2e.run("mngr start agent-1 agent-2 agent-3", comment="start multiple agents at once")
     expect(result).to_succeed()
@@ -122,10 +136,14 @@ def test_start_multiple_agents(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_start_all_via_stdin(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # start all stopped agents by simply passing their ids from "mngr list" and reading the ids from stdin (that's what the "-" means)
         mngr list --ids | mngr start -
-    """)
+
+    Scope: the `-` stdin form of `mngr start`, fed agent ids piped from
+    `mngr list --ids`. It starts the piped agents (output names my-task) and the
+    start takes effect: my-task moves out of the `--stopped` set afterwards.
+    """
     _create_my_task(e2e, 100505)
     # Stop the agent first so the stdin-driven start does real work (starting a
     # stopped agent), matching the tutorial's "start all stopped agents" intent.
@@ -148,10 +166,14 @@ def test_start_all_via_stdin(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 def test_start_dry_run(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # dry-run to see what would happen without actually starting anything
         mngr list --ids | mngr start - --dry-run
-    """)
+
+    Scope: the `--dry-run` flag of `mngr start -` -- it reports the plan
+    ("Would be started", naming my-task) without acting, so every agent's
+    lifecycle state is identical before and after (nothing was actually started).
+    """
     _create_my_task(e2e, 100506)
 
     # Capture every agent's lifecycle state before the dry-run so we can prove
@@ -179,10 +201,14 @@ def test_start_dry_run(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
 def test_stop_basic(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # stop a running agent
         mngr stop my-task
-    """)
+
+    Scope: `mngr stop <agent>` on a running agent -- it succeeds and the stop
+    takes effect: my-task is reported under `--stopped` and no longer appears
+    among `--running` agents.
+    """
     _create_my_task(e2e, 100507)
     expect(e2e.run("mngr stop my-task", comment="stop a running agent")).to_succeed()
     # Verify the stop actually took effect: my-task should now be reported as
@@ -200,10 +226,15 @@ def test_stop_basic(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_stop_archive(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # stop and archive the agent (marks it archived so it can be filtered out of listings; its state is preserved).
         mngr stop my-task --archive
-    """)
+
+    Scope: the `--archive` flag of `mngr stop` -- it both stops the agent
+    (reports "Stopped agent: my-task") and marks it archived (the archived_at
+    label), so my-task shows up under `--archived` yet is filtered out of
+    `--active` listings without being destroyed.
+    """
     _create_my_task(e2e, 100508)
     stop_result = e2e.run("mngr stop my-task --archive", comment="stop and archive the agent")
     expect(stop_result).to_succeed()
@@ -231,10 +262,15 @@ def test_stop_archive(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_archive_command(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # you can also archive an agent via the "archive" command, which is basically just a shortcut for "stop --archive"
         mngr archive my-task
-    """)
+
+    Scope: the happy path of the `mngr archive` command on a stopped agent -- it
+    succeeds and applies the archived_at label, so my-task appears in
+    `mngr list --archived`. (Sibling test_archive_running_agent_is_skipped covers
+    the running-agent unhappy path of this same block.)
+    """
     _create_my_task(e2e, 100509)
     # The archive command only archives non-running agents; in the tutorial flow
     # my-task has already been stopped (see "mngr stop my-task --archive" just
@@ -255,10 +291,15 @@ def test_archive_command(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_archive_running_agent_is_skipped(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # you can also archive an agent via the "archive" command, which is basically just a shortcut for "stop --archive"
         mngr archive my-task
-    """)
+
+    Scope: the unhappy path of the `mngr archive` block (counterpart to
+    test_archive_command) -- without --force, archiving a *running* agent is a
+    no-op: it succeeds but skips the agent with a "Skipping running agent"
+    warning and does NOT apply the archived_at label.
+    """
     _create_my_task(e2e, 100513)
     # Unhappy path: without --force, archiving a *running* agent is a no-op. The
     # agent is skipped with a warning and the archived_at label is NOT applied.
@@ -275,10 +316,15 @@ def test_archive_running_agent_is_skipped(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 def test_stop_all_via_stdin(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # stop all running agents
         mngr list --ids | mngr stop -
-    """)
+
+    Scope: the `-` stdin form of `mngr stop`, fed agent ids piped from
+    `mngr list --ids`. It reports the agents it stopped (names my-task), and the
+    effect is a plain stop, not destroy/archive: my-task leaves `--running` but
+    still exists under `--stopped`.
+    """
     _create_my_task(e2e, 100510)
     stop_result = e2e.run("mngr list --ids | mngr stop -", comment="stop all running agents")
     expect(stop_result).to_succeed()
@@ -298,10 +344,15 @@ def test_stop_all_via_stdin(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 def test_archive_stopped_via_stdin(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # archive all stopped agents (handy for cleaning up "mngr list" after a batch of finished work).
         mngr list --stopped --ids | mngr archive -
-    """)
+
+    Scope: the `-` stdin form of `mngr archive`, fed the ids of stopped agents
+    from `mngr list --stopped --ids`. Starting from a stopped, un-archived
+    my-task, it applies the archived_at label so my-task then appears under
+    `--archived` and is filtered out of the `--active` listing.
+    """
     _create_my_task(e2e, 100511)
     expect(e2e.run("mngr stop my-task", comment="stop my-task before archive")).to_succeed()
 
@@ -335,10 +386,15 @@ def test_archive_stopped_via_stdin(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_stop_dry_run(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # dry-run to see what would be stopped
         mngr list --ids | mngr stop - --dry-run
-    """)
+
+    Scope: the `--dry-run` flag of `mngr stop -` -- it reports what would be
+    stopped ("Would stop", naming my-task) without an actual "Stopped agent"
+    line, and leaves the agent running (a subsequent real stop still finds and
+    stops it).
+    """
     _create_my_task(e2e, 100512)
     dry_run_result = e2e.run("mngr list --ids | mngr stop - --dry-run", comment="dry-run to see what would be stopped")
     expect(dry_run_result).to_succeed()
@@ -358,15 +414,17 @@ def test_stop_dry_run(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.timeout(60)
 def test_stop_by_session_name(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # stop has a special variant for finding an agent by its tmux session name:
         mngr stop --session my-session-name
         # this is used primarily to implement the hotkey for exiting from tmux (ex: ctrl-t)
-    """)
-    # The tutorial's "my-session-name" placeholder lacks the configured tmux
-    # session prefix, so mngr should reject it via the --session format guard:
-    # a clear validation error and a non-zero exit, cleanly (no Python
-    # traceback) rather than crashing.
+
+    Scope: the `--session` variant of `mngr stop`, which finds an agent by its
+    tmux session name. The tutorial's "my-session-name" placeholder lacks the
+    configured session prefix, so the --session format guard rejects it with a
+    clear "does not match the expected format" error and a non-zero exit,
+    cleanly (no Python traceback) rather than crashing.
+    """
     result = e2e.run(
         "mngr stop --session my-session-name",
         comment="stop variant that finds an agent by tmux session name",
