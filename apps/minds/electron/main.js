@@ -369,10 +369,22 @@ function updateBundleBounds(bundle) {
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
       bundle.chromeView.setBounds({ x: 0, y: 0, width, height });
     }
-    for (const view of [bundle.contentView, bundle.modalView]) {
-      if (view && !view.webContents.isDestroyed()) {
-        view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
-      }
+    // Exception: the error takeover's "Report a bug" button opens the /help
+    // modal (the backend is still up in the discovery-pipeline takeover). That
+    // modal must overlay the full window so it is actually visible -- it carries
+    // its own dim backdrop, so the error screen shows through behind it.
+    // Collapsing it to 0x0 like the other views is exactly what made the report
+    // button appear to do nothing. Loading/quitting never have a user-opened
+    // modal to show (quitting hides it via setVisible(false)), so only an
+    // error-state visible modal overlays; everything else fully collapses.
+    const modalOverlays = bundle.isErrorState && bundle.modalVisible;
+    if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
+      bundle.contentView.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+    }
+    if (bundle.modalView && !bundle.modalView.webContents.isDestroyed()) {
+      bundle.modalView.setBounds(
+        modalOverlays ? { x: 0, y: 0, width, height } : { x: 0, y: 0, width: 0, height: 0 },
+      );
     }
     return;
   }
