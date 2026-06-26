@@ -1,1 +1,0 @@
-No production behavior change. The Codex agent-config merge test now exercises the unified overlay merge pipeline (`merge_models_via_overlay`) instead of the removed `AgentTypeConfig.merge_with` helper. The behavior it locks in is unchanged: an override's `cli_args` replaces the base while other fields keep their defaults.

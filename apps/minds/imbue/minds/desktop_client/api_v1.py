@@ -27,6 +27,7 @@ from imbue.minds.desktop_client.api_key_auth import require_minds_api_key
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
+from imbue.minds.desktop_client.report_collector import submit_bug_report_from_body
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.telegram.credential_store import load_agent_bot_credentials
@@ -159,6 +160,34 @@ def _handle_notification(agent_id: str) -> Response:
     return _json_response({"ok": True})
 
 
+# -- Bug report route --
+
+
+@require_minds_api_key
+def _handle_bug_report(agent_id: str) -> Response:
+    """Submit a bug report to Imbue on behalf of an in-workspace agent.
+
+    Backed by the same collector/submitter as the local help form, so an agent-initiated report and a
+    user-initiated one carry the same shape. The report is scoped to the caller's own workspace (the
+    path ``agent_id``, which the gateway has already authorized), not to whatever the body claims.
+    """
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return _json_error("Request body must be a JSON object", 400)
+    if not str(body.get("description", "")).strip():
+        return _json_error("'description' field is required and must be a non-empty string", 400)
+
+    state = get_state()
+    event_id = submit_bug_report_from_body(
+        body={**body, "workspace_agent_id": agent_id},
+        session_store=state.session_store,
+        backend_resolver=state.backend_resolver,
+        minds_config=state.minds_config,
+        paths=state.api_v1_paths,
+    )
+    return _json_response({"ok": True, "event_id": event_id})
+
+
 # -- Blueprint factory --
 
 
@@ -177,5 +206,9 @@ def create_api_v1_blueprint() -> Blueprint:
     # Notifications (per-agent so the gateway's per-host permission file
     # can restrict each caller to its own agent ids).
     blueprint.add_url_rule("/agents/<agent_id>/notifications", view_func=_handle_notification, methods=["POST"])
+
+    # Bug reports (per-agent for the same gateway-permission reason; the agent_id
+    # also scopes the report's workspace context).
+    blueprint.add_url_rule("/agents/<agent_id>/report", view_func=_handle_bug_report, methods=["POST"])
 
     return blueprint

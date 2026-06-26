@@ -328,14 +328,16 @@ deploy *args:
 # Start the minds desktop client (electron) in dev mode against the
 # activated env. Sources .env if present, scrubs any ambient
 # ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL (see below), and sets
-# MINDS_WORKSPACE_* env vars so the create-form auto-fills "repository",
-# "name", and "branch":
+# MINDS_WORKSPACE_* env vars so the create-form auto-fills "repository" and
+# "branch" (and the workspace "name" only if you pass an agent_name):
 #   MINDS_WORKSPACE_GIT_URL = .external_worktrees/forever-claude-template/
 #       (REQUIRED -- recipe fails if missing; create the worktree with
 #       `git -C ~/project/forever-claude-template worktree add` before
 #       running minds-start).
 #   MINDS_WORKSPACE_BRANCH  = the FCT worktree's current branch.
-#   MINDS_WORKSPACE_NAME    = "mindtest".
+#   MINDS_WORKSPACE_NAME    = the agent_name arg, set only when you pass a
+#       non-empty one. Default (empty) leaves it unset, so the create form
+#       generates its own `mind-N` name -- matching a shipped binary.
 # Also sets MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1, the explicit opt-in that
 # tells the desktop client to honor those MINDS_WORKSPACE_* vars. Without it
 # (i.e. a normal `minds run`) the form ignores any stray MINDS_WORKSPACE_* in
@@ -368,8 +370,9 @@ minds-install:
 
 # Override agent_name / branch / fct (FCT worktree path) via positional args
 # (just has no name=value form for recipe params -- pass them in order):
-#   just minds-start my-agent my-branch
-#   just minds-start mindtest "" .external_worktrees/my-fct-worktree   # 3rd arg = fct
+#   just minds-start                     # workspace gets an auto `mind-N` name
+#   just minds-start my-agent my-branch  # pin the workspace name to `my-agent`
+#   just minds-start my-agent "" .external_worktrees/my-fct-worktree   # 3rd arg = fct
 # `fct` defaults to .external_worktrees/forever-claude-template; an absolute
 # path is used as-is, a relative one is resolved against the mngr root. This
 # is what gets synced (vendor/mngr/) and exported as MINDS_WORKSPACE_GIT_URL,
@@ -377,7 +380,7 @@ minds-install:
 # Refuses to start if another minds-start is already running in this
 # worktree (PID file under /tmp keyed by worktree path). Use `just
 # minds-stop` to kill the running instance first.
-minds-start agent_name="mindtest" branch="" fct="":
+minds-start agent_name="" branch="" fct="":
     #!/bin/bash
     set -ueo pipefail
     if [ -z "${MINDS_ROOT_NAME:-}" ]; then
@@ -458,9 +461,18 @@ minds-start agent_name="mindtest" branch="" fct="":
     else
         export MINDS_WORKSPACE_BRANCH="$(git -C "$fct_wt" rev-parse --abbrev-ref HEAD)"
     fi
-    export MINDS_WORKSPACE_NAME="{{agent_name}}"
+    # A non-empty agent_name pins the workspace name via MINDS_WORKSPACE_NAME
+    # (the create form uses it verbatim; a name collision errors at create time
+    # rather than being renamed). The default empty agent_name unsets the var
+    # (clearing any stray value inherited from the shell) so the form falls back
+    # to its generated `mind-N` name -- matching what a shipped binary does.
+    if [ -n "{{agent_name}}" ]; then
+        export MINDS_WORKSPACE_NAME="{{agent_name}}"
+    else
+        unset MINDS_WORKSPACE_NAME
+    fi
     echo "MINDS_WORKSPACE_GIT_URL=$MINDS_WORKSPACE_GIT_URL"
-    echo "MINDS_WORKSPACE_NAME=$MINDS_WORKSPACE_NAME"
+    echo "MINDS_WORKSPACE_NAME=${MINDS_WORKSPACE_NAME:-(unset; create form will pick mind-N)}"
     echo "MINDS_WORKSPACE_BRANCH=$MINDS_WORKSPACE_BRANCH"
     echo "$$" > "$pid_file"
     trap 'rm -f "$pid_file"' EXIT

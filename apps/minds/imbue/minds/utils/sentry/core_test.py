@@ -5,11 +5,7 @@ import pytest
 from imbue.imbue_common.sentry.core import ErrorAttachmentsS3Uploader
 from imbue.imbue_common.sentry.data_types import SentryDeployEnvironment
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
-from imbue.minds.utils.sentry.core import MINDS_SENTRY_ENABLED_ENV_VAR
-from imbue.minds.utils.sentry.core import MINDS_SENTRY_S3_UPLOADS_ENV_VAR
 from imbue.minds.utils.sentry.core import _MINDS_LOG_ATTACHMENT_GROUPS
-from imbue.minds.utils.sentry.core import is_sentry_enabled
-from imbue.minds.utils.sentry.core import is_sentry_s3_upload_enabled
 from imbue.minds.utils.sentry.core import resolve_latchkey_forward_sentry_env
 from imbue.minds.utils.sentry.core import resolve_sentry_environment
 from imbue.minds.utils.sentry.core import sentry_deploy_environment_from_minds_env_name
@@ -27,34 +23,6 @@ def test_sentry_environment_from_minds_env_name_maps_production_and_staging() ->
 @pytest.mark.parametrize("env_name", ["dev-josh-1", "ci-ephemeral", "", "Production", "STAGING", None])
 def test_sentry_environment_from_minds_env_name_defaults_to_development(env_name: str | None) -> None:
     assert sentry_deploy_environment_from_minds_env_name(env_name) is SentryDeployEnvironment.DEVELOPMENT
-
-
-@pytest.mark.parametrize("raw_value", ["1", "true", "TRUE", "yes", " Yes "])
-def test_is_sentry_enabled_accepts_truthy_values(monkeypatch: pytest.MonkeyPatch, raw_value: str) -> None:
-    monkeypatch.setenv(MINDS_SENTRY_ENABLED_ENV_VAR, raw_value)
-    assert is_sentry_enabled() is True
-
-
-@pytest.mark.parametrize("raw_value", ["0", "false", "no", ""])
-def test_is_sentry_enabled_rejects_other_values(monkeypatch: pytest.MonkeyPatch, raw_value: str) -> None:
-    monkeypatch.setenv(MINDS_SENTRY_ENABLED_ENV_VAR, raw_value)
-    assert is_sentry_enabled() is False
-
-
-def test_is_sentry_enabled_defaults_to_false_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(MINDS_SENTRY_ENABLED_ENV_VAR, raising=False)
-    assert is_sentry_enabled() is False
-
-
-@pytest.mark.parametrize("raw_value", ["1", "true", " Yes "])
-def test_is_sentry_s3_upload_enabled_accepts_truthy_values(monkeypatch: pytest.MonkeyPatch, raw_value: str) -> None:
-    monkeypatch.setenv(MINDS_SENTRY_S3_UPLOADS_ENV_VAR, raw_value)
-    assert is_sentry_s3_upload_enabled() is True
-
-
-def test_is_sentry_s3_upload_enabled_defaults_to_false_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(MINDS_SENTRY_S3_UPLOADS_ENV_VAR, raising=False)
-    assert is_sentry_s3_upload_enabled() is False
 
 
 @pytest.mark.parametrize(
@@ -78,13 +46,14 @@ def test_resolve_sentry_environment_defaults_to_development_when_unactivated(mon
 
 
 def test_resolve_latchkey_forward_sentry_env_round_trips_into_forward_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The env vars minds publishes for the daemon must be consumable by the daemon's
-    # own resolver, yielding minds' opt-in + environment. Verified end-to-end here so
-    # the two sides (publisher and consumer) cannot drift apart.
+    # The env vars minds publishes for the daemon must be consumable by the daemon's own resolver,
+    # yielding minds' consent settings + environment. Verified end-to-end here so the two sides
+    # (publisher and consumer) cannot drift apart.
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "minds-staging")
-    monkeypatch.setenv(MINDS_SENTRY_ENABLED_ENV_VAR, "1")
-    monkeypatch.setenv(MINDS_SENTRY_S3_UPLOADS_ENV_VAR, "1")
-    published_env = resolve_latchkey_forward_sentry_env()
+    published_env = resolve_latchkey_forward_sentry_env(
+        is_error_reporting_enabled=True,
+        is_log_inclusion_enabled=True,
+    )
     assert published_env[MNGR_LATCHKEY_SENTRY_ENABLED_ENV_VAR] == "1"
     assert published_env[MNGR_LATCHKEY_SENTRY_S3_UPLOADS_ENV_VAR] == "1"
     assert published_env[MNGR_LATCHKEY_SENTRY_ENVIRONMENT_ENV_VAR] == SentryDeployEnvironment.STAGING.value
@@ -97,9 +66,12 @@ def test_resolve_latchkey_forward_sentry_env_round_trips_into_forward_config(mon
     assert forward_config.is_s3_upload_enabled is True
 
 
-def test_resolve_latchkey_forward_sentry_env_disabled_when_minds_sentry_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(MINDS_SENTRY_ENABLED_ENV_VAR, raising=False)
-    published_env = resolve_latchkey_forward_sentry_env()
+def test_resolve_latchkey_forward_sentry_env_disabled_when_consent_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "minds-staging")
+    published_env = resolve_latchkey_forward_sentry_env(
+        is_error_reporting_enabled=False,
+        is_log_inclusion_enabled=False,
+    )
     assert published_env[MNGR_LATCHKEY_SENTRY_ENABLED_ENV_VAR] == "0"
     for env_var_name, value in published_env.items():
         monkeypatch.setenv(env_var_name, value)

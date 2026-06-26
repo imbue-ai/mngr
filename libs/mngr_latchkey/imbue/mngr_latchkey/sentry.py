@@ -136,10 +136,18 @@ def setup_forward_sentry(log_folder: Path) -> None:
 
     No-op (beyond logging) when reporting is disabled or misconfigured. Must be
     called *after* the command's loguru sinks are set up so Sentry layers on top.
+
+    Unlike the minds backend -- whose error-reporting / log-inclusion gates are read
+    live from a user setting that can be toggled at runtime -- the detached daemon
+    has no live setting to consult: its env vars are a snapshot taken when the
+    minds desktop client (re)spawned it. So both gates are constant for the
+    process: error reporting is on whenever Sentry was set up at all, and log
+    inclusion follows the snapshotted ``MNGR_LATCHKEY_SENTRY_S3_UPLOADS`` value.
     """
     config = resolve_forward_sentry_config()
     if config is None:
         return
+    is_s3_upload_enabled = config.is_s3_upload_enabled
     setup_sentry(
         environment=config.environment,
         release_id=config.release_id,
@@ -150,5 +158,6 @@ def setup_forward_sentry(log_folder: Path) -> None:
         # The daemon is not a web app: it needs no Flask (or other) integration
         # beyond Sentry's default integrations.
         integrations=[],
-        is_s3_upload_enabled=config.is_s3_upload_enabled,
+        is_error_reporting_enabled=lambda: True,
+        is_log_inclusion_enabled=lambda: is_s3_upload_enabled,
     )
