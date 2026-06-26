@@ -219,8 +219,8 @@ def test_approve_permission_request_sends_no_body_without_override() -> None:
     assert captured["content"] == b""
 
 
-def test_approve_permission_request_sends_override_path_body() -> None:
-    """An override path is sent as a ``{"path": ...}`` JSON body so the gateway recomputes the effect."""
+def test_approve_permission_request_sends_override_body() -> None:
+    """An override body is sent verbatim as JSON so the gateway recomputes the effect."""
     captured: dict[str, object] = {}
 
     def _handler(request: httpx.Request) -> httpx.Response:
@@ -229,11 +229,21 @@ def test_approve_permission_request_sends_override_path_body() -> None:
         return httpx.Response(200, json={"request_id": "evt-abc"})
 
     client = _build_client(_handler)
-    client.approve_permission_request("evt-abc", override_path="/Users/glenn/Documents/Shared")
+    # File-sharing override.
+    client.approve_permission_request("evt-abc", override_body={"path": "/Users/glenn/Documents/Shared"})
     sent_body = captured["content"]
     assert isinstance(sent_body, bytes)
     assert json.loads(sent_body) == {"path": "/Users/glenn/Documents/Shared"}
     assert captured["content_type"] == "application/json"
+    # Workspace override (verbs + target).
+    client.approve_permission_request(
+        "evt-abc",
+        override_body={"permissions": ["minds-workspaces-destroy"], "target_workspace_id": "agent-" + "1" * 32},
+    )
+    assert json.loads(captured["content"]) == {
+        "permissions": ["minds-workspaces-destroy"],
+        "target_workspace_id": "agent-" + "1" * 32,
+    }
 
 
 def test_approve_permission_request_raises_on_4xx() -> None:

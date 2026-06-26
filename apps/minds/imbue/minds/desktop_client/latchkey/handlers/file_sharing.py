@@ -291,7 +291,7 @@ class FileSharingGrantHandler(RequestEventHandler):
         try:
             self.gateway_client.approve_permission_request(
                 request_event_id,
-                override_path=override_path,
+                override_body={"path": override_path} if override_path is not None else None,
             )
         except LatchkeyGatewayClientError as e:
             logger.warning(

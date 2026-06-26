@@ -189,11 +189,10 @@ reading detail/version/backups, creating, destroying, starting/stopping,
 exporting backups, and establishing SSH access. It is reached through the
 same `minds-api-proxy` extension and gated by a single `minds-workspaces`
 detent scope with one named permission per verb (`minds-workspaces-read`,
-`-create`, `-destroy`, `-lifecycle`, `-backups-export`, `-ssh`). The scope
-gate plus the broad `read`/`create` schemas are materialized in every
-per-host permissions file at agent creation (and back-filled on `minds run`
-startup); nothing is pre-granted, so an agent's first cross-workspace call
-gets a 403 until the user approves.
+`-create`, `-destroy`, `-lifecycle`, `-backups-export`, `-ssh`). Nothing is
+pre-granted, so an agent's first cross-workspace call gets a 403 until the
+user approves; the scope and verb schemas are not part of the agent baseline
+at all -- they arrive, fully self-described, with the grant (see below).
 
 This surface has its own permission-request type, distinct from the
 `predefined` (service-catalog) and `file-sharing` types: an agent POSTs
@@ -209,23 +208,30 @@ The verbs split on a **target axis**:
   workspace (listing does not leak per-target data, and create takes no
   target).
 * `destroy`, `lifecycle`, `backups-export`, and `ssh` are *target-scoped*.
-  Their permission schemas carry an `anyOf` of path patterns -- one entry
-  per allowed target workspace id (or a `[^/]+` wildcard entry for an
-  "all workspaces" grant). Each approval *accumulates* one more target
-  into that verb's `anyOf` (generalizing the per-agent `minds-api-proxy`
-  allowlist), so re-requesting a different target for the same verb adds
-  to the allowlist rather than replacing it. These targeted verb schemas
-  are not part of the baseline -- the first approved grant for a verb
-  creates its schema (with a non-empty `anyOf`), which keeps the
-  deny-by-default baseline free of an empty `anyOf`.
+  A "selected" grant for one of these verbs mints a **uniquely-named
+  per-target permission schema** (`minds-workspaces-<verb>-<target_id>`)
+  whose path pins that single workspace; an "all workspaces" grant uses
+  the broad schema keyed by the plain verb name (with a `[^/]+` id
+  wildcard). Because each selected target is a distinct schema name,
+  successive grants *accumulate* targets through the gateway's ordinary
+  schema-by-name merge -- the same mechanism file-sharing uses for
+  per-path schemas -- with no `anyOf` and no special merge logic.
 
-The grant is applied to the *requesting* agent's per-host
-`latchkey_permissions.json` by the desktop client
-(`mngr_latchkey.workspace_permissions.grant_workspace_permissions`), which
-writes the rule + accumulated schemas directly and then drops the pending
-gateway record. Unlike `file-sharing`, the `workspace` request type is not
-applied via the gateway's `/approve` endpoint; the stored `effect` is
-informational only.
+The grant is applied exactly like file-sharing: the agent's request carries
+a precomputed `effect` (a self-contained patch of the scope schema + the
+verb schemas + the grant rule, computed in `permission_requests.mjs`'s
+`computeWorkspaceEffect`), and the desktop client approves it via
+`POST /permission-requests/approve/<id>`, which splices the effect into the
+requesting agent's per-host `latchkey_permissions.json` (reached through its
+opaque handle) and drops the pending record. The approve call sends an
+override body (`{permissions, target_workspace_id}`) so the gateway
+recomputes the effect from the user's dialog choices (the verb subset they
+ticked and the all-vs-selected target). The scope schema is emitted on every
+effect and merged by name, so a host file that has never seen the scope gets
+it with the first grant -- no baseline entry or startup migration required.
+The Python `mngr_latchkey.workspace_permissions` module holds only the
+dialog-facing verb metadata; the schema construction lives in the gateway
+extension.
 
 ## Service catalog
 

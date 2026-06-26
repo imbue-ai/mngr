@@ -7,25 +7,24 @@ minds cross-workspace management API (``/api/v1/workspaces/...``) -- listing,
 reading, creating, destroying, starting/stopping, exporting backups, and
 establishing SSH access against *other* workspaces.
 
-Unlike the :mod:`.predefined` (catalog-backed) and :mod:`.file_sharing`
-siblings, a workspace grant is *target-scoped*: the verbs that act on a single
-workspace (destroy / lifecycle / backups-export / ssh) are gated by a per-host
-``anyOf`` allowlist of target workspace ids that accumulates one approved target
-at a time. The dialog lets the user pick which verbs to grant and -- when the
-request names a target workspace and the chosen verbs include a targeted one --
-whether the grant applies to that one workspace ("selected") or to all
-workspaces ("all"). The actual write is done by
-:func:`imbue.mngr_latchkey.workspace_permissions.grant_workspace_permissions`,
-which unions the verbs into the host's ``minds-workspaces`` rule and accumulates
-the approved target into each targeted verb's schema.
+Unlike the :mod:`.predefined` (catalog-backed) sibling, a workspace grant is
+*target-scoped*: the verbs that act on a single workspace (destroy / lifecycle /
+backups-export / ssh) are gated per target workspace id. The dialog lets the
+user pick which verbs to grant and -- when the request names a target workspace
+-- whether the targeted verbs apply to that one workspace ("selected") or to all
+workspaces ("all").
 
-The grant is applied directly to the *requesting* agent's per-host
-``latchkey_permissions.json`` (every agent on a host shares one), then the
-pending request is dropped from the gateway via
-``DELETE /permission-requests/<id>`` -- mirroring the predefined handler, which
-also applies its grant out-of-band and then deletes the gateway record (the
-``workspace`` request type is therefore never applied via the gateway's
-``/approve`` endpoint).
+The grant is applied exactly like the :mod:`.file_sharing` sibling: the
+precomputed (or override-recomputed) ``effect`` is spliced into the requesting
+agent's per-host ``latchkey_permissions.json`` by the gateway's
+``permission-requests`` extension via ``POST /permission-requests/approve/<id>``
+(which also drops the pending record). The handler sends an override body
+carrying the user's dialog choices (``{permissions, target_workspace_id}``) so
+the gateway recomputes the effect: for a "selected" grant each targeted verb
+becomes a uniquely-named per-target schema (so repeated grants accumulate
+targets through the gateway's schema-by-name merge), and for an "all" grant a
+broad schema. Denial drops the pending record via
+``DELETE /permission-requests/<id>``.
 """
 
 import json
@@ -56,12 +55,8 @@ from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.state import get_state
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import HostId
-from imbue.mngr_latchkey.core import Latchkey
-from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.workspace_permissions import MINDS_WORKSPACES_SCOPE
 from imbue.mngr_latchkey.workspace_permissions import WORKSPACE_VERBS
-from imbue.mngr_latchkey.workspace_permissions import grant_workspace_permissions
 
 # Label shown on the inbox list card (lower-case, short).
 _KIND_LABEL: Final[str] = "workspace access"
@@ -115,31 +110,6 @@ def _resolve_target_name(
     return _resolve_workspace_name(backend_resolver, parsed, fallback=target_workspace_id)
 
 
-def _resolve_host_id(
-    backend_resolver: BackendResolverInterface,
-    agent_id: AgentId,
-) -> HostId | None:
-    """Resolve the host an agent runs on, or ``None`` when discovery hasn't caught up.
-
-    Mirrors the predefined handler: workspace permissions are stored per-host, so
-    the grant updates the *requesting* agent's host file. Returns ``None`` when
-    the host id isn't known yet or when the resolver reports the placeholder
-    ``"localhost"`` used by static / in-memory backend resolvers in tests.
-    """
-    info = backend_resolver.get_agent_display_info(agent_id)
-    if info is None:
-        return None
-    try:
-        return HostId(info.host_id)
-    except ValueError:
-        logger.debug(
-            "Backend resolver reported non-HostId host {!r} for agent {}; treating as unknown",
-            info.host_id,
-            agent_id,
-        )
-        return None
-
-
 def _format_granted_message(granted: Sequence[str], target_label: str) -> str:
     verbs = ", ".join(_VERB_DISPLAY_BY_PERMISSION.get(verb, verb) for verb in granted)
     return f"Your cross-workspace permission request was granted ({verbs}) for {target_label}."
@@ -152,18 +122,20 @@ def _format_denied_message() -> str:
 class WorkspacePermissionGrantHandler(RequestEventHandler):
     """Per-``RequestType.WORKSPACE_PERMISSION`` handler.
 
-    Renders the verb + all-vs-selected dialog, applies the approved grant to the
-    requesting agent's per-host permissions file via
-    :func:`grant_workspace_permissions`, drops the pending gateway record, writes
-    the response event, and notifies the waiting agent via ``mngr message``.
+    Renders the verb + all-vs-selected dialog, approves the request through the
+    gateway's ``POST /permission-requests/approve/<id>`` endpoint (sending the
+    user's dialog choices as an override body so the gateway recomputes and
+    splices the effect into the requesting agent's per-host permissions file),
+    writes the response event, and notifies the waiting agent via
+    ``mngr message``. Denial drops the pending record via ``DELETE``.
     """
 
     data_dir: Path = Field(frozen=True, description="Minds data directory (typically ``~/.minds``).")
-    latchkey: Latchkey = Field(
-        description="Latchkey wrapper; used for its ``plugin_data_dir`` (where per-host permissions live).",
-    )
     gateway_client: LatchkeyGatewayClient = Field(
-        description="HTTP client used to ``DELETE /permission-requests/<id>`` once a request is resolved.",
+        description=(
+            "HTTP client used to ``POST /permission-requests/approve/<id>`` (grant) and "
+            "``DELETE /permission-requests/<id>`` (deny) on the gateway's bundled extension."
+        ),
     )
     mngr_message_sender: MngrMessageSender = Field(
         description="Sends ``mngr message`` nudges to the waiting agent on resolution.",
@@ -234,37 +206,31 @@ class WorkspacePermissionGrantHandler(RequestEventHandler):
         request_event_id = str(req_event.event_id)
         parsed_agent_id = AgentId(req_event.agent_id)
         backend_resolver: BackendResolverInterface = get_state().backend_resolver
-        host_id = _resolve_host_id(backend_resolver, parsed_agent_id)
-        if host_id is None:
-            return _json_error(
-                f"Could not resolve host for agent {parsed_agent_id}; cannot apply grant.",
-                status_code=503,
-            )
 
         # Resolve the target the targeted verbs apply to. "selected" pins the
         # request's target workspace; "all" (or a missing target) grants
-        # broadly.
+        # broadly. The gateway recomputes the effect from this override and
+        # writes it to the request's stored ``target`` permissions file (the
+        # requesting agent's per-host file, reached via its opaque handle).
         target_scope = form.get(_TARGET_SCOPE_FIELD, _TARGET_SCOPE_ALL)
-        target_workspace_id: AgentId | None = None
+        target_workspace_id: str | None = None
         if target_scope == _TARGET_SCOPE_SELECTED and req_event.target_workspace_id:
-            try:
-                target_workspace_id = AgentId(req_event.target_workspace_id)
-            except ValueError:
-                return _json_error(
-                    f"Invalid target workspace id: {req_event.target_workspace_id}",
-                    status_code=400,
-                )
+            target_workspace_id = req_event.target_workspace_id
 
         try:
-            grant_workspace_permissions(
-                self.latchkey.plugin_data_dir,
-                host_id,
-                granted_permissions,
-                target_workspace_id,
+            self.gateway_client.approve_permission_request(
+                request_event_id,
+                override_body={
+                    "permissions": list(granted_permissions),
+                    "target_workspace_id": target_workspace_id,
+                },
             )
-        except LatchkeyStoreError as e:
-            logger.warning("Could not apply minds-workspaces grant for agent {}: {}", parsed_agent_id, e)
-            return _json_error(f"Could not apply the cross-workspace grant: {e}", status_code=400)
+        except LatchkeyGatewayClientError as e:
+            logger.warning("Could not approve minds-workspaces request {} via gateway: {}", request_event_id, e)
+            return _json_error(
+                f"Could not approve the cross-workspace request through the latchkey gateway: {e}",
+                status_code=502,
+            )
 
         target_label = (
             _resolve_target_name(backend_resolver, req_event.target_workspace_id) or "the selected workspace"
@@ -293,6 +259,16 @@ class WorkspacePermissionGrantHandler(RequestEventHandler):
             return _json_error("Unsupported request type", status_code=500)
         request_event_id = str(req_event.event_id)
         parsed_agent_id = AgentId(req_event.agent_id)
+        # DELETE tolerates 404 -- if the request is already gone we still want to
+        # write the response event and notify the agent.
+        try:
+            self.gateway_client.delete_permission_request(request_event_id)
+        except LatchkeyGatewayClientError as e:
+            logger.warning(
+                "Could not DELETE workspace permission request {} from gateway; will rely on next-restart cleanup: {}",
+                request_event_id,
+                e,
+            )
         message = _format_denied_message()
         response_event = self._write_response_and_notify(
             request_event_id=request_event_id,
@@ -315,15 +291,12 @@ class WorkspacePermissionGrantHandler(RequestEventHandler):
         status: RequestStatus,
         message: str,
     ) -> RequestResponseEvent:
-        """Drop the gateway record, persist the response event, and notify the agent."""
-        try:
-            self.gateway_client.delete_permission_request(request_event_id)
-        except LatchkeyGatewayClientError as e:
-            logger.warning(
-                "Could not DELETE workspace permission request {} from gateway; will rely on next-restart cleanup: {}",
-                request_event_id,
-                e,
-            )
+        """Persist the response event and notify the agent.
+
+        The gateway record is removed out of band: the ``/approve`` endpoint
+        deletes it on a successful grant, and :meth:`apply_deny_request` issues
+        the ``DELETE`` for a denial. Mirrors the file-sharing handler.
+        """
         response_event = create_request_response_event(
             request_event_id=request_event_id,
             status=status,

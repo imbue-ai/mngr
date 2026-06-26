@@ -614,11 +614,154 @@ def test_post_creates_workspace_request_with_target_and_effect(
         "target_workspace_id": target_id,
     }
     assert parsed["target"] == str(permissions_config_path)
-    # The effect is rules-only (informational); the desktop client applies the
-    # per-target anyOf accumulation itself.
-    assert parsed["effect"] == {"rules": [{MINDS_WORKSPACES_SCOPE: ["minds-workspaces-destroy"]}]}
+    # The effect is a self-contained patch (scope schema + a uniquely-named
+    # per-target verb schema + the grant rule), applied via /approve like
+    # file-sharing -- not an informational rules-only stub.
+    effect = parsed["effect"]
+    per_target_name = f"minds-workspaces-destroy-{target_id}"
+    assert effect["rules"] == [{MINDS_WORKSPACES_SCOPE: [per_target_name]}]
+    assert set(effect["schemas"].keys()) == {MINDS_WORKSPACES_SCOPE, per_target_name}
+    # The scope gate constrains domain + path prefix.
+    scope_schema = effect["schemas"][MINDS_WORKSPACES_SCOPE]
+    assert scope_schema["properties"]["domain"] == {"const": "latchkey-self.invalid"}
+    # The per-target schema pins the single target's destroy path.
+    perm_schema = effect["schemas"][per_target_name]
+    assert perm_schema["properties"]["method"] == {"const": "POST"}
+    path_pattern = re.compile(perm_schema["properties"]["path"]["pattern"])
+    prefix = "/minds-api-proxy/api/v1/workspaces"
+    assert path_pattern.fullmatch(f"{prefix}/{target_id}/destroy")
+    # A different workspace id is not covered by the single-target grant.
+    other_id = str(AgentId.generate())
+    assert not path_pattern.fullmatch(f"{prefix}/{other_id}/destroy")
     stored = next((latchkey_directory / "permission_requests" / "v2").iterdir())
     assert json.loads(stored.read_text()) == parsed
+
+
+def test_post_creates_workspace_request_all_workspaces_uses_wildcard(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "needs ssh to any workspace",
+            "type": "workspace",
+            "payload": {"permissions": ["minds-workspaces-ssh"], "target_workspace_id": None},
+        },
+    )
+    assert status == 201, body
+    effect = json.loads(body)["effect"]
+    # With no target, the targeted verb is keyed by the plain verb name and its
+    # path uses the ``[^/]+`` id wildcard (an "all workspaces" grant).
+    assert effect["rules"] == [{MINDS_WORKSPACES_SCOPE: ["minds-workspaces-ssh"]}]
+    ssh_schema = effect["schemas"]["minds-workspaces-ssh"]
+    path_pattern = re.compile(ssh_schema["properties"]["path"]["pattern"])
+    prefix = "/minds-api-proxy/api/v1/workspaces"
+    assert path_pattern.fullmatch(f"{prefix}/{AgentId.generate()}/ssh")
+    assert path_pattern.fullmatch(f"{prefix}/{AgentId.generate()}/ssh")
+
+
+def test_approve_workspace_override_recomputes_and_accumulates(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """Approving a workspace request with an override splices the recomputed effect.
+
+    Two successive approvals for different targets accumulate as distinct,
+    uniquely-named per-target schemas through the gateway's schema-by-name merge.
+    """
+    base_url, _latchkey_directory, permissions_config_path = node_extension
+    target_a = str(AgentId.generate())
+    target_b = str(AgentId.generate())
+
+    for target in (target_a, target_b):
+        status, body = _post_json(
+            f"{base_url}/permission-requests",
+            {
+                "agent_id": _VALID_AGENT_ID,
+                "rationale": "destroy a sibling",
+                "type": "workspace",
+                "payload": {"permissions": ["minds-workspaces-destroy"], "target_workspace_id": target},
+            },
+        )
+        assert status == 201, body
+        request_id = json.loads(body)["request_id"]
+        # Approve with an override echoing the request's verbs + selected target.
+        status, approve_body = _http(
+            f"{base_url}/permission-requests/approve/{request_id}",
+            method="POST",
+            headers={"Content-Type": "application/json"},
+            body=json.dumps(
+                {"permissions": ["minds-workspaces-destroy"], "target_workspace_id": target}
+            ).encode("utf-8"),
+        )[0:3:2]
+        assert status == 200, approve_body
+
+    applied = json.loads(permissions_config_path.read_text())
+    # Both targets accumulated as distinct per-target schemas, both referenced
+    # by the single minds-workspaces rule.
+    name_a = f"minds-workspaces-destroy-{target_a}"
+    name_b = f"minds-workspaces-destroy-{target_b}"
+    assert name_a in applied["schemas"]
+    assert name_b in applied["schemas"]
+    rule = next(r for r in applied["rules"] if list(r.keys()) == [MINDS_WORKSPACES_SCOPE])
+    assert name_a in rule[MINDS_WORKSPACES_SCOPE]
+    assert name_b in rule[MINDS_WORKSPACES_SCOPE]
+
+
+def test_approve_workspace_all_override_grants_broadly(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """An ``all`` override (null target) grants the broad verb schema."""
+    base_url, _latchkey_directory, permissions_config_path = node_extension
+    target = str(AgentId.generate())
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "destroy a sibling",
+            "type": "workspace",
+            "payload": {"permissions": ["minds-workspaces-destroy"], "target_workspace_id": target},
+        },
+    )
+    assert status == 201, body
+    request_id = json.loads(body)["request_id"]
+    status = _http(
+        f"{base_url}/permission-requests/approve/{request_id}",
+        method="POST",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps({"permissions": ["minds-workspaces-destroy"], "target_workspace_id": None}).encode("utf-8"),
+    )[0]
+    assert status == 200
+    applied = json.loads(permissions_config_path.read_text())
+    # The broad (all-workspaces) schema is keyed by the plain verb name.
+    assert "minds-workspaces-destroy" in applied["schemas"]
+    assert f"minds-workspaces-destroy-{target}" not in applied["schemas"]
+
+
+def test_approve_workspace_rejects_unknown_verb_in_override(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    base_url, *_ = node_extension
+    target = str(AgentId.generate())
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "destroy a sibling",
+            "type": "workspace",
+            "payload": {"permissions": ["minds-workspaces-destroy"], "target_workspace_id": target},
+        },
+    )
+    request_id = json.loads(body)["request_id"]
+    status, approve_body = _http(
+        f"{base_url}/permission-requests/approve/{request_id}",
+        method="POST",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps({"permissions": ["minds-workspaces-teleport"]}).encode("utf-8"),
+    )[0:3:2]
+    assert status == 400
+    assert "permissions" in json.loads(approve_body)["error"]
 
 
 def test_post_creates_workspace_request_without_target(

@@ -37,13 +37,11 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
 
-from loguru import logger
 from pydantic import Field
 from pydantic import JsonValue
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.imbue_common.model_update import to_update
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
@@ -53,15 +51,12 @@ from imbue.mngr_latchkey.remote_gateway import INNER_PORT
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import link_opaque_permissions_to_host
-from imbue.mngr_latchkey.store import list_host_permissions_paths
 from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import new_opaque_permissions_path
 from imbue.mngr_latchkey.store import opaque_permissions_dir
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import point_opaque_handle_at_host
 from imbue.mngr_latchkey.store import save_permissions
-from imbue.mngr_latchkey.workspace_permissions import WORKSPACE_BASELINE_SCHEMAS
-from imbue.mngr_latchkey.workspace_permissions import WORKSPACE_BASELINE_SCHEMA_KEYS
 
 # Env-var names baked into the upstream latchkey CLI's wire contract.
 # Kept as constants so callers building ``--env`` flags do not have to repeat them.
@@ -105,18 +100,14 @@ _MINDS_API_PROXY_PER_AGENT_PATH_PATTERN: Final[str] = rf"^{_MINDS_API_PROXY_PER_
 _SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED: Final[str] = "minds-api-proxy-per-agent-unauthorized"
 _PERM_MINDS_API_PROXY_PER_AGENT: Final[str] = "minds-api-proxy-per-agent"
 
-# Detent scope + named permissions for the minds desktop client's cross-workspace
-# management API (``/api/v1/workspaces/...``), reached through the gateway's
-# bundled ``minds-api-proxy`` extension (so the detent envelope's domain is the
-# synthetic ``latchkey-self.invalid`` gateway-self host). The scope schema and
-# the non-targeted ``read``/``create`` verb schemas live in
-# :mod:`imbue.mngr_latchkey.workspace_permissions`; they are materialized in every
-# per-host permissions file but NOT pre-granted -- an agent goes through the
-# standard permission-request dialog before its first cross-workspace call, and
-# the user picks which verbs to grant. The *targeted* verb schemas (destroy,
-# lifecycle, backups-export, ssh) are not in the baseline: they are created on
-# first user grant by ``workspace_permissions.grant_workspace_permissions``, which
-# accumulates the approved target workspace ids into each verb's ``anyOf``.
+# The minds desktop client's cross-workspace management API
+# (``/api/v1/workspaces/...``) is gated by a separate ``minds-workspaces`` detent
+# scope. Its scope + per-verb permission schemas are NOT part of this agent
+# baseline: they are self-contained in the ``workspace`` permission request's
+# precomputed effect and spliced into the per-host permissions file when the
+# user approves a grant (see ``permission_requests.mjs``'s
+# ``computeWorkspaceEffect`` and the ``workspace_permissions`` module), exactly
+# like the file-sharing flow. Nothing about that scope needs to exist here.
 
 # Exact prefix/suffix wrapping each agent id inside an ``anyOf`` entry's
 # path pattern. Shared by the build + extract helpers so the two cannot
@@ -221,62 +212,8 @@ _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissi
             },
             "required": ["method", "path"],
         },
-        # The ``minds-workspaces`` scope gate + the non-targeted ``read`` /
-        # ``create`` verb schemas. The targeted verb schemas are created on first
-        # user grant (see ``workspace_permissions.grant_workspace_permissions``).
-        **WORKSPACE_BASELINE_SCHEMAS,
     },
 )
-
-# The cross-workspace API baseline schema keys (scope + non-targeted verbs).
-# Used by the startup migration to detect a permissions file that predates this
-# scope. The targeted verb schemas are intentionally excluded: they are managed
-# per-grant and must not be reset to a baseline on startup.
-_MINDS_WORKSPACES_SCHEMA_KEYS: Final[tuple[str, ...]] = WORKSPACE_BASELINE_SCHEMA_KEYS
-
-
-def ensure_minds_workspaces_schema_in_existing_host_files(plugin_data_dir: Path) -> int:
-    """Inject the ``minds-workspaces`` scope + permission schemas into existing host files.
-
-    Agents created before this scope shipped have a host
-    ``latchkey_permissions.json`` that lacks the ``minds-workspaces`` scope and
-    its named permission schemas. Without those schemas, detent cannot match a
-    ``{"minds-workspaces": [...]}`` rule the user grants via the dialog, so
-    cross-workspace requests would be silently denied even after approval.
-
-    This idempotent migration walks every per-host permissions file, parses it,
-    and rewrites it whenever any of the schema keys is missing or stale. Files
-    whose schemas already match are skipped; files that cannot be parsed are
-    logged at warning level and left untouched.
-
-    Must run *before* the shared gateway starts so the gateway's
-    ``permissions.mjs`` extension does not race with us. Returns the number of
-    files actually rewritten.
-    """
-    expected_schemas = {key: _AGENT_BASELINE_PERMISSIONS.schemas[key] for key in _MINDS_WORKSPACES_SCHEMA_KEYS}
-    migrated = 0
-    for path in list_host_permissions_paths(plugin_data_dir):
-        try:
-            raw = path.read_text()
-        except OSError as e:
-            logger.warning("Could not read {} during minds-workspaces schema migration: {}", path, e)
-            continue
-        try:
-            parsed = LatchkeyPermissionsConfig.model_validate_json(raw)
-        except ValueError as e:
-            logger.warning(
-                "Skipping {} during minds-workspaces schema migration; cannot parse as LatchkeyPermissionsConfig: {}",
-                path,
-                e,
-            )
-            continue
-        if all(parsed.schemas.get(key) == expected_schemas[key] for key in _MINDS_WORKSPACES_SCHEMA_KEYS):
-            continue
-        new_schemas = {**parsed.schemas, **expected_schemas}
-        updated = parsed.model_copy_update(to_update(parsed.field_ref().schemas, new_schemas))
-        save_permissions(path, updated)
-        migrated += 1
-    return migrated
 
 
 def register_agent_for_host(

@@ -8,7 +8,6 @@ deterministically.
 """
 
 import json
-import re
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -25,7 +24,6 @@ from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVE
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_SECONDARY
 from imbue.mngr_latchkey.agent_setup import _build_allowed_agent_anyof_entry
 from imbue.mngr_latchkey.agent_setup import _extract_agent_id_from_anyof_entry
-from imbue.mngr_latchkey.agent_setup import ensure_minds_workspaces_schema_in_existing_host_files
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import maybe_recover_host_permissions_for_agent
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
@@ -458,66 +456,8 @@ def test_register_agent_for_host_raises_when_anyof_was_hand_edited(tmp_path: Pat
         register_agent_for_host(tmp_path, host_id, agent_id)
 
 
-# --- minds-workspaces cross-workspace API scope ---
-
-
-def _write_bare_host_permissions(plugin_data_dir: Path, host_id: str) -> Path:
-    host_dir = plugin_data_dir / "hosts" / host_id
-    host_dir.mkdir(parents=True)
-    path = host_dir / "latchkey_permissions.json"
-    path.write_text(json.dumps({"rules": [], "schemas": {}}))
-    return path
-
-
-def test_ensure_minds_workspaces_schema_injects_scope_and_permissions(tmp_path: Path) -> None:
-    plugin_data_dir = tmp_path / "mngr_latchkey"
-    path = _write_bare_host_permissions(plugin_data_dir, "host-x")
-
-    assert ensure_minds_workspaces_schema_in_existing_host_files(plugin_data_dir) == 1
-
-    schemas = json.loads(path.read_text())["schemas"]
-    # Only the scope gate + the non-targeted (broad) read/create verbs are part
-    # of the baseline. The targeted verb schemas (destroy/lifecycle/
-    # backups-export/ssh) are created per-grant, not by the migration.
-    for key in (
-        "minds-workspaces",
-        "minds-workspaces-read",
-        "minds-workspaces-create",
-    ):
-        assert key in schemas
-    for key in (
-        "minds-workspaces-destroy",
-        "minds-workspaces-lifecycle",
-        "minds-workspaces-backups-export",
-        "minds-workspaces-ssh",
-    ):
-        assert key not in schemas
-
-    # Idempotent: a second run rewrites nothing.
-    assert ensure_minds_workspaces_schema_in_existing_host_files(plugin_data_dir) == 0
-
-
-def test_minds_workspaces_permission_patterns_match_expected_requests(tmp_path: Path) -> None:
-    plugin_data_dir = tmp_path / "mngr_latchkey"
-    path = _write_bare_host_permissions(plugin_data_dir, "host-y")
-    ensure_minds_workspaces_schema_in_existing_host_files(plugin_data_dir)
-    schemas = json.loads(path.read_text())["schemas"]
-
-    prefix = "/minds-api-proxy/api/v1/workspaces"
-
-    # The scope gate matches the collection root and anything beneath it, but
-    # nothing outside the workspaces tree.
-    scope_pattern = schemas["minds-workspaces"]["properties"]["path"]["pattern"]
-    assert re.search(scope_pattern, prefix)
-    assert re.search(scope_pattern, f"{prefix}/agent-123/version")
-    assert not re.search(scope_pattern, "/minds-api-proxy/api/v1/agents/agent-123/notifications")
-
-    # Read covers any GET under the tree (list, detail, version, backups, ops).
-    read_pattern = schemas["minds-workspaces-read"]["properties"]["path"]["pattern"]
-    assert re.search(read_pattern, prefix)
-    assert re.search(read_pattern, f"{prefix}/agent-123/backups")
-    assert re.search(read_pattern, f"{prefix}/operations/creation-abc/logs")
-
-    # Create is the exact collection POST, not a sub-path.
-    create_pattern = schemas["minds-workspaces-create"]["properties"]["path"]["const"]
-    assert create_pattern == prefix
+# The ``minds-workspaces`` cross-workspace API scope is no longer part of the
+# agent baseline: its scope + per-verb schemas are self-contained in the
+# ``workspace`` permission request's effect and spliced in on approval (see
+# ``permission_requests.mjs`` and its end-to-end tests). Nothing about it lives
+# in ``agent_setup`` anymore.
