@@ -26,6 +26,7 @@ from imbue.mngr.agents.update_policy import AgentUpdatePolicy
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.preservation import preserve_agent_data
 from imbue.mngr.api.testing import FakeHost
+from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrConfig
@@ -2937,6 +2938,42 @@ def test_normalize_deprecated_raw_config_defers_to_explicit_isolate() -> None:
     )
     with pytest.raises(ConfigError, match="Contradictory"):
         config.resolve_isolate_local_config_dir()
+
+
+def test_resolve_agent_type_honors_alias_through_parent_type_multilayer_merge() -> None:
+    """The deprecated alias keeps resolving when a ``parent_type`` child inherits it through
+    the real multi-layer config path -- the minds scenario, where ``[agent_types.main]`` sets
+    ``parent_type = "claude"`` and the deprecated ``use_env_config_dir = true`` lives on the
+    ``[agent_types.claude]`` parent.
+
+    The loader resolves the alias to ``isolate_local_config_dir`` on the parent's raw config
+    (so it is genuinely set), and the overlay-merge ``model_fields_set`` preservation this
+    change is stacked on keeps the child sparse, so the child inherits the parent's shared
+    mode instead of clobbering it with the ``isolate_local_config_dir`` default. Before both
+    fixes this raised the spurious "Contradictory Claude config" error and hung mind creation.
+    """
+    # Mirror the loader: normalize the parent's raw block, then model_construct it.
+    parent_raw = ClaudeAgentConfig.normalize_deprecated_raw_config(
+        {"use_env_config_dir": True, "check_installation": False}
+    )
+    layer_one = MngrConfig(
+        agent_types={
+            AgentTypeName("claude"): ClaudeAgentConfig.model_construct(**parent_raw),
+            AgentTypeName("main"): ClaudeAgentConfig.model_construct(parent_type=AgentTypeName("claude")),
+        },
+    )
+    # A second layer touching only the parent is what previously re-marked the carried-through
+    # child entry as fully set (so its defaulted isolate_local_config_dir clobbered the parent).
+    layer_two = MngrConfig(
+        agent_types={AgentTypeName("claude"): ClaudeAgentConfig.model_construct(auto_dismiss_dialogs=True)},
+    )
+    merged_once, _ = MngrConfig().merge_with(layer_one)
+    merged_twice, _ = merged_once.merge_with(layer_two)
+
+    resolved = resolve_agent_type(AgentTypeName("main"), merged_twice).agent_config
+    assert isinstance(resolved, ClaudeAgentConfig)
+    # The child inherits the parent's shared mode (use_env_config_dir=true -> isolate=false).
+    assert resolved.resolve_isolate_local_config_dir() is False
 
 
 def test_on_before_provisioning_warns_when_use_env_config_dir_is_set(
