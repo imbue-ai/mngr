@@ -366,13 +366,13 @@ def resolve_create_host_name(submitted_host_name: str, existing_host_names: Coll
        explicit opt-in (see ``_operator_workspace_default``) -- this is how the
        e2e runner / ``just minds-start <name>`` pin a known name, also used
        verbatim;
-    3. the next free ``mind-N`` name (smallest positive ``N`` whose ``mind-N``
-       is not already in ``existing_host_names``).
+    3. the next free ``workspace-N`` name (smallest positive ``N`` whose
+       ``workspace-N`` is not already in ``existing_host_names``).
 
     The two named paths (1, 2) are used verbatim and never uniquified -- an
     explicit collision is the API's 409 to reject, not ours to silently rename
     (a duplicate name fails the ``mngr create`` pre-flight). Only the generated
-    ``mind-N`` fallback consults ``existing_host_names`` to pick a free name.
+    ``workspace-N`` fallback consults ``existing_host_names`` to pick a free name.
 
     Raises ``InvalidName`` if a non-empty submitted or operator name is not
     a valid host name; the generated fallback is always valid.
@@ -437,7 +437,7 @@ def render_create_form(
 
     ``host_name`` is an optional explicit workspace name, exposed as a "Name"
     field in the advanced view. When empty the name is chosen automatically
-    server-side (the next free ``mind-N`` via ``resolve_create_host_name``); a
+    server-side (the next free ``workspace-N`` via ``resolve_create_host_name``); a
     submitted value is carried back here so it survives a validation-error
     re-render. The color is always chosen automatically (the first unused
     palette entry); ``color`` is the ``#rrggbb`` hex carried in the hidden
