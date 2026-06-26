@@ -5,3 +5,5 @@ CI: hardened the `launch-to-msg` end-to-end test against several behaviors intro
 - Tear the app down with SIGTERM (then a bounded SIGKILL fallback) instead of a graceful close, so the new "Shut down running minds?" quit prompt -- a native Electron dialog a headless test cannot click -- does not block teardown until the test timeout. SIGTERM is routed through the same shutdown chain but flagged headless, matching `just minds-stop`.
 
 - Scroll the chat transcript to the live tail before checking for the agent's reply (the chat virtualizes off-screen rows, so a reply rendered below the fold was absent from the DOM the test read).
+
+- Made the self-hosted mac-runner reset (`mac-runner-reset.sh`) best-effort: dropped `set -e` so a single failing cleanup step (e.g. a `df`/`find` pipe) can no longer abort the script and skip the remaining Lima-VM / disk cleanup (which the workflow's `|| true` would silently mask). The optional app-install block now fails loud on its own so a run never proceeds against a stale app.

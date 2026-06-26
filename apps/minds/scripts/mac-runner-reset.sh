@@ -2,7 +2,15 @@
 # Reset the mac-runner to a clean state for a verification run.
 # Wipes Minds state and the installed .app; preserves Lima's base-image cache.
 # Optional arg: a .zip URL to download and install as the fresh app.
-set -euo pipefail
+#
+# Deliberately NOT `set -e`: this is a best-effort cleanup of a non-ephemeral
+# self-hosted runner, and every step must run even if an earlier one fails.
+# Under `set -e` a single unguarded failure (e.g. a `df`/`find` pipe, a
+# `defaults read`) aborts the script and SKIPS the remaining cleanup, leaking
+# Lima VMs / disk -- and the workflow wraps this in `|| true`, so the skipped
+# cleanup is silent. The optional install block at the end fails loud on its
+# own (it must, so a run never proceeds against a stale app).
+set -uo pipefail
 
 log() { printf '[reset] %s\n' "$*" >&2; }
 
@@ -110,9 +118,10 @@ if [[ -n "$URL" ]]; then
   log "downloading fresh app from $URL"
   TMP=$(mktemp -d)
   trap 'rm -rf "$TMP"' EXIT
-  curl -fSL --silent --show-error -o "$TMP/minds.zip" "$URL"
-  unzip -q -d "$TMP" "$TMP/minds.zip"
-  sudo mv "$TMP/minds.app" /Applications/minds.app
+  # Install must fail loud: a run must never proceed against a stale app.
+  curl -fSL --silent --show-error -o "$TMP/minds.zip" "$URL" || { log "ERROR: app download failed"; exit 1; }
+  unzip -q -d "$TMP" "$TMP/minds.zip" || { log "ERROR: app unzip failed"; exit 1; }
+  sudo mv "$TMP/minds.app" /Applications/minds.app || { log "ERROR: app install (mv) failed"; exit 1; }
   # xattr -dr returns non-zero when some signed-bundle internals refuse the
   # delete with "Operation not permitted"; we only care about the top-level
   # quarantine bit so Gatekeeper lets the app launch. Per-file failures
