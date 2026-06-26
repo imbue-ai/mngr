@@ -898,10 +898,11 @@ class Latchkey(MutableModel):
         returns ``(False, message)`` where ``message`` carries the latchkey
         stderr (or stdout, or a generic fallback).
 
-        A service has no registered OAuth client until one is prepared, and
-        until then the bare sign-in fails asking the caller to run ``latchkey
-        auth browser-prepare <service>`` first. That error is the signal that
-        nothing is registered yet, and it drives two recovery paths:
+        Some servicess need a pre-registered OAuth client. A service has none
+        until one is prepared, and until then the bare sign-in fails asking the
+        caller to run ``latchkey auth browser-prepare <service>`` first. That
+        error is the signal that nothing is registered yet, and it drives two
+        recovery paths:
 
         * For a Minds Google OAuth service (:data:`MINDS_GOOGLE_OAUTH_SERVICES`),
           register the Minds-provided client and retry, so the user signs in
@@ -913,8 +914,8 @@ class Latchkey(MutableModel):
           ``auth browser-prepare`` step and retry the sign-in once.
 
         Attempting the bare sign-in first, rather than probing which client is
-        registered up front, keeps the common already-registered case to a
-        single latchkey call.
+        registered up front, keeps the two common cases (already registered and
+        no registration neeeded) to a single latchkey call.
         """
         is_success, detail = self.auth_browser_login(service_name)
         if is_success:
