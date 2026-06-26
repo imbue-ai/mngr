@@ -12,7 +12,7 @@
 
   The color is chosen automatically (the first unused palette entry, carried
   in a hidden input), so it is not asked for here. The workspace name defaults
-  to an auto-generated ``mind-N`` (server-side) but can be set explicitly via
+  to an auto-generated ``workspace-N`` (server-side) but can be set explicitly via
   the advanced view's ``Name`` field.
 
   ``selected_preset`` picks which card starts selected (and which
@@ -426,14 +426,14 @@
   })();
 </script>
 {% endset %}
-<PageNarrowContainer title="Create a mind" padding="form" max_width="max-w-[720px]" scripts={{ _scripts }}>
+<PageNarrowContainer title="Create a workspace" padding="form" max_width="max-w-[720px]" scripts={{ _scripts }}>
   <form id="create-form" action="/create" method="post">
     {# Auto-chosen color carried through the POST; no visible picker. #}
     <input type="hidden" name="color" id="create-color-input" value="{{ color }}">
 
     <div class="text-center mb-12">
-      <p class="type-label uppercase tracking-wide text-secondary">Create a mind</p>
-      <h1 class="type-heading-lg text-primary mt-1">Where do you want to run your mind?</h1>
+      <p class="type-label uppercase tracking-wide text-secondary">Create a workspace</p>
+      <h1 class="type-heading-lg text-primary mt-1">Where should it run?</h1>
     </div>
 
     {% if error_message %}
@@ -441,7 +441,7 @@
     {% endif %}
 
     {# ---- Simple view: two compute presets ---- #}
-    <div id="simple-view" role="radiogroup" aria-label="Where to run your mind">
+    <div id="simple-view" role="radiogroup" aria-label="Where to run your workspace">
       <div class="flex gap-6 items-stretch">
         <PresetCard preset="remote" :selected="selected_preset == 'remote'" extra="flex-1">
           <div class="flex items-center gap-2">
@@ -507,7 +507,7 @@
       <div>
         <FormLabel target="host_name">Name</FormLabel>
         <p class="mb-1 type-helper text-tertiary">Leave empty to name it automatically</p>
-        <TextInput name="host_name" :value="host_name" placeholder="my-mind" id="host_name" />
+        <TextInput name="host_name" :value="host_name" placeholder="my-workspace" id="host_name" />
         {# Inline live-validation message for the name field (format + availability),
            toggled by the script below; mirrors the account-picker error pattern. #}
         <p id="host-name-error" class="hidden mt-1 type-helper text-important"></p>

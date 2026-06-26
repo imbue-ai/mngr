@@ -7,3 +7,5 @@ It also checks availability: if a name is already taken by an active mind on the
 Auto-generated workspace names now use the ``workspace-N`` pattern (e.g. ``workspace-1``) instead of ``mind-N``.
 
 The landing page now says "Workspaces" instead of "Projects" (heading, window title, and empty-state text).
+
+Onboarding copy now refers to a "workspace" instead of a "mind": the create screen ("Create a workspace" / "Where should it run?" / the my-workspace name placeholder), the sign-in prompt ("To run your workspace on Imbue Cloud…" and the "Back to workspace setup" link), and the landing Start/Stop workspace controls. The product is still called Minds.
