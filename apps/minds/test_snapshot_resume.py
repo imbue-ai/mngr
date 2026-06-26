@@ -21,6 +21,7 @@ import json
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 from typing import Final
 
 import pytest
@@ -107,7 +108,7 @@ def _start_all_minds_containers() -> None:
     subprocess.run(["docker", "start", *container_ids], check=True, capture_output=True, text=True, timeout=120)
 
 
-def _list_agents_in_container(container_name: str) -> list[dict]:
+def _list_agents_in_container(container_name: str) -> list[dict[str, Any]]:
     """Return the agents mngr sees from inside the workspace container.
 
     Run from inside the host (the container), where mngr uses the local
@@ -164,7 +165,7 @@ def _wait_for_system_interface_down(container_name: str) -> bool:
     return _exec_in_container(container_name, poll, timeout=90).returncode == 0
 
 
-def _run_minds_in_container_probe(container_name: str) -> dict:
+def _run_minds_in_container_probe(container_name: str) -> dict[str, Any]:
     """Run minds' real in-container recovery probe and return its parsed payload.
 
     Ships the exact probe shell command minds' recovery flow runs (normally
