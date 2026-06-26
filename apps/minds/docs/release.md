@@ -10,20 +10,20 @@ A release ships three pinned artifacts that must agree:
 
 Both repos tag with the **`minds-v<version>`** prefix (e.g. `minds-v0.3.1`), namespacing minds releases from each repo's own `v<version>`. The shipped binary clones the FCT tag at runtime via `FALLBACK_BRANCH` in `apps/minds/imbue/minds/desktop_client/templates.py`; tag immutability pins a binary to the snapshot it was verified against.
 
-Both repos release from **`main`**. Neither `main` is branch-protected, so **PRs are optional** — a convenience for a CI surface and a record, never a merge gate. Each repo gets a short-lived **release branch** (mngr: the version bump; FCT: the `vendor/mngr` refresh); you prove the pair green, land both on `main`, tag each `main`, then re-prove green against the tags. **Green CI on the tags concludes the release**; clicking *Release* in ToDesktop is an optional follow-up.
+Both repos release from **`main`**. Neither `main` is branch-protected, so a PR is **never a merge gate** — you can push or merge to `main` directly. Its only role here is as a **CI surface**: `ci.yml` runs on PRs (any branch) and on push to `main`, *never on a bare branch push*, so opening a PR is how you get traditional CI on a release branch. Nothing is opened for human *review* unless real code rides along. Each repo gets a short-lived **release branch** (mngr: the version bump; FCT: the `vendor/mngr` refresh); you prove the pair green, land both on `main`, tag each `main`, then re-prove green against the tags. **Green CI on the tags concludes the release**; clicking *Release* in ToDesktop is an optional follow-up.
 
 ## The two release branches
 
 | Repo | Carries | Open a PR? |
 |---|---|---|
-| `mngr` | version bump (`apps/minds/package.json`), `FALLBACK_BRANCH` (`templates.py`), any mngr/minds code | Optional. The bump is inert; a PR just gives a CI surface. Required-feeling only when the branch also carries reviewable mngr/minds code. |
-| `forever-claude-template` | `vendor/mngr/` archived from the green mngr SHA, plus any consumer (`system_interface`) changes that vendor requires | No — for a pure vendor refresh there's nothing to review (see below). Open one only if a `system_interface` fix rides along and you want eyes on it. |
+| `mngr` | version bump (`apps/minds/package.json`), `FALLBACK_BRANCH` (`templates.py`), any mngr/minds code | Optional. Traditional CI on an inert bump is redundant with a green `main`, so a PR adds little — open one for a record, or when the branch also carries mngr/minds code you want CI/review on. |
+| `forever-claude-template` | `vendor/mngr/` archived from the green mngr SHA, plus any consumer (`system_interface`) changes that vendor requires | Yes — as a **CI surface, not a review**. A pure vendor refresh isn't read, but a PR is the only way to run `ci.yml`'s `test` job (`uv sync` + `system_interface` tests) on the branch, which catches a `uv`-resolution or `system_interface` break fast on a big vendor jump. (You *can* skip it and lean on launch-to-msg, which covers the same end-to-end, just slower.) |
 
 **Vendor-match invariant.** FCT `vendor/mngr` must be the `git archive` of the *exact* mngr SHA it's paired with — the `commit_sha` you verify and the mngr SHA you tag. The binary runs the mngr SHA; the in-VM agent imports `vendor/mngr`. If they diverge, the agent's mngr can mismatch the binary's API (how the `system_interface` → `send_message_to_agents` break slipped in). Re-archive whenever the mngr SHA changes.
 
 > The Apple-Silicon lima-VZ `cryptography` SIGILL is handled in the FCT template by `OPENSSL_armcap=0` (`.mngr/settings.toml` `host_env__extend` + `scripts/build_workspace.sh`), which skips OpenSSL's SVE CPU-cap probe. mngr does not pin `cryptography`.
 
-**The FCT vendor refresh is not reviewed.** The `vendor/mngr` snapshot (hundreds of files) is generated and verified by *reproduction*, not by reading: the step-6 vendor-match check (`git archive <sha> | tar -x -C tmp && diff -r tmp vendor/mngr`) proves it equals the tagged mngr SHA. A clean diff *is* the review. (`vendor/mngr/**` is `linguist-generated` in FCT's `.gitattributes`, so GitHub also collapses it.) The branch exists only to (a) stage the refresh so launch-to-msg can verify the (binary, template) pair **before** it lands on `main`, and (b) be the commit the tag points at. If a `system_interface` consumer fix rides along, isolate the vendor refresh in its own commit (`vendor/mngr: refresh from mngr <sha>`) so the real code is reviewable on its own — that fix is the only part anyone reads.
+**The FCT vendor refresh is not reviewed.** The `vendor/mngr` snapshot (thousands of files) is generated and verified by *reproduction*, not by reading: the step-6 vendor-match check (a `git ls-tree` blob-hash comparison of the FCT vendor tree against the tagged mngr SHA's tree) proves it equals that SHA file-for-file. A clean comparison *is* the review. (`vendor/mngr/**` is `linguist-generated` in FCT's `.gitattributes`, so GitHub also collapses it.) The branch exists only to (a) stage the refresh so launch-to-msg can verify the (binary, template) pair **before** it lands on `main`, and (b) be the commit the tag points at. If a `system_interface` consumer fix rides along, isolate the vendor refresh in its own commit (`vendor/mngr: refresh from mngr <sha>`) so the real code is reviewable on its own — that fix is the only part anyone reads.
 
 ## File reference
 
@@ -53,7 +53,7 @@ Set these once for the whole session — later steps assume them:
 Three things must hold; only two need *new* CI:
 
 1. **The binary built from the release SHA works end-to-end** — `minds-launch-to-msg.yml` (step 4). `main` never runs this, so it is the release's only unique verification and its wall-clock long pole. Start it as early as possible.
-2. **The FCT branch's traditional CI is green** (step 2) — real signal: it refreshes `vendor/mngr` (and may carry a `system_interface` fix), so a stale-API break surfaces here.
+2. **The FCT PR's `test` job is green** (step 2) — real signal: it refreshes `vendor/mngr` (and may carry a `system_interface` fix), so a `uv`-resolution or stale-API break surfaces here. `ci.yml` only runs on a PR or on `main`, so this needs the FCT branch opened as a PR (a CI surface, not a review).
 3. **`vendor/mngr` equals the tagged mngr SHA** — proved by reproduction (the step-6 `diff -r`), not by CI.
 
 *Not* new signal: **traditional CI on a version-bump-only mngr branch.** Bumping `version` + `FALLBACK_BRANCH` can't change test behavior — no test asserts the version literal or that `FALLBACK_BRANCH` resolves to an existing tag — so a green `main` already covers it. Let those jobs run as a backstop; don't serialize behind them. (When the mngr branch *also* carries mngr/minds code, its CI is real signal — gate on it.)
@@ -68,7 +68,7 @@ For an iteration of the same version, skip. To bump: set `apps/minds/package.jso
 
 ### 2. Traditional CI on both branches (parallel, not a serial gate)
 
-`ci.yml` runs on every branch push (`test-offload`, `test-docker`, `test-docker-electron`, `test-offload-acceptance`, `check-changelog`) — a PR isn't needed to trigger it. Gate on the **FCT** branch (the `vendor/mngr` refresh is exactly what these suites catch) and on the **mngr** branch *only if it carries mngr/minds code*; a version-bump-only mngr branch is already covered by a green `main` (see "What actually gates a release"). The release SHA — `GREEN_MNGR_SHA` — is the mngr release-branch HEAD (`main` + the bump commit) and doesn't depend on this CI finishing.
+`ci.yml` runs only on PRs (any branch) and on push to `main` — **a bare branch push triggers nothing**, so open a branch as a PR when you want its CI. Gate on the **FCT** PR's `test` job (`uv sync --all-packages` + root/`system_interface` pytest — exactly what a bad vendor refresh trips). The **mngr** branch's suites (`test-offload`, `test-docker`, `test-docker-electron`, `test-offload-acceptance`) are real signal only if it carries mngr/minds code; for a version-bump-only branch they're redundant with a green `main` (see "What actually gates a release"), so a PR there is optional. The release SHA — `GREEN_MNGR_SHA` — is the mngr release-branch HEAD (`main` + the bump commit) and doesn't depend on any of this finishing.
 
 ### 3. Refresh FCT `vendor/mngr` from the green mngr SHA (FCT branch)
 
@@ -108,16 +108,21 @@ With `main` unprotected you can merge locally (`git merge --no-ff <branch>`, the
 
 The tag pins **`$GREEN_MNGR_SHA`** — the SHA the binary was built from and FCT's `vendor/mngr` was archived from — **not** `main`'s HEAD. Confirm the *commit you'll actually tag* (FCT `origin/main` post-merge, not your local working copy) still matches that SHA:
 
+Compare the two git **trees** by `(blob-hash, path)` — content-exact, and immune to the symlinks, file modes, and `.gitignore` drops that make `diff -r` on extracted tarballs noisy. The only expected delta is files FCT's `**/.minds/` ignore strips on `git add` (Vault policies + deploy scripts — not part of the installed mngr package); **anything else, especially under `vendor/mngr/libs/**`, is a real mismatch.**
+
 ```bash
 GREEN_MNGR_SHA=<the SHA from step 4>
 git -C "$FCT" fetch origin --quiet
-A=$(mktemp -d); B=$(mktemp -d)
-(cd "$MNGR" && git archive "$GREEN_MNGR_SHA") | tar -x -C "$A"    # the mngr SHA you'll tag
-git -C "$FCT" archive origin/main:vendor/mngr | tar -x -C "$B"    # the FCT commit you'll tag
-diff -r "$A" "$B" && echo OK || echo "MISMATCH — FCT origin/main vendor != archive $GREEN_MNGR_SHA (re-run step 3 / re-merge FCT)"
+real_diff=$(diff \
+  <(git -C "$MNGR" ls-tree -r "$GREEN_MNGR_SHA"        | awk '{print $3, $4}' | sort) \
+  <(git -C "$FCT"  ls-tree -r origin/main:vendor/mngr  | awk '{print $3, $4}' | sort) \
+  | grep '^[<>]' | grep -v '\.minds/')
+[ -z "$real_diff" ] \
+  && echo "OK: vendor/mngr == mngr $GREEN_MNGR_SHA (modulo .minds/)" \
+  || { echo "MISMATCH — re-run step 3 / re-merge FCT:"; echo "$real_diff"; }
 ```
 
-`git archive main` (HEAD) failing to match while `git archive $GREEN_MNGR_SHA` matches is **expected drift** (unrelated PRs landed on `main`), not an error — tag `$GREEN_MNGR_SHA`, not HEAD.
+Comparing the mngr side against `main` (HEAD) instead of `$GREEN_MNGR_SHA` may surface extra differences — that's **expected drift** (unrelated commits landed on mngr `main` after you built), not an error. Always compare against, and tag, `$GREEN_MNGR_SHA`.
 
 ### 7. Tag the verified pair — *not* `main` HEAD
 
