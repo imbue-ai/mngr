@@ -13,6 +13,13 @@ from imbue.skitwright.expect import expect
 @pytest.mark.tmux
 @pytest.mark.timeout(300)
 def test_multiple_agents_coexist(e2e: E2eSession) -> None:
+    """Verify that three agents created concurrently coexist as independent, isolated entities.
+
+    All three must appear in `mngr list` as alive (RUNNING/WAITING), each must be
+    independently reachable via `mngr exec` (echoing back its own name), and each
+    must occupy a distinct working directory (its own worktree) -- so the three
+    working directories are pairwise different rather than a shared one.
+    """
     # Pin a unique sleep value per agent so leaked processes trace back to the specific create call.
     for name, sleep_seconds in [("agent-a", 100101), ("agent-b", 100118), ("agent-c", 100119)]:
         expect(
@@ -61,6 +68,15 @@ def test_multiple_agents_coexist(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(300)
 def test_list_filter_by_state(e2e: E2eSession) -> None:
+    """Verify that `mngr list` state filtering selects agents by actual state.
+
+    With one of two agents stopped, `mngr list --stopped` must return only the
+    stopped agent (and every returned agent must really be in STOPPED state, not
+    merely matched by name). The `--stopped` flag must be a faithful alias for the
+    explicit CEL filter `--include 'state == "STOPPED"'`, returning the identical
+    set. An unfiltered `mngr list` must show both agents in their distinct states:
+    the stopped one as STOPPED and the untouched one still alive (RUNNING/WAITING).
+    """
     # Pin a unique sleep value per agent so leaked processes trace back to the specific create call.
     for name, sleep_seconds in [("running-agent", 100103), ("stopped-agent", 100121)]:
         expect(

@@ -11,6 +11,15 @@ from imbue.skitwright.expect import expect
 @pytest.mark.tmux
 @pytest.mark.timeout(300)
 def test_full_lifecycle(e2e: E2eSession) -> None:
+    """Verify the full agent lifecycle: create, exec, stop, start, exec-after-restart, destroy.
+
+    Creates a command agent running `sleep 100100`, then asserts each lifecycle stage
+    has its expected observable effect: exec runs commands in the live agent; `stop`
+    transitions it to STOPPED in `mngr list`; `start` returns it to RUNNING/WAITING and
+    relaunches the agent's own `sleep 100100` command (confirmed via `ps aux`, not merely
+    that exec works); and `destroy --force` removes it so `mngr list` reports no agents.
+    Each assertion would fail if the corresponding lifecycle operation were a no-op.
+    """
     # Create
     expect(
         e2e.run(

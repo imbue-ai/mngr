@@ -11,6 +11,15 @@ from imbue.skitwright.expect import expect
 @pytest.mark.release
 @pytest.mark.timeout(300)
 def test_plugin_disable_enable_roundtrip(e2e: E2eSession) -> None:
+    """``mngr plugin disable``/``enable`` flips a plugin's enabled flag and the
+    full roundtrip restores the plugin list exactly.
+
+    Verifies that disabling the (initially enabled) claude plugin reports it as
+    ``enabled == "false"`` in ``mngr plugin list``, that re-enabling reports it
+    as ``"true"`` again, and that the final list matches the pre-disable list
+    byte-for-byte (including version/description metadata that is unavailable
+    while the plugin is unloaded).
+    """
     # Capture the initial plugin list so we can assert the roundtrip restores it
     list_before = e2e.run(
         "mngr plugin list --format json",
@@ -66,6 +75,14 @@ def test_plugin_disable_enable_roundtrip(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.timeout(60)
 def test_plugin_disable_affects_create(e2e: E2eSession) -> None:
+    """Disabling a plugin removes its agent type and gates ``mngr create``.
+
+    Verifies that while the claude plugin is disabled, ``mngr create ... claude``
+    fails with an error naming the disabled plugin and the remediation command
+    (and crucially *not* the pytest opt-in guard), and that claude is absent
+    from the active agent-type list. Re-enabling makes both succeed again: the
+    claude agent type reappears in the active list.
+    """
     # Disable the claude plugin so its agent type should be unavailable
     expect(e2e.run("mngr plugin disable claude", comment="Disable claude plugin")).to_succeed()
 
