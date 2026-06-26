@@ -1,31 +1,34 @@
 {
   "name": "minds",
   "productName": "Minds",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Minds - Self-improving, persistent AI agents",
   "homepage": "https://github.com/imbue-ai/mngr",
   "author": "Imbue <dev@imbue.com>",
   "main": "electron/main.js",
   "scripts": {
     "prestart": "node scripts/ensure-binaries.js && pnpm run build:css",
-    "start": "concurrently -k -n css,electron -c blue,green \"pnpm:watch:css\" \"electron .\"",
+    "start": "concurrently -k -n css,electron -c blue,green \"pnpm:watch:css\" \"MINDS_DISABLE_CRASHPAD=1 electron .\"",
     "build": "node scripts/build.js",
     "build:css": "tailwindcss -i imbue/minds/desktop_client/static/app.css -o imbue/minds/desktop_client/static/app.min.css --minify",
     "watch:css": "tailwindcss -i imbue/minds/desktop_client/static/app.css -o imbue/minds/desktop_client/static/app.min.css --watch",
     "dist": "pnpm build && pnpm exec todesktop build",
     "todesktop:beforeInstall": "./scripts/download-binaries.js",
+    "test:unit": "node --test test/unit/*.test.js",
     "test:e2e": "playwright test --config=test/e2e/playwright.config.js"
   },
   "dependencies": {
+    "@sentry/electron": "^7.13.0",
     "@todesktop/runtime": "^1.6.0",
-    "latchkey": "^2.17.2"
+    "latchkey": "^2.19.1",
+    "smol-toml": "^1.6.1"
   },
   "devDependencies": {
+    "@playwright/test": "1.60.0",
     "@tailwindcss/cli": "4.2.1",
     "@todesktop/cli": "^1.8.0",
     "concurrently": "9.2.1",
     "electron": "40.10.1",
-    "@playwright/test": "1.60.0",
     "playwright": "1.60.0",
     "tailwindcss": "4.2.1"
   },

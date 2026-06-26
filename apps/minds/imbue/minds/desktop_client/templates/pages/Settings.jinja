@@ -1,0 +1,79 @@
+{#def report_unexpected_errors=false, include_error_logs=false #}
+{#
+  App-level settings page, reachable from the floating sidebar's "Settings" entry.
+
+  Hosts the per-machine error-reporting toggles (the same settings the first-launch
+  consent screen records). These are global to the machine, not account-scoped, which
+  is why they live here rather than on the manage-accounts page.
+#}
+{% set _scripts %}
+<script>
+  (function () {
+    var reportToggle = document.getElementById('report-errors-toggle');
+    var logsRow = document.getElementById('include-logs-row');
+    var logsToggle = document.getElementById('include-logs-toggle');
+
+    // "Include logs" is only meaningful when reporting is on; reveal it with the
+    // report toggle and clear it (persisting the cleared state) when reporting goes off.
+    function syncLogsVisibility() {
+      if (reportToggle.checked) {
+        logsRow.classList.remove('hidden');
+      } else {
+        logsRow.classList.add('hidden');
+      }
+    }
+    syncLogsVisibility();
+
+    function saveErrorReporting(payload) {
+      return fetch('/_chrome/error-reporting', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    }
+
+    reportToggle.addEventListener('change', function () {
+      var enabled = reportToggle.checked;
+      var payload = { report_unexpected_errors: enabled };
+      if (!enabled) {
+        // Turning reporting off also clears log inclusion so the stored pair stays consistent.
+        logsToggle.checked = false;
+        payload.include_logs = false;
+      }
+      syncLogsVisibility();
+      saveErrorReporting(payload);
+    });
+
+    logsToggle.addEventListener('change', function () {
+      saveErrorReporting({ include_logs: logsToggle.checked });
+    });
+  })();
+</script>
+{% endset %}
+<Base title="Settings" scripts={{ _scripts }}>
+  <PageContainer>
+    <h1 class="type-heading text-primary mb-4">Settings</h1>
+
+    <h2 class="type-heading text-primary mb-2">Error reporting</h2>
+    <p class="type-helper text-tertiary mb-3">Applies to this device, regardless of which account is signed in.</p>
+    <label class="flex items-start justify-between gap-3 py-3 border-b border-subtle cursor-pointer">
+      <span>
+        <span class="type-body text-primary font-semibold">Report unexpected errors</span>
+        <span class="block type-helper text-tertiary">Send a report to Imbue when something goes wrong.</span>
+      </span>
+      <input type="checkbox" id="report-errors-toggle" class="mt-1 shrink-0"
+             {% if report_unexpected_errors %}checked{% endif %}>
+    </label>
+    <label id="include-logs-row"
+           class="flex items-start justify-between gap-3 py-3 border-b border-subtle cursor-pointer {% if not report_unexpected_errors %}hidden{% endif %}">
+      <span>
+        <span class="type-body text-primary font-semibold">Include logs</span>
+        <span class="block type-helper text-tertiary">Attach recent log files to help diagnose the problem.</span>
+      </span>
+      <input type="checkbox" id="include-logs-toggle" class="mt-1 shrink-0"
+             {% if include_error_logs %}checked{% endif %}>
+    </label>
+
+    <div class="mt-8"><Link href="/" extra="type-helper">&larr; Back to projects</Link></div>
+  </PageContainer>
+</Base>

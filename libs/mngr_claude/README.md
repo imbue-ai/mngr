@@ -26,13 +26,16 @@ When isolation is disabled (shared mode):
 - `CLAUDE_CONFIG_DIR` resolves to the user's shared dir (`$CLAUDE_CONFIG_DIR`, or
   `~/.claude` when unset) and is injected into the agent environment so claude
   reads the user's real config.
-- mngr never writes to the user's Claude config (no trust additions, no dialog
-  dismissal, no per-agent settings.json, no keychain provisioning). The user is
-  responsible for one-time interactive `claude` setup (trust the work_dir,
-  complete onboarding, log in).
-- The repo-settings sync and auto-dismiss fields (`sync_repo_settings`,
-  `override_settings_folder`, `auto_dismiss_dialogs`) are silently ignored since
-  shared mode has no per-agent dir to write into.
+- mngr still writes to the user's Claude config to dismiss the cosmetic startup
+  dialogs (trust the work_dir, onboarding, effort callout, cost threshold) so they
+  don't intercept automated input -- prompting interactively, or silently when
+  `auto_dismiss_dialogs` is set. It writes these into the file claude actually
+  reads (`$CLAUDE_CONFIG_DIR/.claude.json`, or `~/.claude.json` when unset). It
+  does **not** accept bypass-permissions mode there (that is governed by
+  settings.json), and it does no per-agent settings.json or keychain provisioning.
+  The user is still responsible for logging in (credentials).
+- The repo-settings sync fields (`sync_repo_settings`, `override_settings_folder`)
+  are silently ignored since shared mode has no per-agent dir to write into.
 - Reduced settings support (a scoped, documented limitation of this mode). In
   normal mode mngr bakes its hooks and `settings_overrides` into the per-agent
   config-dir `settings.json`, and a user `--settings` passes through so Claude

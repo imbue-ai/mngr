@@ -114,6 +114,15 @@ const APPROVE_PATH_PREFIX = '/permission-requests/approve/';
 const ITEM_PATH_PREFIX = '/permission-requests/';
 const REQUEST_FILE_SUFFIX = '.json';
 const VALID_REQUEST_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
+// The canonical agent-id definition lives in Python:
+// ``imbue.imbue_common.ids.RandomId._validate``, specialized by ``AgentId``
+// (prefix ``agent``). The gateway is pure Node with no Python in the request
+// path, so we mirror that rule here and MUST keep it in sync: an ``agent-``
+// prefix followed by exactly 32 hex characters. Case-insensitive to match
+// ``_validate``'s ``int(hex_part, 16)`` acceptance (real ids from
+// ``uuid4().hex`` are lowercase). The cross-language drift guard lives in
+// permission_requests_test.py, which posts a freshly generated ``AgentId``.
+const VALID_AGENT_ID_PATTERN = /^agent-[0-9a-fA-F]{32}$/;
 
 // Permission request types accepted by POST /permission-requests.
 // ``predefined`` mirrors the original detent-flavored scope/permission
@@ -655,6 +664,14 @@ async function parsePermissionRequestBody(request) {
     throw new InvalidRequestBodyError('expected a JSON object.');
   }
   ensureNonEmptyString('', 'agent_id', parsed.agent_id);
+  // Reject a malformed agent_id at the gateway (the agent's tool call) rather
+  // than persist it and let the consumer's ``AgentId(...)`` parse raise later --
+  // an uncaught raise there killed the permission-requests consumer thread.
+  if (!VALID_AGENT_ID_PATTERN.test(parsed.agent_id)) {
+    throw new InvalidRequestBodyError(
+      `'agent_id' must be a valid agent id ('agent-' followed by 32 hex characters); got '${parsed.agent_id}'.`,
+    );
+  }
   ensureNonEmptyString('', 'rationale', parsed.rationale);
   ensureNonEmptyString('', 'type', parsed.type);
   if (!VALID_REQUEST_TYPES.has(parsed.type)) {

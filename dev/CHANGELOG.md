@@ -4,6 +4,101 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-06-25
+
+### Added
+
+- Added: Blueprint planning document for the minds error-reporting & "get help" work (`blueprint/minds-error-reporting-help/`), scoping the full four-phase design (phases 1-2 implemented in this run; 3-4 will follow as stacked PRs).
+- Added: Design doc `specs/tmr-bounded-convergence-and-normalization.md` for improving the e2e tests TMR generates — tutorial-anchored convergence with deletion as a first-class action, plus a suite-level normalization stage in the reducer and a FIXME-resolution/escalation lifecycle.
+- Added: Design blueprint `blueprint/gateway-agent-id-validation/` documenting the decision to reject malformed permission-request `agent_id`s at the latchkey gateway instead of only guarding against them on the consumer side.
+
+### Changed
+
+- Changed: Bumped the offload CI pin in `.github/workflows/ci.yml` from `0.9.7` to `0.9.9` (cargo cache key, version check, and `cargo install` invocation updated to match).
+- Changed: `just minds-start` no longer defaults the workspace name to `mindtest`. Its `agent_name` argument defaults to empty, so a plain `just minds-start` leaves `MINDS_WORKSPACE_NAME` unset and the create form generates an automatic `mind-N` name — matching what a shipped binary does. Pass a name explicitly to pin it (a collision now errors at create time rather than being auto-suffixed).
+- Changed: Nightly changelog consolidation automation now merges its PR immediately instead of leaving it for a human to review and merge. The in-run accuracy review remains the quality gate.
+
+## 2026-06-24
+
+### Added
+
+- Added: `scripts/remove_old_flat_vault_secrets.py` — one-off cleanup tool that deletes the old flat per-service Vault entries for a tier (`secrets/minds/<tier>/<service>`) once they have been mirrored into the split layout. Refuses to delete any entry whose split mirror is missing or whose keys/values disagree; defaults to dry-run; requires `--yes` to actually delete.
+
+### Changed
+
+- Changed: `scripts/install.sh` now runs `mngr config wizard` as a final step to populate common user-scope configuration (e.g. whether to isolate the Claude config dir for local agents). Like the other steps, it prompts before changing anything and is safe to re-run.
+- Changed: `scripts/push_vault_from_file.py` writes each declared key as its own single-`value` leaf at `secrets/minds/<tier>/<service>/<KEY>` (the new "split" Vault secret layout) instead of a single flat KV entry with many fields. `scripts/changelog_deploy.sh` reads `GH_TOKEN` / `ANTHROPIC_API_KEY` from the split layout.
+- Changed: Removed the minds app's `postinstall` CSS-compile hook (it broke ToDesktop's `--prod` cloud install). The CSS build is now wired in explicitly at its real consumption points: a "Build Tailwind CSS for the e2e app" step in the CI minds_electron e2e job, and a `minds-css` dependency on the `just minds-test-electron` recipe.
+
+## 2026-06-23
+
+### Added
+
+- Added: `just minds-start-cloud` recipe — launches the minds desktop client in dev mode to test the `imbue_cloud` provider against pre-baked pool slices. Unlike `just minds-start`, it leaves the form's shipped fallbacks in place (the canonical forever-claude-template remote plus `FALLBACK_BRANCH`) so an `imbue_cloud` create matches and fast-path leases a slice baked at that tag instead of dropping to the slow rebuild path. Also skips the live-mngr to `vendor/mngr/` rsync.
+- Added: `just backfill-pool-host-keys` recipe wrapping `minds pool backfill-host-keys` for the activated minds env — the one-time SSH host-key backfill to run once per tier after deploying the host-key-pinning connector.
+- Added: Optional `fct` positional argument on `just minds-start` to point a launch at a specific forever-claude-template worktree (absolute path used as-is; relative resolved against the mngr root). Omitting it keeps the previous default.
+- Added: New runtime dependency `traceback-with-variables` (used by the minds Sentry integration to format tracebacks with local variables); updates `uv.lock`.
+- Added: Design blueprints — `blueprint/discovery-health-watchdog/`, `blueprint/pin-imbue-cloud-host-keys/`, plus revisions to `blueprint/remote-mind-recovery/`.
+
+### Changed
+
+- Changed: Rewrote the `release-minds` skill to be a thin pointer to `apps/minds/docs/release.md`, the canonical release runbook, instead of describing its own (now-obsolete) release flow.
+- Changed: Consolidated the docs describing how FCT's `vendor/mngr` is kept in sync into a single canonical place (`apps/minds/docs/vendor-mngr-sync.md`); the `minds-dev-workflow` and `minds-justfile` skills now point at it instead of re-describing the mechanisms.
+
+## 2026-06-22
+
+### Added
+
+- Added: Design blueprints — `blueprint/consistent-provider-auth-failures/`, `blueprint/robust-minds-list-provider-errors/`, `blueprint/minds-flask-migration/`, `blueprint/remove-system-interface-asyncio/`, and `blueprint/unify-remote-host-lock/`.
+
+### Changed
+
+- Changed: Renamed `just minds-tailwind` to `just minds-css` — it now compiles the minds desktop client's Tailwind v4 stylesheet (`static/app.css` -> minified `static/app.min.css`) via the pinned `@tailwindcss/cli`, instead of fetching the Tailwind Play CDN JS bundle. The `.gitignore` entry tracks the new compiled artifact (`app.min.css`) in place of the retired `tailwind.js`.
+- Changed: `forward-system-interface` justfile recipe now resolves an agent's id with `mngr list --on-error continue`, so an unauthenticated/unreachable provider no longer aborts the lookup of a local agent.
+
+## 2026-06-21
+
+### Added
+
+- Added: Design blueprints `blueprint/sshd-restart-robustness/` and `blueprint/share-bare-metal-across-dev-envs/`.
+
+## 2026-06-20
+
+### Removed
+
+- Removed: `bake-pool-host-{dev,prod}` justfile recipes (they baked OVH classic VPS pool hosts, now deprecated). Pool hosts are baked as bare-metal slices via the `bake-slice-{dev,prod}` recipes; `list-pool-hosts` and `destroy-pool-host` are unchanged and still cover legacy OVH VPS rows. The `minds-justfile` and `minds-dev-workflow` skill docs were updated to match.
+
+## 2026-06-19
+
+### Added
+
+- Added: `specs/bare-providers/` (spec.md + concise.md + extraction_design.md) — design proposal for running agents directly on a cloud VM with no Docker container, introducing a substrate-x-realizer architecture and a staged rollout that later folds local/docker/lima/ssh into the same grid.
+- Added: A set of provider specs under `specs/` (`provider-uniformity-review.md`, `provider-shape.md`, `implementing-a-provider.md`) covering all nine `mngr` provider plugins (modal, aws, azure, gcp, vultr, ovh, lima, docker, ssh), and `specs/provider-release-tests.md` condensed to a remaining-gaps tracker now that the shared `run_provider_release_trip{1..4}` harness has landed.
+- Added: `blueprint/remote-mind-recovery/` design doc for extending minds' workspace-recovery flow to remote (Imbue Cloud) minds.
+- Added: New `overlay` workspace library registered at the repo root (`[tool.uv.sources]` workspace source, plus `--cov=imbue.overlay` in the shared coverage flags).
+- Added: New runtime dependency at the repo root (`uv.lock`): `google-cloud-storage>=2.18`, used by the GCP provider's offline `host_dir` GCS state bucket.
+
+### Changed
+
+- Changed: `make_cli_docs.py` now also generates the provider/agent config tables in each plugin README from the Pydantic field descriptions (the source of truth, also shown by `mngr config`), spliced between markers and verified by the docs `--check` gate so the tables can no longer drift from the code. The `regenerate-cli-docs` pre-commit hook now runs `make_cli_docs.py --check` (non-mutating, covering every generated file) and its trigger includes the provider/agent `config.py` / `plugin.py` sources.
+- Changed: Updated the root pytest coverage config to track the renamed `imbue.mngr_vps` package (was `imbue.mngr_vps_docker`).
+
+### Removed
+
+- Removed: Monorepo-development-only paragraph (the `~/.local/bin` pre-commit shim note) from the top-level README so the published PyPI README stays focused on user-relevant content.
+
+## 2026-06-18
+
+### Added
+
+- Added: New `identify-suspicious-edge-cases` skill — flags over-broad exception catches, fallback `else` branches, defensive guards, and unnecessary `| None` types under a given path.
+- Added: `specs/provider-state-bucket/` design spec for the AWS / Azure offline state stored in cloud object storage (S3 / Azure Blob) so a stopped instance's host record, agent metadata, and `host_dir` are readable offline without hitting the 256-char EC2/VM tag-value limit.
+- Added: `moto[s3]` to the root dev dependency group for in-memory S3 unit tests of the new AWS state bucket.
+
+### Changed
+
+- Changed: The `identify-*` skills (`identify-doc-code-disagreements`, `identify-inconsistencies`, `identify-outdated-docstrings`, `identify-style-issues`) now accept a `target_path` argument instead of a bare library name. You can scope them to a whole library or to any subdirectory within one; each skill resolves the scan scope and its containing library, and writes findings to the containing library's `_tasks/` folder.
+
 ## 2026-06-17
 
 ### Added
