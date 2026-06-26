@@ -54,7 +54,7 @@ Three things must hold; only two need *new* CI:
 
 1. **The binary built from the release SHA works end-to-end** — `minds-launch-to-msg.yml` (step 4). `main` never runs this, so it is the release's only unique verification and its wall-clock long pole. Start it as early as possible.
 2. **The FCT PR's `test` job is green** (step 2) — real signal: it refreshes `vendor/mngr` (and may carry a `system_interface` fix), so a `uv`-resolution or stale-API break surfaces here. `ci.yml` only runs on a PR or on `main`, so this needs the FCT branch opened as a PR (a CI surface, not a review).
-3. **`vendor/mngr` equals the tagged mngr SHA** — proved by reproduction (the step-6 `diff -r`), not by CI.
+3. **`vendor/mngr` equals the tagged mngr SHA** — proved by reproduction (the step-6 `git ls-tree` blob-hash comparison), not by CI.
 
 *Not* new signal: **traditional CI on a version-bump-only mngr branch.** Bumping `version` + `FALLBACK_BRANCH` can't change test behavior — no test asserts the version literal or that `FALLBACK_BRANCH` resolves to an existing tag — so a green `main` already covers it. Let those jobs run as a backstop; don't serialize behind them. (When the mngr branch *also* carries mngr/minds code, its CI is real signal — gate on it.)
 
