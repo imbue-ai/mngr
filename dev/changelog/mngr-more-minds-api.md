@@ -1,0 +1,1 @@
+Adds the minds workspace-API blueprint plan and handoff doc under `blueprint/minds-workspace-api/`, and updates root `justfile` recipes supporting the minds app and workspace-API development workflow.

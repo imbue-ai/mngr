@@ -1,0 +1,5 @@
+Adds the `minds-workspaces` detent permission scope used by the minds cross-workspace management API, with one named permission per verb (`minds-workspaces-read`, `-create`, `-destroy`, `-lifecycle`, `-backups-export`, `-ssh`).
+
+- Verbs split on a target axis: `read`/`create` are all-or-nothing, while `destroy`/`lifecycle`/`backups-export`/`ssh` are target-scoped. A "selected" grant mints a uniquely-named per-target permission schema (`minds-workspaces-<verb>-<target_id>`) that pins a single workspace; an "all workspaces" grant uses the broad verb schema. Successive selected grants accumulate targets through the gateway's ordinary schema-by-name merge.
+
+- The grant is applied like file-sharing: the agent's `type=workspace` permission request carries a precomputed effect (scope schema + verb schemas + rule, built in `permission_requests.mjs`'s `computeWorkspaceEffect`), spliced into the requesting agent's per-host permissions file on approval. The Python side keeps only the dialog-facing verb metadata.
