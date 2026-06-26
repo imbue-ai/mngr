@@ -110,7 +110,7 @@ def resolve_forward_sentry_config() -> ForwardSentryConfig | None:
         if not value
     ]
     if missing_env_var_names:
-        logger.warning(
+        logger.error(
             "Sentry is enabled for mngr latchkey forward but required env vars are missing ({}); "
             "skipping Sentry setup.",
             ", ".join(missing_env_var_names),
