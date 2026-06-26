@@ -44,6 +44,7 @@ from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
 from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
+from imbue.minds.desktop_client.agent_creator import provider_instance_name_for_launch
 from imbue.minds.desktop_client.agent_creator import resolve_template_version
 from imbue.minds.desktop_client.api_v1 import create_api_v1_blueprint
 from imbue.minds.desktop_client.auth import AuthStoreInterface
@@ -600,6 +601,26 @@ def _existing_workspace_host_names(backend_resolver: BackendResolverInterface) -
         if name is not None:
             names.add(name)
     return names
+
+
+def _taken_host_names_on_provider(backend_resolver: BackendResolverInterface, provider_instance_name: str) -> set[str]:
+    """Case-folded names of active workspaces on a single provider instance.
+
+    Scopes to the provider instance a create would target -- where the host-name
+    uniqueness check actually fires -- and to *active* workspaces only (a
+    destroyed host's name is free to reuse), reading the discovery snapshot per
+    the resolver-cache convention. Names are case-folded so the availability
+    check treats ``My-Mind`` and ``my-mind`` as the same name.
+    """
+    taken: set[str] = set()
+    for agent_id in backend_resolver.list_active_workspace_ids():
+        info = backend_resolver.get_agent_display_info(agent_id)
+        if info is None or info.provider_name != provider_instance_name:
+            continue
+        name = backend_resolver.get_workspace_name(agent_id)
+        if name is not None:
+            taken.add(name.casefold())
+    return taken
 
 
 def _handle_welcome_page() -> Response:
@@ -1352,6 +1373,63 @@ def _handle_create_page() -> Response:
         color=_suggested_create_color(backend_resolver),
     )
     return make_html_response(content=html)
+
+
+def _handle_host_name_availability_api() -> Response:
+    """Report whether a workspace name is free (GET /api/host-name-available).
+
+    Read-only liveness check for the create form's Name field. Reads the
+    discovery snapshot (resolver cache) -- no provider/subprocess call -- and
+    answers whether ``name`` is already taken by an *active* workspace on the
+    provider instance the selected ``launch_mode`` / ``account_id`` / ``region``
+    would target. Format validation is left to the client; an empty or malformed
+    name reports available (only a valid name can collide, and the client
+    surfaces its own format message).
+
+    Query params: ``name`` (required), ``launch_mode``, ``account_id``,
+    ``region``. Returns ``{"available": bool}``.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+
+    name = request.args.get("name", "").strip()
+    if not name:
+        return make_response(content=json.dumps({"available": True}), media_type="application/json")
+    try:
+        HostName(name)
+    except InvalidName:
+        return make_response(content=json.dumps({"available": True}), media_type="application/json")
+
+    try:
+        launch_mode = LaunchMode(str(request.args.get("launch_mode", LaunchMode.DOCKER.value)))
+    except ValueError:
+        launch_mode = LaunchMode.DOCKER
+    account_id = request.args.get("account_id", "").strip()
+    region = request.args.get("region", "").strip()
+
+    # Imbue Cloud is per-account, so its provider instance (``imbue_cloud_<slug>``)
+    # is named from the account email; the session store maps user_id -> email.
+    account_email = ""
+    if account_id and launch_mode is LaunchMode.IMBUE_CLOUD:
+        session_store_inst: MultiAccountSessionStore | None = get_state().session_store
+        if session_store_inst is not None:
+            account_email = session_store_inst.get_account_email(account_id) or ""
+
+    try:
+        provider_instance_name = provider_instance_name_for_launch(
+            launch_mode, imbue_cloud_account=account_email or None, region=region or None
+        )
+    except MngrCommandError:
+        # Not enough context to scope (imbue_cloud without an account, or AWS
+        # without a region). The form blocks submit on those separately, so
+        # report available rather than a spurious conflict.
+        return make_response(content=json.dumps({"available": True}), media_type="application/json")
+
+    taken = _taken_host_names_on_provider(get_state().backend_resolver, provider_instance_name)
+    return make_response(
+        content=json.dumps({"available": name.casefold() not in taken}),
+        media_type="application/json",
+    )
 
 
 def _handle_create_agent_api() -> Response:
@@ -4537,6 +4615,7 @@ def create_desktop_client(
     app.add_url_rule("/create", view_func=_handle_create_form_submit, methods=["POST"])
     app.add_url_rule("/api/backup-status", view_func=_handle_backup_status_api)
     app.add_url_rule("/api/backup-export/<agent_id>", view_func=_handle_backup_export_api)
+    app.add_url_rule("/api/host-name-available", view_func=_handle_host_name_availability_api)
     app.add_url_rule("/api/create-agent", view_func=_handle_create_agent_api, methods=["POST"])
     app.add_url_rule("/api/create-agent/<agent_id>/status", view_func=_handle_creation_status_api)
     app.add_url_rule("/api/create-agent/<agent_id>/logs", view_func=_handle_creation_logs_sse)

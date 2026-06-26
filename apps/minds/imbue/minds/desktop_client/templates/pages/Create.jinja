@@ -64,6 +64,8 @@
     var regionSelect = document.getElementById('region');
     var presetCards = document.querySelectorAll('[data-preset]');
     var accountError = document.getElementById('account-error');
+    var hostNameInput = document.getElementById('host_name');
+    var hostNameError = document.getElementById('host-name-error');
     var REGION_OPTIONS = {{ region_options_by_launch_mode | tojson }};
     var REGION_SELECTED = {{ region_selected_by_launch_mode | tojson }};
 
@@ -136,6 +138,95 @@
       accountSelect.classList.remove('!ring-1', 'ring-important');
     }
 
+    // ---- Live Name (host name) validation -------------------------------
+    // Mirrors mngr's HostName rules (alphanumeric plus '-'/'_' in the middle,
+    // no leading/trailing '-'/'_', no dots) for instant format feedback, then
+    // debounced-asks the server whether the name is free on the *selected*
+    // provider (the scope where a real create would actually collide). State
+    // 'ok' lets submit through; 'invalid'/'taken' block it (the field stays
+    // editable). Empty is always 'ok' -- the server auto-names it.
+    var HOST_NAME_OK = 'ok', HOST_NAME_INVALID = 'invalid', HOST_NAME_TAKEN = 'taken';
+    var hostNameState = HOST_NAME_OK;
+    var hostNameDebounce = null;
+    var hostNameCheckSeq = 0;
+
+    function hostNameFormatError(value) {
+      // Friendly message for the first broken rule, or '' if valid. Empty is
+      // valid (named automatically server-side).
+      if (value === '') return '';
+      var invalidChar = value.match(/[^a-zA-Z0-9_-]/);
+      if (invalidChar) {
+        if (invalidChar[0] === '.') return "Dots aren't allowed in a name.";
+        if (invalidChar[0] === ' ') return "Spaces aren't allowed in a name.";
+        return 'Use only letters, numbers, dashes, and underscores.';
+      }
+      if (/^[-_]/.test(value)) return "Can't start with a dash or underscore.";
+      if (/[-_]$/.test(value)) return "Can't end with a dash or underscore.";
+      return '';
+    }
+
+    function showHostNameError(message) {
+      hostNameError.textContent = message;
+      hostNameError.classList.remove('hidden');
+      hostNameInput.classList.add('!ring-1', 'ring-important');
+    }
+
+    function clearHostNameError() {
+      hostNameError.textContent = '';
+      hostNameError.classList.add('hidden');
+      hostNameInput.classList.remove('!ring-1', 'ring-important');
+    }
+
+    function hostNameAvailabilityUrl(value) {
+      var params = new URLSearchParams({
+        name: value,
+        launch_mode: launchSelect.value,
+        account_id: accountSelect.value,
+        region: regionSelect.disabled ? '' : regionSelect.value
+      });
+      return '/api/host-name-available?' + params.toString();
+    }
+
+    function validateHostName() {
+      var value = hostNameInput.value.trim();
+      var formatError = hostNameFormatError(value);
+      if (formatError) {
+        hostNameState = HOST_NAME_INVALID;
+        showHostNameError(formatError);
+        return;
+      }
+      if (value === '') {
+        hostNameState = HOST_NAME_OK;
+        clearHostNameError();
+        return;
+      }
+      // Format is fine; ask the server about availability. Until it answers we
+      // optimistically treat the name as ok so a fast Create isn't blocked (the
+      // rare race falls back to the server's own create-time conflict check).
+      hostNameState = HOST_NAME_OK;
+      clearHostNameError();
+      var seq = ++hostNameCheckSeq;
+      fetch(hostNameAvailabilityUrl(value), { headers: { 'Accept': 'application/json' } })
+        .then(function (resp) { return resp.ok ? resp.json() : null; })
+        .then(function (data) {
+          // Ignore a stale response superseded by a newer keystroke/change.
+          if (seq !== hostNameCheckSeq) return;
+          if (data && data.available === false) {
+            hostNameState = HOST_NAME_TAKEN;
+            showHostNameError('That name is already taken. Pick a different one.');
+          } else {
+            hostNameState = HOST_NAME_OK;
+            clearHostNameError();
+          }
+        })
+        .catch(function () { /* network error: fail open, leave the name usable */ });
+    }
+
+    function scheduleHostNameValidation() {
+      if (hostNameDebounce) clearTimeout(hostNameDebounce);
+      hostNameDebounce = setTimeout(validateHostName, 300);
+    }
+
     function onPresetClick(name) {
       // Clicking a card only selects it -- it never navigates. Remote (Imbue
       // Cloud) compute needs an account: when the user has signed-in accounts
@@ -177,6 +268,21 @@
         e.preventDefault();
         if (HAS_ANY_ACCOUNT) showAccountError();
         else openSigninModal();
+        return;
+      }
+      // Re-run format validation synchronously so a known-bad / already-taken
+      // name blocks submit (mirroring the account-picker guard). Availability
+      // that hasn't come back yet does not block -- the server's create-time
+      // conflict check backstops that rare race.
+      var nameFormatError = hostNameFormatError(hostNameInput.value.trim());
+      if (nameFormatError) {
+        hostNameState = HOST_NAME_INVALID;
+        showHostNameError(nameFormatError);
+      }
+      if (hostNameState === HOST_NAME_INVALID || hostNameState === HOST_NAME_TAKEN) {
+        e.preventDefault();
+        showAdvanced(true);
+        hostNameInput.focus();
         return;
       }
       submitBtn.disabled = true;
@@ -268,10 +374,19 @@
     backupSelect.addEventListener('change', update);
     backupEncryptionSelect.addEventListener('change', update);
 
+    hostNameInput.addEventListener('input', scheduleHostNameValidation);
+    // Provider / account / region changes move the goalposts for "taken", so
+    // re-check the name against the newly-selected scope.
+    accountSelect.addEventListener('change', scheduleHostNameValidation);
+    launchSelect.addEventListener('change', scheduleHostNameValidation);
+    regionSelect.addEventListener('change', scheduleHostNameValidation);
+
     var initialPreset = selectedPreset();
     if (initialPreset) markPresetSelected(initialPreset);
     showAdvanced({{ 'true' if start_advanced else 'false' }});
     update();
+    // Validate any pre-filled name on load (e.g. a re-rendered submit error).
+    validateHostName();
   })();
 </script>
 {% endset %}
@@ -357,6 +472,9 @@
         <FormLabel target="host_name">Name</FormLabel>
         <p class="mb-1 type-helper text-tertiary">Leave empty to name it automatically</p>
         <TextInput name="host_name" :value="host_name" placeholder="my-mind" id="host_name" />
+        {# Inline live-validation message for the name field (format + availability),
+           toggled by the script below; mirrors the account-picker error pattern. #}
+        <p id="host-name-error" class="hidden mt-1 type-helper text-important"></p>
       </div>
 
       <div>
