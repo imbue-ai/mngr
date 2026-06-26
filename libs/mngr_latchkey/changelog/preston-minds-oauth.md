@@ -1,0 +1,9 @@
+Bump the pinned latchkey CLI version installed on remote VPS environments (the secondary gateway) to 2.19.1.
+
+`Latchkey.auth_browser` now owns the full Minds Google OAuth flow, so all of the auth logic lives in one place. It attempts the browser sign-in optimistically and, only when latchkey reports that the service has no registered client yet, prefers the Minds-provided OAuth client: for a Minds-OAuth Google service it registers that client (`auth prepare`) and retries against the Minds consent screen before falling back to the user self-setup flow (`auth browser-prepare`). This removes the previous up-front `auth list` probe, which was expensive because it queried every service.
+
+The registered Minds client is cleared (`auth clear`) only when we just registered it and its sign-in then failed; a client that was already registered (for example a user's own) is never cleared.
+
+Add the supporting `Latchkey` primitives used by that flow: `auth_prepare` (register an OAuth client id/secret for a service), `auth_browser_login` (a bare `auth browser` sign-in with no self-setup fallback), and `auth_clear` (`latchkey auth clear -y <service>`). Add an explicit set of Minds-OAuth Google services (`MINDS_GOOGLE_OAUTH_SERVICES`) used to gate the flow -- `google-directions` is deliberately excluded because it authenticates with an API key, not OAuth, so it must not go through the Minds OAuth client -- plus the Minds Google OAuth client id/secret as hardcoded constants (an installed/desktop-app OAuth client, where the "secret" is not truly confidential since it ships inside the distributed client).
+
+Raise the minimum supported latchkey CLI version (`LATCHKEY_MIN_VERSION`) to 2.19.1, kept in lockstep with the version installed/bundled. The package now refuses to operate against gateways older than 2.19.1 (2.18.0 introduced the `auth prepare` subcommand the flow depends on).

@@ -1,0 +1,5 @@
+Bump the bundled Latchkey version to 2.19.1.
+
+When a mind needs a Google API and its credentials are not valid, Minds now tries the Minds-provided Google OAuth consent screen first, and only falls back to the old "create your own Google project" self-setup flow if that fails. Most users no longer see the self-setup step. The flow applies to an explicit list of OAuth Google services (Gmail, Calendar, Drive, Docs, Sheets, People, Analytics); `google-directions` (which uses an API key, not OAuth) and all non-Google services are unchanged.
+
+This logic now lives entirely in the shared Latchkey wrapper's browser sign-in, so granting a permission runs the same sign-in path for every service. The sign-in is attempted optimistically and only registers the Minds OAuth client when the service has no client yet, which avoids an expensive per-service credential probe. A user's own Google OAuth client is never cleared -- only a Minds client that we just registered and that then failed to sign in is discarded before the self-setup fallback runs.
