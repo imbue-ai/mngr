@@ -1,1 +1,3 @@
 Adds the minds workspace-API blueprint plan and handoff doc under `blueprint/minds-workspace-api/`, and updates root `justfile` recipes supporting the minds app and workspace-API development workflow.
+
+Updates those blueprint docs to match the shipped permission design: the cross-workspace permissions use a `minds-workspaces` scope whose schemas (including per-target ones) arrive with each grant and merge by name, rather than the originally-planned per-host `anyOf` allowlist synced at startup. The plan carries a superseded-notice pointing at `apps/minds/docs/latchkey-permissions.md`, and the handoff now reflects current status (telegram/per-target/create-parity done; SSH remote→local broker outstanding; old UI routes still in use enumerated).

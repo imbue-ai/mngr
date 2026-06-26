@@ -1,5 +1,40 @@
 # Plan: Minds workspace API (cross-workspace capabilities via latchkey)
 
+> **Superseded — permission model.** The permission design described below
+> (a `minds` detent scope whose schemas are defined once in code and
+> *idempotently synced into every per-host file on `minds run` startup*, with
+> the per-target axis built by *generalizing the per-agent `anyOf` allowlist*)
+> was **not** how this shipped. The implemented model is simpler and is the
+> canonical reference: see
+> [`apps/minds/docs/latchkey-permissions.md`](../../apps/minds/docs/latchkey-permissions.md)
+> ("Cross-workspace management API permissions"). In short:
+>
+> * The scope is named **`minds-workspaces`** (not `minds`), with one named
+>   permission per verb (`minds-workspaces-read`, `-create`, `-destroy`,
+>   `-lifecycle`, `-backups-export`, `-ssh`).
+> * **No startup schema-sync and no baseline migration.** The scope + verb
+>   schemas are emitted, fully self-described, *with each grant* and merged
+>   into the requesting agent's per-host file by name -- a host that has never
+>   seen the scope gets it on the first grant.
+> * The per-target ("selected") axis uses a **uniquely-named per-target verb
+>   schema** (`minds-workspaces-<verb>-<target_id>`) that pins one workspace;
+>   successive selected grants *accumulate* via the gateway's ordinary
+>   schema-by-name merge -- **no `anyOf`, no per-host allowlist generalization,
+>   no special merge logic** (the same mechanism file-sharing uses for
+>   per-path schemas).
+> * The grant is applied like file-sharing: the agent posts a `type=workspace`
+>   permission request, the effect (scope schema + verb schemas + rule) is
+>   computed in the gateway extension's `computeWorkspaceEffect`
+>   (`permission_requests.mjs`), and the desktop client approves it via
+>   `POST /permission-requests/approve/<id>`. The Python
+>   `mngr_latchkey.workspace_permissions` module holds only the dialog-facing
+>   verb metadata.
+>
+> The rest of this plan (API surface, operations, version, backups, SSH,
+> telegram removal) describes what shipped; only the permission *plumbing*
+> bullets in the "Refined prompt", "Overview", and "Changes" sections below
+> reflect the original (abandoned) design and should be read through this note.
+
 ## Refined prompt
 
 > **Expose the basic Minds functionality through a versioned API (via latchkey) so that Minds workspaces can themselves interact with other workspaces, backups, etc.** — CRUD/listing for workspaces, workspace version data, enabling SSH access into workspaces, and read/listing for backups, with permission scoping that allows none/all/selected workspaces.
@@ -49,7 +84,7 @@
 ## Overview
 
 - Promote the minds desktop client's ad-hoc, UI-only capabilities (create / destroy / lifecycle / backups) into a **single versioned `/api/v1/workspaces/...` API** that both the browser UI and in-workspace agents call — one implementation behind one HTTP surface, reached by agents through the existing latchkey `minds-api-proxy` (the proxy already forwards any path, so gating is pure detent — no latchkey change).
-- Add a **`minds` detent scope with per-verb permissions** (read / create / destroy / backups / ssh), each grantable for **none / all / selected** target workspaces, surfaced through the existing permission-request → inbox → grant dialog. The "selected" axis reuses the per-host allowlist machinery already used for the per-agent self-scope.
+- Add a **`minds-workspaces` detent scope with per-verb permissions** (read / create / destroy / lifecycle / backups-export / ssh), each grantable for **none / all / selected** target workspaces, surfaced through the existing permission-request → inbox → grant dialog. The "selected" axis mints a uniquely-named per-target verb schema and accumulates targets through the gateway's ordinary schema-by-name merge (the same mechanism file-sharing uses for per-path schemas) -- not the per-host `anyOf` allowlist this plan originally proposed; see the superseded-notice at the top.
 - Add genuinely-new capabilities agents need to "adapt work from another workspace": **workspace version data** (immutable `original_minds_version` label + git-derived upgrade history), **backup listing + per-snapshot export** (works even for offline/destroyed workspaces because the hub holds each `restic.env`), and **hub-brokered ephemeral SSH access** (caller ships only a public key; the hub injects a TTL-tagged key and brokers a tunnel that dies with the app).
 - Treat the prior `yash/spawn-peer-minds` branch as the proven seed: reuse its dual cookie-or-bearer auth, its inline-schema-in-code + startup-sync approach, and its `UNKNOWN`-credential-status grant-flow fix (every minds-internal scope reports `UNKNOWN`, so without the fix grants would wrongly demand credentials).
 - **Remove telegram entirely** (minds desktop subsystem + FCT skills/bot/service) — it was a redundant channel for minds workspaces (web UI is inbound, the kept `notifications` API is outbound), and removing it shrinks the surface this work has to carry.
@@ -97,13 +132,13 @@
 - Point the browser UI's data/JSON calls at the new `/api/v1/workspaces/...` routes; retire the ad-hoc `/api/create-agent`, `/api/destroy-agent`, `/api/backup-*`, `/api/agents/<id>/*-host`, etc. JSON endpoints in favor of the versioned ones (HTML page routes stay).
 - Ensure both front doors call the same underlying service functions (agent creator, destroying, backup status/export, backend resolver) so there is one implementation.
 
-**Permissions (`libs/mngr_latchkey` + `apps/minds`)**
+**Permissions (`libs/mngr_latchkey` + `apps/minds`)** *(shipped design; see the superseded-notice at the top of this doc and [`latchkey-permissions.md`](../../apps/minds/docs/latchkey-permissions.md))*
 
-- Define a `minds` detent scope with per-verb permission schemas (read / create / destroy / backups / ssh), each able to carry a per-target allowlist; define them once in code and idempotently sync them into every per-host permissions file on `minds run` startup (generalize the prior branch's schema-injection migration).
-- Generalize the per-host allowlist mechanism (today's per-agent `anyOf`) into a reusable "verb → allowed target workspace ids" construct, written on user grant.
-- Extend the permission-request model + inbox dialog to carry a target workspace and verb selection, and to present the none/all/selected choice (model the target-carrying request on the existing file-sharing request type).
+- Define a `minds-workspaces` detent scope with one named permission per verb (`minds-workspaces-read`, `-create`, `-destroy`, `-lifecycle`, `-backups-export`, `-ssh`). The verb catalog (scope name, schema names, targeted/non-targeted split, dialog labels) lives in a single shared `extensions/workspace_permissions.json` read by both the Python dialog metadata (`mngr_latchkey.workspace_permissions`) and the gateway extension.
+- **No startup schema-sync and no baseline.** The scope + verb schemas are emitted with each grant (self-described `effect`) and merged into the requesting agent's per-host file by name, so a host that has never seen the scope gets it on the first grant.
+- Per-target ("selected") grants for the target-scoped verbs (`destroy`, `lifecycle`, `backups-export`, `ssh`) mint a uniquely-named per-target schema (`minds-workspaces-<verb>-<target_id>`); successive selected grants accumulate via the ordinary schema-by-name merge (no `anyOf`, no per-host allowlist construct). `read` and `create` are all-or-nothing.
+- Extend the permission-request model + inbox dialog to carry a target workspace and verb selection, and to present the none/all/selected choice. This is a dedicated `type=workspace` request type (distinct from `predefined` and `file-sharing`); the effect is computed in the gateway extension's `computeWorkspaceEffect` and applied via the standard `POST /permission-requests/approve/<id>` path (the approve call sends an override body so the gateway recomputes from the user's dialog choices).
 - Port the `UNKNOWN`-credential-status grant-flow fix so minds-internal scopes are granted without a spurious credential step.
-- Add a services-catalog entry for the `minds` scope (display name, verb permissions).
 
 **Version data (`apps/minds` + FCT)**
 
