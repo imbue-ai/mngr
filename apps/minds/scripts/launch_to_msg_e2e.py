@@ -1193,6 +1193,16 @@ async def amain() -> int:
                     chat_now = await find_chat_window(ctx)
                     if chat_now is not None:
                         win = chat_now
+                    # Scroll the transcript to the live tail before reading it, as a
+                    # user reading the latest reply would. The chat virtualizes
+                    # off-screen rows, so a reply rendered below the fold (e.g. the
+                    # view was not pinned to the bottom when it arrived) is absent
+                    # from document.body.innerText until the viewport is at the tail.
+                    with contextlib.suppress(Exception):
+                        await win.evaluate(
+                            "() => { for (const el of document.querySelectorAll('.app-content')) "
+                            "{ el.scrollTop = el.scrollHeight; } }"
+                        )
                     # Check for canned body in chat (PASS).
                     body = await win.evaluate("document.body.innerText")
                     if CANNED_BODY.lower() in body.lower() and approval_stage >= 3:
