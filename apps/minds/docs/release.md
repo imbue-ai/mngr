@@ -21,6 +21,8 @@ Both repos release from **`main`** via **two PRs that both target `main`** (one 
 
 **Vendor-match invariant.** FCT `vendor/mngr` must be the `git archive` of the *exact* mngr SHA it's paired with — the `commit_sha` you verify and the mngr SHA you tag. The binary runs the mngr SHA; the in-VM agent imports `vendor/mngr`. If they diverge, the agent's mngr can mismatch the binary's API (how the `system_interface` → `send_message_to_agents` break slipped in). Re-archive whenever the mngr SHA changes.
 
+> When iterating on CI, always dispatch with a `template_ref` whose `vendor/mngr` is synced to the *same* mngr SHA you're building — never FCT `main`, which lags. A stale vendor accepts an old agent-config schema, so a field the release binary renamed is silently rejected and the in-VM agent never starts: the e2e wedges at "Waiting for initial chat agent…" / a chat-input timeout, which reads as a frontend hang but is really vendor skew. (Seen for `use_env_config_dir` → `isolate_local_config_dir`.) `just sync-vendor-mngr` produces a matching FCT branch; pass that as `template_ref`.
+
 > The Apple-Silicon lima-VZ `cryptography` SIGILL is handled in the FCT template by `OPENSSL_armcap=0` (`.mngr/settings.toml` `host_env__extend` + `scripts/build_workspace.sh`), which skips OpenSSL's SVE CPU-cap probe. mngr does not pin `cryptography`.
 
 **Reviewing the FCT PR.** Two kinds of change land on the same branch: the mechanical `vendor/mngr` snapshot (hundreds of files) and reviewable code (e.g. a `system_interface` fix). CI needs the *full* branch — the binary clones the ref and imports the committed `vendor/mngr` — but reviewers should read only the code. Keep them separable:
