@@ -1,13 +1,11 @@
 import json
 import os
 import queue
-import shlex
 import threading
 import time
 from collections.abc import Collection
 from collections.abc import Iterator
 from collections.abc import Mapping
-from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -26,13 +24,10 @@ from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.dispatcher import DispatcherMiddleware
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
-from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.bootstrap import is_imbue_cloud_provider_enabled_for_account
 from imbue.minds.bootstrap import list_disabled_provider_names
-from imbue.minds.bootstrap import set_provider_is_enabled
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
@@ -44,7 +39,6 @@ from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backup_password_store import has_saved_backup_password
-from imbue.minds.desktop_client.backup_status import compute_backup_status_for_workspaces
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
@@ -58,15 +52,11 @@ from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
-from imbue.minds.desktop_client.mind_liveness import MindLiveness
 from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
 from imbue.minds.desktop_client.mind_liveness import get_shutdown_capable_workspace_agent_ids
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.provider_display import friendly_provider_label
-from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
-from imbue.minds.desktop_client.recovery_probe import build_host_health_response
-from imbue.minds.desktop_client.recovery_probe import build_probe_argv
 from imbue.minds.desktop_client.region_preference import AWS_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import GeoLocationCache
 from imbue.minds.desktop_client.region_preference import IMBUE_CLOUD_PROVIDER_KEY
@@ -95,7 +85,6 @@ from imbue.minds.desktop_client.sharing_handler import resolve_account_email_for
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.state import set_state
-from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
 from imbue.minds.desktop_client.supertokens_routes import create_supertokens_blueprint
 from imbue.minds.desktop_client.supertokens_routes import signout_user_via_plugin
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
@@ -121,28 +110,18 @@ from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
-from imbue.minds.desktop_client.tunnel_token_injection import clear_tunnel_token_from_agent
 from imbue.minds.desktop_client.webdav import create_webdav_app
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
-from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
 from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
 from imbue.minds.desktop_client.workspace_create import default_region_for_provider_with_config
-from imbue.minds.envs.docker_cleanup import DockerCleanupError
-from imbue.minds.envs.docker_cleanup import stop_active_env_state_container
 from imbue.minds.errors import InvalidJsonBodyError
-from imbue.minds.errors import MngrCommandError
-from imbue.minds.errors import MngrCommandTimeoutError
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.api.discovery_events import DISCOVERY_STREAM_POLL_INTERVAL_SECONDS
-from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import HostId
-from imbue.mngr.primitives import HostState
-from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
@@ -680,42 +659,6 @@ def _build_region_form_context(
     return options_by_launch_mode, selected_by_launch_mode
 
 
-def _handle_backup_status_api() -> Response:
-    """Return per-project backup status (GET /api/backup-status).
-
-    Queries restic (from the minds machine) for every known workspace using
-    its canonical restic.env, in parallel with a per-workspace timeout. The
-    landing page fetches this once on load to fill each tile.
-    """
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
-    backend_resolver = get_state().backend_resolver
-    paths: WorkspacePaths | None = get_state().api_v1_paths
-    if paths is None:
-        return make_response(content="{}", media_type="application/json")
-    root_concurrency_group: ConcurrencyGroup | None = get_state().root_concurrency_group
-    agent_ids = backend_resolver.list_active_workspace_ids()
-    status_by_agent_id = compute_backup_status_for_workspaces(paths, agent_ids, parent_cg=root_concurrency_group)
-    # Workspace creation time lets the landing page show "Created N ago" instead
-    # of a scary "No backups" for a freshly-created, not-yet-backed-up workspace.
-    create_time_by_agent_id: dict[str, datetime] = {}
-    for agent_id in agent_ids:
-        display_info = backend_resolver.get_agent_display_info(agent_id)
-        if display_info is not None and display_info.create_time is not None:
-            create_time_by_agent_id[str(agent_id)] = display_info.create_time
-    payload = {
-        agent_id: {
-            "state": str(status.state),
-            "last_success_at": status.last_success_at.isoformat() if status.last_success_at is not None else None,
-            "created_at": (
-                create_time_by_agent_id[agent_id].isoformat() if agent_id in create_time_by_agent_id else None
-            ),
-        }
-        for agent_id, status in status_by_agent_id.items()
-    }
-    return make_response(content=json.dumps(payload), media_type="application/json")
-
-
 # -- Agent creation route handlers --
 
 
@@ -884,178 +827,6 @@ def _handle_destroying_page(
         status=str(record.status).lower(),
     )
     return make_html_response(content=html)
-
-
-# -- Workspace color route handler --
-
-
-def _handle_set_workspace_color_api(
-    agent_id: str,
-) -> Response:
-    """POST /api/workspaces/<agent_id>/color: write the per-workspace color label.
-
-    Body: ``{"hex": "<rrggbb>"}``. Lenient: accepts ``#fff`` / ``fff`` /
-    ``#ffffff`` / ``ffffff`` in any case; normalized to ``#rrggbb`` lowercase
-    server-side.
-
-    Error responses (all JSON with an ``error`` discriminant):
-      - 400 ``invalid_hex`` -- the body's hex didn't parse.
-      - 404 ``not_primary`` -- the agent is not a primary workspace
-        (no ``workspace`` / ``is_primary`` label pair, or unknown).
-      - 409 ``stale_provider`` -- the agent's provider's last discovery
-        poll errored, so the host is unreachable and writing the label
-        would not be observable until provider recovery.
-      - 502 ``host_unreachable`` -- ``mngr label`` itself failed (timeout,
-        non-zero exit, exec failure).
-
-    On success, writes ``color=<hex>`` via ``mngr label`` (CLI merge
-    semantics, so other labels are preserved), optimistically updates
-    the resolver's snapshot so the next SSE workspaces tick reflects the
-    new color without waiting for the discovery refresh, and returns
-    ``{"agent_id": ..., "color": "#rrggbb"}``.
-    """
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
-
-    try:
-        body = _read_json_body()
-    except (json.JSONDecodeError, ValueError) as exc:
-        # ValueError also covers UnicodeDecodeError on a non-UTF-8 body
-        # (matches the other request.json() call sites in this file).
-        # External (HTTP) input: log at warning level rather than silently
-        # swallowing so a buggy / hostile client's bad bodies are visible.
-        logger.warning("Color write for {} got malformed JSON body: {}", agent_id, exc)
-        return make_response(
-            status_code=400,
-            content=json.dumps({"error": "invalid_hex"}),
-            media_type="application/json",
-        )
-    raw_hex = body.get("hex", "") if isinstance(body, dict) else ""
-    normalized = normalize_workspace_color(str(raw_hex))
-    if normalized is None:
-        return make_response(
-            status_code=400,
-            content=json.dumps({"error": "invalid_hex"}),
-            media_type="application/json",
-        )
-
-    parsed_id = AgentId(agent_id)
-    backend_resolver: BackendResolverInterface = get_state().backend_resolver
-
-    # The minds primary-workspace filter is the "workspace" + "is_primary"
-    # label pair (see backend_resolver.list_known_workspace_ids). Color writes
-    # only apply to primary agents; the sibling system-services agent shares
-    # the host but does not own workspace identity.
-    if parsed_id not in backend_resolver.list_known_workspace_ids():
-        return make_response(
-            status_code=404,
-            content=json.dumps({"error": "not_primary"}),
-            media_type="application/json",
-        )
-
-    info = backend_resolver.get_agent_display_info(parsed_id)
-    errored_provider_names = {str(name) for name in backend_resolver.get_provider_errors()}
-    if _is_workspace_provider_errored(info, errored_provider_names):
-        return make_response(
-            status_code=409,
-            content=json.dumps({"error": "stale_provider"}),
-            media_type="application/json",
-        )
-
-    mngr_binary: str = get_state().mngr_binary
-    mngr_host_dir: Path = get_state().mngr_host_dir
-    concurrency_group: ConcurrencyGroup | None = get_state().root_concurrency_group
-    if concurrency_group is None:
-        # The concurrency group is wired in production (see create_desktop_client
-        # entrypoint); only test paths that explicitly skip it can hit this.
-        logger.warning("No concurrency group available; cannot write color label for {}", parsed_id)
-        return make_response(
-            status_code=502,
-            content=json.dumps({"error": "host_unreachable", "detail": "concurrency group unavailable"}),
-            media_type="application/json",
-        )
-
-    env = dict(os.environ)
-    env["MNGR_HOST_DIR"] = str(mngr_host_dir)
-    # `mngr label` (CLI) merges with existing labels; BaseAgent.set_labels at
-    # the API level would full-replace and clobber concurrent writes to other
-    # keys, so we shell out to the CLI to get the merge for free.
-    argv = [mngr_binary, "label", str(parsed_id), "-l", f"color={normalized}"]
-    try:
-        # Run ``mngr label`` to completion on the root concurrency group so the
-        # subprocess plumbing (launch, timeout, capture) lives in one place and
-        # the handler returns the real outcome of the label write.
-        _run_mngr(concurrency_group, argv, env)
-    except MngrCommandError as exc:
-        logger.warning("mngr label failed for {}: {}", parsed_id, exc)
-        return make_response(
-            status_code=502,
-            content=json.dumps({"error": "host_unreachable", "detail": str(exc)}),
-            media_type="application/json",
-        )
-
-    if isinstance(backend_resolver, MngrCliBackendResolver):
-        backend_resolver.set_workspace_color_locally(parsed_id, normalized)
-
-    return make_response(
-        status_code=200,
-        content=json.dumps({"agent_id": agent_id, "color": normalized}),
-        media_type="application/json",
-    )
-
-
-# -- Providers panel toggle route --
-
-
-def _handle_provider_toggle(
-    provider_name: str,
-) -> Response:
-    """Toggle ``is_enabled`` for a provider in minds' active settings and bounce observe.
-
-    POST ``/api/providers/{provider_name}/toggle`` with body ``{"is_enabled": bool}``.
-    Writes via :func:`set_provider_is_enabled`, then bounces the detached
-    ``mngr latchkey forward`` supervisor's ``mngr observe`` child -- the single
-    discovery observer -- to pick up the new setting. The next
-    ``FullDiscoverySnapshotEvent`` it writes to the shared discovery log is tailed
-    by minds' ``mngr forward --observe-via-file``; the chrome's optimistic
-    "waiting for refresh" state clears at that point.
-    """
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
-    try:
-        body = _read_json_body()
-    except (json.JSONDecodeError, ValueError) as e:
-        logger.warning("Provider toggle request body was not valid JSON: {}", e)
-        return make_response(status_code=400, content='{"error": "Body must be JSON"}', media_type="application/json")
-    # request.json() can return any JSON value (array, string, number, null, ...),
-    # not just objects. Reject non-dict bodies before calling .get() so we return
-    # a structured 400 rather than a 500 from an AttributeError.
-    if not isinstance(body, dict):
-        return make_response(
-            status_code=400,
-            content='{"error": "Body must be a JSON object"}',
-            media_type="application/json",
-        )
-    is_enabled = body.get("is_enabled")
-    if not isinstance(is_enabled, bool):
-        return make_response(
-            status_code=400,
-            content='{"error": "Body must include is_enabled: bool"}',
-            media_type="application/json",
-        )
-    changed = set_provider_is_enabled(provider_name, is_enabled)
-    # Only bounce when the settings file actually changed -- a no-op toggle
-    # (e.g. user clicking Disable twice) should not trigger a SIGHUP and a full
-    # mngr observe restart, since the next discovery snapshot would be identical.
-    if changed:
-        # Bounce the single discovery observer (latchkey forward's `mngr observe`)
-        # so its next snapshot reflects the new provider set; minds' `mngr forward`
-        # tails the resulting shared discovery log.
-        bounce_latchkey_forward_supervisor(get_state().latchkey_forward_supervisor)
-    return make_response(
-        content=json.dumps({"provider_name": provider_name, "is_enabled": is_enabled, "changed": changed}),
-        media_type="application/json",
-    )
 
 
 # -- Chrome (persistent shell) route handlers --
@@ -1610,47 +1381,17 @@ def _build_requests_payload(
     return {"count": len(request_ids), "request_ids": request_ids}
 
 
-# -- System-interface recovery / restart --
-
-# Minds creates two mngr agents per workspace, both with ``work_dir=/code``
-# in the same container:
-#   - a ``claude``-type agent with the user-chosen name -- runs the user's
-#     Claude conversation.
-#   - a ``main``-type agent always named ``system-services`` -- runs the
-#     bootstrap, which execs supervisord, which supervises the system interface.
-# The restart endpoints are invoked with the user agent's id; the recovery
-# flow restarts the *system-services* agent (which shares the user agent's
-# host), so it resolves that agent through the backend resolver.
+# -- System-interface recovery page --
 #
-# Two recovery tiers:
-#   - System-interface restart (surgical): ``mngr stop`` + ``mngr start`` on
-#     the system-services agent. The user's claude agent is untouched.
-#   - Host restart: ``mngr stop --stop-host`` + ``mngr start`` on the
-#     system-services agent. This bounces the whole container, so every
-#     agent in the workspace is interrupted; only system-services is
-#     started back up (the claude agent is started template-side on the
-#     user's next message).
+# The recovery page's data calls (host-health probe + the two restart tiers) are
+# served by the versioned surface now (GET /api/v1/workspaces/<id>/health, POST
+# /api/v1/workspaces/<id>/restart with a ``scope``), whose engine lives in
+# ``workspace_recovery.py``. Only the page route and its helpers remain here.
 
 # How long a single workspace probe through the plugin is allowed to hang.
 # Used by the background system-interface-health probe loop -- we want a short,
 # snappy timeout so a wedged workspace doesn't gate the recovery UI.
 _WORKSPACE_PROBE_TIMEOUT_SECONDS: Final[float] = 2.0
-# Default hard timeout for an ``mngr`` subprocess run via ``_run_mngr``. Generous
-# because it is sized for the slowest legitimate case -- a host stop/start, which
-# bounces a container and can take tens of seconds -- so it is a "definitely
-# wedged" ceiling, not an estimate. Most callers (stop/start, bulk host stop,
-# ``mngr label``) take this default; the recovery host-health exec probe
-# overrides it with a much shorter cap.
-_MNGR_COMMAND_TIMEOUT_SECONDS: Final[float] = 120.0
-# Hard timeout for the recovery host-health probe's in-container ``mngr exec``.
-# Far shorter than the default ceiling: this is a *diagnostic* that gates the
-# recovery UI. The exec touches the provider (``get_host`` -> the connector's
-# ~30s httpx) before reaching the container, so it must carry its own 30s-class
-# cap rather than inheriting the 120s default -- otherwise a wedged host could
-# gate the recovery UI for the full timeout. The probe is only fired when the
-# provider is reachable and the host is RUNNING, so it never stacks a doomed
-# round-trip during an outage.
-_HOST_HEALTH_PROBE_TIMEOUT_SECONDS: Final[float] = 30.0
 # How recent the last full discovery snapshot must be to treat discovery as
 # trustworthy. A healthy discovery poll emits a snapshot every
 # ``DISCOVERY_STREAM_POLL_INTERVAL_SECONDS``; three missed snapshots means the
@@ -1659,29 +1400,6 @@ _HOST_HEALTH_PROBE_TIMEOUT_SECONDS: Final[float] = 30.0
 # above the normal inter-snapshot interval to avoid a false "stale" during a
 # single slow-but-healthy poll.
 _DISCOVERY_FRESHNESS_THRESHOLD_SECONDS: Final[float] = 3 * DISCOVERY_STREAM_POLL_INTERVAL_SECONDS
-# How long we wait for the system interface to answer again after a restart,
-# split by tier. A surgical (in-place) restart leaves the container running, so
-# the interface should answer again quickly. A host restart cold-boots the
-# container (restore-from-snapshot + the bootstrap execing supervisord, which
-# spawns the system interface), which legitimately takes longer. Initial agent-creation
-# readiness waiting keeps its own, much longer, timeout.
-_SURGICAL_STARTUP_WAIT_SECONDS: Final[float] = 15.0
-_HOST_RESTART_STARTUP_WAIT_SECONDS: Final[float] = 30.0
-# Poll cadence while waiting for the system interface to come back post-restart.
-_RESTART_PROBE_INTERVAL_SECONDS: Final[float] = 1.0
-
-
-def _build_mngr_stop_argv(mngr_binary: str, agent_id: AgentId, is_host_restart: bool) -> list[str]:
-    """Build the argv for ``mngr stop`` on ``agent_id`` -- with ``--stop-host`` for the host tier."""
-    argv = [mngr_binary, "stop", str(agent_id), "--quiet"]
-    if is_host_restart:
-        argv.append("--stop-host")
-    return argv
-
-
-def _build_mngr_start_argv(mngr_binary: str, agent_id: AgentId) -> list[str]:
-    """Build the argv for ``mngr start`` on ``agent_id`` (also starts the host if it is stopped)."""
-    return [mngr_binary, "start", str(agent_id), "--quiet"]
 
 
 def _sanitize_recovery_return_to(raw: str) -> str:
@@ -1782,461 +1500,6 @@ def _handle_recovery_page(
     return make_html_response(content=html_body)
 
 
-def _run_mngr(
-    concurrency_group: ConcurrencyGroup,
-    argv: list[str],
-    env: dict[str, str],
-    timeout_seconds: float = _MNGR_COMMAND_TIMEOUT_SECONDS,
-) -> str:
-    """Run an ``mngr`` subprocess to completion and return its stdout on a clean exit.
-
-    Raises ``MngrCommandError`` for every non-clean outcome, like the rest of
-    minds' mngr calls (``run_mngr_create``, the destroy cleanup) -- one domain
-    error the caller catches once. Delegates the launch/timeout handling to
-    ``_run_mngr_capturing`` and layers the raise-on-nonzero policy on top, so the
-    subprocess plumbing lives in one place. A timeout therefore surfaces as
-    ``MngrCommandTimeoutError`` (a ``MngrCommandError`` subclass, so existing
-    ``except MngrCommandError`` callers are unaffected), a nonzero exit as a bare
-    ``MngrCommandError`` (discarding stdout, unlike ``_run_mngr_capturing``), and
-    a launch failure as a bare ``MngrCommandError``.
-
-    ``timeout_seconds`` defaults to the generous ceiling sized for a host
-    stop/start; the recovery host-health exec probe overrides it with a much
-    shorter cap since it must not gate the recovery UI for tens of seconds.
-    """
-    stdout, returncode, stderr = _run_mngr_capturing(concurrency_group, argv, env, timeout_seconds=timeout_seconds)
-    if returncode != 0:
-        raise MngrCommandError(f"exited {returncode}: {stderr.strip()}")
-    return stdout
-
-
-def _run_mngr_capturing(
-    concurrency_group: ConcurrencyGroup,
-    argv: list[str],
-    env: dict[str, str],
-    timeout_seconds: float = _MNGR_COMMAND_TIMEOUT_SECONDS,
-) -> tuple[str, int, str]:
-    """Run an ``mngr`` subprocess, returning ``(stdout, returncode, stderr)`` without raising on a nonzero exit.
-
-    A nonzero exit is reported through the returned ``returncode`` rather than
-    raised, so stdout is preserved for the caller to inspect. A failure to launch
-    the process raises ``MngrCommandError``; a timeout raises the more specific
-    ``MngrCommandTimeoutError``.
-    """
-    try:
-        finished = concurrency_group.run_process_to_completion(
-            argv,
-            timeout=timeout_seconds,
-            is_checked_after=False,
-            env=env,
-        )
-    except (OSError, ConcurrencyGroupError) as exc:
-        # The command never ran (a fork/exec failure, or a concurrency-group
-        # setup/strand/shutdown failure -- ``ProcessSetupError``,
-        # ``StrandTimedOutError``, ``EnvironmentStoppedError``,
-        # ``InvalidConcurrencyGroupStateError``). Our callers handle failure
-        # locally and must keep going (the host-health probe composes a partial
-        # response and cannot 500), so we wrap it as the single MngrCommandError
-        # they already catch rather than leaving them to also catch this
-        # infra-exception tuple.
-        raise MngrCommandError(str(exc)) from exc
-    if finished.is_timed_out:
-        raise MngrCommandTimeoutError(f"timed out after {int(timeout_seconds)}s")
-    # A finished, non-timed-out process always carries a returncode; the Optional
-    # is for the not-yet-finished case, which this branch has ruled out. Coerce a
-    # surprise None to a nonzero so the caller treats it as a failed listing.
-    returncode = finished.returncode if finished.returncode is not None else 1
-    return finished.stdout, returncode, finished.stderr
-
-
-def _await_system_interface_ready(
-    agent_id: AgentId, mngr_forward_port: int, preauth_cookie: str, wait_seconds: float
-) -> bool:
-    """Poll the system interface through the plugin until it answers 200, or ``wait_seconds`` elapses."""
-    deadline = time.monotonic() + wait_seconds
-    with make_workspace_probe_client(
-        preauth_cookie=preauth_cookie,
-        probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
-    ) as probe_client:
-        while time.monotonic() < deadline:
-            status = probe_workspace_through_plugin(
-                mngr_forward_port=mngr_forward_port,
-                preauth_cookie=preauth_cookie,
-                agent_id=agent_id,
-                probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
-                client=probe_client,
-            )
-            if status == 200:
-                return True
-            threading.Event().wait(timeout=_RESTART_PROBE_INTERVAL_SECONDS)
-    return False
-
-
-class _RestartWorkerFailureHandler(MutableModel):
-    """Callable ``on_failure`` hook for the restart worker thread.
-
-    The recovery page only leaves its "Restarting..." state on a HEALTHY or
-    RESTART_FAILED transition, and the tracker is already RESTARTING when the
-    worker starts. If the worker thread crashes unexpectedly, the
-    ``ConcurrencyGroup`` invokes this so the tracker still reaches
-    RESTART_FAILED instead of the page hanging. The crash itself is logged by
-    the ``ObservableThread`` machinery, so this only records the recovery state.
-    """
-
-    tracker: SystemInterfaceHealthTracker = Field(frozen=True, description="Health tracker to transition.")
-    workspace_agent_id: AgentId = Field(frozen=True, description="Workspace agent whose restart worker crashed.")
-
-    def __call__(self, exc: BaseException) -> None:
-        self.tracker.mark_restart_failed(self.workspace_agent_id, f"The restart worker failed unexpectedly: {exc}")
-
-
-def _run_restart_sequence(
-    workspace_agent_id: AgentId,
-    is_host_restart: bool,
-    tracker: SystemInterfaceHealthTracker,
-    backend_resolver: BackendResolverInterface,
-    mngr_binary: str,
-    mngr_host_dir: Path,
-    concurrency_group: ConcurrencyGroup,
-    mngr_forward_port: int,
-    mngr_forward_preauth_cookie: str | None,
-    skip_stop: bool = False,
-) -> None:
-    """Background worker: stop + start the system-services agent, then await recovery.
-
-    Drives the health tracker to HEALTHY on recovery or RESTART_FAILED (with a
-    reason) when a step errors or the system interface does not return within
-    the tier's startup-wait budget (the host tier cold-boots a container, so it
-    waits longer than the in-place surgical tier). A crash of this worker is
-    turned into RESTART_FAILED by ``_RestartWorkerFailureHandler``, wired as the
-    thread's ``on_failure`` callback.
-
-    ``skip_stop`` is set only for the auto-dispatched host tier, which is chosen
-    exclusively when the host-health probe found the container fully stopped --
-    there is nothing to stop, so the (idempotent but not free) ``mngr stop
-    --stop-host`` subprocess is skipped to shave a full mngr invocation off the
-    cold boot's critical path.
-    """
-    tier_label = "host restart" if is_host_restart else "system-interface restart"
-    startup_wait_seconds = _HOST_RESTART_STARTUP_WAIT_SECONDS if is_host_restart else _SURGICAL_STARTUP_WAIT_SECONDS
-    services_agent_id = backend_resolver.get_system_services_agent_id(workspace_agent_id)
-    if services_agent_id is None:
-        tracker.mark_restart_failed(
-            workspace_agent_id, "Could not locate the system-services agent for this workspace."
-        )
-        return
-
-    env = dict(os.environ)
-    env["MNGR_HOST_DIR"] = str(mngr_host_dir)
-
-    if skip_stop:
-        logger.info("Skipping stop step for {} ({}): container already fully stopped", workspace_agent_id, tier_label)
-    else:
-        try:
-            _run_mngr(concurrency_group, _build_mngr_stop_argv(mngr_binary, services_agent_id, is_host_restart), env)
-        except MngrCommandError as exc:
-            logger.warning("Stop step of {} for {} failed: {}", tier_label, workspace_agent_id, exc)
-            tracker.mark_restart_failed(workspace_agent_id, f"Stop step of {tier_label} failed: {exc}")
-            return
-
-    try:
-        _run_mngr(concurrency_group, _build_mngr_start_argv(mngr_binary, services_agent_id), env)
-    except MngrCommandError as exc:
-        logger.warning("Start step of {} for {} failed: {}", tier_label, workspace_agent_id, exc)
-        tracker.mark_restart_failed(workspace_agent_id, f"Start step of {tier_label} failed: {exc}")
-        return
-
-    # Without a plugin route there is no way to probe for recovery, so treat a
-    # clean dispatch as success (mirrors the background probe loop being a no-op).
-    if mngr_forward_port == 0 or not mngr_forward_preauth_cookie:
-        tracker.record_probe_success(workspace_agent_id)
-        return
-
-    if _await_system_interface_ready(
-        workspace_agent_id, mngr_forward_port, mngr_forward_preauth_cookie, startup_wait_seconds
-    ):
-        tracker.record_probe_success(workspace_agent_id)
-    else:
-        tracker.mark_restart_failed(
-            workspace_agent_id,
-            f"The system interface did not respond within {int(startup_wait_seconds)}s of the {tier_label}.",
-        )
-
-
-def _dispatch_restart(
-    agent_id: str,
-    is_host_restart: bool,
-) -> Response:
-    """Shared body for the two restart endpoints: validate, mark RESTARTING, spawn the worker."""
-    if not _is_request_authenticated():
-        return _json_error("Not authenticated", status_code=403)
-    aid = AgentId(agent_id)
-    tracker: SystemInterfaceHealthTracker | None = get_state().system_interface_health_tracker
-    concurrency_group: ConcurrencyGroup | None = get_state().root_concurrency_group
-    backend_resolver: BackendResolverInterface = get_state().backend_resolver
-    if tracker is None or concurrency_group is None:
-        return _json_error("Workspace restart is unavailable in this configuration", status_code=503)
-    # A restart is already in flight for this agent -- don't stack a second
-    # worker thread racing the first one's stop/start commands. mark_restarting
-    # decides the RESTARTING transition under its own lock and reports whether
-    # this caller won it, so this check-and-claim is atomic against concurrent
-    # restart requests (recovery page, sidebar, landing page).
-    if not tracker.mark_restarting(aid):
-        return make_response(status_code=202, content="{}", media_type="application/json")
-
-    # The auto-dispatched host tier (chosen only when the host-health probe
-    # found the container fully stopped) passes ``host_already_stopped=1`` so
-    # the worker can skip the redundant stop step. Honored only for host
-    # restarts: a manually-requested restart may target a still-running
-    # container, which must be stopped first.
-    skip_stop = is_host_restart and request.args.get("host_already_stopped") == "1"
-
-    # is_checked=False + on_failure: a crash of the one-shot worker is handled
-    # by transitioning the tracker to RESTART_FAILED (so the recovery page does
-    # not hang), rather than being surfaced later when the root group is checked.
-    #
-    # The spawn itself can also raise (``ConcurrencyGroupError`` when the group
-    # is shutting down). Since we've already claimed RESTARTING, catch that here
-    # and roll the tracker into RESTART_FAILED too -- otherwise it would be stuck
-    # RESTARTING forever with no worker to advance it.
-    try:
-        concurrency_group.start_new_thread(
-            target=_run_restart_sequence,
-            kwargs={
-                "workspace_agent_id": aid,
-                "is_host_restart": is_host_restart,
-                "tracker": tracker,
-                "backend_resolver": backend_resolver,
-                "mngr_binary": get_state().mngr_binary,
-                "mngr_host_dir": get_state().mngr_host_dir,
-                "concurrency_group": concurrency_group,
-                "mngr_forward_port": get_state().mngr_forward_port or 0,
-                "mngr_forward_preauth_cookie": get_state().mngr_forward_preauth_cookie,
-                "skip_stop": skip_stop,
-            },
-            name=f"system-interface-restart-{aid}",
-            daemon=True,
-            is_checked=False,
-            on_failure=_RestartWorkerFailureHandler(tracker=tracker, workspace_agent_id=aid),
-        )
-    except (OSError, RuntimeError, ConcurrencyGroupError) as exc:
-        logger.warning("Failed to spawn restart worker for {}: {}", aid, exc)
-        tracker.mark_restart_failed(aid, f"Could not start the restart worker: {exc}")
-        return _json_error(f"Could not start the restart worker: {exc}", status_code=503)
-    return make_response(status_code=202, content="{}", media_type="application/json")
-
-
-def _handle_restart_system_interface_api(
-    agent_id: str,
-) -> Response:
-    """Dispatch a surgical restart of the system-services agent (``mngr stop`` + ``mngr start``)."""
-    return _dispatch_restart(agent_id=agent_id, is_host_restart=False)
-
-
-def _handle_restart_host_api(
-    agent_id: str,
-) -> Response:
-    """Dispatch a full host restart (``mngr stop --stop-host`` + ``mngr start`` of system-services)."""
-    return _dispatch_restart(agent_id=agent_id, is_host_restart=True)
-
-
-# -- Mind host Start / Stop --
-#
-# A "shutdown-capable mind" is a workspace on a provider whose host minds can
-# stop and start (see ``provider_backend_supports_shutdown`` -- the local docker
-# / lima backends today). Stopping one frees the user's machine while preserving
-# data and leaving it fully restartable. Stop = ``mngr stop --stop-host`` on the
-# host (same teardown the host-restart tier uses); Start = ``mngr start`` (boots
-# the stopped container). Both set an optimistic host-state override on the
-# resolver so the landing page and quit prompt flip at once; the next discovery
-# snapshot then confirms (or corrects) it.
-#
-# The single-mind endpoints run the ``mngr`` command synchronously (on the
-# request's worker thread) and return the real outcome -- no fire-and-forget
-# dispatch. The quit-time bulk stop issues ONE
-# ``mngr stop <ids...> --stop-host``, which stops every named host concurrently
-# via mngr's own executor, rather than one subprocess per mind.
-
-
-def _resolve_host_id(backend_resolver: BackendResolverInterface, workspace_agent_id: AgentId) -> HostId | None:
-    """Return the host id of ``workspace_agent_id`` (the key the liveness override uses), or None."""
-    info = backend_resolver.get_agent_display_info(workspace_agent_id)
-    return HostId(info.host_id) if info is not None else None
-
-
-def _build_mngr_stop_hosts_argv(mngr_binary: str, agent_ids: Sequence[AgentId]) -> list[str]:
-    """Build the argv for one ``mngr stop <ids...> --stop-host`` over several hosts.
-
-    ``mngr stop`` is variadic and stops the named hosts concurrently (mngr's own
-    executor), so a single command replaces one subprocess per mind.
-    """
-    return [mngr_binary, "stop", *(str(aid) for aid in agent_ids), "--quiet", "--stop-host"]
-
-
-def _running_mind_entries(backend_resolver: BackendResolverInterface) -> list[dict[str, str]]:
-    """Return ``[{id, name}, ...]`` for every shutdown-capable mind currently RUNNING.
-
-    Reads liveness from the discovery snapshot (plus any optimistic override) in
-    memory -- no subprocess -- so callers (the quit prompt, the bulk-stop result)
-    are instant.
-    """
-    running: list[dict[str, str]] = []
-    for aid_str, state in compute_mind_liveness_by_agent_id(backend_resolver).items():
-        if state != MindLiveness.RUNNING:
-            continue
-        aid = AgentId(aid_str)
-        name = backend_resolver.get_workspace_name(aid)
-        if not name:
-            info = backend_resolver.get_agent_display_info(aid)
-            name = info.agent_name if info is not None else aid_str
-        running.append({"id": aid_str, "name": name})
-    return running
-
-
-def _handle_running_minds_api() -> Response:
-    """Return the shutdown-capable minds whose containers are currently running, for the quit prompt.
-
-    Derives state from the discovery snapshot's host state (plus any optimistic
-    override from a just-issued Start/Stop) in memory rather than shelling out to
-    ``mngr list`` -- so the quit dialog appears instantly instead of blocking on a
-    subprocess. The prompt's purpose is "free local resources you forgot about",
-    not exact accounting: a container stopped externally since the last discovery
-    snapshot may still be listed, but re-stopping it is idempotent. Each entry
-    carries the agent id and human-readable workspace name.
-    """
-    if not _is_request_authenticated():
-        return _json_error("Not authenticated", status_code=403)
-    backend_resolver: BackendResolverInterface = get_state().backend_resolver
-    return make_response(
-        content=json.dumps({"running": _running_mind_entries(backend_resolver)}), media_type="application/json"
-    )
-
-
-def _handle_stop_mind_hosts_api() -> Response:
-    """Stop the hosts of the given shutdown-capable minds in one ``mngr stop --stop-host``.
-
-    The target agent ids come from repeated ``agent_id`` query params (the ids the
-    quit prompt listed). Each is resolved to the system-services agent sharing its
-    host -- the host-stop target -- and all are passed to a single, synchronous
-    ``mngr stop ... --stop-host``; mngr stops every named host concurrently via
-    its own executor, so this is one subprocess rather than one per mind.
-
-    After the attempt it recomputes liveness and returns the requested minds still
-    running, so the quit flow can offer Retry without polling. On full success
-    every targeted host is stopped, the STOPPED override is set per host, and
-    ``still_running`` is empty; on partial failure ``mngr stop`` raises (it still
-    joins every host first), so ``still_running`` reflects the current discovery
-    snapshot -- which may briefly over-report a host that did stop until discovery
-    catches up. A Retry re-stop is idempotent (mngr reports "already stopped").
-    """
-    if not _is_request_authenticated():
-        return _json_error("Not authenticated", status_code=403)
-    backend_resolver: BackendResolverInterface = get_state().backend_resolver
-    concurrency_group: ConcurrencyGroup | None = get_state().root_concurrency_group
-    if concurrency_group is None:
-        return _json_error("Mind host control is unavailable in this configuration", status_code=503)
-    requested_ids = request.args.getlist("agent_id")
-    # Resolve each workspace agent to the system-services agent that shares its
-    # host (the host-stop target) and remember its host for the optimistic override.
-    services_agent_ids: list[AgentId] = []
-    host_ids: list[HostId] = []
-    for agent_id in requested_ids:
-        aid = AgentId(agent_id)
-        services_agent_id = backend_resolver.get_system_services_agent_id(aid)
-        if services_agent_id is None:
-            logger.warning("Could not locate the system-services agent for host stop on {}", aid)
-            continue
-        services_agent_ids.append(services_agent_id)
-        host_id = _resolve_host_id(backend_resolver, aid)
-        if host_id is not None:
-            host_ids.append(host_id)
-    if services_agent_ids:
-        env = dict(os.environ)
-        env["MNGR_HOST_DIR"] = str(get_state().mngr_host_dir)
-        argv = _build_mngr_stop_hosts_argv(get_state().mngr_binary, services_agent_ids)
-        try:
-            _run_mngr(concurrency_group, argv, env)
-        except MngrCommandError as exc:
-            logger.warning("Bulk host stop failed for {}: {}", requested_ids, exc)
-        else:
-            for host_id in host_ids:
-                backend_resolver.set_host_state_override(host_id, HostState.STOPPED)
-    requested_set = set(requested_ids)
-    still_running = [entry for entry in _running_mind_entries(backend_resolver) if entry["id"] in requested_set]
-    return make_response(content=json.dumps({"still_running": still_running}), media_type="application/json")
-
-
-def _handle_stop_state_container_api() -> Response:
-    """Stop this env's mngr Docker state container, to fully free local resources at quit.
-
-    The docker provider keeps a singleton state container (``<MNGR_PREFIX>docker-
-    state-<user_id>``) holding host records; ``mngr stop --stop-host`` leaves it
-    running. The Electron quit flow calls this after all minds are stopped so
-    nothing minds-related is left running. It stops (not removes) the container --
-    the volume / records persist and it restarts on next use. This is inherently
-    docker-specific (the state container is a docker-provider construct); a no-op
-    for envs without one.
-    """
-    if not _is_request_authenticated():
-        return _json_error("Not authenticated", status_code=403)
-    concurrency_group: ConcurrencyGroup | None = get_state().root_concurrency_group
-    if concurrency_group is None:
-        return make_response(content=json.dumps({"stopped": False}), media_type="application/json")
-    try:
-        was_attempted = stop_active_env_state_container(
-            mngr_host_dir=get_state().mngr_host_dir,
-            parent_concurrency_group=concurrency_group,
-        )
-    except DockerCleanupError as exc:
-        logger.warning("Failed to stop the Docker state container at shutdown: {}", exc)
-        return _json_error(f"Could not stop the Docker state container: {exc}", status_code=500)
-    return make_response(content=json.dumps({"stopped": was_attempted}), media_type="application/json")
-
-
-def _handle_host_health_probe_api(
-    agent_id: str,
-) -> Response:
-    """Layer-2 probe: run each recovery-diagnostics probe, classify the dispatch tier.
-
-    Returns a flat ``HostHealthResponse`` -- a list of named probes plus a
-    derived ``dispatch_tier``. The recovery page renders each probe as a
-    row and keys its restart-tier branching off ``dispatch_tier``.
-    """
-    if not _is_request_authenticated():
-        return _json_error("Not authenticated", status_code=403)
-    aid = AgentId(agent_id)
-    concurrency_group: ConcurrencyGroup | None = get_state().root_concurrency_group
-    if concurrency_group is None:
-        return _json_error("Host health probe is unavailable in this configuration", status_code=503)
-    response = _run_host_health_probe(aid, concurrency_group)
-    logger.info("Layer-2 host-state probe for {}: dispatch_tier={}", aid, response.dispatch_tier.value)
-    return make_response(
-        content=response.model_dump_json(),
-        media_type="application/json",
-    )
-
-
-def _provider_error_message_for_workspace(
-    provider_errors: Mapping[ProviderInstanceName, DiscoveryError], provider_name: str | None
-) -> str | None:
-    """Map this workspace's provider error message (if any) from the discovery snapshot.
-
-    ``get_provider_errors()`` keys per-provider discovery errors by provider
-    name, so attribution to *this* workspace's provider is exact -- a docker
-    mind's recovery is never blamed on a simultaneous imbue_cloud outage. Returns
-    None in the brief pre-discovery window where the provider is unknown
-    (``provider_name is None``) rather than guess, and None when this workspace's
-    provider has no surfaced error. Otherwise returns the provider's own error
-    message, which the recovery page surfaces verbatim.
-    """
-    if provider_name is None:
-        return None
-    for name, error in provider_errors.items():
-        if str(name) == provider_name:
-            return error.message
-    return None
-
-
 def _is_discovery_fresh(last_full_snapshot_at: datetime | None) -> bool:
     """Whether the most recent full discovery snapshot is recent enough to trust.
 
@@ -2248,84 +1511,6 @@ def _is_discovery_fresh(last_full_snapshot_at: datetime | None) -> bool:
         return False
     age_seconds = (datetime.now(timezone.utc) - last_full_snapshot_at).total_seconds()
     return age_seconds <= _DISCOVERY_FRESHNESS_THRESHOLD_SECONDS
-
-
-def _run_host_health_probe(
-    agent_id: AgentId,
-    concurrency_group: ConcurrencyGroup,
-) -> HostHealthResponse:
-    """Compose the host-health response from the passive resolver + an in-container probe.
-
-    Provider reachability and host lifecycle are read from the
-    ``backend_resolver`` -- the single passive-discovery sampler shared with the
-    rest of minds -- not re-sampled with a synchronous ``mngr list``. The reason
-    the inner interface isn't answering comes from the batched in-container
-    ``mngr exec`` probe, which is fired only when the provider is reachable and
-    the host is RUNNING so an outage never pays a doomed provider round-trip. The
-    plugin's resolver-snapshot mirror supplies the last probe.
-
-    Callers reach this only once discovery is fresh (the recovery redirect is
-    gated on freshness in the chrome-events stream), so the host/provider state
-    read here is trustworthy without a per-call freshness gate.
-    """
-    env = dict(os.environ)
-    env["MNGR_HOST_DIR"] = str(get_state().mngr_host_dir)
-    mngr_binary: str = get_state().mngr_binary
-    backend_resolver: BackendResolverInterface = get_state().backend_resolver
-    services_agent_id = backend_resolver.get_system_services_agent_id(agent_id)
-    display_info = backend_resolver.get_agent_display_info(agent_id)
-    provider_name = display_info.provider_name if display_info is not None else None
-    # Friendly provider name for the "Can't connect to ..." page title; reuse the
-    # workspace-listing label map (docker -> "Docker", imbue_cloud_* -> "Imbue
-    # Cloud", ...), falling back to a generic label for an unknown/None provider.
-    provider_label = friendly_provider_label(provider_name) or "the workspace backend"
-
-    # Read host/provider state from the passive discovery resolver.
-    host_state_enum = (
-        backend_resolver.get_host_state(HostId(display_info.host_id)) if display_info is not None else None
-    )
-    host_state = host_state_enum.value if host_state_enum is not None else ""
-    provider_error_message = _provider_error_message_for_workspace(
-        backend_resolver.get_provider_errors(), provider_name
-    )
-
-    # In-container exec probe, only when the provider is reachable and the host is
-    # RUNNING. The exec SSHes to the container via ``get_host`` (the connector's
-    # ~30s httpx), so it carries an explicit 30s-class cap (never the 120s
-    # default) and is skipped entirely unless the provider has no surfaced error
-    # and the host is RUNNING -- so an outage never stacks a doomed round-trip
-    # here, and a stopped host is classified offline without an exec attempt. A
-    # non-clean outcome leaves ``in_container_stdout`` None (parses to "no" on the
-    # can-we-run-commands probe) and is recorded only at debug.
-    in_container_stdout: str | None = None
-    if services_agent_id is not None and provider_error_message is None and host_state_enum == HostState.RUNNING:
-        try:
-            in_container_stdout = _run_mngr(
-                concurrency_group,
-                build_probe_argv(mngr_binary, services_agent_id),
-                env,
-                timeout_seconds=_HOST_HEALTH_PROBE_TIMEOUT_SECONDS,
-            )
-        except MngrCommandError as exc:
-            logger.debug("in-container probe for host-health of {} did not exit cleanly: {}", agent_id, exc)
-    consumer: EnvelopeStreamConsumer | None = get_state().envelope_stream_consumer
-    plugin_resolver_services: dict[str, str] = (
-        consumer.get_resolver_snapshot_for_agent(agent_id) if consumer is not None else {}
-    )
-    if services_agent_id is not None:
-        exec_command = shlex.join(build_probe_argv(mngr_binary, services_agent_id))
-    else:
-        exec_command = "(mngr exec <system-services-agent>) -- no services agent id known"
-    return build_host_health_response(
-        host_state=host_state,
-        services_agent_id=services_agent_id,
-        in_container_stdout=in_container_stdout,
-        plugin_resolver_services=plugin_resolver_services,
-        mngr_exec_command=exec_command,
-        mngr_binary=mngr_binary,
-        provider_error_message=provider_error_message,
-        provider_label=provider_label,
-    )
 
 
 # -- Account management routes --
@@ -2459,79 +1644,6 @@ def _handle_workspace_settings(
         is_stale=is_stale,
     )
     return make_html_response(content=html)
-
-
-def _handle_workspace_associate(
-    agent_id: str,
-) -> Response:
-    """Associate a workspace with an account."""
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content="Not authenticated")
-    # Leased imbue_cloud hosts are permanently bound to their leasing account;
-    # re-associating one to a different account would cause confusing account
-    # mixing, so reject it here as a defense-in-depth backstop to the UI guard.
-    backend_resolver: BackendResolverInterface = get_state().backend_resolver
-    if _is_leased_imbue_cloud_workspace(backend_resolver, agent_id):
-        return make_response(
-            status_code=403,
-            content="Cannot change the account association of a host leased from imbue_cloud",
-        )
-    form = request.form
-    user_id = str(form.get("user_id", ""))
-    redirect_url = str(form.get("redirect", ""))
-    session_store: MultiAccountSessionStore | None = get_state().session_store
-    if session_store and user_id:
-        session_store.associate_workspace(user_id, agent_id)
-        # Wake the chrome SSE so the workspace tile picks up its new
-        # 'account' field immediately rather than at the next 30s SSE
-        # heartbeat. Without this, the user clicks Associate, the page
-        # reloads via 303, but the chrome panel still shows the old
-        # unassociated state for ~half a minute.
-        if isinstance(backend_resolver, MngrCliBackendResolver):
-            backend_resolver.notify_change()
-    location = redirect_url if redirect_url else f"/workspace/{agent_id}/settings"
-    return make_response(status_code=303, headers={"Location": location})
-
-
-def _handle_workspace_disassociate(
-    agent_id: str,
-) -> Response:
-    """Disassociate a workspace from its account and tear down its tunnel."""
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content="Not authenticated")
-    # Leased imbue_cloud hosts must stay bound to their leasing account; block
-    # disassociation here as a defense-in-depth backstop to the disabled UI control.
-    backend_resolver: BackendResolverInterface = get_state().backend_resolver
-    if _is_leased_imbue_cloud_workspace(backend_resolver, agent_id):
-        return make_response(
-            status_code=403,
-            content="Cannot disassociate a host leased from imbue_cloud",
-        )
-    session_store: MultiAccountSessionStore | None = get_state().session_store
-    cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
-    if session_store:
-        account = session_store.get_account_for_workspace(agent_id)
-        if account:
-            # Tear down the Cloudflare tunnel for this agent (if any). The
-            # plugin owns tunnel state -- minds keeps no local cache. After
-            # deleting the tunnel server-side, also clear the token file inside
-            # the agent so its cloudflare-tunnel service stops cloudflared
-            # rather than spinning against a now-deleted tunnel.
-            if cli is not None:
-                try:
-                    tunnel = cli.find_tunnel_for_agent(account=str(account.email), agent_id=agent_id)
-                    if tunnel is not None:
-                        cli.delete_tunnel(account=str(account.email), tunnel_name=tunnel.tunnel_name)
-                        clear_tunnel_token_from_agent(AgentId(agent_id))
-                except ImbueCloudCliError as e:
-                    logger.warning("Failed to delete tunnel during disassociation: {}", e)
-            session_store.disassociate_workspace(str(account.user_id), agent_id)
-            # Mirror the associate handler: poke the chrome SSE so the
-            # tile flips back to unassociated immediately instead of
-            # waiting out the 30s heartbeat.
-            if isinstance(backend_resolver, MngrCliBackendResolver):
-                backend_resolver.notify_change()
-    return make_response(status_code=303, headers={"Location": f"/workspace/{agent_id}/settings"})
 
 
 # -- Inbox routes --
@@ -3269,10 +2381,9 @@ def create_desktop_client(
     app.add_url_rule("/accounts/set-default", view_func=_handle_set_default_account, methods=["POST"])
     app.add_url_rule("/accounts/<user_id>/logout", view_func=_handle_account_logout, methods=["POST"])
 
-    # Workspace settings routes
+    # Workspace settings page (the account-association and color writes it drives
+    # now go through PATCH /api/v1/workspaces/<id>).
     app.add_url_rule("/workspace/<agent_id>/settings", view_func=_handle_workspace_settings)
-    app.add_url_rule("/workspace/<agent_id>/associate", view_func=_handle_workspace_associate, methods=["POST"])
-    app.add_url_rule("/workspace/<agent_id>/disassociate", view_func=_handle_workspace_disassociate, methods=["POST"])
 
     # Request inbox routes
     app.add_url_rule("/inbox", view_func=_handle_inbox_page)
@@ -3294,7 +2405,6 @@ def create_desktop_client(
     # only the GET create-form page and the /creating/<id> progress page remain
     # here; status/logs and the form POST moved to the versioned surface.
     app.add_url_rule("/create", view_func=_handle_create_page)
-    app.add_url_rule("/api/backup-status", view_func=_handle_backup_status_api)
     app.add_url_rule("/creating/<agent_id>", view_func=_handle_creating_page)
 
     # Agent destruction routes. Destroy + status/log streaming are served by the
@@ -3303,29 +2413,11 @@ def create_desktop_client(
     app.add_url_rule("/api/destroying/<agent_id>/dismiss", view_func=_handle_destroying_dismiss_api, methods=["POST"])
     app.add_url_rule("/destroying/<agent_id>", view_func=_handle_destroying_page)
 
-    # Workspace color route
-    app.add_url_rule("/api/workspaces/<agent_id>/color", view_func=_handle_set_workspace_color_api, methods=["POST"])
-
-    # Providers panel toggle (Disable / Enable buttons in the landing page panel)
-    app.add_url_rule("/api/providers/<provider_name>/toggle", view_func=_handle_provider_toggle, methods=["POST"])
-
-    # System-interface recovery routes
+    # Workspace-recovery page. The host-health probe and the restart actions it
+    # drives are served by the versioned surface now (GET
+    # /api/v1/workspaces/<id>/health, POST /api/v1/workspaces/<id>/restart with a
+    # ``scope``); only the page route remains here.
     app.add_url_rule("/agents/<agent_id>/recovery", view_func=_handle_recovery_page)
-    app.add_url_rule("/api/agents/<agent_id>/host-health", view_func=_handle_host_health_probe_api)
-    app.add_url_rule(
-        "/api/agents/<agent_id>/restart-system-interface",
-        view_func=_handle_restart_system_interface_api,
-        methods=["POST"],
-    )
-    app.add_url_rule("/api/agents/<agent_id>/restart-host", view_func=_handle_restart_host_api, methods=["POST"])
-
-    # Per-mind host Start / Stop are served by the versioned
-    # /api/v1/workspaces/<id>/start|stop routes now (both the browser landing
-    # controls and the Electron shell call those). The quit-prompt running-minds
-    # lookup and the bulk stop-hosts remain here (no v1 equivalent yet).
-    app.add_url_rule("/api/minds/running", view_func=_handle_running_minds_api)
-    app.add_url_rule("/api/minds/stop-hosts", view_func=_handle_stop_mind_hosts_api, methods=["POST"])
-    app.add_url_rule("/api/minds/stop-state-container", view_func=_handle_stop_state_container_api, methods=["POST"])
 
     return app
 

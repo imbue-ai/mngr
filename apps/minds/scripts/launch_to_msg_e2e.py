@@ -51,7 +51,7 @@ Flow:
      bundled host_dir, assert W1's host is listed AND W2's is gone
      -- cross-checks the destroy lifecycle from a different angle
      than the UI's home-page tile state.
-  9. Duplicate-name conflict: POST /api/create-agent with HOST_NAME
+  9. Duplicate-name conflict: POST /api/v1/workspaces with HOST_NAME
      already owned by W1; assert 409 with "already exists". Proves
      the duplicate-name guard added on this branch works.
   10. Teardown: revert /etc/hosts, clear latchkey, kill mock + socat
@@ -671,7 +671,7 @@ async def _create_workspace_and_first_message(
     """Drive create-form -> first-message for one workspace; navigate `win` to its chat.
 
     Steps: navigate to /create, fill the form for `host_name`, submit,
-    poll /api/create-agent/<id>/status until DONE, follow the
+    poll /api/v1/workspaces/operations/<id> until DONE, follow the
     redirect_url to the agent chat URL on `win`, send FIRST_PROMPT,
     wait for a >=2-occurrence reply of FIRST_EXPECT. Snaps each
     milestone with names from `snaps`.
@@ -726,7 +726,7 @@ async def _create_workspace_and_first_message(
     while time.time() < deadline and not done:
         stat = await win.evaluate(
             """async (id) => {
-                const r = await fetch('/api/create-agent/' + id + '/status');
+                const r = await fetch('/api/v1/workspaces/operations/' + id);
                 return {status: r.status, body: await r.text()};
             }""",
             creation_id,
@@ -801,7 +801,7 @@ async def _create_workspace_and_first_message(
         target = win.url
     elif not done_redirect_url:
         raise E2EFailure(
-            f"[{label}] creation DONE without redirect_url; check the /api/create-agent/<id>/status contract"
+            f"[{label}] creation DONE without redirect_url; check the /api/v1/workspaces/operations/<id> contract"
         )
     else:
         target = done_redirect_url if done_redirect_url.startswith("http") else origin + done_redirect_url

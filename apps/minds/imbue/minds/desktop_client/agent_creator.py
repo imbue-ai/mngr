@@ -1316,8 +1316,8 @@ class AgentCreator(MutableModel):
         """
         log_queue: queue.Queue[str] = queue.Queue()
         # ``host_name`` falls back to a repo-derived name when blank so the
-        # API path (``/api/create-agent``) doesn't need to compute it itself.
-        # The form path already requires the field. ``HostName(...)`` is
+        # API path (``POST /api/v1/workspaces``) doesn't need to compute it
+        # itself. The form path already requires the field. ``HostName(...)`` is
         # invoked downstream in ``_create_agent_background`` so any invalid
         # input fails inside the background thread with an error_message
         # rather than crashing this synchronous entry point.

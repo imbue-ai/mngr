@@ -793,12 +793,14 @@ def test_render_recovery_page_includes_agent_id_and_return_to() -> None:
     )
     assert str(_AGENT_A) in html
     assert "http://agent.localhost:8421/" in html
-    assert "/api/agents/" in html
-    # The two restart tiers the recovery page can dispatch.
-    assert "restart-system-interface" in html
-    assert "restart-host" in html
-    # The layer-2 probe endpoint the page calls on load.
-    assert "host-health" in html
+    # The versioned workspace surface the page's JS drives.
+    assert "/api/v1/workspaces/" in html
+    # The two restart tiers the recovery page can dispatch (a ``scope`` body on
+    # the versioned restart route) plus the health probe it calls on load.
+    assert "/restart" in html
+    assert "scope: 'services'" in html
+    assert "scope: 'host'" in html
+    assert "/health" in html
     assert 'data-initial-status="stuck"' in html
 
 

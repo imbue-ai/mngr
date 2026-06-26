@@ -1,5 +1,6 @@
-"""Flask test-client coverage for the mind host Start/Stop endpoints, the quit-prompt
-running-minds lookup, the bulk stop-hosts endpoint, and the landing-page controls.
+"""Flask test-client coverage for the desktop running-workspaces / bulk stop-hosts /
+state-container routes (``/api/v1/desktop/...``, reached here with the session
+cookie) and the landing-page Start/Stop controls.
 
 Mind liveness is derived from the discovery snapshot's host state (folded into the
 resolver as ``host_state_by_host_id``) plus the resolver's optimistic
@@ -14,6 +15,7 @@ from pathlib import Path
 
 from flask.testing import FlaskClient
 
+from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
@@ -51,6 +53,9 @@ def _make_client(tmp_path: Path, resolver: MngrCliBackendResolver) -> tuple[Flas
         auth_store=auth_store,
         backend_resolver=resolver,
         http_client=None,
+        # Mount the /api/v1 surface so the desktop running-workspaces / stop-hosts
+        # / state-container routes are reachable with the session cookie.
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
     )
     return app.test_client(), auth_store
 
@@ -106,8 +111,8 @@ def _resolver_with_running_capable_agent(agent_id: AgentId) -> MngrCliBackendRes
 def test_stop_mind_hosts_requires_authentication(tmp_path: Path) -> None:
     agent = AgentId.generate()
     client, _ = _make_client(tmp_path, _resolver_with_running_capable_agent(agent))
-    response = client.post(f"/api/minds/stop-hosts?agent_id={agent}")
-    assert response.status_code == 403
+    response = client.post(f"/api/v1/desktop/stop-hosts?agent_id={agent}")
+    assert response.status_code == 401
 
 
 def test_stop_mind_hosts_unavailable_without_concurrency_group(tmp_path: Path) -> None:
@@ -115,46 +120,47 @@ def test_stop_mind_hosts_unavailable_without_concurrency_group(tmp_path: Path) -
     agent = AgentId.generate()
     client, auth_store = _make_client(tmp_path, _resolver_with_running_capable_agent(agent))
     _authenticate(client, auth_store)
-    response = client.post(f"/api/minds/stop-hosts?agent_id={agent}")
+    response = client.post(f"/api/v1/desktop/stop-hosts?agent_id={agent}")
     assert response.status_code == 503
 
 
 def test_running_minds_requires_authentication(tmp_path: Path) -> None:
     client, _ = _make_client(tmp_path, MngrCliBackendResolver())
-    response = client.get("/api/minds/running")
-    assert response.status_code == 403
+    response = client.get("/api/v1/desktop/running-workspaces")
+    assert response.status_code == 401
 
 
 def test_running_minds_empty_when_no_capable_minds(tmp_path: Path) -> None:
     """The quit-prompt lookup returns an empty list when discovery has no capable minds."""
     client, auth_store = _make_client(tmp_path, MngrCliBackendResolver())
     _authenticate(client, auth_store)
-    response = client.get("/api/minds/running")
+    response = client.get("/api/v1/desktop/running-workspaces")
     assert response.status_code == 200
     assert response.get_json() == {"running": []}
 
 
 def test_stop_state_container_requires_authentication(tmp_path: Path) -> None:
     client, _ = _make_client(tmp_path, MngrCliBackendResolver())
-    response = client.post("/api/minds/stop-state-container")
-    assert response.status_code == 403
+    response = client.post("/api/v1/desktop/state-container/stop")
+    assert response.status_code == 401
 
 
 def test_stop_state_container_noop_without_concurrency_group(tmp_path: Path) -> None:
     """Without a concurrency group (test factory) the state-container stop is a no-op."""
     client, auth_store = _make_client(tmp_path, MngrCliBackendResolver())
     _authenticate(client, auth_store)
-    response = client.post("/api/minds/stop-state-container")
+    response = client.post("/api/v1/desktop/state-container/stop")
     assert response.status_code == 200
     assert response.get_json() == {"stopped": False}
 
 
 def test_running_minds_reads_discovery_without_subprocess(tmp_path: Path) -> None:
-    """The quit-prompt lookup returns running minds straight from discovery host state.
+    """The running-workspaces lookup returns running minds straight from discovery host state.
 
     No ``root_concurrency_group`` is wired here, so if the endpoint tried to shell
     out to ``mngr list`` it would degrade to empty; returning the running mind
-    proves it reads the in-memory discovery state (instant, no subprocess).
+    proves it reads the in-memory discovery state (instant, no subprocess). This
+    also pins the per-entry ``{id, name}`` shape the Electron quit flow consumes.
     """
     running_agent = AgentId.generate()
     stopped_agent = AgentId.generate()
@@ -162,12 +168,14 @@ def test_running_minds_reads_discovery_without_subprocess(tmp_path: Path) -> Non
     client, auth_store = _make_client(tmp_path, resolver)
     _authenticate(client, auth_store)
 
-    response = client.get("/api/minds/running")
+    response = client.get("/api/v1/desktop/running-workspaces")
 
     assert response.status_code == 200
     running = response.get_json()["running"]
     # Only the RUNNING mind is listed; the STOPPED one is excluded.
     assert [entry["id"] for entry in running] == [str(running_agent)]
+    # The per-entry shape the Electron quit flow reads: id + human name.
+    assert set(running[0].keys()) == {"id", "name"}
 
 
 def test_running_minds_reflects_optimistic_override(tmp_path: Path) -> None:
@@ -178,7 +186,7 @@ def test_running_minds_reflects_optimistic_override(tmp_path: Path) -> None:
     client, auth_store = _make_client(tmp_path, resolver)
     _authenticate(client, auth_store)
 
-    response = client.get("/api/minds/running")
+    response = client.get("/api/v1/desktop/running-workspaces")
 
     assert response.status_code == 200
     assert response.get_json() == {"running": []}

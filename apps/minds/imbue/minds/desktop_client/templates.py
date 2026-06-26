@@ -1115,21 +1115,26 @@ _RECOVERY_SCRIPT: Final[str] = """\
           show(debugDetailsEl, false);
         }
 
-        function postRestart(path) {
+        function postRestart(body) {
           renderLoading();
-          // The endpoint returns 202 once the tracker is RESTARTING; any other
-          // status means the dispatch did not start, so surface an error
-          // instead of refreshing into a re-probe loop.
-          fetch('/api/agents/' + encodeURIComponent(agentId) + path, {
+          // The endpoint returns a 202 operation handle once the tracker is
+          // RESTARTING; any other status means the dispatch did not start, so
+          // surface an error instead of refreshing into a re-probe loop. The
+          // page keeps its own health-poll loop (scheduleRefresh re-reads the
+          // tracker via the recovery page), so the operation handle is unused
+          // here -- a clean 202 is enough to start polling.
+          fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/restart', {
             method: 'POST',
             credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
           }).then(function (resp) {
             if (resp.ok) { scheduleRefresh(); } else { renderDispatchError(); }
           }, renderDispatchError);
         }
 
         function fetchHealth() {
-          return fetch('/api/agents/' + encodeURIComponent(agentId) + '/host-health', {
+          return fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/health', {
             credentials: 'same-origin',
           }).then(function (resp) { return resp.json(); });
         }
@@ -1163,12 +1168,12 @@ _RECOVERY_SCRIPT: Final[str] = """\
             // Container fully stopped: nothing live to interrupt, dispatch
             // unattended. Tell the endpoint the host is already stopped so it
             // skips the redundant stop step and cold-boots straight away.
-            postRestart('/restart-host?host_already_stopped=1');
+            postRestart({ scope: 'host', host_already_stopped: true });
             return;
           }
           if (tier === 'interface_unresponsive') {
             // Container running, exec works: restart the system-services agent in place.
-            postRestart('/restart-system-interface');
+            postRestart({ scope: 'services' });
             return;
           }
           // 'host_unresponsive' or anything else: require explicit user consent for a host restart.
@@ -1190,7 +1195,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
         }
 
         hostBtn.addEventListener('click', function () {
-          postRestart('/restart-host');
+          postRestart({ scope: 'host' });
         });
         if (retryBtn) {
           retryBtn.addEventListener('click', function () {

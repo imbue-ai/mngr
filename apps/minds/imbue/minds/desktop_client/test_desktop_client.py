@@ -13,15 +13,11 @@ from flask.testing import FlaskClient
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
-from imbue.minds.desktop_client.app import _build_mngr_start_argv
-from imbue.minds.desktop_client.app import _build_mngr_stop_argv
 from imbue.minds.desktop_client.app import _build_requests_payload
 from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import _destroying_agent_ids
 from imbue.minds.desktop_client.app import _is_discovery_fresh
-from imbue.minds.desktop_client.app import _provider_error_message_for_workspace
 from imbue.minds.desktop_client.app import _resolve_destroying_for_landing
-from imbue.minds.desktop_client.app import _run_restart_sequence
 from imbue.minds.desktop_client.app import _should_emit_system_interface_status
 from imbue.minds.desktop_client.app import _ssh_command_for_agent
 from imbue.minds.desktop_client.app import create_desktop_client
@@ -29,7 +25,6 @@ from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
-from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import DEFAULT_SERVICE_NAME
 from imbue.minds.desktop_client.conftest import make_agents_json
@@ -59,12 +54,8 @@ from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHe
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServiceName
-from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import AgentName
-from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
-from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 
@@ -338,24 +329,6 @@ def _make_leased_host_client(tmp_path: Path) -> tuple[FlaskClient, FileAuthStore
     )
     _authenticate_client(client=client, auth_store=auth_store)
     return client, auth_store, agent_id
-
-
-def test_disassociate_leased_host_returns_403(tmp_path: Path) -> None:
-    client, _auth_store, agent_id = _make_leased_host_client(tmp_path)
-    response = client.post(f"/workspace/{agent_id}/disassociate", follow_redirects=False)
-    assert response.status_code == 403
-    assert "leased from imbue_cloud" in response.text
-
-
-def test_associate_leased_host_returns_403(tmp_path: Path) -> None:
-    client, _auth_store, agent_id = _make_leased_host_client(tmp_path)
-    response = client.post(
-        f"/workspace/{agent_id}/associate",
-        data={"user_id": "user-123"},
-        follow_redirects=False,
-    )
-    assert response.status_code == 403
-    assert "leased from imbue_cloud" in response.text
 
 
 def test_settings_page_disables_disassociate_for_leased_host(tmp_path: Path) -> None:
@@ -1752,67 +1725,6 @@ def test_api_v1_bug_report_rejects_empty_description(tmp_path: Path) -> None:
 # -- system-interface restart + recovery tests --
 
 
-def test_build_mngr_stop_argv_appends_stop_host_only_for_host_restart() -> None:
-    """The host tier adds --stop-host; the surgical tier stops just the agent."""
-    aid = AgentId.generate()
-
-    surgical = _build_mngr_stop_argv("/usr/local/bin/mngr", aid, is_host_restart=False)
-    assert surgical[:3] == ["/usr/local/bin/mngr", "stop", str(aid)]
-    assert "--stop-host" not in surgical
-
-    host = _build_mngr_stop_argv("/usr/local/bin/mngr", aid, is_host_restart=True)
-    assert host[:3] == ["/usr/local/bin/mngr", "stop", str(aid)]
-    assert "--stop-host" in host
-
-
-def test_build_mngr_start_argv_targets_the_agent() -> None:
-    aid = AgentId.generate()
-    argv = _build_mngr_start_argv("/usr/local/bin/mngr", aid)
-    assert argv[:3] == ["/usr/local/bin/mngr", "start", str(aid)]
-
-
-def test_provider_error_message_for_workspace_keys_on_this_workspaces_provider() -> None:
-    """The provider error message is attributed by exact provider name.
-
-    This is the per-provider keying that keeps a docker mind's recovery from
-    being misclassified during a simultaneous imbue_cloud outage: only an error
-    whose provider name matches this workspace's is used.
-    """
-    errors = {
-        ProviderInstanceName("imbue_cloud_acme"): DiscoveryError(
-            type_name="ProviderUnavailableError",
-            message="could not reach Imbue Cloud",
-            provider_name=ProviderInstanceName("imbue_cloud_acme"),
-        ),
-    }
-    matched = _provider_error_message_for_workspace(errors, "imbue_cloud_acme")
-    assert matched == "could not reach Imbue Cloud"
-
-
-def test_provider_error_message_for_workspace_ignores_other_providers() -> None:
-    """An error for a different provider is never blamed on this workspace."""
-    errors = {
-        ProviderInstanceName("imbue_cloud_acme"): DiscoveryError(
-            type_name="ProviderUnavailableError",
-            message="down",
-            provider_name=ProviderInstanceName("imbue_cloud_acme"),
-        ),
-    }
-    assert _provider_error_message_for_workspace(errors, "docker") is None
-
-
-def test_provider_error_message_for_workspace_is_none_when_provider_unknown() -> None:
-    """Pre-discovery (provider unknown), we cannot attribute any error to this workspace."""
-    errors = {
-        ProviderInstanceName("imbue_cloud_acme"): DiscoveryError(
-            type_name="ProviderUnavailableError",
-            message="down",
-            provider_name=ProviderInstanceName("imbue_cloud_acme"),
-        ),
-    }
-    assert _provider_error_message_for_workspace(errors, None) is None
-
-
 def test_is_discovery_fresh_distinguishes_recent_from_stale_and_missing() -> None:
     """Freshness gates the recovery redirect: only a recent snapshot is trustworthy."""
     now = datetime.now(timezone.utc)
@@ -1928,10 +1840,12 @@ def test_recovery_page_renders_for_authenticated_user(tmp_path: Path) -> None:
     assert safe_return_to in response.text
     # The recovery page chrome rendered: the host-restart button (the
     # surgical tier is auto-dispatched, so it has no button) and the
-    # surgical-restart endpoint the page's JS posts to when the probe
+    # versioned health + restart endpoints the page's JS drives once the probe
     # reports the container reachable.
     assert "Restart workspace" in response.text
-    assert "restart-system-interface" in response.text
+    assert "/api/v1/workspaces/" in response.text
+    assert "/health" in response.text
+    assert "/restart" in response.text
     # The recovery page offers an in-page report button that opens the get-help modal
     # via the ``minds:open-help`` relay message.
     assert 'id="recovery-report-btn"' in response.text
@@ -2034,12 +1948,6 @@ def test_recovery_page_renders_copy_ssh_button_from_resolver(tmp_path: Path) -> 
     assert response.status_code == 200
     assert 'id="copy-ssh-btn"' in response.text
     assert 'data-ssh-command="ssh -i /home/u/.mngr/key -p 60022 root@127.0.0.1"' in response.text
-
-
-def test_restart_api_requires_authentication(tmp_path: Path) -> None:
-    client, _, agent_id = _setup_test_server(tmp_path)
-    response = client.post(f"/api/agents/{agent_id}/restart-system-interface")
-    assert response.status_code == 403
 
 
 def test_create_desktop_client_stashes_system_interface_health_tracker(tmp_path: Path) -> None:
@@ -2292,455 +2200,3 @@ def test_sharing_readiness_requires_authentication(tmp_path: Path) -> None:
 
     assert response.status_code == 403
     assert len(probed) == 0
-
-
-# -- restart sequence (background worker) tests --
-
-
-def _write_fake_mngr(tmp_path: Path, stop_exit: int = 0, start_exit: int = 0) -> str:
-    """Write an executable stub that stands in for the ``mngr`` binary.
-
-    Exits per-subcommand so a test can simulate a failing stop or start
-    without a real mngr / provider. Every invocation appends its argv to a
-    ``<script>.log`` sibling file so a test can assert which subcommands ran
-    (e.g. that the stop step was skipped).
-    """
-    script = tmp_path / "fake_mngr"
-    script.write_text(
-        "#!/bin/sh\n"
-        'echo "$@" >> "$0.log"\n'
-        f'case "$1" in\n  stop) exit {stop_exit} ;;\n  start) exit {start_exit} ;;\n  *) exit 0 ;;\nesac\n'
-    )
-    script.chmod(0o755)
-    return str(script)
-
-
-def _read_fake_mngr_invocations(mngr_binary: str) -> list[str]:
-    """Return the recorded argv lines for a ``_write_fake_mngr`` stub (empty if never invoked)."""
-    log_path = Path(mngr_binary + ".log")
-    if not log_path.exists():
-        return []
-    return log_path.read_text().splitlines()
-
-
-def _resolver_with_system_services(workspace_agent: AgentId, services_agent: AgentId) -> MngrCliBackendResolver:
-    """Build a resolver where the workspace agent and system-services agent share a host."""
-    host_id = HostId.generate()
-    resolver = MngrCliBackendResolver()
-    resolver.update_agents(
-        ParsedAgentsResult(
-            agent_ids=(workspace_agent, services_agent),
-            discovered_agents=(
-                DiscoveredAgent(
-                    host_id=host_id,
-                    agent_id=workspace_agent,
-                    agent_name=AgentName("my-claude-agent"),
-                    provider_name=ProviderInstanceName("docker"),
-                ),
-                DiscoveredAgent(
-                    host_id=host_id,
-                    agent_id=services_agent,
-                    agent_name=AgentName("system-services"),
-                    provider_name=ProviderInstanceName("docker"),
-                ),
-            ),
-        )
-    )
-    return resolver
-
-
-def test_run_restart_sequence_fails_when_system_services_agent_is_unresolved(tmp_path: Path) -> None:
-    """With no system-services agent discovered, the sequence ends in RESTART_FAILED."""
-    tracker = SystemInterfaceHealthTracker()
-    workspace_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent)
-
-    with ConcurrencyGroup(name="test-restart") as cg:
-        _run_restart_sequence(
-            workspace_agent_id=workspace_agent,
-            is_host_restart=False,
-            tracker=tracker,
-            backend_resolver=MngrCliBackendResolver(),
-            mngr_binary="mngr",
-            mngr_host_dir=tmp_path,
-            concurrency_group=cg,
-            mngr_forward_port=0,
-            mngr_forward_preauth_cookie=None,
-        )
-
-    assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
-    assert "system-services" in (tracker.get_last_restart_error(workspace_agent) or "")
-
-
-def test_run_restart_sequence_fails_when_stop_command_errors(tmp_path: Path) -> None:
-    """A non-zero ``mngr stop`` ends the sequence in RESTART_FAILED naming the stop step."""
-    tracker = SystemInterfaceHealthTracker()
-    workspace_agent = AgentId.generate()
-    services_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent)
-    resolver = _resolver_with_system_services(workspace_agent, services_agent)
-
-    with ConcurrencyGroup(name="test-restart") as cg:
-        _run_restart_sequence(
-            workspace_agent_id=workspace_agent,
-            is_host_restart=False,
-            tracker=tracker,
-            backend_resolver=resolver,
-            mngr_binary=_write_fake_mngr(tmp_path, stop_exit=1),
-            mngr_host_dir=tmp_path,
-            concurrency_group=cg,
-            mngr_forward_port=0,
-            mngr_forward_preauth_cookie=None,
-        )
-
-    assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
-    assert "Stop step" in (tracker.get_last_restart_error(workspace_agent) or "")
-
-
-def test_run_restart_sequence_fails_when_stop_command_cannot_launch(tmp_path: Path) -> None:
-    """A launch failure (missing ``mngr`` binary) surfaces as RESTART_FAILED naming the stop step.
-
-    Exercises the path where ``_run_mngr`` wraps the ``OSError`` from the failed
-    fork/exec into a ``MngrCommandError`` and the restart sequence catches that
-    single domain error at the call site.
-    """
-    tracker = SystemInterfaceHealthTracker()
-    workspace_agent = AgentId.generate()
-    services_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent)
-    resolver = _resolver_with_system_services(workspace_agent, services_agent)
-    missing_binary = str(tmp_path / "definitely_not_a_real_mngr")
-
-    with ConcurrencyGroup(name="test-restart") as cg:
-        _run_restart_sequence(
-            workspace_agent_id=workspace_agent,
-            is_host_restart=False,
-            tracker=tracker,
-            backend_resolver=resolver,
-            mngr_binary=missing_binary,
-            mngr_host_dir=tmp_path,
-            concurrency_group=cg,
-            mngr_forward_port=0,
-            mngr_forward_preauth_cookie=None,
-        )
-
-    assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
-    assert "Stop step" in (tracker.get_last_restart_error(workspace_agent) or "")
-
-
-def test_run_restart_sequence_recovers_on_clean_dispatch_without_plugin(tmp_path: Path) -> None:
-    """Clean stop+start with no plugin route to probe through recovers the agent to HEALTHY."""
-    tracker = SystemInterfaceHealthTracker()
-    workspace_agent = AgentId.generate()
-    services_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent)
-    resolver = _resolver_with_system_services(workspace_agent, services_agent)
-
-    with ConcurrencyGroup(name="test-restart") as cg:
-        _run_restart_sequence(
-            workspace_agent_id=workspace_agent,
-            is_host_restart=True,
-            tracker=tracker,
-            backend_resolver=resolver,
-            mngr_binary=_write_fake_mngr(tmp_path),
-            mngr_host_dir=tmp_path,
-            concurrency_group=cg,
-            mngr_forward_port=0,
-            mngr_forward_preauth_cookie=None,
-        )
-
-    assert tracker.get_health(workspace_agent) == AgentHealth.HEALTHY
-
-
-def test_run_restart_sequence_skips_stop_when_host_already_stopped(tmp_path: Path) -> None:
-    """``skip_stop=True`` on a host restart goes straight to ``mngr start`` (no stop subprocess)."""
-    tracker = SystemInterfaceHealthTracker()
-    workspace_agent = AgentId.generate()
-    services_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent)
-    resolver = _resolver_with_system_services(workspace_agent, services_agent)
-    mngr_binary = _write_fake_mngr(tmp_path)
-
-    with ConcurrencyGroup(name="test-restart") as cg:
-        _run_restart_sequence(
-            workspace_agent_id=workspace_agent,
-            is_host_restart=True,
-            tracker=tracker,
-            backend_resolver=resolver,
-            mngr_binary=mngr_binary,
-            mngr_host_dir=tmp_path,
-            concurrency_group=cg,
-            mngr_forward_port=0,
-            mngr_forward_preauth_cookie=None,
-            skip_stop=True,
-        )
-
-    assert tracker.get_health(workspace_agent) == AgentHealth.HEALTHY
-    invocations = _read_fake_mngr_invocations(mngr_binary)
-    assert any(line.startswith("start ") for line in invocations)
-    assert not any(line.startswith("stop ") for line in invocations)
-
-
-def test_run_restart_sequence_stops_before_start_by_default(tmp_path: Path) -> None:
-    """Without ``skip_stop``, a host restart stops the host before starting it."""
-    tracker = SystemInterfaceHealthTracker()
-    workspace_agent = AgentId.generate()
-    services_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent)
-    resolver = _resolver_with_system_services(workspace_agent, services_agent)
-    mngr_binary = _write_fake_mngr(tmp_path)
-
-    with ConcurrencyGroup(name="test-restart") as cg:
-        _run_restart_sequence(
-            workspace_agent_id=workspace_agent,
-            is_host_restart=True,
-            tracker=tracker,
-            backend_resolver=resolver,
-            mngr_binary=mngr_binary,
-            mngr_host_dir=tmp_path,
-            concurrency_group=cg,
-            mngr_forward_port=0,
-            mngr_forward_preauth_cookie=None,
-        )
-
-    assert tracker.get_health(workspace_agent) == AgentHealth.HEALTHY
-    invocations = _read_fake_mngr_invocations(mngr_binary)
-    stop_index = next((i for i, line in enumerate(invocations) if line.startswith("stop ")), None)
-    start_index = next((i for i, line in enumerate(invocations) if line.startswith("start ")), None)
-    assert stop_index is not None, invocations
-    assert start_index is not None, invocations
-    assert stop_index < start_index
-
-
-def test_restart_host_api_requires_authentication(tmp_path: Path) -> None:
-    client, _, agent_id = _setup_test_server(tmp_path)
-    response = client.post(f"/api/agents/{agent_id}/restart-host")
-    assert response.status_code == 403
-
-
-def test_host_health_api_requires_authentication(tmp_path: Path) -> None:
-    client, _, agent_id = _setup_test_server(tmp_path)
-    response = client.get(f"/api/agents/{agent_id}/host-health")
-    assert response.status_code == 403
-
-
-# -- Workspace color route ---------------------------------------------
-#
-# POST /api/workspaces/<agent_id>/color writes the per-workspace color
-# label via ``mngr label`` (CLI merge semantics). Tests cover the
-# error responses (403 unauthenticated / 400 invalid_hex / 404 not_primary /
-# 409 stale_provider / 502 host_unreachable) and the success path through
-# a fake mngr stub. The optimistic-resolver-update path is unit-tested
-# in backend_resolver_test.py; here we cover the route's plumbing.
-
-
-def _make_workspace_color_resolver(
-    agent_id: AgentId, provider_name: str = "docker", extra_labels: dict[str, str] | None = None
-) -> MngrCliBackendResolver:
-    """Build a resolver carrying a single primary-workspace agent.
-
-    Primary workspaces are filtered by the ``workspace`` + ``is_primary``
-    label pair (matches MngrCliBackendResolver.list_known_workspace_ids).
-    """
-    labels = {"workspace": "true", "is_primary": "true", **(extra_labels or {})}
-    resolver = MngrCliBackendResolver()
-    resolver.update_agents(
-        ParsedAgentsResult(
-            agent_ids=(agent_id,),
-            discovered_agents=(
-                DiscoveredAgent(
-                    host_id=HostId.generate(),
-                    agent_id=agent_id,
-                    agent_name=AgentName(str(agent_id)),
-                    provider_name=ProviderInstanceName(provider_name),
-                    certified_data={"labels": labels},
-                ),
-            ),
-        )
-    )
-    return resolver
-
-
-def _create_test_desktop_client_with_color_runtime(
-    tmp_path: Path,
-    backend_resolver: BackendResolverInterface,
-    mngr_binary: str,
-    concurrency_group: ConcurrencyGroup | None,
-) -> tuple[FlaskClient, FileAuthStore]:
-    """Like ``_create_test_desktop_client`` but wires mngr_binary + concurrency
-    group so the workspace-color route can shell out to a fake ``mngr label``."""
-    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
-    app = create_desktop_client(
-        auth_store=auth_store,
-        backend_resolver=backend_resolver,
-        http_client=None,
-        mngr_binary=mngr_binary,
-        root_concurrency_group=concurrency_group,
-        mngr_host_dir=tmp_path / "mngr",
-    )
-    return app.test_client(), auth_store
-
-
-def test_set_workspace_color_requires_authentication(tmp_path: Path) -> None:
-    agent_id = AgentId.generate()
-    resolver = _make_workspace_color_resolver(agent_id)
-    client, _ = _create_test_desktop_client_with_color_runtime(
-        tmp_path=tmp_path, backend_resolver=resolver, mngr_binary="mngr", concurrency_group=None
-    )
-    response = client.post(f"/api/workspaces/{agent_id}/color", json={"hex": "#0b292b"})
-    assert response.status_code == 403
-
-
-def test_set_workspace_color_rejects_invalid_hex(tmp_path: Path) -> None:
-    agent_id = AgentId.generate()
-    resolver = _make_workspace_color_resolver(agent_id)
-    client, auth_store = _create_test_desktop_client_with_color_runtime(
-        tmp_path=tmp_path, backend_resolver=resolver, mngr_binary="mngr", concurrency_group=None
-    )
-    _authenticate_client(client=client, auth_store=auth_store)
-
-    response = client.post(f"/api/workspaces/{agent_id}/color", json={"hex": "not-a-hex"})
-    assert response.status_code == 400
-    assert response.get_json()["error"] == "invalid_hex"
-
-
-def test_set_workspace_color_rejects_non_primary_agent(tmp_path: Path) -> None:
-    """An agent without the ``workspace`` + ``is_primary`` label pair (e.g.
-    the sibling system-services agent) is not a valid color-write target.
-    The resolver returns 404 ``not_primary``."""
-    primary_id = AgentId.generate()
-    services_id = AgentId.generate()
-    host = HostId.generate()
-    resolver = MngrCliBackendResolver()
-    resolver.update_agents(
-        ParsedAgentsResult(
-            agent_ids=(primary_id, services_id),
-            discovered_agents=(
-                DiscoveredAgent(
-                    host_id=host,
-                    agent_id=primary_id,
-                    agent_name=AgentName("user-agent"),
-                    provider_name=ProviderInstanceName("docker"),
-                    certified_data={"labels": {"workspace": "true", "is_primary": "true"}},
-                ),
-                DiscoveredAgent(
-                    host_id=host,
-                    agent_id=services_id,
-                    agent_name=AgentName("system-services"),
-                    provider_name=ProviderInstanceName("docker"),
-                    certified_data={"labels": {}},
-                ),
-            ),
-        )
-    )
-    client, auth_store = _create_test_desktop_client_with_color_runtime(
-        tmp_path=tmp_path, backend_resolver=resolver, mngr_binary="mngr", concurrency_group=None
-    )
-    _authenticate_client(client=client, auth_store=auth_store)
-
-    response = client.post(f"/api/workspaces/{services_id}/color", json={"hex": "#0b292b"})
-    assert response.status_code == 404
-    assert response.get_json()["error"] == "not_primary"
-
-
-def test_set_workspace_color_rejects_stale_provider(tmp_path: Path) -> None:
-    """A workspace whose provider's latest discovery poll errored is
-    flagged is_stale and is not a safe color-write target -- writes
-    against an unreachable host would not be observable. Returns 409."""
-    agent_id = AgentId.generate()
-    provider_name = "imbue_cloud_acct"
-    resolver = _make_workspace_color_resolver(agent_id, provider_name=provider_name)
-    errored = ProviderInstanceName(provider_name)
-    resolver.update_providers(
-        providers=(),
-        error_by_provider_name={
-            errored: DiscoveryError(type_name="RuntimeError", message="boom", provider_name=errored)
-        },
-        last_full_snapshot_at=datetime.now(timezone.utc),
-    )
-    client, auth_store = _create_test_desktop_client_with_color_runtime(
-        tmp_path=tmp_path, backend_resolver=resolver, mngr_binary="mngr", concurrency_group=None
-    )
-    _authenticate_client(client=client, auth_store=auth_store)
-
-    response = client.post(f"/api/workspaces/{agent_id}/color", json={"hex": "#0b292b"})
-    assert response.status_code == 409
-    assert response.get_json()["error"] == "stale_provider"
-
-
-def test_set_workspace_color_returns_502_when_mngr_label_fails(tmp_path: Path) -> None:
-    """A non-zero ``mngr label`` exit (host unreachable, label-mode bug,
-    etc.) surfaces as 502 with the detail in the response so the
-    settings UI can show an inline error."""
-    agent_id = AgentId.generate()
-    resolver = _make_workspace_color_resolver(agent_id)
-    # Fake mngr that fails on the ``label`` subcommand.
-    fake = tmp_path / "fake_mngr_failing"
-    fake.write_text('#!/bin/sh\ncase "$1" in\n  label) echo "label failed" >&2; exit 1 ;;\n  *) exit 0 ;;\nesac\n')
-    fake.chmod(0o755)
-
-    with ConcurrencyGroup(name="test-color-failure") as cg:
-        client, auth_store = _create_test_desktop_client_with_color_runtime(
-            tmp_path=tmp_path,
-            backend_resolver=resolver,
-            mngr_binary=str(fake),
-            concurrency_group=cg,
-        )
-        _authenticate_client(client=client, auth_store=auth_store)
-        response = client.post(f"/api/workspaces/{agent_id}/color", json={"hex": "#0b292b"})
-
-    assert response.status_code == 502
-    assert response.get_json()["error"] == "host_unreachable"
-
-
-def test_set_workspace_color_writes_label_and_updates_resolver(tmp_path: Path) -> None:
-    """End-to-end: a valid POST (a) shells out to ``mngr label`` with the
-    normalized hex, (b) optimistically updates the resolver's snapshot,
-    (c) returns 200 with the normalized hex."""
-    agent_id = AgentId.generate()
-    resolver = _make_workspace_color_resolver(agent_id)
-    # Fake mngr that logs every invocation but always exits clean.
-    mngr_binary = _write_fake_mngr(tmp_path)
-
-    with ConcurrencyGroup(name="test-color-success") as cg:
-        client, auth_store = _create_test_desktop_client_with_color_runtime(
-            tmp_path=tmp_path,
-            backend_resolver=resolver,
-            mngr_binary=mngr_binary,
-            concurrency_group=cg,
-        )
-        _authenticate_client(client=client, auth_store=auth_store)
-
-        # Lenient input ``"FFF"`` should normalize to ``"#ffffff"`` server-side.
-        response = client.post(f"/api/workspaces/{agent_id}/color", json={"hex": "FFF"})
-
-    assert response.status_code == 200
-    body = response.get_json()
-    assert body["agent_id"] == str(agent_id)
-    assert body["color"] == "#ffffff"
-
-    # Fake mngr captured the label argv with the normalized hex.
-    invocations = _read_fake_mngr_invocations(mngr_binary)
-    label_lines = [line for line in invocations if line.startswith("label ")]
-    assert len(label_lines) == 1, invocations
-    assert f"label {agent_id} -l color=#ffffff" in label_lines[0]
-
-    # The resolver's cached snapshot reflects the new color, so the
-    # next SSE workspaces emit will carry it.
-    assert resolver.get_workspace_color(agent_id) == "#ffffff"
-
-
-def test_set_workspace_color_returns_502_when_concurrency_group_missing(tmp_path: Path) -> None:
-    """If the desktop client was created without a concurrency group
-    (a test-only path), the color route cannot shell out and returns
-    502 with the missing-runtime detail."""
-    agent_id = AgentId.generate()
-    resolver = _make_workspace_color_resolver(agent_id)
-    client, auth_store = _create_test_desktop_client_with_color_runtime(
-        tmp_path=tmp_path, backend_resolver=resolver, mngr_binary="mngr", concurrency_group=None
-    )
-    _authenticate_client(client=client, auth_store=auth_store)
-
-    response = client.post(f"/api/workspaces/{agent_id}/color", json={"hex": "#0b292b"})
-    assert response.status_code == 502
-    assert response.get_json()["error"] == "host_unreachable"

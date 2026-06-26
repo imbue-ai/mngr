@@ -20,6 +20,7 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
+from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
@@ -740,6 +741,40 @@ def test_patch_workspace_requires_bearer(tmp_path: Path) -> None:
     response = client.patch(f"/api/v1/workspaces/{agent_id}", json={"color": "#fff"})
 
     assert response.status_code == 401
+
+
+class _LeasedImbueCloudResolver(StaticBackendResolver):
+    """Static resolver reporting every known agent as living on a leased imbue_cloud provider."""
+
+    def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
+        return AgentDisplayInfo(
+            agent_name=str(agent_id),
+            host_id="host-leased",
+            provider_name="imbue_cloud_alice-imbue-com",
+        )
+
+
+def test_patch_workspace_associate_leased_host_returns_403(tmp_path: Path) -> None:
+    # A host leased from imbue_cloud is permanently bound to its leasing account,
+    # so re-associating it to another account is rejected (the defense-in-depth
+    # backstop to the disabled UI control).
+    agent_id = AgentId()
+    client = _build_client(tmp_path, _LeasedImbueCloudResolver(url_by_agent_and_service={}))
+
+    response = client.patch(f"/api/v1/workspaces/{agent_id}", headers=_auth_header(), json={"account_id": "user-123"})
+
+    assert response.status_code == 403
+    assert "leased from imbue_cloud" in json.loads(response.data)["error"]
+
+
+def test_patch_workspace_disassociate_leased_host_returns_403(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client = _build_client(tmp_path, _LeasedImbueCloudResolver(url_by_agent_and_service={}))
+
+    response = client.patch(f"/api/v1/workspaces/{agent_id}", headers=_auth_header(), json={"account_id": None})
+
+    assert response.status_code == 403
+    assert "leased from imbue_cloud" in json.loads(response.data)["error"]
 
 
 # -- DELETE /api/v1/workspaces/operations/<id> (dismiss) --
