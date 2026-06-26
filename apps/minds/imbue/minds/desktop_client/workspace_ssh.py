@@ -96,6 +96,22 @@ def build_authorized_keys_line(*, public_key: str, requester_workspace_id: str, 
     return f"{key_type} {key_material} {marker}"
 
 
+def _marker_token_value(line: str, token_key: str) -> str | None:
+    """Return the value of the ``<token_key>=`` token in a minds-owned grant line, else None.
+
+    Lines without our marker (keys the user added by hand) return None, as do
+    minds-owned lines that simply lack the requested token. This is the single
+    place that knows how grant marker tokens are encoded.
+    """
+    if _GRANT_MARKER not in line:
+        return None
+    prefix = f"{token_key}="
+    for token in line.split():
+        if token.startswith(prefix):
+            return token[len(prefix) :]
+    return None
+
+
 def _parse_grant_expiry(line: str) -> datetime | None:
     """Return the expiry encoded in a minds-owned authorized_keys line, else None.
 
@@ -108,17 +124,15 @@ def _parse_grant_expiry(line: str) -> datetime | None:
     """
     if _GRANT_MARKER not in line:
         return None
-    for token in line.split():
-        if token.startswith(f"{_EXPIRES_KEY}="):
-            raw = token[len(_EXPIRES_KEY) + 1 :]
-            try:
-                parsed = datetime.fromisoformat(raw)
-            except ValueError:
-                return datetime.fromtimestamp(0, tz=timezone.utc)
-            if parsed.tzinfo is None:
-                return datetime.fromtimestamp(0, tz=timezone.utc)
-            return parsed
-    return datetime.fromtimestamp(0, tz=timezone.utc)
+    epoch = datetime.fromtimestamp(0, tz=timezone.utc)
+    raw = _marker_token_value(line, _EXPIRES_KEY)
+    if raw is None:
+        return epoch
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return epoch
+    return parsed if parsed.tzinfo is not None else epoch
 
 
 def _grant_requester(line: str) -> str | None:
@@ -127,12 +141,7 @@ def _grant_requester(line: str) -> str | None:
     Lines without our marker (keys the user added by hand) return None so they
     are never treated as belonging to any requester and thus never superseded.
     """
-    if _GRANT_MARKER not in line:
-        return None
-    for token in line.split():
-        if token.startswith(f"{_REQUESTER_KEY}="):
-            return token[len(_REQUESTER_KEY) + 1 :]
-    return None
+    return _marker_token_value(line, _REQUESTER_KEY)
 
 
 def prune_expired_grant_lines(authorized_keys_content: str, *, now: datetime) -> str:
