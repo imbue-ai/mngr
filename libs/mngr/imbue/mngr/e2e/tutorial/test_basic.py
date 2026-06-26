@@ -15,13 +15,17 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 def test_help_succeeds(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # or see the other commands--list, destroy, message, connect, push, pull, clone, and more!  These other commands are covered in their own sections below.
-    mngr --help
-    """)
+    """Tutorial block:
+        # or see the other commands--list, destroy, message, connect, git, clone, and more!  These other commands are covered in their own sections below.
+        mngr --help
+
+    Scope: `mngr --help` exits 0 and its output lists the advertised
+    subcommands (create, list, destroy, message, connect, clone). push/pull are
+    folded into the `git` command, so they are not asserted.
+    """
     result = e2e.run(
         "mngr --help",
-        comment="or see the other commands--list, destroy, message, connect, push, pull, clone, and more!",
+        comment="or see the other commands--list, destroy, message, connect, git, clone, and more!",
     )
     expect(result).to_succeed()
     expect(result.stdout).to_contain("Usage")
@@ -34,13 +38,15 @@ def test_help_succeeds(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_unknown_command_fails(e2e: E2eSession) -> None:
-    # Shares the tutorial block with test_help_succeeds: that block teaches users
-    # to discover commands via `mngr --help`. This is the unhappy path -- invoking
-    # a command that does not exist must fail and point the user back to --help.
-    e2e.write_tutorial_block("""
-    # or see the other commands--list, destroy, message, connect, push, pull, clone, and more!  These other commands are covered in their own sections below.
-    mngr --help
-    """)
+    """Tutorial block:
+        # or see the other commands--list, destroy, message, connect, git, clone, and more!  These other commands are covered in their own sections below.
+        mngr --help
+
+    Scope: the unhappy path of the same block, which teaches command discovery
+    via `mngr --help`. An unknown command fails with usage exit code 2, leaves
+    stdout empty (clean for scripting), and its stderr names the offending
+    command and points the user back to `mngr --help`.
+    """
     result = e2e.run(
         "mngr definitely-not-a-real-command",
         comment="an unknown command fails and points the user to --help",
@@ -58,10 +64,15 @@ def test_unknown_command_fails(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_create_help_succeeds(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # tons more arguments for anything you could want! As always, you can learn more via --help
-    mngr create --help
-    """)
+    """Tutorial block:
+        # tons more arguments for anything you could want! As always, you can learn more via --help
+        mngr create --help
+
+    Scope: `mngr create --help` exits 0 and shows the `create` command's own
+    man-page help -- the NAME summary, a SYNOPSIS, an EXAMPLES section, and the
+    advertised arguments (a representative spread: --no-connect, --type) -- not
+    some other command's help.
+    """
     result = e2e.run(
         "mngr create --help",
         comment="tons more arguments for anything you could want! As always, you can learn more via --help",
@@ -82,14 +93,15 @@ def test_create_help_succeeds(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_create_rejects_unknown_option(e2e: E2eSession) -> None:
-    """Unhappy path for the same `mngr create` block: an option not listed in
-    --help is rejected with a non-zero exit and a usage error, so the user is
-    pointed back at the documented arguments.
+    """Tutorial block:
+        # tons more arguments for anything you could want! As always, you can learn more via --help
+        mngr create --help
+
+    Scope: the unhappy path of the same `mngr create` block. An option not
+    listed in --help is rejected at argument-parsing time with usage exit code 2,
+    leaves stdout empty (clean for scripting), and emits a stderr usage error
+    that names the bad option, pointing the user back at the documented arguments.
     """
-    e2e.write_tutorial_block("""
-    # tons more arguments for anything you could want! As always, you can learn more via --help
-    mngr create --help
-    """)
     result = e2e.run(
         "mngr create --this-flag-does-not-exist",
         comment="an option not listed in --help is rejected",
@@ -108,11 +120,17 @@ def test_create_rejects_unknown_option(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_create_with_json_output(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # you can control output format for scripting:
-    mngr create my-task --no-connect --format json
-    # (--quiet suppresses all output)
-    """)
+    """Tutorial block:
+        # you can control output format for scripting:
+        mngr create my-task --no-connect --format json
+        # (--quiet suppresses all output)
+
+    Scope: the `--format json` half of the block. A successful create with
+    `--format json` prints a machine-readable object on stdout carrying the new
+    agent's identifiers (agent_id, host_id), and that same agent appears in
+    `mngr list --format json` with matching ids and the expected name/type/
+    command -- which is how a script chains the two commands.
+    """
     create_result = e2e.run(
         "mngr create my-task --no-connect --type command --no-ensure-clean --format json -- sleep 100064",
         comment="you can control output format for scripting",
@@ -144,18 +162,16 @@ def test_create_with_json_output(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_create_quiet_suppresses_output(e2e: E2eSession) -> None:
-    """Covers the second half of the same tutorial block: the `--quiet` comment.
+    """Tutorial block:
+        # you can control output format for scripting:
+        mngr create my-task --no-connect --format json
+        # (--quiet suppresses all output)
 
-    `--quiet` promises to suppress *all* console output, so a successful create
-    must leave both stdout and stderr empty while still actually creating the
-    agent. This is the counterpart to test_create_with_json_output, which
-    exercises the `--format json` half of the block.
+    Scope: the `--quiet` half of the block (counterpart to
+    test_create_with_json_output). `--quiet` suppresses *all* console output, so
+    a successful create leaves both stdout and stderr empty while still actually
+    creating the agent (it appears in `mngr list`).
     """
-    e2e.write_tutorial_block("""
-    # you can control output format for scripting:
-    mngr create my-task --no-connect --format json
-    # (--quiet suppresses all output)
-    """)
     create_result = e2e.run(
         "mngr create my-task --no-connect --type command --no-ensure-clean --quiet -- sleep 100066",
         comment="--quiet suppresses all output",
@@ -185,11 +201,15 @@ def test_create_quiet_suppresses_output(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_create_headless(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # mngr is very much meant to be used for scripting and automation, so nothing requires interactivity.
-    # if you want to be sure that interactivity is disabled, you can use the --headless flag:
-    mngr create my-task --headless
-    """)
+    """Tutorial block:
+        # mngr is very much meant to be used for scripting and automation, so nothing requires interactivity.
+        # if you want to be sure that interactivity is disabled, you can use the --headless flag:
+        mngr create my-task --headless
+
+    Scope: `mngr create --headless` succeeds non-interactively, the agent
+    appears in `mngr list`, and it is actually running and reachable (not merely
+    listed) -- exec inside it returns its absolute working directory.
+    """
     expect(
         e2e.run(
             "mngr create my-task --type command --no-ensure-clean --headless -- sleep 100065",
@@ -223,10 +243,14 @@ def test_create_headless(e2e: E2eSession) -> None:
 # raise it (mirrors the other e2e create tests, e.g. test_create_commands.py).
 @pytest.mark.timeout(180)
 def test_create_with_label(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # you can add labels to organize your agents and tags for host metadata:
-    mngr create my-task --label team=backend --host-label env=staging
-    """)
+    """Tutorial block:
+        # you can add labels to organize your agents and tags for host metadata:
+        mngr create my-task --label team=backend --host-label env=staging
+
+    Scope: `--label` attaches the given agent label and `--host-label` the given
+    host tag, both visible in `mngr list --format json` (the agent's
+    labels.team == backend and its host.tags.env == staging).
+    """
     expect(
         e2e.run(
             "mngr create my-task --type command --no-ensure-clean --label team=backend --host-label env=staging -- sleep 100068",
@@ -252,14 +276,15 @@ def test_create_with_label(e2e: E2eSession) -> None:
 # create tests above.
 @pytest.mark.timeout(120)
 def test_create_rejects_malformed_label(e2e: E2eSession) -> None:
-    """Unhappy path for the same `mngr create --label` block: a label missing the
-    `=` separator is not in KEY=VALUE format, so create must fail with a clear
-    error before any agent is created.
+    """Tutorial block:
+        # you can add labels to organize your agents and tags for host metadata:
+        mngr create my-task --label team=backend --host-label env=staging
+
+    Scope: the unhappy path of the same `--label` block. A label value missing
+    the `=` separator (not KEY=VALUE format) is rejected with a non-zero exit and
+    a stderr error mentioning KEY=VALUE, before any agent is created -- nothing is
+    left behind in the listing.
     """
-    e2e.write_tutorial_block("""
-    # you can add labels to organize your agents and tags for host metadata:
-    mngr create my-task --label team=backend --host-label env=staging
-    """)
     result = e2e.run(
         "mngr create my-task --type command --no-ensure-clean --label team -- sleep 100069",
         comment="a label that is not in KEY=VALUE format is rejected",
