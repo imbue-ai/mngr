@@ -46,7 +46,9 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroupError
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client import backup_status
+from imbue.minds.desktop_client import desktop_control
 from imbue.minds.desktop_client import destroying
+from imbue.minds.desktop_client import workspace_settings
 from imbue.minds.desktop_client import workspace_ssh
 from imbue.minds.desktop_client import workspace_version
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
@@ -65,6 +67,12 @@ from imbue.minds.desktop_client.responses import make_file_response
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.responses import make_streaming_response
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.sharing_handler import SharingError
+from imbue.minds.desktop_client.sharing_handler import disable_sharing
+from imbue.minds.desktop_client.sharing_handler import enable_sharing_via_cloudflare
+from imbue.minds.desktop_client.sharing_handler import get_sharing_status
+from imbue.minds.desktop_client.sharing_handler import is_probeable_share_url
+from imbue.minds.desktop_client.sharing_handler import probe_share_url_readiness
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
 from imbue.minds.desktop_client.workspace_create import build_backup_request_or_error
@@ -72,12 +80,14 @@ from imbue.minds.desktop_client.workspace_create import build_create_on_created_
 from imbue.minds.desktop_client.workspace_create import resolve_effective_region
 from imbue.minds.desktop_client.workspace_lifecycle import MindHostAction
 from imbue.minds.desktop_client.workspace_lifecycle import perform_mind_host_action
+from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupEncryptionMethod
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
+from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 
@@ -794,6 +804,213 @@ def _handle_bug_report(agent_id: str) -> Response:
         paths=state.api_v1_paths,
     )
     return _json_response({"ok": True, "event_id": event_id})
+
+
+# -- Workspace metadata update route (color + account association) --
+
+
+@require_api_or_cookie_auth
+def _handle_patch_workspace(agent_id: str) -> Response:
+    """Partially update a workspace's metadata (color and/or account association).
+
+    JSON body may carry any of: ``color`` (a hex string, normalized + written via
+    ``mngr label``); ``account_id`` (a string to associate, or ``null`` / empty
+    string to disassociate). Only the keys present in the body are applied.
+    Returns 200 with the applied fields (``agent_id`` plus each of ``color`` /
+    ``account_id`` that was set).
+    """
+    parsed_id = AgentId(agent_id)
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return _json_error("Request body must be a JSON object", 400)
+
+    state = get_state()
+    backend_resolver = state.backend_resolver
+    applied: dict[str, object] = {"agent_id": str(parsed_id)}
+
+    if "color" in body:
+        try:
+            applied["color"] = workspace_settings.set_workspace_color(
+                parsed_id,
+                str(body.get("color", "")),
+                backend_resolver,
+                state.mngr_binary,
+                state.mngr_host_dir,
+                state.root_concurrency_group,
+            )
+        except workspace_settings.WorkspaceColorError as exc:
+            return _json_error(exc.code, exc.status_code)
+
+    if "account_id" in body:
+        account_value = body.get("account_id")
+        is_disassociate = account_value is None or (isinstance(account_value, str) and not account_value.strip())
+        try:
+            if is_disassociate:
+                workspace_settings.disassociate_workspace_account(
+                    parsed_id, backend_resolver, state.session_store, state.imbue_cloud_cli
+                )
+                applied["account_id"] = None
+            else:
+                account_id = str(account_value).strip()
+                workspace_settings.associate_workspace_account(
+                    parsed_id, account_id, backend_resolver, state.session_store
+                )
+                applied["account_id"] = account_id
+        except workspace_settings.WorkspaceAssociationError as exc:
+            return _json_error(str(exc), exc.status_code)
+
+    return _json_response(applied)
+
+
+# -- Workspace operation dismissal --
+
+
+@require_api_or_cookie_auth
+def _handle_dismiss_operation(operation_id: str) -> Response:
+    """Dismiss a finished operation card (replaces ``/api/destroying/<id>/dismiss``).
+
+    For a destroy operation (the id is an ``AgentId``), removes the on-disk
+    destroy record. For a create operation (``creation-...`` id) or an unknown
+    id, this is an idempotent no-op. Always returns 200 ``{}``.
+    """
+    if operation_id.startswith(f"{CreationId.PREFIX}-"):
+        return _json_response({})
+    paths: WorkspacePaths | None = get_state().api_v1_paths
+    if paths is None:
+        return _json_response({})
+    destroying.delete_destroying(AgentId(operation_id), paths)
+    return _json_response({})
+
+
+# -- Sharing sub-resource routes --
+
+
+@require_api_or_cookie_auth
+def _handle_sharing_status(agent_id: str, service_name: str) -> Response:
+    """Return current sharing status for a service: ``{enabled, url, policy}``."""
+    state = get_state()
+    status = get_sharing_status(
+        AgentId(agent_id), ServiceName(service_name), state.imbue_cloud_cli, state.session_store
+    )
+    return _json_response(status)
+
+
+@require_api_or_cookie_auth
+def _handle_sharing_readiness(agent_id: str, service_name: str) -> Response:
+    """Probe a shared service's hostname to see if Cloudflare Access is live yet.
+
+    The hostname to probe comes from the ``url`` query param; restricted to
+    public ``https`` URLs to avoid an SSRF vector. Contract: ``{"ready": bool}``.
+    """
+    probe_url = request.args.get("url", "")
+    http_client = get_state().http_client
+    if http_client is None or not is_probeable_share_url(probe_url):
+        return _json_response({"ready": False})
+    return _json_response({"ready": probe_share_url_readiness(http_client, probe_url)})
+
+
+@require_api_or_cookie_auth
+def _handle_sharing_enable(agent_id: str, service_name: str) -> Response:
+    """Enable or update sharing for a service. Body: ``{"emails": [...]}``."""
+    parsed_id = AgentId(agent_id)
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return _json_error("Request body must be a JSON object", 400)
+    emails_raw = body.get("emails", [])
+    if not isinstance(emails_raw, list):
+        return _json_error("'emails' must be a JSON array of strings", 400)
+    emails = [str(email) for email in emails_raw]
+    try:
+        enable_sharing_via_cloudflare(
+            agent_id=parsed_id,
+            service_name=ServiceName(service_name),
+            emails=emails,
+            backend_resolver=get_state().backend_resolver,
+        )
+    except SharingError as exc:
+        return _json_error(str(exc), 502)
+    return _json_response({"agent_id": str(parsed_id), "service_name": service_name, "enabled": True})
+
+
+@require_api_or_cookie_auth
+def _handle_sharing_disable(agent_id: str, service_name: str) -> Response:
+    """Disable sharing for a service (removes it from its tunnel; the tunnel persists)."""
+    state = get_state()
+    try:
+        disable_sharing(AgentId(agent_id), ServiceName(service_name), state.imbue_cloud_cli, state.session_store)
+    except SharingError as exc:
+        return _json_error(str(exc), 502)
+    return _json_response({"agent_id": agent_id, "service_name": service_name, "enabled": False})
+
+
+# -- Desktop namespace routes (cookie-or-bearer; no agent verb) --
+#
+# These manage install-scoped app state (provider config, host/state-container
+# lifecycle). They mint no ``minds-workspaces`` verb, so agents are blocked at
+# the gateway (deny-all baseline) while the desktop UI reaches them by cookie.
+
+
+@require_api_or_cookie_auth
+def _handle_patch_provider(provider_name: str) -> Response:
+    """Set a provider's ``is_enabled`` flag. Body: ``{"enabled": bool}``.
+
+    Idempotent desired-state. Refuses to disable a provider that still has active
+    workspaces (409) -- disabling it would drop those live workspaces off
+    discovery.
+    """
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return _json_error("Request body must be a JSON object", 400)
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        return _json_error("Body must include 'enabled' as a bool", 400)
+    state = get_state()
+    try:
+        changed = desktop_control.set_provider_enabled(
+            provider_name, enabled, state.backend_resolver, state.latchkey_forward_supervisor
+        )
+    except desktop_control.ProviderHasActiveWorkspacesError as exc:
+        return _json_error(str(exc), 409)
+    return _json_response({"provider_name": provider_name, "enabled": enabled, "changed": changed})
+
+
+@require_api_or_cookie_auth
+def _handle_running_workspaces() -> Response:
+    """Return the shutdown-capable workspaces whose containers are currently running."""
+    return _json_response({"running": desktop_control.running_workspace_entries(get_state().backend_resolver)})
+
+
+@require_api_or_cookie_auth
+def _handle_stop_hosts() -> Response:
+    """Stop the hosts of the requested workspaces in one ``mngr stop --stop-host``.
+
+    The target workspace agent ids come from repeated ``agent_id`` query params.
+    Returns the requested workspaces still running after the attempt.
+    """
+    state = get_state()
+    parent_cg = state.root_concurrency_group
+    if parent_cg is None:
+        return _json_error("Workspace host control is unavailable in this configuration", 503)
+    requested_ids = request.args.getlist("agent_id")
+    still_running = desktop_control.stop_workspace_hosts(
+        requested_ids, state.backend_resolver, state.mngr_binary, state.mngr_host_dir, parent_cg
+    )
+    return _json_response({"still_running": still_running})
+
+
+@require_api_or_cookie_auth
+def _handle_stop_state_container() -> Response:
+    """Stop this env's mngr Docker state container, to fully free local resources at quit."""
+    state = get_state()
+    parent_cg = state.root_concurrency_group
+    if parent_cg is None:
+        return _json_response({"stopped": False})
+    try:
+        stopped = desktop_control.stop_state_container(state.mngr_host_dir, parent_cg)
+    except DockerCleanupError as exc:
+        logger.warning("Failed to stop the Docker state container at shutdown: {}", exc)
+        return _json_error(f"Could not stop the Docker state container: {exc}", 500)
+    return _json_response({"stopped": stopped})
 
 
 # -- Blueprint factory --

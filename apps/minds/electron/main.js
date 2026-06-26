@@ -1965,9 +1965,9 @@ function postMindStop(agentId) {
   });
 }
 
-// POST /api/minds/stop-hosts?agent_id=...&agent_id=... (synchronous). Issues ONE
-// ``mngr stop <ids...> --stop-host`` server-side (mngr stops the hosts
-// concurrently). Resolves { ok, stillRunning }: ``stillRunning`` is the subset
+// POST /api/v1/desktop/stop-hosts?agent_id=...&agent_id=... (synchronous).
+// Issues ONE ``mngr stop <ids...> --stop-host`` server-side (mngr stops the
+// hosts concurrently). Resolves { ok, stillRunning }: ``stillRunning`` is the subset
 // of requested minds the server still sees running after the attempt; ``ok`` is
 // false when the request itself failed (so the caller treats it as "couldn't
 // stop" rather than "all stopped").
@@ -2018,9 +2018,9 @@ function postStopMinds(agentIds) {
   });
 }
 
-// POST /api/minds/stop-state-container -- stops this env's mngr docker "state
-// container" (provider bookkeeping) so nothing minds-related is left running
-// after a full shutdown. Best-effort: resolves regardless of outcome, but logs.
+// POST /api/v1/desktop/state-container/stop -- stops this env's mngr docker
+// "state container" (provider bookkeeping) so nothing minds-related is left
+// running after a full shutdown. Best-effort: resolves regardless of outcome, but logs.
 function postStopStateContainer() {
   return new Promise((resolve) => {
     if (!backendBaseUrl) {
@@ -2921,10 +2921,10 @@ ipcMain.on('close-modal', (event) => {
 
 // Settings-page color picker: optimistic chrome-titlebar paint for the
 // bundle the picker is in, so the user sees the new color immediately
-// without waiting for the POST -> mngr label subprocess -> SSE
+// without waiting for the PATCH -> mngr label subprocess -> SSE
 // round-trip. The actual persistence still goes through the
-// /api/workspaces/<id>/color POST endpoint; this just shortcuts the
-// local-window UI feedback. Only content-relay-preload.js can emit
+// PATCH /api/v1/workspaces/<id> endpoint (color field); this just
+// shortcuts the local-window UI feedback. Only content-relay-preload.js can emit
 // this channel, and it validates the agent id + accent shape there;
 // we re-validate here defensively and only forward to the *sending
 // bundle's* chrome view so a stray sender can't paint another
