@@ -277,11 +277,18 @@
       // Re-run format validation synchronously so a known-bad / already-taken
       // name blocks submit (mirroring the account-picker guard). Availability
       // that hasn't come back yet does not block -- the server's create-time
-      // conflict check backstops that rare race.
+      // conflict check backstops that rare race. This synchronous check owns the
+      // *format* dimension: it must also clear a stale 'invalid' from a prior
+      // keystroke (the debounced validateHostName may not have re-run yet), or a
+      // name the user just corrected would be wrongly blocked. It leaves a
+      // 'taken' state alone, since availability is the separate, backstopped one.
       var nameFormatError = hostNameFormatError(hostNameInput.value.trim());
       if (nameFormatError) {
         hostNameState = HOST_NAME_INVALID;
         showHostNameError(nameFormatError);
+      } else if (hostNameState === HOST_NAME_INVALID) {
+        hostNameState = HOST_NAME_OK;
+        clearHostNameError();
       }
       if (hostNameState === HOST_NAME_INVALID || hostNameState === HOST_NAME_TAKEN) {
         e.preventDefault();
