@@ -1,1 +1,3 @@
 Release minds v0.3.4: bump `apps/minds/package.json` to `0.3.4` and point the shipped binary's `FALLBACK_BRANCH` at the `minds-v0.3.4` forever-claude-template tag. This rolls up all mngr/minds changes that landed on `main` since `minds-v0.3.3`.
+
+Also clarified the release runbook (`apps/minds/docs/release.md`): neither `main` is branch-protected, so the FCT `vendor/mngr` refresh is a plain branch (no PR — the snapshot is generated and verified by `diff -r` reproduction, not reviewed), and the runbook now names the actual critical path (the `minds-launch-to-msg` end-to-end run), noting that traditional CI on a version-bump-only mngr branch is redundant with a green `main` and shouldn't be serialized against.
