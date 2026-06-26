@@ -7,9 +7,12 @@ is written -- so without a separate marker the landing page can't tell a
 so the status check can surface a distinct "Backup setup failed" state.
 
 The record is transient, unlike the canonical env: it is cleared as soon as
-backups are configured successfully (see ``AgentCreator._provision_backups``),
-and is purely advisory (it holds no secrets -- just the error text + when it
-happened).
+backups are configured successfully (see ``AgentCreator._provision_backups``).
+It stores only the failure's error message and when it happened -- written
+0600, owner-only, the same on-disk posture as the sibling canonical-env store,
+and never injected into a workspace. (The error text comes from the backup
+exception, so it should carry no credentials, but it is kept owner-only
+regardless rather than relying on that.)
 """
 
 import os
