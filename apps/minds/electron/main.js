@@ -1779,17 +1779,19 @@ function ensureChromeSSELoopRunning() {
   }
 }
 
-// POST a restart endpoint (``restart-system-interface`` or ``restart-host``)
-// and resolve once the server has acknowledged the 202 dispatch (or the
-// request errors / times out). The endpoints return 202 immediately and
-// drive recovery asynchronously; the 202 also means the health tracker is
-// already RESTARTING, so callers navigate to the recovery page afterward,
-// which shows restart progress and returns to the workspace once healthy.
+// POST the v1 restart endpoint with a ``scope`` ('services' to restart just the
+// system-services agent, 'host' to restart the whole host) and resolve once the
+// server has acknowledged the 202 dispatch (or the request errors / times out).
+// The route returns 202 immediately (with an ``{operation_id, kind}`` handle we
+// don't need here) and drives recovery asynchronously; the 202 also means the
+// health tracker is already RESTARTING, so callers navigate to the recovery
+// page afterward, which polls health, shows restart progress, and returns to
+// the workspace once healthy.
 //
 // Always resolves (never rejects) so callers can chain navigation
 // regardless of network outcome.
 const RESTART_REQUEST_TIMEOUT_MS = 10000;
-function postRestart(agentId, endpointPath) {
+function postRestart(agentId, scope) {
   return new Promise((resolve) => {
     if (!agentId || !backendBaseUrl) {
       resolve();
@@ -1798,10 +1800,11 @@ function postRestart(agentId, endpointPath) {
     let req;
     try {
       req = net.request({
-        url: `${backendBaseUrl}/api/agents/${encodeURIComponent(agentId)}/${endpointPath}`,
+        url: `${backendBaseUrl}/api/v1/workspaces/${encodeURIComponent(agentId)}/restart`,
         method: 'POST',
         useSessionCookies: true,
       });
+      req.setHeader('Content-Type', 'application/json');
     } catch (e) {
       console.warn('[restart] failed to construct restart request:', e);
       resolve();
@@ -1837,6 +1840,7 @@ function postRestart(agentId, endpointPath) {
       clearTimeout(timer);
       settle();
     });
+    req.write(JSON.stringify({ scope }));
     req.end();
   });
 }
@@ -1858,7 +1862,8 @@ function sleepInterruptible(ms) {
 
 // ---------- Mind shutdown on quit + landing Stop button ----------
 
-// Timeout for the instant, in-memory liveness lookup (GET /api/minds/running).
+// Timeout for the instant, in-memory liveness lookup (GET
+// /api/v1/desktop/running-workspaces).
 const MIND_HTTP_TIMEOUT_MS = 10000;
 // Timeout for the synchronous command endpoints (single/bulk host stop, state
 // container stop). These block until the underlying ``mngr``/docker command
@@ -1866,10 +1871,10 @@ const MIND_HTTP_TIMEOUT_MS = 10000;
 // above it here so the server-side failure surfaces rather than a client abort.
 const MIND_COMMAND_TIMEOUT_MS = 150000;
 
-// GET /api/minds/running -> { ok, running }. ``running`` is an array of
-// {id, name}; ``ok`` is false when the check itself failed (network, parse, no
-// backend) so the caller can distinguish "nothing running" from "couldn't tell"
-// instead of silently treating a failed check as an empty list.
+// GET /api/v1/desktop/running-workspaces -> { ok, running }. ``running`` is an
+// array of {id, name}; ``ok`` is false when the check itself failed (network,
+// parse, no backend) so the caller can distinguish "nothing running" from
+// "couldn't tell" instead of silently treating a failed check as an empty list.
 function getRunningMinds() {
   return new Promise((resolve) => {
     if (!backendBaseUrl) {
@@ -1879,7 +1884,7 @@ function getRunningMinds() {
     }
     let req;
     try {
-      req = net.request({ url: backendBaseUrl + '/api/minds/running', method: 'GET', useSessionCookies: true });
+      req = net.request({ url: backendBaseUrl + '/api/v1/desktop/running-workspaces', method: 'GET', useSessionCookies: true });
     } catch (e) {
       console.warn('[mind-shutdown] failed to construct running-minds request:', e);
       resolve({ ok: false, running: [] });
@@ -1976,7 +1981,7 @@ function postStopMinds(agentIds) {
     const query = agentIds.map((id) => 'agent_id=' + encodeURIComponent(id)).join('&');
     let req;
     try {
-      req = net.request({ url: `${backendBaseUrl}/api/minds/stop-hosts?${query}`, method: 'POST', useSessionCookies: true });
+      req = net.request({ url: `${backendBaseUrl}/api/v1/desktop/stop-hosts?${query}`, method: 'POST', useSessionCookies: true });
     } catch (e) {
       console.warn('[mind-shutdown] failed to construct bulk-stop request:', e);
       resolve({ ok: false, stillRunning: [] });
@@ -2025,7 +2030,7 @@ function postStopStateContainer() {
     }
     let req;
     try {
-      req = net.request({ url: backendBaseUrl + '/api/minds/stop-state-container', method: 'POST', useSessionCookies: true });
+      req = net.request({ url: backendBaseUrl + '/api/v1/desktop/state-container/stop', method: 'POST', useSessionCookies: true });
     } catch (e) {
       console.warn('[mind-shutdown] failed to construct stop-state-container request:', e);
       resolve();
@@ -3004,7 +3009,7 @@ ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
       // Close the sidebar first so the user gets immediate visual feedback
       // while the restart dispatch is acknowledged.
       closeModal(bundle);
-      await postRestart(agentId, 'restart-system-interface');
+      await postRestart(agentId, 'services');
       goToRecoveryView();
     },
   });
@@ -3023,7 +3028,7 @@ ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
       });
       if (response !== 1) return;
       closeModal(bundle);
-      await postRestart(agentId, 'restart-host');
+      await postRestart(agentId, 'host');
       goToRecoveryView();
     },
   });
