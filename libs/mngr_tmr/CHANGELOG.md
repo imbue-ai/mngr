@@ -8,6 +8,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Changed
 
+- Changed: TMR agent prompts reworked so generated e2e tests converge to a stable size instead of accreting assertions. The mapper anchors test quality to two sources (claims the tutorial block makes; effects implied by each command or flag), making removal of over-fitted assertions a first-class improvement. Testing agents flag cross-cutting blockers with `# FIXME(tmr): ...` comments. The integrator gained a normalize stage that extracts genuinely-duplicated scaffolding (preserving the 1:1 test/tutorial relationship) and triages FIXMEs, with unresolved blockers surfaced as `escalations` in the outcome schema and HTML report.
 - Changed: `mngr tmr` testing agents now publish a single `outputs.tar.gz` archive into the per-agent volume API, replacing the rsync + git-pull finalization; SSH provider no longer supported for testing-agent outputs.
 - Changed: TMR run names are now a single compact timestamp `YYYYMMDDHHMMSS` used consistently across the output directory, the `mapreduce_run_name` agent label, and every TMR-spawned entity's agent / host / branch names. Testing agents are `tmr-<run>-<suffix>`, branches `tmr/<run>/<suffix>`, and the random hex id is gone.
 - Changed: Added `--run-name` flag to override the auto-generated run name.
