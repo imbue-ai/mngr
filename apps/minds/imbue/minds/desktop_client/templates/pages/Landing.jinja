@@ -511,16 +511,51 @@
       });
     }
 
+    // Derive the badge status from a workspace's snapshots (+ its create time
+    // for the no-backups fallback). The old batch route returned a precomputed
+    // ``state``; the per-workspace backups route returns only snapshots, so we
+    // map "has snapshots" -> BACKED_UP (last_success = newest snapshot's time)
+    // and "no snapshots" -> the create-time fallback ("Created N ago" / "No
+    // backups"). This keeps applyBackupBadge's visual output equivalent.
+    function deriveBackupStatus(snapshots, createTime) {
+      if (snapshots && snapshots.length > 0) {
+        var latest = snapshots.reduce(function (a, b) {
+          return Date.parse(b.time) >= Date.parse(a.time) ? b : a;
+        });
+        return { state: 'BACKED_UP', last_success_at: latest.time };
+      }
+      return { created_at: createTime || null };
+    }
+
     function loadBackupStatus() {
+      if (renderedIds.length === 0) return;
       showBackupChecking();
-      fetch('/api/backup-status').then(function (response) {
-        return response.ok ? response.json() : {};
-      }).then(function (data) {
-        Object.keys(data).forEach(function (agentId) { applyBackupBadge(agentId, data[agentId]); });
-        clearBackupChecking();
-      }).catch(function (err) {
-        console.error('Backup status fetch failed:', err);
-        clearBackupChecking();
+      // The workspaces list carries each row's create_time for the no-backups
+      // "Created N ago" fallback; fetch it once, then fan out one backups
+      // request per workspace (replacing the old single batch route).
+      fetch('/api/v1/workspaces').then(function (response) {
+        return response.ok ? response.json() : { workspaces: [] };
+      }).catch(function () { return { workspaces: [] }; }).then(function (wsData) {
+        var createTimeByAgent = {};
+        ((wsData && wsData.workspaces) || []).forEach(function (w) {
+          var id = w && (w.agent_id || w.id);
+          if (id) createTimeByAgent[id] = w.create_time || w.created_at;
+        });
+        var pending = renderedIds.length;
+        function finishOne() {
+          pending -= 1;
+          if (pending <= 0) clearBackupChecking();
+        }
+        renderedIds.forEach(function (agentId) {
+          fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backups').then(function (response) {
+            return response.ok ? response.json() : null;
+          }).catch(function () { return null; }).then(function (data) {
+            var snapshots = (data && data.snapshots) || [];
+            applyBackupBadge(agentId, deriveBackupStatus(snapshots, createTimeByAgent[agentId]));
+          }).catch(function (err) {
+            console.error('Backup status fetch failed for', agentId, err);
+          }).then(finishOne);
+        });
       });
     }
     loadBackupStatus();
