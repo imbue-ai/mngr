@@ -13,7 +13,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Changed
 
-- Changed: Bumped pinned latchkey CLI on remote VPS environments (the secondary gateway) to 2.19.1; minimum installed CLI is now 2.17.1.
+- Changed: Bumped pinned latchkey CLI on remote VPS environments (the secondary gateway) to 2.19.1; minimum installed CLI is now 2.19.1.
 
 ### Fixed
 
