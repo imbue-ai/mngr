@@ -1,0 +1,81 @@
+{#def agent_id, request_id, ws_name, rationale, display_name, verbs, checked_permissions, target_workspace_id, target_workspace_name, show_target_choice, mngr_forward_origin #}
+{#
+  Latchkey cross-workspace (``minds-workspaces``) permission request fragment.
+  Rendered inside the inbox modal's right pane. Provides a checkbox per
+  workspace verb (pre-checking the verbs the agent requested) and, when the
+  request names a target workspace, an all-vs-selected radio. Chrome and form
+  submission JS live in the inbox shell and operate on the shared element ids
+  (#permissions-form, #permissions-approve-btn, ...).
+
+  The form submits ``permissions`` (the verb checkboxes) and ``target_scope``
+  (``selected`` | ``all``). The targeted verbs (destroy / lifecycle /
+  backups-export / ssh) honor ``target_scope``; the broad verbs (read / create)
+  ignore it.
+#}
+<div class="permissions-detail">
+  <PermissionsHeader :display_name="display_name" :ws_name="ws_name" :agent_id="agent_id" :rationale="rationale" />
+
+  <PermissionsForm :request_id="request_id">
+    <p class="type-body text-primary mb-3">
+      Approving will grant {{ ws_name or agent_id }} and its sibling agents the selected
+      cross-workspace permissions below.
+    </p>
+
+    <h2 class="type-label text-primary mb-2">Permissions to grant:</h2>
+    <Card extra="space-y-3">
+      {% for verb in verbs %}
+        <label class="flex items-start gap-2 cursor-pointer">
+          <input type="checkbox" name="permissions" value="{{ verb.permission }}"
+                 class="mt-1 shrink-0"
+                 {% if verb.permission in checked_permissions %}checked{% endif %}>
+          <span class="min-w-0">
+            <code class="type-body font-mono text-primary">{{ verb.display_name }}</code>
+            {% if verb.description %}
+              <span class="block type-body text-primary mt-0.5">{{ verb.description }}</span>
+            {% endif %}
+          </span>
+        </label>
+      {% endfor %}
+    </Card>
+
+    {# Target choice. Shown only when the request named a target workspace.
+       The mutating verbs accumulate the chosen target into a per-workspace
+       allowlist; "All workspaces" grants them broadly instead. The non-mutating
+       verbs (list/read, create) are unaffected by this choice. #}
+    {% if show_target_choice %}
+      <h2 class="type-label text-primary mt-6 mb-2">Apply workspace-specific actions to:</h2>
+      <Card extra="space-y-2">
+        <label class="flex items-start gap-2 cursor-pointer">
+          <input type="radio" name="target_scope" value="selected" class="mt-1 shrink-0" checked>
+          <span class="min-w-0">
+            <span class="type-body text-primary">Only this workspace</span>
+            <code class="block type-body font-mono text-primary mt-0.5">{{ target_workspace_name or target_workspace_id }}</code>
+          </span>
+        </label>
+        <label class="flex items-start gap-2 cursor-pointer">
+          <input type="radio" name="target_scope" value="all" class="mt-1 shrink-0">
+          <span class="min-w-0">
+            <span class="type-body text-primary">All workspaces</span>
+            <span class="block type-body text-primary mt-0.5">
+              Grant the selected actions for every workspace (current and future).
+            </span>
+          </span>
+        </label>
+      </Card>
+    {% else %}
+      {# No target workspace named: any targeted verbs the user grants apply
+         broadly. Carry the choice as a hidden field so the handler reads a
+         consistent value. #}
+      <input type="hidden" name="target_scope" value="all">
+    {% endif %}
+  </PermissionsForm>
+
+  <div id="permissions-progress" class="hidden mt-4">
+    <Notice variant="info">
+      <span class="font-semibold">Granting permission...</span>
+    </Notice>
+  </div>
+
+  <PermissionsManualCredentials />
+  <PermissionsError />
+</div>

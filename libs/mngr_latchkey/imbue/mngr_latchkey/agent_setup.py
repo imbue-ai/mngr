@@ -60,6 +60,8 @@ from imbue.mngr_latchkey.store import opaque_permissions_dir
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import point_opaque_handle_at_host
 from imbue.mngr_latchkey.store import save_permissions
+from imbue.mngr_latchkey.workspace_permissions import WORKSPACE_BASELINE_SCHEMAS
+from imbue.mngr_latchkey.workspace_permissions import WORKSPACE_BASELINE_SCHEMA_KEYS
 
 # Env-var names baked into the upstream latchkey CLI's wire contract.
 # Kept as constants so callers building ``--env`` flags do not have to repeat them.
@@ -103,34 +105,18 @@ _MINDS_API_PROXY_PER_AGENT_PATH_PATTERN: Final[str] = rf"^{_MINDS_API_PROXY_PER_
 _SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED: Final[str] = "minds-api-proxy-per-agent-unauthorized"
 _PERM_MINDS_API_PROXY_PER_AGENT: Final[str] = "minds-api-proxy-per-agent"
 
-# Inline detent scope + named permissions for the minds desktop client's
-# cross-workspace management API (``/api/v1/workspaces/...``), reached through
-# the gateway's bundled ``minds-api-proxy`` extension (so the detent envelope's
-# domain is the synthetic ``latchkey-self.invalid`` gateway-self host). Mirrors
-# the ``_SCOPE_LATCHKEY_SELF`` paradigm: the scope schema constrains the domain
-# + path prefix, and each named permission constrains a ``(method, path)`` shape
-# for one verb. The scope is materialized in every per-host permissions file but
-# NOT pre-granted -- an agent goes through the standard permission-request dialog
-# before its first cross-workspace call, and the user picks which verbs to grant.
-# Defining the schemas inline (rather than in detent's built-in catalog) keeps a
-# user grant like ``{"minds-workspaces": ["minds-workspaces-read"]}`` matching
-# exactly the endpoints declared here.
-_MINDS_WORKSPACES_PATH_PREFIX: Final[str] = "/minds-api-proxy/api/v1/workspaces"
-_SCOPE_MINDS_WORKSPACES: Final[str] = "minds-workspaces"
-_PERM_WORKSPACES_READ: Final[str] = "minds-workspaces-read"
-_PERM_WORKSPACES_CREATE: Final[str] = "minds-workspaces-create"
-_PERM_WORKSPACES_DESTROY: Final[str] = "minds-workspaces-destroy"
-_PERM_WORKSPACES_LIFECYCLE: Final[str] = "minds-workspaces-lifecycle"
-_PERM_WORKSPACES_BACKUPS_EXPORT: Final[str] = "minds-workspaces-backups-export"
-_PERM_WORKSPACES_SSH: Final[str] = "minds-workspaces-ssh"
-
-# Scope-level path-prefix gate. Necessary because detent ``any`` matches every
-# request satisfying the scope schema -- without this gate, a broad grant would
-# escape into every other gateway-self endpoint. Matches the collection root and
-# anything beneath it.
-_MINDS_WORKSPACES_SCOPE_PATTERN: Final[str] = rf"^{_MINDS_WORKSPACES_PATH_PREFIX}(/|$)"
-# A workspace id (or operation id) is one path segment after the prefix.
-_MINDS_WORKSPACES_SEGMENT: Final[str] = r"[^/]+"
+# Detent scope + named permissions for the minds desktop client's cross-workspace
+# management API (``/api/v1/workspaces/...``), reached through the gateway's
+# bundled ``minds-api-proxy`` extension (so the detent envelope's domain is the
+# synthetic ``latchkey-self.invalid`` gateway-self host). The scope schema and
+# the non-targeted ``read``/``create`` verb schemas live in
+# :mod:`imbue.mngr_latchkey.workspace_permissions`; they are materialized in every
+# per-host permissions file but NOT pre-granted -- an agent goes through the
+# standard permission-request dialog before its first cross-workspace call, and
+# the user picks which verbs to grant. The *targeted* verb schemas (destroy,
+# lifecycle, backups-export, ssh) are not in the baseline: they are created on
+# first user grant by ``workspace_permissions.grant_workspace_permissions``, which
+# accumulates the approved target workspace ids into each verb's ``anyOf``.
 
 # Exact prefix/suffix wrapping each agent id inside an ``anyOf`` entry's
 # path pattern. Shared by the build + extract helpers so the two cannot
@@ -235,88 +221,18 @@ _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissi
             },
             "required": ["method", "path"],
         },
-        _SCOPE_MINDS_WORKSPACES: {
-            "properties": {
-                "domain": {"const": _GATEWAY_SELF_HOST},
-                "path": {"type": "string", "pattern": _MINDS_WORKSPACES_SCOPE_PATTERN},
-            },
-            "required": ["domain", "path"],
-        },
-        # Read covers every GET under /workspaces (list, detail, version, backups
-        # listing, and operation status/logs), so an agent that can read can also
-        # watch the operations spawned by its create/destroy calls.
-        _PERM_WORKSPACES_READ: {
-            "properties": {
-                "method": {"const": "GET"},
-                "path": {"type": "string", "pattern": _MINDS_WORKSPACES_SCOPE_PATTERN},
-            },
-            "required": ["method", "path"],
-        },
-        _PERM_WORKSPACES_CREATE: {
-            "properties": {
-                "method": {"const": "POST"},
-                "path": {"const": _MINDS_WORKSPACES_PATH_PREFIX},
-            },
-            "required": ["method", "path"],
-        },
-        _PERM_WORKSPACES_DESTROY: {
-            "properties": {
-                "method": {"const": "POST"},
-                "path": {
-                    "type": "string",
-                    "pattern": rf"^{_MINDS_WORKSPACES_PATH_PREFIX}/{_MINDS_WORKSPACES_SEGMENT}/destroy$",
-                },
-            },
-            "required": ["method", "path"],
-        },
-        _PERM_WORKSPACES_LIFECYCLE: {
-            "properties": {
-                "method": {"const": "POST"},
-                "path": {
-                    "type": "string",
-                    "pattern": rf"^{_MINDS_WORKSPACES_PATH_PREFIX}/{_MINDS_WORKSPACES_SEGMENT}/(start|stop)$",
-                },
-            },
-            "required": ["method", "path"],
-        },
-        _PERM_WORKSPACES_BACKUPS_EXPORT: {
-            "properties": {
-                "method": {"const": "POST"},
-                "path": {
-                    "type": "string",
-                    "pattern": (
-                        rf"^{_MINDS_WORKSPACES_PATH_PREFIX}/{_MINDS_WORKSPACES_SEGMENT}"
-                        rf"/backups/{_MINDS_WORKSPACES_SEGMENT}/export$"
-                    ),
-                },
-            },
-            "required": ["method", "path"],
-        },
-        _PERM_WORKSPACES_SSH: {
-            "properties": {
-                "method": {"const": "POST"},
-                "path": {
-                    "type": "string",
-                    "pattern": rf"^{_MINDS_WORKSPACES_PATH_PREFIX}/{_MINDS_WORKSPACES_SEGMENT}/ssh$",
-                },
-            },
-            "required": ["method", "path"],
-        },
+        # The ``minds-workspaces`` scope gate + the non-targeted ``read`` /
+        # ``create`` verb schemas. The targeted verb schemas are created on first
+        # user grant (see ``workspace_permissions.grant_workspace_permissions``).
+        **WORKSPACE_BASELINE_SCHEMAS,
     },
 )
 
-# The scope + named-permission schema keys for the cross-workspace API, in the
-# order the dialog presents them. Used by the startup migration to detect a
-# permissions file that predates this scope.
-_MINDS_WORKSPACES_SCHEMA_KEYS: Final[tuple[str, ...]] = (
-    _SCOPE_MINDS_WORKSPACES,
-    _PERM_WORKSPACES_READ,
-    _PERM_WORKSPACES_CREATE,
-    _PERM_WORKSPACES_DESTROY,
-    _PERM_WORKSPACES_LIFECYCLE,
-    _PERM_WORKSPACES_BACKUPS_EXPORT,
-    _PERM_WORKSPACES_SSH,
-)
+# The cross-workspace API baseline schema keys (scope + non-targeted verbs).
+# Used by the startup migration to detect a permissions file that predates this
+# scope. The targeted verb schemas are intentionally excluded: they are managed
+# per-grant and must not be reset to a baseline on startup.
+_MINDS_WORKSPACES_SCHEMA_KEYS: Final[tuple[str, ...]] = WORKSPACE_BASELINE_SCHEMA_KEYS
 
 
 def ensure_minds_workspaces_schema_in_existing_host_files(plugin_data_dir: Path) -> int:

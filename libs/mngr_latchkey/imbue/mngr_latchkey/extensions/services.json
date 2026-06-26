@@ -1764,38 +1764,5 @@
         }
       ]
     }
-  ],
-  "minds-workspaces": [
-    {
-      "scope": "minds-workspaces",
-      "display_name": "Minds workspaces",
-      "description": "Manage other minds workspaces and their backups through the minds desktop client's cross-workspace API.",
-      "permissions": [
-        {
-          "name": "minds-workspaces-read",
-          "description": "List workspaces and read a workspace's details, version history, and backup list (including watching the progress of create/destroy operations)."
-        },
-        {
-          "name": "minds-workspaces-create",
-          "description": "Create a new peer workspace from any git URL, including cloud launches that consume compute and AI credits on your account."
-        },
-        {
-          "name": "minds-workspaces-destroy",
-          "description": "Permanently destroy a workspace and release its host (its backups are retained)."
-        },
-        {
-          "name": "minds-workspaces-lifecycle",
-          "description": "Start or stop a workspace's host."
-        },
-        {
-          "name": "minds-workspaces-backups-export",
-          "description": "Download a workspace's backup snapshot as a zip archive."
-        },
-        {
-          "name": "minds-workspaces-ssh",
-          "description": "Open temporary SSH access into a remote workspace (inject your public key so you can connect to it directly)."
-        }
-      ]
-    }
   ]
 }

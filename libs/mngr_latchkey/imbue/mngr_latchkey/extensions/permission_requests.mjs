@@ -8,7 +8,7 @@
  *       with the fields:
  *         - ``agent_id``   (string, required)
  *         - ``rationale``  (string, required)
- *         - ``type``       (one of "predefined" | "file-sharing")
+ *         - ``type``       (one of "predefined" | "file-sharing" | "workspace")
  *         - ``payload``    (object whose shape depends on ``type``)
  *       For ``type=="predefined"`` the payload is
  *         ``{scope: <string>, permissions: [<string>, ...]}``,
@@ -26,6 +26,16 @@
  *       contain any ``..`` segments (rejected as a path-traversal
  *       attempt). ``~user`` notation for another user's home is
  *       rejected.
+ *       For ``type=="workspace"`` the payload is
+ *         ``{permissions: [<verb>, ...], target_workspace_id: <id>|null}``;
+ *       each verb must be one of the ``minds-workspaces`` verb schema
+ *       names (read / create / destroy / lifecycle / backups-export /
+ *       ssh) and ``target_workspace_id`` (the workspace the targeted
+ *       verbs act on) is optional and, when present, must be a valid
+ *       agent id. The desktop client applies the grant itself (it
+ *       accumulates a per-target ``anyOf`` into the host's permissions
+ *       file), so unlike file-sharing this request type is not applied
+ *       via ``/approve``; the stored ``effect`` is informational only.
  *
  *       The extension also stores, alongside the user-supplied fields:
  *         - ``request_id`` (server-generated, UUIDv4 hex)
@@ -131,7 +141,33 @@ const VALID_AGENT_ID_PATTERN = /^agent-[0-9a-fA-F]{32}$/;
 // path via the Minds API proxy.
 const REQUEST_TYPE_PREDEFINED = 'predefined';
 const REQUEST_TYPE_FILE_SHARING = 'file-sharing';
-const VALID_REQUEST_TYPES = new Set([REQUEST_TYPE_PREDEFINED, REQUEST_TYPE_FILE_SHARING]);
+// ``workspace`` grants access to the minds cross-workspace management API
+// (``/api/v1/workspaces/...``) under the ``minds-workspaces`` detent scope. The
+// payload names the verbs the agent wants and, for verbs that act on a specific
+// workspace, the target workspace id. The desktop client owns applying the grant
+// (it accumulates a per-target ``anyOf`` into the host's permissions file); the
+// gateway only validates + stores the request here.
+const REQUEST_TYPE_WORKSPACE = 'workspace';
+const VALID_REQUEST_TYPES = new Set([
+  REQUEST_TYPE_PREDEFINED,
+  REQUEST_TYPE_FILE_SHARING,
+  REQUEST_TYPE_WORKSPACE,
+]);
+
+// The ``minds-workspaces`` scope and its verb permission-schema names. These
+// MUST stay in sync with the Python definitions in
+// ``imbue.mngr_latchkey.workspace_permissions`` (the gateway is pure Node with
+// no Python in the request path). A cross-language drift guard lives in
+// permission_requests_test.py.
+const MINDS_WORKSPACES_SCOPE = 'minds-workspaces';
+const VALID_WORKSPACE_VERBS = new Set([
+  'minds-workspaces-read',
+  'minds-workspaces-create',
+  'minds-workspaces-destroy',
+  'minds-workspaces-lifecycle',
+  'minds-workspaces-backups-export',
+  'minds-workspaces-ssh',
+]);
 
 // Detent's catch-all permission schema. The ``services.json``
 // catalog never lists it explicitly (every scope implicitly
@@ -641,6 +677,56 @@ function validateFileSharingPayload(payload) {
 }
 
 /**
+ * Validate the payload object for a ``workspace`` permission request.
+ * Returns the canonical payload shape
+ * (``{permissions, target_workspace_id}``).
+ *
+ * ``permissions`` is a non-empty array of ``minds-workspaces`` verb names
+ * (each validated against the hard-coded verb set). ``target_workspace_id``
+ * is the workspace the targeted verbs (destroy / lifecycle / backups-export /
+ * ssh) act on; it is optional -- absent or ``null`` denotes a request that
+ * only concerns the non-targeted verbs (read / create) or one whose
+ * all-vs-selected target the user will choose in the dialog. When present it
+ * must be a valid agent id.
+ */
+function validateWorkspacePayload(payload) {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+    throw new InvalidRequestBodyError("'payload' must be a JSON object for type 'workspace'.");
+  }
+  ensureStringArray('payload.', 'permissions', payload.permissions);
+  if (payload.permissions.length === 0) {
+    throw new InvalidRequestBodyError("payload.'permissions' must list at least one verb.");
+  }
+  const unknown = payload.permissions.filter((permission) => !VALID_WORKSPACE_VERBS.has(permission));
+  if (unknown.length > 0) {
+    throw new InvalidRequestBodyError(
+      `payload.'permissions' contains unknown minds-workspaces verb(s): ${unknown
+        .map((name) => `'${name}'`)
+        .join(', ')}.`,
+    );
+  }
+  // ``target_workspace_id`` is optional. Absent or an explicit JSON ``null``
+  // both normalize to ``null`` (no specific target).
+  let targetWorkspaceId = null;
+  if (payload.target_workspace_id !== undefined && payload.target_workspace_id !== null) {
+    if (typeof payload.target_workspace_id !== 'string' || payload.target_workspace_id.length === 0) {
+      throw new InvalidRequestBodyError(
+        "payload.'target_workspace_id' must be a non-empty string, null, or omitted.",
+      );
+    }
+    if (!VALID_AGENT_ID_PATTERN.test(payload.target_workspace_id)) {
+      throw new InvalidRequestBodyError(
+        `payload.'target_workspace_id' must be a valid workspace (agent) id; got `
+        + `'${payload.target_workspace_id}'.`,
+      );
+    }
+    targetWorkspaceId = payload.target_workspace_id;
+  }
+  ensureNoExtraneousFields('payload ', ['permissions', 'target_workspace_id'], payload);
+  return { permissions: [...payload.permissions], target_workspace_id: targetWorkspaceId };
+}
+
+/**
  * Parse the POST /permission-requests body. The body must contain
  * ``agent_id``, ``rationale``, ``type``, and ``payload``; the payload
  * shape depends on the request type. Any other top-level field
@@ -691,6 +777,9 @@ async function parsePermissionRequestBody(request) {
     case REQUEST_TYPE_FILE_SHARING:
       payload = validateFileSharingPayload(parsed.payload);
       break;
+    case REQUEST_TYPE_WORKSPACE:
+      payload = validateWorkspacePayload(parsed.payload);
+      break;
     default:
       // Unreachable because VALID_REQUEST_TYPES has already gated the
       // value; the default branch satisfies linting.
@@ -726,6 +815,8 @@ function computeEffect(type, payload) {
       };
     case REQUEST_TYPE_FILE_SHARING:
       return computeFileSharingEffect(payload.path, payload.access);
+    case REQUEST_TYPE_WORKSPACE:
+      return computeWorkspaceEffect(payload.permissions);
     default:
       // Already validated by parsePermissionRequestBody; this branch
       // exists only to satisfy the type system / linters.
@@ -875,6 +966,25 @@ function computeFileSharingEffect(filePath, access) {
     // and the merge logic in ``handleApproveRequest`` unions the new
     // permission name into that scope's existing permission list.
     rules: [{ [FILE_SHARING_SCOPE_NAME]: [permissionSchemaName] }],
+  };
+}
+
+/**
+ * Compute the (informational) ``effect`` for a ``workspace`` request: the
+ * verbs to grant under the ``minds-workspaces`` scope.
+ *
+ * Unlike ``file-sharing``, the desktop client does not apply this effect via
+ * ``POST /permission-requests/approve``. The per-target ``anyOf`` accumulation
+ * (and the user's all-vs-selected choice) is applied desktop-side by
+ * ``workspace_permissions.grant_workspace_permissions``, which writes the
+ * host's permissions file directly. The effect is carried for traceability and
+ * mirrors the predefined effect's rules-only shape; it deliberately emits no
+ * ``schemas`` (the scope schema lives in the agent baseline and the targeted
+ * verb schemas are created per-grant desktop-side).
+ */
+function computeWorkspaceEffect(permissions) {
+  return {
+    rules: [{ [MINDS_WORKSPACES_SCOPE]: [...permissions] }],
   };
 }
 

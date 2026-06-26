@@ -64,53 +64,15 @@ _NON_SERVICE_FILES: Final[frozenset[str]] = frozenset({"any.json"})
 # ``agent_setup.py``). Merged into the generated catalog so a regeneration
 # from detent does not drop them. Keyed by service name exactly as it appears
 # in ``services.json``.
-_MANUAL_SERVICE_ENTRIES: Final[Mapping[str, list[dict[str, object]]]] = {
-    "minds-workspaces": [
-        {
-            "scope": "minds-workspaces",
-            "display_name": "Minds workspaces",
-            "description": (
-                "Manage other minds workspaces and their backups through the minds desktop "
-                "client's cross-workspace API."
-            ),
-            "permissions": [
-                {
-                    "name": "minds-workspaces-read",
-                    "description": (
-                        "List workspaces and read a workspace's details, version history, and "
-                        "backup list (including watching the progress of create/destroy operations)."
-                    ),
-                },
-                {
-                    "name": "minds-workspaces-create",
-                    "description": (
-                        "Create a new peer workspace from any git URL, including cloud launches "
-                        "that consume compute and AI credits on your account."
-                    ),
-                },
-                {
-                    "name": "minds-workspaces-destroy",
-                    "description": "Permanently destroy a workspace and release its host (its backups are retained).",
-                },
-                {
-                    "name": "minds-workspaces-lifecycle",
-                    "description": "Start or stop a workspace's host.",
-                },
-                {
-                    "name": "minds-workspaces-backups-export",
-                    "description": "Download a workspace's backup snapshot as a zip archive.",
-                },
-                {
-                    "name": "minds-workspaces-ssh",
-                    "description": (
-                        "Open temporary SSH access into a remote workspace (inject your public "
-                        "key so you can connect to it directly)."
-                    ),
-                },
-            ],
-        }
-    ],
-}
+#
+# The cross-workspace ``minds-workspaces`` scope is intentionally NOT listed
+# here: it has its own dedicated permission-request type (``workspace``) with
+# per-target gating, rather than going through the service-catalog-backed
+# ``predefined`` flow. Its verb metadata lives in
+# ``imbue.mngr_latchkey.workspace_permissions`` instead, and keeping it out of
+# the catalog ensures the credential-sync path treats it as the internal scope
+# it is (no third-party credentials to ship).
+_MANUAL_SERVICE_ENTRIES: Final[Mapping[str, list[dict[str, object]]]] = {}
 
 # AWS is structurally ambiguous: every ``aws-*`` schema matches only on domain
 # and so looks like a scope, but detent treats only the top-level ``aws`` schema

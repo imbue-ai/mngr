@@ -34,6 +34,8 @@ from typing import Final
 import pytest
 
 from imbue.mngr.primitives import AgentId
+from imbue.mngr_latchkey.workspace_permissions import MINDS_WORKSPACES_SCOPE
+from imbue.mngr_latchkey.workspace_permissions import WORKSPACE_VERBS
 
 _NODE_BINARY: Final[str | None] = shutil.which("node")
 
@@ -582,6 +584,142 @@ def test_post_rejects_unknown_type(node_extension: tuple[str, Path, Path]) -> No
     )
     assert status == 400
     assert "type" in json.loads(body)["error"]
+
+
+# -- POST /permission-requests: workspace type --
+
+
+def test_post_creates_workspace_request_with_target_and_effect(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    base_url, latchkey_directory, permissions_config_path = node_extension
+    target_id = str(AgentId.generate())
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "needs to destroy a sibling workspace",
+            "type": "workspace",
+            "payload": {
+                "permissions": ["minds-workspaces-destroy"],
+                "target_workspace_id": target_id,
+            },
+        },
+    )
+    assert status == 201, body
+    parsed = json.loads(body)
+    assert parsed["request_type"] == "workspace"
+    assert parsed["payload"] == {
+        "permissions": ["minds-workspaces-destroy"],
+        "target_workspace_id": target_id,
+    }
+    assert parsed["target"] == str(permissions_config_path)
+    # The effect is rules-only (informational); the desktop client applies the
+    # per-target anyOf accumulation itself.
+    assert parsed["effect"] == {"rules": [{MINDS_WORKSPACES_SCOPE: ["minds-workspaces-destroy"]}]}
+    stored = next((latchkey_directory / "permission_requests" / "v2").iterdir())
+    assert json.loads(stored.read_text()) == parsed
+
+
+def test_post_creates_workspace_request_without_target(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "needs to create + list workspaces",
+            "type": "workspace",
+            "payload": {"permissions": ["minds-workspaces-read", "minds-workspaces-create"]},
+        },
+    )
+    assert status == 201, body
+    parsed = json.loads(body)
+    # An omitted target normalizes to null in the persisted payload.
+    assert parsed["payload"]["target_workspace_id"] is None
+    assert parsed["payload"]["permissions"] == ["minds-workspaces-read", "minds-workspaces-create"]
+
+
+def test_post_accepts_all_python_workspace_verbs(node_extension: tuple[str, Path, Path]) -> None:
+    # Cross-language drift guard: every verb the Python
+    # ``workspace_permissions`` source of truth defines must be accepted by the
+    # gateway's hard-coded ``VALID_WORKSPACE_VERBS`` set.
+    base_url, *_ = node_extension
+    python_verbs = [verb.permission for verb in WORKSPACE_VERBS]
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "all verbs",
+            "type": "workspace",
+            "payload": {"permissions": python_verbs},
+        },
+    )
+    assert status == 201, body
+
+
+def test_post_rejects_unknown_workspace_verb(node_extension: tuple[str, Path, Path]) -> None:
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "x",
+            "type": "workspace",
+            "payload": {"permissions": ["minds-workspaces-teleport"]},
+        },
+    )
+    assert status == 400
+    assert "permissions" in json.loads(body)["error"]
+
+
+def test_post_rejects_empty_workspace_permissions(node_extension: tuple[str, Path, Path]) -> None:
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "x",
+            "type": "workspace",
+            "payload": {"permissions": []},
+        },
+    )
+    assert status == 400
+    assert "permissions" in json.loads(body)["error"]
+
+
+def test_post_rejects_invalid_workspace_target_id(node_extension: tuple[str, Path, Path]) -> None:
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "x",
+            "type": "workspace",
+            "payload": {
+                "permissions": ["minds-workspaces-destroy"],
+                "target_workspace_id": "not-an-agent-id",
+            },
+        },
+    )
+    assert status == 400
+    assert "target_workspace_id" in json.loads(body)["error"]
+
+
+def test_post_rejects_extraneous_workspace_payload_field(node_extension: tuple[str, Path, Path]) -> None:
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "x",
+            "type": "workspace",
+            "payload": {"permissions": ["minds-workspaces-read"], "bonus": 1},
+        },
+    )
+    assert status == 400
+    assert "bonus" in json.loads(body)["error"]
 
 
 @pytest.mark.parametrize(

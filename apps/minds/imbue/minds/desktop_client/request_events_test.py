@@ -2,11 +2,13 @@ import json
 from pathlib import Path
 
 from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
+from imbue.minds.desktop_client.request_events import LatchkeyWorkspacePermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestStatus
 from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import append_response_event
 from imbue.minds.desktop_client.request_events import create_latchkey_predefined_permission_request_event
+from imbue.minds.desktop_client.request_events import create_latchkey_workspace_permission_request_event
 from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.minds.desktop_client.request_events import parse_request_event
@@ -16,6 +18,23 @@ from imbue.minds.desktop_client.request_events import write_request_event_to_fil
 def test_parse_invalid_json_returns_none() -> None:
     """Invalid JSON returns None instead of raising."""
     assert parse_request_event("not json") is None
+
+
+def test_parse_workspace_permission_request_round_trips() -> None:
+    """A serialized workspace request parses back into the typed event."""
+    event = create_latchkey_workspace_permission_request_event(
+        agent_id="agent-" + "0" * 32,
+        rationale="manage my sibling",
+        permissions=("minds-workspaces-destroy", "minds-workspaces-read"),
+        target_workspace_id="agent-" + "1" * 32,
+    )
+    line = json.dumps(event.model_dump(mode="json"))
+    parsed = parse_request_event(line)
+    assert isinstance(parsed, LatchkeyWorkspacePermissionRequestEvent)
+    assert parsed.request_type == str(RequestType.WORKSPACE_PERMISSION)
+    assert parsed.permissions == ("minds-workspaces-destroy", "minds-workspaces-read")
+    assert parsed.target_workspace_id == "agent-" + "1" * 32
+    assert parsed.rationale == "manage my sibling"
 
 
 def test_inbox_empty_by_default() -> None:

@@ -181,6 +181,52 @@ by an agent.
 `LATCHKEY_DIRECTORY` -- where credentials live -- stays shared across all
 agents on the same machine.
 
+## Cross-workspace management API permissions
+
+Minds exposes a cross-workspace management API (`/api/v1/workspaces/...`)
+that lets an agent in one workspace act on *other* workspaces -- listing,
+reading detail/version/backups, creating, destroying, starting/stopping,
+exporting backups, and establishing SSH access. It is reached through the
+same `minds-api-proxy` extension and gated by a single `minds-workspaces`
+detent scope with one named permission per verb (`minds-workspaces-read`,
+`-create`, `-destroy`, `-lifecycle`, `-backups-export`, `-ssh`). The scope
+gate plus the broad `read`/`create` schemas are materialized in every
+per-host permissions file at agent creation (and back-filled on `minds run`
+startup); nothing is pre-granted, so an agent's first cross-workspace call
+gets a 403 until the user approves.
+
+This surface has its own permission-request type, distinct from the
+`predefined` (service-catalog) and `file-sharing` types: an agent POSTs
+`type=workspace` to the gateway's `permission-requests` extension with the
+verbs it wants and -- for the verbs that act on a specific workspace -- the
+`target_workspace_id` it wants to act on. The desktop client surfaces a
+dialog with a checkbox per verb plus, when the request names a target
+workspace, an all-vs-selected choice.
+
+The verbs split on a **target axis**:
+
+* `read` and `create` are all-or-nothing: a grant applies to every
+  workspace (listing does not leak per-target data, and create takes no
+  target).
+* `destroy`, `lifecycle`, `backups-export`, and `ssh` are *target-scoped*.
+  Their permission schemas carry an `anyOf` of path patterns -- one entry
+  per allowed target workspace id (or a `[^/]+` wildcard entry for an
+  "all workspaces" grant). Each approval *accumulates* one more target
+  into that verb's `anyOf` (generalizing the per-agent `minds-api-proxy`
+  allowlist), so re-requesting a different target for the same verb adds
+  to the allowlist rather than replacing it. These targeted verb schemas
+  are not part of the baseline -- the first approved grant for a verb
+  creates its schema (with a non-empty `anyOf`), which keeps the
+  deny-by-default baseline free of an empty `anyOf`.
+
+The grant is applied to the *requesting* agent's per-host
+`latchkey_permissions.json` by the desktop client
+(`mngr_latchkey.workspace_permissions.grant_workspace_permissions`), which
+writes the rule + accumulated schemas directly and then drops the pending
+gateway record. Unlike `file-sharing`, the `workspace` request type is not
+applied via the gateway's `/approve` endpoint; the stored `effect` is
+informational only.
+
 ## Service catalog
 
 The catalog of latchkey services (display name + scope schema + the

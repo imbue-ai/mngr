@@ -42,6 +42,7 @@ class RequestType(UpperCaseStrEnum):
     PERMISSIONS = auto()
     LATCHKEY_PERMISSION = auto()
     FILE_SHARING_PERMISSION = auto()
+    WORKSPACE_PERMISSION = auto()
 
 
 class RequestStatus(UpperCaseStrEnum):
@@ -146,6 +147,45 @@ class LatchkeyFileSharingPermissionRequestEvent(RequestEvent):
     )
 
 
+class LatchkeyWorkspacePermissionRequestEvent(RequestEvent):
+    """A request for the user to grant the agent cross-workspace API access.
+
+    Delivered to the inbox when an agent submits a ``type=workspace``
+    permission request to the gateway. The agent declares which
+    ``minds-workspaces`` verbs it wants (e.g. ``minds-workspaces-destroy``)
+    and, for verbs that act on a specific workspace, the
+    ``target_workspace_id`` it wants to act on. The user picks the final
+    verb set in the dialog and chooses whether the targeted verbs apply to
+    the selected workspace only or to all workspaces; the desktop client
+    applies the grant by accumulating the approved target into each targeted
+    verb's per-host ``anyOf`` allowlist.
+    """
+
+    permissions: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "``minds-workspaces`` verb schema names the agent requested; the user may grant a "
+            "different subset in the dialog."
+        ),
+    )
+    target_workspace_id: str | None = Field(
+        default=None,
+        description=(
+            "Workspace (agent) id the targeted verbs act on, or ``None`` when the request "
+            "concerns only the non-targeted verbs (read / create)."
+        ),
+    )
+    rationale: str = Field(description="One-paragraph human-readable reason the agent needs this access.")
+    permissions_target_path: str | None = Field(
+        default=None,
+        description=(
+            "Absolute path of the permissions.json the agent's gateway JWT resolves to "
+            "(the streamed request's ``target`` field, i.e. the agent's opaque permissions "
+            "handle). ``None`` when the event did not originate from the gateway stream."
+        ),
+    )
+
+
 class RequestResponseEvent(EventEnvelope):
     """A response to a request, written by the desktop client."""
 
@@ -203,6 +243,28 @@ def create_latchkey_file_sharing_permission_request_event(
         is_user_requested=is_user_requested,
         path=path,
         access=access,
+        rationale=rationale,
+    )
+
+
+def create_latchkey_workspace_permission_request_event(
+    agent_id: str,
+    rationale: str,
+    permissions: tuple[str, ...] = (),
+    target_workspace_id: str | None = None,
+    is_user_requested: bool = False,
+) -> "LatchkeyWorkspacePermissionRequestEvent":
+    """Create a new workspace-permission request event with auto-generated metadata."""
+    return LatchkeyWorkspacePermissionRequestEvent(
+        timestamp=_now_iso(),
+        type=EventType("workspace_permission_request"),
+        event_id=_generate_event_id(),
+        source=EventSource(REQUESTS_EVENT_SOURCE_NAME),
+        agent_id=agent_id,
+        request_type=str(RequestType.WORKSPACE_PERMISSION),
+        is_user_requested=is_user_requested,
+        permissions=permissions,
+        target_workspace_id=target_workspace_id,
         rationale=rationale,
     )
 
@@ -321,6 +383,8 @@ def parse_request_event(line: str) -> RequestEvent | None:
             return LatchkeyPredefinedPermissionRequestEvent.model_validate(data)
         elif request_type == str(RequestType.FILE_SHARING_PERMISSION):
             return LatchkeyFileSharingPermissionRequestEvent.model_validate(data)
+        elif request_type == str(RequestType.WORKSPACE_PERMISSION):
+            return LatchkeyWorkspacePermissionRequestEvent.model_validate(data)
         else:
             return RequestEvent.model_validate(data)
     except (json.JSONDecodeError, ValueError, TypeError) as e:

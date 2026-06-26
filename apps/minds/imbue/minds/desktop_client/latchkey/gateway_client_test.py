@@ -15,6 +15,7 @@ from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingReques
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequestPayload
+from imbue.minds.desktop_client.latchkey.gateway_client import WorkspaceRequestPayload
 
 
 def _build_client(handler: Callable[[httpx.Request], httpx.Response]) -> LatchkeyGatewayClient:
@@ -123,6 +124,18 @@ def test_iter_permission_requests_parses_jsonl_stream() -> None:
             "target": "/tmp/permissions.json",
             "effect": {"rules": [{"latchkey-self": ["minds-file-server-cafef00d"]}]},
         },
+        {
+            "request_id": "ghi",
+            "agent_id": "a3",
+            "rationale": "manage sibling",
+            "request_type": "workspace",
+            "payload": {
+                "permissions": ["minds-workspaces-destroy"],
+                "target_workspace_id": "agent-" + "1" * 32,
+            },
+            "target": "/tmp/permissions.json",
+            "effect": {"rules": [{"minds-workspaces": ["minds-workspaces-destroy"]}]},
+        },
     ]
     body = "".join(json.dumps(item) + "\n" for item in requests_payload).encode("utf-8")
 
@@ -134,7 +147,7 @@ def test_iter_permission_requests_parses_jsonl_stream() -> None:
 
     client = _build_client(_handler)
     items = list(client.iter_permission_requests())
-    assert [item.request_id for item in items] == ["abc", "def"]
+    assert [item.request_id for item in items] == ["abc", "def", "ghi"]
     assert items[0].request_type == "predefined"
     predefined_payload = items[0].payload
     assert isinstance(predefined_payload, PredefinedRequestPayload)
@@ -145,6 +158,11 @@ def test_iter_permission_requests_parses_jsonl_stream() -> None:
     assert isinstance(file_sharing_payload, FileSharingRequestPayload)
     assert file_sharing_payload.path == "/home/user/file.txt"
     assert str(file_sharing_payload.access) == "READ"
+    assert items[2].request_type == "workspace"
+    workspace_payload = items[2].payload
+    assert isinstance(workspace_payload, WorkspaceRequestPayload)
+    assert workspace_payload.permissions == ("minds-workspaces-destroy",)
+    assert workspace_payload.target_workspace_id == "agent-" + "1" * 32
 
 
 def test_iter_permission_requests_skips_malformed_lines() -> None:

@@ -129,6 +129,27 @@ class FileSharingRequestPayload(FrozenModel):
     )
 
 
+class WorkspaceRequestPayload(FrozenModel):
+    """Payload for ``type == "workspace"`` permission requests.
+
+    Grants access to the minds cross-workspace management API under the
+    ``minds-workspaces`` detent scope. ``permissions`` are the verb schema
+    names the agent wants; ``target_workspace_id`` is the workspace the
+    targeted verbs (destroy / lifecycle / backups-export / ssh) act on, or
+    ``None`` when the request concerns only the non-targeted verbs
+    (read / create).
+    """
+
+    permissions: tuple[str, ...] = Field(
+        default=(),
+        description="``minds-workspaces`` verb schema names the agent is requesting.",
+    )
+    target_workspace_id: str | None = Field(
+        default=None,
+        description="Workspace (agent) id the targeted verbs act on, or ``None`` for non-targeted verbs.",
+    )
+
+
 class PermissionEffect(FrozenModel):
     """Pre-computed patch the gateway will splice into ``target`` when a request is approved.
 
@@ -176,7 +197,7 @@ class StreamedPermissionRequest(FrozenModel):
             "carried through for logging / round-tripping only."
         ),
     )
-    payload: PredefinedRequestPayload | FileSharingRequestPayload = Field(
+    payload: PredefinedRequestPayload | FileSharingRequestPayload | WorkspaceRequestPayload = Field(
         description="Type-specific payload; dispatch with ``isinstance``.",
     )
     target: str = Field(

@@ -40,8 +40,10 @@ from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayCl
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
+from imbue.minds.desktop_client.latchkey.gateway_client import WorkspaceRequestPayload
 from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
+from imbue.minds.desktop_client.request_events import LatchkeyWorkspacePermissionRequestEvent
 from imbue.minds.desktop_client.request_events import REQUESTS_EVENT_SOURCE_NAME
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestType
@@ -73,7 +75,10 @@ def streamed_request_to_event(streamed: StreamedPermissionRequest) -> RequestEve
     grant flow); :class:`FileSharingRequestPayload` becomes a
     :class:`LatchkeyFileSharingPermissionRequestEvent` (rendered as a single
     per-path yes/no dialog whose grant path goes through
-    ``POST /permission-requests/approve/<id>``).
+    ``POST /permission-requests/approve/<id>``);
+    :class:`WorkspaceRequestPayload` becomes a
+    :class:`LatchkeyWorkspacePermissionRequestEvent` (the cross-workspace
+    ``minds-workspaces`` verb + all-vs-selected target dialog).
     """
     payload = streamed.payload
     if isinstance(payload, PredefinedRequestPayload):
@@ -102,6 +107,20 @@ def streamed_request_to_event(streamed: StreamedPermissionRequest) -> RequestEve
             permissions_target_path=streamed.target,
             path=payload.path,
             access=str(payload.access),
+            rationale=streamed.rationale,
+        )
+    if isinstance(payload, WorkspaceRequestPayload):
+        return LatchkeyWorkspacePermissionRequestEvent(
+            timestamp=_now_iso(),
+            type=EventType("workspace_permission_request"),
+            event_id=EventId(streamed.request_id),
+            source=EventSource(REQUESTS_EVENT_SOURCE_NAME),
+            agent_id=streamed.agent_id,
+            request_type=str(RequestType.WORKSPACE_PERMISSION),
+            is_user_requested=False,
+            permissions_target_path=streamed.target,
+            permissions=payload.permissions,
+            target_workspace_id=payload.target_workspace_id,
             rationale=streamed.rationale,
         )
     assert_never(payload)

@@ -476,16 +476,22 @@ def test_ensure_minds_workspaces_schema_injects_scope_and_permissions(tmp_path: 
     assert ensure_minds_workspaces_schema_in_existing_host_files(plugin_data_dir) == 1
 
     schemas = json.loads(path.read_text())["schemas"]
+    # Only the scope gate + the non-targeted (broad) read/create verbs are part
+    # of the baseline. The targeted verb schemas (destroy/lifecycle/
+    # backups-export/ssh) are created per-grant, not by the migration.
     for key in (
         "minds-workspaces",
         "minds-workspaces-read",
         "minds-workspaces-create",
+    ):
+        assert key in schemas
+    for key in (
         "minds-workspaces-destroy",
         "minds-workspaces-lifecycle",
         "minds-workspaces-backups-export",
         "minds-workspaces-ssh",
     ):
-        assert key in schemas
+        assert key not in schemas
 
     # Idempotent: a second run rewrites nothing.
     assert ensure_minds_workspaces_schema_in_existing_host_files(plugin_data_dir) == 0
@@ -515,21 +521,3 @@ def test_minds_workspaces_permission_patterns_match_expected_requests(tmp_path: 
     # Create is the exact collection POST, not a sub-path.
     create_pattern = schemas["minds-workspaces-create"]["properties"]["path"]["const"]
     assert create_pattern == prefix
-
-    # Destroy / lifecycle / backups-export / ssh each pin their own sub-path.
-    destroy_pattern = schemas["minds-workspaces-destroy"]["properties"]["path"]["pattern"]
-    assert re.search(destroy_pattern, f"{prefix}/agent-123/destroy")
-    assert not re.search(destroy_pattern, f"{prefix}/agent-123/start")
-
-    lifecycle_pattern = schemas["minds-workspaces-lifecycle"]["properties"]["path"]["pattern"]
-    assert re.search(lifecycle_pattern, f"{prefix}/agent-123/start")
-    assert re.search(lifecycle_pattern, f"{prefix}/agent-123/stop")
-    assert not re.search(lifecycle_pattern, f"{prefix}/agent-123/destroy")
-
-    export_pattern = schemas["minds-workspaces-backups-export"]["properties"]["path"]["pattern"]
-    assert re.search(export_pattern, f"{prefix}/agent-123/backups/snap-1/export")
-    assert not re.search(export_pattern, f"{prefix}/agent-123/backups")
-
-    ssh_pattern = schemas["minds-workspaces-ssh"]["properties"]["path"]["pattern"]
-    assert re.search(ssh_pattern, f"{prefix}/agent-123/ssh")
-    assert not re.search(ssh_pattern, f"{prefix}/agent-123/sshhh")

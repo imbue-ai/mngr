@@ -61,6 +61,7 @@ from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayCl
 from imbue.minds.desktop_client.latchkey.handlers.file_sharing import FileSharingGrantHandler
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
+from imbue.minds.desktop_client.latchkey.handlers.workspace import WorkspacePermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
 from imbue.minds.desktop_client.latchkey_auto_register import LatchkeyAutoRegister
 from imbue.minds.desktop_client.minds_config import MindsConfig
@@ -340,6 +341,12 @@ def run(
         gateway_client=gateway_client,
         mngr_message_sender=mngr_message_sender,
     )
+    workspace_permission_handler = WorkspacePermissionGrantHandler(
+        data_dir=data_directory,
+        latchkey=latchkey,
+        gateway_client=gateway_client,
+        mngr_message_sender=mngr_message_sender,
+    )
     imbue_cloud_cli = ImbueCloudCli(
         parent_concurrency_group=root_concurrency_group,
         connector_url=client_env_config.connector_url,
@@ -478,7 +485,7 @@ def run(
         minds_config=minds_config,
         client_env_config=client_env_config,
         request_inbox=request_inbox,
-        request_event_handlers=(latchkey_permission_handler, file_sharing_handler),
+        request_event_handlers=(latchkey_permission_handler, file_sharing_handler, workspace_permission_handler),
         server_port=port,
         mngr_forward_port=mngr_forward_port,
         mngr_forward_preauth_cookie=preauth_cookie,
