@@ -102,13 +102,16 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cargo/bin/offload
-          key: cargo-offload-0.9.10-${{ runner.os }}
+          key: cargo-offload-affinity-p25-0e1f926-${{ runner.os }}
 
       - name: Install offload
+        # EXPERIMENT: unreleased test-affinity branch (imbue-ai/offload#235),
+        # pinned commit, unconditional --force (shares version 0.9.10 with the
+        # crates.io release so a version check would skip it).
         run: |
-          if ! command -v offload &> /dev/null || ! offload --version | grep -q '0.9.10'; then
-            cargo install offload@0.9.10 --force
-          fi
+          cargo install --git https://github.com/imbue-ai/offload \
+            --rev 0e1f9264100134bd8b67056d13716dffa536a77a --locked --force
+          offload --version
 
       - name: Restore offload test durations from previous run
         uses: actions/cache/restore@v5
