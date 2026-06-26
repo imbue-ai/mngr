@@ -17,11 +17,10 @@
 # 0.9.5 -> 0.9.6 in this PR is what enables this config to exist.
 
 [offload]
-# Tiny test suite to start (one sanity check). max_parallel scales up
-# as more @pytest.mark.minds_snapshot_resume tests get added.
+# Tiny test suite to start. max_parallel scales up as more
+# @pytest.mark.minds_snapshot_resume tests get added.
 max_parallel = 10
-test_timeout_secs = 600
-retry_count = 0
+test_timeout_secs = 900
 stream_output = true
 sandbox_project_root = "/code/mngr"
 
@@ -32,6 +31,18 @@ sandbox_project_root = "/code/mngr"
 
 [provider]
 type = "modal"
+# Resource request per sandbox. offload's Modal default is only 128 MiB,
+# which is fine for the trivial container-state checks but nowhere near
+# enough to RESUME the workspace: a resumed sandbox runs dockerd, starts
+# the FCT workspace container, AND its nested docker-state (docker-in-
+# docker) daemon. Without this the resume tests OOM and pytest is killed
+# before it writes junit, which surfaces only as offload "failed to
+# download junit.xml ... path does not exist". Match what
+# scripts/snapshot_minds_e2e_state.py used to PRODUCE the image (cpu=4,
+# memory=8GiB) so the resumed state has the same headroom it was built
+# with.
+cpu_cores = 4.0
+memory_gb = 8
 # vm_runtime must match what scripts/snapshot_minds_e2e_state.py used
 # when *producing* the image -- the resumed sandbox's Docker-in-sandbox
 # layer (/var/lib/docker) was written under a VM-runtime sandbox and
@@ -65,11 +76,31 @@ type = "pytest"
 command = "bash -c '[ -d /code/mngr ] && cd /code/mngr; exec uv run pytest \"$@\"' --"
 run_args = "--no-cov -p no:xdist"
 
+# Single group, no retries: a real failure should surface, not be masked
+# by a retry. The suite currently has no @pytest.mark.flaky test.
+#
+# NOTE on retries: offload-modal.toml splits into `all`
+# (`... and not flaky`, retry_count=0) and `flaky`
+# (`... and flaky`, retry_count=N) groups so retries apply ONLY to
+# flaky-marked tests. We deliberately do NOT replicate that split yet,
+# because offload runs `pytest --collect-only` per group and a group
+# that matches zero tests exits 5 ("no tests collected"), which offload
+# treats as a discovery failure and fails the whole run. With no flaky
+# snapshot test, a `flaky` group would always be empty and break CI.
+# When the first @pytest.mark.flaky snapshot test is added, switch to the
+# two-group split below (then the `flaky` group is non-empty and safe):
+#     [groups.all]
+#     retry_count = 0
+#     filters = "-m 'minds_snapshot_resume and not flaky'"
+#     [groups.flaky]
+#     retry_count = 4
+#     filters = "-m 'minds_snapshot_resume and flaky'"
 [groups.all]
-# Only tests carrying the snapshot-resume mark. Everything else is
-# scoped out of this run (and `minds_snapshot_resume` is itself scoped
-# out of the other offload configs, so a test with this mark is only
-# ever collected here).
+# Only tests carrying the snapshot-resume mark. Everything else is scoped
+# out of this run (and `minds_snapshot_resume` is itself scoped out of the
+# other offload configs, so a test with this mark is only ever collected
+# here).
+retry_count = 0
 filters = "-m 'minds_snapshot_resume'"
 
 [history]

@@ -149,6 +149,24 @@ LAUNCH_BACKEND_TIMEOUT = 120
 # Canned slack-mock body the agent should quote back.
 CANNED_BODY = "CI MOCK: greetings from the localhost slack mock."
 
+# Sending a chat message only auto-scrolls to the new row when the transcript
+# was already pinned to the bottom (minds-v0.3.4 behavior); a view left scrolled
+# up stays put -- e.g. after a goto()/reload() re-renders the chat. The
+# transcript also virtualizes off-screen rows, so a reply in an unmounted row
+# below the fold is absent from document.body.innerText. Scroll every
+# .app-content to its tail before reading the transcript so the tail rows mount.
+_SCROLL_CHAT_TO_TAIL_JS = (
+    "for (const el of document.querySelectorAll('.app-content')) { el.scrollTop = el.scrollHeight; }"
+)
+
+
+def _wait_for_chat_text_js(condition: str) -> str:
+    """Build a `wait_for_function` body that scrolls the (virtualized) transcript
+    to its tail each poll, then evaluates `condition` against the now-mounted
+    text. Use for any wait that reads chat-reply content."""
+    return f"() => {{ {_SCROLL_CHAT_TO_TAIL_JS} return {condition}; }}"
+
+
 SLACK_PROMPT = (
     "Please read the most recent message from any Slack channel using a "
     "read-only Slack tool. Don't post anything. Then tell me here in chat "
@@ -721,6 +739,8 @@ async def _create_workspace_and_first_message(
     phase_durations: dict[str, float] = {}
     done = False
     done_redirect_url = ""
+    navigated_to_workspace = False
+    chat_url_re = re.compile(r"agent-[a-f0-9]+\.localhost")
     while time.time() < deadline and not done:
         stat = await win.evaluate(
             """async (id) => {
@@ -748,6 +768,20 @@ async def _create_workspace_and_first_message(
                 logger.info("[{}] creation status: (none) -> {}", label, state)
             last_status = state
             phase_started_at = now
+            if not state and not chat_url_re.search(win.url):
+                # An empty status off the workspace origin is anomalous: the
+                # /status body had no "status" field -- a 403 "Not authenticated"
+                # or 404 "Unknown agent creation". (Empty status *on* the
+                # workspace URL is the normal auto-navigate-on-DONE case, handled
+                # below.) Log the raw response to tell the anomalies apart.
+                with contextlib.suppress(Exception):
+                    logger.warning(
+                        "[{}]   empty-status detail: http={} url={} body={!r}",
+                        label,
+                        stat.get("status"),
+                        win.url,
+                        (stat.get("body") or "")[:160],
+                    )
         if state == "DONE":
             phase_durations[state] = round(time.monotonic() - phase_started_at, 2)
             done_redirect_url = payload.get("redirect_url", "")
@@ -755,6 +789,16 @@ async def _create_workspace_and_first_message(
             break
         if state == "FAILED":
             raise E2EFailure(f"[{label}] creation FAILED: {payload.get('error', stat['body'])}")
+        # On DONE, creating.js auto-navigates the page to the workspace; the
+        # /status fetch then hits the workspace origin and returns HTML, so
+        # `state` reads empty. Landing on the workspace URL *is* success -- the
+        # page is already where the redirect below would send it -- so the poll
+        # must not keep waiting for a "DONE" it already missed.
+        if not state and chat_url_re.search(win.url):
+            logger.info("[{}] creation DONE (page auto-navigated to workspace {})", label, win.url)
+            done = True
+            navigated_to_workspace = True
+            break
         if (
             state == "CREATING_WORKSPACE"
             and not any(SCREENSHOT_DIR.glob(f"{snaps.creating_mid}.*"))
@@ -769,14 +813,18 @@ async def _create_workspace_and_first_message(
             tail = EVENTS_LOG.read_text(errors="ignore").splitlines()[-60:]
             logger.error("[{}] minds-events.jsonl tail:\n{}", label, "\n".join(tail))
         raise E2EFailure(f"[{label}] creation didn't reach DONE in {CREATE_TIMEOUT}s (last={last_status})")
-    if not done_redirect_url:
+    if navigated_to_workspace:
+        # The page already navigated to the workspace on its own; no goto needed.
+        logger.info("[{}] creation DONE; already on workspace {}", label, win.url)
+        target = win.url
+    elif not done_redirect_url:
         raise E2EFailure(
             f"[{label}] creation DONE without redirect_url; check the /api/create-agent/<id>/status contract"
         )
-    target = done_redirect_url if done_redirect_url.startswith("http") else origin + done_redirect_url
-    logger.info("[{}] creation DONE; navigating directly to {}", label, target)
-    await win.goto(target)
-    chat_url_re = re.compile(r"agent-[a-f0-9]+\.localhost")
+    else:
+        target = done_redirect_url if done_redirect_url.startswith("http") else origin + done_redirect_url
+        logger.info("[{}] creation DONE; navigating directly to {}", label, target)
+        await win.goto(target)
     chat_wait_seconds = 180
     chat_deadline = time.time() + chat_wait_seconds
     while time.time() < chat_deadline and not chat_url_re.search(win.url):
@@ -796,12 +844,12 @@ async def _create_workspace_and_first_message(
     await inp.press("Enter")
     with contextlib.suppress(Exception):
         await win.wait_for_function(
-            f"document.body.innerText.includes({FIRST_PROMPT!r})",
+            _wait_for_chat_text_js(f"document.body.innerText.includes({FIRST_PROMPT!r})"),
             timeout=10_000,
         )
     await snap_page(win, snaps.msg_sent)
     await win.wait_for_function(
-        f"(document.body.innerText.toLowerCase().match(/{FIRST_EXPECT}/g) || []).length >= 2",
+        _wait_for_chat_text_js(f"(document.body.innerText.toLowerCase().match(/{FIRST_EXPECT}/g) || []).length >= 2"),
         timeout=REPLY_TIMEOUT * 1000,
     )
     await asyncio.sleep(1)
@@ -840,12 +888,12 @@ async def _send_followup_and_verify(
     await inp.press("Enter")
     with contextlib.suppress(Exception):
         await win.wait_for_function(
-            f"document.body.innerText.includes({prompt!r})",
+            _wait_for_chat_text_js(f"document.body.innerText.includes({prompt!r})"),
             timeout=10_000,
         )
     await snap_page(win, snap_sent)
     await win.wait_for_function(
-        f"(document.body.innerText.toLowerCase().match(/{expect_token}/g) || []).length >= 2",
+        _wait_for_chat_text_js(f"(document.body.innerText.toLowerCase().match(/{expect_token}/g) || []).length >= 2"),
         timeout=REPLY_TIMEOUT * 1000,
     )
     await asyncio.sleep(1)
@@ -1008,6 +1056,19 @@ async def amain() -> int:
         await win.goto(origin + "/")
         await snap_page(win, "02-home-after-auth")
 
+        # The post-login "Help improve Minds" error-reporting consent screen
+        # (Consent.jinja, shown while error_reporting_consent_given is False --
+        # always here, since the runner's ~/.minds is wiped each run) sits on
+        # the home page until answered. Dismiss it once via Continue; the
+        # POST /consent + reload then proceeds home, so the create flow and the
+        # later both-tiles home assertion see the home page, not the consent.
+        with contextlib.suppress(Exception):
+            consent_btn = await win.wait_for_selector("#consent-continue", timeout=8_000)
+            if consent_btn is not None:
+                await consent_btn.click()
+                await win.wait_for_selector("#consent-continue", state="detached", timeout=15_000)
+                logger.info("dismissed error-reporting consent screen")
+
         # 4-6. Create agent via UI click and drive to first message. Mirrors
         # what a user does (Configure panel, launch_mode/ai_provider/api_key
         # fields, host_name fill, submit, poll until DONE, navigate to chat,
@@ -1051,6 +1112,8 @@ async def amain() -> int:
             logger.info("=== iter 15: reload W1 chat, verify history persists ===")
             await win.reload(wait_until="domcontentloaded")
             await asyncio.sleep(2)
+            with contextlib.suppress(Exception):
+                await win.evaluate(f"() => {{ {_SCROLL_CHAT_TO_TAIL_JS} }}")
             body_after_reload = await win.evaluate("document.body.innerText")
             pong_count = body_after_reload.lower().count(FIRST_EXPECT.lower())
             if pong_count < 2:
@@ -1193,6 +1256,9 @@ async def amain() -> int:
                     chat_now = await find_chat_window(ctx)
                     if chat_now is not None:
                         win = chat_now
+                    # Scroll the transcript to the live tail before reading it.
+                    with contextlib.suppress(Exception):
+                        await win.evaluate(f"() => {{ {_SCROLL_CHAT_TO_TAIL_JS} }}")
                     # Check for canned body in chat (PASS).
                     body = await win.evaluate("document.body.innerText")
                     if CANNED_BODY.lower() in body.lower() and approval_stage >= 3:

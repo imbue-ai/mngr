@@ -60,11 +60,13 @@ mv "$TARBALL.tmp" "$TARBALL"
 def build_test_agent_prompt(
     test_node_id: str,
     pytest_flags: tuple[str, ...],
+    e2e_run_name: str | None = None,
 ) -> str:
     """Build the prompt/initial message for a test-running agent.
 
-    Human-sanctioned: prompt is currently specific to mngr's E2E tutorial tests.
-    This should be made generic in the future, but is acceptable for now.
+    The prompt is generic: the test's docstring is the scope contract. When the
+    test is an mngr e2e test, ``e2e_run_name`` is the base run name that gates the
+    e2e-specific multi-run artifact-naming guidance (and is None otherwise).
     """
     flags_str = " ".join(pytest_flags)
     run_cmd = f"pytest {test_node_id}"
@@ -76,6 +78,7 @@ def build_test_agent_prompt(
         run_cmd=run_cmd,
         outcome_filename=TESTING_AGENT_OUTCOME_FILENAME,
         publish_snippet=_PUBLISH_OUTPUTS_SNIPPET,
+        e2e_run_name=e2e_run_name,
     )
 
 

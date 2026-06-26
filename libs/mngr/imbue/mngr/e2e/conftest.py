@@ -1,3 +1,4 @@
+import inspect
 import os
 import pty
 import shlex
@@ -7,7 +8,6 @@ import stat
 import subprocess
 import sys
 import tempfile
-import textwrap
 import threading
 from collections.abc import Generator
 from datetime import datetime
@@ -228,15 +228,6 @@ class E2eSession(Session):
         self._transcript.record(result, comment=comment)
         return result
 
-    def write_tutorial_block(self, block: str) -> None:
-        """Write the original tutorial script block to the test output directory.
-
-        The block text is dedented and stripped so that Python-indented
-        triple-quoted strings produce clean output without leading whitespace.
-        """
-        cleaned = textwrap.dedent(block).strip() + "\n"
-        (self.output_dir / "tutorial_block.txt").write_text(cleaned)
-
     def run_connecting_command(
         self,
         command: str,
@@ -324,7 +315,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--mngr-e2e-artifacts",
         choices=["yes", "on-failure", "no"],
         default="yes",
-        help="Save test artifacts (transcript, asciinema recordings, tutorial block). "
+        help="Save test artifacts (transcript, asciinema recordings, docstring). "
         "'yes' = always (default), 'on-failure' = only when test fails, 'no' = never",
     )
     group.addoption(
@@ -738,6 +729,11 @@ def e2e(
     if save_artifacts or keep_env:
         transcript_path = test_output_dir / "transcript.txt"
         transcript_path.write_text(session.transcript)
+        # Capture the test's docstring (the scope anchor: the verbatim tutorial
+        # block plus crystallized scope) so the detail renderer can show it.
+        docstring = inspect.cleandoc(request.node.function.__doc__ or "")
+        if docstring:
+            (test_output_dir / "docstring.txt").write_text(docstring + "\n")
     else:
         shutil.rmtree(test_output_dir, ignore_errors=True)
 
