@@ -13,13 +13,16 @@ from imbue.minds.utils.sentry.core import SentryDeployEnvironment
 from imbue.minds.utils.sentry.core import _MINDS_LOG_ATTACHMENT_GROUPS
 from imbue.minds.utils.sentry.core import _S3_ATTACHMENT_BUCKET_BY_ENVIRONMENT
 from imbue.minds.utils.sentry.core import _SENTRY_DSN_BY_ENVIRONMENT
+from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
 from imbue.minds.utils.sentry.core import resolve_latchkey_forward_sentry_env
 from imbue.minds.utils.sentry.core import resolve_sentry_environment
 from imbue.minds.utils.sentry.core import sentry_deploy_environment_from_minds_env_name
+from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
+from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_CONSENT_FILE_ENV_VAR
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_DSN_ENV_VAR
-from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_ENABLED_ENV_VAR
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_ENVIRONMENT_ENV_VAR
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_S3_BUCKET_ENV_VAR
+from imbue.mngr_latchkey.sentry import read_forward_sentry_consent
 from imbue.mngr_latchkey.sentry import resolve_forward_sentry_config
 
 
@@ -66,19 +69,20 @@ def test_resolve_sentry_environment_defaults_to_development_when_unactivated(mon
     assert resolve_sentry_environment() is SentryDeployEnvironment.DEVELOPMENT
 
 
-def test_resolve_latchkey_forward_sentry_env_round_trips_into_forward_config(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_latchkey_forward_sentry_env_round_trips_into_forward_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     # The env vars minds publishes for the daemon must be consumable by the daemon's own resolver,
-    # yielding minds' resolved DSN + environment + bucket. Verified end-to-end here so the two sides
-    # (publisher and consumer) cannot drift apart.
+    # yielding minds' resolved DSN + environment + bucket + consent-file path. Verified end-to-end here
+    # so the two sides (publisher and consumer) cannot drift apart. The bucket is always published (it
+    # is infrastructure, decoupled from consent); consent lives in the file.
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "minds-staging")
-    published_env = resolve_latchkey_forward_sentry_env(
-        is_error_reporting_enabled=True,
-        is_log_inclusion_enabled=True,
-    )
-    assert published_env[MNGR_LATCHKEY_SENTRY_ENABLED_ENV_VAR] == "1"
+    consent_path = latchkey_forward_sentry_consent_path(tmp_path)
+    published_env = resolve_latchkey_forward_sentry_env(consent_file_path=consent_path)
     assert published_env[MNGR_LATCHKEY_SENTRY_DSN_ENV_VAR] == SENTRY_DSN_STAGING
     assert published_env[MNGR_LATCHKEY_SENTRY_ENVIRONMENT_ENV_VAR] == SentryDeployEnvironment.STAGING.value
     assert published_env[MNGR_LATCHKEY_SENTRY_S3_BUCKET_ENV_VAR] == STAGING_UPLOADS_BUCKET
+    assert published_env[MNGR_LATCHKEY_SENTRY_CONSENT_FILE_ENV_VAR] == str(consent_path)
 
     for env_var_name, value in published_env.items():
         monkeypatch.setenv(env_var_name, value)
@@ -87,34 +91,25 @@ def test_resolve_latchkey_forward_sentry_env_round_trips_into_forward_config(mon
     assert forward_config.dsn == SENTRY_DSN_STAGING
     assert forward_config.environment_name == SentryDeployEnvironment.STAGING.value
     assert forward_config.s3_attachment_bucket == STAGING_UPLOADS_BUCKET
+    assert forward_config.consent_file_path == consent_path
 
 
-def test_resolve_latchkey_forward_sentry_env_omits_bucket_when_log_inclusion_off(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "minds-staging")
-    published_env = resolve_latchkey_forward_sentry_env(
-        is_error_reporting_enabled=True,
-        is_log_inclusion_enabled=False,
+def test_consent_file_round_trips_minds_settings_to_the_daemon_reader(tmp_path: Path) -> None:
+    # What minds writes (from its consent settings) must be exactly what the daemon's live reader sees,
+    # and rewriting it must change the next read -- this is the mechanism that propagates a grant/revoke
+    # to the running daemon without respawning it.
+    consent_path = latchkey_forward_sentry_consent_path(tmp_path)
+    write_latchkey_forward_sentry_consent(consent_path, is_error_reporting_enabled=True, is_log_inclusion_enabled=True)
+    granted = read_forward_sentry_consent(consent_path)
+    assert granted.report_unexpected_errors is True
+    assert granted.include_error_logs is True
+
+    write_latchkey_forward_sentry_consent(
+        consent_path, is_error_reporting_enabled=False, is_log_inclusion_enabled=False
     )
-    assert published_env[MNGR_LATCHKEY_SENTRY_S3_BUCKET_ENV_VAR] == ""
-    for env_var_name, value in published_env.items():
-        monkeypatch.setenv(env_var_name, value)
-    forward_config = resolve_forward_sentry_config()
-    assert forward_config is not None
-    assert forward_config.s3_attachment_bucket is None
-
-
-def test_resolve_latchkey_forward_sentry_env_disabled_when_consent_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "minds-staging")
-    published_env = resolve_latchkey_forward_sentry_env(
-        is_error_reporting_enabled=False,
-        is_log_inclusion_enabled=False,
-    )
-    assert published_env[MNGR_LATCHKEY_SENTRY_ENABLED_ENV_VAR] == "0"
-    for env_var_name, value in published_env.items():
-        monkeypatch.setenv(env_var_name, value)
-    assert resolve_forward_sentry_config() is None
+    revoked = read_forward_sentry_consent(consent_path)
+    assert revoked.report_unexpected_errors is False
+    assert revoked.include_error_logs is False
 
 
 def test_collect_external_attachments_classifies_flat_minds_log_layout(tmp_path: Path) -> None:

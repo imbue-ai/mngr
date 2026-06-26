@@ -20,15 +20,23 @@ _FORWARD_SENTRY_SERVICE_NAME = "mngr-latchkey-forward"
 # does not know about any particular Sentry project or environment: it receives concrete
 # config (the DSN, the environment label, the S3 bucket) as strings, which the embedder
 # (the minds desktop client) resolves from its own settings and publishes here.
-MNGR_LATCHKEY_SENTRY_ENABLED_ENV_VAR = "MNGR_LATCHKEY_SENTRY_ENABLED"
+#
+# These describe the (mostly static) *infrastructure*: which project to report to and how
+# the build is tagged. They are snapshotted into the daemon's environment when it is
+# spawned. The *consent* settings -- whether to actually report, and whether to attach
+# logs -- live instead in the consent file at ``MNGR_LATCHKEY_SENTRY_CONSENT_FILE`` so the
+# embedder can toggle them on a running daemon (the gates read the file live, per event).
 MNGR_LATCHKEY_SENTRY_DSN_ENV_VAR = "MNGR_LATCHKEY_SENTRY_DSN"
 MNGR_LATCHKEY_SENTRY_ENVIRONMENT_ENV_VAR = "MNGR_LATCHKEY_SENTRY_ENVIRONMENT"
-# The S3 bucket to upload log/traceback attachments to. Empty / unset means upload nothing.
+# The S3 bucket to upload log/traceback attachments to. Empty / unset means there is no bucket
+# (e.g. a development environment), so nothing is ever uploaded regardless of consent.
 MNGR_LATCHKEY_SENTRY_S3_BUCKET_ENV_VAR = "MNGR_LATCHKEY_SENTRY_S3_BUCKET"
 MNGR_LATCHKEY_SENTRY_RELEASE_ENV_VAR = "MNGR_LATCHKEY_SENTRY_RELEASE"
 MNGR_LATCHKEY_SENTRY_GIT_SHA_ENV_VAR = "MNGR_LATCHKEY_SENTRY_GIT_SHA"
-
-_SENTRY_ENABLED_TRUTHY_VALUES = ("1", "true", "yes")
+# Path to the JSON consent file the embedder writes (and rewrites whenever the user toggles
+# consent). The daemon reads it live on every event, so a grant/revoke takes effect without
+# respawning the daemon. Absent/unreadable file -> reporting and log inclusion both off.
+MNGR_LATCHKEY_SENTRY_CONSENT_FILE_ENV_VAR = "MNGR_LATCHKEY_SENTRY_CONSENT_FILE"
 
 # The ``mngr latchkey forward`` process writes its structured loguru log to
 # ``events.jsonl`` (rotated to ``events.jsonl.<ts>``) and its raw stdout/stderr
@@ -62,38 +70,68 @@ _FORWARD_LOG_ATTACHMENT_GROUPS = (
 )
 
 
-def _is_env_var_truthy(env_var_name: str) -> bool:
-    return os.environ.get(env_var_name, "").strip().lower() in _SENTRY_ENABLED_TRUTHY_VALUES
+class ForwardSentryConsent(FrozenModel):
+    """The user-consent toggles that live-gate the daemon's Sentry reporting.
+
+    Mirrors the minds backend's ``report_unexpected_errors`` / ``include_error_logs`` user settings.
+    The embedder writes this as JSON to the consent file; the daemon reads it live on every event.
+    Shared as the serialization contract between the embedder (writer) and the daemon (reader).
+    """
+
+    report_unexpected_errors: bool = Field(description="Whether automatic error reports may be sent.")
+    include_error_logs: bool = Field(description="Whether log/traceback attachments may be uploaded.")
+
+
+_NO_CONSENT = ForwardSentryConsent(report_unexpected_errors=False, include_error_logs=False)
+
+
+def read_forward_sentry_consent(consent_file_path: Path | None) -> ForwardSentryConsent:
+    """Read the live consent toggles, defaulting to all-off when absent/unreadable/malformed.
+
+    Robust by design: this runs inside Sentry's before_send / attachment hooks (once per event), so
+    it must never raise -- any failure is treated as "no consent" so the daemon errs toward not
+    reporting.
+    """
+    if consent_file_path is None:
+        return _NO_CONSENT
+    try:
+        raw = consent_file_path.read_text()
+    except OSError:
+        return _NO_CONSENT
+    try:
+        return ForwardSentryConsent.model_validate_json(raw)
+    except ValueError:
+        return _NO_CONSENT
 
 
 class ForwardSentryConfig(FrozenModel):
-    """Resolved Sentry configuration for the ``mngr latchkey forward`` daemon."""
+    """Resolved (mostly static) Sentry infrastructure config for the ``mngr latchkey forward`` daemon.
+
+    The live, user-toggleable consent is read separately from :attr:`consent_file_path`.
+    """
 
     dsn: str = Field(description="The Sentry DSN to report to (resolved and supplied by the embedder).")
     environment_name: str = Field(description="The Sentry environment label (e.g. ``production``/``staging``).")
     release_id: str = Field(description="Release version the running code was cut from (inherited from the embedder).")
     git_commit_sha: str = Field(description="Git SHA the running code was cut from (inherited from the embedder).")
     s3_attachment_bucket: str | None = Field(
-        description="S3 bucket for log/traceback attachments, or ``None`` to upload nothing."
+        description="S3 bucket for log/traceback attachments, or ``None`` when the environment has no bucket."
+    )
+    consent_file_path: Path | None = Field(
+        description="Path to the JSON consent file the daemon reads live, or ``None`` if the embedder published none."
     )
 
 
 def resolve_forward_sentry_config() -> ForwardSentryConfig | None:
-    """Resolve the daemon's Sentry config from its ``MNGR_LATCHKEY_SENTRY_*`` env vars.
+    """Resolve the daemon's Sentry infrastructure config from its ``MNGR_LATCHKEY_SENTRY_*`` env vars.
 
-    Returns ``None`` (and logs why) when reporting is disabled or the required inputs are missing.
-    Unlike minds, the daemon has no fallback for the DSN / environment / release id / git sha: they
-    are required to be supplied via env vars by the embedder (the minds desktop client), so a
-    misconfigured environment disables reporting rather than inventing placeholder values. The S3
-    bucket is optional -- an empty value means uploads are off.
+    Returns ``None`` (and logs why) when the daemon is not configured for Sentry -- i.e. when run
+    standalone rather than spawned by an embedder, so the required env vars are absent. Unlike minds,
+    the daemon has no fallback for the DSN / environment / release id / git sha: they are required to
+    be supplied via env vars, so a partial/misconfigured environment disables reporting rather than
+    inventing placeholder values. The S3 bucket and consent file are optional (an empty bucket means
+    no uploads; an absent consent file means no reporting until the embedder writes one).
     """
-    if not _is_env_var_truthy(MNGR_LATCHKEY_SENTRY_ENABLED_ENV_VAR):
-        logger.info(
-            "Sentry is disabled for mngr latchkey forward (set {}=1 to enable error reporting).",
-            MNGR_LATCHKEY_SENTRY_ENABLED_ENV_VAR,
-        )
-        return None
-
     dsn = os.environ.get(MNGR_LATCHKEY_SENTRY_DSN_ENV_VAR, "").strip()
     environment_name = os.environ.get(MNGR_LATCHKEY_SENTRY_ENVIRONMENT_ENV_VAR, "").strip()
     release_id = os.environ.get(MNGR_LATCHKEY_SENTRY_RELEASE_ENV_VAR, "").strip()
@@ -110,40 +148,39 @@ def resolve_forward_sentry_config() -> ForwardSentryConfig | None:
         if not value
     ]
     if missing_env_var_names:
-        logger.error(
-            "Sentry is enabled for mngr latchkey forward but required env vars are missing ({}); "
-            "skipping Sentry setup.",
+        logger.info(
+            "Sentry is not configured for mngr latchkey forward (missing {}); skipping Sentry setup.",
             ", ".join(missing_env_var_names),
         )
         return None
 
     bucket = os.environ.get(MNGR_LATCHKEY_SENTRY_S3_BUCKET_ENV_VAR, "").strip()
+    consent_file = os.environ.get(MNGR_LATCHKEY_SENTRY_CONSENT_FILE_ENV_VAR, "").strip()
     return ForwardSentryConfig(
         dsn=dsn,
         environment_name=environment_name,
         release_id=release_id,
         git_commit_sha=git_commit_sha,
         s3_attachment_bucket=bucket or None,
+        consent_file_path=Path(consent_file) if consent_file else None,
     )
 
 
 def setup_forward_sentry(log_folder: Path) -> None:
-    """Initialize Sentry for the ``mngr latchkey forward`` daemon if opted in via env vars.
+    """Initialize Sentry for the ``mngr latchkey forward`` daemon when configured via env vars.
 
-    No-op (beyond logging) when reporting is disabled or misconfigured. Must be
+    No-op (beyond logging) when the daemon is not configured for Sentry (e.g. run standalone). Must be
     called *after* the command's loguru sinks are set up so Sentry layers on top.
 
-    Unlike the minds backend -- whose error-reporting / log-inclusion gates are read
-    live from a user setting that can be toggled at runtime -- the detached daemon
-    has no live setting to consult: its env vars are a snapshot taken when the
-    minds desktop client (re)spawned it. So both gates are constant for the
-    process: error reporting is on whenever Sentry was set up at all, and log
-    inclusion follows the snapshotted bucket (present -> on).
+    Sentry always initializes when configured; what it actually *sends* is gated live by the consent
+    file the embedder maintains, exactly mirroring how the minds backend gates its own Sentry on live
+    user settings. So a grant/revoke by the user reaches this detached daemon on the next event,
+    without respawning it. With no consent file (or an unreadable one), both gates default to off.
     """
     config = resolve_forward_sentry_config()
     if config is None:
         return
-    is_log_inclusion_enabled = config.s3_attachment_bucket is not None
+    consent_file_path = config.consent_file_path
     setup_sentry(
         dsn=config.dsn,
         environment_name=config.environment_name,
@@ -155,7 +192,7 @@ def setup_forward_sentry(log_folder: Path) -> None:
         # The daemon is not a web app: it needs no Flask (or other) integration
         # beyond Sentry's default integrations.
         integrations=[],
-        is_error_reporting_enabled=lambda: True,
-        is_log_inclusion_enabled=lambda: is_log_inclusion_enabled,
+        is_error_reporting_enabled=lambda: read_forward_sentry_consent(consent_file_path).report_unexpected_errors,
+        is_log_inclusion_enabled=lambda: read_forward_sentry_consent(consent_file_path).include_error_logs,
         s3_attachment_bucket=config.s3_attachment_bucket,
     )

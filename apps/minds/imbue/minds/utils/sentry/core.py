@@ -16,8 +16,9 @@ from imbue.minds.bootstrap import is_minds_root_name_set_to_active_env
 from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.build_info import resolve_git_sha
 from imbue.minds.build_info import resolve_release_id
+from imbue.mngr_latchkey.sentry import ForwardSentryConsent
+from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_CONSENT_FILE_ENV_VAR
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_DSN_ENV_VAR
-from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_ENABLED_ENV_VAR
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_ENVIRONMENT_ENV_VAR
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_GIT_SHA_ENV_VAR
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_RELEASE_ENV_VAR
@@ -135,31 +136,56 @@ def _s3_attachment_bucket_for_environment(environment: SentryDeployEnvironment) 
     return _S3_ATTACHMENT_BUCKET_BY_ENVIRONMENT[environment]
 
 
-def resolve_latchkey_forward_sentry_env(
+def latchkey_forward_sentry_consent_path(data_dir: Path) -> Path:
+    """Path of the JSON consent file minds maintains for the detached ``mngr latchkey forward`` daemon.
+
+    The daemon reads this file live (per event) to gate what it sends, so minds rewrites it whenever
+    the user changes their error-reporting consent -- letting a grant/revoke reach the running daemon
+    without respawning it.
+    """
+    return data_dir / "latchkey_forward_sentry_consent.json"
+
+
+def write_latchkey_forward_sentry_consent(
+    consent_file_path: Path,
     is_error_reporting_enabled: bool,
     is_log_inclusion_enabled: bool,
-) -> dict[str, str]:
+) -> None:
+    """Atomically write the daemon's live consent file from minds' current consent settings.
+
+    Called at startup and on every consent change so the detached daemon's live gates reflect the
+    user's ``report_unexpected_errors`` / ``include_error_logs`` choices promptly.
+    """
+    consent = ForwardSentryConsent(
+        report_unexpected_errors=is_error_reporting_enabled,
+        include_error_logs=is_log_inclusion_enabled,
+    )
+    consent_file_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = consent_file_path.with_suffix(".json.tmp")
+    tmp_path.write_text(consent.model_dump_json())
+    tmp_path.rename(consent_file_path)
+
+
+def resolve_latchkey_forward_sentry_env(consent_file_path: Path) -> dict[str, str]:
     """Env vars to publish into the detached ``mngr latchkey forward`` supervisor.
 
-    The daemon receives concrete Sentry config (the DSN, environment name, and S3 bucket) that minds
-    resolves from its own (minds-owned) environment model, so the daemon needs no knowledge of minds'
-    Sentry projects/environments -- it just reads strings from its ``MNGR_LATCHKEY_SENTRY_*`` vars. It
-    inherits minds' user-consent settings: ``is_error_reporting_enabled`` (``report_unexpected_errors``)
-    and ``is_log_inclusion_enabled`` (``include_error_logs``); when log inclusion is off, no bucket is
-    published so the daemon uploads nothing. The release id / git sha are minds' (the daemon requires
-    them via env, having no fallback of its own). Because the daemon is detached, these are a snapshot
-    taken when the supervisor is (re)spawned; a mid-session consent toggle reaches it on the next
-    minds restart.
+    The daemon receives concrete Sentry *infrastructure* config (the DSN, environment name, and S3
+    bucket) that minds resolves from its own (minds-owned) environment model, plus the path of the
+    live consent file. The daemon needs no knowledge of minds' Sentry projects/environments -- it just
+    reads strings from its ``MNGR_LATCHKEY_SENTRY_*`` vars. The infrastructure is a snapshot taken when
+    the supervisor is (re)spawned (it rarely changes); the user-toggleable consent is *not* snapshotted
+    here -- it lives in the consent file, which minds rewrites on every change so a grant/revoke reaches
+    the running daemon live.
     """
     environment = resolve_sentry_environment()
-    bucket = _s3_attachment_bucket_for_environment(environment) if is_log_inclusion_enabled else None
+    bucket = _s3_attachment_bucket_for_environment(environment)
     return {
-        MNGR_LATCHKEY_SENTRY_ENABLED_ENV_VAR: "1" if is_error_reporting_enabled else "0",
         MNGR_LATCHKEY_SENTRY_DSN_ENV_VAR: _SENTRY_DSN_BY_ENVIRONMENT[environment],
         MNGR_LATCHKEY_SENTRY_ENVIRONMENT_ENV_VAR: environment.value,
         MNGR_LATCHKEY_SENTRY_S3_BUCKET_ENV_VAR: bucket or "",
         MNGR_LATCHKEY_SENTRY_RELEASE_ENV_VAR: resolve_release_id(),
         MNGR_LATCHKEY_SENTRY_GIT_SHA_ENV_VAR: resolve_git_sha(),
+        MNGR_LATCHKEY_SENTRY_CONSENT_FILE_ENV_VAR: str(consent_file_path),
     }
 
 

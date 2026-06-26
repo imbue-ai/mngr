@@ -81,9 +81,11 @@ from imbue.minds.primitives import OutputFormat
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.output import emit_event
+from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
 from imbue.minds.utils.sentry.core import resolve_latchkey_forward_sentry_env
 from imbue.minds.utils.sentry.core import resolve_sentry_environment
 from imbue.minds.utils.sentry.core import setup_sentry
+from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
@@ -272,13 +274,23 @@ def run(
         extra_env={
             MINDS_API_PROXY_URL_ENV_VAR: f"http://127.0.0.1:{port}",
             MINDS_API_PROXY_KEY_ENV_VAR: minds_api_key,
-            # Publish minds' Sentry consent settings so the detached daemon inherits
-            # them (snapshot at spawn) while reading only its own MNGR_LATCHKEY_* vars.
+            # Publish the daemon's (mostly static) Sentry infrastructure config + the path of the
+            # live consent file, while reading only its own MNGR_LATCHKEY_* vars. The toggleable
+            # consent lives in the file (written just below and on every change), not in the env,
+            # so a grant/revoke reaches the running daemon live.
             **resolve_latchkey_forward_sentry_env(
-                is_error_reporting_enabled=minds_config.get_report_unexpected_errors(),
-                is_log_inclusion_enabled=minds_config.get_include_error_logs(),
+                consent_file_path=latchkey_forward_sentry_consent_path(data_directory)
             ),
         },
+    )
+
+    # Seed the daemon's live consent file from minds' current consent before it is (re)spawned, so the
+    # daemon's gates have a value to read immediately. It is rewritten whenever the user toggles
+    # consent (see the error-reporting endpoints), which is what propagates a change to the daemon.
+    write_latchkey_forward_sentry_consent(
+        latchkey_forward_sentry_consent_path(data_directory),
+        is_error_reporting_enabled=minds_config.get_report_unexpected_errors(),
+        is_log_inclusion_enabled=minds_config.get_include_error_logs(),
     )
 
     # Background thread: supervisor restart must complete before the

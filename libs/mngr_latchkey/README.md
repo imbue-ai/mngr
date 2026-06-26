@@ -99,15 +99,16 @@ CLI flag > env var > settings.toml > built-in default.
 
 ## Error reporting (Sentry)
 
-`mngr latchkey forward` can report errors to Sentry. It is **off by default**
-and configured entirely via `MNGR_LATCHKEY_SENTRY_*` environment variables (the
+`mngr latchkey forward` can report errors to Sentry. It is **off by default** and
+configured entirely via `MNGR_LATCHKEY_SENTRY_*` environment variables (the
 `MNGR_LATCHKEY_` prefix distinguishes `mngr latchkey` from the upstream core
-`latchkey` project). The supervisor itself owns no Sentry project / environment
-definitions: it receives concrete values (a DSN, an environment label, an S3
-bucket) as strings, which the embedder resolves and passes in:
+`latchkey` project). The supervisor owns no Sentry project / environment
+definitions: it receives concrete values as strings, which the embedder resolves
+and passes in.
 
-- `MNGR_LATCHKEY_SENTRY_ENABLED` -- set truthy (`1`/`true`/`yes`) to turn error
-  reporting on.
+The **infrastructure** (which project, how the build is tagged) is snapshotted
+into the daemon's environment when it is spawned:
+
 - `MNGR_LATCHKEY_SENTRY_DSN` -- the Sentry DSN to report to.
 - `MNGR_LATCHKEY_SENTRY_ENVIRONMENT` -- the Sentry environment label (e.g.
   `production`, `staging`, `development`).
@@ -115,18 +116,28 @@ bucket) as strings, which the embedder resolves and passes in:
   version and git SHA events are tagged with.
 - `MNGR_LATCHKEY_SENTRY_S3_BUCKET` -- the S3 bucket to upload the supervisor's
   logs (`events.jsonl`, rotated copies, `latchkey_forward.log`) and a captured
-  traceback to on each error. Empty / unset means upload nothing.
+  traceback to. Empty / unset means there is no bucket, so nothing is uploaded.
 
-`DSN`, `ENVIRONMENT`, `RELEASE`, and `GIT_SHA` are **required** when reporting is
-enabled: the supervisor has no fallback of its own, so if any is missing Sentry
-setup is skipped with a warning rather than crashing the daemon.
+Sentry initializes whenever `DSN`, `ENVIRONMENT`, `RELEASE`, and `GIT_SHA` are all
+present (run standalone without them, it simply does nothing). They are required
+together: the supervisor has no fallback of its own.
+
+The **consent** -- whether to actually send reports, and whether to attach logs
+-- is read live, not snapshotted, so the embedder can toggle it on a running
+daemon without respawning it:
+
+- `MNGR_LATCHKEY_SENTRY_CONSENT_FILE` -- path to a JSON file
+  (`{"report_unexpected_errors": bool, "include_error_logs": bool}`) that the
+  embedder writes and rewrites whenever the user changes their consent. The
+  daemon reads it on every event, so a grant/revoke takes effect immediately. An
+  absent/unreadable file means both are off.
 
 Events are tagged with the `mngr-latchkey-forward` service name so they are
 distinguishable from other Imbue Python processes that report to the same
-projects. When the minds desktop client spawns the supervisor it sets these
-variables automatically -- resolving the DSN / environment / bucket from its own
-Sentry settings -- so the daemon inherits whether reporting (and log uploads)
-are enabled.
+projects. When the minds desktop client spawns the supervisor it sets all of
+these automatically -- resolving the DSN / environment / bucket from its own
+Sentry settings and maintaining the consent file from the user's error-reporting
+settings.
 
 ## Permissions config
 
