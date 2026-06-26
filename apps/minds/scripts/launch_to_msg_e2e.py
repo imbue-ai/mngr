@@ -1038,6 +1038,19 @@ async def amain() -> int:
         await win.goto(origin + "/")
         await snap_page(win, "02-home-after-auth")
 
+        # The post-login "Help improve Minds" error-reporting consent screen
+        # (Consent.jinja, shown while error_reporting_consent_given is False --
+        # always here, since the runner's ~/.minds is wiped each run) sits on
+        # the home page until answered. Dismiss it once via Continue; the
+        # POST /consent + reload then proceeds home, so the create flow and the
+        # later both-tiles home assertion see the home page, not the consent.
+        with contextlib.suppress(Exception):
+            consent_btn = await win.wait_for_selector("#consent-continue", timeout=8_000)
+            if consent_btn is not None:
+                await consent_btn.click()
+                await win.wait_for_selector("#consent-continue", state="detached", timeout=15_000)
+                logger.info("dismissed error-reporting consent screen")
+
         # 4-6. Create agent via UI click and drive to first message. Mirrors
         # what a user does (Configure panel, launch_mode/ai_provider/api_key
         # fields, host_name fill, submit, poll until DONE, navigate to chat,

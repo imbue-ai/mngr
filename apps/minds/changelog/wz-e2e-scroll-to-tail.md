@@ -7,3 +7,5 @@ CI: hardened the `launch-to-msg` end-to-end test against several behaviors intro
 - Scroll the chat transcript to the live tail before checking for the agent's reply (the chat virtualizes off-screen rows, so a reply rendered below the fold was absent from the DOM the test read).
 
 - Made the self-hosted mac-runner reset (`mac-runner-reset.sh`) best-effort: dropped `set -e` so a single failing cleanup step (e.g. a `df`/`find` pipe) can no longer abort the script and skip the remaining Lima-VM / disk cleanup (which the workflow's `|| true` would silently mask). The optional app-install block now fails loud on its own so a run never proceeds against a stale app.
+
+- Dismiss the new post-login "Help improve Minds" error-reporting consent screen (`Consent.jinja`) before creating workspaces, so the home-page "both tiles render" assertion sees the home page rather than the consent screen.
