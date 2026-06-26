@@ -37,6 +37,19 @@ window.addEventListener('message', (event) => {
     ipcRenderer.send('open-request-modal', requestId);
     return;
   }
+  // Error pages (e.g. the workspace-recovery page) ask the shell to open the
+  // get-help / report-a-bug modal. ``agentId`` is optional -- when present it
+  // scopes the report to that workspace; it is validated to the server-issued
+  // shape (or accepted as empty) so a foreign page can't smuggle path/query
+  // characters into the help URL the main process builds.
+  if (data.type === 'minds:open-help') {
+    const agentId = data.agentId;
+    if (agentId !== undefined && agentId !== '' && (typeof agentId !== 'string' || !AGENT_ID_PATTERN.test(agentId))) {
+      return;
+    }
+    ipcRenderer.send('open-help', typeof agentId === 'string' ? agentId : '');
+    return;
+  }
   // Create-screen sign-in: open the shared modal overlay loaded with the
   // sign-in page (so it covers the whole window, including the title bar).
   // No payload -- the main process builds the fixed `/auth/signin-modal` URL.

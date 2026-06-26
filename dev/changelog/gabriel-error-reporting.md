@@ -1,0 +1,1 @@
+Add the blueprint planning document for the minds error-reporting & "get help" work (`blueprint/minds-error-reporting-help/`), which scopes the full four-phase design (consent + settings, report-a-bug + API, in-workspace agent help, out-of-workspace agent help). Phases 1-2 are implemented in this PR; phases 3-4 will follow as stacked PRs.

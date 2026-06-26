@@ -1,0 +1,222 @@
+{#def include_logs_setting=false, workspace_agent_id="" #}
+{#
+  Get-help modal page. Loaded into the shared modal overlay view in Electron (and
+  into the content frame as a fallback in browser mode), so the body is transparent
+  and a dim backdrop reveals what's behind it -- matching the inbox modal.
+
+  Two options are offered: "have an agent help" (disabled for now) and "report a bug
+  to Imbue" (the active path). Submitting POSTs the description plus the chosen
+  diagnostics to /help/report, which collects state and sends a manually-tagged
+  Sentry report; the response carries the Sentry ``event_id`` (or null when Sentry is
+  inactive), shown in the confirmation so the user can quote it. ``include_logs_setting``
+  is the persistent include-logs preference: when on, logs are always attached and the
+  one-off checkbox is hidden. ``workspace_agent_id`` scopes the optional workspace
+  details to the workspace the help flow was opened from.
+
+  The diagnostics checkboxes are shown at the top level (not under a disclosure) and
+  are "sticky": their checked state persists in localStorage across reports.
+#}
+{% set _scripts %}
+<script>
+  (function () {
+    var WORKSPACE_AGENT_ID = {{ workspace_agent_id | tojson }};
+    var INCLUDE_LOGS_SETTING = {{ 'true' if include_logs_setting else 'false' }};
+
+    // Sticky checkbox state: persist each box's checked value across reports so a user
+    // who files several reports does not have to re-tick the same diagnostics each time.
+    // Keyed by element id; the description text is intentionally NOT persisted.
+    var STICKY_PREFIX = "minds.help.";
+    var STICKY_IDS = ["help-include-logs", "help-app-diagnostics", "help-workspace-details", "help-remote-access"];
+
+    function restoreSticky(box) {
+      var stored = window.localStorage.getItem(STICKY_PREFIX + box.id);
+      if (stored !== null) box.checked = stored === "true";
+    }
+    function persistSticky(box) {
+      try {
+        window.localStorage.setItem(STICKY_PREFIX + box.id, box.checked ? "true" : "false");
+      } catch (e) {
+        /* ignore: a full/blocked localStorage just means the value isn't sticky */
+      }
+    }
+    STICKY_IDS.forEach(function (id) {
+      var box = document.getElementById(id);
+      if (!box) return;  // not rendered (e.g. include-logs hidden, or no workspace)
+      try { restoreSticky(box); } catch (e) { /* ignore unreadable localStorage */ }
+      box.addEventListener("change", function () { persistSticky(box); });
+    });
+
+    function closeHelp() {
+      if (window.minds && window.minds.closeModal) window.minds.closeModal();
+      else window.history.back();
+    }
+    window.onHelpBackdropClick = function (event) {
+      if (event.target && event.target.id === "help-backdrop") closeHelp();
+    };
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") closeHelp();
+    });
+    document.getElementById("help-close-btn").addEventListener("click", closeHelp);
+
+    var status = document.getElementById("help-status");
+    var submit = document.getElementById("help-submit");
+
+    submit.addEventListener("click", function () {
+      var description = document.getElementById("help-description").value.trim();
+      if (!description) {
+        status.textContent = "Please describe the problem first.";
+        status.className = "type-helper text-danger mt-2";
+        return;
+      }
+      var logsBox = document.getElementById("help-include-logs");
+      var workspaceBox = document.getElementById("help-workspace-details");
+      var payload = {
+        description: description,
+        include_logs: INCLUDE_LOGS_SETTING || (logsBox ? logsBox.checked : false),
+        include_app_diagnostics: document.getElementById("help-app-diagnostics").checked,
+        include_workspace_details: workspaceBox ? workspaceBox.checked : false,
+        remote_access: document.getElementById("help-remote-access").checked,
+        workspace_agent_id: WORKSPACE_AGENT_ID,
+      };
+      submit.disabled = true;
+      status.textContent = "Sending...";
+      status.className = "type-helper text-tertiary mt-2";
+      fetch("/help/report", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }).then(function (resp) {
+        return resp.json().then(function (data) { return { ok: resp.ok, data: data }; });
+      }).then(function (result) {
+        if (result.ok) {
+          showSent(result.data && result.data.event_id);
+        } else {
+          submit.disabled = false;
+          status.textContent = (result.data && result.data.error) || "Could not send the report.";
+          status.className = "type-helper text-danger mt-2";
+        }
+      }).catch(function () {
+        submit.disabled = false;
+        status.textContent = "Network error sending the report.";
+        status.className = "type-helper text-danger mt-2";
+      });
+    });
+
+    // Reveal the confirmation. When Sentry returned an event id, show it with a copy
+    // button so the user can quote it when following up; otherwise hide that row (the
+    // report was collected but Sentry was inactive, e.g. in dev).
+    function showSent(eventId) {
+      document.getElementById("help-form").classList.add("hidden");
+      document.getElementById("help-sent").classList.remove("hidden");
+      var idRow = document.getElementById("help-event-id-row");
+      var idValue = document.getElementById("help-event-id");
+      if (eventId) {
+        idValue.textContent = eventId;
+        idRow.classList.remove("hidden");
+      } else {
+        idRow.classList.add("hidden");
+      }
+    }
+
+    var copyBtn = document.getElementById("help-copy-id-btn");
+    copyBtn.addEventListener("click", function () {
+      var id = document.getElementById("help-event-id").textContent;
+      try {
+        if (navigator.clipboard) navigator.clipboard.writeText(id);
+        copyBtn.textContent = "Copied";
+        setTimeout(function () { copyBtn.textContent = "Copy"; }, 1500);
+      } catch (e) {
+        /* ignore */
+      }
+    });
+
+    document.getElementById("help-done-btn").addEventListener("click", closeHelp);
+  })();
+</script>
+{% endset %}
+<Base title="Get help"
+      body_class="bg-transparent text-primary font-sans antialiased"
+      scripts={{ _scripts }}>
+  <div id="help-backdrop"
+       class="fixed inset-0 bg-surface-overlay flex items-center justify-center p-4"
+       onclick="onHelpBackdropClick(event)">
+    <div id="help-dialog"
+         class="relative w-full max-w-md max-h-[90vh] overflow-y-auto bg-surface-primary rounded-lg border border-default shadow-overlay">
+      <div class="flex items-center justify-between px-4 h-[44px] border-b border-default">
+        <h1 class="type-section text-primary">Get help</h1>
+        <button type="button" aria-label="Close" id="help-close-btn"
+                class="inline-flex items-center justify-center w-6 h-6 rounded-md text-tertiary hover:text-primary hover:bg-fill-hover cursor-pointer">
+          <Icon16 name="close" />
+        </button>
+      </div>
+
+      <div id="help-form" class="p-4">
+        <p class="type-body text-primary mb-4">Seems like you're running into a problem &mdash; we can help.</p>
+
+        <div class="flex flex-col gap-2 mb-4">
+          <label class="flex items-start gap-3 cursor-not-allowed opacity-50">
+            <input type="radio" name="help-mode" value="agent" class="mt-1 shrink-0" disabled>
+            <span>
+              <span class="type-body text-primary font-semibold">Have an agent help fix the problem</span>
+              <span class="block type-helper text-tertiary">Coming soon.</span>
+            </span>
+          </label>
+          <label class="flex items-start gap-3 cursor-pointer">
+            <input type="radio" name="help-mode" value="report" class="mt-1 shrink-0" checked>
+            <span>
+              <span class="type-body text-primary font-semibold">Report a bug to Imbue</span>
+              <span class="block type-helper text-tertiary">Send us a description and diagnostics so we can investigate.</span>
+            </span>
+          </label>
+        </div>
+
+        <label class="block type-label text-secondary mb-1" for="help-description">What happened?</label>
+        <textarea id="help-description" rows="4"
+                  class="w-full rounded-md border border-default bg-surface-primary p-2 type-body text-primary"
+                  placeholder="Describe the problem you ran into..."></textarea>
+
+        <p class="type-label text-secondary mt-4 mb-2">Include with the report</p>
+        <div class="flex flex-col gap-2">
+          {% if not include_logs_setting %}
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" id="help-include-logs" class="shrink-0">
+            <span class="type-body text-primary">Logs</span>
+          </label>
+          {% endif %}
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" id="help-app-diagnostics" class="shrink-0">
+            <span class="type-body text-primary">App diagnostics (versions, accounts, workspaces, system)</span>
+          </label>
+          {% if workspace_agent_id %}
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" id="help-workspace-details" class="shrink-0">
+            <span class="type-body text-primary">Details about the current workspace</span>
+          </label>
+          {% endif %}
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" id="help-remote-access" class="shrink-0">
+            <span class="type-body text-primary">Allow Imbue to request remote access to help debug</span>
+          </label>
+        </div>
+
+        <Button variant="primary" block id="help-submit" extra="mt-4">Send report</Button>
+        <p id="help-status" class="type-helper text-tertiary mt-2"></p>
+      </div>
+
+      <div id="help-sent" class="p-4 hidden text-center">
+        <h2 class="type-heading text-primary mb-2">Thanks!</h2>
+        <p class="type-body text-secondary mb-4">Your report was sent to Imbue.</p>
+        <div id="help-event-id-row" class="hidden mb-4 text-left">
+          <p class="type-label text-secondary mb-1">Report ID</p>
+          <div class="flex items-center gap-2">
+            <code id="help-event-id" class="flex-1 min-w-0 truncate rounded-md border border-default bg-fill-subtle px-2 py-1 type-label text-primary font-mono"></code>
+            <Button variant="secondary" id="help-copy-id-btn">Copy</Button>
+          </div>
+          <p class="type-helper text-tertiary mt-1">Quote this ID when you follow up so we can find your report.</p>
+        </div>
+        <Button variant="primary" block id="help-done-btn">Done</Button>
+      </div>
+    </div>
+  </div>
+</Base>
