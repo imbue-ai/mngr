@@ -1267,6 +1267,28 @@ def test_operation_status_reports_restart_record_first(tmp_path: Path) -> None:
     assert done["status"] == "DONE"
 
 
+def test_operation_status_destroy_is_not_shadowed_by_stale_restart_record(tmp_path: Path) -> None:
+    # The in-memory restart registry is never pruned, so a completed restart
+    # record for a workspace lingers for the rest of the app session. A later
+    # destroy of that same workspace -- keyed by the same agent id -- must report
+    # as kind=destroy, not be shadowed by the stale restart record.
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
+    registry.complete(agent_id)
+
+    # Write an on-disk destroy record (a live pid -> RUNNING) for the same id,
+    # matching the layout documented in ``destroying.py``.
+    destroy_dir = tmp_path / "minds" / "destroying" / str(agent_id)
+    destroy_dir.mkdir(parents=True)
+    (destroy_dir / "pid").write_text(f"{os.getpid()}\n")
+
+    body = json.loads(client.get(f"/api/v1/workspaces/operations/{agent_id}", headers=_auth_header()).data)
+    assert body["kind"] == "destroy"
+    assert body["status"] == "RUNNING"
+
+
 def test_operation_logs_streams_restart_log_lines(tmp_path: Path) -> None:
     # A restart op's logs stream from the in-memory registry queue, ending with a
     # terminal done frame when the operation completes.

@@ -744,10 +744,11 @@ def _handle_workspace_restart(agent_id: str) -> Response:
 
 @require_api_or_cookie_auth
 def _handle_operation_status(operation_id: str) -> Response:
-    """Report the status of a create or destroy operation, keyed by its id.
+    """Report the status of a create, destroy, or restart operation, keyed by its id.
 
-    Create operations are keyed by a ``creation-...`` id (from the create
-    route); destroy operations are keyed by the workspace's agent id.
+    Create operations are keyed by a ``creation-...`` id (from the create route);
+    destroy and restart operations are both keyed by the workspace's agent id (a
+    destroy by its on-disk record, a restart by the in-memory registry).
     """
     if operation_id.startswith(f"{CreationId.PREFIX}-"):
         agent_creator: AgentCreator | None = get_state().agent_creator
@@ -771,9 +772,37 @@ def _handle_operation_status(operation_id: str) -> Response:
         )
 
     parsed_id = AgentId(operation_id)
-    # A restart op is keyed by the workspace agent id, same as a destroy. Consult
-    # the in-memory restart registry first: a workspace is never destroyed and
-    # restarted at once, so a present restart record means this id is a restart.
+    # A destroy op and a restart op are both keyed by the workspace agent id, so
+    # consult the on-disk destroy record *first*. Once a destroy is started it is
+    # the authoritative operation for that workspace, whereas the in-memory
+    # restart registry is never pruned -- a restart record left over from earlier
+    # in this app session would otherwise shadow a later destroy of the same
+    # workspace. A restart never overlaps a destroy (you cannot restart a
+    # destroyed workspace), so during a live restart no destroy record exists on
+    # disk and we correctly fall through to the registry below.
+    paths: WorkspacePaths | None = get_state().api_v1_paths
+    if paths is not None:
+        backend_resolver = get_state().backend_resolver
+        # A destroy is only DONE once the workspace's *host* is gone (not merely
+        # the workspace agent): a destroy that tore down only the agent while the
+        # host's ``system-services`` kept it alive must read as FAILED, not a
+        # false DONE. ``destroying.is_host_still_active`` answers that (active-set
+        # membership OR a host not yet in ``DESTROYED``); see
+        # :func:`destroying.read_destroying`.
+        record = destroying.read_destroying(
+            parsed_id, paths, destroying.is_host_still_active(backend_resolver, paths, parsed_id)
+        )
+        if record is not None:
+            return _json_response(
+                {
+                    "operation_id": operation_id,
+                    "kind": "destroy",
+                    "status": str(record.status),
+                    "is_done": record.status == destroying.DestroyingStatus.DONE,
+                    "agent_id": operation_id,
+                }
+            )
+
     restart_record = get_state().workspace_operation_registry.get(parsed_id)
     if restart_record is not None:
         return _json_response(
@@ -786,29 +815,7 @@ def _handle_operation_status(operation_id: str) -> Response:
             }
         )
 
-    paths: WorkspacePaths | None = get_state().api_v1_paths
-    if paths is None:
-        return _json_error(f"Unknown operation {operation_id}", 404)
-    backend_resolver = get_state().backend_resolver
-    # A destroy is only DONE once the workspace's *host* is gone (not merely the
-    # workspace agent): a destroy that tore down only the agent while the host's
-    # ``system-services`` kept it alive must read as FAILED, not a false DONE.
-    # ``destroying.is_host_still_active`` answers that (active-set membership OR a
-    # host not yet in ``DESTROYED``); see :func:`destroying.read_destroying`.
-    record = destroying.read_destroying(
-        parsed_id, paths, destroying.is_host_still_active(backend_resolver, paths, parsed_id)
-    )
-    if record is None:
-        return _json_error(f"Unknown operation {operation_id}", 404)
-    return _json_response(
-        {
-            "operation_id": operation_id,
-            "kind": "destroy",
-            "status": str(record.status),
-            "is_done": record.status == destroying.DestroyingStatus.DONE,
-            "agent_id": operation_id,
-        }
-    )
+    return _json_error(f"Unknown operation {operation_id}", 404)
 
 
 def _sse(payload: dict[str, object]) -> str:
@@ -892,11 +899,12 @@ def _stream_destroy_operation_logs(agent_id: AgentId, paths: WorkspacePaths) -> 
 
 @require_api_or_cookie_auth
 def _handle_operation_logs(operation_id: str) -> Response:
-    """Stream a create or destroy operation's logs as server-sent events.
+    """Stream a create, destroy, or restart operation's logs as server-sent events.
 
     Create operations (``creation-...`` id) stream the in-memory creation log;
     destroy operations (workspace agent id) tail the detached destroy
-    subprocess's on-disk log until the host is gone.
+    subprocess's on-disk log until the host is gone; restart operations (also the
+    workspace agent id) drain the in-memory registry's log queue.
     """
     if operation_id.startswith(f"{CreationId.PREFIX}-"):
         agent_creator: AgentCreator | None = get_state().agent_creator
@@ -908,8 +916,20 @@ def _handle_operation_logs(operation_id: str) -> Response:
         )
 
     parsed_id = AgentId(operation_id)
-    # A restart op's logs come from the in-memory registry (checked first, same
-    # first-match rule as the status route).
+    # A destroy op's logs take precedence over a restart op's, mirroring the
+    # status route: both are keyed by the workspace agent id, and a started
+    # destroy is the authoritative operation, so a stale restart record left in
+    # the (never-pruned) registry from earlier in the session must not shadow it.
+    # During a live restart no destroy record exists on disk, so we fall through
+    # to the in-memory registry below.
+    paths: WorkspacePaths | None = get_state().api_v1_paths
+    if paths is not None:
+        is_host_still_active = destroying.is_host_still_active(get_state().backend_resolver, paths, parsed_id)
+        if destroying.read_destroying(parsed_id, paths, is_host_still_active) is not None:
+            return make_streaming_response(
+                _stream_destroy_operation_logs(parsed_id, paths), media_type="text/event-stream", headers=_SSE_HEADERS
+            )
+
     registry = get_state().workspace_operation_registry
     if registry.get(parsed_id) is not None:
         log_queue = registry.get_log_queue(parsed_id)
@@ -918,15 +938,7 @@ def _handle_operation_logs(operation_id: str) -> Response:
                 _stream_restart_operation_logs(log_queue), media_type="text/event-stream", headers=_SSE_HEADERS
             )
 
-    paths: WorkspacePaths | None = get_state().api_v1_paths
-    if paths is None:
-        return _json_error(f"Unknown operation {operation_id}", 404)
-    is_host_still_active = destroying.is_host_still_active(get_state().backend_resolver, paths, parsed_id)
-    if destroying.read_destroying(parsed_id, paths, is_host_still_active) is None:
-        return _json_error(f"Unknown operation {operation_id}", 404)
-    return make_streaming_response(
-        _stream_destroy_operation_logs(parsed_id, paths), media_type="text/event-stream", headers=_SSE_HEADERS
-    )
+    return _json_error(f"Unknown operation {operation_id}", 404)
 
 
 # -- SSH access route --
