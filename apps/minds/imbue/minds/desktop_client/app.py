@@ -3117,6 +3117,23 @@ def _dispatch_restart(
     backend_resolver: BackendResolverInterface = get_state().backend_resolver
     if tracker is None or concurrency_group is None:
         return _json_error("Workspace restart is unavailable in this configuration", status_code=503)
+    # An auto-dispatched recovery restart (fired by the recovery page off its
+    # tier classification) can race the workspace's own self-recovery: the
+    # host-health probe that picks the tier runs a slow in-container exec, and
+    # the background probe loop can flip the tracker back to HEALTHY while that
+    # exec is still in flight. Restarting a workspace that already recovered is
+    # pure harm -- it bounces a healthy backend for nothing -- so skip it and let
+    # the recovery page's refresh 302 the user back to the workspace. A *manual*
+    # restart carries no marker and always proceeds; the user explicitly asked.
+    auto_dispatched = request.args.get("auto_dispatched") == "1"
+    if auto_dispatched and tracker.get_health(aid) == AgentHealth.HEALTHY:
+        logger.info(
+            "Skipping auto-dispatched {} for {}: workspace already recovered to HEALTHY "
+            "before the recovery probe completed",
+            "host restart" if is_host_restart else "system-interface restart",
+            aid,
+        )
+        return make_response(status_code=202, content="{}", media_type="application/json")
     # A restart is already in flight for this agent -- don't stack a second
     # worker thread racing the first one's stop/start commands. mark_restarting
     # decides the RESTARTING transition under its own lock and reports whether

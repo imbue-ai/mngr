@@ -1165,16 +1165,19 @@ _RECOVERY_SCRIPT: Final[str] = """\
             renderUnresponsive();
             return;
           }
+          // ``auto_dispatched=1`` marks these as recovery-page auto-restarts (not
+          // a manual sidebar restart), so the endpoint can skip the bounce if the
+          // workspace self-recovered while the slow host-health probe was in flight.
           if (tier === 'host_offline') {
             // Container fully stopped: nothing live to interrupt, dispatch
             // unattended. Tell the endpoint the host is already stopped so it
             // skips the redundant stop step and cold-boots straight away.
-            postRestart('/restart-host?host_already_stopped=1');
+            postRestart('/restart-host?host_already_stopped=1&auto_dispatched=1');
             return;
           }
           if (tier === 'interface_unresponsive') {
             // Container running, exec works: restart the system-services agent in place.
-            postRestart('/restart-system-interface');
+            postRestart('/restart-system-interface?auto_dispatched=1');
             return;
           }
           // 'host_unresponsive' or anything else: require explicit user consent for a host restart.

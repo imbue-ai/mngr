@@ -10,32 +10,45 @@ from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.system_interface_health import should_enroll_suspect_for_backend_failure
 from imbue.mngr.primitives import AgentId
+from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 
 # Short STUCK threshold so the probe-failure-run tests don't have to sleep 5s.
 _FAST_THRESHOLD: float = 0.05
 
 
 @pytest.mark.parametrize(
-    "status_code,expected",
+    "reason,status_code,initial_discovery_complete,expected",
     [
         # Connection-level failure (no HTTP status) always enrolls.
-        (None, True),
+        (SystemInterfaceBackendFailureReason.CONNECT_ERROR, None, True, True),
+        (SystemInterfaceBackendFailureReason.CONNECT_ERROR, None, False, True),
+        (SystemInterfaceBackendFailureReason.SSE_EOF, None, True, True),
         # Infrastructure 5xx: the backend is unreachable / not serving.
-        (502, True),
-        (503, True),
-        (504, True),
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 502, True, True),
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 503, True, True),
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 504, True, True),
         # Application errors: the backend is alive and responding, so they
         # don't enroll -- the background probe adjudicates a wedged backend.
-        (500, False),
-        (404, False),
-        (401, False),
-        (400, False),
-        # A success that somehow reached the failure path must not enroll.
-        (200, False),
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 500, True, False),
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 404, True, False),
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 401, True, False),
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 400, True, False),
+        # UNRESOLVED before initial discovery completes is cold-start warm-up
+        # (the forward has no route yet), so it must NOT enroll a healthy
+        # workspace as a suspect...
+        (SystemInterfaceBackendFailureReason.UNRESOLVED, None, False, False),
+        # ...but once initial discovery has completed, a still-unrouted agent is
+        # genuinely gone, and the connection-level failure enrolls as usual.
+        (SystemInterfaceBackendFailureReason.UNRESOLVED, None, True, True),
     ],
 )
-def test_should_enroll_suspect_for_backend_failure(status_code: int | None, expected: bool) -> None:
-    assert should_enroll_suspect_for_backend_failure(status_code) is expected
+def test_should_enroll_suspect_for_backend_failure(
+    reason: SystemInterfaceBackendFailureReason,
+    status_code: int | None,
+    initial_discovery_complete: bool,
+    expected: bool,
+) -> None:
+    assert should_enroll_suspect_for_backend_failure(reason, status_code, initial_discovery_complete) is expected
 
 
 def _sleep(seconds: float) -> None:

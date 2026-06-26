@@ -371,8 +371,10 @@ def run(
     # Only connection-level failures and infrastructure 5xx enroll a suspect --
     # application errors are left for the background probe to adjudicate.
     consumer.add_on_system_interface_backend_failure_callback(
-        lambda agent_id, _reason, status_code: system_interface_health_tracker.record_failure(agent_id)
-        if should_enroll_suspect_for_backend_failure(status_code)
+        lambda agent_id, reason, status_code: system_interface_health_tracker.record_failure(agent_id)
+        if should_enroll_suspect_for_backend_failure(
+            reason, status_code, backend_resolver.has_completed_initial_discovery()
+        )
         else None
     )
 

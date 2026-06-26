@@ -2684,6 +2684,37 @@ def test_restart_api_requires_authentication(tmp_path: Path) -> None:
     assert response.status_code == 403
 
 
+def test_auto_dispatched_restart_skipped_when_workspace_already_recovered(tmp_path: Path) -> None:
+    """An auto-dispatched recovery restart must no-op once the workspace recovered.
+
+    The recovery page's host-health probe is slow, so the background probe loop
+    can flip the tracker back to HEALTHY while it is in flight; firing the
+    queued restart then would bounce a healthy backend. With the
+    ``auto_dispatched`` marker the endpoint must skip the restart (and leave the
+    tracker HEALTHY rather than transitioning it to RESTARTING) so the recovery
+    page's refresh simply sends the user back to the now-healthy workspace.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    agent_id = AgentId()
+    with ConcurrencyGroup(name="test-restart-guard") as cg:
+        app = create_desktop_client(
+            auth_store=auth_store,
+            backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+            http_client=None,
+            system_interface_health_tracker=tracker,
+            root_concurrency_group=cg,
+        )
+        client = app.test_client()
+        _authenticate_client(client=client, auth_store=auth_store)
+        # Tracker is HEALTHY (the agent has recovered / was never enrolled).
+        response = client.post(f"/api/agents/{agent_id}/restart-system-interface?auto_dispatched=1")
+
+    assert response.status_code == 202
+    # The guard returned before mark_restarting, so no restart was dispatched.
+    assert tracker.get_health(agent_id) == AgentHealth.HEALTHY
+
+
 def test_create_desktop_client_stashes_system_interface_health_tracker(tmp_path: Path) -> None:
     """create_desktop_client should expose the tracker on the app state for handlers."""
     auth_dir = tmp_path / "auth"

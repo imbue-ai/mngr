@@ -55,6 +55,7 @@ from pydantic import PrivateAttr
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.primitives import AgentId
+from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 
 _DEFAULT_STUCK_THRESHOLD_SECONDS: Final[float] = 5.0
 
@@ -65,7 +66,11 @@ _DEFAULT_STUCK_THRESHOLD_SECONDS: Final[float] = 5.0
 _BACKEND_UNREACHABLE_STATUSES: Final[frozenset[int]] = frozenset({502, 503, 504})
 
 
-def should_enroll_suspect_for_backend_failure(status_code: int | None) -> bool:
+def should_enroll_suspect_for_backend_failure(
+    reason: SystemInterfaceBackendFailureReason,
+    status_code: int | None,
+    initial_discovery_complete: bool,
+) -> bool:
     """Whether a ``system_interface_backend_failure`` should enroll a probe suspect.
 
     The plugin emits a failure envelope for every non-2xx response and for
@@ -75,7 +80,19 @@ def should_enroll_suspect_for_backend_failure(status_code: int | None) -> bool:
     errors (app 500s, ordinary 4xx) mean the backend is alive and responding, so
     they are left alone; the background probe still catches a genuinely-wrong or
     wedged backend.
+
+    ``UNRESOLVED`` is special-cased on ``initial_discovery_complete``. Before
+    initial discovery has completed, the forward simply has no route for the
+    agent yet -- a cold-start / fresh-forward warm-up -- so the failure reflects
+    discovery not having caught up, not the workspace's health. Enrolling on it
+    marks a perfectly healthy workspace STUCK during normal startup, which then
+    drives the recovery UI to needlessly restart it. So during warm-up an
+    ``UNRESOLVED`` failure is ignored. Once initial discovery has completed, an
+    agent that still will not resolve is genuinely unrouted (e.g. destroyed),
+    which is worth surfacing, so it falls through to the status-code policy.
     """
+    if reason == SystemInterfaceBackendFailureReason.UNRESOLVED and not initial_discovery_complete:
+        return False
     return status_code is None or status_code in _BACKEND_UNREACHABLE_STATUSES
 
 
