@@ -81,6 +81,7 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
 from imbue.minds.desktop_client.templates import resolve_create_host_name
+from imbue.minds.desktop_client.templates import status_text_for
 from imbue.minds.desktop_client.workspace_create import build_backup_request_or_error
 from imbue.minds.desktop_client.workspace_create import build_create_on_created_callback
 from imbue.minds.desktop_client.workspace_create import resolve_effective_region
@@ -341,9 +342,17 @@ def _handle_workspace_backups(agent_id: str) -> Response:
         )
     except BackupProvisioningError as e:
         return _json_error(str(e), 404)
+    # Whether a backup is running *right now* (non-stale restic lock). The
+    # snapshot list alone can't express this, so the landing page reads this
+    # flag to show the live "Backing up..." badge it lost when the batch
+    # /api/backup-status route was removed.
+    is_backing_up = backup_status.is_workspace_backing_up(
+        paths, parsed_id, now=datetime.now(timezone.utc), parent_cg=get_state().root_concurrency_group
+    )
     return _json_response(
         {
             "agent_id": str(parsed_id),
+            "is_backing_up": is_backing_up,
             "snapshots": [
                 {
                     "snapshot_id": snapshot.snapshot_id,
@@ -760,6 +769,10 @@ def _handle_operation_status(operation_id: str) -> Response:
                 "operation_id": operation_id,
                 "kind": "create",
                 "status": str(info.status),
+                # Human-readable stage caption for the creating page (e.g.
+                # "Cloning repository...", "Failed: ..."), mode-aware. Restores
+                # the live caption the old per-stage SSE status frames carried.
+                "status_text": status_text_for(str(info.status), error=info.error, launch_mode=info.launch_mode),
                 "is_done": info.status == AgentCreationStatus.DONE,
                 "agent_id": str(info.agent_id) if info.agent_id is not None else None,
                 # The absolute ``/goto/<agent>/`` URL the creating page navigates

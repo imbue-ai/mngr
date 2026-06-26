@@ -169,6 +169,44 @@ def _safe_latest_snapshot(
         return None
 
 
+def is_workspace_backing_up(
+    paths: WorkspacePaths,
+    agent_id: AgentId,
+    *,
+    now: datetime,
+    parent_cg: ConcurrencyGroup | None = None,
+    restic_timeout_seconds: float = _STATUS_RESTIC_TIMEOUT_SECONDS,
+) -> bool:
+    """Whether a restic backup is currently running for this workspace (non-stale lock).
+
+    A lighter probe than :func:`compute_backup_status_for_workspace` -- it checks
+    only the repository lock, not the latest snapshot. Returns ``False`` when no
+    canonical restic.env exists or on any restic error, so a status probe never
+    raises into the route that serves the backups list.
+    """
+    content = read_canonical_env(paths, agent_id)
+    if content is None:
+        return False
+    env = parse_restic_env(content)
+    repository = env.get("RESTIC_REPOSITORY", "")
+    if not repository:
+        return False
+    password = env.get("RESTIC_PASSWORD")
+    backend_env = {key: value for key, value in env.items() if key not in ("RESTIC_REPOSITORY", "RESTIC_PASSWORD")}
+    try:
+        return restic_cli.is_backup_in_progress(
+            repository=repository,
+            backend_env=backend_env,
+            password=password,
+            now=now,
+            parent_cg=parent_cg,
+            timeout_seconds=restic_timeout_seconds,
+        )
+    except BackupProvisioningError as e:
+        logger.warning("Could not check backup-in-progress for {}: {}", agent_id, e)
+        return False
+
+
 def compute_backup_status_for_workspaces(
     paths: WorkspacePaths,
     agent_ids: Sequence[AgentId],

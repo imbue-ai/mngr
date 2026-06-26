@@ -17,6 +17,8 @@ from pydantic import SecretStr
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
+from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -38,6 +40,7 @@ from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.templates import status_text_for
 from imbue.minds.desktop_client.workspace_operations import OPERATION_LOG_SENTINEL
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.primitives import AIProvider
@@ -117,6 +120,15 @@ class _RecordingAgentCreator(AgentCreator):
     def last_call(self) -> dict[str, object]:
         assert self._last_call is not None, "start_creation was never called"
         return self._last_call
+
+
+class _StatusReportingAgentCreator(_RecordingAgentCreator):
+    """Recording creator that also reports a fixed creation info for status polls."""
+
+    fixed_info: AgentCreationInfo
+
+    def get_creation_info(self, creation_id: CreationId) -> AgentCreationInfo | None:
+        return self.fixed_info if creation_id == self.fixed_info.creation_id else None
 
 
 def _client_with_agent_creator(
@@ -381,6 +393,38 @@ def test_create_workspace_auto_names_next_mind_when_host_name_omitted(
 
     assert response.status_code == 202
     assert str(creator.last_call["host_name"]) == "mind-2"
+
+
+def test_create_operation_status_includes_status_text(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    # The create-operation status carries a human-readable status_text (the stage
+    # caption the creating page renders), derived from status + launch_mode.
+    creation_id = CreationId()
+    creator = _StatusReportingAgentCreator(
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
+        fixed_info=AgentCreationInfo(
+            creation_id=creation_id,
+            status=AgentCreationStatus.INITIALIZING,
+            launch_mode=LaunchMode.DOCKER,
+        ),
+    )
+    client = _client_with_agent_creator(
+        tmp_path, root_concurrency_group, notification_dispatcher, agent_creator=creator
+    )
+
+    response = client.get(f"/api/v1/workspaces/operations/{creation_id}", headers=_auth_header())
+
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body["kind"] == "create"
+    assert body["status_text"] == status_text_for(str(AgentCreationStatus.INITIALIZING), launch_mode=LaunchMode.DOCKER)
+    assert body["status_text"]
 
 
 def test_create_workspace_full_surface_returns_202_and_threads_fields(

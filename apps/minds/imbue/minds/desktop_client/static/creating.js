@@ -130,6 +130,11 @@
       creationError = data.error || 'unknown error';
       showFailure();
       if (statusPoll) { clearInterval(statusPoll); statusPoll = null; }
+    } else if (data.status_text && !creationFailed) {
+      // Live stage caption (e.g. "Cloning repository...") from the create
+      // operation status, restoring the per-stage text the old SSE carried.
+      var stageEl = document.getElementById('stage');
+      if (stageEl) stageEl.textContent = data.status_text;
     }
   }
   function pollStatus() {

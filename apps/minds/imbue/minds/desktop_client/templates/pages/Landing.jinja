@@ -517,12 +517,22 @@
     // map "has snapshots" -> BACKED_UP (last_success = newest snapshot's time)
     // and "no snapshots" -> the create-time fallback ("Created N ago" / "No
     // backups"). This keeps applyBackupBadge's visual output equivalent.
-    function deriveBackupStatus(snapshots, createTime) {
+    function deriveBackupStatus(snapshots, createTime, isBackingUp) {
+      var latestTime = null;
       if (snapshots && snapshots.length > 0) {
         var latest = snapshots.reduce(function (a, b) {
           return Date.parse(b.time) >= Date.parse(a.time) ? b : a;
         });
-        return { state: 'BACKED_UP', last_success_at: latest.time };
+        latestTime = latest.time;
+      }
+      // A backup running right now takes precedence over the last-success time,
+      // restoring the live "Backing up…" badge (the per-workspace backups route
+      // reports this via is_backing_up; the snapshot list alone can't).
+      if (isBackingUp) {
+        return { state: 'BACKING_UP', last_success_at: latestTime };
+      }
+      if (latestTime) {
+        return { state: 'BACKED_UP', last_success_at: latestTime };
       }
       return { created_at: createTime || null };
     }
@@ -551,7 +561,7 @@
             return response.ok ? response.json() : null;
           }).catch(function () { return null; }).then(function (data) {
             var snapshots = (data && data.snapshots) || [];
-            applyBackupBadge(agentId, deriveBackupStatus(snapshots, createTimeByAgent[agentId]));
+            applyBackupBadge(agentId, deriveBackupStatus(snapshots, createTimeByAgent[agentId], data && data.is_backing_up));
           }).catch(function (err) {
             console.error('Backup status fetch failed for', agentId, err);
           }).then(finishOne);
