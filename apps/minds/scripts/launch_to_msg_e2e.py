@@ -799,11 +799,11 @@ async def _create_workspace_and_first_message(
         # The page already navigated to the workspace on its own; no goto needed.
         logger.info("[{}] creation DONE; already on workspace {}", label, win.url)
         target = win.url
+    elif not done_redirect_url:
+        raise E2EFailure(
+            f"[{label}] creation DONE without redirect_url; check the /api/create-agent/<id>/status contract"
+        )
     else:
-        if not done_redirect_url:
-            raise E2EFailure(
-                f"[{label}] creation DONE without redirect_url; check the /api/create-agent/<id>/status contract"
-            )
         target = done_redirect_url if done_redirect_url.startswith("http") else origin + done_redirect_url
         logger.info("[{}] creation DONE; navigating directly to {}", label, target)
         await win.goto(target)
