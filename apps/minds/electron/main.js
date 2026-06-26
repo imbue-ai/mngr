@@ -3,13 +3,15 @@ const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
 const paths = require('./paths');
-const { initSentry } = require('./sentry');
+const { initSentry, captureManualReport, isLogInclusionEnabled } = require('./sentry');
 const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
+const { decideStartupRoute } = require('./startup-routing');
 
 // Initialize Sentry as early as possible so errors thrown during main-process
-// startup (window creation, env setup, backend spawn) are captured. No-op
-// unless MINDS_SENTRY_ENABLED is set and a real DSN is configured -- see
+// startup (window creation, env setup, backend spawn) are captured. The SDK is
+// always initialized but only sends when the user has enabled error reporting
+// (the report_unexpected_errors setting, read live per event) -- see
 // electron/sentry.js.
 initSentry();
 
@@ -189,18 +191,6 @@ function toAbsoluteUrl(url) {
   if (!url) return url;
   if (url.startsWith('/') && backendBaseUrl) return backendBaseUrl + url;
   return url;
-}
-
-// Whether ``url`` is the workspace-creation form (``/create``). Used to decide
-// when a window has *left* the create form so its freeform accent preview can
-// be dropped -- see ``hasFreeformAccentPreview`` in ``onContentNavigate``.
-function isCreateFormUrl(url) {
-  if (!url) return false;
-  try {
-    return new URL(url).pathname === '/create';
-  } catch {
-    return false;
-  }
 }
 
 // Classify a URL as "external" -- i.e. something that should open in the
@@ -611,11 +601,6 @@ function createBundle() {
     // even though they don't count as "displaying" the workspace. NOT persisted:
     // a restored window re-derives it from its saved content URL.
     currentAccentAgentId: null,
-    // The create form paints the titlebar directly (out of band of
-    // ``currentAccentAgentId``) to preview the picked workspace color; this
-    // flags that an override is live so leaving the form repaints the real
-    // accent. See ``preview-freeform-accent`` + ``onContentNavigate``.
-    hasFreeformAccentPreview: false,
     preErrorUrl: null,
     isErrorState: false,
     isLoadingState: true,
@@ -679,20 +664,6 @@ function wireContentViewEvents(bundle, contentView) {
     // on truthiness: the accent tracks the *current* screen, not the last
     // workspace opened in this window.
     updateBundleAccentAgentId(bundle, parseAccentSourceAgentId(url));
-    // Drop the create-form's freeform accent preview once we've navigated off
-    // ``/create`` (by submitting OR abandoning). That preview paints the
-    // titlebar CSS vars directly, out of band of ``currentAccentAgentId``, so
-    // the ``updateBundleAccentAgentId`` above can't clear it on its own: the
-    // abandon case (``/create`` -> a general screen) is null -> null, which its
-    // no-op guard swallows, so no ``accent-changed`` would fire and the preview
-    // would stay stranded on the bar. Force a repaint from the real accent
-    // here (neutral on abandon; the new workspace on submit).
-    if (bundle.hasFreeformAccentPreview && !isCreateFormUrl(url)) {
-      bundle.hasFreeformAccentPreview = false;
-      if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
-        bundle.chromeView.webContents.send('accent-changed', bundle.currentAccentAgentId);
-      }
-    }
     updateOsTitle(bundle);
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
       bundle.chromeView.webContents.send('content-url-changed', url);
@@ -1000,6 +971,18 @@ function inboxUrlFor(query) {
   return backendBaseUrl + '/inbox' + (query || '');
 }
 
+function signinModalUrlFor() {
+  if (!backendBaseUrl) return null;
+  return backendBaseUrl + '/auth/signin-modal';
+}
+
+function openSigninModal(bundle) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  const url = signinModalUrlFor();
+  if (!url) return;
+  openModal(bundle, url);
+}
+
 function isInboxModalOpen(bundle) {
   if (!bundle || !bundle.modalVisible) return false;
   if (!bundle.modalUrl) return false;
@@ -1024,6 +1007,42 @@ function toggleInbox(bundle) {
   if (!bundle || bundle.window.isDestroyed()) return;
   if (isInboxModalOpen(bundle)) closeModal(bundle);
   else openInbox(bundle, '');
+}
+
+// -- Get-help modal (per-bundle) --
+//
+// The help modal shares the same modalView overlay as the inbox and sidebar (see
+// openModal): it just loads the backend's /help page. ``agentId`` (the
+// currently-displayed workspace, or falsy on a general screen) is forwarded as a
+// ?workspace= query so the help page can scope its bug report to that workspace.
+
+function helpUrlFor(agentId) {
+  if (!backendBaseUrl) return null;
+  const query = agentId ? '?workspace=' + encodeURIComponent(agentId) : '';
+  return backendBaseUrl + '/help' + query;
+}
+
+function isHelpModalOpen(bundle) {
+  if (!bundle || !bundle.modalVisible || !bundle.modalUrl) return false;
+  // Compare path only; the ?workspace= query may differ between screens.
+  try {
+    return new URL(bundle.modalUrl).pathname === '/help';
+  } catch {
+    return false;
+  }
+}
+
+function openHelp(bundle, agentId) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  const url = helpUrlFor(agentId);
+  if (!url) return;
+  openModal(bundle, url);
+}
+
+function toggleHelp(bundle, agentId) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  if (isHelpModalOpen(bundle)) closeModal(bundle);
+  else openHelp(bundle, agentId);
 }
 
 // Coalesce rapid SSE-triggered chrome-event posts so the inbox shell
@@ -1127,7 +1146,17 @@ function openHomeInNewWindow() {
 
 // -- Error / retry flow --
 
-function showErrorInAllWindows(message, details, actionLabel) {
+// The most recent error takeover's message/details, captured so the shell's
+// "Report a bug" button can file a one-shot Sentry report of the on-screen error
+// when the backend is down (and thus the normal /help flow is unreachable).
+let lastErrorTakeover = null;
+
+// ``canUseBackendReport`` is true only when the Python backend is still up (e.g. the
+// discovery-pipeline-stall takeover): there the shell's report button opens the full
+// /help modal. For a crashed/never-started backend it is false, and the report button
+// falls back to a one-shot main-process Sentry report (see the report-error IPC handler).
+function showErrorInAllWindows(message, details, actionLabel, canUseBackendReport = false) {
+  lastErrorTakeover = { message, details };
   for (const bundle of bundles) {
     if (bundle.window.isDestroyed()) continue;
     bundle.isErrorState = true;
@@ -1147,11 +1176,11 @@ function showErrorInAllWindows(message, details, actionLabel) {
         bundle.chromeView.webContents.loadFile(path.join(__dirname, 'shell.html'));
         bundle.chromeView.webContents.once('did-finish-load', () => {
           if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
-            bundle.chromeView.webContents.send('error-details', { message, details, actionLabel });
+            bundle.chromeView.webContents.send('error-details', { message, details, actionLabel, canUseBackendReport });
           }
         });
       } else {
-        bundle.chromeView.webContents.send('error-details', { message, details, actionLabel });
+        bundle.chromeView.webContents.send('error-details', { message, details, actionLabel, canUseBackendReport });
       }
     }
   }
@@ -1574,6 +1603,9 @@ function handleChromeSSEEvent(evt) {
         "Minds has disconnected from your workspaces and can't automatically reconnect. Restart the app to recover. Your data has not been lost.",
         null,
         'Restart Minds',
+        // The Python backend is still up in this takeover (only the discovery pipeline
+        // stalled), so the shell's report button can use the full /help modal.
+        true,
       );
     }
   }
@@ -2567,23 +2599,32 @@ async function startBackendWithRetry() {
         initialBundle.chromeView.webContents.loadURL(backendBaseUrl + '/_chrome');
       }
 
-      if (!authenticated) {
-        // The one-time code was already consumed above but fetchInitialChromeState
-        // still returned unauthenticated (should not happen, but handle gracefully).
+      // Decide the cold-start landing screen. The precedence (welcome > create
+      // > restore) lives in the pure ``decideStartupRoute`` helper so it can be
+      // unit-tested (startup-routing.test.js). Key subtlety: a "functionally
+      // empty" app -- signed out of every account AND no workspaces -- routes
+      // to /welcome even when stale window-state lingers, so a leftover home
+      // (`/`) window can't silently suppress onboarding for a signed-out user.
+      const startupRoute = decideStartupRoute({
+        authenticated,
+        hasAccounts: !!(chromeState && chromeState.hasAccounts),
+        workspaceCount: workspaceList.length,
+        restorableCount: restorable.length,
+      });
+
+      const loadInitialContent = (relativePath) => {
         if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
-          initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/welcome');
+          initialBundle.contentView.webContents.loadURL(backendBaseUrl + relativePath);
         }
-      } else if (!chromeState.hasAccounts && restorable.length === 0) {
-        // Locally authenticated but user has never signed in with SuperTokens
-        // and has no saved windows -- show the welcome/onboarding page.
-        if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
-          initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/welcome');
-        }
-      } else if (restorable.length === 0) {
-        // Has accounts but nothing to restore -- land on the create page.
-        if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
-          initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/');
-        }
+      };
+
+      if (startupRoute === 'welcome') {
+        // Either unauthenticated (one-time code somehow not consumed -- handled
+        // gracefully) or functionally empty (signed out + no workspaces).
+        loadInitialContent('/welcome');
+      } else if (startupRoute === 'create') {
+        // Has accounts (or workspaces) but nothing to restore -- land on home.
+        loadInitialContent('/');
       } else {
         // Restore saved windows with their positions and sizes. Each window's
         // titlebar accent is re-derived from its restored content URL by
@@ -2782,6 +2823,43 @@ ipcMain.on('toggle-inbox', (event) => {
   toggleInbox(getBundleFromEvent(event));
 });
 
+ipcMain.on('toggle-help', (event, agentId) => {
+  toggleHelp(getBundleFromEvent(event), agentId);
+});
+
+// One-shot bug report from the full-app error takeover (shell.html), used when the
+// Python backend is down and its /help flow is unreachable. Reports the on-screen
+// error via the always-initialized main-process Sentry -- with host basics, plus
+// recent log files when the user opted in (the persistent include-logs setting, or
+// the takeover's per-report ``includeLogs`` checkbox) -- since the backend's richer
+// collector is gone. Returns the event id so the shell can show it. ``invoke`` (not
+// ``send``) so the renderer gets the id back.
+ipcMain.handle('report-error', (_event, opts) => {
+  try {
+    const eventId = captureManualReport({
+      message: lastErrorTakeover ? lastErrorTakeover.message : null,
+      details: lastErrorTakeover ? lastErrorTakeover.details : null,
+      includeLogs: Boolean(opts && opts.includeLogs),
+    });
+    return { ok: Boolean(eventId), eventId: eventId || null };
+  } catch (err) {
+    console.error('[report-error] failed to capture manual report:', err && err.message);
+    return { ok: false, eventId: null };
+  }
+});
+
+// Lets the error takeover (shell.html) learn the persistent ``include_error_logs``
+// setting so it only offers its per-report "Include recent logs" checkbox when the
+// setting is off (when on, logs are always attached and the checkbox is redundant).
+ipcMain.handle('get-log-inclusion-setting', () => {
+  try {
+    return isLogInclusionEnabled();
+  } catch (err) {
+    console.error('[get-log-inclusion-setting] failed to read setting:', err && err.message);
+    return false;
+  }
+});
+
 ipcMain.on('open-workspace-in-new-window', (event, agentId) => {
   if (!agentId) return;
   openOrFocusWorkspace(agentId, workspaceUrlForAgent(agentId));
@@ -2812,6 +2890,26 @@ ipcMain.on('open-request-modal', (event, requestId) => {
   if (sender) openInbox(sender, '?selected=' + encodeURIComponent(requestId));
 });
 
+// Open the get-help / report-a-bug modal on behalf of the (otherwise
+// unprivileged) content view -- used by error pages like the workspace-recovery
+// page. Only content-relay-preload.js can emit this channel, and only for an
+// allowlisted `minds:open-help` postMessage. The agent id is re-validated here
+// (never trust the renderer) before being packed into the help URL.
+ipcMain.on('open-help', (event, agentId) => {
+  const scopedAgentId = typeof agentId === 'string' && /^agent-[a-f0-9]{1,64}$/i.test(agentId) ? agentId : '';
+  openHelp(getBundleFromEvent(event), scopedAgentId);
+});
+
+// Open the sign-in modal in the shared overlay on behalf of the (otherwise
+// unprivileged) workspace content view -- the create screen posts an
+// allowlisted `minds:open-signin-modal` when a signed-out user presses
+// "Create" with the Imbue Cloud preset selected. No payload to validate; the
+// URL is a fixed server route.
+ipcMain.on('open-signin-modal', (event) => {
+  const sender = getBundleFromEvent(event);
+  if (sender) openSigninModal(sender);
+});
+
 ipcMain.on('close-modal', (event) => {
   closeModal(getBundleFromEvent(event));
 });
@@ -2834,24 +2932,6 @@ ipcMain.on('preview-workspace-accent', (event, agentId, accent) => {
   bundle.chromeView.webContents.send('chrome-event', {
     type: 'workspace_accent_preview',
     agent_id: agentId,
-    accent,
-  });
-});
-
-// Create-form picker freeform preview: no workspace exists yet, so this
-// paints the chrome CSS variables directly. We flag the bundle so that
-// navigating off ``/create`` (submit OR abandon) repaints the bar through
-// the regular accent channel and drops the preview -- see the
-// ``hasFreeformAccentPreview`` handling in ``onContentNavigate``. (Without
-// that, abandoning to a general screen is a null -> null accent transition,
-// which ``updateBundleAccentAgentId`` no-ops, leaving the preview stranded.)
-ipcMain.on('preview-freeform-accent', (event, accent) => {
-  if (typeof accent !== 'string' || !/^#[0-9a-f]{6}$/.test(accent)) return;
-  const bundle = getBundleFromEvent(event);
-  if (!bundle || !bundle.chromeView || bundle.chromeView.webContents.isDestroyed()) return;
-  bundle.hasFreeformAccentPreview = true;
-  bundle.chromeView.webContents.send('chrome-event', {
-    type: 'freeform_accent_preview',
     accent,
   });
 });

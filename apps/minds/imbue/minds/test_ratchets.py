@@ -56,7 +56,7 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    rc.check_bare_print(_DIR, snapshot(5))
+    rc.check_bare_print(_DIR, snapshot(12))
 
 
 # --- Exception handling ---
@@ -94,7 +94,7 @@ def test_prevent_silent_decode_error_catches() -> None:
     # The added catch is ``build_info.py`` parsing the desktop app's package.json
     # for the Sentry release id: a malformed file degrades to a fallback version
     # (logged at debug) rather than crashing startup.
-    rc.check_silent_decode_error_catches(_DIR, snapshot(7))
+    rc.check_silent_decode_error_catches(_DIR, snapshot(8))
 
 
 # --- Import style ---
@@ -136,14 +136,10 @@ def test_prevent_setattr() -> None:
 
 
 def test_prevent_asyncio_import() -> None:
-    # app.py uses ``asyncio.get_running_loop()`` and
-    # ``asyncio.run_coroutine_threadsafe`` for HTTP route handlers; the two
-    # sibling permission handlers under ``latchkey/handlers/`` (``predefined.py``
-    # and ``file_sharing.py``) both use ``run_in_executor`` to run the blocking
-    # grant/deny path off the event loop -- all intrinsic to FastAPI
-    # integration. The ported Sentry loguru handler also references
-    # ``asyncio.CancelledError`` so task cancellations are not reported.
-    rc.check_asyncio_import(_DIR, snapshot(2))
+    # The minds backend is synchronous (Flask) and uses no asyncio. The only remaining import is in
+    # ``scripts/launch_to_msg_e2e.py``, a standalone Playwright e2e driver that runs its own event
+    # loop in a separate process.
+    rc.check_asyncio_import(_DIR, snapshot(1))
 
 
 def test_prevent_pandas_import() -> None:

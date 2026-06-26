@@ -175,7 +175,7 @@ def test_build_mngr_create_command_lifts_latchkey_env_to_host_env_flags() -> Non
 
 
 def test_build_mngr_create_command_attaches_color_label_when_provided() -> None:
-    """The onboarding picker passes a hex through; the command builder
+    """The create form's color picker passes a hex through; the command builder
     lifts it into a --label color=<hex> flag alongside the existing
     workspace / is_primary / user_created labels so the workspace ships
     with its color from create time onward (no post-create write needed)."""

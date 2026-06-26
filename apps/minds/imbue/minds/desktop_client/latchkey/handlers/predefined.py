@@ -388,10 +388,12 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                     ),
                 )
             logger.info(
-                "Credentials for {} reported as {}; running latchkey auth browser",
+                "Credentials for {} reported as {}; running browser sign-in",
                 service_info.name,
                 latchkey_service_info.credential_status,
             )
+            # ``auth_browser`` owns all of the auth-flow logic, including the
+            # Minds Google OAuth client preference for ``google-*`` services.
             is_success, detail = self.latchkey.auth_browser(service_info.name)
             if not is_success:
                 # The browser sign-in (or its one-off ``auth

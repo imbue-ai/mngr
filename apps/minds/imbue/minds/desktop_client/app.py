@@ -61,14 +61,13 @@ from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
-from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.mind_liveness import MindLiveness
 from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
 from imbue.minds.desktop_client.mind_liveness import get_shutdown_capable_workspace_agent_ids
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
-from imbue.minds.desktop_client.onboarding import OnboardingAnswers
-from imbue.minds.desktop_client.onboarding import OnboardingApplier
+from imbue.minds.desktop_client.notification import NotificationRequest
+from imbue.minds.desktop_client.notification import NotificationUrgency
 from imbue.minds.desktop_client.provider_display import friendly_provider_label
 from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
 from imbue.minds.desktop_client.recovery_probe import build_host_health_response
@@ -78,6 +77,8 @@ from imbue.minds.desktop_client.region_preference import GeoLocationCache
 from imbue.minds.desktop_client.region_preference import IMBUE_CLOUD_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import VULTR_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import known_regions_for_provider
+from imbue.minds.desktop_client.region_preference import resolve_default_region
+from imbue.minds.desktop_client.report_collector import submit_bug_report_from_body
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestType
@@ -88,6 +89,7 @@ from imbue.minds.desktop_client.responses import make_html_response
 from imbue.minds.desktop_client.responses import make_redirect_response
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.responses import make_streaming_response
+from imbue.minds.desktop_client.responses import safe_local_redirect_path
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sharing_handler import SharingError
@@ -108,10 +110,12 @@ from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
 from imbue.minds.desktop_client.templates import render_accounts_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
+from imbue.minds.desktop_client.templates import render_consent_page
 from imbue.minds.desktop_client.templates import render_create_form
 from imbue.minds.desktop_client.templates import render_creating_page
 from imbue.minds.desktop_client.templates import render_destroying_page
 from imbue.minds.desktop_client.templates import render_dev_styleguide_page
+from imbue.minds.desktop_client.templates import render_help_page
 from imbue.minds.desktop_client.templates import render_inbox_list_fragment
 from imbue.minds.desktop_client.templates import render_inbox_page
 from imbue.minds.desktop_client.templates import render_inbox_unavailable_fragment
@@ -119,10 +123,12 @@ from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.desktop_client.templates import render_recovery_page
+from imbue.minds.desktop_client.templates import render_settings_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
+from imbue.minds.desktop_client.templates import resolve_create_host_name
 from imbue.minds.desktop_client.templates import status_text_for
 from imbue.minds.desktop_client.tunnel_token_injection import clear_tunnel_token_from_agent
 from imbue.minds.desktop_client.webdav import create_webdav_app
@@ -146,7 +152,6 @@ from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.primitives import ServiceName
-from imbue.minds.primitives import UserDataPreference
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.mngr.api.discovery_events import DISCOVERY_STREAM_POLL_INTERVAL_SECONDS
 from imbue.mngr.api.discovery_events import DiscoveryError
@@ -441,6 +446,150 @@ def _suggested_create_color(backend_resolver: BackendResolverInterface) -> str:
     return pick_unused_create_color(used)
 
 
+def _maybe_consent_screen() -> Response | None:
+    """Return the error-reporting consent screen if it still needs answering, else None.
+
+    The screen is shown once per machine -- on first launch, and once more after upgrading from a
+    build that predates it -- after the user has authenticated and before the landing content, until
+    they answer it via POST /consent. Callers are responsible for gating this on authentication. When
+    config is unavailable (e.g. minimal test apps) there is nothing to gate on, so this is a no-op.
+    """
+    minds_config: MindsConfig | None = get_state().minds_config
+    if minds_config is None or minds_config.get_error_reporting_consent_given():
+        return None
+    return make_html_response(
+        content=render_consent_page(
+            report_unexpected_errors=minds_config.get_report_unexpected_errors(),
+            include_logs=minds_config.get_include_error_logs(),
+        )
+    )
+
+
+def _handle_consent_page() -> Response:
+    """Render the error-reporting consent screen (GET /consent).
+
+    The consent screen sits just after login, so an unauthenticated request is bounced to the login
+    page. If consent was already answered, redirect home so the screen never reappears.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=302, headers={"Location": "/login"})
+    consent_response = _maybe_consent_screen()
+    if consent_response is not None:
+        return consent_response
+    return make_response(status_code=302, headers={"Location": "/"})
+
+
+def _handle_consent_submit() -> Response:
+    """Record the consent-screen choices and mark consent as answered (POST /consent).
+
+    The consent screen sits just after login, so this requires authentication. "Include logs" is only
+    persisted as on when reporting is also on, matching the screen's coupling.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
+    minds_config: MindsConfig | None = get_state().minds_config
+    if minds_config is not None:
+        report = bool(body.get("report_unexpected_errors", False))
+        include_logs = bool(body.get("include_logs", False))
+        minds_config.set_report_unexpected_errors(report)
+        minds_config.set_include_error_logs(include_logs and report)
+        minds_config.set_error_reporting_consent_given(True)
+    return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
+
+
+def _handle_error_reporting_settings() -> Response:
+    """Persist the error-reporting toggles from the Settings page (POST /_chrome/error-reporting).
+
+    Accepts any subset of ``{report_unexpected_errors, include_logs}``; each present boolean is saved.
+    The settings UI clears "include logs" when reporting is turned off, so the stored pair stays
+    consistent without extra coercion here.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
+    minds_config: MindsConfig | None = get_state().minds_config
+    if minds_config:
+        if "report_unexpected_errors" in body:
+            minds_config.set_report_unexpected_errors(bool(body["report_unexpected_errors"]))
+        if "include_logs" in body:
+            minds_config.set_include_error_logs(bool(body["include_logs"]))
+    return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
+
+
+def _handle_help_page() -> Response:
+    """Render the get-help modal page (GET /help).
+
+    Intentionally unauthenticated: reporting a bug must work even when sign-in itself is broken. The
+    ``workspace`` query param (set by the titlebar button) scopes the optional workspace section.
+    """
+    minds_config: MindsConfig | None = get_state().minds_config
+    include_logs_setting = minds_config.get_include_error_logs() if minds_config else False
+    workspace_agent_id = request.args.get("workspace", "")
+    return make_html_response(
+        content=render_help_page(
+            include_logs_setting=include_logs_setting,
+            workspace_agent_id=workspace_agent_id,
+        )
+    )
+
+
+def _handle_help_report() -> Response:
+    """Collect and submit a user-submitted bug report from the help form (POST /help/report).
+
+    Unauthenticated for the same reason as the page: the user may be reporting a sign-in problem. The
+    shared collector also backs the ``/api/v1`` bug-report route, so both paths produce identical reports.
+    """
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return make_response(
+            status_code=400,
+            content='{"error": "Request body must be a JSON object"}',
+            media_type="application/json",
+        )
+    if not str(body.get("description", "")).strip():
+        return make_response(
+            status_code=400, content='{"error": "A description is required"}', media_type="application/json"
+        )
+
+    state = get_state()
+    event_id = submit_bug_report_from_body(
+        body=body,
+        session_store=state.session_store,
+        backend_resolver=state.backend_resolver,
+        minds_config=state.minds_config,
+        paths=state.api_v1_paths,
+    )
+    return make_response(
+        status_code=200,
+        content=json.dumps({"ok": True, "event_id": event_id}),
+        media_type="application/json",
+    )
+
+
+def _existing_workspace_host_names(backend_resolver: BackendResolverInterface) -> set[str]:
+    """Gather the host names of every known workspace across all providers.
+
+    Reads the resolver's discovery snapshot (the aggregated view over all
+    providers) rather than shelling out per workspace, per the resolver-cache
+    read convention. Uses ``list_known_workspace_ids`` -- the *full* set,
+    including workspaces on destroyed-but-still-lingering hosts -- so an
+    auto-generated ``mind-N`` name does not collide with one that discovery has
+    not yet fully dropped. Feeds both the duplicate-name guard and the
+    ``mind-N`` auto-naming in ``resolve_create_host_name``.
+    """
+    names: set[str] = set()
+    for aid in backend_resolver.list_known_workspace_ids():
+        name = backend_resolver.get_workspace_name(aid)
+        if name is not None:
+            names.add(name)
+    return names
+
+
 def _handle_welcome_page() -> Response:
     """Render the welcome/splash page for first-time users."""
     if not _is_request_authenticated():
@@ -454,6 +603,13 @@ def _handle_landing_page() -> Response:
     if not _is_request_authenticated():
         html = render_login_page()
         return make_html_response(content=html)
+
+    # The error-reporting consent screen sits just after login: once the user is authenticated but
+    # has not yet answered it, show it here before the landing content (the Electron content view and
+    # browser both load "/" first, and _handle_post_login_redirect routes here while it is unanswered).
+    consent_response = _maybe_consent_screen()
+    if consent_response is not None:
+        return consent_response
 
     backend_resolver = get_state().backend_resolver
     all_agent_ids = backend_resolver.list_active_workspace_ids()
@@ -522,6 +678,9 @@ def _handle_landing_page() -> Response:
         has_saved_backup_password=is_backup_password_saved,
         region_options_by_launch_mode=region_options,
         region_selected_by_launch_mode=region_selected,
+        # A deep-link that pre-fills a repo/branch wants those advanced fields
+        # visible; otherwise start on the simple preset cards.
+        start_advanced=bool(git_url or branch),
         color=_suggested_create_color(backend_resolver),
     )
     return make_html_response(content=html)
@@ -531,13 +690,24 @@ def _handle_post_login_redirect() -> Response:
     """Decide where a just-authenticated user lands (GET /post-login).
 
     All sign-in paths (email/password, OAuth, post-email-verification) funnel
-    here. A user who already has workspaces goes to the account-management page
-    (the prior behavior); a user with none goes to ``/`` -- which renders the
-    create form -- so first-time users land on the new-workspace screen instead
-    of the account page.
+    here. A ``?return_to=`` query param (a safe same-origin path, e.g.
+    ``/create`` when the user came from the create page to enable the remote
+    preset) wins when present. Otherwise a user who already has workspaces
+    goes to the account-management page (the prior behavior); a user with none
+    goes to ``/`` -- which renders the create form -- so first-time users land
+    on the new-workspace screen instead of the account page.
     """
     if not _is_request_authenticated():
         return make_response(status_code=302, headers={"Location": "/login"})
+    # The error-reporting consent screen sits just after login. While it is unanswered, send the user
+    # to "/" (the landing handler shows the consent screen there) rather than straight to /accounts or
+    # a return_to deep-link, so the one-time consent gate is answered first.
+    minds_config: MindsConfig | None = get_state().minds_config
+    if minds_config is not None and not minds_config.get_error_reporting_consent_given():
+        return make_response(status_code=302, headers={"Location": "/"})
+    return_to = safe_local_redirect_path(request.args.get("return_to"))
+    if return_to is not None:
+        return make_response(status_code=302, headers={"Location": return_to})
     backend_resolver = get_state().backend_resolver
     has_any_workspace = bool(backend_resolver.list_active_workspace_ids())
     destination = "/accounts" if has_any_workspace else "/"
@@ -607,6 +777,13 @@ def _handle_backup_status_api() -> Response:
 # -- Agent creation route handlers --
 
 
+# Where the create page sends a user who chose the remote (Imbue Cloud)
+# preset without any signed-in account: into the sign-up/sign-in flow with a
+# link back to the picker. ``return_to=%2Fcreate`` is the URL-encoded
+# ``/create`` -- the client builds the same target via
+# ``encodeURIComponent('/create')`` in Create.jinja, and ``_handle_auth_page``
+# only honors a safe same-origin path.
+_REMOTE_SIGNIN_REDIRECT_URL: Final[str] = "/auth/signup?return_to=%2Fcreate"
 def _handle_create_form_submit() -> Response:
     """Handle form submission to create a new agent."""
     if not _is_request_authenticated():
@@ -658,8 +835,8 @@ def _handle_create_form_submit() -> Response:
         # so a validation error doesn't silently revert their choice.
         html_body = render_create_form(
             git_url=git_url,
-            host_name=host_name,
             branch=branch,
+            host_name=host_name,
             launch_mode=launch_mode,
             ai_provider=ai_provider,
             accounts=accounts_list,
@@ -672,6 +849,9 @@ def _handle_create_form_submit() -> Response:
             backup_api_key_env=backup_api_key_env,
             has_saved_backup_password=has_saved_backup_password(agent_creator.paths),
             error_message=message,
+            # Errors are about advanced-view fields (repository, providers,
+            # backup), so open that view directly rather than the cards.
+            start_advanced=True,
             color=color,
         )
         return make_html_response(content=html_body, status_code=status)
@@ -679,19 +859,31 @@ def _handle_create_form_submit() -> Response:
     if not git_url:
         return _re_render_with_error("Repository URL is required.")
 
-    # Validate the host name eagerly so the user sees the error inline on
-    # the form rather than as a deferred "FAILED" status on the creating
-    # page. An empty value falls through; ``start_creation`` substitutes a
-    # repo-derived fallback for the API path.
-    if host_name:
-        try:
-            HostName(host_name)
-        except InvalidName as exc:
-            return _re_render_with_error(str(exc))
+    # The workspace name is chosen automatically unless the user typed one: a
+    # submitted value (from the advanced view's optional "Name" field, empty in
+    # the common simple flow), else the operator ``MINDS_WORKSPACE_NAME``
+    # override, else the next free ``mind-N`` name (computed from the host names
+    # already in use across every provider). Resolve it eagerly so an invalid
+    # name surfaces inline rather than as a deferred "FAILED" status on the
+    # creating page.
+    try:
+        resolved_host_name = resolve_create_host_name(
+            host_name, _existing_workspace_host_names(get_state().backend_resolver)
+        )
+    except InvalidName as exc:
+        return _re_render_with_error(str(exc))
 
     is_imbue_cloud_compute = launch_mode is LaunchMode.IMBUE_CLOUD
     is_imbue_cloud_ai = ai_provider is AIProvider.IMBUE_CLOUD
     if not account_id and (is_imbue_cloud_compute or is_imbue_cloud_ai):
+        # The remote (Imbue Cloud) presets require an account. With no account
+        # at all, the compute path is unusable, so route into the sign-in/up
+        # flow (the client does this on card-select; this is the no-JS
+        # backstop) with a link back to the picker. When accounts exist but
+        # none is selected, re-render asking the user to pick one.
+        has_any_account = bool(session_store_inst.list_accounts()) if session_store_inst is not None else False
+        if not has_any_account:
+            return make_response(status_code=303, headers={"Location": _REMOTE_SIGNIN_REDIRECT_URL})
         return _re_render_with_error(
             "imbue_cloud requires an account. Select an account or pick a different "
             "option for both the compute and AI providers."
@@ -749,7 +941,7 @@ def _handle_create_form_submit() -> Response:
     # the association is keyed under the right id.
     creation_id = agent_creator.start_creation(
         git_url,
-        host_name=host_name,
+        host_name=resolved_host_name,
         branch=branch,
         launch_mode=launch_mode,
         ai_provider=ai_provider,
@@ -791,6 +983,9 @@ def _handle_create_page() -> Response:
         has_saved_backup_password=is_backup_password_saved,
         region_options_by_launch_mode=region_options,
         region_selected_by_launch_mode=region_selected,
+        # A deep-link that pre-fills a repo/branch wants those advanced fields
+        # visible; otherwise start on the simple preset cards.
+        start_advanced=bool(git_url or branch),
         color=_suggested_create_color(backend_resolver),
     )
     return make_html_response(content=html)
@@ -833,72 +1028,15 @@ def _handle_creation_status_api(
     return make_response(content=json.dumps(result), media_type="application/json")
 
 
-def _parse_onboarding_answers(data: Mapping[str, object]) -> OnboardingAnswers:
-    """Parse the three optional onboarding fields from a JSON body / form mapping.
-
-    An unrecognized or empty ``user_data_preference`` resolves to ``None``
-    (the question was skipped), matching the no-op semantics of every
-    onboarding answer.
-    """
-    raw_preference = str(data.get("user_data_preference", "")).strip()
-    data_preference: UserDataPreference | None = None
-    if raw_preference:
-        try:
-            data_preference = UserDataPreference(raw_preference)
-        except ValueError:
-            data_preference = None
-    return OnboardingAnswers(
-        data_preference=data_preference,
-        initial_problem=str(data.get("initial_problem", "")),
-        permissions_preference=str(data.get("permissions_preference", "")),
-    )
-
-
-def _handle_onboarding_submit(
-    agent_id: str,
-) -> Response:
-    """Apply onboarding answers for an in-flight creation (POST /api/create-agent/{agent_id}/onboarding).
-
-    Used by the creating-page question flow: the answers are submitted once
-    the user finishes the questions, then applied on a background thread.
-    Returns immediately; the route param carries a ``CreationId``.
-    """
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
-
-    onboarding_applier: OnboardingApplier | None = get_state().onboarding_applier
-    if onboarding_applier is None:
-        return make_response(
-            status_code=501, content='{"error": "Onboarding not configured"}', media_type="application/json"
-        )
-
-    try:
-        body = _read_json_body()
-    except (json.JSONDecodeError, ValueError):
-        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
-
-    creation_id = CreationId(agent_id)
-    if onboarding_applier.agent_creator.get_creation_info(creation_id) is None:
-        return make_response(
-            status_code=404, content='{"error": "Unknown agent creation"}', media_type="application/json"
-        )
-
-    answers = _parse_onboarding_answers(body)
-    onboarding_applier.start_apply(creation_id, answers)
-    return make_response(content=json.dumps({"status": "ok"}), media_type="application/json")
-
-
 def _handle_creating_page(
     agent_id: str,
 ) -> Response:
-    """Show the creating/onboarding page (GET /creating/{agent_id}).
+    """Show the creating/loading page (GET /creating/{agent_id}).
 
-    The page renders the onboarding questions first (the workspace is
-    already being created in the background) and falls through to the
-    loading screen if creation hasn't finished by the time the user is
-    done. It no longer redirects when creation is already DONE -- the
-    questions still need to be shown so their answers can take effect; the
-    page itself redirects into the workspace once the user finishes.
+    The page shows the setting-up progress screen while the workspace is
+    created in the background, then redirects into the workspace once
+    creation finishes. The status-polling / SSE endpoints are keyed by the
+    same ``creation_id`` carried in the route.
     """
     if not _is_request_authenticated():
         return make_response(status_code=403, content="Not authenticated")
@@ -2576,6 +2714,24 @@ def _handle_accounts_page() -> Response:
     return make_html_response(content=html)
 
 
+def _handle_settings_page() -> Response:
+    """Render the app-level settings page (GET /settings).
+
+    Hosts the per-machine error-reporting toggles, seeded from ``MindsConfig``. Requires the same
+    local session as the rest of the app; it is not account-scoped.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    minds_config: MindsConfig | None = get_state().minds_config
+    report_unexpected_errors = minds_config.get_report_unexpected_errors() if minds_config else False
+    include_error_logs = minds_config.get_include_error_logs() if minds_config else False
+    html = render_settings_page(
+        report_unexpected_errors=report_unexpected_errors,
+        include_error_logs=include_error_logs,
+    )
+    return make_html_response(content=html)
+
+
 def _handle_set_default_account() -> Response:
     """Set the default account for new workspaces."""
     if not _is_request_authenticated():
@@ -3400,30 +3556,11 @@ def create_desktop_client(
         logger.opt(exception=exc).error("Unhandled exception on {} {}", request.method, request.path)
         return make_response(status_code=500, content=f"Internal Server Error: {exc}")
 
-    # Applies onboarding answers (Q1 local scan, Q2 chat message, Q3 memory
-    # file) on a background thread. Available whenever agent creation is: it
-    # reuses the agent creator's own root concurrency group to track the
-    # detached apply thread, and reads the host name / canonical agent id off
-    # the creator. Without an agent_creator the endpoint returns 501.
-    onboarding_applier: OnboardingApplier | None = None
-    if agent_creator is not None:
-        onboarding_applier = OnboardingApplier(
-            agent_creator=agent_creator,
-            paths=agent_creator.paths,
-            message_sender=MngrMessageSender(
-                mngr_caller=get_default_mngr_caller(),
-                concurrency_group=agent_creator.root_concurrency_group,
-            ),
-            root_concurrency_group=agent_creator.root_concurrency_group,
-            mngr_binary=mngr_binary,
-        )
-
     state = DesktopClientState(
         auth_store=auth_store,
         backend_resolver=backend_resolver,
         http_client=http_client,
         agent_creator=agent_creator,
-        onboarding_applier=onboarding_applier,
         imbue_cloud_cli=imbue_cloud_cli,
         notification_dispatcher=notification_dispatcher,
         api_v1_paths=paths,
@@ -3478,6 +3615,11 @@ def create_desktop_client(
     app.add_url_rule("/_dev/styleguide", view_func=_handle_dev_styleguide)
 
     # Core routes
+    app.add_url_rule("/consent", view_func=_handle_consent_page)
+    app.add_url_rule("/consent", view_func=_handle_consent_submit, methods=["POST"])
+    app.add_url_rule("/_chrome/error-reporting", view_func=_handle_error_reporting_settings, methods=["POST"])
+    app.add_url_rule("/help", view_func=_handle_help_page)
+    app.add_url_rule("/help/report", view_func=_handle_help_report, methods=["POST"])
     app.add_url_rule("/welcome", view_func=_handle_welcome_page)
     app.add_url_rule("/login", view_func=_handle_login)
     app.add_url_rule("/authenticate", view_func=_handle_authenticate)
@@ -3486,6 +3628,7 @@ def create_desktop_client(
 
     # Account management routes
     app.add_url_rule("/accounts", view_func=_handle_accounts_page)
+    app.add_url_rule("/settings", view_func=_handle_settings_page)
     app.add_url_rule("/accounts/set-default", view_func=_handle_set_default_account, methods=["POST"])
     app.add_url_rule("/accounts/<user_id>/logout", view_func=_handle_account_logout, methods=["POST"])
 
@@ -3513,7 +3656,6 @@ def create_desktop_client(
     app.add_url_rule("/create", view_func=_handle_create_page)
     app.add_url_rule("/create", view_func=_handle_create_form_submit, methods=["POST"])
     app.add_url_rule("/api/backup-status", view_func=_handle_backup_status_api)
-    app.add_url_rule("/api/create-agent/<agent_id>/onboarding", view_func=_handle_onboarding_submit, methods=["POST"])
     app.add_url_rule("/api/create-agent/<agent_id>/status", view_func=_handle_creation_status_api)
     app.add_url_rule("/api/create-agent/<agent_id>/logs", view_func=_handle_creation_logs_sse)
     app.add_url_rule("/creating/<agent_id>", view_func=_handle_creating_page)

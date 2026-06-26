@@ -100,15 +100,6 @@ _CREATE_FORM_TIMEOUT_SECONDS: Final[int] = 600
 _SYSTEM_INTERFACE_TIMEOUT_SECONDS: Final[int] = 180
 _CREATE_OUTCOME_POLL_INTERVAL_MS: Final[int] = 500
 
-# The onboarding wizard's screen-advance is driven by creating.js, a deferred
-# script that attaches its ``.js-next`` click handlers after the page renders.
-# Playwright's ``click`` waits for the button to be visible/stable but not for
-# that handler to be wired up, so an early click can silently no-op and leave
-# the wizard on the same screen. We click and confirm the screen advanced,
-# retrying the click if it was lost.
-_ONBOARDING_ADVANCE_TIMEOUT_MS: Final[int] = 5_000
-_ONBOARDING_CLICK_ATTEMPTS: Final[int] = 3
-
 # Pre-tested CSS selector against the system_interface frontend at
 # .external_worktrees/forever-claude-template/apps/system_interface/.
 # `.dockview-workspace` is the wrapper div the DockviewWorkspace mithril
@@ -673,31 +664,6 @@ def _ensure_field_value(page: Page, selector: str, expected_value: str) -> None:
     page.fill(selector, expected_value)
 
 
-def _advance_onboarding_screen(page: Page, screen_name: str) -> None:
-    """Click an onboarding screen's Next button and confirm the wizard advanced.
-
-    Waits for the screen's ``.js-next`` to be visible, clicks it, then waits for
-    that button to become hidden (``creating.js``'s ``showScreen`` toggles the
-    leaving screen's ``hidden`` class). Retries the click because Playwright's
-    ``click`` can land before the deferred ``creating.js`` attaches its handlers,
-    silently no-opping; without the retry the wizard appears stuck on the next
-    screen. Raises ``AssertionError`` if the screen never advances.
-    """
-    next_button = f'[data-screen="{screen_name}"] .js-next'
-    page.wait_for_selector(next_button, state="visible", timeout=10_000)
-    for _attempt in range(_ONBOARDING_CLICK_ATTEMPTS):
-        page.click(next_button)
-        try:
-            page.wait_for_selector(next_button, state="hidden", timeout=_ONBOARDING_ADVANCE_TIMEOUT_MS)
-            return
-        except PlaywrightTimeoutError:
-            logger.warning("Onboarding screen {!r} did not advance after click; retrying", screen_name)
-    raise AssertionError(
-        f"Onboarding screen {screen_name!r} did not advance after {_ONBOARDING_CLICK_ATTEMPTS} "
-        "clicks of its Next button (creating.js handlers may not have attached)"
-    )
-
-
 def destroy_agent_best_effort(workspace_name: str, config_project_dir: Path | None = None) -> None:
     """Tear down the mngr agent created during a run. Always survives.
 
@@ -765,7 +731,7 @@ def _wait_for_workspace_ready_or_failure(page: Page, timeout_seconds: int) -> No
     """Block until the create flow reaches the workspace or reports failure.
 
     The minds create flow has two mutually exclusive terminal states after
-    the onboarding questions: a redirect to the ``agent-<id>.localhost``
+    the create form is submitted: a redirect to the ``agent-<id>.localhost``
     workspace URL (success), or the loading screen's failure sub-view
     (``#failure-view``) becoming visible (failure -- ``creating.js``'s
     ``showFailure()`` un-hides it once the status poll/SSE reports FAILED).
@@ -803,7 +769,7 @@ def _drive_create_flow(
     account_label: str | None = None,
     region: str | None = None,
 ) -> None:
-    """Drive the create form + onboarding to a ready workspace on an attached page.
+    """Drive the create form to a ready workspace on an attached page.
 
     Runs exactly once per successful Electron attach; any failure here is a real
     test failure (not a wedged-launch flake) and propagates to fail the test.
@@ -821,11 +787,20 @@ def _drive_create_flow(
     page.goto(f"{backend_origin}/create", wait_until="domcontentloaded")
     page.wait_for_selector("#create-form", state="attached", timeout=10_000)
 
-    # The repo field lives inside the collapsed "Configure..."
-    # panel's nested "Show advanced settings" section; open both
-    # so the field is visible (and to mirror what a user setting
-    # a non-default repo would do). ``#host_name`` is top-level.
-    page.click("#configure-toggle")
+    # The form defaults to the "Imbue Cloud" preset (cloud compute / AI / backup)
+    # for everyone, including signed-out users. Submitting with a cloud provider
+    # but no account opens the sign-in modal instead of creating. When this run
+    # has no account, pick the "local" preset card first so the AI / backup
+    # providers are the non-cloud set (the compute mode is overridden below);
+    # account-based modes pass ``account_label`` and keep the cloud defaults.
+    if account_label is None:
+        page.click('[data-preset="local"]')
+
+    # The repo field, the workspace-name field, and the compute-provider
+    # controls all live in the create form's advanced configuration view,
+    # which is collapsed by default. Open it via the single "Advanced
+    # Configuration" toggle so those fields are visible (mirroring what a
+    # user setting a non-default repo would do).
     page.wait_for_selector("#toggle-advanced:visible", timeout=5_000)
     page.click("#toggle-advanced")
     page.wait_for_selector("#git_url:visible", timeout=5_000)
@@ -838,7 +813,7 @@ def _drive_create_flow(
         page.select_option("#account_id", label=account_label)
     # Select the requested compute provider. With no account selected the
     # form defaults to LIMA; CI's local-Docker test pins DOCKER. The select
-    # lives in the (now-open) "Configure..." panel.
+    # lives in the (now-open) advanced configuration view.
     page.select_option("#launch_mode", launch_mode)
     # Region-aware modes (aws/vultr/imbue_cloud) reveal a region select
     # that must carry a value; the JS shows the row on the launch_mode
@@ -850,26 +825,10 @@ def _drive_create_flow(
     logger.info("Submitting create form")
     page.click("#create-submit")
 
-    # Submitting starts creation in the background and lands on
-    # the onboarding question flow. Walk the three questions
-    # accepting their pre-selected defaults; finishing the last
-    # one enters the workspace (directly if creation already
-    # finished, otherwise via the loading screen, which redirects
-    # once creation completes).
-    page.wait_for_selector("#onboarding", state="attached", timeout=10_000)
-    # Walk the three onboarding questions, accepting each
-    # pre-selected default. q1/q2 advance to the next question
-    # screen; confirm each advance (retrying the click) to absorb
-    # the creating.js handler-attach race. The final (q3) Next runs
-    # finishQuestions(), which shows the loading screen or redirects
-    # straight to the workspace -- the workspace-ready-or-failure wait
-    # below covers that transition (and the failure case), and by q3
-    # creating.js has long since loaded.
-    _advance_onboarding_screen(page, "q1")
-    _advance_onboarding_screen(page, "q2")
-    q3_next_button = '[data-screen="q3"] .js-next'
-    page.wait_for_selector(q3_next_button, state="visible", timeout=10_000)
-    page.click(q3_next_button)
+    # Submitting starts creation in the background and lands on the
+    # creating/loading page, which streams progress and redirects into
+    # the workspace once creation completes.
+    page.wait_for_selector("#creating", state="attached", timeout=10_000)
 
     # Race the workspace-ready redirect against the create flow's
     # failure view, so a `mngr create` failure (e.g. an unregistered
@@ -884,6 +843,23 @@ def _drive_create_flow(
         timeout=_SYSTEM_INTERFACE_TIMEOUT_SECONDS * 1000,
     )
     logger.info("system_interface dockview rendered; workspace creation complete")
+
+
+def _attach_renderer_diagnostics(page: Page) -> None:
+    """Stream the Electron renderer's console output, JS errors, and failed
+    requests to loguru.
+
+    Electron's stderr only carries main-process output, so a renderer-side
+    fault (e.g. ``creating.js`` throwing before it attaches its handlers, or
+    failing to load) is otherwise invisible in CI. Mirroring those events into
+    the run log makes a stuck create step diagnosable.
+    """
+    page.on("console", lambda message: logger.debug("[renderer console:{}] {}", message.type, message.text))
+    page.on("pageerror", lambda error: logger.warning("[renderer pageerror] {}", error))
+    page.on(
+        "requestfailed",
+        lambda request: logger.warning("[renderer requestfailed] {} ({})", request.url, request.failure),
+    )
 
 
 def _attempt_create_workspace_via_electron(
@@ -919,6 +895,9 @@ def _attempt_create_workspace_via_electron(
                     page = _pick_content_page(browser, _BACKEND_READY_TIMEOUT_SECONDS)
                 except (PlaywrightError, TimeoutError) as exc:
                     raise _ElectronConnectError(f"Electron CDP attach failed on port {debug_port}: {exc}") from exc
+                # Surface renderer console/JS errors into the run log so a stuck
+                # create step (creating.js handlers not attaching) is diagnosable.
+                _attach_renderer_diagnostics(page)
                 _drive_create_flow(
                     page,
                     fct_path,
@@ -1109,12 +1088,10 @@ def drive_create_docker_imbue_workspace(page: Page, fct_path: Path, workspace_na
     logger.info("Submitting create form")
     page.click("#create-submit")
 
-    page.wait_for_selector("#onboarding", state="attached", timeout=15_000)
-    _advance_onboarding_screen(page, "q1")
-    _advance_onboarding_screen(page, "q2")
-    q3_next = '[data-screen="q3"] .js-next'
-    page.wait_for_selector(q3_next, state="visible", timeout=10_000)
-    page.click(q3_next)
+    # Submitting starts creation in the background and lands on the
+    # creating/loading page, which streams progress and redirects into
+    # the workspace once creation completes.
+    page.wait_for_selector("#creating", state="attached", timeout=10_000)
 
     _wait_for_workspace_ready_or_failure(page, _CREATE_FORM_TIMEOUT_SECONDS)
     logger.info("Workspace ready at {}", page.url)

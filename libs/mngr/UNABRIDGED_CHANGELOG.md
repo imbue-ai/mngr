@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-25
+
+Bumped the offload version baked into `libs/mngr/imbue/mngr/resources/Dockerfile` from `0.9.7` to `0.9.9` to track the CI pin.
+
 ## 2026-06-24
 
 Added `mngr config wizard`, an interactive command that walks through common one-time user-scope configuration. Each step short-circuits when its setting is already configured, so it is safe to re-run.

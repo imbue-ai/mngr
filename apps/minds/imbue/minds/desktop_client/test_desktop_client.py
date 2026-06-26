@@ -291,6 +291,32 @@ def test_post_login_redirects_to_login_when_unauthenticated(tmp_path: Path) -> N
     assert response.headers["location"] == "/login"
 
 
+def test_post_login_honors_safe_return_to(tmp_path: Path) -> None:
+    """A ``return_to`` (e.g. /create, from the remote-preset sign-in flow) wins."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path, backend_resolver=backend_resolver, http_client=None
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/post-login", query_string={"return_to": "/create"}, follow_redirects=False)
+    assert response.status_code == 302
+    assert response.headers["location"] == "/create"
+
+
+def test_post_login_ignores_unsafe_return_to(tmp_path: Path) -> None:
+    """An off-origin ``return_to`` is ignored and the default destination is used."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path, backend_resolver=backend_resolver, http_client=None
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/post-login", query_string={"return_to": "https://evil.com"}, follow_redirects=False)
+    assert response.status_code == 302
+    assert response.headers["location"] == "/"
+
+
 # -- Leased imbue_cloud host account-binding tests --
 
 
@@ -447,7 +473,7 @@ def test_landing_page_shows_create_form_after_discovery_finds_no_agents(tmp_path
 
     response = client.get("/")
     assert response.status_code == 200
-    assert "Create workspace" in response.text
+    assert "Where do you want to run your mind?" in response.text
     assert "git_url" in response.text
 
 
@@ -478,7 +504,9 @@ def test_create_page_shows_form(tmp_path: Path) -> None:
 
     response = client.get("/create")
     assert response.status_code == 200
-    assert "Create workspace" in response.text
+    assert "Where do you want to run your mind?" in response.text
+    assert 'data-preset="remote"' in response.text
+    assert 'data-preset="local"' in response.text
 
 
 def test_creation_status_returns_404_for_unknown_agent(tmp_path: Path) -> None:
@@ -617,47 +645,32 @@ def test_create_form_submit_passes_host_name(tmp_path: Path) -> None:
     agent_creator.wait_for_all()
 
 
-def test_onboarding_submit_returns_404_for_unknown_creation(tmp_path: Path) -> None:
-    """POST /api/create-agent/{id}/onboarding returns 404 for an untracked creation."""
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+def test_create_form_submit_auto_names_next_mind(tmp_path: Path) -> None:
+    """POST /create with no host_name auto-generates the next free ``mind-N``.
+
+    The form no longer asks for a name. With ``mind-1`` already a known
+    workspace in the resolver, the create handler must gather existing names
+    across providers and resolve the new workspace to ``mind-2``.
+    """
+    existing_id = AgentId()
+    resolver = make_resolver_with_data(
+        make_agents_json(existing_id, labels={"workspace": "mind-1", "is_primary": "true"}),
+    )
+    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path, backend_resolver=resolver)
 
     response = client.post(
-        "/api/create-agent/{}/onboarding".format(CreationId()),
-        json={"user_data_preference": "PRIVACY"},
+        "/create",
+        data={"git_url": "file:///nonexistent-repo"},
+        follow_redirects=False,
     )
-    assert response.status_code == 404
-
-
-def test_onboarding_submit_accepts_answers_for_tracked_creation(tmp_path: Path) -> None:
-    """POST /api/create-agent/{id}/onboarding accepts answers for a tracked creation."""
-    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
-
-    creation_id = agent_creator.start_creation("file:///nonexistent-repo")
-
-    # Only the data preference is submitted so the apply thread stays local.
-    response = client.post(
-        "/api/create-agent/{}/onboarding".format(creation_id),
-        json={"user_data_preference": "PRIVACY"},
-    )
-    assert response.status_code == 200
-    assert response.get_json()["status"] == "ok"
+    assert response.status_code == 303
+    creation_id = CreationId(response.headers["Location"].rsplit("/", 1)[-1])
+    info = agent_creator.get_creation_info(creation_id)
+    assert info is not None
+    assert info.host_name == "mind-2"
     agent_creator.wait_for_all()
 
 
-def test_onboarding_submit_requires_authentication(tmp_path: Path) -> None:
-    """POST /api/create-agent/{id}/onboarding returns 403 without authentication."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
-    client, _ = _create_test_desktop_client(
-        tmp_path=tmp_path,
-        backend_resolver=backend_resolver,
-        http_client=None,
-    )
-
-    response = client.post(
-        "/api/create-agent/{}/onboarding".format(CreationId()),
-        json={"user_data_preference": "PRIVACY"},
-    )
-    assert response.status_code == 403
 
 
 def test_create_form_submit_rejects_invalid_host_name(tmp_path: Path) -> None:
@@ -675,7 +688,11 @@ def test_create_form_submit_rejects_invalid_host_name(tmp_path: Path) -> None:
 
 
 def test_creating_page_shows_status(tmp_path: Path) -> None:
-    """GET /creating/{agent_id} shows the creating progress page."""
+    """GET /creating/{agent_id} shows the loading/progress page directly.
+
+    The page no longer interposes any onboarding questions before the
+    setting-up screen, so it goes straight to the loading view.
+    """
     client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
 
     agent_id = agent_creator.start_creation("file:///nonexistent-repo")
@@ -683,6 +700,10 @@ def test_creating_page_shows_status(tmp_path: Path) -> None:
     response = client.get("/creating/{}".format(agent_id))
     assert response.status_code == 200
     assert "Creating your project" in response.text
+    assert "Setting up your workspace" in response.text
+    # The onboarding question UI was removed, so none of its markers render.
+    assert "data-question" not in response.text
+    assert 'class="opt' not in response.text
     agent_creator.wait_for_all()
 
 
@@ -967,42 +988,45 @@ def test_create_form_does_not_show_env_file_checkbox(tmp_path: Path) -> None:
     assert "include_env_file" not in response.text
 
 
-def test_create_form_submit_rejects_imbue_cloud_compute_without_account(tmp_path: Path) -> None:
-    """Selecting IMBUE_CLOUD compute without an account is rejected with a clear message."""
+def test_create_form_submit_redirects_imbue_cloud_compute_without_account_to_signin(tmp_path: Path) -> None:
+    """IMBUE_CLOUD compute without any account routes into the sign-in/up flow.
+
+    With no signed-in account at all, the remote compute path is unusable, so
+    rather than re-rendering an error the server sends the user to sign up (with
+    a link back to the picker).
+    """
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
     response = client.post(
         "/create",
         data={
             "git_url": "file:///nonexistent-repo",
-            "host_name": "my-agent",
             "launch_mode": "IMBUE_CLOUD",
             "ai_provider": "SUBSCRIPTION",
             "account_id": "",
         },
         follow_redirects=False,
     )
-    assert response.status_code == 400
-    assert "imbue_cloud requires an account" in response.text
+    assert response.status_code == 303
+    assert response.headers["location"] == "/auth/signup?return_to=%2Fcreate"
 
 
-def test_create_form_submit_rejects_imbue_cloud_ai_without_account(tmp_path: Path) -> None:
-    """Selecting IMBUE_CLOUD AI provider without an account is rejected."""
+def test_create_form_submit_redirects_imbue_cloud_ai_without_account_to_signin(tmp_path: Path) -> None:
+    """IMBUE_CLOUD AI provider without any account routes into the sign-in/up flow."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
     response = client.post(
         "/create",
         data={
             "git_url": "file:///nonexistent-repo",
-            "host_name": "my-agent",
             "launch_mode": "DOCKER",
             "ai_provider": "IMBUE_CLOUD",
             "account_id": "",
         },
         follow_redirects=False,
     )
-    assert response.status_code == 400
-    assert "imbue_cloud requires an account" in response.text
+    assert response.status_code == 303
+    assert response.headers["location"] == "/auth/signup?return_to=%2Fcreate"
 
 
 def test_create_form_submit_rejects_api_key_provider_without_key(tmp_path: Path) -> None:
@@ -1050,14 +1074,16 @@ def test_create_form_submit_preserves_account_id_on_validation_error(tmp_path: P
     option as ``selected`` and must NOT show any other account as selected."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
-    # Trigger a validation error (IMBUE_CLOUD AI without an account).
+    # Trigger a re-rendering validation error: AI provider API_KEY with no key.
+    # (imbue_cloud-without-account now redirects to sign-in instead of
+    # re-rendering, so it no longer exercises this re-render path.)
     response = client.post(
         "/create",
         data={
             "git_url": "file:///nonexistent-repo",
-            "host_name": "my-agent",
             "launch_mode": "DOCKER",
-            "ai_provider": "IMBUE_CLOUD",
+            "ai_provider": "API_KEY",
+            "anthropic_api_key": "",
             "account_id": "",
         },
         follow_redirects=False,
@@ -1065,8 +1091,8 @@ def test_create_form_submit_preserves_account_id_on_validation_error(tmp_path: P
     assert response.status_code == 400
     # The "No account (private project)" option is selected when default_account_id is empty.
     assert 'value=""' in response.text and "No account" in response.text
-    # And the IMBUE_CLOUD warning should be present.
-    assert "imbue_cloud requires an account" in response.text
+    # And the API-key validation error should be present.
+    assert "Anthropic API key is required" in response.text
 
 
 def test_unhandled_exception_returns_500_with_message(tmp_path: Path) -> None:
@@ -1433,6 +1459,39 @@ def test_auth_login_page_without_message_query_param(tmp_path: Path) -> None:
     assert "You need to sign in to Imbue" not in response.text
 
 
+def test_auth_page_with_return_to_shows_back_link_and_explainer(tmp_path: Path) -> None:
+    """GET /auth/signup?return_to=/create shows a back link + the remote explainer."""
+    client = _create_test_client_with_auth_routes(tmp_path)
+    response = client.get("/auth/signup", query_string={"return_to": "/create"})
+    assert response.status_code == 200
+    # Back link to the picker.
+    assert "Back to mind setup" in response.text
+    assert 'href="/create"' in response.text
+    # Default explainer banner (no explicit message supplied).
+    assert "run your mind on Imbue Cloud" in response.text
+
+
+def test_auth_signin_modal_page_renders_overlay_with_auth_form(tmp_path: Path) -> None:
+    """GET /auth/signin-modal serves the overlay sign-in page (transparent
+    backdrop + the shared auth form) loaded into the shared modal view."""
+    client = _create_test_client_with_auth_routes(tmp_path)
+    response = client.get("/auth/signin-modal")
+    assert response.status_code == 200
+    assert 'id="signin-modal-backdrop"' in response.text
+    assert 'id="signin-form"' in response.text
+    assert "run your mind on Imbue Cloud" in response.text
+
+
+def test_auth_page_ignores_unsafe_return_to(tmp_path: Path) -> None:
+    """An off-origin return_to is dropped: no back link to it, no explainer."""
+    client = _create_test_client_with_auth_routes(tmp_path)
+    response = client.get("/auth/signup", query_string={"return_to": "https://evil.com"})
+    assert response.status_code == 200
+    assert "Back to mind setup" not in response.text
+    assert "evil.com" not in response.text
+    assert "run your mind on Imbue Cloud" not in response.text
+
+
 def test_accounts_page_requires_auth(tmp_path: Path) -> None:
     """The /accounts page requires authentication."""
     client, _ = _create_test_client_with_stores(tmp_path)
@@ -1459,6 +1518,37 @@ def test_accounts_page_shows_logged_in_accounts(tmp_path: Path) -> None:
     response = client.get("/accounts")
     assert response.status_code == 200
     assert "test@example.com" in response.text
+
+
+def test_accounts_page_no_longer_hosts_error_reporting_toggles(tmp_path: Path) -> None:
+    """The error-reporting toggles moved off the manage-accounts page to the dedicated Settings page."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.get("/accounts")
+    assert response.status_code == 200
+    assert "report-errors-toggle" not in response.text
+
+
+def test_settings_page_requires_auth(tmp_path: Path) -> None:
+    """The /settings page requires authentication."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/settings")
+    assert response.status_code == 403
+
+
+def test_settings_page_hosts_error_reporting_toggles(tmp_path: Path) -> None:
+    """The Settings page hosts the per-machine error-reporting toggles, seeded from config."""
+    MindsConfig(data_dir=tmp_path).set_report_unexpected_errors(True)
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.get("/settings")
+    assert response.status_code == 200
+    assert "Report unexpected errors" in response.text
+    report_input = response.text.split('id="report-errors-toggle"')[1].split(">")[0]
+    assert "checked" in report_input
+    # With reporting on, the include-logs row is revealed (not ``hidden``).
+    logs_row = response.text.split('id="include-logs-row"')[1].split(">")[0]
+    assert "hidden" not in logs_row
 
 
 def test_workspace_settings_page_requires_auth(tmp_path: Path) -> None:
@@ -1799,6 +1889,263 @@ def test_auto_open_toggle(tmp_path: Path) -> None:
     assert config.get_auto_open_requests_panel() is False
 
 
+# -- error-reporting consent + settings tests --
+
+
+def test_landing_shows_login_not_consent_when_unauthenticated(tmp_path: Path) -> None:
+    """The consent screen sits after login: an unauthenticated "/" shows the login prompt, not consent."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "Help improve Minds" not in response.text
+    assert "Login" in response.text
+
+
+def test_landing_shows_consent_screen_after_login_when_unanswered(tmp_path: Path) -> None:
+    """Once authenticated, "/" shows the consent screen until it is answered."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "Help improve Minds" in response.text
+    assert "Report unexpected errors" in response.text
+
+
+def test_welcome_continue_without_account_routes_through_consent(tmp_path: Path) -> None:
+    """ "Continue without an account" sends the user to "/" so the consent screen is offered.
+
+    Reporting is not gated behind an Imbue account: the account-less skip path lands on "/", whose
+    handler shows the "Help improve Minds" consent screen (when unanswered) before the create form.
+    """
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    welcome = client.get("/welcome")
+    assert welcome.status_code == 200
+    # Isolate the full opening <a> tag that carries the skip-account id, regardless of
+    # attribute order, and assert it links to "/" (the consent-bearing landing route)
+    # rather than straight to "/create".
+    before, after = welcome.text.split('id="skip-account-btn"', 1)
+    skip_tag = before.rsplit("<a", 1)[1] + after.split(">", 1)[0]
+    assert 'href="/"' in skip_tag
+    # Following that link while consent is unanswered shows the consent screen.
+    landing = client.get("/")
+    assert "Help improve Minds" in landing.text
+
+
+def test_consent_page_requires_auth(tmp_path: Path) -> None:
+    """GET /consent bounces an unauthenticated request to the login page."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/consent")
+    assert response.status_code == 302
+    assert response.headers["location"] == "/login"
+
+
+def test_consent_submit_requires_auth(tmp_path: Path) -> None:
+    """POST /consent rejects an unauthenticated request and persists nothing."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.post("/consent", json={"report_unexpected_errors": True, "include_logs": True})
+    assert response.status_code == 403
+    assert MindsConfig(data_dir=tmp_path).get_error_reporting_consent_given() is False
+
+
+def test_post_login_routes_to_landing_while_consent_unanswered(tmp_path: Path) -> None:
+    """While consent is unanswered, post-login routes to "/" (which shows consent), not /accounts."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-test-123", email="test@example.com")
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+    response = client.get("/post-login", follow_redirects=False)
+    assert response.status_code == 302
+    assert response.headers["location"] == "/"
+
+
+def test_consent_submit_records_choices_and_unblocks_landing(tmp_path: Path) -> None:
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.post("/consent", json={"report_unexpected_errors": True, "include_logs": True})
+    assert response.status_code == 200
+
+    config = MindsConfig(data_dir=tmp_path)
+    assert config.get_error_reporting_consent_given() is True
+    assert config.get_report_unexpected_errors() is True
+    assert config.get_include_error_logs() is True
+
+    # With consent answered, the authenticated "/" no longer shows the consent screen.
+    landing = client.get("/")
+    assert "Help improve Minds" not in landing.text
+
+
+def test_consent_submit_does_not_persist_logs_without_reporting(tmp_path: Path) -> None:
+    """ "Include logs" is only meaningful with reporting on, so it is not persisted otherwise."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.post("/consent", json={"report_unexpected_errors": False, "include_logs": True})
+    assert response.status_code == 200
+
+    config = MindsConfig(data_dir=tmp_path)
+    assert config.get_error_reporting_consent_given() is True
+    assert config.get_report_unexpected_errors() is False
+    assert config.get_include_error_logs() is False
+
+
+def test_error_reporting_settings_requires_auth(tmp_path: Path) -> None:
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.post("/_chrome/error-reporting", json={"report_unexpected_errors": True})
+    assert response.status_code == 403
+    # Nothing was persisted.
+    config = MindsConfig(data_dir=tmp_path)
+    assert config.get_report_unexpected_errors() is False
+
+
+def test_error_reporting_settings_persist_each_toggle(tmp_path: Path) -> None:
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+
+    assert client.post("/_chrome/error-reporting", json={"report_unexpected_errors": True}).status_code == 200
+    assert client.post("/_chrome/error-reporting", json={"include_logs": True}).status_code == 200
+
+    config = MindsConfig(data_dir=tmp_path)
+    assert config.get_report_unexpected_errors() is True
+    assert config.get_include_error_logs() is True
+
+    # A partial update touches only the named key.
+    assert client.post("/_chrome/error-reporting", json={"report_unexpected_errors": False}).status_code == 200
+    config = MindsConfig(data_dir=tmp_path)
+    assert config.get_report_unexpected_errors() is False
+    assert config.get_include_error_logs() is True
+
+
+# -- get-help / report-a-bug tests --
+
+
+def test_help_page_renders_report_option(tmp_path: Path) -> None:
+    """The help page renders the report-a-bug flow; the agent-help option is present but disabled."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/help")
+    assert response.status_code == 200
+    assert "Report a bug to Imbue" in response.text
+    assert "Have an agent help fix the problem" in response.text
+    # The agent-help radio is disabled in this phase.
+    agent_radio = response.text.split('value="agent"')[1].split(">")[0]
+    assert "disabled" in agent_radio
+
+
+def test_help_page_hides_include_logs_checkbox_when_setting_on(tmp_path: Path) -> None:
+    """With the persistent include-logs setting on, logs are always attached and the checkbox is hidden."""
+    MindsConfig(data_dir=tmp_path).set_include_error_logs(True)
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/help")
+    assert 'id="help-include-logs"' not in response.text
+
+
+def test_help_page_shows_include_logs_checkbox_when_setting_off(tmp_path: Path) -> None:
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/help")
+    assert 'id="help-include-logs"' in response.text
+
+
+def test_help_page_shows_checkboxes_inline_and_report_id_affordance(tmp_path: Path) -> None:
+    """The diagnostics checkboxes are top-level (no Advanced disclosure) and the confirmation can show
+    a copyable report ID."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/help")
+    assert response.status_code == 200
+    # Checkboxes are rendered directly, not hidden behind an Advanced <details> disclosure.
+    assert "<details" not in response.text
+    assert 'id="help-app-diagnostics"' in response.text
+    assert 'id="help-remote-access"' in response.text
+    # The confirmation hosts a copyable report-ID slot populated from the response's event_id.
+    assert 'id="help-event-id"' in response.text
+    assert 'id="help-copy-id-btn"' in response.text
+
+
+def test_help_report_requires_description(tmp_path: Path) -> None:
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.post("/help/report", json={"description": "  "})
+    assert response.status_code == 400
+
+
+def test_help_report_accepts_a_description(tmp_path: Path) -> None:
+    # Sentry is not initialized in tests, so the report is collected and the route returns ok with a
+    # null event_id (nothing was actually transmitted). This exercises the full collect path end to end.
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.post(
+        "/help/report",
+        json={"description": "the app froze", "include_app_diagnostics": True, "remote_access": True},
+    )
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["ok"] is True
+    assert body["event_id"] is None
+
+
+def test_served_page_omits_frontend_sentry_when_reporting_off(tmp_path: Path) -> None:
+    # Default shipped state: report_unexpected_errors is off, so a page served by the backend must
+    # not boot the frontend Sentry SDK. This is the unified gate -- the browser honors the same user
+    # setting as the backend rather than the old MINDS_SENTRY_ENABLED env var.
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/help")
+    assert response.status_code == 200
+    assert "minds-sentry-config" not in response.text
+    assert "sentry.browser.min.js" not in response.text
+
+
+def test_served_page_emits_frontend_sentry_when_reporting_on(tmp_path: Path) -> None:
+    # With the user's report_unexpected_errors setting on, a served page boots the frontend Sentry
+    # SDK. The setting is read live per render, so flipping it (as the consent screen / settings do)
+    # takes effect on the next page load without restarting the backend.
+    MindsConfig(data_dir=tmp_path).set_report_unexpected_errors(True)
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/help")
+    assert response.status_code == 200
+    assert '<script type="application/json" id="minds-sentry-config">' in response.text
+    assert "sentry.browser.min.js" in response.text
+
+
+def _create_test_client_with_api_key(tmp_path: Path, api_key: str) -> FlaskClient:
+    """Build a client with the /api/v1 blueprint mounted and a known central API key."""
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    session_store = make_session_store_for_test(tmp_path)
+    minds_config = MindsConfig(data_dir=tmp_path)
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        http_client=None,
+        session_store=session_store,
+        minds_config=minds_config,
+        paths=WorkspacePaths(data_dir=tmp_path),
+        minds_api_key=api_key,
+    )
+    return app.test_client()
+
+
+def test_api_v1_bug_report_requires_bearer_token(tmp_path: Path) -> None:
+    client = _create_test_client_with_api_key(tmp_path, api_key="secret-key")
+    response = client.post(f"/api/v1/agents/{AgentId()}/report", json={"description": "boom"})
+    assert response.status_code == 401
+
+
+def test_api_v1_bug_report_accepts_authorized_request(tmp_path: Path) -> None:
+    client = _create_test_client_with_api_key(tmp_path, api_key="secret-key")
+    response = client.post(
+        f"/api/v1/agents/{AgentId()}/report",
+        json={"description": "agent saw an error"},
+        headers={"Authorization": "Bearer secret-key"},
+    )
+    assert response.status_code == 200
+    assert response.get_json()["ok"] is True
+
+
+def test_api_v1_bug_report_rejects_empty_description(tmp_path: Path) -> None:
+    client = _create_test_client_with_api_key(tmp_path, api_key="secret-key")
+    response = client.post(
+        f"/api/v1/agents/{AgentId()}/report",
+        json={"description": ""},
+        headers={"Authorization": "Bearer secret-key"},
+    )
+    assert response.status_code == 400
+
+
 # -- system-interface restart + recovery tests --
 
 
@@ -1982,6 +2329,10 @@ def test_recovery_page_renders_for_authenticated_user(tmp_path: Path) -> None:
     # reports the container reachable.
     assert "Restart workspace" in response.text
     assert "restart-system-interface" in response.text
+    # The recovery page offers an in-page report button that opens the get-help modal
+    # via the ``minds:open-help`` relay message.
+    assert 'id="recovery-report-btn"' in response.text
+    assert "minds:open-help" in response.text
 
 
 def test_recovery_page_drops_open_redirect_return_to(tmp_path: Path) -> None:

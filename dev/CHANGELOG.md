@@ -4,6 +4,20 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-06-25
+
+### Added
+
+- Added: Blueprint planning document for the minds error-reporting & "get help" work (`blueprint/minds-error-reporting-help/`), scoping the full four-phase design (phases 1-2 implemented in this run; 3-4 will follow as stacked PRs).
+- Added: Design doc `specs/tmr-bounded-convergence-and-normalization.md` for improving the e2e tests TMR generates — tutorial-anchored convergence with deletion as a first-class action, plus a suite-level normalization stage in the reducer and a FIXME-resolution/escalation lifecycle.
+- Added: Design blueprint `blueprint/gateway-agent-id-validation/` documenting the decision to reject malformed permission-request `agent_id`s at the latchkey gateway instead of only guarding against them on the consumer side.
+
+### Changed
+
+- Changed: Bumped the offload CI pin in `.github/workflows/ci.yml` from `0.9.7` to `0.9.9` (cargo cache key, version check, and `cargo install` invocation updated to match).
+- Changed: `just minds-start` no longer defaults the workspace name to `mindtest`. Its `agent_name` argument defaults to empty, so a plain `just minds-start` leaves `MINDS_WORKSPACE_NAME` unset and the create form generates an automatic `mind-N` name — matching what a shipped binary does. Pass a name explicitly to pin it (a collision now errors at create time rather than being auto-suffixed).
+- Changed: Nightly changelog consolidation automation now merges its PR immediately instead of leaving it for a human to review and merge. The in-run accuracy review remains the quality gate.
+
 ## 2026-06-24
 
 ### Added
