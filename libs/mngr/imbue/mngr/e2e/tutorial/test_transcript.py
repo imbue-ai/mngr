@@ -164,10 +164,14 @@ def _create_claude_task_with_transcript(e2e: E2eSession, host_dir: Path, sleep_v
 @pytest.mark.tmux
 @pytest.mark.timeout(600)
 def test_transcript_default(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # view the transcript of an agent's conversation
         mngr transcript my-task
-    """)
+
+    Scope: `mngr transcript my-task` renders the agent's conversation as
+    human-readable text, showing both the user message we sent (`user:` plus the
+    initial message text) and at least one assistant reply (`assistant:`).
+    """
     _create_my_task(e2e)
     result = e2e.run("mngr transcript my-task", comment="view the transcript")
     expect(result).to_succeed()
@@ -184,10 +188,14 @@ def test_transcript_default(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 def test_transcript_assistant_only(e2e: E2eSession, temp_host_dir: Path) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # view only assistant messages
         mngr transcript my-task --role assistant
-    """)
+
+    Scope: `--role assistant` filters the transcript to assistant messages only,
+    showing the assistant message while dropping both the user message and the
+    tool result.
+    """
     _create_claude_task_with_transcript(e2e, temp_host_dir, 100801)
     result = e2e.run("mngr transcript my-task --role assistant", comment="view only assistant messages")
     expect(result).to_succeed()
@@ -203,10 +211,13 @@ def test_transcript_assistant_only(e2e: E2eSession, temp_host_dir: Path) -> None
 @pytest.mark.tmux
 @pytest.mark.timeout(600)
 def test_transcript_tail(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # view the last 5 messages
         mngr transcript my-task --tail 5
-    """)
+
+    Scope: `--tail 5` caps the transcript to at most the last 5 events (verified
+    against the JSONL output, which yields between 1 and 5 events).
+    """
     _create_my_task(e2e)
     result = e2e.run("mngr transcript my-task --tail 5", comment="view the last 5 messages")
     expect(result).to_succeed()
@@ -221,10 +232,13 @@ def test_transcript_tail(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(600)
 def test_transcript_tail_one(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # quickly peek at an agent's most recent message without connecting (handy for sanity-checking many agents)
         mngr transcript my-task --tail 1
-    """)
+
+    Scope: `--tail 1` shows exactly the single most recent event (verified
+    against the JSONL output, which yields exactly 1 event).
+    """
     _create_my_task(e2e)
     result = e2e.run("mngr transcript my-task --tail 1", comment="quickly peek at most recent message")
     expect(result).to_succeed()
@@ -240,10 +254,13 @@ def test_transcript_tail_one(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(600)
 def test_transcript_format_jsonl(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # output transcript as JSONL for programmatic use
         mngr transcript my-task --format jsonl
-    """)
+
+    Scope: `--format jsonl` emits the transcript as JSONL, where every non-blank
+    line is a standalone JSON object (a dict) suitable for programmatic use.
+    """
     _create_my_task(e2e)
     result = e2e.run("mngr transcript my-task --format jsonl", comment="output transcript as JSONL")
     expect(result).to_succeed()
