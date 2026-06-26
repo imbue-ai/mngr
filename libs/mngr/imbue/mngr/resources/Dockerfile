@@ -103,7 +103,7 @@ ENV UV_LINK_MODE=copy
 # call (per-layer caching, see `_build_image_from_dockerfile_contents`). ARGs
 # don't carry across separate calls, so an ARG above would expand to empty in
 # the RUN below and `cargo install offload@` would error.
-RUN export OFFLOAD_VERSION=0.9.9 \
+RUN export OFFLOAD_VERSION=0.9.10 \
     && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path \
     && /root/.cargo/bin/cargo install offload@${OFFLOAD_VERSION} --locked --root /opt/offload \
