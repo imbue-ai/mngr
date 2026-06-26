@@ -556,8 +556,9 @@ def _handle_help_page() -> Response:
 def _handle_help_report() -> Response:
     """Collect and submit a user-submitted bug report from the help form (POST /help/report).
 
-    Unauthenticated for the same reason as the page: the user may be reporting a sign-in problem. The
-    shared collector also backs the ``/api/v1`` bug-report route, so both paths produce identical reports.
+    Unauthenticated for the same reason as the page: the user may be reporting a sign-in problem. An
+    agent-initiated report (the ``/api/v1`` route) lands here too: that route pre-fills this same form
+    rather than submitting, so the human-reviewed send always flows through this collector.
     """
     body = request.get_json(silent=True, force=True)
     if not isinstance(body, dict):
