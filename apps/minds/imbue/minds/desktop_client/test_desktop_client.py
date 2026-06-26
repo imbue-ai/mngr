@@ -2,6 +2,7 @@ import json
 import os
 import queue
 import subprocess
+import threading
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -2384,8 +2385,9 @@ def test_api_v1_bug_report_opens_prefilled_modal_instead_of_submitting(tmp_path:
     pre-filled with the agent's description, scoped to the caller's own workspace."""
     client = _create_test_client_with_api_key(tmp_path, api_key="secret-key")
     agent_id = AgentId()
-    received: list[OpenHelpRequest] = []
-    get_state(client.application).help_modal_request_broker.add_on_request_callback(received.append)
+    request_queue: "queue.Queue[OpenHelpRequest]" = queue.Queue()
+    wake_event = threading.Event()
+    get_state(client.application).help_modal_request_broker.subscribe(request_queue, wake_event)
     response = client.post(
         f"/api/v1/agents/{agent_id}/report",
         json={"description": "agent saw an error"},
@@ -2396,9 +2398,10 @@ def test_api_v1_bug_report_opens_prefilled_modal_instead_of_submitting(tmp_path:
     assert body["ok"] is True
     # No Sentry submission happens here, so there is no event_id to return.
     assert "event_id" not in body
-    assert len(received) == 1
-    assert received[0].description == "agent saw an error"
-    assert received[0].workspace_agent_id == str(agent_id)
+    # The route published an open-help request (scoped to the caller's workspace) instead of submitting.
+    received = request_queue.get_nowait()
+    assert received.description == "agent saw an error"
+    assert received.workspace_agent_id == str(agent_id)
 
 
 def test_api_v1_bug_report_rejects_empty_description(tmp_path: Path) -> None:

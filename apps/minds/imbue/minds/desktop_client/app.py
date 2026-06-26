@@ -2301,11 +2301,10 @@ def _handle_chrome_events() -> Response:
         def _on_health_change(agent_id: AgentId, status: AgentHealth) -> None:
             _enqueue_health_change(health_queue, change_event, agent_id, status)
 
-        def _on_open_help(req: OpenHelpRequest) -> None:
-            open_help_queue.put(req)
-            change_event.set()
-
-        help_broker.add_on_request_callback(_on_open_help)
+        # Subscribe this connection's queue + wake event directly (no callback)
+        # so the broker fans open-help requests onto it the same way health
+        # transitions reach ``health_queue``.
+        help_broker.subscribe(open_help_queue, change_event)
 
         if isinstance(backend_resolver, MngrCliBackendResolver):
             backend_resolver.add_on_change_callback(_on_change)
@@ -2541,7 +2540,7 @@ def _handle_chrome_events() -> Response:
                         json.dumps({"type": "requests", **current_requests_payload, "auto_open": auto_open})
                     )
         finally:
-            help_broker.remove_on_request_callback(_on_open_help)
+            help_broker.unsubscribe(open_help_queue, change_event)
             if isinstance(backend_resolver, MngrCliBackendResolver):
                 backend_resolver.remove_on_change_callback(_on_change)
             if tracker is not None:
