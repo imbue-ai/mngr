@@ -257,6 +257,24 @@ def test_build_mngr_create_command_forwards_region_for_imbue_cloud() -> None:
     assert "region=US-WEST-OR" in command
 
 
+def test_build_mngr_create_command_modal_direct_targets_modal_provider() -> None:
+    """Modal Direct addresses the ``modal`` provider instance (local-token mode)."""
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.MODAL_DIRECT,
+        host_name=HostName("hello"),
+    )
+    # Exact list-element match so it can't be confused with ``modal_proxied``.
+    assert "system-services@hello.modal" in command
+    assert "system-services@hello.modal_proxied" not in command
+    # Same remote shape as vultr/aws: new host + main + modal templates.
+    assert "--new-host" in command
+    assert command.count("--template") == 2
+    assert "modal" in command
+    assert "main" in command
+    # No --reuse (that is only for imbue_cloud pool adoption).
+    assert "--reuse" not in command
+
+
 def test_build_mngr_create_command_forwards_region_for_vultr() -> None:
     command = _build_mngr_create_command(
         launch_mode=LaunchMode.VULTR,

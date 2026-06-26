@@ -252,6 +252,7 @@ def _ensure_mngr_settings(root_name: str) -> None:
         recursive_plugin = plugins.get("recursive", {})
         default_imbue_cloud = providers.get(_IMBUE_CLOUD_BACKEND_NAME, {})
         default_aws = providers.get(_AWS_BACKEND_NAME, {})
+        modal_direct = providers.get(_MODAL_DIRECT_PROVIDER_NAME, {})
         if (
             recursive_plugin.get("enabled") is False
             and "ssh" not in providers
@@ -260,6 +261,14 @@ def _ensure_mngr_settings(root_name: str) -> None:
             and default_aws.get("backend") == _AWS_BACKEND_NAME
             and default_aws.get("is_enabled") is False
             and _existing_aws_provider_names(providers) == set(desired_aws_names)
+            # The Modal (Direct) block must already be present, enabled, AND
+            # persistent, else fall through and rewrite it. The is_persistent
+            # check matters: an older build wrote is_persistent=false, which makes
+            # Modal create an ephemeral app that nukes the sandbox the moment
+            # `mngr create` exits -- this catches + overwrites that stale value.
+            and modal_direct.get("mode") == _MODAL_MODE_DIRECT
+            and modal_direct.get("is_enabled") is True
+            and modal_direct.get("is_persistent") is True
         ):
             # Already in the desired shape -- recursive disabled, no stale
             # ssh provider section, default imbue_cloud + aws instances
@@ -306,6 +315,10 @@ def _ensure_mngr_settings(root_name: str) -> None:
     # AWS credentials are configured, ``desired_aws_names`` is empty and any
     # stale blocks are removed.
     _write_aws_provider_blocks(providers_section, desired_aws_names)
+
+    # ``[providers.modal]`` (DIRECT) for the "Modal (1-day ephemeral) - Direct"
+    # compute option. Always written; uses the local Modal token at create time.
+    providers_section[_MODAL_DIRECT_PROVIDER_NAME] = _build_modal_direct_provider_block()
 
     plugins_section = doc.setdefault("plugins", tomlkit.table())
     recursive_block = tomlkit.table()
@@ -543,6 +556,36 @@ _AWS_BACKEND_NAME: Final[str] = "aws"
 _AWS_DOCKER_RUNTIME: Final[str] = "runsc"
 _AWS_INSTALL_GVISOR_RUNTIME: Final[bool] = True
 _AWS_PROVIDER_NAME_PREFIX: Final[str] = "aws-"
+
+# The single ``[providers.modal]`` instance for "Modal (1-day ephemeral)" (DIRECT
+# mode): the local machine authenticates to Modal with its own token
+# (``modal token new``). Written unconditionally at startup so the option works
+# as soon as a token exists; if none is present the provider just reports
+# unavailable during discovery. Sizing (2 CPU / 4 GB) and the 24h sandbox timeout
+# come from the ModalProviderConfig defaults; only ``is_persistent`` is forced.
+_MODAL_BACKEND_NAME: Final[str] = "modal"
+_MODAL_DIRECT_PROVIDER_NAME: Final[str] = "modal"
+_MODAL_MODE_DIRECT: Final[str] = "DIRECT"
+
+
+def _build_modal_direct_provider_block() -> Table:
+    """Build the ``[providers.modal]`` block (DIRECT mode).
+
+    ``is_persistent=True`` is set EXPLICITLY (not inherited): each ``mngr create``
+    is a one-shot subprocess, and a non-persistent (ephemeral) Modal app would
+    terminate the sandbox the instant that subprocess exits. Setting it explicitly
+    also lets the idempotency check below detect (and overwrite) a stale
+    ``is_persistent = false`` left by an older build. Sizing + 24h sandbox timeout
+    come from the ModalProviderConfig defaults.
+    """
+    block = tomlkit.table()
+    block["backend"] = _MODAL_BACKEND_NAME
+    block["mode"] = _MODAL_MODE_DIRECT
+    block["is_enabled"] = True
+    block["is_persistent"] = True
+    return block
+
+
 # EC2 instance size for minds AWS workspaces. The mngr_aws default (t3.small,
 # 2 GB) is too small for the full forever-claude-template build (uv sync + npm
 # ci/build OOMs/thrashes on 2 GB); minds workspaces default to t3.large (8 GB).

@@ -1834,7 +1834,13 @@ def _handle_destroy_agent_api(
             ),
             media_type="application/json",
         )
-    start_destroy(parsed_id, paths, host_id)
+    # The detached destroy shells out to ``mngr list | mngr destroy``, which must
+    # see the same host dir every other minds->mngr shell-out points at (color,
+    # restart, start/stop, bulk-stop); without it the destroy targets the wrong
+    # (default) host dir and silently finds nothing to tear down.
+    env = dict(os.environ)
+    env["MNGR_HOST_DIR"] = str(get_state().mngr_host_dir)
+    start_destroy(parsed_id, paths, host_id, env=env, mngr_binary=get_state().mngr_binary)
 
     return make_response(
         status_code=202,
