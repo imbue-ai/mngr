@@ -1,0 +1,1 @@
+Workspace recovery page: the "Report a problem" link no longer appears on the transient "Loading workspace" spinner. It is now shown only on the terminal states that offer an action -- "Workspace unresponsive" (restart), the restart-dispatch error, and "Can't connect to ..." (provider unreachable, retry) -- where there is an actual failure to report.

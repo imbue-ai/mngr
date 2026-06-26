@@ -903,10 +903,11 @@ _RECOVERY_STYLE: Final[str] = """\
       #copy-diagnostics-btn:hover,
       #copy-ssh-btn:hover { background: #f4f4f5; }
 
-      /* A quiet "Report a problem" link under the primary action, always visible
-         so the user can open the bug-report modal from any recovery state. Kept
-         de-emphasized (text-only) so it never competes with the restart/retry
-         button above it. */
+      /* A quiet "Report a problem" link under the primary action, shown only on
+         the terminal recovery states that offer a restart/retry (not the
+         transient "Loading workspace" spinner, where there is nothing to report
+         yet). Kept de-emphasized (text-only) so it never competes with the
+         restart/retry button above it. */
       #recovery-report-btn {
         margin-top: 12px;
         align-self: center;
@@ -942,6 +943,9 @@ _RECOVERY_SCRIPT: Final[str] = """\
         // workspace-unreachable states, where a restart cannot help; re-runs the
         // host-health probe so the user can re-check reachability on demand.
         var retryBtn = document.getElementById('recovery-retry-btn');
+        // The "Report a problem" link. Hidden on the transient loading spinner;
+        // shown only on the terminal states that offer a restart or retry.
+        var reportBtn = document.getElementById('recovery-report-btn');
         // Holds the verbatim provider error on the backend-unreachable state;
         // hidden (and emptied) on every other state. Populated by
         // renderBackendUnreachable from the response's ``unreachable_reason``.
@@ -1057,6 +1061,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
           show(errorEl, false);
           show(hostBtn, false);
           show(retryBtn, false);
+          show(reportBtn, false);
           // A stale diagnostic from the previous tick would be misleading
           // while we're in flight to a fresh check; hide it and drop the
           // cached payload so renderDebugMenu starts blank next time.
@@ -1080,6 +1085,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
           hostBtn.textContent = 'Restart workspace';
           hostBtn.classList.remove('secondary');
           show(hostBtn, true);
+          show(reportBtn, true);
         }
         function renderDispatchError() {
           titleEl.textContent = 'Workspace unresponsive';
@@ -1089,6 +1095,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
           hostBtn.textContent = 'Restart workspace';
           hostBtn.classList.remove('secondary');
           show(hostBtn, true);
+          show(reportBtn, true);
         }
         // The provider/backend hosting this workspace is unreachable or rejected
         // us (connector down, docker daemon stopped or paused, expired login,
@@ -1115,6 +1122,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
           show(errorEl, false);
           show(hostBtn, false);
           show(retryBtn, true);
+          show(reportBtn, true);
           // No diagnostics here: when the backend itself is unreachable the
           // in-container probes are moot -- the cause is the provider's own
           // error, shown verbatim above -- so suppress the Diagnostics disclosure.
@@ -1209,7 +1217,6 @@ _RECOVERY_SCRIPT: Final[str] = """\
         if (copyBtn) {
           copyBtn.addEventListener('click', copyDiagnostics);
         }
-        var reportBtn = document.getElementById('recovery-report-btn');
         if (reportBtn) {
           reportBtn.addEventListener('click', function () {
             // Ask the shell to open the get-help / report-a-bug modal, scoped to this
@@ -1317,7 +1324,7 @@ def render_recovery_page(
         '      <p id="recovery-provider-reason" class="recovery-provider-reason hidden"></p>\n'
         '      <button id="recovery-host-btn" class="hidden">Restart workspace</button>\n'
         '      <button id="recovery-retry-btn" class="hidden">Retry</button>\n'
-        '      <button type="button" id="recovery-report-btn">Report a problem</button>\n'
+        '      <button type="button" id="recovery-report-btn" class="hidden">Report a problem</button>\n'
         '      <div class="recovery-troubleshooting">\n'
         '        <p class="recovery-troubleshooting-label">Troubleshooting</p>\n'
         + error_block

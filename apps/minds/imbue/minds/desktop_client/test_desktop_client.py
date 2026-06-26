@@ -2575,8 +2575,10 @@ def test_recovery_page_renders_for_authenticated_user(tmp_path: Path) -> None:
     assert "Restart workspace" in response.text
     assert "restart-system-interface" in response.text
     # The recovery page offers an in-page report button that opens the get-help modal
-    # via the ``minds:open-help`` relay message.
-    assert 'id="recovery-report-btn"' in response.text
+    # via the ``minds:open-help`` relay message. It renders hidden by default so it
+    # never shows on the transient "Loading workspace" spinner; the recovery JS
+    # reveals it only on the terminal restart/retry states.
+    assert '<button type="button" id="recovery-report-btn" class="hidden">' in response.text
     assert "minds:open-help" in response.text
 
 
