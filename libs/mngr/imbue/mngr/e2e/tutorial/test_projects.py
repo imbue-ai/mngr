@@ -11,12 +11,16 @@ from imbue.skitwright.expect import expect
 @pytest.mark.modal
 @pytest.mark.timeout(360)
 def test_list_current_project_only(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # agents inherit the project from the directory where you run mngr create.
         # the project is typically the name of the git repo.
         # list agents for the current project only
         mngr list --project my-project
-    """)
+
+    Scope: `mngr list --project my-project` filters the listing to that project:
+    a seeded agent tagged with my-project appears, and the filter is exclusive
+    (a different project's listing omits that agent).
+    """
     # Seed an agent explicitly tagged with "my-project" so the project filter
     # below has something to match. A lightweight command agent (just sleeps) is
     # enough; creating it on Modal invokes the Modal CLI via environment_create
@@ -56,10 +60,13 @@ def test_list_current_project_only(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_create_with_explicit_project(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # create an agent explicitly tagged with a different project
         mngr create my-task --project other-project
-    """)
+
+    Scope: `mngr create --project other-project` succeeds, tagging the new agent
+    with the explicitly given project rather than the current directory's.
+    """
     expect(
         e2e.run(
             "mngr create my-task --project other-project --type command --no-ensure-clean --no-connect -- sleep 100910",
@@ -70,10 +77,14 @@ def test_create_with_explicit_project(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_list_filter_project_cel(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # filter agents by project using CEL expressions
         mngr list --include 'project == "my-project"'
-    """)
+
+    Scope: `mngr list --include` accepts and evaluates a CEL project expression;
+    with no matching agents in this fresh environment it reports "No agents
+    found" rather than erroring.
+    """
     result = e2e.run(
         "mngr list --include 'project == \"my-project\"'",
         comment="filter agents by project using CEL expressions",
@@ -86,13 +97,15 @@ def test_list_filter_project_cel(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_list_filter_invalid_cel(e2e: E2eSession) -> None:
-    # Unhappy path for the same tutorial block: a syntactically invalid CEL
-    # expression must be rejected with a clear error rather than silently
-    # ignored or crashing with a traceback.
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # filter agents by project using CEL expressions
         mngr list --include 'project == "my-project"'
-    """)
+
+    Scope: the unhappy path of the same CEL block. A syntactically invalid
+    `--include` expression is rejected with a non-zero exit and an "Invalid
+    include filter expression" error rather than being silently ignored or
+    crashing with a traceback.
+    """
     result = e2e.run(
         "mngr list --include 'project =='",
         comment="reject a syntactically invalid CEL expression",
@@ -103,14 +116,18 @@ def test_list_filter_invalid_cel(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_list_project_dot(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # the literal "." is expanded to the current project (derived from your git worktree
         # root's remote origin, falling back to its source-repo dir name (for worktrees) or
         # folder name, so it stays correct from any subdirectory), so this lists agents for
         # the project you're currently in:
         mngr list --project .
         # this also works for "mngr kanpan --project ."
-    """)
+
+    Scope: `mngr list --project .` accepts "." and expands it to the current
+    project rather than rejecting it or treating it as a literal project named
+    ".", yielding a clean listing ("No agents found" in the empty environment).
+    """
     # The "." must be accepted and expanded to the current project (rather than
     # rejected or treated as a literal project named "."), yielding a clean
     # listing. The fresh e2e environment has no agents, so the expanded
@@ -125,10 +142,14 @@ def test_list_project_dot(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
 def test_list_project_field(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # see which projects have agents by looking at the project field
         mngr list --fields "name,project,state"
-    """)
+
+    Scope: `mngr list --fields "name,project,state"` renders the project column
+    populated from each agent's project label -- a created my-project agent shows
+    both its name and its project value.
+    """
     # Create an agent tagged with a known project so the project field has a
     # concrete value to display (an empty agent list would make "looking at the
     # project field" meaningless).

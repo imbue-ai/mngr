@@ -23,12 +23,18 @@ def _create_my_task(e2e: E2eSession, sleep_value: int) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 def test_exec_basic(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # run a command on a specific agent's host
         mngr exec my-task "ls -la /workspace"
         # note that the command must be quoted--it's the last argument passed to "mngr exec"
         # the quoting is required because e.g. this may be sent over SSH
-    """)
+
+    Scope: `mngr exec <agent> "<cmd>"` runs the quoted command on that specific
+    agent's host and forwards its stdout back. The whole quoted string (here
+    including a pipe) executes on the host as one command; `ls -la` always emits
+    a leading "total" line, proving exec ran the command and returned its output
+    rather than short-circuiting to a bare zero exit.
+    """
     _create_my_task(e2e, 100400)
     # /workspace may not exist on the agent's host, so list `/` instead. Beyond
     # a clean exit code, assert that the command's stdout was actually forwarded
@@ -49,10 +55,15 @@ def test_exec_basic(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_exec_short_form(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # short form
         mngr x my-task "git status"
-    """)
+
+    Scope: `mngr x` is the documented short form of `mngr exec`; it runs the
+    quoted command inside the agent's work_dir and forwards real output. `git
+    status` reports the agent's own `mngr/my-task` branch ("On branch ..."),
+    proving git ran in the work_dir rather than exec just exiting 0.
+    """
     _create_my_task(e2e, 100401)
     # ``my-task`` is a local command agent, so neither create nor exec ever
     # provisions a Modal environment -- there is no @pytest.mark.modal because
@@ -72,10 +83,13 @@ def test_exec_short_form(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 def test_exec_all_agents(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # run a command on all agents
         mngr exec -a "whoami"
-    """)
+
+    Scope: `mngr exec -a "<cmd>"` targets all agents at once (rather than a named
+    agent) and runs the command against them, exiting 0.
+    """
     _create_my_task(e2e, 100402)
     expect(e2e.run('mngr exec -a "whoami"', comment="run a command on all agents")).to_succeed()
 
@@ -85,10 +99,16 @@ def test_exec_all_agents(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_exec_as_other_user(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # run a command as a specific user as you normally would on that host (ex: sudo -u other-user)
         mngr exec my-task "sudo -u other-user apt-get update"
-    """)
+
+    Scope: exec passes the quoted command verbatim to the agent host, so any
+    host-native form (here the `sudo -u other-user` variant) works the same way.
+    The substituted `id -u` exercises that passthrough without needing a real
+    other user or package install: it runs on the host and streams back its real
+    output (a numeric uid on its own line).
+    """
     _create_my_task(e2e, 100403)
     # `sudo -u other-user` requires that user to exist; substitute a
     # non-mutating sudo-style command that just demonstrates the same
@@ -108,11 +128,16 @@ def test_exec_as_other_user(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(300)
 def test_exec_cwd(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # run a command in a specific working directory
         mngr exec my-task --cwd /tmp "pwd"
         # by default, commands are run in the agent's work_dir
-    """)
+
+    Scope: `--cwd <dir>` runs the command in that directory (`pwd` prints exactly
+    /tmp), while omitting it runs in the agent's work_dir (`pwd` is not /tmp).
+    The contrast proves --cwd changed the directory rather than matching a default
+    that happened to already be /tmp.
+    """
     _create_my_task(e2e, 100404)
     # With --cwd, the command runs in the given directory: `pwd` prints exactly /tmp.
     result = e2e.run('mngr exec my-task --cwd /tmp "pwd"', comment="run a command in a specific working directory")
@@ -131,18 +156,16 @@ def test_exec_cwd(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(300)
 def test_exec_cwd_nonexistent(e2e: E2eSession) -> None:
-    """Unhappy path for the same ``--cwd`` block: a missing directory fails.
-
-    Shares the ``mngr exec --cwd`` tutorial block but exercises the error case
-    where the requested working directory does not exist on the agent host. The
-    command cannot be started there, so exec must surface a nonzero exit code
-    rather than silently falling back to the work_dir.
-    """
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # run a command in a specific working directory
         mngr exec my-task --cwd /tmp "pwd"
         # by default, commands are run in the agent's work_dir
-    """)
+
+    Scope: the unhappy path of the same `--cwd` block. When the requested working
+    directory does not exist on the agent host, the command cannot be started
+    there, so exec surfaces a nonzero exit code rather than silently falling back
+    to the work_dir (stdout shows no /tmp-rooted work_dir path).
+    """
     _create_my_task(e2e, 100405)
     # Point --cwd at a directory that does not exist on the agent host. exec
     # should fail (nonzero exit) rather than run the command in some fallback
@@ -162,10 +185,15 @@ def test_exec_cwd_nonexistent(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_exec_timeout(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # set a timeout (in seconds) for the command
         mngr exec my-task --timeout 30 "python long_script.py"
-    """)
+
+    Scope: `--timeout <seconds>` is accepted, and a command that finishes well
+    within the budget runs to completion normally -- exec succeeds and forwards
+    its stdout back (the substituted `echo done` proves the command actually ran,
+    not just that the flag parsed).
+    """
     _create_my_task(e2e, 100405)
     # Substitute a quick command that returns well within the 30s timeout;
     # the point is to demonstrate the --timeout flag is accepted and that a
@@ -184,10 +212,16 @@ def test_exec_timeout(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_exec_timeout_enforced(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # set a timeout (in seconds) for the command
         mngr exec my-task --timeout 30 "python long_script.py"
-    """)
+
+    Scope: the unhappy path of the same `--timeout` block. A command that would
+    run far longer than its --timeout is terminated, causing exec to fail. The
+    inner --timeout (3s) is well below the sleep (120s), so an enforced timeout
+    returns quickly with a non-zero exit (and no "Command succeeded"); were it
+    ignored, the sleep would outlast e2e.run's own budget.
+    """
     _create_my_task(e2e, 100409)
     # Unhappy path for the same tutorial block: a command that would run far
     # longer than its --timeout must be terminated, causing exec to fail. The
@@ -208,11 +242,16 @@ def test_exec_timeout_enforced(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
 def test_exec_with_start(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # by default, start the agent's host if it's stopped, run the command, then leave it running
         # but you can be explicit about that behavior:
         mngr exec my-task --start "cat /etc/os-release"
-    """)
+
+    Scope: `--start` makes the default auto-start behavior explicit -- exec
+    succeeds, runs the command on the host, and forwards its real output. Every
+    Linux /etc/os-release contains an `ID=` field, proving exec captured the
+    host's file contents rather than just exiting cleanly.
+    """
     _create_my_task(e2e, 100406)
     result = e2e.run(
         'mngr exec my-task --start "cat /etc/os-release"',
@@ -229,10 +268,15 @@ def test_exec_with_start(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 def test_exec_no_start(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # and you can disable auto-starting as well (fails if agent is stopped):
         mngr exec my-task --no-start "cat /etc/os-release"
-    """)
+
+    Scope: `--no-start` disables auto-starting (it would fail if the agent were
+    stopped). Here the host is already online from create, so exec succeeds
+    without starting anything and forwards the command's real output -- every
+    /etc/os-release defines `NAME=`, proving the command ran rather than no-op'd.
+    """
     _create_my_task(e2e, 100407)
     # The agent's host is already online (create started it), so --no-start
     # succeeds without auto-starting. Assert on the actual command output --
@@ -250,11 +294,17 @@ def test_exec_no_start(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 def test_exec_on_error_continue(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # control error handling when running on multiple agents
         mngr list --ids | mngr exec - --on-error continue "git log --oneline -5"
         # the choices for --on-error are the same as for messaging: "continue" (try all agents) and "abort" (stop if any agent fails)
-    """)
+
+    Scope: piping `mngr list --ids` into `mngr exec -` runs the command on each
+    listed agent, and `--on-error continue` tries all agents even if some fail
+    (so the run succeeds overall). The command runs in each agent's git work_dir
+    -- `git log` returns the fixture's history ("Initial commit"), proving it
+    actually executed on the host rather than exec just exiting 0.
+    """
     _create_my_task(e2e, 100408)
     # `git log` may fail in the agent's workdir if there's no git history;
     # --on-error continue lets the test succeed regardless.

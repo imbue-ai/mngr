@@ -6,11 +6,15 @@ on:
       test_paths:
         description: "Test paths (space-separated, passed as positional args before --)"
         required: true
-        default: "libs/mngr/imbue/mngr/e2e/"
+        # Default: all of mngr's release tests, not just the e2e tutorial ones.
+        default: "libs/mngr"
       pytest_args:
         description: "Pytest args after `--` (must be valid bash; quote values containing spaces, e.g. `-m \"foo and bar\"`)"
         required: true
-        default: "-m release"
+        # docker/docker_sdk release tests are excluded: they need a real Docker
+        # daemon and run on a GitHub runner in release-tests.yml, not on the
+        # Modal hosts TMR provisions (Docker-in-Docker via gVisor is too flaky).
+        default: "-m \"release and not docker and not docker_sdk\""
       mngr_user_id:
         description: "Override MNGR_USER_ID for the orchestrator. Leave blank to use the shared 'tmr-ci' namespace, which lets any teammate with their key in .github/tmr-authorized-keys debug the CI-created modal agents (see libs/mngr_tmr/scripts/setup_tmr_ci_debug.py)."
         required: false
@@ -32,11 +36,13 @@ on:
       test_paths:
         type: string
         required: false
-        default: "libs/mngr/imbue/mngr/e2e/"
+        # Default: all of mngr's release tests, not just the e2e tutorial ones.
+        default: "libs/mngr"
       pytest_args:
         type: string
         required: false
-        default: "-m release"
+        # docker/docker_sdk release tests are excluded (see workflow_dispatch above).
+        default: "-m \"release and not docker and not docker_sdk\""
       mngr_user_id:
         type: string
         required: false

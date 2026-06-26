@@ -51,8 +51,17 @@ def _admin_username() -> str:
 @pytest.mark.release
 @pytest.mark.timeout(120)
 def test_full_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
-    """End-to-end test: create tunnel, manage services with admin and agent auth,
-    set auth policies, verify cascading cleanup."""
+    """Verify the full tunnel lifecycle against the real Cloudflare API end to end.
+
+    Creating a tunnel returns the expected ``username--agent_id`` name and a non-null token.
+    Tunnel-level and service-level Access auth policies, once set, are read back with the
+    expected rules, and adding a service actually provisions a Cloudflare Access Application
+    with at least one policy. Admin credentials can create/configure tunnels and services;
+    a tunnel's own bearer token (agent auth) can add, list, and remove services on that
+    tunnel but is rejected (403) from creating tunnels, deleting the tunnel, or changing
+    tunnel-level auth. Deleting the tunnel succeeds and removes it from the listing,
+    confirming cascading cleanup. Each assertion would fail if the corresponding route,
+    auth check, or Cloudflare provisioning step were broken or a no-op."""
     _skip_if_missing_env()
 
     suffix = secrets.token_hex(4)
@@ -144,6 +153,9 @@ def test_full_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_build_slice_teardown_commands_includes_disk_when_present() -> None:
+    """Verify that when a data disk name is supplied, teardown emits both the instance
+    delete and a separate disk delete command (in that order). The test would fail if the
+    disk-delete command were omitted, reordered, or built with the wrong name."""
     commands = app_module.build_slice_teardown_commands("mngr-slice-abc", "mngr-slice-abc-data")
     assert commands == (
         "limactl delete --force mngr-slice-abc",
@@ -152,11 +164,17 @@ def test_build_slice_teardown_commands_includes_disk_when_present() -> None:
 
 
 def test_build_slice_teardown_commands_omits_disk_when_absent() -> None:
+    """Verify that when no data disk name is supplied (None), teardown emits only the single
+    instance-delete command and no disk-delete command. The test would fail if a spurious
+    disk-delete were appended for the diskless case."""
     commands = app_module.build_slice_teardown_commands("mngr-slice-abc", None)
     assert commands == ("limactl delete --force mngr-slice-abc",)
 
 
 def test_build_slice_teardown_commands_quotes_unsafe_names() -> None:
+    """Verify that instance/disk names containing shell metacharacters are shell-quoted so
+    they cannot break out of the teardown command (defense-in-depth against injection). The
+    test would fail if the names were interpolated raw, leaving the ``;`` separator active."""
     # Defense-in-depth: instance/disk names flow into a shell command, so they
     # must be shell-quoted.
     commands = app_module.build_slice_teardown_commands("a b; rm -rf /", "d$x")

@@ -164,4 +164,15 @@ class _AntigravityReleaseProfile(AgentReleaseProfile):
 # copied from the opencode/pi sibling tests before this test had ever completed a run.
 @pytest.mark.timeout(600)
 def test_antigravity_agent_full_lifecycle(tmp_path: Path) -> None:
+    """The antigravity agent survives the full real-CLI release lifecycle end to end.
+
+    Drives ``mngr`` against the real ``agy`` binary through every stage of the shared agent
+    release arc and asserts each stage's effect: create reaches WAITING; a ``message`` turn
+    completes and sets the RUNNING marker; the transcript surfaces the assistant's reply; a
+    stop/start cycle resumes the same conversation so the agent still recalls a secret given
+    before the restart; and an ``--adopt`` create in a fresh worktree, fed the preserved
+    conversation id, recalls that same secret -- proving the native session was preserved and
+    re-adopted. Each assertion fails if its stage were a no-op (auth not seeded, turn not run,
+    transcript not decoded, resume/adopt not carrying conversation state forward).
+    """
     run_agent_release_lifecycle(_AntigravityReleaseProfile(), tmp_path)
