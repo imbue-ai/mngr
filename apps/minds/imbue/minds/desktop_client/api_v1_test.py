@@ -839,10 +839,14 @@ def test_patch_provider_disable_with_active_workspaces_conflicts(tmp_path: Path)
 @pytest.mark.parametrize(
     "body",
     [
-        {},  # missing 'enabled' key -> enabled is None
-        {"enabled": "yes"},  # wrong type (string)
-        {"enabled": 1},  # wrong type (int, must not be accepted via truthiness)
-        [1, 2, 3],  # non-object JSON body
+        # missing 'enabled' key -> enabled is None
+        {},
+        # wrong type (string)
+        {"enabled": "yes"},
+        # wrong type (int, must not be accepted via truthiness)
+        {"enabled": 1},
+        # non-object JSON body
+        [1, 2, 3],
     ],
 )
 def test_patch_provider_rejects_invalid_body(tmp_path: Path, body: object) -> None:
