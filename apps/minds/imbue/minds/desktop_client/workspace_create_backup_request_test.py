@@ -1,11 +1,11 @@
-"""Unit tests for ``_build_backup_request_or_error`` (form/API backup resolution)."""
+"""Unit tests for ``build_backup_request_or_error`` (form/API backup resolution)."""
 
 from pathlib import Path
 
 from imbue.minds.config.data_types import WorkspacePaths
-from imbue.minds.desktop_client.app import _build_backup_request_or_error
 from imbue.minds.desktop_client.backup_password_store import read_saved_backup_password
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
+from imbue.minds.desktop_client.workspace_create import build_backup_request_or_error
 from imbue.minds.primitives import BackupEncryptionMethod
 from imbue.minds.primitives import BackupProvider
 
@@ -24,7 +24,7 @@ def _build(
     api_key_env: str = "",
     account_email: str = "",
 ) -> tuple[BackupSetupRequest | None, str | None]:
-    return _build_backup_request_or_error(
+    return build_backup_request_or_error(
         backup_provider=backup_provider,
         encryption_method=encryption_method,
         typed_master_password=typed_master_password,
@@ -60,7 +60,7 @@ def test_master_password_without_typed_or_saved_is_an_error(tmp_path: Path) -> N
 
 def test_master_password_typed_and_saved_persists_and_is_used(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
-    request, error = _build_backup_request_or_error(
+    request, error = build_backup_request_or_error(
         backup_provider=BackupProvider.API_KEY,
         encryption_method=BackupEncryptionMethod.MASTER_PASSWORD,
         typed_master_password="topsecret",
@@ -79,7 +79,7 @@ def test_master_password_typed_and_saved_persists_and_is_used(tmp_path: Path) ->
 
 def test_master_password_typed_without_save_is_not_persisted(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
-    request, error = _build_backup_request_or_error(
+    request, error = build_backup_request_or_error(
         backup_provider=BackupProvider.API_KEY,
         encryption_method=BackupEncryptionMethod.MASTER_PASSWORD,
         typed_master_password="ephemeral",
@@ -97,7 +97,7 @@ def test_master_password_typed_without_save_is_not_persisted(tmp_path: Path) -> 
 def test_master_password_uses_saved_over_typed(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
     # Establish a saved password first.
-    _build_backup_request_or_error(
+    build_backup_request_or_error(
         backup_provider=BackupProvider.API_KEY,
         encryption_method=BackupEncryptionMethod.MASTER_PASSWORD,
         typed_master_password="original",
@@ -106,7 +106,7 @@ def test_master_password_uses_saved_over_typed(tmp_path: Path) -> None:
         account_email="",
         paths=paths,
     )
-    request, error = _build_backup_request_or_error(
+    request, error = build_backup_request_or_error(
         backup_provider=BackupProvider.API_KEY,
         encryption_method=BackupEncryptionMethod.MASTER_PASSWORD,
         typed_master_password="a-different-typed-value",

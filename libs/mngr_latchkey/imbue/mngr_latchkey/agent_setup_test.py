@@ -454,3 +454,10 @@ def test_register_agent_for_host_raises_when_anyof_was_hand_edited(tmp_path: Pat
     path.write_text(json.dumps(config))
     with pytest.raises(LatchkeyStoreError):
         register_agent_for_host(tmp_path, host_id, agent_id)
+
+
+# The ``minds-workspaces`` cross-workspace API scope is no longer part of the
+# agent baseline: its scope + per-verb schemas are self-contained in the
+# ``workspace`` permission request's effect and spliced in on approval (see
+# ``permission_requests.mjs`` and its end-to-end tests). Nothing about it lives
+# in ``agent_setup`` anymore.

@@ -162,6 +162,15 @@ class BackendResolverInterface(MutableModel, ABC):
         """
         return None
 
+    def get_agent_label(self, agent_id: AgentId, label_key: str) -> str | None:
+        """Return the value of an arbitrary mngr label for an agent, or None.
+
+        Default implementation returns None. Subclasses with access to agent
+        labels should override this. Used by the workspace API to read
+        labels like ``original_minds_version`` off the discovered agent.
+        """
+        return None
+
     def get_workspace_color(self, agent_id: AgentId) -> str | None:
         """Return the workspace color hex for an agent, or None if unset.
 
@@ -815,6 +824,14 @@ class MngrCliBackendResolver(BackendResolverInterface):
             for agent in self._agents_result.discovered_agents:
                 if agent.agent_id == agent_id:
                     return agent.labels.get("workspace")
+            return None
+
+    def get_agent_label(self, agent_id: AgentId, label_key: str) -> str | None:
+        """Return the value of an arbitrary mngr label for an agent, or None."""
+        with self._lock:
+            for agent in self._agents_result.discovered_agents:
+                if agent.agent_id == agent_id:
+                    return agent.labels.get(label_key)
             return None
 
     def get_workspace_color(self, agent_id: AgentId) -> str | None:

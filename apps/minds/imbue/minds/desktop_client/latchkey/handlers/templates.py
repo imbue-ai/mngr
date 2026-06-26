@@ -27,6 +27,7 @@ from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.templates import CATALOG
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import WILDCARD_PERMISSION_NAME
+from imbue.mngr_latchkey.workspace_permissions import WorkspaceVerb
 
 # The catch-all ``any`` permission is stored and submitted verbatim (it is
 # Detent's wildcard schema), but users find ``all`` clearer, so the dialog
@@ -124,5 +125,45 @@ def render_file_sharing_permission_dialog(
         allowed_roots_json=allowed_roots_json,
         home_dir=home_dir,
         display_name=file_path,
+        mngr_forward_origin=mngr_forward_origin,
+    )
+
+
+@pure
+def render_workspace_permission_dialog(
+    agent_id: str,
+    request_id: str,
+    ws_name: str,
+    rationale: str,
+    verbs: Sequence[WorkspaceVerb],
+    checked_permissions: Sequence[str],
+    target_workspace_id: str | None,
+    target_workspace_name: str | None,
+    show_target_choice: bool,
+    mngr_forward_origin: str = "",
+) -> str:
+    """Render the cross-workspace (``minds-workspaces``) permission detail fragment.
+
+    Presents a checkbox per ``minds-workspaces`` verb (pre-checking the verbs the
+    agent requested) plus, when ``show_target_choice`` is set, an all-vs-selected
+    radio naming the target workspace. The form submits ``permissions`` (the
+    verb checkboxes, shared with the other dialogs so the inbox shell's Approve
+    gating works) and ``target_scope`` (``selected`` | ``all``).
+
+    ``mngr_forward_origin`` is the bare origin of the ``mngr forward`` plugin;
+    the workspace link in the fragment points at ``{mngr_forward_origin}/goto/<agent>/``.
+    """
+    return CATALOG.render(
+        "pages.LatchkeyWorkspacePermission",
+        agent_id=agent_id,
+        request_id=request_id,
+        ws_name=ws_name,
+        rationale=rationale,
+        display_name=target_workspace_name or "workspaces",
+        verbs=verbs,
+        checked_permissions=set(checked_permissions),
+        target_workspace_id=target_workspace_id or "",
+        target_workspace_name=target_workspace_name or "",
+        show_target_choice=show_target_choice,
         mngr_forward_origin=mngr_forward_origin,
     )

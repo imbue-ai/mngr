@@ -100,6 +100,15 @@ _MINDS_API_PROXY_PER_AGENT_PATH_PATTERN: Final[str] = rf"^{_MINDS_API_PROXY_PER_
 _SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED: Final[str] = "minds-api-proxy-per-agent-unauthorized"
 _PERM_MINDS_API_PROXY_PER_AGENT: Final[str] = "minds-api-proxy-per-agent"
 
+# The minds desktop client's cross-workspace management API
+# (``/api/v1/workspaces/...``) is gated by a separate ``minds-workspaces`` detent
+# scope. Its scope + per-verb permission schemas are NOT part of this agent
+# baseline: they are self-contained in the ``workspace`` permission request's
+# precomputed effect and spliced into the per-host permissions file when the
+# user approves a grant (see ``permission_requests.mjs``'s
+# ``computeWorkspaceEffect`` and the ``workspace_permissions`` module), exactly
+# like the file-sharing flow. Nothing about that scope needs to exist here.
+
 # Exact prefix/suffix wrapping each agent id inside an ``anyOf`` entry's
 # path pattern. Shared by the build + extract helpers so the two cannot
 # drift apart.

@@ -129,6 +129,27 @@ class FileSharingRequestPayload(FrozenModel):
     )
 
 
+class WorkspaceRequestPayload(FrozenModel):
+    """Payload for ``type == "workspace"`` permission requests.
+
+    Grants access to the minds cross-workspace management API under the
+    ``minds-workspaces`` detent scope. ``permissions`` are the verb schema
+    names the agent wants; ``target_workspace_id`` is the workspace the
+    targeted verbs (destroy / lifecycle / backups-export / ssh) act on, or
+    ``None`` when the request concerns only the non-targeted verbs
+    (read / create).
+    """
+
+    permissions: tuple[str, ...] = Field(
+        default=(),
+        description="``minds-workspaces`` verb schema names the agent is requesting.",
+    )
+    target_workspace_id: str | None = Field(
+        default=None,
+        description="Workspace (agent) id the targeted verbs act on, or ``None`` for non-targeted verbs.",
+    )
+
+
 class PermissionEffect(FrozenModel):
     """Pre-computed patch the gateway will splice into ``target`` when a request is approved.
 
@@ -176,7 +197,7 @@ class StreamedPermissionRequest(FrozenModel):
             "carried through for logging / round-tripping only."
         ),
     )
-    payload: PredefinedRequestPayload | FileSharingRequestPayload = Field(
+    payload: PredefinedRequestPayload | FileSharingRequestPayload | WorkspaceRequestPayload = Field(
         description="Type-specific payload; dispatch with ``isinstance``.",
     )
     target: str = Field(
@@ -442,21 +463,26 @@ class LatchkeyGatewayClient(MutableModel):
                 f"DELETE {url} returned {response.status_code}: {response.text.strip()}",
             )
 
-    def approve_permission_request(self, request_id: str, override_path: str | None = None) -> None:
+    def approve_permission_request(
+        self,
+        request_id: str,
+        override_body: Mapping[str, JsonValue] | None = None,
+    ) -> None:
         """Approve the named pending request via the gateway's bundled extension.
 
         Wraps ``POST /permission-requests/approve/<request_id>``. The
         extension owns the actual work: it reads the request file,
-        splices the precomputed ``effect`` into the stored ``target``
-        permissions.json, and removes the pending-request file. Failure
-        leaves the request pending so the user can retry.
+        splices the (possibly recomputed) ``effect`` into the stored
+        ``target`` permissions.json, and removes the pending-request
+        file. Failure leaves the request pending so the user can retry.
 
-        ``override_path`` is set only for *file-sharing* requests whose
-        shared path the user edited in the approval dialog before
-        approving. When provided, it is sent as a ``{"path": ...}`` JSON
-        body and the gateway recomputes the file-sharing effect for that
-        path (re-validating it for traversal) instead of using the
-        agent-supplied one. Leaving it ``None`` sends no body, so the
+        ``override_body`` carries the user's approval-time adjustments and
+        is recomputed into the effect by the gateway instead of the
+        agent-supplied one. It is request-type specific: a *file-sharing*
+        request sends ``{"path": ...}`` (the user-edited share path); a
+        *workspace* request sends ``{"permissions": [...],
+        "target_workspace_id": ...}`` (the verbs the user ticked and the
+        all-vs-selected target). Leaving it ``None`` sends no body, so the
         gateway applies the precomputed effect verbatim.
 
         Unlike :meth:`delete_permission_request`, ``404`` is *not*
@@ -466,7 +492,7 @@ class LatchkeyGatewayClient(MutableModel):
         """
         self.ensure_initialized()
         url = f"{self._require_base_url().rstrip('/')}/permission-requests/approve/{request_id}"
-        json_body = {"path": override_path} if override_path is not None else None
+        json_body = dict(override_body) if override_body is not None else None
         try:
             with self._one_shot_client() as client:
                 response = client.post(url, headers=self._build_headers(), json=json_body)

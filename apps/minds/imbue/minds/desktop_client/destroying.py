@@ -50,8 +50,10 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
 
 _DESTROYING_DIR_NAME: Final[str] = "destroying"
 _PID_FILE_NAME: Final[str] = "pid"
@@ -126,6 +128,31 @@ def read_host_id(agent_id: AgentId, paths: WorkspacePaths) -> HostId | None:
         logger.warning("Could not read host_id file {} for destroying agent {}: {}", path, agent_id, e)
         return None
     return HostId(value) if value else None
+
+
+def is_host_still_active(
+    backend_resolver: BackendResolverInterface,
+    paths: WorkspacePaths | None,
+    agent_id: AgentId,
+) -> bool:
+    """Whether the workspace's *host* is still up (not just the workspace agent).
+
+    True when the workspace agent is still in ``list_active_workspace_ids()`` OR
+    its recorded host has not yet reached ``HostState.DESTROYED``. This is the
+    canonical value to pass as :func:`read_destroying`'s ``is_host_still_active``
+    argument: keying on the host (not just the workspace agent) is what keeps a
+    destroy that tore down only the workspace agent -- while ``system-services``
+    kept the host alive -- reading as FAILED rather than a false DONE.
+    """
+    if agent_id in backend_resolver.list_active_workspace_ids():
+        return True
+    if paths is None:
+        return False
+    host_id = read_host_id(agent_id, paths)
+    if host_id is None:
+        return False
+    state = backend_resolver.get_host_state(host_id)
+    return state is not None and state is not HostState.DESTROYED
 
 
 def _is_pid_alive(pid: int) -> bool:

@@ -1,0 +1,17 @@
+Wire the agent-facing `/api/v1/workspaces` create route up to full backup + tunnel parity, and point the browser UI's lifecycle / destroy / backup-export flows at the versioned API.
+
+- Extracted the create-orchestration helpers (backup-request builder, post-creation tunnel/account callback, region resolve/persist) out of `app.py` into a new shared `workspace_create.py` so both the browser create form and the `/api/v1/workspaces` create route build the exact same thing. `POST /api/v1/workspaces` now accepts the `backup_*` fields, provisions restic backups, injects the Cloudflare tunnel token, and persists the chosen region just like the desktop form does.
+
+- The landing page's start/stop buttons now call `POST /api/v1/workspaces/<id>/start|stop`, the workspace-settings destroy button and the destroy detail page (status poll + SSE log tail + retry) now use `POST /api/v1/workspaces/<id>/destroy` and `/api/v1/workspaces/operations/<id>`, and backup download now lists snapshots via `GET /api/v1/workspaces/<id>/backups` and exports the most recent via `POST .../backups/<snapshot>/export`. No user-visible behavior change.
+
+- The Electron shell's single-row Stop relay and the `launch_to_msg_e2e` harness's destroy poll were repointed to the same v1 routes, so the legacy `/api/destroy-agent/<id>`, `/api/destroying/<id>/status`, `/api/destroying/<id>/log`, and `/api/backup-export/<id>` routes (and their handlers) are now removed. The legacy `/api/agents/<id>/start-host`/`stop-host` lifecycle routes, the batch `/api/minds/stop-hosts`, `restart-host`, the create routes, the destroy-dismiss action, and `/api/backup-status` are retained (they have no v1 equivalent yet or remain in active use).
+
+- Added `apps/minds/scripts/electron_full_flow_e2e.py`, an operator harness that drives the whole Electron workspace lifecycle (create local Docker workspace -> chat message + reply -> terminal -> home -> v1 destroy) against the real app over CDP. Used to verify the v1 lifecycle/destroy repointing end-to-end; runnable via `just minds-test-electron-flow`.
+
+- Removed the legacy `POST /api/create-agent` JSON create endpoint (and its `_handle_create_agent_api` handler, tests, and the e2e duplicate-name conflict check). The browser create form and the versioned `POST /api/v1/workspaces` are now the create paths. The per-creation sub-routes `/api/create-agent/<id>/{onboarding,status,logs}` (used by the creating page) remain.
+
+- Extracted the host start/stop logic into a shared `workspace_lifecycle.py` (`perform_mind_host_action`) so the agent-facing `POST /api/v1/workspaces/<id>/start|stop` now does the same system-services resolution and optimistic host-state override the browser/Electron controls do. The legacy `/api/agents/<id>/start-host` and `/stop-host` routes are removed (the landing buttons and the Electron shell call the v1 routes); `restart-host` and the batch `/api/minds/stop-hosts` stay (no v1 equivalent yet).
+
+- A malformed workspace/operation id in any `/api/v1/workspaces/...` path now returns 400 (via a blueprint error handler for `InvalidRandomIdError`) instead of a logged 500.
+
+- The Electron full-flow harness now also round-trips the v1 stop/start lifecycle (a STEP 4 between terminal and home) so `perform_mind_host_action` is exercised against real Docker end-to-end.

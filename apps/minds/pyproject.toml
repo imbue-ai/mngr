@@ -102,11 +102,6 @@ omit = [
   "*/tests/*",
   "*/conftest.py",
   "*/utils/testing.py",
-  # External service interaction modules -- tested via acceptance/release tests.
-  # Pure functions within these modules are tested in the corresponding *_test.py files.
-  "*/telegram/credential_extractor.py",
-  "*/telegram/bot_creator.py",
-  "*/telegram/injector.py",
   # Cloudflare tunnel token inject/clear shell out via `mngr exec` -- exercised
   # via acceptance/release tests. The path constant is pinned in the *_test.py.
   "*/desktop_client/tunnel_token_injection.py",
