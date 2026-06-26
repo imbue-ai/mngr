@@ -26,6 +26,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `mngr config set` / `extend` / `assign` now render configuration errors through the central CLI error handler.
 - Changed: `mngr config` is now exempt from the settings-narrowing guard, so a config that would otherwise narrow can still be loaded in order to *edit* it (`mngr config set` / `unset` previously failed with the narrowing error themselves — a catch-22).
 - Changed: Hardened agent process-tree teardown so a long-lived daemon launched under an agent can no longer outlive the agent and collide with a relaunch. New `reap_agent_process_tree(agent)` helper kills the agent's tmux-session pane descendants and any `MNGR_AGENT_ID`-tagged orphans that reparented to PID 1. `start_agents` reaps any stale process tree for an agent id before launching, but only when that agent isn't already running.
+- Changed: Bumped the offload version baked into the host Dockerfile from `0.9.7` to `0.9.9` to track the CI pin.
 
 ### Fixed
 

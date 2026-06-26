@@ -4,6 +4,20 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-25
+
+Bumped the offload CI pin in `.github/workflows/ci.yml` from `0.9.7` to `0.9.9` (the latest release), updating the cargo cache key, the version check, and the `cargo install` invocation.
+
+Add the blueprint planning document for the minds error-reporting & "get help" work (`blueprint/minds-error-reporting-help/`), which scopes the full four-phase design (consent + settings, report-a-bug + API, in-workspace agent help, out-of-workspace agent help). Phases 1-2 are implemented in this PR; phases 3-4 will follow as stacked PRs.
+
+`just minds-start` no longer defaults the workspace name to `mindtest`. Its `agent_name` argument now defaults to empty, so a plain `just minds-start` leaves `MINDS_WORKSPACE_NAME` unset and the create form generates an automatic `mind-N` name -- matching what a shipped binary does. Pass a name (`just minds-start my-agent`) to pin the workspace name explicitly; a pinned name is used verbatim and a collision errors at create time rather than being auto-suffixed to `mindtest-2`.
+
+Changed: The nightly changelog consolidation automation now merges its PR immediately instead of leaving it for a human to review and merge. The in-run accuracy review remains the quality gate.
+
+Added a design doc, `specs/tmr-bounded-convergence-and-normalization.md`, for improving the e2e tests TMR generates: bounding per-test complexity via a tutorial-anchored convergence objective (with deletion as a first-class action), and a suite-level normalization stage in the reducer (utility extraction gated on the tutorial-1:1 predicate, plus a FIXME-resolution/escalation lifecycle verified on offload). No build or tooling behavior change.
+
+Added a design blueprint (`blueprint/gateway-agent-id-validation/`) documenting the decision to reject a malformed permission-request `agent_id` at the latchkey gateway (the agent's HTTP tool call) instead of only guarding against it defensively on the consumer side.
+
 ## 2026-06-24
 
 Removed the minds app's `postinstall` CSS-compile hook (it broke ToDesktop's `--prod` cloud install). To cover the one path that compiled CSS only as an install side-effect -- the `minds_electron` end-to-end test, which launches `electron main.js` directly rather than through `pnpm start` -- the CSS build is now wired in explicitly: a "Build Tailwind CSS for the e2e app" step in the CI e2e job, and a `minds-css` dependency on the `just minds-test-electron` recipe.
