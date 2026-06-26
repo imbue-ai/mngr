@@ -6,4 +6,6 @@ Added a third permission-request type, `workspace`, to the `permission-requests`
 
 - The approve override body is extended so a `workspace` request can recompute its effect at approval time from the user's dialog choices (`{permissions, target_workspace_id}`), mirroring file-sharing's `{path}` override.
 
-- The `minds-workspaces` scope is no longer part of the agent baseline and is not in the service catalog: it has its own dedicated request type, and its scope + verb schemas arrive self-described in the grant effect. The startup schema-backfill migration for it has been removed. The Python `workspace_permissions` module now holds only the dialog-facing verb metadata.
+- The `minds-workspaces` scope is no longer part of the agent baseline and is not in the service catalog: it has its own dedicated request type, and its scope + verb schemas arrive self-described in the grant effect. The startup schema-backfill migration for it has been removed, and the now-empty `_MANUAL_SERVICE_ENTRIES` hook in the `services.json` generation script has been dropped.
+
+- The `minds-workspaces` verb catalog now lives in a single shared data file, `extensions/workspace_permissions.json`, read by both the gateway extension (for request-path schema construction) and the Python `workspace_permissions` module (for dialog-facing verb metadata), so the two sides cannot drift.

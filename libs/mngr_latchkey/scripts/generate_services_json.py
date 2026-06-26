@@ -58,22 +58,6 @@ _COMMENT_KEY: Final[str] = "$comment"
 # The ``any.json`` catch-all is not a service and has no scope; skip it.
 _NON_SERVICE_FILES: Final[frozenset[str]] = frozenset({"any.json"})
 
-# Manually-curated catalog entries for scopes that are NOT detent built-in
-# services -- minds-internal scopes served by the gateway's own extensions
-# (their schemas live inline in each agent's permissions file; see
-# ``agent_setup.py``). Merged into the generated catalog so a regeneration
-# from detent does not drop them. Keyed by service name exactly as it appears
-# in ``services.json``.
-#
-# The cross-workspace ``minds-workspaces`` scope is intentionally NOT listed
-# here: it has its own dedicated permission-request type (``workspace``) with
-# per-target gating, rather than going through the service-catalog-backed
-# ``predefined`` flow. Its verb metadata lives in
-# ``imbue.mngr_latchkey.workspace_permissions`` instead, and keeping it out of
-# the catalog ensures the credential-sync path treats it as the internal scope
-# it is (no third-party credentials to ship).
-_MANUAL_SERVICE_ENTRIES: Final[Mapping[str, list[dict[str, object]]]] = {}
-
 # AWS is structurally ambiguous: every ``aws-*`` schema matches only on domain
 # and so looks like a scope, but detent treats only the top-level ``aws`` schema
 # as a scope and folds the service-specific ones in as permissions.
@@ -314,10 +298,6 @@ def build_services_catalog(builtin_schemas_directory: Path) -> dict[str, list[di
         service_name: [entry.model_dump() for entry in entries_by_service_name[service_name]]
         for service_name in ordered_service_names
     }
-    # Append the manually-curated minds-internal scope entries (not derived from
-    # detent), preserving them across regenerations.
-    for service_name, entries in _MANUAL_SERVICE_ENTRIES.items():
-        catalog[service_name] = list(entries)
     return catalog
 
 

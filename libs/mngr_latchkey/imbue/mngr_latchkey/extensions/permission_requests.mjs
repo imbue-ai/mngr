@@ -147,9 +147,8 @@ const REQUEST_TYPE_FILE_SHARING = 'file-sharing';
 // ``workspace`` grants access to the minds cross-workspace management API
 // (``/api/v1/workspaces/...``) under the ``minds-workspaces`` detent scope. The
 // payload names the verbs the agent wants and, for verbs that act on a specific
-// workspace, the target workspace id. The desktop client owns applying the grant
-// (it accumulates a per-target ``anyOf`` into the host's permissions file); the
-// gateway only validates + stores the request here.
+// workspace, the target workspace id. The grant effect is computed here and
+// applied via ``/approve`` like file-sharing.
 const REQUEST_TYPE_WORKSPACE = 'workspace';
 const VALID_REQUEST_TYPES = new Set([
   REQUEST_TYPE_PREDEFINED,
@@ -157,53 +156,76 @@ const VALID_REQUEST_TYPES = new Set([
   REQUEST_TYPE_WORKSPACE,
 ]);
 
-// The ``minds-workspaces`` scope and its verb permission-schema names. These
-// MUST stay in sync with the Python definitions in
-// ``imbue.mngr_latchkey.workspace_permissions`` (the gateway is pure Node with
-// no Python in the request path). A cross-language drift guard lives in
-// permission_requests_test.py.
-const MINDS_WORKSPACES_SCOPE = 'minds-workspaces';
-// The gateway-self synthetic host every ``minds-api-proxy`` request carries as
-// its detent ``domain`` (mirrors ``agent_setup._GATEWAY_SELF_HOST``).
-const MINDS_WORKSPACES_GATEWAY_SELF_HOST = 'latchkey-self.invalid';
-// URL path prefix the cross-workspace API lives under, as the gateway sees it.
-const MINDS_WORKSPACES_PATH_PREFIX = '/minds-api-proxy/api/v1/workspaces';
-// Scope-level path-prefix gate (matches the collection root and anything beneath
-// it) so a grant cannot escape into other gateway-self endpoints.
-const MINDS_WORKSPACES_SCOPE_PATTERN = `^${MINDS_WORKSPACES_PATH_PREFIX}(/|$)`;
+// The ``minds-workspaces`` verb catalog is a *shared* definition file read by
+// both this gateway extension and the Python desktop side
+// (``imbue.mngr_latchkey.workspace_permissions``), so the two cannot drift. It
+// is shipped next to this extension and copied into the gateway's extension
+// directory at spawn time (alongside ``services.json``), so ``import.meta.url``
+// resolves it. We read it once at module load -- it is static package data, and
+// a package upgrade rematerializes it and restarts the gateway.
+const WORKSPACE_PERMISSIONS_FILE = 'workspace_permissions.json';
+const WORKSPACE_PERMISSIONS_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  WORKSPACE_PERMISSIONS_FILE,
+);
+
 // The "any workspace" id wildcard used when a targeted verb is granted broadly.
 const MINDS_WORKSPACES_ANY_SEGMENT = '[^/]+';
 
-// Definition of each ``minds-workspaces`` verb: its HTTP method, whether it is
-// scoped to a target workspace id, and how its request path is shaped. For the
-// targeted verbs, ``pathSuffix`` is appended to ``<prefix>/<id-segment>``; for
-// the non-targeted verbs, ``buildPath`` produces the full path schema directly.
-// MUST stay in sync with the Python definitions in
-// ``imbue.mngr_latchkey.workspace_permissions`` (the gateway is pure Node with
-// no Python in the request path). A cross-language drift guard lives in
-// permission_requests_test.py.
-const WORKSPACE_VERB_DEFS = {
-  'minds-workspaces-read': {
-    method: 'GET',
-    isTargeted: false,
-    // Read covers every GET under the workspaces tree (list, detail, version,
-    // backups listing, operation status/logs).
-    pathSchema: () => ({ type: 'string', pattern: MINDS_WORKSPACES_SCOPE_PATTERN }),
-  },
-  'minds-workspaces-create': {
-    method: 'POST',
-    isTargeted: false,
-    pathSchema: () => ({ const: MINDS_WORKSPACES_PATH_PREFIX }),
-  },
-  'minds-workspaces-destroy': { method: 'POST', isTargeted: true, pathSuffix: '/destroy$' },
-  'minds-workspaces-lifecycle': { method: 'POST', isTargeted: true, pathSuffix: '/(start|stop)$' },
-  'minds-workspaces-backups-export': {
-    method: 'POST',
-    isTargeted: true,
-    pathSuffix: `/backups/${MINDS_WORKSPACES_ANY_SEGMENT}/export$`,
-  },
-  'minds-workspaces-ssh': { method: 'POST', isTargeted: true, pathSuffix: '/ssh$' },
-};
+/**
+ * Load + validate the shared ``minds-workspaces`` verb catalog. Returns the
+ * derived constants the rest of the module needs. A structural problem is a
+ * deployment bug and throws at module load (the extension fails to load loudly).
+ */
+function loadWorkspacePermissions() {
+  const raw = readFileSync(WORKSPACE_PERMISSIONS_PATH, 'utf-8');
+  const parsed = JSON.parse(raw);
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`${WORKSPACE_PERMISSIONS_FILE} top-level value must be a JSON object.`);
+  }
+  const { scope, gateway_self_host: gatewaySelfHost, path_prefix: pathPrefix, verbs } = parsed;
+  for (const [key, value] of [['scope', scope], ['gateway_self_host', gatewaySelfHost], ['path_prefix', pathPrefix]]) {
+    if (typeof value !== 'string' || value.length === 0) {
+      throw new Error(`${WORKSPACE_PERMISSIONS_FILE}: '${key}' must be a non-empty string.`);
+    }
+  }
+  if (!Array.isArray(verbs) || verbs.length === 0) {
+    throw new Error(`${WORKSPACE_PERMISSIONS_FILE}: 'verbs' must be a non-empty array.`);
+  }
+  const verbDefs = {};
+  for (const verb of verbs) {
+    if (typeof verb !== 'object' || verb === null || typeof verb.permission !== 'string') {
+      throw new Error(`${WORKSPACE_PERMISSIONS_FILE}: each verb must be an object with a string 'permission'.`);
+    }
+    const path = verb.path;
+    if (typeof path !== 'object' || path === null || typeof path.kind !== 'string') {
+      throw new Error(`${WORKSPACE_PERMISSIONS_FILE}: verb '${verb.permission}' needs a 'path.kind'.`);
+    }
+    if (path.kind === 'targeted' && typeof path.suffix !== 'string') {
+      throw new Error(`${WORKSPACE_PERMISSIONS_FILE}: targeted verb '${verb.permission}' needs a 'path.suffix'.`);
+    }
+    verbDefs[verb.permission] = {
+      method: verb.method,
+      kind: path.kind,
+      suffix: path.suffix,
+      isTargeted: path.kind === 'targeted',
+    };
+  }
+  return {
+    scope,
+    gatewaySelfHost,
+    pathPrefix,
+    scopePattern: `^${pathPrefix}(/|$)`,
+    verbDefs,
+  };
+}
+
+const WORKSPACE_PERMISSIONS = loadWorkspacePermissions();
+const MINDS_WORKSPACES_SCOPE = WORKSPACE_PERMISSIONS.scope;
+const MINDS_WORKSPACES_GATEWAY_SELF_HOST = WORKSPACE_PERMISSIONS.gatewaySelfHost;
+const MINDS_WORKSPACES_PATH_PREFIX = WORKSPACE_PERMISSIONS.pathPrefix;
+const MINDS_WORKSPACES_SCOPE_PATTERN = WORKSPACE_PERMISSIONS.scopePattern;
+const WORKSPACE_VERB_DEFS = WORKSPACE_PERMISSIONS.verbDefs;
 const VALID_WORKSPACE_VERBS = new Set(Object.keys(WORKSPACE_VERB_DEFS));
 
 // Detent's catch-all permission schema. The ``services.json``
@@ -1040,11 +1062,25 @@ function workspaceTargetedVerbSchema(def, idSegment) {
       method: { const: def.method },
       path: {
         type: 'string',
-        pattern: `^${MINDS_WORKSPACES_PATH_PREFIX}/${idSegment}${def.pathSuffix}`,
+        pattern: `^${MINDS_WORKSPACES_PATH_PREFIX}/${idSegment}${def.suffix}`,
       },
     },
     required: ['method', 'path'],
   };
+}
+
+/**
+ * Build the path schema for a non-targeted verb from its ``kind``: ``tree``
+ * (read) matches any path under the workspaces tree; ``collection`` (create)
+ * is the exact collection root.
+ */
+function workspaceNonTargetedPathSchema(def) {
+  if (def.kind === 'collection') {
+    return { const: MINDS_WORKSPACES_PATH_PREFIX };
+  }
+  // ``tree`` (and any future non-targeted kind) matches the whole workspaces
+  // subtree via the scope pattern.
+  return { type: 'string', pattern: MINDS_WORKSPACES_SCOPE_PATTERN };
 }
 
 /**
@@ -1054,7 +1090,7 @@ function workspaceNonTargetedVerbSchema(def) {
   return {
     properties: {
       method: { const: def.method },
-      path: def.pathSchema(),
+      path: workspaceNonTargetedPathSchema(def),
     },
     required: ['method', 'path'],
   };

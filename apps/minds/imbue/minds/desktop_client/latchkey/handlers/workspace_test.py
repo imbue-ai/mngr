@@ -26,10 +26,13 @@ from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import create_latchkey_workspace_permission_request_event
 from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.mngr.primitives import AgentId
-from imbue.mngr_latchkey.workspace_permissions import PERM_WORKSPACES_DESTROY
-from imbue.mngr_latchkey.workspace_permissions import PERM_WORKSPACES_READ
 
 _HttpxHandler: Final = Callable[[httpx.Request], httpx.Response]
+
+# Verb permission names referenced by these tests (the catalog lives in the
+# shared ``workspace_permissions.json``).
+PERM_WORKSPACES_DESTROY: Final = "minds-workspaces-destroy"
+PERM_WORKSPACES_READ: Final = "minds-workspaces-read"
 
 
 class _RecordingMessageSender(MngrMessageSender):

@@ -1,0 +1,49 @@
+{
+  "scope": "minds-workspaces",
+  "gateway_self_host": "latchkey-self.invalid",
+  "path_prefix": "/minds-api-proxy/api/v1/workspaces",
+  "verbs": [
+    {
+      "permission": "minds-workspaces-read",
+      "method": "GET",
+      "path": { "kind": "tree" },
+      "display_name": "List and read workspaces",
+      "description": "List all workspaces and read their detail, version, and backups. Applies to all workspaces (listing is not per-workspace)."
+    },
+    {
+      "permission": "minds-workspaces-create",
+      "method": "POST",
+      "path": { "kind": "collection" },
+      "display_name": "Create workspaces",
+      "description": "Create new workspaces."
+    },
+    {
+      "permission": "minds-workspaces-destroy",
+      "method": "POST",
+      "path": { "kind": "targeted", "suffix": "/destroy$" },
+      "display_name": "Destroy a workspace",
+      "description": "Permanently destroy the selected workspace."
+    },
+    {
+      "permission": "minds-workspaces-lifecycle",
+      "method": "POST",
+      "path": { "kind": "targeted", "suffix": "/(start|stop)$" },
+      "display_name": "Start/stop a workspace",
+      "description": "Start or stop the selected workspace's host."
+    },
+    {
+      "permission": "minds-workspaces-backups-export",
+      "method": "POST",
+      "path": { "kind": "targeted", "suffix": "/backups/[^/]+/export$" },
+      "display_name": "Export a workspace's backups",
+      "description": "Export a backup snapshot of the selected workspace."
+    },
+    {
+      "permission": "minds-workspaces-ssh",
+      "method": "POST",
+      "path": { "kind": "targeted", "suffix": "/ssh$" },
+      "display_name": "Establish SSH access to a workspace",
+      "description": "Establish SSH access into the selected workspace."
+    }
+  ]
+}
