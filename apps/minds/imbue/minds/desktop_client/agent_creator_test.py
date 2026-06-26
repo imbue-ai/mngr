@@ -39,6 +39,7 @@ from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
 from imbue.minds.desktop_client.agent_creator import run_mngr_aws_prepare
+from imbue.minds.desktop_client.backup_failure_store import read_backup_setup_failure
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
@@ -804,6 +805,49 @@ def test_provision_backups_notifies_user_after_retry_budget_exhausted(tmp_path) 
     assert len(dispatcher.recorded) == 1
     notification, _agent_display_name = dispatcher.recorded[0]
     assert notification.title == "Backup setup failed"
+
+
+def test_provision_backups_fails_fast_when_restic_unavailable(tmp_path, monkeypatch) -> None:
+    """A missing restic binary is a permanent condition, so it must not be retried.
+
+    ``ResticNotInstalledError`` can never resolve within the retry window, so the
+    loop should fail fast on the first attempt -- returning well before the
+    (deliberately large) retry wait could elapse -- and still surface exactly one
+    notification. Guards against the regression where a permanent restic failure
+    was retried for the full budget, flooding the logs once per attempt per agent.
+    """
+    # Point at a binary that doesn't exist so ensure_restic_available() raises.
+    monkeypatch.setenv("MINDS_RESTIC_BINARY", str(tmp_path / "nonexistent-restic"))
+    dispatcher = _RecordingNotificationDispatcher(is_electron=False, is_macos=False)
+    creator = _make_test_creator(
+        tmp_path,
+        notification_dispatcher=dispatcher,
+        # A single (wrongful) retry would block for this 30s wait; failing fast
+        # returns near-instantly, so the elapsed-time assertion below distinguishes them.
+        backup_setup_retry_budget_seconds=300.0,
+        backup_setup_retry_wait_seconds=30.0,
+    )
+    request = BackupSetupRequest(backup_provider=BackupProvider.API_KEY, api_key_env_text="")
+
+    agent_id = AgentId.generate()
+    started = time.monotonic()
+    creator._provision_backups(
+        agent_id=agent_id,
+        host_id="host-00000000000000000000000000000000",
+        backup_request=request,
+    )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 10.0, "permanent restic failure should fail fast, not wait for a retry"
+    assert len(dispatcher.recorded) == 1
+    notification, _agent_display_name = dispatcher.recorded[0]
+    assert notification.title == "Backup setup failed"
+    assert "restic" in notification.message
+    # The failure is persisted so the landing page can surface it (a distinct
+    # FAILED badge) rather than it being lost once the transient notification fades.
+    failure = read_backup_setup_failure(creator.paths, agent_id)
+    assert failure is not None
+    assert "restic" in failure.error
 
 
 def test_wait_for_workspace_ready_short_circuits_when_disabled(tmp_path) -> None:

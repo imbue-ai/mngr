@@ -16,6 +16,8 @@ import pytest
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
+from imbue.minds.desktop_client.backup_failure_store import BackupSetupFailure
+from imbue.minds.desktop_client.backup_failure_store import record_backup_setup_failure
 from imbue.minds.desktop_client.backup_status import BackupStatusState
 from imbue.minds.desktop_client.backup_status import compute_backup_status_for_workspace
 from imbue.minds.desktop_client.backup_status import compute_backup_status_for_workspaces
@@ -37,6 +39,32 @@ def _now() -> datetime:
 def test_no_canonical_env_is_not_configured(tmp_path: Path) -> None:
     status = compute_backup_status_for_workspace(_paths(tmp_path), AgentId.generate(), now=_now())
     assert status.state is BackupStatusState.NOT_CONFIGURED
+
+
+def test_failure_marker_without_canonical_env_is_failed(tmp_path: Path) -> None:
+    """A failed setup (marker, no canonical env) reports FAILED, not NOT_CONFIGURED.
+
+    This is the whole point of the marker: a broken backup must be
+    distinguishable from a workspace the user deliberately left unbacked-up.
+    """
+    paths = _paths(tmp_path)
+    agent_id = AgentId.generate()
+    record_backup_setup_failure(
+        paths, agent_id, BackupSetupFailure(error="restic binary not found at 'restic'", failed_at=_now())
+    )
+    status = compute_backup_status_for_workspace(paths, agent_id, now=_now())
+    assert status.state is BackupStatusState.FAILED
+    assert status.error == "restic binary not found at 'restic'"
+
+
+def test_canonical_env_takes_precedence_over_stale_failure_marker(tmp_path: Path) -> None:
+    """If both a canonical env and a (stale) failure marker exist, success wins."""
+    paths = _paths(tmp_path)
+    agent_id = AgentId.generate()
+    record_backup_setup_failure(paths, agent_id, BackupSetupFailure(error="old failure", failed_at=_now()))
+    write_canonical_env(paths, agent_id, "RESTIC_PASSWORD=p\n")
+    status = compute_backup_status_for_workspace(paths, agent_id, now=_now())
+    assert status.state is not BackupStatusState.FAILED
 
 
 def test_malformed_env_without_repository_is_unknown(tmp_path: Path) -> None:

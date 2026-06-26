@@ -26,6 +26,7 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client.backup_env_store import parse_restic_env
 from imbue.minds.desktop_client.backup_env_store import read_canonical_env
+from imbue.minds.desktop_client.backup_failure_store import read_backup_setup_failure
 from imbue.minds.errors import BackupProvisioningError
 from imbue.mngr.primitives import AgentId
 
@@ -44,6 +45,10 @@ class BackupStatusState(UpperCaseStrEnum):
 
     # No canonical env -- backups were never configured for this workspace.
     NOT_CONFIGURED = auto()
+    # No canonical env, but setup was attempted and failed (a failure marker
+    # exists). Distinct from NOT_CONFIGURED so a broken backup doesn't masquerade
+    # as a workspace the user deliberately left without backups.
+    FAILED = auto()
     # Configured, but no successful snapshot exists yet.
     NEVER = auto()
     # At least one snapshot exists; ``last_success_at`` is populated.
@@ -62,6 +67,10 @@ class BackupStatus(FrozenModel):
         default=None,
         description="Time of the most recent successful snapshot, when known (UTC)",
     )
+    error: str | None = Field(
+        default=None,
+        description="For FAILED: why the last backup-setup attempt failed (shown as the badge tooltip).",
+    )
 
 
 def compute_backup_status_for_workspace(
@@ -74,12 +83,16 @@ def compute_backup_status_for_workspace(
 ) -> BackupStatus:
     """Compute the backup status for one workspace from its canonical restic.env.
 
-    Returns ``NOT_CONFIGURED`` when no canonical env exists, and ``UNKNOWN``
-    on any restic error / malformed env rather than propagating -- a single
-    bad repo must not break the whole landing-page status fill.
+    Returns ``FAILED`` when no canonical env exists but a failure marker does,
+    ``NOT_CONFIGURED`` when neither exists, and ``UNKNOWN`` on any restic error /
+    malformed env rather than propagating -- a single bad repo must not break
+    the whole landing-page status fill.
     """
     content = read_canonical_env(paths, agent_id)
     if content is None:
+        failure = read_backup_setup_failure(paths, agent_id)
+        if failure is not None:
+            return BackupStatus(state=BackupStatusState.FAILED, error=failure.error)
         return BackupStatus(state=BackupStatusState.NOT_CONFIGURED)
 
     env = parse_restic_env(content)

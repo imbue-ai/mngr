@@ -19,6 +19,8 @@ import threading
 import time
 from collections.abc import Callable
 from collections.abc import Mapping
+from datetime import datetime
+from datetime import timezone
 from enum import auto
 from pathlib import Path
 from typing import Final
@@ -33,6 +35,7 @@ from pydantic import PrivateAttr
 from tenacity import RetryCallState
 from tenacity import Retrying
 from tenacity import retry_if_exception_type
+from tenacity import retry_if_not_exception_type
 from tenacity import stop_after_delay
 from tenacity import wait_fixed
 
@@ -44,6 +47,9 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.backend_resolver import SYSTEM_SERVICES_AGENT_NAME
+from imbue.minds.desktop_client.backup_failure_store import BackupSetupFailure
+from imbue.minds.desktop_client.backup_failure_store import clear_backup_setup_failure
+from imbue.minds.desktop_client.backup_failure_store import record_backup_setup_failure
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import configure_backups_for_host
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
@@ -52,6 +58,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
+from imbue.minds.desktop_client.restic_cli import ResticNotInstalledError
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import GitCloneError
@@ -1799,14 +1806,24 @@ class AgentCreator(MutableModel):
         readiness probe has already passed, but a slow host's ``mngr exec`` can
         still race the agent's reachability for a while after that. Transient
         failures are retried quietly (debug-logged per attempt); only if the
-        whole budget is exhausted do we surface an OS notification. Either way
-        this is non-fatal to the already-created workspace -- the user can
-        configure backups later -- and it never blocks the create call.
+        whole budget is exhausted do we surface an OS notification.
+
+        A missing ``restic`` binary (``ResticNotInstalledError``) is excluded
+        from the retry: it is a deterministic, machine-level prerequisite that
+        retrying cannot conjure, so we fail fast on the first attempt rather
+        than spinning for the full budget (and flooding the logs with one
+        failed-span line per attempt, per agent).
+
+        Either way this is non-fatal to the already-created workspace -- the
+        user can configure backups later -- and it never blocks the create call.
         """
 
         try:
             for attempt in Retrying(
-                retry=retry_if_exception_type((BackupProvisioningError, ImbueCloudCliError)),
+                retry=(
+                    retry_if_exception_type((BackupProvisioningError, ImbueCloudCliError))
+                    & retry_if_not_exception_type(ResticNotInstalledError)
+                ),
                 stop=stop_after_delay(self.backup_setup_retry_budget_seconds),
                 wait=wait_fixed(self.backup_setup_retry_wait_seconds),
                 reraise=True,
@@ -1821,12 +1838,19 @@ class AgentCreator(MutableModel):
                         paths=self.paths,
                         parent_cg=self.root_concurrency_group,
                     )
+            # Succeeded -- clear any failure marker from a prior attempt so the
+            # landing page stops showing "Backup setup failed" for this workspace.
+            clear_backup_setup_failure(self.paths, agent_id)
         except (BackupProvisioningError, ImbueCloudCliError) as exc:
-            logger.opt(exception=exc).warning(
-                "Failed to configure backups for agent {} after {:.0f}s of retries",
-                agent_id,
-                self.backup_setup_retry_budget_seconds,
-            )
+            if isinstance(exc, ResticNotInstalledError):
+                # Failed fast (no retry); don't claim a budget of retries we never spent.
+                logger.warning("Skipping backup setup for agent {}; restic unavailable: {}", agent_id, exc)
+            else:
+                logger.opt(exception=exc).warning(
+                    "Failed to configure backups for agent {} after {:.0f}s of retries",
+                    agent_id,
+                    self.backup_setup_retry_budget_seconds,
+                )
             self.notification_dispatcher.dispatch(
                 NotificationRequest(
                     title="Backup setup failed",
@@ -1837,6 +1861,15 @@ class AgentCreator(MutableModel):
                     urgency=NotificationUrgency.NORMAL,
                 ),
                 agent_display_name=str(agent_id)[:8],
+            )
+            # Persist a marker so the failure stays visible on the landing page
+            # (a distinct, persistent "Backup setup failed" badge), not just in
+            # the logs + a transient OS notification. Done after the notification
+            # so a marker-write error can't suppress the user-facing alert.
+            record_backup_setup_failure(
+                self.paths,
+                agent_id,
+                BackupSetupFailure(error=str(exc), failed_at=datetime.now(timezone.utc)),
             )
 
     def _build_redirect_url(self, agent_id: AgentId) -> str:
