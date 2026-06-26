@@ -750,12 +750,12 @@ async def _create_workspace_and_first_message(
                 logger.info("[{}] creation status: (none) -> {}", label, state)
             last_status = state
             phase_started_at = now
-            if not state:
-                # An empty status means the /status body had no "status" field:
-                # 403 "Not authenticated", 404 "Unknown agent creation", or the
-                # page auto-navigated to the workspace on DONE (so the fetch hit
-                # the wrong origin). Log the raw response + current URL to tell
-                # these apart.
+            if not state and not chat_url_re.search(win.url):
+                # An empty status off the workspace origin is anomalous: the
+                # /status body had no "status" field -- a 403 "Not authenticated"
+                # or 404 "Unknown agent creation". (Empty status *on* the
+                # workspace URL is the normal auto-navigate-on-DONE case, handled
+                # below.) Log the raw response to tell the anomalies apart.
                 with contextlib.suppress(Exception):
                     logger.warning(
                         "[{}]   empty-status detail: http={} url={} body={!r}",
