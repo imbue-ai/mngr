@@ -180,7 +180,7 @@ def test_render_sharing_editor_workspace_link_interpolates_agent_id() -> None:
 
 def test_render_landing_page_with_no_agents_shows_empty_state() -> None:
     html = render_landing_page(accessible_agent_ids=())
-    assert "No projects yet" in html
+    assert "No workspaces yet" in html
 
 
 def test_render_landing_page_discovering_shows_auto_refresh() -> None:
@@ -231,7 +231,7 @@ def test_render_create_form_has_default_values() -> None:
 
 def test_render_create_form_has_optional_name_field() -> None:
     # The advanced view exposes an explicit "Name" (host_name) field so a user
-    # can name the mind; left empty, the server auto-names it (mind-N).
+    # can name the workspace; left empty, the server auto-names it (workspace-N).
     html = render_create_form()
     assert 'name="host_name"' in html
 
@@ -502,19 +502,19 @@ def test_resolve_create_host_name_uses_submitted_value() -> None:
     assert str(resolve_create_host_name("my-workspace")) == "my-workspace"
 
 
-def test_resolve_create_host_name_generates_mind_name_when_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_create_host_name_generates_workspace_name_when_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     # No submitted name, no operator override, and no existing workspaces ->
-    # the first ``mind-N`` name.
+    # the first ``workspace-N`` name.
     monkeypatch.delenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", raising=False)
     monkeypatch.delenv("MINDS_WORKSPACE_NAME", raising=False)
-    assert str(resolve_create_host_name("")) == "mind-1"
+    assert str(resolve_create_host_name("")) == "workspace-1"
 
 
-def test_resolve_create_host_name_picks_next_free_mind_name(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_create_host_name_picks_next_free_workspace_name(monkeypatch: pytest.MonkeyPatch) -> None:
     # The fallback skips names already in use across providers.
     monkeypatch.delenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", raising=False)
     monkeypatch.delenv("MINDS_WORKSPACE_NAME", raising=False)
-    assert str(resolve_create_host_name("", {"mind-1", "mind-2"})) == "mind-3"
+    assert str(resolve_create_host_name("", {"workspace-1", "workspace-2"})) == "workspace-3"
 
 
 def test_resolve_create_host_name_honors_operator_override_when_opted_in(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -535,10 +535,10 @@ def test_resolve_create_host_name_operator_override_is_not_uniquified(monkeypatc
 
 def test_resolve_create_host_name_ignores_operator_override_without_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
     # Without the opt-in, a stray MINDS_WORKSPACE_NAME is ignored and a
-    # ``mind-N`` name is generated instead.
+    # ``workspace-N`` name is generated instead.
     monkeypatch.delenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", raising=False)
     monkeypatch.setenv("MINDS_WORKSPACE_NAME", "mindtest")
-    assert str(resolve_create_host_name("")) == "mind-1"
+    assert str(resolve_create_host_name("")) == "workspace-1"
 
 
 def test_make_unique_host_name_numbered_empty_is_one() -> None:

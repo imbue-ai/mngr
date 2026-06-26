@@ -660,16 +660,16 @@ def test_create_form_submit_passes_host_name(tmp_path: Path) -> None:
     agent_creator.wait_for_all()
 
 
-def test_create_form_submit_auto_names_next_mind(tmp_path: Path) -> None:
-    """POST /create with no host_name auto-generates the next free ``mind-N``.
+def test_create_form_submit_auto_names_next_workspace(tmp_path: Path) -> None:
+    """POST /create with no host_name auto-generates the next free ``workspace-N``.
 
-    The form no longer asks for a name. With ``mind-1`` already a known
+    The form no longer asks for a name. With ``workspace-1`` already a known
     workspace in the resolver, the create handler must gather existing names
-    across providers and resolve the new workspace to ``mind-2``.
+    across providers and resolve the new workspace to ``workspace-2``.
     """
     existing_id = AgentId()
     resolver = make_resolver_with_data(
-        make_agents_json(existing_id, labels={"workspace": "mind-1", "is_primary": "true"}),
+        make_agents_json(existing_id, labels={"workspace": "workspace-1", "is_primary": "true"}),
     )
     client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path, backend_resolver=resolver)
 
@@ -682,7 +682,7 @@ def test_create_form_submit_auto_names_next_mind(tmp_path: Path) -> None:
     creation_id = CreationId(response.headers["Location"].rsplit("/", 1)[-1])
     info = agent_creator.get_creation_info(creation_id)
     assert info is not None
-    assert info.host_name == "mind-2"
+    assert info.host_name == "workspace-2"
     agent_creator.wait_for_all()
 
 

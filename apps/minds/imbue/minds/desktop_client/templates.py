@@ -322,8 +322,8 @@ def _operator_workspace_default(env_var: str, fallback: str) -> str:
 
 
 # Base for auto-generated workspace host names. The generic default is never
-# used bare -- it is always numbered (``mind-1``, ``mind-2``, ...).
-_DEFAULT_HOST_NAME_BASE: Final[str] = "mind"
+# used bare -- it is always numbered (``workspace-1``, ``workspace-2``, ...).
+_DEFAULT_HOST_NAME_BASE: Final[str] = "workspace"
 
 
 @pure
@@ -339,8 +339,8 @@ def make_unique_host_name(base: str, existing_host_names: Collection[str], *, al
 
     With ``always_number`` True, ``base`` is never used bare: the smallest free
     ``base-1``, ``base-2``, ... is returned. This is the generic default's
-    scheme, which has no bare ``mind`` form; a gap left by a destroyed
-    ``mind-2`` is reused before climbing to ``mind-4``.
+    scheme, which has no bare ``workspace`` form; a gap left by a destroyed
+    ``workspace-2`` is reused before climbing to ``workspace-4``.
 
     Raises ``InvalidName`` if the chosen name is not a valid ``HostName`` (i.e.
     ``base`` itself is invalid); appending ``-N`` to a valid base stays valid.
