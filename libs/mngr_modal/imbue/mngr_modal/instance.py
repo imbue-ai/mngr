@@ -2610,15 +2610,54 @@ log "=== Shutdown script completed ==="
                 host_state=host_state,
             )
 
-            agent_refs: list[DiscoveredAgent] = []
-            for agent_data in agent_data_by_host_id.get(host_id, []):
-                ref = validate_and_create_discovered_agent(agent_data, host_id, self.name)
-                if ref is not None:
-                    agent_refs.append(ref)
-
-            result[host_ref] = agent_refs
+            # A RUNNING host's agents are read LIVE off the sandbox; only offline
+            # hosts fall back to the state volume. See _discover_agent_refs_for_host.
+            result[host_ref] = self._discover_agent_refs_for_host(
+                host_id, host_record, is_running, agent_data_by_host_id.get(host_id, [])
+            )
 
         return result
+
+    def _discover_agent_refs_for_host(
+        self,
+        host_id: HostId,
+        host_record: HostRecord,
+        is_running: bool,
+        volume_agent_data: list[dict[str, Any]],
+    ) -> list[DiscoveredAgent]:
+        """Resolve a host's agent refs: LIVE for running hosts, the state volume otherwise.
+
+        A running host's agents must be read live off the sandbox: agents created
+        in-sandbox (e.g. the user's workspace agent) are never written to the state
+        volume -- only host-side agents like ``system-services`` are. Reading the
+        volume only made ``mngr destroy`` / ``mngr start`` unable to resolve a live
+        in-sandbox agent (it was absent from the volume), so teardown spun forever.
+        This mirrors the VPS providers, which read running hosts live and fall back
+        to the persisted store only when the host is offline (or the live read fails).
+        """
+        if is_running:
+            try:
+                host = self._get_host(host_id, host_record)
+                if isinstance(host, Host):
+                    return list(host.discover_agents())
+            except (HostConnectionError, MngrError) as e:
+                logger.debug(
+                    "Live agent read failed for running Modal host {}; falling back to volume records: {}",
+                    host_id,
+                    e,
+                )
+        return self._agent_refs_from_volume_data(host_id, volume_agent_data)
+
+    def _agent_refs_from_volume_data(
+        self, host_id: HostId, volume_agent_data: list[dict[str, Any]]
+    ) -> list[DiscoveredAgent]:
+        """Build agent refs from persisted state-volume records (the offline-host path)."""
+        agent_refs: list[DiscoveredAgent] = []
+        for agent_data in volume_agent_data:
+            ref = validate_and_create_discovered_agent(agent_data, host_id, self.name)
+            if ref is not None:
+                agent_refs.append(ref)
+        return agent_refs
 
     def get_host_resources(self, host: HostInterface) -> HostResources:
         """Get resource information for a Modal sandbox."""

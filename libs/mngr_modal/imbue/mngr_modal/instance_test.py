@@ -13,13 +13,16 @@ import pytest
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import ConfigStructureError
+from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ModalAuthError
+from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
@@ -2005,3 +2008,60 @@ def test_destroy_host_surfaces_terminate_failure(
 
     with pytest.raises(CleanupFailedGroup):
         testing_provider.destroy_host(host_id)
+
+
+# =============================================================================
+# Agent-ref resolution: live for running hosts, state volume for offline hosts.
+# (The core of the destroy/start resolution fix -- agents created in-sandbox are
+# never written to the volume, so a running host must be read live.)
+# =============================================================================
+
+
+def test_discover_agent_refs_reads_live_for_running_host(modal_provider: ModalProviderInstance) -> None:
+    """A RUNNING host's agents are read live off the sandbox; the live result wins over
+    the state volume (which lacks agents created in-sandbox, e.g. the user's workspace)."""
+    host_id = HostId.generate()
+    host_record = _make_host_record(host_id)
+    # discover_agents() result is returned verbatim by the helper.
+    live_agents = [MagicMock()]
+    fake_host = MagicMock(spec=Host)
+    fake_host.discover_agents.return_value = live_agents
+    # Volume has a DIFFERENT agent -- it must be ignored in favor of the live read.
+    volume_data = [{"id": str(AgentId.generate()), "name": "stale-from-volume"}]
+
+    with patch.object(modal_provider, "_get_host", return_value=fake_host) as mock_get_host:
+        refs = modal_provider._discover_agent_refs_for_host(host_id, host_record, True, volume_data)
+
+    assert refs == live_agents
+    mock_get_host.assert_called_once()
+    fake_host.discover_agents.assert_called_once()
+
+
+def test_discover_agent_refs_reads_volume_for_offline_host(modal_provider: ModalProviderInstance) -> None:
+    """An offline host falls back to the persisted state-volume records (no live read)."""
+    host_id = HostId.generate()
+    host_record = _make_host_record(host_id)
+    volume_data = [{"id": str(AgentId.generate()), "name": "system-services"}]
+
+    with patch.object(modal_provider, "_get_host") as mock_get_host:
+        refs = modal_provider._discover_agent_refs_for_host(host_id, host_record, False, volume_data)
+
+    mock_get_host.assert_not_called()
+    assert len(refs) == 1
+    assert isinstance(refs[0], DiscoveredAgent)
+
+
+def test_discover_agent_refs_falls_back_to_volume_when_live_read_fails(
+    modal_provider: ModalProviderInstance,
+) -> None:
+    """If the live read fails for a running host, fall back to the volume so the host
+    still lists (offline-ish) rather than disappearing."""
+    host_id = HostId.generate()
+    host_record = _make_host_record(host_id)
+    volume_data = [{"id": str(AgentId.generate()), "name": "system-services"}]
+
+    with patch.object(modal_provider, "_get_host", side_effect=HostConnectionError("unreachable")):
+        refs = modal_provider._discover_agent_refs_for_host(host_id, host_record, True, volume_data)
+
+    assert len(refs) == 1
+    assert isinstance(refs[0], DiscoveredAgent)
