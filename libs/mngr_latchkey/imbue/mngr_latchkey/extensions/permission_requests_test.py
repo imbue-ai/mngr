@@ -662,6 +662,41 @@ def test_post_creates_workspace_request_all_workspaces_uses_wildcard(
     assert path_pattern.fullmatch(f"{prefix}/{AgentId.generate()}/ssh")
 
 
+def test_post_creates_workspace_request_multi_method_verb(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    # A verb whose catalog ``method`` is an array (here ``minds-workspaces-recover``
+    # matches GET + POST) produces a schema whose ``method`` is an ``enum`` of all
+    # its methods, and whose targeted path pattern includes the verb's suffix.
+    base_url, *_ = node_extension
+    target_id = str(AgentId.generate())
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "needs to recover a sibling workspace",
+            "type": "workspace",
+            "payload": {
+                "permissions": ["minds-workspaces-recover"],
+                "target_workspace_id": target_id,
+            },
+        },
+    )
+    assert status == 201, body
+    effect = json.loads(body)["effect"]
+    per_target_name = f"minds-workspaces-recover-{target_id}"
+    perm_schema = effect["schemas"][per_target_name]
+    # Multi-method verb -> enum of every method (order-independent).
+    assert perm_schema["properties"]["method"] == {"enum": ["GET", "POST"]}
+    path_pattern = re.compile(perm_schema["properties"]["path"]["pattern"])
+    prefix = "/minds-api-proxy/api/v1/workspaces"
+    # The suffix admits both the health and restart sub-paths for this target.
+    assert path_pattern.fullmatch(f"{prefix}/{target_id}/health")
+    assert path_pattern.fullmatch(f"{prefix}/{target_id}/restart")
+    # A different workspace id is not covered by the single-target grant.
+    assert not path_pattern.fullmatch(f"{prefix}/{AgentId.generate()}/health")
+
+
 def test_approve_workspace_override_recomputes_and_accumulates(
     node_extension: tuple[str, Path, Path],
 ) -> None:

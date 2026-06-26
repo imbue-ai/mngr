@@ -30,7 +30,8 @@
  *         ``{permissions: [<verb>, ...], target_workspace_id: <id>|null}``;
  *       each verb must be one of the ``minds-workspaces`` verb schema
  *       names (read / create / destroy / lifecycle / backups-export /
- *       ssh) and ``target_workspace_id`` (the workspace the targeted
+ *       ssh / update / recover / sharing) and ``target_workspace_id``
+ *       (the workspace the targeted
  *       verbs act on) is optional and, when present, must be a valid
  *       agent id. The effect is a self-contained patch (scope + verb
  *       schemas + rule) applied via ``/approve`` like file-sharing;
@@ -203,6 +204,19 @@ function loadWorkspacePermissions() {
     }
     if (path.kind === 'targeted' && typeof path.suffix !== 'string') {
       throw new Error(`${WORKSPACE_PERMISSIONS_FILE}: targeted verb '${verb.permission}' needs a 'path.suffix'.`);
+    }
+    // ``method`` may be a single HTTP method string or a non-empty array of
+    // method strings (a verb that matches more than one method).
+    const isStringMethod = typeof verb.method === 'string' && verb.method.length > 0;
+    const isArrayMethod =
+      Array.isArray(verb.method) &&
+      verb.method.length > 0 &&
+      verb.method.every((m) => typeof m === 'string' && m.length > 0);
+    if (!isStringMethod && !isArrayMethod) {
+      throw new Error(
+        `${WORKSPACE_PERMISSIONS_FILE}: verb '${verb.permission}' needs a 'method' that is a `
+        + `non-empty string or a non-empty array of strings.`,
+      );
     }
     verbDefs[verb.permission] = {
       method: verb.method,
@@ -742,7 +756,8 @@ function validateFileSharingPayload(payload) {
  * ``permissions`` is a non-empty array of ``minds-workspaces`` verb names
  * (each validated against the hard-coded verb set). ``target_workspace_id``
  * is the workspace the targeted verbs (destroy / lifecycle / backups-export /
- * ssh) act on; it is optional -- absent or ``null`` denotes a request that
+ * ssh / update / recover / sharing) act on; it is optional -- absent or
+ * ``null`` denotes a request that
  * only concerns the non-targeted verbs (read / create) or, on approval, an
  * "all workspaces" grant. When present it must be a valid agent id.
  *
@@ -1052,6 +1067,15 @@ function workspaceScopeSchema() {
 }
 
 /**
+ * Build the JSON-Schema ``method`` property for a verb. A single method string
+ * becomes ``{const: <method>}``; an array of methods becomes ``{enum: [...]}``
+ * so a verb that matches more than one HTTP method admits any of them.
+ */
+function workspaceMethodSchema(method) {
+  return Array.isArray(method) ? { enum: [...method] } : { const: method };
+}
+
+/**
  * Build a targeted verb's permission schema for one id segment. ``idSegment``
  * is either the ``[^/]+`` wildcard (an "all workspaces" grant) or a single
  * regex-escaped workspace id (a "selected" grant).
@@ -1059,7 +1083,7 @@ function workspaceScopeSchema() {
 function workspaceTargetedVerbSchema(def, idSegment) {
   return {
     properties: {
-      method: { const: def.method },
+      method: workspaceMethodSchema(def.method),
       path: {
         type: 'string',
         pattern: `^${MINDS_WORKSPACES_PATH_PREFIX}/${idSegment}${def.suffix}`,
@@ -1089,7 +1113,7 @@ function workspaceNonTargetedPathSchema(def) {
 function workspaceNonTargetedVerbSchema(def) {
   return {
     properties: {
-      method: { const: def.method },
+      method: workspaceMethodSchema(def.method),
       path: workspaceNonTargetedPathSchema(def),
     },
     required: ['method', 'path'],
@@ -1104,7 +1128,8 @@ function workspaceNonTargetedVerbSchema(def) {
  * For each requested verb:
  *  * non-targeted verbs (read / create) emit a broad schema keyed by the verb
  *    name;
- *  * targeted verbs (destroy / lifecycle / backups-export / ssh) emit, when
+ *  * targeted verbs (destroy / lifecycle / backups-export / ssh / update /
+ *    recover / sharing) emit, when
  *    ``targetWorkspaceId`` is ``null`` (an "all workspaces" grant), a broad
  *    schema keyed by the verb name; otherwise a per-target schema keyed
  *    ``<verb>-<target_id>`` whose path pins the single workspace id.

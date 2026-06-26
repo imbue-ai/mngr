@@ -6,10 +6,14 @@ where ``<key>`` is from :mod:`api_key_store`. The latchkey gateway's bundled
 so an agent in a workspace reaches us by hitting
 ``$LATCHKEY_GATEWAY/minds-api-proxy/api/v1/...``.
 
-The notifications route is bearer-only. The cross-workspace ``/workspaces``
-routes accept *either* that bearer (agents, via the gateway) *or* the desktop
-client's signed session cookie, so the browser UI can call the same versioned
-API as agents over one HTTP surface (see :func:`require_api_or_cookie_auth`).
+*Every* ``/api/v1`` route uses one auth implementation
+(:func:`require_api_or_cookie_auth`): it accepts *either* that bearer (agents,
+via the gateway) *or* the desktop client's signed session cookie, so the browser
+UI and in-workspace agents call the same versioned API over one HTTP surface.
+Agent reachability of any given route is decided separately, by whether a
+``minds-workspaces-<verb>`` schema matches its path at the gateway; routes with
+no matching verb (e.g. the ``/desktop`` namespace) are simply unreachable by
+agents (deny-all baseline) while still cookie-reachable by the UI.
 
 Agent identity, when a route needs it, comes from the URL path's
 ``<agent_id>`` parameter -- *not* from the bearer token. The gateway's
@@ -49,7 +53,6 @@ from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
 from imbue.minds.desktop_client.api_key_auth import is_request_authenticated
-from imbue.minds.desktop_client.api_key_auth import require_minds_api_key
 from imbue.minds.desktop_client.backup_export import BackupExportError
 from imbue.minds.desktop_client.backup_export import export_snapshot_zip
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
@@ -153,7 +156,7 @@ def require_api_or_cookie_auth(view: Callable[_ViewParams, Response]) -> Callabl
 # -- Notification route --
 
 
-@require_minds_api_key
+@require_api_or_cookie_auth
 def _handle_notification(agent_id: str) -> Response:
     """Send a notification on behalf of the named agent."""
     dispatcher: NotificationDispatcher | None = get_state().notification_dispatcher
@@ -768,7 +771,7 @@ def _handle_establish_ssh(agent_id: str) -> Response:
 # -- Bug report route --
 
 
-@require_minds_api_key
+@require_api_or_cookie_auth
 def _handle_bug_report(agent_id: str) -> Response:
     """Submit a bug report to Imbue on behalf of an in-workspace agent.
 

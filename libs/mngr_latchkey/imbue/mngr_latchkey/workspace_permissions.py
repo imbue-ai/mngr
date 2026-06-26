@@ -3,7 +3,8 @@
 Minds exposes a small cross-workspace management API
 (``/api/v1/workspaces/...``) that an agent in one workspace can call to act on
 *other* workspaces -- listing them, reading detail, creating, destroying,
-starting/stopping, exporting backups, and establishing SSH access. Those calls
+starting/stopping, exporting backups, establishing SSH access, updating settings,
+recovering (health check / restart), and managing service sharing. Those calls
 are reached through the gateway's bundled ``minds-api-proxy`` extension (so the
 detent envelope's domain is the synthetic ``latchkey-self.invalid`` gateway-self
 host) and gated by a single ``minds-workspaces`` detent scope with one named
@@ -26,9 +27,10 @@ The verbs split on a target axis:
 
 * ``read`` and ``create`` are all-or-nothing (listing is not per-workspace and
   create takes no target).
-* ``destroy``, ``lifecycle``, ``backups-export``, and ``ssh`` are target-scoped:
-  each approval mints a uniquely-named per-target verb schema, so granting
-  access to another workspace accumulates rather than replaces.
+* ``destroy``, ``lifecycle``, ``backups-export``, ``ssh``, ``update``,
+  ``recover``, and ``sharing`` are target-scoped: each approval mints a
+  uniquely-named per-target verb schema, so granting access to another workspace
+  accumulates rather than replaces.
 """
 
 import json
@@ -61,8 +63,9 @@ class WorkspaceVerb(FrozenModel):
     ``permission`` is the Detent permission-schema name (e.g.
     ``minds-workspaces-destroy``) that the dialog offers as a checkbox.
     ``is_targeted`` is ``True`` for the verbs whose request path carries a target
-    workspace id (destroy, lifecycle, backups-export, ssh): those are gated
-    per-target. The non-targeted verbs (read, create) are all-or-nothing.
+    workspace id (destroy, lifecycle, backups-export, ssh, update, recover,
+    sharing): those are gated per-target. The non-targeted verbs (read, create)
+    are all-or-nothing.
     """
 
     permission: str = Field(description="Detent permission-schema name for this verb.")
