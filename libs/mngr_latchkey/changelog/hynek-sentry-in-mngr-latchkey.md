@@ -15,3 +15,5 @@ Sentry initializes whenever `DSN`, `ENVIRONMENT`, `RELEASE`, and `GIT_SHA` are a
 Whether the daemon actually *sends* reports (and attaches logs) is gated by a live consent file at `MNGR_LATCHKEY_SENTRY_CONSENT_FILE`, read on every event. This lets the embedder toggle consent on a running daemon -- a grant/revoke takes effect immediately, with no respawn -- exactly mirroring how the minds backend gates its own Sentry on live user settings.
 
 When the minds desktop client spawns the daemon, it publishes the infrastructure variables automatically (resolving the DSN / environment / bucket from its own Sentry settings) and maintains the consent file from the user's error-reporting settings, rewriting it whenever the user changes consent.
+
+Unhandled exceptions that escape the supervisor are now logged through loguru before the process exits, so their Sentry reports carry the daemon's logs + traceback as attachments (an exception captured directly by the SDK's excepthook integration would otherwise bypass that handler and arrive with no logs). Expected `click` control-flow exits are left as-is and not reported as errors.

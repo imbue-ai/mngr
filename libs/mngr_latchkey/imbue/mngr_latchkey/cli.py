@@ -24,6 +24,7 @@ surfaced as a non-zero exit (no ``--allow-degraded`` mode).
 import os
 import signal
 import threading
+from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -503,6 +504,43 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
     # flat in the plugin data dir, so that is the folder Sentry attaches log files from.
     setup_forward_sentry(log_folder=latchkey.plugin_data_dir)
 
+    # Run the supervisor body inside a single error-reporting boundary (logs unhandled errors through
+    # loguru so they reach Sentry with the daemon's logs attached, then flushes on every exit path).
+    _run_forward_with_error_reporting(lambda: _run_forward_supervisor(mngr_ctx=mngr_ctx, opts=opts, latchkey=latchkey))
+
+
+def _run_forward_with_error_reporting(run_supervisor: Callable[[], None]) -> None:
+    """Run the supervisor body, reporting an unhandled error to Sentry with logs, and always flushing.
+
+    A long-running daemon's unhandled exception would otherwise reach Sentry only via the SDK's
+    excepthook integration, which bypasses our loguru handler -- so the report would carry no logs.
+    Logging it through loguru here routes it through the loguru -> Sentry handler (which attaches the
+    daemon's logs + traceback), then we re-raise so the CLI still exits non-zero. ``click``
+    control-flow exceptions are expected exits, not faults, so they are surfaced without becoming
+    Sentry events. The ``finally`` flushes late-captured events and their pending S3 attachment
+    uploads once, on every exit path; it is a no-op when Sentry was never set up.
+    """
+    try:
+        run_supervisor()
+    except (click.ClickException, click.Abort):
+        raise
+    except Exception as e:
+        logger.opt(exception=e).error("mngr latchkey forward exited with an unhandled error")
+        raise
+    finally:
+        flush_sentry_on_shutdown()
+
+
+def _run_forward_supervisor(
+    mngr_ctx: MngrContext,
+    opts: _ForwardCliOptions,
+    latchkey: Latchkey,
+) -> None:
+    """Run the shared gateway + reverse-tunnel supervisor until shutdown is signalled.
+
+    Extracted from :func:`_forward_command` so the latter can wrap it in a single error-logging +
+    Sentry-flush boundary; see that function for why an unhandled error is logged through loguru.
+    """
     # Refuse to start if another forward is already alive for this
     # latchkey directory; two forwards would fight over the same
     # reverse tunnels and produce a confusing stream of failures.
@@ -604,10 +642,6 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
         except LatchkeyError as e:
             logger.warning("Failed to stop shared Latchkey gateway during shutdown: {}", e)
         delete_forward_info(latchkey.plugin_data_dir)
-        # Flush any errors captured late in the session (no-op when Sentry was
-        # never set up). Kept last so a wedged Sentry/S3 endpoint cannot delay
-        # the gateway/tunnel teardown above.
-        flush_sentry_on_shutdown()
 
 
 class _ShutdownSignalHandler(FrozenModel):
