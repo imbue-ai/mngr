@@ -7,9 +7,11 @@
 # self-hosted runner, and every step must run even if an earlier one fails.
 # Under `set -e` a single unguarded failure (e.g. a `df`/`find` pipe, a
 # `defaults read`) aborts the script and SKIPS the remaining cleanup, leaking
-# Lima VMs / disk -- and the workflow wraps this in `|| true`, so the skipped
-# cleanup is silent. The optional install block at the end fails loud on its
-# own (it must, so a run never proceeds against a stale app).
+# Lima VMs / disk. So instead: run every step best-effort, then VERIFY the end
+# state (no surviving minds-e2e VMs, no ~/.minds, app removed) and exit
+# non-zero if the runner is not actually clean -- otherwise a leaked VM rots
+# the runner silently. Callers surface that exit code (the post-test cleanup
+# step no longer swallows it with `|| true`). The install block fails loud too.
 set -uo pipefail
 
 log() { printf '[reset] %s\n' "$*" >&2; }
@@ -114,6 +116,32 @@ done
 sudo rm -rf /Applications/minds.app
 
 URL="${1:-}"
+
+# Verify the cleanup actually reached a clean state. The steps above are
+# best-effort and swallow their own failures, so without this check a pinned
+# Lima VM or a busy ~/.minds would leak silently and rot this non-ephemeral
+# runner. Assert the post-conditions and exit non-zero so the caller's job
+# goes red. A pure cleanup (no install URL) also expects the app to be gone;
+# when a URL is given the install below puts a fresh one back.
+cleanup_failed=0
+surviving_vms=$(find "$HOME/.lima" -maxdepth 1 -type d -name 'minds-e2e*' 2>/dev/null | wc -l | tr -d ' ')
+if [[ "$surviving_vms" -gt 0 ]]; then
+  log "ERROR: $surviving_vms minds-e2e* VM dir(s) survived cleanup under ~/.lima"
+  cleanup_failed=1
+fi
+if [[ -e "$HOME/.minds" ]]; then
+  log "ERROR: ~/.minds survived cleanup"
+  cleanup_failed=1
+fi
+if [[ -z "$URL" && -e /Applications/minds.app ]]; then
+  log "ERROR: /Applications/minds.app survived cleanup"
+  cleanup_failed=1
+fi
+if [[ "$cleanup_failed" -ne 0 ]]; then
+  log "cleanup did not reach a clean state; failing so the dirty runner is visible"
+  exit 1
+fi
+
 if [[ -n "$URL" ]]; then
   log "downloading fresh app from $URL"
   TMP=$(mktemp -d)

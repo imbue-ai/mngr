@@ -946,13 +946,15 @@ jobs:
               echo "| $base | $win_cell | $desk_cell |" >> "$GITHUB_STEP_SUMMARY"
             done
           done
-      - name: post-test cleanup (best effort)
+      - name: post-test cleanup
         if: always()
         run: |
-          # Wipe state after the run so the runner sits idle clean.
-          # Pre-test reset on the NEXT run also cleans, this is belt+braces.
-          # All steps are best-effort; we never want cleanup to fail the job.
-          bash apps/minds/scripts/mac-runner-reset.sh 2>&1 || true
+          # Wipe state after the run so the runner sits idle clean. Each step
+          # is best-effort, but the script verifies the end state and exits
+          # non-zero if a VM / ~/.minds / the app survived -- surface that as a
+          # job failure so a leaked Lima VM on this non-ephemeral runner can't
+          # rot it silently. Pre-test reset on the NEXT run also cleans.
+          bash apps/minds/scripts/mac-runner-reset.sh
 
   # Vanilla `macos-latest` cold-launch smoke: the same binary the `build`
   # job produced (or cache-hit) gets installed on a fresh GHA-hosted Mac
