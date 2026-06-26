@@ -201,7 +201,11 @@ class DiscoveryStreamConsumer(MutableModel):
             return
         try:
             self._process.terminate()
-        except (OSError, RuntimeError) as e:
+        except _OBSERVE_BOUNCE_ERRORS as e:
+            # Same terminate() failure modes as a bounce (notably TimeoutExpired
+            # on a force-kill overrun): swallow them so the rest of the forward
+            # shutdown sequence (tunnel cleanup, gateway stop, forward-info
+            # deletion) still runs instead of being aborted mid-teardown.
             logger.trace("Error terminating observe subprocess: {}", e)
         self._process = None
 
