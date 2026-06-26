@@ -1,0 +1,1 @@
+Gives the `mngr list` nested-fields CLI test (`test_list_command_with_nested_fields`) the same `@pytest.mark.timeout(30)` its sibling real-tmux `list` tests already carry, so it no longer flakily exceeds the 10s default timeout while creating a real tmux agent under CI load.
