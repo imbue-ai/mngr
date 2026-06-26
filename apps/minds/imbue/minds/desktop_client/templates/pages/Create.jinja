@@ -174,13 +174,17 @@
     function showHostNameError(message) {
       hostNameError.textContent = message;
       hostNameError.classList.remove('hidden');
-      hostNameInput.classList.add('!ring-1', 'ring-important');
+      // Turn the field's own border red (no extra ring), and recolor the focus
+      // outline red instead of the default accent. ``!border-important`` beats
+      // the base ``border-strong`` / ``hover:border-stronger``;
+      // ``focus:!outline-important`` overrides the base ``focus:outline-accent``.
+      hostNameInput.classList.add('!border-important', 'focus:!outline-important');
     }
 
     function clearHostNameError() {
       hostNameError.textContent = '';
       hostNameError.classList.add('hidden');
-      hostNameInput.classList.remove('!ring-1', 'ring-important');
+      hostNameInput.classList.remove('!border-important', 'focus:!outline-important');
     }
 
     function hostNameAvailabilityUrl(value) {
