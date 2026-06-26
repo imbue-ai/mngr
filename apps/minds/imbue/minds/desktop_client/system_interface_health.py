@@ -69,7 +69,6 @@ _BACKEND_UNREACHABLE_STATUSES: Final[frozenset[int]] = frozenset({502, 503, 504}
 def should_enroll_suspect_for_backend_failure(
     reason: SystemInterfaceBackendFailureReason,
     status_code: int | None,
-    initial_discovery_complete: bool,
 ) -> bool:
     """Whether a ``system_interface_backend_failure`` should enroll a probe suspect.
 
@@ -81,17 +80,17 @@ def should_enroll_suspect_for_backend_failure(
     they are left alone; the background probe still catches a genuinely-wrong or
     wedged backend.
 
-    ``UNRESOLVED`` is special-cased on ``initial_discovery_complete``. Before
-    initial discovery has completed, the forward simply has no route for the
-    agent yet -- a cold-start / fresh-forward warm-up -- so the failure reflects
-    discovery not having caught up, not the workspace's health. Enrolling on it
-    marks a perfectly healthy workspace STUCK during normal startup, which then
-    drives the recovery UI to needlessly restart it. So during warm-up an
-    ``UNRESOLVED`` failure is ignored. Once initial discovery has completed, an
-    agent that still will not resolve is genuinely unrouted (e.g. destroyed),
-    which is worth surfacing, so it falls through to the status-code policy.
+    ``UNRESOLVED`` is ignored outright: it means the forward has no route for the
+    agent at all. A restart routes *through* the forward, so it cannot help a
+    routeless agent regardless. In practice ``UNRESOLVED`` is either a cold-start
+    / fresh-forward warm-up (the forward has not caught up to discovery yet --
+    this self-resolves the moment it does, so enrolling would only mark a healthy
+    workspace STUCK and needlessly restart it) or a genuinely-gone agent (which a
+    restart cannot revive). A workspace that is present but unreachable does NOT
+    land here: discovery retains its (stale) route, so the dial failure surfaces
+    as ``CONNECT_ERROR`` / a 5xx, which still enrolls and still drives recovery.
     """
-    if reason == SystemInterfaceBackendFailureReason.UNRESOLVED and not initial_discovery_complete:
+    if reason == SystemInterfaceBackendFailureReason.UNRESOLVED:
         return False
     return status_code is None or status_code in _BACKEND_UNREACHABLE_STATUSES
 

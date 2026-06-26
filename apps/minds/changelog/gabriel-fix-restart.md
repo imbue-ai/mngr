@@ -4,7 +4,7 @@ On a cold start the freshly-spawned `mngr forward` has not yet resolved the work
 
 Two fixes:
 
-- Suspect enrollment now ignores an `UNRESOLVED` backend failure until initial discovery has completed -- during the warm-up the forward simply has no route yet, which says nothing about the workspace's health. After initial discovery completes, a still-unrouted agent is treated as a real failure as before.
+- Suspect enrollment now ignores an `UNRESOLVED` backend failure outright. `UNRESOLVED` means the forward has no route for the agent at all -- a cold-start warm-up (which self-resolves) or a genuinely-gone agent (which a restart cannot revive) -- and a restart routes through the forward either way. A workspace that is present but unreachable does not land here: discovery retains its route, so the dial failure surfaces as `CONNECT_ERROR` / a 5xx, which still enrolls and still drives recovery.
 
 - The recovery page's auto-dispatched restart now no-ops if the workspace has already recovered to HEALTHY by the time it fires (the host-health probe is slow, so the background probe loop can flip the workspace healthy while it is in flight). A manual restart is unaffected and always proceeds.
 

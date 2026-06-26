@@ -17,38 +17,34 @@ _FAST_THRESHOLD: float = 0.05
 
 
 @pytest.mark.parametrize(
-    "reason,status_code,initial_discovery_complete,expected",
+    "reason,status_code,expected",
     [
-        # Connection-level failure (no HTTP status) always enrolls.
-        (SystemInterfaceBackendFailureReason.CONNECT_ERROR, None, True, True),
-        (SystemInterfaceBackendFailureReason.CONNECT_ERROR, None, False, True),
-        (SystemInterfaceBackendFailureReason.SSE_EOF, None, True, True),
+        # Connection-level failure (no HTTP status) enrolls.
+        (SystemInterfaceBackendFailureReason.CONNECT_ERROR, None, True),
+        (SystemInterfaceBackendFailureReason.SSE_EOF, None, True),
         # Infrastructure 5xx: the backend is unreachable / not serving.
-        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 502, True, True),
-        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 503, True, True),
-        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 504, True, True),
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 502, True),
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 503, True),
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 504, True),
         # Application errors: the backend is alive and responding, so they
         # don't enroll -- the background probe adjudicates a wedged backend.
-        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 500, True, False),
-        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 404, True, False),
-        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 401, True, False),
-        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 400, True, False),
-        # UNRESOLVED before initial discovery completes is cold-start warm-up
-        # (the forward has no route yet), so it must NOT enroll a healthy
-        # workspace as a suspect...
-        (SystemInterfaceBackendFailureReason.UNRESOLVED, None, False, False),
-        # ...but once initial discovery has completed, a still-unrouted agent is
-        # genuinely gone, and the connection-level failure enrolls as usual.
-        (SystemInterfaceBackendFailureReason.UNRESOLVED, None, True, True),
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 500, False),
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 404, False),
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 401, False),
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 400, False),
+        # UNRESOLVED means the forward has no route for the agent at all (a
+        # cold-start warm-up or a genuinely-gone agent); a restart routes through
+        # the forward so it cannot help either way. Never enroll on it -- even
+        # though it carries a None status code that would otherwise enroll.
+        (SystemInterfaceBackendFailureReason.UNRESOLVED, None, False),
     ],
 )
 def test_should_enroll_suspect_for_backend_failure(
     reason: SystemInterfaceBackendFailureReason,
     status_code: int | None,
-    initial_discovery_complete: bool,
     expected: bool,
 ) -> None:
-    assert should_enroll_suspect_for_backend_failure(reason, status_code, initial_discovery_complete) is expected
+    assert should_enroll_suspect_for_backend_failure(reason, status_code) is expected
 
 
 def _sleep(seconds: float) -> None:
