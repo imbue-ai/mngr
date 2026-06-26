@@ -43,6 +43,8 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.bootstrap import env_name_from_root_name
 from imbue.minds.bootstrap import is_minds_root_name_set_to_active_env
 from imbue.minds.bootstrap import resolve_minds_root_name
+from imbue.minds.utils.logging import install_exception_dedup_patcher
+from imbue.minds.utils.logging import is_not_duplicate_exception
 from imbue.minds.utils.sentry.loguru_handler import SENTRY_LOG_FORMAT
 from imbue.minds.utils.sentry.loguru_handler import SentryBreadcrumbHandler
 from imbue.minds.utils.sentry.loguru_handler import SentryEventHandler
@@ -677,6 +679,11 @@ def setup_sentry(
     # We deliberately do not call ``sentry_sdk.set_user`` (and keep
     # ``send_default_pii=False``) so error reports carry no user PII for now.
 
+    # The dedup patcher is normally installed by ``setup_logging`` (which always runs first), but
+    # reinstall it here so the Sentry sinks below get automatic exception-report dedup even if this
+    # process somehow set up Sentry without the regular loguru sinks. Idempotent.
+    install_exception_dedup_patcher()
+
     # capture loguru errors/exceptions with a custom handler
     min_sentry_level: int = SentryLoguruLoggingLevels.LOW_PRIORITY.value
     handler = SentryEventHandler(
@@ -689,8 +696,9 @@ def setup_sentry(
         level=min_sentry_level,
         diagnose=False,
         format=SENTRY_LOG_FORMAT,
-        # records explicitly marked to skip Sentry (e.g. the local app-log line emitted by
-        # log_error_inside_sentry) must reach the file sinks but never become Sentry events themselves.
+        # should_record_sentry_event drops records that must not become Sentry events: those marked
+        # to skip Sentry (e.g. the local app-log line from log_error_inside_sentry, which must still
+        # reach the file sinks) and duplicate reports of an exception already sent at error level.
         filter=should_record_sentry_event,
     )
     # capture lower level loguru messages to add as breadcrumbs on events
@@ -701,6 +709,8 @@ def setup_sentry(
         level=breadcrumb_level,
         diagnose=False,
         format=SENTRY_LOG_FORMAT,
+        # a duplicate error report should not add a duplicate breadcrumb either.
+        filter=is_not_duplicate_exception,
     )
     scope = get_current_scope()
     scope.set_context(

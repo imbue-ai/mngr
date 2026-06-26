@@ -39,6 +39,7 @@ from sentry_sdk.utils import current_stacktrace
 from sentry_sdk.utils import event_from_exception
 from sentry_sdk.utils import to_string
 
+from imbue.minds.utils.logging import is_not_duplicate_exception
 from imbue.minds.utils.sentry.s3_uploader import EXTRAS_UPLOADED_FILES_KEY
 
 # for formatting the log message. we don't want the timestamp/level because sentry already tracks that,
@@ -332,8 +333,15 @@ _SKIP_SENTRY_EVENT_EXTRA_KEY = "skip_sentry_event"
 
 
 def should_record_sentry_event(record: "loguru.Record") -> bool:
-    """Loguru filter for the SentryEventHandler: drop records explicitly marked to skip Sentry."""
-    return not record["extra"].get(_SKIP_SENTRY_EVENT_EXTRA_KEY, False)
+    """Loguru filter for the SentryEventHandler.
+
+    Drops records that must not become Sentry events: those explicitly marked to skip Sentry (e.g.
+    the local app-log line emitted by ``log_error_inside_sentry``), and duplicate reports of an
+    exception already sent to Sentry at error level (see ``is_not_duplicate_exception``).
+    """
+    if record["extra"].get(_SKIP_SENTRY_EVENT_EXTRA_KEY, False):
+        return False
+    return is_not_duplicate_exception(record)
 
 
 # Reentrancy guard. Reporting goes through ``client.capture_event``, which re-runs the whole

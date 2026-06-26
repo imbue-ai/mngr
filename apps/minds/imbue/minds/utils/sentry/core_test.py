@@ -13,6 +13,7 @@ from sentry_sdk.types import Event
 from sentry_sdk.types import Hint
 
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
+from imbue.minds.utils.logging import install_exception_dedup_patcher
 from imbue.minds.utils.sentry.core import ErrorAttachmentsS3Uploader
 from imbue.minds.utils.sentry.core import MANUALLY_SUBMITTED_TAG
 from imbue.minds.utils.sentry.core import SENTRY_DSN_DEV
@@ -89,6 +90,26 @@ def test_collect_external_attachments_classifies_flat_minds_log_layout(tmp_path:
     assert len(groups["electron_logs"]) == 1
     # one callback per upload: traceback + the three log files.
     assert len(callbacks) == 4
+
+
+@pytest.mark.usefixtures("_isolated_logger")
+def test_should_record_sentry_event_drops_duplicate_exception_reports() -> None:
+    # The SentryEventHandler filter must not turn the same exception instance into multiple Sentry
+    # events when it is caught and re-logged at several stack frames as it propagates.
+    install_exception_dedup_patcher()
+    sentry_messages: list[str] = []
+    logger.add(
+        lambda message: sentry_messages.append(message.record["message"]),
+        level=0,
+        filter=should_record_sentry_event,
+    )
+    error = ValueError("dup-sentry-marker-66127")
+
+    logger.opt(exception=error).error("first-report")
+    logger.opt(exception=error).error("second-report")
+
+    assert "first-report" in sentry_messages
+    assert "second-report" not in sentry_messages
 
 
 def test_before_send_wrapper_logs_failure_locally_without_recursing_into_sentry() -> None:
