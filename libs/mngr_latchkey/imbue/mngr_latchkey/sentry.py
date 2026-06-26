@@ -8,22 +8,23 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.sentry.core import MAX_SENTRY_LIST_SIZE
 from imbue.imbue_common.sentry.core import setup_sentry
 from imbue.imbue_common.sentry.data_types import LogAttachmentGroup
-from imbue.imbue_common.sentry.data_types import SentryDeployEnvironment
 
 # The ``service`` tag / ``server_name`` distinguishing ``mngr latchkey forward``
 # events from the other Imbue Python processes (e.g. the minds backend) that
-# report to the same shared Sentry projects.
+# report to the same Sentry projects.
 _FORWARD_SENTRY_SERVICE_NAME = "mngr-latchkey-forward"
 
 # Env vars the ``mngr latchkey forward`` daemon reads to configure Sentry. They are
 # deliberately namespaced ``MNGR_LATCHKEY_*`` (not ``LATCHKEY_*``) so they are never
-# confused with the upstream core ``latchkey`` project's own configuration. The
-# minds desktop client publishes these into the detached supervisor's environment,
-# derived from its own (``MINDS_SENTRY_*``) values, so the daemon "inherits" minds'
-# opt-in + environment while reading only its own variables.
+# confused with the upstream core ``latchkey`` project's own configuration. The daemon
+# does not know about any particular Sentry project or environment: it receives concrete
+# config (the DSN, the environment label, the S3 bucket) as strings, which the embedder
+# (the minds desktop client) resolves from its own settings and publishes here.
 MNGR_LATCHKEY_SENTRY_ENABLED_ENV_VAR = "MNGR_LATCHKEY_SENTRY_ENABLED"
-MNGR_LATCHKEY_SENTRY_S3_UPLOADS_ENV_VAR = "MNGR_LATCHKEY_SENTRY_S3_UPLOADS"
+MNGR_LATCHKEY_SENTRY_DSN_ENV_VAR = "MNGR_LATCHKEY_SENTRY_DSN"
 MNGR_LATCHKEY_SENTRY_ENVIRONMENT_ENV_VAR = "MNGR_LATCHKEY_SENTRY_ENVIRONMENT"
+# The S3 bucket to upload log/traceback attachments to. Empty / unset means upload nothing.
+MNGR_LATCHKEY_SENTRY_S3_BUCKET_ENV_VAR = "MNGR_LATCHKEY_SENTRY_S3_BUCKET"
 MNGR_LATCHKEY_SENTRY_RELEASE_ENV_VAR = "MNGR_LATCHKEY_SENTRY_RELEASE"
 MNGR_LATCHKEY_SENTRY_GIT_SHA_ENV_VAR = "MNGR_LATCHKEY_SENTRY_GIT_SHA"
 
@@ -68,20 +69,23 @@ def _is_env_var_truthy(env_var_name: str) -> bool:
 class ForwardSentryConfig(FrozenModel):
     """Resolved Sentry configuration for the ``mngr latchkey forward`` daemon."""
 
-    environment: SentryDeployEnvironment = Field(description="Which shared Imbue Python Sentry project to report to.")
+    dsn: str = Field(description="The Sentry DSN to report to (resolved and supplied by the embedder).")
+    environment_name: str = Field(description="The Sentry environment label (e.g. ``production``/``staging``).")
     release_id: str = Field(description="Release version the running code was cut from (inherited from the embedder).")
     git_commit_sha: str = Field(description="Git SHA the running code was cut from (inherited from the embedder).")
-    is_s3_upload_enabled: bool = Field(description="Whether to upload log/traceback attachments to S3.")
+    s3_attachment_bucket: str | None = Field(
+        description="S3 bucket for log/traceback attachments, or ``None`` to upload nothing."
+    )
 
 
 def resolve_forward_sentry_config() -> ForwardSentryConfig | None:
     """Resolve the daemon's Sentry config from its ``MNGR_LATCHKEY_SENTRY_*`` env vars.
 
-    Returns ``None`` (and logs why) when reporting is disabled or the required
-    inputs are missing/invalid. Unlike minds, the daemon has no fallback for the
-    release id / git sha: they are required to be supplied via env vars by the
-    embedder (the minds desktop client), so a misconfigured environment disables
-    reporting rather than inventing placeholder values.
+    Returns ``None`` (and logs why) when reporting is disabled or the required inputs are missing.
+    Unlike minds, the daemon has no fallback for the DSN / environment / release id / git sha: they
+    are required to be supplied via env vars by the embedder (the minds desktop client), so a
+    misconfigured environment disables reporting rather than inventing placeholder values. The S3
+    bucket is optional -- an empty value means uploads are off.
     """
     if not _is_env_var_truthy(MNGR_LATCHKEY_SENTRY_ENABLED_ENV_VAR):
         logger.info(
@@ -90,14 +94,16 @@ def resolve_forward_sentry_config() -> ForwardSentryConfig | None:
         )
         return None
 
-    environment_value = os.environ.get(MNGR_LATCHKEY_SENTRY_ENVIRONMENT_ENV_VAR, "").strip()
+    dsn = os.environ.get(MNGR_LATCHKEY_SENTRY_DSN_ENV_VAR, "").strip()
+    environment_name = os.environ.get(MNGR_LATCHKEY_SENTRY_ENVIRONMENT_ENV_VAR, "").strip()
     release_id = os.environ.get(MNGR_LATCHKEY_SENTRY_RELEASE_ENV_VAR, "").strip()
     git_commit_sha = os.environ.get(MNGR_LATCHKEY_SENTRY_GIT_SHA_ENV_VAR, "").strip()
 
     missing_env_var_names = [
         name
         for name, value in (
-            (MNGR_LATCHKEY_SENTRY_ENVIRONMENT_ENV_VAR, environment_value),
+            (MNGR_LATCHKEY_SENTRY_DSN_ENV_VAR, dsn),
+            (MNGR_LATCHKEY_SENTRY_ENVIRONMENT_ENV_VAR, environment_name),
             (MNGR_LATCHKEY_SENTRY_RELEASE_ENV_VAR, release_id),
             (MNGR_LATCHKEY_SENTRY_GIT_SHA_ENV_VAR, git_commit_sha),
         )
@@ -111,23 +117,13 @@ def resolve_forward_sentry_config() -> ForwardSentryConfig | None:
         )
         return None
 
-    try:
-        environment = SentryDeployEnvironment(environment_value)
-    except ValueError:
-        logger.warning(
-            "Sentry is enabled for mngr latchkey forward but {}={!r} is not a valid environment "
-            "(expected one of {}); skipping Sentry setup.",
-            MNGR_LATCHKEY_SENTRY_ENVIRONMENT_ENV_VAR,
-            environment_value,
-            ", ".join(member.value for member in SentryDeployEnvironment),
-        )
-        return None
-
+    bucket = os.environ.get(MNGR_LATCHKEY_SENTRY_S3_BUCKET_ENV_VAR, "").strip()
     return ForwardSentryConfig(
-        environment=environment,
+        dsn=dsn,
+        environment_name=environment_name,
         release_id=release_id,
         git_commit_sha=git_commit_sha,
-        is_s3_upload_enabled=_is_env_var_truthy(MNGR_LATCHKEY_SENTRY_S3_UPLOADS_ENV_VAR),
+        s3_attachment_bucket=bucket or None,
     )
 
 
@@ -142,14 +138,15 @@ def setup_forward_sentry(log_folder: Path) -> None:
     has no live setting to consult: its env vars are a snapshot taken when the
     minds desktop client (re)spawned it. So both gates are constant for the
     process: error reporting is on whenever Sentry was set up at all, and log
-    inclusion follows the snapshotted ``MNGR_LATCHKEY_SENTRY_S3_UPLOADS`` value.
+    inclusion follows the snapshotted bucket (present -> on).
     """
     config = resolve_forward_sentry_config()
     if config is None:
         return
-    is_s3_upload_enabled = config.is_s3_upload_enabled
+    is_log_inclusion_enabled = config.s3_attachment_bucket is not None
     setup_sentry(
-        environment=config.environment,
+        dsn=config.dsn,
+        environment_name=config.environment_name,
         release_id=config.release_id,
         git_commit_sha=config.git_commit_sha,
         log_folder=log_folder,
@@ -159,5 +156,6 @@ def setup_forward_sentry(log_folder: Path) -> None:
         # beyond Sentry's default integrations.
         integrations=[],
         is_error_reporting_enabled=lambda: True,
-        is_log_inclusion_enabled=lambda: is_s3_upload_enabled,
+        is_log_inclusion_enabled=lambda: is_log_inclusion_enabled,
+        s3_attachment_bucket=config.s3_attachment_bucket,
     )

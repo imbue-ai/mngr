@@ -42,8 +42,6 @@ from traceback_with_variables import Format
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.sentry.data_types import LogAttachmentGroup
-from imbue.imbue_common.sentry.data_types import SENTRY_DSN_BY_ENVIRONMENT
-from imbue.imbue_common.sentry.data_types import SentryDeployEnvironment
 from imbue.imbue_common.sentry.loguru_handler import SENTRY_LOG_FORMAT
 from imbue.imbue_common.sentry.loguru_handler import SentryBreadcrumbHandler
 from imbue.imbue_common.sentry.loguru_handler import SentryEventHandler
@@ -516,7 +514,11 @@ def fixup_release_id(release_id: str) -> str:
 
 
 def setup_sentry(
-    environment: SentryDeployEnvironment,
+    dsn: str,
+    # The Sentry environment label (e.g. ``production`` / ``staging`` / ``development``). Which Sentry
+    # project a ``dsn`` points at, and which environment names exist, is project-specific config the
+    # caller supplies; this library is agnostic to it.
+    environment_name: str,
     release_id: str,
     git_commit_sha: str,
     log_folder: Path,
@@ -529,6 +531,11 @@ def setup_sentry(
     integrations: Sequence[Integration],
     is_error_reporting_enabled: Callable[[], bool],
     is_log_inclusion_enabled: Callable[[], bool],
+    # The S3 bucket to upload log/traceback attachments to, or ``None`` to disable S3 entirely (e.g.
+    # in environments that have no bucket). When set, the uploader is initialized for this bucket;
+    # whether attachments are actually collected per-event is still gated live by
+    # ``is_log_inclusion_enabled``.
+    s3_attachment_bucket: str | None = None,
     extra_tags: Mapping[str, str] | None = None,
 ) -> None:
     """Sets up the main Sentry instance for this process.
@@ -542,8 +549,8 @@ def setup_sentry(
       False, automatic events are dropped before they leave the process. Manually-submitted bug
       reports (tagged ``MANUALLY_SUBMITTED_TAG``) bypass this gate.
     * ``is_log_inclusion_enabled`` is read whenever attachments are collected; while it returns False,
-      log/traceback attachments are skipped. This only matters in production/staging, where the S3
-      bucket exists -- ``development`` never uploads attachments regardless.
+      log/traceback attachments are skipped. Attachments are additionally only uploaded when
+      ``s3_attachment_bucket`` is set.
 
     Both callables are read live, so toggling the corresponding source takes effect without a restart.
 
@@ -554,9 +561,9 @@ def setup_sentry(
         # We pass ``dsn=`` explicitly below, so sentry_sdk ignores any SENTRY_DSN
         # in the environment. Warn rather than crash: a user may have it set for
         # unrelated reasons.
-        logger.info("Ignoring SENTRY_DSN from the environment; we select the Sentry DSN by environment.")
+        logger.info("Ignoring SENTRY_DSN from the environment; the DSN is passed in explicitly.")
 
-    sentry_dsn = SENTRY_DSN_BY_ENVIRONMENT[environment]
+    sentry_dsn = dsn
 
     # NOTE: the rate limiter object's lifetime is maintained by being captured in the closure of the
     #       before_send function. Interrupt / clean-shutdown exceptions are dropped first (they are
@@ -574,7 +581,7 @@ def setup_sentry(
 
     sentry_sdk.init(
         sample_rate=1.0,
-        environment=environment.value,
+        environment=environment_name,
         server_name=service_name,
         # We use Sentry for error reporting, not performance monitoring. Leaving
         # tracing on would emit a transaction for every HTTP request (including
@@ -606,18 +613,14 @@ def setup_sentry(
     )
     logger.info("Sentry initialized")
 
-    # The S3 attachment uploader is initialized whenever the environment has a bucket
-    # (production/staging). Whether logs/tracebacks are actually collected and uploaded is decided
-    # live per-event by ``is_log_inclusion_enabled`` (in ``add_extra_info_hook``); development has no
-    # bucket and never uploads.
-    if environment is SentryDeployEnvironment.PRODUCTION:
-        setup_s3_uploads(is_production=True)
-        logger.info("Sentry S3 attachment uploader ready (production bucket)")
-    elif environment is SentryDeployEnvironment.STAGING:
-        setup_s3_uploads(is_production=False)
-        logger.info("Sentry S3 attachment uploader ready (staging bucket)")
+    # The S3 attachment uploader is initialized whenever a bucket is configured. Whether
+    # logs/tracebacks are actually collected and uploaded is decided live per-event by
+    # ``is_log_inclusion_enabled`` (in ``add_extra_info_hook``); with no bucket, nothing is uploaded.
+    if s3_attachment_bucket is not None:
+        setup_s3_uploads(bucket=s3_attachment_bucket)
+        logger.info("Sentry S3 attachment uploader ready (bucket={})", s3_attachment_bucket)
     else:
-        logger.info("Sentry S3 attachment uploads disabled (environment={} has no bucket)", environment.value)
+        logger.info("Sentry S3 attachment uploads disabled (no bucket configured)")
 
     # We deliberately do not call ``sentry_sdk.set_user`` (and keep
     # ``send_default_pii=False``) so error reports carry no user PII for now.

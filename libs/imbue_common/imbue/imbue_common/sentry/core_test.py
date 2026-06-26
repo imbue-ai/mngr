@@ -22,11 +22,6 @@ from imbue.imbue_common.sentry.core import fixup_release_id
 from imbue.imbue_common.sentry.core import register_attachments_uploader
 from imbue.imbue_common.sentry.core import submit_manual_bug_report
 from imbue.imbue_common.sentry.data_types import LogAttachmentGroup
-from imbue.imbue_common.sentry.data_types import SENTRY_DSN_BY_ENVIRONMENT
-from imbue.imbue_common.sentry.data_types import SENTRY_DSN_DEV
-from imbue.imbue_common.sentry.data_types import SENTRY_DSN_PRODUCTION
-from imbue.imbue_common.sentry.data_types import SENTRY_DSN_STAGING
-from imbue.imbue_common.sentry.data_types import SentryDeployEnvironment
 from imbue.imbue_common.sentry.loguru_handler import should_record_sentry_event
 
 _LIVE_LOG_GROUP = LogAttachmentGroup(
@@ -35,13 +30,6 @@ _LIVE_LOG_GROUP = LogAttachmentGroup(
 _ROTATED_LOG_GROUP = LogAttachmentGroup(
     group_name="rotated_logs", glob="*.jsonl.*", max_file_count=1, is_compressed=True, is_immutable=True
 )
-
-
-def test_dsn_map_pairs_each_environment_with_a_distinct_dsn() -> None:
-    assert SENTRY_DSN_BY_ENVIRONMENT[SentryDeployEnvironment.PRODUCTION] == SENTRY_DSN_PRODUCTION
-    assert SENTRY_DSN_BY_ENVIRONMENT[SentryDeployEnvironment.STAGING] == SENTRY_DSN_STAGING
-    assert SENTRY_DSN_BY_ENVIRONMENT[SentryDeployEnvironment.DEVELOPMENT] == SENTRY_DSN_DEV
-    assert len({SENTRY_DSN_PRODUCTION, SENTRY_DSN_STAGING, SENTRY_DSN_DEV}) == 3
 
 
 @pytest.mark.parametrize(

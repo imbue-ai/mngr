@@ -31,9 +31,9 @@ from collections.abc import Mapping
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.sentry.core import fixup_release_id
-from imbue.imbue_common.sentry.data_types import SentryDeployEnvironment
 from imbue.minds.build_info import resolve_git_sha
 from imbue.minds.build_info import resolve_release_id
+from imbue.minds.utils.sentry.core import SentryDeployEnvironment
 from imbue.minds.utils.sentry.core import resolve_sentry_environment
 
 # Keep these in sync with the Sentry projects declared in apps/minds/electron/sentry.js.

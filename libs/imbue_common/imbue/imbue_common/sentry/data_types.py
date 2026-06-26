@@ -1,47 +1,6 @@
-from collections.abc import Mapping
-from enum import StrEnum
-
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
-
-# The three shared Imbue *Python-backend* Sentry projects. These were originally
-# created for the minds Python backend; the ``mngr latchkey forward`` daemon (also
-# a Python process) reports to the same projects, distinguishing its events with a
-# ``service`` tag and its own ``server_name`` rather than a separate project.
-#
-# These are deliberately *not* the minds *frontend* (JavaScript) DSNs, which live
-# in ``imbue.minds.utils.sentry.frontend``: a single Sentry project is tied to one
-# platform (issue grouping, source-map handling, release-health UI are all
-# platform-specific), so the Python and JavaScript SDKs stay on separate projects.
-SENTRY_DSN_PRODUCTION = (
-    "https://d8658891db0c1246864df82eefd74b6d@o4504335315501056.ingest.us.sentry.io/4511609235636224"
-)
-SENTRY_DSN_STAGING = "https://221f676a7e3c99733e85dc5c8dd6d6e2@o4504335315501056.ingest.us.sentry.io/4511609241862145"
-SENTRY_DSN_DEV = "https://0a66e5894c00f701e3c1b7c2daae4650@o4504335315501056.ingest.us.sentry.io/4511609244811264"
-
-
-class SentryDeployEnvironment(StrEnum):
-    """Which shared Imbue Python Sentry project (and S3 bucket) a process reports to.
-
-    ``production`` and ``staging`` each report to their own Sentry DSN and S3
-    bucket; ``development`` reports to the shared dev Sentry project and uploads
-    nothing to S3. The values are the lowercase Sentry environment names, so this
-    is intentionally a plain ``StrEnum`` (not ``UpperCaseStrEnum``).
-    """
-
-    PRODUCTION = "production"
-    STAGING = "staging"
-    DEVELOPMENT = "development"
-
-
-# The DSN each environment reports to. Shared by every Python process (minds
-# backend and ``mngr latchkey forward``) that calls ``setup_sentry``.
-SENTRY_DSN_BY_ENVIRONMENT: Mapping[SentryDeployEnvironment, str] = {
-    SentryDeployEnvironment.PRODUCTION: SENTRY_DSN_PRODUCTION,
-    SentryDeployEnvironment.STAGING: SENTRY_DSN_STAGING,
-    SentryDeployEnvironment.DEVELOPMENT: SENTRY_DSN_DEV,
-}
 
 
 class LogAttachmentGroup(FrozenModel):

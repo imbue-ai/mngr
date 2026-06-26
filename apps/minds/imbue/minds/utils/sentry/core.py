@@ -1,4 +1,6 @@
 from collections.abc import Callable
+from collections.abc import Mapping
+from enum import StrEnum
 from pathlib import Path
 
 from sentry_sdk.integrations.flask import FlaskIntegration
@@ -9,22 +11,65 @@ from imbue.imbue_common.sentry.core import flush_sentry_on_shutdown as flush_sen
 from imbue.imbue_common.sentry.core import setup_sentry as _setup_sentry
 from imbue.imbue_common.sentry.core import submit_manual_bug_report as submit_manual_bug_report
 from imbue.imbue_common.sentry.data_types import LogAttachmentGroup
-from imbue.imbue_common.sentry.data_types import SentryDeployEnvironment
 from imbue.minds.bootstrap import env_name_from_root_name
 from imbue.minds.bootstrap import is_minds_root_name_set_to_active_env
 from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.build_info import resolve_git_sha
 from imbue.minds.build_info import resolve_release_id
+from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_DSN_ENV_VAR
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_ENABLED_ENV_VAR
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_ENVIRONMENT_ENV_VAR
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_GIT_SHA_ENV_VAR
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_RELEASE_ENV_VAR
-from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_S3_UPLOADS_ENV_VAR
+from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_S3_BUCKET_ENV_VAR
 
 # The ``service`` tag / ``server_name`` distinguishing minds-backend events from
 # the other Imbue Python processes that report to the same Sentry projects (e.g.
 # ``mngr latchkey forward``).
 _MINDS_SENTRY_SERVICE_NAME = "minds-backend"
+
+# The three minds *Python-backend* Sentry projects. The ``mngr latchkey forward`` daemon (also a
+# Python process) reports to the same projects -- minds passes it the resolved DSN via env var --
+# distinguishing its events with a ``service`` tag rather than a separate project. These are
+# deliberately *not* the minds *frontend* (JavaScript) DSNs, which live in
+# :mod:`imbue.minds.utils.sentry.frontend`: a Sentry project is tied to one platform.
+SENTRY_DSN_PRODUCTION = (
+    "https://d8658891db0c1246864df82eefd74b6d@o4504335315501056.ingest.us.sentry.io/4511609235636224"
+)
+SENTRY_DSN_STAGING = "https://221f676a7e3c99733e85dc5c8dd6d6e2@o4504335315501056.ingest.us.sentry.io/4511609241862145"
+SENTRY_DSN_DEV = "https://0a66e5894c00f701e3c1b7c2daae4650@o4504335315501056.ingest.us.sentry.io/4511609244811264"
+
+# The S3 buckets minds uploads log/traceback attachments to. ``development`` has no bucket.
+PRODUCTION_UPLOADS_BUCKET = "traceback-uploads-production"
+STAGING_UPLOADS_BUCKET = "traceback-uploads-staging"
+
+
+class SentryDeployEnvironment(StrEnum):
+    """Which minds Python Sentry project (and S3 bucket) a process reports to.
+
+    ``production`` and ``staging`` each report to their own Sentry DSN and S3 bucket;
+    ``development`` reports to the shared dev Sentry project and uploads nothing to S3.
+    The values are the lowercase Sentry environment names, so this is intentionally a
+    plain ``StrEnum`` (not ``UpperCaseStrEnum``).
+    """
+
+    PRODUCTION = "production"
+    STAGING = "staging"
+    DEVELOPMENT = "development"
+
+
+_SENTRY_DSN_BY_ENVIRONMENT: Mapping[SentryDeployEnvironment, str] = {
+    SentryDeployEnvironment.PRODUCTION: SENTRY_DSN_PRODUCTION,
+    SentryDeployEnvironment.STAGING: SENTRY_DSN_STAGING,
+    SentryDeployEnvironment.DEVELOPMENT: SENTRY_DSN_DEV,
+}
+
+_S3_ATTACHMENT_BUCKET_BY_ENVIRONMENT: Mapping[SentryDeployEnvironment, str | None] = {
+    SentryDeployEnvironment.PRODUCTION: PRODUCTION_UPLOADS_BUCKET,
+    SentryDeployEnvironment.STAGING: STAGING_UPLOADS_BUCKET,
+    SentryDeployEnvironment.DEVELOPMENT: None,
+}
+
 
 # Minds writes all of its logs flat into a single logs directory (``~/.minds/logs``):
 #   * ``minds-events.jsonl``       -- the live Python backend log (the loguru JSONL sink)
@@ -86,24 +131,33 @@ def resolve_sentry_environment() -> SentryDeployEnvironment:
     return sentry_deploy_environment_from_minds_env_name(activated_env_name)
 
 
+def _s3_attachment_bucket_for_environment(environment: SentryDeployEnvironment) -> str | None:
+    return _S3_ATTACHMENT_BUCKET_BY_ENVIRONMENT[environment]
+
+
 def resolve_latchkey_forward_sentry_env(
     is_error_reporting_enabled: bool,
     is_log_inclusion_enabled: bool,
 ) -> dict[str, str]:
     """Env vars to publish into the detached ``mngr latchkey forward`` supervisor.
 
-    The daemon inherits minds' user-consent settings -- ``is_error_reporting_enabled``
-    (``report_unexpected_errors``) and ``is_log_inclusion_enabled`` (``include_error_logs``)
-    -- plus minds' environment and its release id / git sha (which the daemon requires to be
-    supplied via env, having no fallback of its own), while reading only its own
-    ``MNGR_LATCHKEY_SENTRY_*`` vars. Because the daemon is detached, these are a snapshot taken
-    when the supervisor is (re)spawned; a mid-session consent toggle reaches it on the next
+    The daemon receives concrete Sentry config (the DSN, environment name, and S3 bucket) that minds
+    resolves from its own (minds-owned) environment model, so the daemon needs no knowledge of minds'
+    Sentry projects/environments -- it just reads strings from its ``MNGR_LATCHKEY_SENTRY_*`` vars. It
+    inherits minds' user-consent settings: ``is_error_reporting_enabled`` (``report_unexpected_errors``)
+    and ``is_log_inclusion_enabled`` (``include_error_logs``); when log inclusion is off, no bucket is
+    published so the daemon uploads nothing. The release id / git sha are minds' (the daemon requires
+    them via env, having no fallback of its own). Because the daemon is detached, these are a snapshot
+    taken when the supervisor is (re)spawned; a mid-session consent toggle reaches it on the next
     minds restart.
     """
+    environment = resolve_sentry_environment()
+    bucket = _s3_attachment_bucket_for_environment(environment) if is_log_inclusion_enabled else None
     return {
         MNGR_LATCHKEY_SENTRY_ENABLED_ENV_VAR: "1" if is_error_reporting_enabled else "0",
-        MNGR_LATCHKEY_SENTRY_S3_UPLOADS_ENV_VAR: "1" if is_log_inclusion_enabled else "0",
-        MNGR_LATCHKEY_SENTRY_ENVIRONMENT_ENV_VAR: resolve_sentry_environment().value,
+        MNGR_LATCHKEY_SENTRY_DSN_ENV_VAR: _SENTRY_DSN_BY_ENVIRONMENT[environment],
+        MNGR_LATCHKEY_SENTRY_ENVIRONMENT_ENV_VAR: environment.value,
+        MNGR_LATCHKEY_SENTRY_S3_BUCKET_ENV_VAR: bucket or "",
         MNGR_LATCHKEY_SENTRY_RELEASE_ENV_VAR: resolve_release_id(),
         MNGR_LATCHKEY_SENTRY_GIT_SHA_ENV_VAR: resolve_git_sha(),
     }
@@ -119,7 +173,8 @@ def setup_sentry(
 ) -> None:
     """Set up Sentry for the minds backend process (Flask integration + flat-log layout)."""
     _setup_sentry(
-        environment=environment,
+        dsn=_SENTRY_DSN_BY_ENVIRONMENT[environment],
+        environment_name=environment.value,
         release_id=release_id,
         git_commit_sha=git_commit_sha,
         log_folder=log_folder,
@@ -128,4 +183,5 @@ def setup_sentry(
         integrations=[FlaskIntegration()],
         is_error_reporting_enabled=is_error_reporting_enabled,
         is_log_inclusion_enabled=is_log_inclusion_enabled,
+        s3_attachment_bucket=_s3_attachment_bucket_for_environment(environment),
     )
