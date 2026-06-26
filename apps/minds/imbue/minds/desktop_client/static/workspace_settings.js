@@ -115,10 +115,10 @@
       previewChromeAccent(normalized);
       setControlsDisabled(true);
       setSavingState(true);
-      fetch('/api/workspaces/' + encodeURIComponent(agentId) + '/color', {
-        method: 'POST',
+      fetch('/api/v1/workspaces/' + encodeURIComponent(agentId), {
+        method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ hex: normalized }),
+        body: JSON.stringify({ color: normalized }),
       })
         .then(function (resp) {
           return resp.json().then(function (body) { return { ok: resp.ok, status: resp.status, body: body }; });
@@ -232,7 +232,11 @@
         section.style.opacity = '0.5';
         section.style.pointerEvents = 'none';
       }
-      fetch('/workspace/' + encodeURIComponent(agentId) + '/disassociate', { method: 'POST' })
+      fetch('/api/v1/workspaces/' + encodeURIComponent(agentId), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ account_id: null }),
+      })
         .then(function () { window.location.reload(); })
         .catch(function (err) {
           alert('Failed: ' + err.message);

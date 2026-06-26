@@ -2,9 +2,9 @@
 // operation resource. Status is polled from
 // /api/v1/workspaces/operations/<id> (authoritative completion signal) and the
 // live log streams over SSE from .../operations/<id>/logs. Retry re-issues the
-// v1 destroy; dismiss removes the on-disk record (no v1 equivalent, so it stays
-// on its dedicated route). Reads the agent id from #destroying-page
-// data-agent-id so the template stays JS-free.
+// v1 destroy; dismiss clears the operation record via
+// DELETE /api/v1/workspaces/operations/<id>. Reads the agent id from
+// #destroying-page data-agent-id so the template stays JS-free.
 (function () {
   var pageEl = document.getElementById('destroying-page');
   if (!pageEl) return;
@@ -132,7 +132,7 @@
   if (dismissBtn) {
     dismissBtn.addEventListener('click', function () {
       dismissBtn.disabled = true;
-      fetch('/api/destroying/' + encodeURIComponent(agentId) + '/dismiss', { method: 'POST' })
+      fetch('/api/v1/workspaces/operations/' + encodeURIComponent(agentId), { method: 'DELETE' })
         .finally(function () { window.location.href = '/'; });
     });
   }

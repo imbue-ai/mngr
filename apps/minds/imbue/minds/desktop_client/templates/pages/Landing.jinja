@@ -354,16 +354,25 @@
     function toggleProvider(name, isEnabled) {
       pendingToggleClickedAtByProvider[name] = Date.now();
       renderProviders({ providers: renderedProviders || [] });
-      fetch('/api/providers/' + encodeURIComponent(name) + '/toggle', {
-        method: 'POST',
+      fetch('/api/v1/desktop/providers/' + encodeURIComponent(name), {
+        method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ is_enabled: isEnabled }),
+        body: JSON.stringify({ enabled: isEnabled }),
       }).then(function (response) {
-        if (!response.ok) {
-          console.error('Provider toggle for', name, 'returned HTTP', response.status);
-          delete pendingToggleClickedAtByProvider[name];
-          renderProviders({ providers: renderedProviders || [] });
-        }
+        if (response.ok) return;
+        // The toggle failed (e.g. 409 when disabling a provider that still has
+        // active workspaces): drop the optimistic pending state, re-render, and
+        // surface the server's reason to the user instead of silently reverting.
+        delete pendingToggleClickedAtByProvider[name];
+        renderProviders({ providers: renderedProviders || [] });
+        return response.json().catch(function () { return null; }).then(function (body) {
+          var message = (body && (body.error || body.detail)) || ('HTTP ' + response.status);
+          if (response.status === 409) {
+            window.alert('Cannot disable ' + name + ': ' + message);
+          } else {
+            console.error('Provider toggle for', name, 'returned HTTP', response.status, message);
+          }
+        });
       }).catch(function (err) {
         console.error('Provider toggle for', name, 'failed:', err);
         delete pendingToggleClickedAtByProvider[name];
