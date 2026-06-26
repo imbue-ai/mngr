@@ -1,6 +1,7 @@
 import json
 import os
 import time
+from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -10,6 +11,7 @@ import httpx
 import pytest
 from flask.testing import FlaskClient
 from pydantic import Field
+from pydantic import PrivateAttr
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -20,6 +22,7 @@ from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import make_agents_json
@@ -36,7 +39,9 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.workspace_operations import OPERATION_LOG_SENTINEL
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
+from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import LaunchMode
 from imbue.minds.testing import stub_mngr_host_dir
 from imbue.mngr.primitives import AgentId
 
@@ -65,35 +70,104 @@ def _auth_header() -> dict[str, str]:
     return {"Authorization": f"Bearer {_TEST_KEY}"}
 
 
+class _RecordingAgentCreator(AgentCreator):
+    """An ``AgentCreator`` whose ``start_creation`` records its args instead of spawning.
+
+    The real ``start_creation`` launches a background thread that clones the repo
+    and shells out to ``mngr create``; the create-route tests only need to assert
+    on what the route *passes* to it (resolved host name, color, ...), so this
+    stub captures the call and returns a fresh ``CreationId`` synchronously.
+    """
+
+    _last_call: dict[str, object] | None = PrivateAttr(default=None)
+
+    def start_creation(
+        self,
+        repo_source: str,
+        host_name: str = "",
+        branch: str = "",
+        launch_mode: LaunchMode = LaunchMode.DOCKER,
+        ai_provider: AIProvider = AIProvider.SUBSCRIPTION,
+        account_email: str = "",
+        branch_or_tag: str = "",
+        region: str = "",
+        anthropic_api_key: str = "",
+        on_created: Callable[[AgentId], None] | None = None,
+        backup_request: BackupSetupRequest | None = None,
+        color: str | None = None,
+        original_minds_version: str = "",
+    ) -> CreationId:
+        self._last_call = {
+            "repo_source": repo_source,
+            "host_name": host_name,
+            "branch": branch,
+            "launch_mode": launch_mode,
+            "ai_provider": ai_provider,
+            "account_email": account_email,
+            "branch_or_tag": branch_or_tag,
+            "region": region,
+            "anthropic_api_key": anthropic_api_key,
+            "color": color,
+            "original_minds_version": original_minds_version,
+        }
+        return CreationId()
+
+    @property
+    def last_call(self) -> dict[str, object]:
+        assert self._last_call is not None, "start_creation was never called"
+        return self._last_call
+
+
 def _client_with_agent_creator(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
     notification_dispatcher: NotificationDispatcher,
+    *,
+    resolver: BackendResolverInterface | None = None,
+    agent_creator: AgentCreator | None = None,
+    session_store: MultiAccountSessionStore | None = None,
 ) -> FlaskClient:
     """Build a test client whose ``/api/v1`` create route has an ``AgentCreator`` wired.
 
     The create route returns 501 when no ``AgentCreator`` is configured (before
     any input validation runs), so reaching the validation branches requires a
-    real creator. The invalid-input tests below assert on the 400 responses,
-    which return before ``start_creation`` is ever called, so no background
-    creation (subprocess / network) is started.
+    creator. The invalid-input tests assert on 400 responses that return before
+    ``start_creation`` is ever called; the happy-path tests pass a
+    :class:`_RecordingAgentCreator` so the route's call is captured without
+    starting a real background creation (subprocess / network).
     """
-    resolver = StaticBackendResolver(url_by_agent_and_service={})
-    agent_creator = AgentCreator(
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
-        root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
-        system_interface_health_tracker=SystemInterfaceHealthTracker(),
-    )
+    if resolver is None:
+        resolver = StaticBackendResolver(url_by_agent_and_service={})
+    if agent_creator is None:
+        agent_creator = AgentCreator(
+            paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+            root_concurrency_group=root_concurrency_group,
+            notification_dispatcher=notification_dispatcher,
+            system_interface_health_tracker=SystemInterfaceHealthTracker(),
+        )
     app = create_desktop_client(
         auth_store=FileAuthStore(data_directory=tmp_path / "auth"),
         backend_resolver=resolver,
         http_client=None,
         agent_creator=agent_creator,
+        session_store=session_store,
         paths=WorkspacePaths(data_dir=tmp_path / "minds"),
         minds_api_key=_TEST_KEY,
     )
     return app.test_client()
+
+
+def _make_recording_creator(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> _RecordingAgentCreator:
+    return _RecordingAgentCreator(
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
+    )
 
 
 def test_list_workspaces_returns_known_workspaces(tmp_path: Path) -> None:
@@ -206,13 +280,14 @@ def test_create_workspace_without_agent_creator_returns_501(tmp_path: Path) -> N
     assert response.status_code == 501
 
 
-def test_create_workspace_requires_account_id_for_imbue_cloud(
+def test_create_workspace_imbue_cloud_without_any_account_returns_signup_redirect(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
     notification_dispatcher: NotificationDispatcher,
 ) -> None:
-    # An IMBUE_CLOUD launch_mode without an account_id must fail validation up
-    # front (400), not defer the failure into the background creation thread.
+    # IMBUE_CLOUD with no account selected AND no accounts existing at all is the
+    # no-account backstop: the route returns a 400 carrying the sign-up redirect
+    # target so the create page navigates there (mirrors the old form's 303).
     client = _client_with_agent_creator(tmp_path, root_concurrency_group, notification_dispatcher)
 
     response = client.post(
@@ -222,7 +297,125 @@ def test_create_workspace_requires_account_id_for_imbue_cloud(
     )
 
     assert response.status_code == 400
-    assert "account_id" in json.loads(response.data)["error"]
+    assert json.loads(response.data)["redirect_url"] == "/auth/signup?return_to=%2Fcreate"
+
+
+def test_create_workspace_imbue_cloud_with_account_unselected_returns_field_error(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    # IMBUE_CLOUD with no account selected but accounts that DO exist must ask the
+    # user to pick one (a field error on account_id), not redirect to sign-up.
+    cli = _fake_sharing_cli()
+    cli.add_account(user_id="11111111-1111-1111-1111-111111111111", email="owner@example.com")
+    store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group, notification_dispatcher, session_store=store)
+
+    response = client.post(
+        "/api/v1/workspaces",
+        headers=_auth_header(),
+        json={"git_url": "https://example/repo", "launch_mode": "IMBUE_CLOUD"},
+    )
+
+    assert response.status_code == 400
+    body = json.loads(response.data)
+    assert body["field"] == "account_id"
+    assert "redirect_url" not in body
+
+
+def test_create_workspace_empty_git_url_returns_field_error(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    # A missing repository URL is a field-level validation error so the create
+    # page can render the message inline next to the git_url input.
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group, notification_dispatcher)
+
+    response = client.post("/api/v1/workspaces", headers=_auth_header(), json={"git_url": ""})
+
+    assert response.status_code == 400
+    body = json.loads(response.data)
+    assert body["field"] == "git_url"
+    assert body["error"]
+
+
+def test_create_workspace_invalid_host_name_returns_field_error(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    # A submitted name that fails HostName validation surfaces as a 400 keyed to
+    # the host_name field (rather than a deferred FAILED on the creating page).
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group, notification_dispatcher)
+
+    response = client.post(
+        "/api/v1/workspaces",
+        headers=_auth_header(),
+        json={"git_url": "https://example/repo", "host_name": "bad.name"},
+    )
+
+    assert response.status_code == 400
+    assert json.loads(response.data)["field"] == "host_name"
+
+
+def test_create_workspace_auto_names_next_mind_when_host_name_omitted(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    # With no host_name and ``mind-1`` already known, the route resolves the next
+    # free ``mind-N`` (mind-2) before handing off to the creator.
+    existing_id = AgentId()
+    resolver = make_resolver_with_data(
+        make_agents_json(existing_id, labels={"workspace": "mind-1", "is_primary": "true"}),
+    )
+    creator = _make_recording_creator(tmp_path, root_concurrency_group, notification_dispatcher)
+    client = _client_with_agent_creator(
+        tmp_path, root_concurrency_group, notification_dispatcher, resolver=resolver, agent_creator=creator
+    )
+
+    response = client.post("/api/v1/workspaces", headers=_auth_header(), json={"git_url": "https://example/repo"})
+
+    assert response.status_code == 202
+    assert str(creator.last_call["host_name"]) == "mind-2"
+
+
+def test_create_workspace_full_surface_returns_202_and_threads_fields(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    # The full create field surface (color, explicit name, branch, ...) is
+    # accepted: a 202 with an operation handle, and the fields are passed through
+    # to the creator.
+    creator = _make_recording_creator(tmp_path, root_concurrency_group, notification_dispatcher)
+    client = _client_with_agent_creator(
+        tmp_path, root_concurrency_group, notification_dispatcher, agent_creator=creator
+    )
+
+    response = client.post(
+        "/api/v1/workspaces",
+        headers=_auth_header(),
+        json={
+            "git_url": "https://example/repo",
+            "host_name": "my-mind",
+            "branch": "main",
+            "color": "#0b292b",
+            "launch_mode": "DOCKER",
+            "ai_provider": "SUBSCRIPTION",
+            "backup_provider": "CONFIGURE_LATER",
+        },
+    )
+
+    assert response.status_code == 202
+    body = json.loads(response.data)
+    assert body["kind"] == "create"
+    assert body["operation_id"]
+    assert str(creator.last_call["host_name"]) == "my-mind"
+    assert str(creator.last_call["color"]) == "#0b292b"
+    assert str(creator.last_call["branch"]) == "main"
 
 
 def test_create_workspace_requires_api_key_for_api_key_provider(
@@ -241,7 +434,7 @@ def test_create_workspace_requires_api_key_for_api_key_provider(
     )
 
     assert response.status_code == 400
-    assert "anthropic_api_key" in json.loads(response.data)["error"]
+    assert json.loads(response.data)["field"] == "anthropic_api_key"
 
 
 def test_create_workspace_rejects_invalid_backup_provider(

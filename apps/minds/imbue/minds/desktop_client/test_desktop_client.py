@@ -1,6 +1,4 @@
-import json
 import os
-import queue
 import subprocess
 from datetime import datetime
 from datetime import timedelta
@@ -14,9 +12,7 @@ from flask.testing import FlaskClient
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
-from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
-from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
 from imbue.minds.desktop_client.app import _build_mngr_start_argv
 from imbue.minds.desktop_client.app import _build_mngr_stop_argv
 from imbue.minds.desktop_client.app import _build_requests_payload
@@ -61,7 +57,6 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.primitives import CreationId
-from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.api.discovery_events import DiscoveryError
@@ -509,18 +504,6 @@ def test_create_page_shows_form(tmp_path: Path) -> None:
     assert 'data-preset="local"' in response.text
 
 
-def test_creation_status_returns_404_for_unknown_agent(tmp_path: Path) -> None:
-    """GET /api/create-agent/{id}/status returns 404 for unknown creation."""
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
-
-    # The URL handle is a ``CreationId`` (minds-internal in-flight handle),
-    # not a canonical mngr ``AgentId``; passing an AgentId-prefixed string
-    # would now fail to parse and never even reach the not-tracked check.
-    unknown_id = CreationId()
-    response = client.get("/api/create-agent/{}/status".format(unknown_id))
-    assert response.status_code == 404
-
-
 def test_landing_page_lists_agents_when_multiple_known(tmp_path: Path) -> None:
     """When authenticated and multiple agents are known, the landing page lists them all."""
     agent_id_1 = AgentId()
@@ -542,20 +525,6 @@ def test_landing_page_lists_agents_when_multiple_known(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert str(agent_id_1) in response.text
     assert str(agent_id_2) in response.text
-
-
-def test_create_form_submit_returns_501_without_agent_creator(tmp_path: Path) -> None:
-    """POST /create returns 501 when no agent_creator is configured."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
-    client, auth_store = _create_test_desktop_client(
-        tmp_path=tmp_path,
-        backend_resolver=backend_resolver,
-        http_client=None,
-    )
-    _authenticate_client(client=client, auth_store=auth_store)
-
-    response = client.post("/create", data={"git_url": "file:///nonexistent-repo"})
-    assert response.status_code == 501
 
 
 def test_creating_page_returns_501_without_agent_creator(tmp_path: Path) -> None:
@@ -610,81 +579,6 @@ def _create_test_server_with_agent_creator(
     return client, auth_store, agent_creator
 
 
-def test_create_form_submit_redirects_to_creating_page(tmp_path: Path) -> None:
-    """POST /create with valid git_url redirects to /creating/{agent_id}."""
-    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.post(
-        "/create",
-        data={"git_url": "file:///nonexistent-repo"},
-        follow_redirects=False,
-    )
-    assert response.status_code == 303
-    assert response.headers["location"].startswith("/creating/")
-    agent_creator.wait_for_all()
-
-
-def test_create_form_submit_rejects_empty_git_url(tmp_path: Path) -> None:
-    """POST /create with empty git_url returns 400."""
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.post("/create", data={"git_url": "", "host_name": "test"})
-    assert response.status_code == 400
-
-
-def test_create_form_submit_passes_host_name(tmp_path: Path) -> None:
-    """POST /create passes host_name to the creator."""
-    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.post(
-        "/create",
-        data={"git_url": "file:///nonexistent-repo", "host_name": "my-workspace"},
-        follow_redirects=False,
-    )
-    assert response.status_code == 303
-    agent_creator.wait_for_all()
-
-
-def test_create_form_submit_auto_names_next_mind(tmp_path: Path) -> None:
-    """POST /create with no host_name auto-generates the next free ``mind-N``.
-
-    The form no longer asks for a name. With ``mind-1`` already a known
-    workspace in the resolver, the create handler must gather existing names
-    across providers and resolve the new workspace to ``mind-2``.
-    """
-    existing_id = AgentId()
-    resolver = make_resolver_with_data(
-        make_agents_json(existing_id, labels={"workspace": "mind-1", "is_primary": "true"}),
-    )
-    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path, backend_resolver=resolver)
-
-    response = client.post(
-        "/create",
-        data={"git_url": "file:///nonexistent-repo"},
-        follow_redirects=False,
-    )
-    assert response.status_code == 303
-    creation_id = CreationId(response.headers["Location"].rsplit("/", 1)[-1])
-    info = agent_creator.get_creation_info(creation_id)
-    assert info is not None
-    assert info.host_name == "mind-2"
-    agent_creator.wait_for_all()
-
-
-def test_create_form_submit_rejects_invalid_host_name(tmp_path: Path) -> None:
-    """POST /create with a host_name that fails HostName validation re-renders the form with an error."""
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.post(
-        "/create",
-        data={"git_url": "file:///nonexistent-repo", "host_name": "bad.name"},
-        follow_redirects=False,
-    )
-    assert response.status_code == 400
-    assert "alphanumeric" in response.text
-    assert "bad.name" in response.text
-
-
 def test_creating_page_shows_status(tmp_path: Path) -> None:
     """GET /creating/{agent_id} shows the loading/progress page directly.
 
@@ -711,33 +605,6 @@ def test_creating_page_returns_404_for_unknown(tmp_path: Path) -> None:
 
     response = client.get("/creating/{}".format(CreationId()))
     assert response.status_code == 404
-
-
-def test_creation_status_api_returns_status_for_tracked_agent(tmp_path: Path) -> None:
-    """GET /api/create-agent/{id}/status returns a valid status for a tracked creation."""
-    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
-
-    creation_id = agent_creator.start_creation("file:///nonexistent-repo")
-
-    response = client.get("/api/create-agent/{}/status".format(creation_id))
-    assert response.status_code == 200
-    data = response.get_json()
-    # The status response now reports both ``creation_id`` (always present)
-    # and ``agent_id`` (only once mngr create returns a canonical id). For
-    # this test the create runs against a nonexistent repo so it may never
-    # produce an agent_id; just check that the creation_id round-trips.
-    assert data["creation_id"] == str(creation_id)
-    assert data["status"] in (
-        "INITIALIZING",
-        "CLONING_REPO",
-        "CHECKING_OUT_BRANCH",
-        "PROVISIONING_AI",
-        "CREATING_WORKSPACE",
-        "WAITING_FOR_READY",
-        "DONE",
-        "FAILED",
-    )
-    agent_creator.wait_for_all()
 
 
 def test_create_page_prefills_git_url_from_query(tmp_path: Path) -> None:
@@ -784,144 +651,6 @@ def test_create_page_rejects_unauthenticated(tmp_path: Path) -> None:
     assert response.status_code == 403
 
 
-def test_create_form_submit_rejects_unauthenticated(tmp_path: Path) -> None:
-    """POST /create returns 403 without authentication."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
-    client, _ = _create_test_desktop_client(
-        tmp_path=tmp_path,
-        backend_resolver=backend_resolver,
-        http_client=None,
-    )
-
-    response = client.post("/create", data={"git_url": "file:///nonexistent-repo"})
-    assert response.status_code == 403
-
-
-def test_creation_status_api_rejects_unauthenticated(tmp_path: Path) -> None:
-    """GET /api/create-agent/{id}/status returns 403 without authentication."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
-    client, _ = _create_test_desktop_client(
-        tmp_path=tmp_path,
-        backend_resolver=backend_resolver,
-        http_client=None,
-    )
-
-    response = client.get("/api/create-agent/{}/status".format(AgentId()))
-    assert response.status_code == 403
-
-
-def test_creation_logs_sse_returns_501_without_agent_creator(tmp_path: Path) -> None:
-    """GET /api/create-agent/{id}/logs returns 501 when no agent_creator."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
-    client, auth_store = _create_test_desktop_client(
-        tmp_path=tmp_path,
-        backend_resolver=backend_resolver,
-        http_client=None,
-    )
-    _authenticate_client(client=client, auth_store=auth_store)
-
-    response = client.get("/api/create-agent/{}/logs".format(AgentId()))
-    assert response.status_code == 501
-
-
-def test_creation_logs_sse_rejects_unauthenticated(tmp_path: Path) -> None:
-    """GET /api/create-agent/{id}/logs returns 403 without authentication."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
-    client, _ = _create_test_desktop_client(
-        tmp_path=tmp_path,
-        backend_resolver=backend_resolver,
-        http_client=None,
-    )
-
-    response = client.get("/api/create-agent/{}/logs".format(AgentId()))
-    assert response.status_code == 403
-
-
-def test_creation_logs_sse_returns_404_for_unknown(tmp_path: Path) -> None:
-    """GET /api/create-agent/{id}/logs returns 404 for unknown agent."""
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.get("/api/create-agent/{}/logs".format(CreationId()))
-    assert response.status_code == 404
-
-
-def test_creation_logs_sse_streams_events(tmp_path: Path) -> None:
-    """GET /api/create-agent/{id}/logs returns SSE stream for a tracked creation."""
-    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
-
-    agent_id = agent_creator.start_creation("file:///nonexistent-repo")
-
-    response = client.get("/api/create-agent/{}/logs".format(agent_id))
-    assert response.status_code == 200
-    assert "text/event-stream" in response.headers.get("content-type", "")
-    response.close()
-    agent_creator.wait_for_all()
-
-
-def test_creation_logs_sse_emits_status_events(tmp_path: Path) -> None:
-    """The current ``AgentCreationStatus`` is surfaced as a ``{"_type": "status"}`` SSE event.
-
-    Regular log lines stay on the ``{"log": ...}`` channel. This test exercises
-    the polling dispatch in ``_stream_creation_logs`` by seeding a particular
-    status into the ``AgentCreator``'s private state and verifying the stream
-    emits a matching status event with the right ``status_text`` -- without
-    running a real agent creation (which would require Docker).
-    """
-    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
-
-    creation_id = CreationId()
-    log_queue: queue.Queue[str] = queue.Queue()
-    with agent_creator._lock:
-        agent_creator._statuses[str(creation_id)] = AgentCreationStatus.CREATING_WORKSPACE
-        agent_creator._launch_modes[str(creation_id)] = LaunchMode.DOCKER
-        agent_creator._log_queues[str(creation_id)] = log_queue
-
-    log_queue.put("regular log line")
-    log_queue.put(LOG_SENTINEL)
-
-    payloads: list[dict[str, object]] = []
-    response = client.get("/api/create-agent/{}/logs".format(creation_id))
-    assert response.status_code == 200
-    # The seeded LOG_SENTINEL makes this stream finite, so the full body can be read.
-    for line in response.get_data(as_text=True).splitlines():
-        if line.startswith("data: "):
-            payloads.append(json.loads(line[len("data: ") :]))
-
-    status_events = [p for p in payloads if p.get("_type") == "status"]
-    log_events = [p for p in payloads if "log" in p]
-    assert len(status_events) == 1
-    assert status_events[0]["status"] == "CREATING_WORKSPACE"
-    assert status_events[0]["status_text"] == "Creating workspace..."
-    assert any(p["log"] == "regular log line" for p in log_events)
-
-
-def test_creation_logs_sse_emits_status_text_for_imbue_cloud(tmp_path: Path) -> None:
-    """Status captions are launch-mode-aware via ``_STATUS_TEXT_IMBUE_CLOUD``."""
-    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
-
-    creation_id = CreationId()
-    log_queue: queue.Queue[str] = queue.Queue()
-    with agent_creator._lock:
-        agent_creator._statuses[str(creation_id)] = AgentCreationStatus.CREATING_WORKSPACE
-        agent_creator._launch_modes[str(creation_id)] = LaunchMode.IMBUE_CLOUD
-        agent_creator._log_queues[str(creation_id)] = log_queue
-
-    log_queue.put(LOG_SENTINEL)
-
-    payloads: list[dict[str, object]] = []
-    response = client.get("/api/create-agent/{}/logs".format(creation_id))
-    assert response.status_code == 200
-    # The seeded LOG_SENTINEL makes this stream finite, so the full body can be read.
-    for line in response.get_data(as_text=True).splitlines():
-        if line.startswith("data: "):
-            payloads.append(json.loads(line[len("data: ") :]))
-
-    status_events = [p for p in payloads if p.get("_type") == "status"]
-    assert status_events
-    assert status_events[0]["status"] == "CREATING_WORKSPACE"
-    assert status_events[0]["status_text"] == "Setting up agent..."
-
-
 def test_creating_page_rejects_unauthenticated(tmp_path: Path) -> None:
     """GET /creating/{id} returns 403 without authentication."""
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
@@ -933,23 +662,6 @@ def test_creating_page_rejects_unauthenticated(tmp_path: Path) -> None:
 
     response = client.get("/creating/{}".format(AgentId()))
     assert response.status_code == 403
-
-
-def test_create_form_submit_passes_launch_mode(tmp_path: Path) -> None:
-    """POST /create passes launch_mode to the creator."""
-    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.post(
-        "/create",
-        data={
-            "git_url": "file:///nonexistent-repo",
-            "host_name": "my-agent",
-            "launch_mode": "DOCKER",
-        },
-        follow_redirects=False,
-    )
-    assert response.status_code == 303
-    agent_creator.wait_for_all()
 
 
 def test_create_form_shows_launch_mode_dropdown(tmp_path: Path) -> None:
@@ -984,113 +696,6 @@ def test_create_form_does_not_show_env_file_checkbox(tmp_path: Path) -> None:
     response = client.get("/create")
     assert response.status_code == 200
     assert "include_env_file" not in response.text
-
-
-def test_create_form_submit_redirects_imbue_cloud_compute_without_account_to_signin(tmp_path: Path) -> None:
-    """IMBUE_CLOUD compute without any account routes into the sign-in/up flow.
-
-    With no signed-in account at all, the remote compute path is unusable, so
-    rather than re-rendering an error the server sends the user to sign up (with
-    a link back to the picker).
-    """
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.post(
-        "/create",
-        data={
-            "git_url": "file:///nonexistent-repo",
-            "launch_mode": "IMBUE_CLOUD",
-            "ai_provider": "SUBSCRIPTION",
-            "account_id": "",
-        },
-        follow_redirects=False,
-    )
-    assert response.status_code == 303
-    assert response.headers["location"] == "/auth/signup?return_to=%2Fcreate"
-
-
-def test_create_form_submit_redirects_imbue_cloud_ai_without_account_to_signin(tmp_path: Path) -> None:
-    """IMBUE_CLOUD AI provider without any account routes into the sign-in/up flow."""
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.post(
-        "/create",
-        data={
-            "git_url": "file:///nonexistent-repo",
-            "launch_mode": "DOCKER",
-            "ai_provider": "IMBUE_CLOUD",
-            "account_id": "",
-        },
-        follow_redirects=False,
-    )
-    assert response.status_code == 303
-    assert response.headers["location"] == "/auth/signup?return_to=%2Fcreate"
-
-
-def test_create_form_submit_rejects_api_key_provider_without_key(tmp_path: Path) -> None:
-    """Selecting AI provider API_KEY without supplying a key is rejected."""
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.post(
-        "/create",
-        data={
-            "git_url": "file:///nonexistent-repo",
-            "host_name": "my-agent",
-            "launch_mode": "DOCKER",
-            "ai_provider": "API_KEY",
-            "anthropic_api_key": "",
-        },
-        follow_redirects=False,
-    )
-    assert response.status_code == 400
-    assert "Anthropic API key is required" in response.text
-
-
-def test_create_form_submit_accepts_subscription_with_no_account(tmp_path: Path) -> None:
-    """Subscription mode + no account is the no-account default and must be accepted."""
-    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.post(
-        "/create",
-        data={
-            "git_url": "file:///nonexistent-repo",
-            "host_name": "my-agent",
-            "launch_mode": "DOCKER",
-            "ai_provider": "SUBSCRIPTION",
-            "account_id": "",
-        },
-        follow_redirects=False,
-    )
-    assert response.status_code == 303
-    agent_creator.wait_for_all()
-
-
-def test_create_form_submit_preserves_account_id_on_validation_error(tmp_path: Path) -> None:
-    """When validation fails and the form re-renders, the user's account_id choice
-    must survive instead of reverting to the config default. The form submits
-    ``account_id=""`` for "No account"; the re-rendered page must show that
-    option as ``selected`` and must NOT show any other account as selected."""
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
-
-    # Trigger a re-rendering validation error: AI provider API_KEY with no key.
-    # (imbue_cloud-without-account now redirects to sign-in instead of
-    # re-rendering, so it no longer exercises this re-render path.)
-    response = client.post(
-        "/create",
-        data={
-            "git_url": "file:///nonexistent-repo",
-            "launch_mode": "DOCKER",
-            "ai_provider": "API_KEY",
-            "anthropic_api_key": "",
-            "account_id": "",
-        },
-        follow_redirects=False,
-    )
-    assert response.status_code == 400
-    # The "No account (private project)" option is selected when default_account_id is empty.
-    assert 'value=""' in response.text and "No account" in response.text
-    # And the API-key validation error should be present.
-    assert "Anthropic API key is required" in response.text
 
 
 def test_unhandled_exception_returns_500_with_message(tmp_path: Path) -> None:

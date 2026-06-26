@@ -54,11 +54,15 @@ from imbue.minds.desktop_client import workspace_version
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
+from imbue.minds.desktop_client.agent_creator import resolve_template_version
 from imbue.minds.desktop_client.api_key_auth import is_request_authenticated
 from imbue.minds.desktop_client.backup_export import BackupExportError
 from imbue.minds.desktop_client.backup_export import export_snapshot_zip
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
+from imbue.minds.desktop_client.create_helpers import REMOTE_SIGNIN_REDIRECT_URL
+from imbue.minds.desktop_client.create_helpers import color_for_new_workspace
+from imbue.minds.desktop_client.create_helpers import existing_workspace_host_names
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
@@ -76,6 +80,7 @@ from imbue.minds.desktop_client.sharing_handler import probe_share_url_readiness
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
+from imbue.minds.desktop_client.templates import resolve_create_host_name
 from imbue.minds.desktop_client.workspace_create import build_backup_request_or_error
 from imbue.minds.desktop_client.workspace_create import build_create_on_created_callback
 from imbue.minds.desktop_client.workspace_create import resolve_effective_region
@@ -97,6 +102,7 @@ from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import InvalidName
 
 _ViewParams = ParamSpec("_ViewParams")
 
@@ -120,6 +126,16 @@ def _json_response(data: dict[str, object], status_code: int = 200) -> Response:
 
 def _json_error(message: str, status_code: int) -> Response:
     return _json_response({"error": message}, status_code=status_code)
+
+
+def _json_field_error(message: str, field: str, status_code: int = 400) -> Response:
+    """A 400-style validation error that also names the offending form field.
+
+    The browser create page reads the ``field`` key to render the message inline
+    next to the right input; agents (the other caller of this route) simply
+    ignore the extra key, so it stays backward compatible.
+    """
+    return _json_response({"error": message, "field": field}, status_code=status_code)
 
 
 def _handle_invalid_random_id(error: InvalidRandomIdError) -> Response:
@@ -381,13 +397,21 @@ def _handle_create_workspace() -> Response:
     """Create a new peer workspace; return an operation handle to poll.
 
     Accepts a JSON body with ``git_url`` (required) and optional ``host_name``,
-    ``branch``, ``launch_mode`` (default ``DOCKER``), ``ai_provider`` (default
-    ``SUBSCRIPTION``), ``account_id`` (selects the imbue_cloud account for
-    compute/AI -- required when ``launch_mode`` or ``ai_provider`` is
+    ``branch``, ``color``, ``launch_mode`` (default ``DOCKER``), ``ai_provider``
+    (default ``SUBSCRIPTION``), ``account_id`` (selects the imbue_cloud account
+    for compute/AI -- required when ``launch_mode`` or ``ai_provider`` is
     ``IMBUE_CLOUD``), ``anthropic_api_key`` (required when ``ai_provider`` is
     ``API_KEY``), and ``region``. Returns ``202`` with an ``operation_id`` the
     caller polls at ``/api/v1/workspaces/operations/<operation_id>``; the
     canonical workspace id appears there once ``mngr create`` returns.
+
+    This is the single create front door for both agents and the browser. To let
+    the create page render validation errors inline, a ``400`` carries a
+    structured body: ``{"error", "field"}`` names the offending field where
+    applicable (agents ignore ``field``), and the no-account imbue_cloud backstop
+    returns ``{"error", "redirect_url"}`` pointing at the sign-up flow. An empty
+    ``host_name`` is auto-resolved to the next free ``mind-N`` (the form no
+    longer asks for a name).
 
     Backup provisioning and Cloudflare tunnel injection match the desktop UI's
     create flow: the optional ``backup_*`` fields (``backup_provider``,
@@ -407,9 +431,10 @@ def _handle_create_workspace() -> Response:
         return _json_error("Request body must be a JSON object", 400)
     git_url = str(body.get("git_url", "")).strip()
     if not git_url:
-        return _json_error("'git_url' is required", 400)
+        return _json_field_error("Repository URL is required.", "git_url")
     host_name = str(body.get("host_name", "")).strip()
     branch = str(body.get("branch", "")).strip()
+    color = color_for_new_workspace(body.get("color"))
     try:
         launch_mode = LaunchMode(str(body.get("launch_mode", LaunchMode.DOCKER.value)))
     except ValueError:
@@ -435,22 +460,52 @@ def _handle_create_workspace() -> Response:
     anthropic_api_key = str(body.get("anthropic_api_key", "")).strip()
     submitted_region = str(body.get("region", "")).strip()
 
+    # The workspace name is chosen automatically unless one was submitted (the
+    # advanced view's optional "Name" field): a submitted value, else the
+    # operator ``MINDS_WORKSPACE_NAME`` override, else the next free ``mind-N``
+    # name (computed from the host names already in use across every provider).
+    # Resolve it eagerly so an invalid name surfaces as a 400 here rather than as
+    # a deferred FAILED status on the creating page.
+    backend_resolver = get_state().backend_resolver
+    try:
+        resolved_host_name = resolve_create_host_name(host_name, existing_workspace_host_names(backend_resolver))
+    except InvalidName as exc:
+        return _json_field_error(str(exc), "host_name")
+
     # Mirror the UI's create-form validation so misconfiguration fails fast here
     # rather than deep in the background creation thread.
+    session_store: MultiAccountSessionStore | None = get_state().session_store
     is_imbue_cloud = launch_mode is LaunchMode.IMBUE_CLOUD or ai_provider is AIProvider.IMBUE_CLOUD
     if is_imbue_cloud and not account_id:
-        return _json_error("account_id is required when launch_mode or ai_provider is IMBUE_CLOUD", 400)
+        # The remote (Imbue Cloud) presets require an account. With no account at
+        # all the compute path is unusable, so carry the sign-up redirect target
+        # back to the create page (its no-JS backstop is the same destination).
+        # When accounts exist but none is selected, ask the user to pick one.
+        has_any_account = bool(session_store.list_accounts()) if session_store is not None else False
+        if not has_any_account:
+            return _json_response(
+                {
+                    "error": "imbue_cloud requires an account. Sign in to continue.",
+                    "redirect_url": REMOTE_SIGNIN_REDIRECT_URL,
+                },
+                status_code=400,
+            )
+        return _json_field_error(
+            "imbue_cloud requires an account. Select an account or pick a different "
+            "option for both the compute and AI providers.",
+            "account_id",
+        )
     if ai_provider is AIProvider.API_KEY and not anthropic_api_key:
-        return _json_error("anthropic_api_key is required when ai_provider is API_KEY", 400)
+        return _json_field_error(
+            "An Anthropic API key is required when AI provider is set to api_key.", "anthropic_api_key"
+        )
 
     # Resolve the imbue_cloud account email (the session store maps account_id
     # -> email) so the background creation can mint a LiteLLM key / lease a pool
     # host against the right account.
     account_email = ""
-    if account_id:
-        session_store: MultiAccountSessionStore | None = get_state().session_store
-        if session_store is not None:
-            account_email = session_store.get_account_email(account_id) or ""
+    if account_id and session_store is not None:
+        account_email = session_store.get_account_email(account_id) or ""
 
     # Build the same restic setup request the create form builds (reads / saves
     # the shared master password as a side effect). Fail fast on a bad config.
@@ -464,7 +519,13 @@ def _handle_create_workspace() -> Response:
         paths=agent_creator.paths,
     )
     if backup_error is not None:
-        return _json_error(backup_error, 400)
+        return _json_field_error(backup_error, "backup_master_password")
+
+    # For imbue_cloud compute the lease needs the resolved template version
+    # (the latest semver tag when no branch was given), matching the form path.
+    branch_or_tag = branch
+    if launch_mode is LaunchMode.IMBUE_CLOUD and not branch_or_tag:
+        branch_or_tag = resolve_template_version(git_url, branch, parent_cg=agent_creator.root_concurrency_group)
 
     # Resolve the effective region (honoring a valid submitted value, else the
     # provider default) and, on a successful create, build the post-creation
@@ -476,16 +537,18 @@ def _handle_create_workspace() -> Response:
 
     creation_id = agent_creator.start_creation(
         git_url,
-        host_name=host_name,
+        host_name=resolved_host_name,
         branch=branch,
         launch_mode=launch_mode,
         ai_provider=ai_provider,
         account_email=account_email,
+        branch_or_tag=branch_or_tag,
         region=region,
         anthropic_api_key=anthropic_api_key,
         on_created=on_created,
         backup_request=backup_request,
-        original_minds_version=(branch or FALLBACK_BRANCH),
+        color=color,
+        original_minds_version=(branch_or_tag or branch or FALLBACK_BRANCH),
     )
     return _json_response({"operation_id": str(creation_id), "kind": "create"}, status_code=202)
 
@@ -698,6 +761,11 @@ def _handle_operation_status(operation_id: str) -> Response:
                 "status": str(info.status),
                 "is_done": info.status == AgentCreationStatus.DONE,
                 "agent_id": str(info.agent_id) if info.agent_id is not None else None,
+                # The absolute ``/goto/<agent>/`` URL the creating page navigates
+                # to once the workspace is ready. Built by the creator (it knows
+                # the ``mngr forward`` port) and populated atomically with DONE,
+                # so the page redirects without reconstructing it client-side.
+                "redirect_url": info.redirect_url,
                 "error": info.error,
             }
         )

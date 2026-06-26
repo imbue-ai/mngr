@@ -35,12 +35,9 @@ from imbue.minds.bootstrap import list_disabled_provider_names
 from imbue.minds.bootstrap import set_provider_is_enabled
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import WorkspacePaths
-from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
-from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
 from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
-from imbue.minds.desktop_client.agent_creator import resolve_template_version
 from imbue.minds.desktop_client.api_v1 import create_api_v1_blueprint
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
@@ -103,7 +100,6 @@ from imbue.minds.desktop_client.supertokens_routes import create_supertokens_blu
 from imbue.minds.desktop_client.supertokens_routes import signout_user_via_plugin
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
-from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
 from imbue.minds.desktop_client.templates import render_accounts_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
@@ -125,25 +121,17 @@ from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
-from imbue.minds.desktop_client.templates import resolve_create_host_name
-from imbue.minds.desktop_client.templates import status_text_for
 from imbue.minds.desktop_client.tunnel_token_injection import clear_tunnel_token_from_agent
 from imbue.minds.desktop_client.webdav import create_webdav_app
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
 from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
-from imbue.minds.desktop_client.workspace_create import build_backup_request_or_error
-from imbue.minds.desktop_client.workspace_create import build_create_on_created_callback
 from imbue.minds.desktop_client.workspace_create import default_region_for_provider_with_config
-from imbue.minds.desktop_client.workspace_create import resolve_effective_region
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.envs.docker_cleanup import stop_active_env_state_container
 from imbue.minds.errors import InvalidJsonBodyError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.errors import MngrCommandTimeoutError
-from imbue.minds.primitives import AIProvider
-from imbue.minds.primitives import BackupEncryptionMethod
-from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
@@ -154,7 +142,6 @@ from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
-from imbue.mngr.primitives import InvalidName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
@@ -406,27 +393,6 @@ def _resolved_workspace_color(backend_resolver: BackendResolverInterface, agent_
     return stored if stored is not None else DEFAULT_WORKSPACE_COLOR
 
 
-def _color_for_new_workspace(raw_color: object) -> str:
-    """Lenient parse of a create request's submitted color, with default fallback.
-
-    The create form posts the picker's hidden ``color`` input and the
-    JSON API accepts an optional ``color`` field. A missing or malformed
-    value (e.g. the browser ate the input) must not reject the whole
-    create request -- the new workspace just gets the default color.
-    A *missing* color (an absent field, or an explicit JSON ``null``) is
-    normal flow (the JSON API treats it as optional) and stays silent; a
-    non-empty value that fails to parse indicates a buggy client, so it
-    is logged before falling back.
-    """
-    stripped = str(raw_color).strip() if raw_color is not None else ""
-    normalized = normalize_workspace_color(stripped)
-    if normalized is not None:
-        return normalized
-    if stripped:
-        logger.warning("Ignoring malformed create-request color {!r}; using the default workspace color.", stripped)
-    return DEFAULT_WORKSPACE_COLOR
-
-
 def _suggested_create_color(backend_resolver: BackendResolverInterface) -> str:
     """Pick the color to preselect in the create form.
 
@@ -564,25 +530,6 @@ def _handle_help_report() -> Response:
         content=json.dumps({"ok": True, "event_id": event_id}),
         media_type="application/json",
     )
-
-
-def _existing_workspace_host_names(backend_resolver: BackendResolverInterface) -> set[str]:
-    """Gather the host names of every known workspace across all providers.
-
-    Reads the resolver's discovery snapshot (the aggregated view over all
-    providers) rather than shelling out per workspace, per the resolver-cache
-    read convention. Uses ``list_known_workspace_ids`` -- the *full* set,
-    including workspaces on destroyed-but-still-lingering hosts -- so an
-    auto-generated ``mind-N`` name does not collide with one that discovery has
-    not yet fully dropped. Feeds both the duplicate-name guard and the
-    ``mind-N`` auto-naming in ``resolve_create_host_name``.
-    """
-    names: set[str] = set()
-    for aid in backend_resolver.list_known_workspace_ids():
-        name = backend_resolver.get_workspace_name(aid)
-        if name is not None:
-            names.add(name)
-    return names
 
 
 def _handle_welcome_page() -> Response:
@@ -772,190 +719,6 @@ def _handle_backup_status_api() -> Response:
 # -- Agent creation route handlers --
 
 
-# Where the create page sends a user who chose the remote (Imbue Cloud)
-# preset without any signed-in account: into the sign-up/sign-in flow with a
-# link back to the picker. ``return_to=%2Fcreate`` is the URL-encoded
-# ``/create`` -- the client builds the same target via
-# ``encodeURIComponent('/create')`` in Create.jinja, and ``_handle_auth_page``
-# only honors a safe same-origin path.
-_REMOTE_SIGNIN_REDIRECT_URL: Final[str] = "/auth/signup?return_to=%2Fcreate"
-
-
-def _handle_create_form_submit() -> Response:
-    """Handle form submission to create a new agent."""
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content="Not authenticated")
-
-    agent_creator: AgentCreator | None = get_state().agent_creator
-    if agent_creator is None:
-        return make_response(status_code=501, content="Agent creation not configured")
-
-    form = request.form
-    git_url = str(form.get("git_url", "")).strip()
-    host_name = str(form.get("host_name", "")).strip()
-    branch = str(form.get("branch", "")).strip()
-    try:
-        launch_mode = LaunchMode(str(form.get("launch_mode", LaunchMode.DOCKER.value)))
-    except ValueError:
-        launch_mode = LaunchMode.DOCKER
-    try:
-        ai_provider = AIProvider(str(form.get("ai_provider", AIProvider.SUBSCRIPTION.value)))
-    except ValueError:
-        ai_provider = AIProvider.SUBSCRIPTION
-    account_id = str(form.get("account_id", "")).strip()
-    anthropic_api_key = str(form.get("anthropic_api_key", "")).strip()
-    color = _color_for_new_workspace(form.get("color", ""))
-    try:
-        backup_provider = BackupProvider(str(form.get("backup_provider", BackupProvider.CONFIGURE_LATER.value)))
-    except ValueError:
-        backup_provider = BackupProvider.CONFIGURE_LATER
-    try:
-        backup_encryption_method = BackupEncryptionMethod(
-            str(form.get("backup_encryption_method", BackupEncryptionMethod.NO_PASSWORD.value))
-        )
-    except ValueError:
-        backup_encryption_method = BackupEncryptionMethod.NO_PASSWORD
-    backup_master_password = str(form.get("backup_master_password", ""))
-    is_save_backup_password = str(form.get("backup_save_password", "")).strip() != ""
-    backup_api_key_env = str(form.get("backup_api_key_env", ""))
-    submitted_region = str(form.get("region", "")).strip()
-
-    session_store_inst: MultiAccountSessionStore | None = get_state().session_store
-    minds_config: MindsConfig | None = get_state().minds_config
-    geo_cache: GeoLocationCache | None = get_state().geo_location_cache
-
-    def _re_render_with_error(message: str, status: int = 400) -> Response:
-        accounts_list = session_store_inst.list_accounts() if session_store_inst else []
-        region_options, region_selected = _build_region_form_context(minds_config, geo_cache)
-        # Re-render with the user's submitted account_id pre-selected
-        # (including "" -> "No account") rather than the config default,
-        # so a validation error doesn't silently revert their choice.
-        html_body = render_create_form(
-            git_url=git_url,
-            branch=branch,
-            host_name=host_name,
-            launch_mode=launch_mode,
-            ai_provider=ai_provider,
-            accounts=accounts_list,
-            region_options_by_launch_mode=region_options,
-            region_selected_by_launch_mode=region_selected,
-            default_account_id=account_id,
-            anthropic_api_key=anthropic_api_key,
-            backup_provider=backup_provider,
-            backup_encryption_method=backup_encryption_method,
-            backup_api_key_env=backup_api_key_env,
-            has_saved_backup_password=has_saved_backup_password(agent_creator.paths),
-            error_message=message,
-            # Errors are about advanced-view fields (repository, providers,
-            # backup), so open that view directly rather than the cards.
-            start_advanced=True,
-            color=color,
-        )
-        return make_html_response(content=html_body, status_code=status)
-
-    if not git_url:
-        return _re_render_with_error("Repository URL is required.")
-
-    # The workspace name is chosen automatically unless the user typed one: a
-    # submitted value (from the advanced view's optional "Name" field, empty in
-    # the common simple flow), else the operator ``MINDS_WORKSPACE_NAME``
-    # override, else the next free ``mind-N`` name (computed from the host names
-    # already in use across every provider). Resolve it eagerly so an invalid
-    # name surfaces inline rather than as a deferred "FAILED" status on the
-    # creating page.
-    try:
-        resolved_host_name = resolve_create_host_name(
-            host_name, _existing_workspace_host_names(get_state().backend_resolver)
-        )
-    except InvalidName as exc:
-        return _re_render_with_error(str(exc))
-
-    is_imbue_cloud_compute = launch_mode is LaunchMode.IMBUE_CLOUD
-    is_imbue_cloud_ai = ai_provider is AIProvider.IMBUE_CLOUD
-    if not account_id and (is_imbue_cloud_compute or is_imbue_cloud_ai):
-        # The remote (Imbue Cloud) presets require an account. With no account
-        # at all, the compute path is unusable, so route into the sign-in/up
-        # flow (the client does this on card-select; this is the no-JS
-        # backstop) with a link back to the picker. When accounts exist but
-        # none is selected, re-render asking the user to pick one.
-        has_any_account = bool(session_store_inst.list_accounts()) if session_store_inst is not None else False
-        if not has_any_account:
-            return make_response(status_code=303, headers={"Location": _REMOTE_SIGNIN_REDIRECT_URL})
-        return _re_render_with_error(
-            "imbue_cloud requires an account. Select an account or pick a different "
-            "option for both the compute and AI providers."
-        )
-
-    if ai_provider is AIProvider.API_KEY and not anthropic_api_key:
-        return _re_render_with_error("An Anthropic API key is required when AI provider is set to api_key.")
-
-    # Resolve the account email when needed (imbue_cloud compute, AI, or
-    # backup). The mngr_imbue_cloud plugin owns the SuperTokens session and
-    # is responsible for fetching a fresh access token at the time of each
-    # subprocess invocation, so minds only needs to know which account to
-    # ask for.
-    is_imbue_cloud_backup = backup_provider is BackupProvider.IMBUE_CLOUD
-    account_email = ""
-    if (
-        account_id
-        and session_store_inst is not None
-        and (is_imbue_cloud_compute or is_imbue_cloud_ai or is_imbue_cloud_backup)
-    ):
-        account_email = session_store_inst.get_account_email(account_id) or ""
-
-    # Resolve the backup configuration (reads / first-time-saves the shared
-    # master password as a side effect) before kicking off creation.
-    backup_request, backup_error = build_backup_request_or_error(
-        backup_provider=backup_provider,
-        encryption_method=backup_encryption_method,
-        typed_master_password=backup_master_password,
-        is_save_password=is_save_backup_password,
-        api_key_env=backup_api_key_env,
-        account_email=account_email,
-        paths=agent_creator.paths,
-    )
-    if backup_error is not None:
-        return _re_render_with_error(backup_error)
-
-    branch_or_tag = branch
-    if is_imbue_cloud_compute and not branch_or_tag:
-        branch_or_tag = resolve_template_version(git_url, branch, parent_cg=agent_creator.root_concurrency_group)
-
-    # Resolve the explicit region the user chose (or the resolved default) and,
-    # on a successful create, persist it as the provider's new last-used default.
-    region = resolve_effective_region(launch_mode, submitted_region, minds_config, geo_cache)
-
-    # Build the composed post-creation callback (injects the tunnel token /
-    # associates the account, then persists the chosen region) -- the same
-    # helper the /api/v1/workspaces create route uses, so both front doors
-    # build the exact same thing. Fires only after a successful create.
-    on_created = build_create_on_created_callback(account_id, minds_config, launch_mode, region)
-
-    # ``start_creation`` returns a CreationId (minds-internal handle for
-    # tracking the in-flight create) -- the canonical AgentId only exists
-    # after ``mngr create`` returns. Workspace<->account association is now
-    # done from the on_created callback (which fires post-canonical-id) so
-    # the association is keyed under the right id.
-    creation_id = agent_creator.start_creation(
-        git_url,
-        host_name=resolved_host_name,
-        branch=branch,
-        launch_mode=launch_mode,
-        ai_provider=ai_provider,
-        account_email=account_email,
-        branch_or_tag=branch_or_tag,
-        region=region,
-        anthropic_api_key=anthropic_api_key,
-        on_created=on_created,
-        backup_request=backup_request,
-        color=color,
-        original_minds_version=(branch_or_tag or branch or FALLBACK_BRANCH),
-    )
-
-    creating_url = "/creating/{}".format(creation_id)
-    return make_response(status_code=303, headers={"Location": creating_url})
-
-
 def _handle_create_page() -> Response:
     """Show the create form page (GET /create)."""
     if not _is_request_authenticated():
@@ -988,43 +751,6 @@ def _handle_create_page() -> Response:
     return make_html_response(content=html)
 
 
-def _handle_creation_status_api(
-    agent_id: str,
-) -> Response:
-    """API endpoint for checking agent creation status."""
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
-
-    agent_creator: AgentCreator | None = get_state().agent_creator
-    if agent_creator is None:
-        return make_response(status_code=501, content="Agent creation not configured")
-
-    # The URL parameter is named ``agent_id`` for legacy API compatibility
-    # but it actually carries a ``CreationId`` (minds-internal in-flight
-    # handle). The canonical mngr ``AgentId`` is reported back through
-    # ``info.agent_id`` once ``mngr create`` returns.
-    creation_id = CreationId(agent_id)
-    info = agent_creator.get_creation_info(creation_id)
-    if info is None:
-        return make_response(
-            status_code=404,
-            content='{"error": "Unknown agent creation"}',
-            media_type="application/json",
-        )
-
-    result: dict[str, str] = {
-        "creation_id": str(info.creation_id),
-        "status": str(info.status),
-    }
-    if info.agent_id is not None:
-        result["agent_id"] = str(info.agent_id)
-    if info.redirect_url is not None:
-        result["redirect_url"] = info.redirect_url
-    if info.error is not None:
-        result["error"] = info.error
-    return make_response(content=json.dumps(result), media_type="application/json")
-
-
 def _handle_creating_page(
     agent_id: str,
 ) -> Response:
@@ -1032,8 +758,9 @@ def _handle_creating_page(
 
     The page shows the setting-up progress screen while the workspace is
     created in the background, then redirects into the workspace once
-    creation finishes. The status-polling / SSE endpoints are keyed by the
-    same ``creation_id`` carried in the route.
+    creation finishes. The page's JS polls the versioned operations resource
+    (``/api/v1/workspaces/operations/<creation_id>`` + ``/logs``) for status
+    and live logs, keyed by the same ``creation_id`` carried in the route.
     """
     if not _is_request_authenticated():
         return make_response(status_code=403, content="Not authenticated")
@@ -1042,8 +769,9 @@ def _handle_creating_page(
     if agent_creator is None:
         return make_response(status_code=501, content="Agent creation not configured")
 
-    # ``agent_id`` route param is actually a CreationId (see comment in
-    # ``_handle_creation_status_api``).
+    # The ``agent_id`` route param is actually a ``CreationId`` (the
+    # minds-internal in-flight handle returned by ``start_creation``); the
+    # canonical mngr ``AgentId`` only exists once ``mngr create`` returns.
     creation_id = CreationId(agent_id)
     info = agent_creator.get_creation_info(creation_id)
     if info is None:
@@ -1051,95 +779,6 @@ def _handle_creating_page(
 
     html = render_creating_page(creation_id=creation_id, info=info)
     return make_html_response(content=html)
-
-
-def _stream_creation_logs(
-    log_queue: queue.Queue[str],
-    agent_creator: AgentCreator,
-    creation_id: CreationId,
-    shutdown_event: threading.Event,
-) -> Iterator[str]:
-    """Generator that yields SSE events from a creation log queue.
-
-    Each iteration polls ``agent_creator.get_creation_info(creation_id)``
-    and emits a ``{"_type": "status", ...}`` event whenever the status
-    has changed since the last emission. This piggybacks on the existing
-    ~1s log-queue keepalive cadence; caption-update latency is therefore
-    bounded by the queue.get timeout below, which is acceptable since
-    each backend phase takes much longer than 1s.
-
-    Exits cleanly when ``shutdown_event`` is set so the server's
-    graceful-shutdown deadline doesn't have to cancel us mid-stream.
-    """
-    last_status: AgentCreationStatus | None = None
-    streaming = True
-    while streaming:
-        if shutdown_event.is_set():
-            return
-        info = agent_creator.get_creation_info(creation_id)
-        if info is not None and info.status != last_status:
-            last_status = info.status
-            status_event = {
-                "_type": "status",
-                "status": str(info.status),
-                "status_text": status_text_for(
-                    str(info.status),
-                    error=info.error,
-                    launch_mode=info.launch_mode,
-                ),
-            }
-            yield "data: {}\n\n".format(json.dumps(status_event))
-
-        try:
-            line = log_queue.get(block=True, timeout=1.0)
-        except queue.Empty:
-            yield ": keepalive\n\n"
-            continue
-
-        if line == LOG_SENTINEL:
-            streaming = False
-            info = agent_creator.get_creation_info(creation_id)
-            if info is not None:
-                result = {"status": str(info.status)}
-                if info.redirect_url is not None:
-                    result["redirect_url"] = info.redirect_url
-                if info.error is not None:
-                    result["error"] = info.error
-                result["_type"] = "done"
-                yield "data: {}\n\n".format(json.dumps(result))
-                # Yield a final keepalive so the done event is flushed to the
-                # browser in its own TCP segment, separate from the stream close.
-                yield ": end\n\n"
-        else:
-            yield "data: {}\n\n".format(json.dumps({"log": line}))
-
-
-def _handle_creation_logs_sse(
-    agent_id: str,
-) -> Response:
-    """SSE endpoint that streams creation logs for an agent."""
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content="Not authenticated")
-
-    agent_creator: AgentCreator | None = get_state().agent_creator
-    if agent_creator is None:
-        return make_response(status_code=501, content="Agent creation not configured")
-
-    # ``agent_id`` route param carries a CreationId (see comment in
-    # ``_handle_creation_status_api``).
-    creation_id = CreationId(agent_id)
-    log_queue = agent_creator.get_log_queue(creation_id)
-    if log_queue is None:
-        return make_response(status_code=404, content="Unknown agent creation")
-
-    return make_streaming_response(
-        _stream_creation_logs(log_queue, agent_creator, creation_id, get_state().shutdown_event),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
-    )
 
 
 # -- Agent destruction route handlers --
@@ -3525,8 +3164,9 @@ def create_desktop_client(
     ``backend_resolver`` and is also the bounce target for ``SIGHUP``-style
     re-discovery after a SuperTokens signin writes a new provider entry.
 
-    When ``agent_creator`` is provided, the server can create new agents
-    from git URLs via the /create form and /api/create-agent API.
+    When ``agent_creator`` is provided, the server can create new agents from
+    git URLs: the create page submits to ``POST /api/v1/workspaces`` and
+    ``/creating/<id>`` polls the v1 operations resource for status and logs.
 
     When ``paths`` is provided, the /api/v1/ REST API router is mounted with
     API key authentication. The notification endpoint within the router
@@ -3649,12 +3289,12 @@ def create_desktop_client(
     app.add_url_rule("/api/sharing-status/<agent_id>/<service_name>", view_func=_handle_sharing_status_api)
     app.add_url_rule("/api/sharing-readiness/<agent_id>/<service_name>", view_func=_handle_sharing_readiness_api)
 
-    # Agent creation routes
+    # Agent creation routes. The create form now submits to POST
+    # /api/v1/workspaces and /creating/<id> polls the v1 operations resource, so
+    # only the GET create-form page and the /creating/<id> progress page remain
+    # here; status/logs and the form POST moved to the versioned surface.
     app.add_url_rule("/create", view_func=_handle_create_page)
-    app.add_url_rule("/create", view_func=_handle_create_form_submit, methods=["POST"])
     app.add_url_rule("/api/backup-status", view_func=_handle_backup_status_api)
-    app.add_url_rule("/api/create-agent/<agent_id>/status", view_func=_handle_creation_status_api)
-    app.add_url_rule("/api/create-agent/<agent_id>/logs", view_func=_handle_creation_logs_sse)
     app.add_url_rule("/creating/<agent_id>", view_func=_handle_creating_page)
 
     # Agent destruction routes. Destroy + status/log streaming are served by the
