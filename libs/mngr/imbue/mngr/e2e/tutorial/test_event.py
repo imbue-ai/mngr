@@ -47,12 +47,17 @@ def _create_my_task(e2e: E2eSession, sleep_value: int) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_event_default(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # view all events for an agent
         mngr event my-task
         # all events are json objects that are guaranteed to have at least the following fields: "event_id", "timestamp", "source" and "type"
         # events are printed as JSONL (one JSON object per line), so you can easily pipe them to jq for filtering and formatting, or to other tools for monitoring and alerting
-    """)
+
+    Scope: `mngr event my-task` exits 0 and prints the agent's event stream as
+    clean JSONL -- every line parses as a JSON object (no warnings or log lines
+    leaking in, so it can be piped to jq), and any event present carries the four
+    guaranteed fields (event_id, timestamp, source, type).
+    """
     _create_my_task(e2e, 100700)
     result = e2e.run("mngr event my-task", comment="view all events for an agent", timeout=60.0)
     expect(result).to_succeed()
@@ -73,10 +78,15 @@ def test_event_default(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_event_follow(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # follow events in real time (like tail -f). Extremely useful for scripting.
         mngr event my-task --follow
-    """)
+
+    Scope: `--follow` keeps the event stream open indefinitely instead of
+    emitting the backlog and exiting the way the bare `mngr event` does. Wrapped
+    in `timeout 3`, it is still running when killed (exit code 124), proving the
+    stream stayed open.
+    """
     _create_my_task(e2e, 100701)
     # --follow polls for new events forever (it blocks after emitting any
     # backlog), so wrap it in `timeout` to stop it. A clean timeout kill exits
@@ -92,12 +102,17 @@ def test_event_follow(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_event_follow_filter_source(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # restrict the event stream to a specific type of event (source)
         # in this case we're looking at the "claude/common_transcript" events for a claude agent,
         # which shows the conversation messages in and out of the agent in a unified format
         mngr event my-task --follow claude/common_transcript
-    """)
+
+    Scope: passing a source argument restricts `--follow` to that source. The
+    sleep command agent emits no "claude/common_transcript" events, so the filter
+    excludes everything and stdout is empty, while `--follow` still keeps the
+    stream open (killed by `timeout 1`, exit code 124) rather than crashing early.
+    """
     _create_my_task(e2e, 100702)
     # --follow streams indefinitely, so `timeout 1` kills it after 1s and the
     # shell reports exit code 124. Asserting on 124 (rather than swallowing the
@@ -118,10 +133,13 @@ def test_event_follow_filter_source(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_event_tail(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # show only the last 20 events
         mngr event my-task --tail 20
-    """)
+
+    Scope: `--tail 20` exits 0 and returns at most 20 events, each a JSONL object
+    carrying the four guaranteed fields (event_id, timestamp, source, type).
+    """
     _create_my_task(e2e, 100703)
     result = e2e.run("mngr event my-task --tail 20", comment="show only the last 20 events")
     expect(result).to_succeed()
@@ -144,10 +162,15 @@ def test_event_tail(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_event_head(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # show only the first 10 events
         mngr event my-task --head 10
-    """)
+
+    Scope: `--head 10` exits 0 and returns at most 10 events, each a JSONL object
+    carrying the four guaranteed fields. Unlike `--tail`, `--head` selects the
+    FIRST events: its result is exactly the leading prefix of the full unfiltered
+    stream.
+    """
     _create_my_task(e2e, 100704)
     result = e2e.run("mngr event my-task --head 10", comment="show only the first 10 events")
     expect(result).to_succeed()
@@ -174,17 +197,20 @@ def test_event_head(e2e: E2eSession) -> None:
     )
 
 
-# Unhappy path for the --head block: --head and --tail select opposite ends of
-# the stream, so combining them is rejected before any events are read.
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_event_head_conflicts_with_tail(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # show only the first 10 events
         mngr event my-task --head 10
-    """)
+
+    Scope: the unhappy path of the same `--head` block. `--head` and `--tail`
+    select opposite ends of the stream, so combining them is rejected during
+    argument validation -- the command fails with a stderr error "Cannot specify
+    both --head and --tail" before any events are read, leaving stdout empty.
+    """
     _create_my_task(e2e, 100706)
     result = e2e.run(
         "mngr event my-task --head 10 --tail 20",
@@ -202,10 +228,15 @@ def test_event_head_conflicts_with_tail(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_event_include_filter(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # include only events matching a CEL expression
         mngr event my-task --include 'type == "user_message"'
-    """)
+
+    Scope: `--include` with a CEL expression exits 0 and keeps only events
+    satisfying the predicate -- every returned event has type == "user_message",
+    and the filtered set is a subset of the full unfiltered stream (the filter may
+    only drop events, never invent or alter them).
+    """
     _create_my_task(e2e, 100705)
 
     # The exact tutorial command. Whatever the filter returns, every event must
@@ -233,13 +264,15 @@ def test_event_include_filter(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_event_include_filter_rejects_invalid_cel(e2e: E2eSession) -> None:
-    # Unhappy path for the same tutorial block: a syntactically invalid CEL
-    # expression must fail loudly rather than silently returning all (or no)
-    # events.
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # include only events matching a CEL expression
         mngr event my-task --include 'type == "user_message"'
-    """)
+
+    Scope: the unhappy path of the same `--include` block. A syntactically
+    invalid CEL expression fails loudly -- the command fails with a stderr error
+    "Invalid include filter expression" and emits no events on stdout, rather than
+    silently returning all (or no) events.
+    """
     _create_my_task(e2e, 100706)
     result = e2e.run(
         "mngr event my-task --include 'type ==='",

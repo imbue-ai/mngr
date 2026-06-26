@@ -29,11 +29,16 @@ _REMOTE_TIMEOUT_CUSTOM_IMAGE = 240.0
 @pytest.mark.rsync
 @pytest.mark.timeout(120)
 def test_create_provider_modal(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # you can also launch your default agent remotely in Modal:
         mngr create my-task --provider modal
         # see more details below in "CREATING AGENTS REMOTELY" for relevant options
-    """)
+
+    Scope: `mngr create --provider modal` launches the default agent on a
+    Modal-backed host; the new agent appears in `mngr list --provider modal`,
+    confirming it really lives on the Modal provider (not just that create
+    exited 0).
+    """
     result = e2e.run(
         "mngr create my-task --provider modal --no-connect --no-ensure-clean",
         comment="you can also launch your default agent remotely in Modal",
@@ -57,13 +62,18 @@ def test_create_provider_modal(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(660)
 def test_create_modal_no_connect_message(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # you can send an initial message (so you don't have to wait around, eg, while a Modal container starts)
-    mngr create my-task --provider modal --no-connect --message "Speed up one of my tests and make a PR on github"
-    # here we disable the default --connect behavior (because presumably you just wanted to launch that in the background and continue on your way)
-    # and then we also pass in an explicit message for the agent to start working on immediately
-    # the message can also be specified as the contents of a file (by using --message-file instead of --message)
-    """)
+    """Tutorial block:
+        # you can send an initial message (so you don't have to wait around, eg, while a Modal container starts)
+        mngr create my-task --provider modal --no-connect --message "Speed up one of my tests and make a PR on github"
+        # here we disable the default --connect behavior (because presumably you just wanted to launch that in the background and continue on your way)
+        # and then we also pass in an explicit message for the agent to start working on immediately
+        # the message can also be specified as the contents of a file (by using --message-file instead of --message)
+
+    Scope: the `--message` half of the block. `--no-connect --message` creates
+    the agent on Modal without attaching and delivers the initial message to the
+    started agent (create logs "Sending initial message"); the agent then appears
+    in `mngr list --provider modal`.
+    """
     # Use a generous ready timeout because the agent needs to fully start
     # (install Claude Code, authenticate, signal readiness) before the message
     # can be sent. This is slow on fresh Modal hosts (~2-5 min), and even
@@ -113,10 +123,14 @@ def test_create_modal_no_connect_message(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(120)
 def test_create_modal_edit_message(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # you can also edit the message *while the agent is starting up*, which is very handy for making it "feel" instant:
-    mngr create my-task --provider modal --edit-message
-    """)
+    """Tutorial block:
+        # you can also edit the message *while the agent is starting up*, which is very handy for making it "feel" instant:
+        mngr create my-task --provider modal --edit-message
+
+    Scope: `--edit-message` opens $EDITOR in parallel with creation and delivers
+    whatever it composes; with an empty buffer the create reports "no message to
+    send", and the agent is still created on the Modal provider.
+    """
     # --edit-message opens $EDITOR (defaulting to vim) to compose the message.
     # The e2e environment has no interactive editor installed, so point EDITOR
     # at `true`: it exits 0 immediately, leaving the (empty) message buffer
@@ -159,10 +173,14 @@ def test_create_modal_edit_message(e2e: E2eSession) -> None:
 # (on top of remote host creation) to verify the rsync transfer actually landed.
 @pytest.mark.timeout(180)
 def test_create_modal_rsync(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # you can use rsync to transfer extra data as well, beyond just the git data:
-    mngr create my-task --provider modal --rsync --rsync-args "--exclude=node_modules"
-    """)
+    """Tutorial block:
+        # you can use rsync to transfer extra data as well, beyond just the git data:
+        mngr create my-task --provider modal --rsync --rsync-args "--exclude=node_modules"
+
+    Scope: `--rsync` transfers extra (gitignored) data beyond the git contents,
+    while `--rsync-args "--exclude=node_modules"` excludes node_modules; on the
+    host data/extra.txt is present and node_modules is absent.
+    """
     # Seed the source repo with two *gitignored* files so we can prove the actual
     # effect of the flags, not just a 0 exit code. mngr's git transfer carries
     # committed and unclean *tracked* files but not gitignored ones, so only the
@@ -203,13 +221,17 @@ def test_create_modal_rsync(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(180)
 def test_create_modal_passthrough_agent_args(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # one of the coolest features of mngr is the ability to create agents on remote hosts just as easily as you can create them locally:
-    mngr create my-task --provider modal -- --dangerously-skip-permissions --append-system-prompt "Don't ask me any questions!"
-    # that command passes the "--dangerously-skip-permissions" flag to claude because it's safe to do so:
-    # agents running remotely are running in a sandboxed environment where they can't really mess anything up on their local machine (or if they do, it doesn't matter)
-    # because it's running remotely, you might also want something like that system prompt (to tell it not to get blocked on you)
-    """)
+    """Tutorial block:
+        # one of the coolest features of mngr is the ability to create agents on remote hosts just as easily as you can create them locally:
+        mngr create my-task --provider modal -- --dangerously-skip-permissions --append-system-prompt "Don't ask me any questions!"
+        # that command passes the "--dangerously-skip-permissions" flag to claude because it's safe to do so:
+        # agents running remotely are running in a sandboxed environment where they can't really mess anything up on their local machine (or if they do, it doesn't matter)
+        # because it's running remotely, you might also want something like that system prompt (to tell it not to get blocked on you)
+
+    Scope: args after `--` are passed through to the agent (claude), not consumed
+    by mngr; the created agent's recorded launch command carries
+    --dangerously-skip-permissions, --append-system-prompt, and the prompt text.
+    """
     result = e2e.run(
         'mngr create my-task --provider modal --no-connect --no-ensure-clean -- --dangerously-skip-permissions --append-system-prompt "Don\'t ask me any questions!"',
         comment="one of the coolest features of mngr is the ability to create agents on remote hosts",
@@ -240,13 +262,16 @@ def test_create_modal_passthrough_agent_args(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(180)
 def test_create_modal_idle_timeout(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # running agents remotely is really cool because you can create an unlimited number of them, but it comes with some downsides
-    # one of the main downsides is cost--remote hosts aren't free, and if you forget about them, they can rack up a big bill.
-    # mngr makes it really easy to deal with this by automatically shutting down hosts when their agents are idle:
-    mngr create my-task --provider modal --idle-timeout 60
-    # that command shuts down the Modal host (and agent) after 1 minute of inactivity.
-    """)
+    """Tutorial block:
+        # running agents remotely is really cool because you can create an unlimited number of them, but it comes with some downsides
+        # one of the main downsides is cost--remote hosts aren't free, and if you forget about them, they can rack up a big bill.
+        # mngr makes it really easy to deal with this by automatically shutting down hosts when their agents are idle:
+        mngr create my-task --provider modal --idle-timeout 60
+        # that command shuts down the Modal host (and agent) after 1 minute of inactivity.
+
+    Scope: `--idle-timeout 60` configures the Modal host to shut down after 60
+    seconds of inactivity; the listing reports idle_timeout_seconds == 60.
+    """
     result = e2e.run(
         "mngr create my-task --provider modal --idle-timeout 60 --no-connect --no-ensure-clean",
         comment="mngr makes it really easy to deal with this by automatically shutting down hosts when their agents are idle",
@@ -276,12 +301,16 @@ def test_create_modal_idle_timeout(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(120)
 def test_create_modal_idle_mode_ssh(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # You can customize what "inactivity" means by using the --idle-mode flag:
-    mngr create my-task --provider modal --idle-mode "ssh"
-    # that command will only consider agents as "idle" when you are not connected to them
-    # see the idle_detection.md file for more details on idle detection and timeouts
-    """)
+    """Tutorial block:
+        # You can customize what "inactivity" means by using the --idle-mode flag:
+        mngr create my-task --provider modal --idle-mode "ssh"
+        # that command will only consider agents as "idle" when you are not connected to them
+        # see the idle_detection.md file for more details on idle detection and timeouts
+
+    Scope: `--idle-mode "ssh"` sets the host's idle definition to "no SSH
+    sessions connected"; the created command agent runs its sleep and the listing
+    reports idle_mode == ssh.
+    """
     # The tutorial relies on the user's configured default agent type; the
     # isolated test profile has none, so pass an explicit --type. "ssh" idle
     # detection is independent of the agent type, so a lightweight command
@@ -321,10 +350,15 @@ def test_create_modal_idle_mode_ssh(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.timeout(120)
 def test_create_address_syntax_existing_host(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # you can specify which existing host to run on using the address syntax (eg, if you have multiple Modal hosts or SSH servers):
-    mngr create my-task@my-dev-box
-    """)
+    """Tutorial block:
+        # you can specify which existing host to run on using the address syntax (eg, if you have multiple Modal hosts or SSH servers):
+        mngr create my-task@my-dev-box
+
+    Scope: the unhappy path of the `name@host` address syntax. `my-task@my-dev-box`
+    parses the host portion (my-dev-box) and tries to resolve it as an existing
+    host; resolution fails with a non-zero exit and an error naming the unknown
+    host my-dev-box.
+    """
     # --type is supplied explicitly (the tutorial assumes the user has a default
     # agent type configured) so the command gets past agent-type resolution and
     # reaches host resolution -- which is the behavior this test exercises.
@@ -349,13 +383,18 @@ def test_create_address_syntax_existing_host(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(300)
 def test_create_modal_build_args(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # generally though, you'll want to construct a new Modal host for each agent.
-    # build arguments let you customize that new remote host (eg, GPU type, memory, base Docker image for Modal):
-    mngr create my-task --provider modal -b cpu=4 -b memory=16 -b image=python:3.12
-    # see "mngr create --help" for all provider-specific build args
-    # some other useful Modal build args: --region, --timeout, --offline (blocks network), --secret, --cidr-allowlist, --context-dir
-    """)
+    """Tutorial block:
+        # generally though, you'll want to construct a new Modal host for each agent.
+        # build arguments let you customize that new remote host (eg, GPU type, memory, base Docker image for Modal):
+        mngr create my-task --provider modal -b cpu=4 -b memory=16 -b image=python:3.12
+        # see "mngr create --help" for all provider-specific build args
+        # some other useful Modal build args: --region, --timeout, --offline (blocks network), --secret, --cidr-allowlist, --context-dir
+
+    Scope: build args customize the new Modal host -- `-b image=python:3.12`
+    makes Python 3.12 the host interpreter (python --version reports 3.12.x), and
+    `-b cpu=4 -b memory=16` set the recorded host resources (cpu.count 4,
+    memory_gb 16.0).
+    """
     # The tutorial block relies on the user's configured default agent type
     # (stored under `[commands.create] type`, set during install). The isolated
     # e2e profile has no default, so pass `--type claude` explicitly (the
@@ -400,14 +439,19 @@ def test_create_modal_build_args(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(300)
 def test_create_modal_dockerfile_and_context(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # the most important build args for Modal are probably "--file" and "--context-dir",
-    # which let you specify a custom Dockerfile and build context directory (respectively) for building the host environment.
-    # This is how you can get custom dependencies, files, and setup steps on your Modal hosts. For example:
-    mngr create my-task --provider modal -b file=./Dockerfile.agent -b context-dir=./agent-context
-    # that command builds a Modal host using the Dockerfile at ./Dockerfile.agent and the build context at ./agent-context
-    # (which is where the Dockerfile can COPY files from, and also where build args are evaluated from)
-    """)
+    """Tutorial block:
+        # the most important build args for Modal are probably "--file" and "--context-dir",
+        # which let you specify a custom Dockerfile and build context directory (respectively) for building the host environment.
+        # This is how you can get custom dependencies, files, and setup steps on your Modal hosts. For example:
+        mngr create my-task --provider modal -b file=./Dockerfile.agent -b context-dir=./agent-context
+        # that command builds a Modal host using the Dockerfile at ./Dockerfile.agent and the build context at ./agent-context
+        # (which is where the Dockerfile can COPY files from, and also where build args are evaluated from)
+
+    Scope: `-b file=` selects a custom Dockerfile and `-b context-dir=` the build
+    context it COPYs from; the marker COPYed out of ./agent-context is present on
+    the host, proving the host was built from this Dockerfile + context rather
+    than the default image.
+    """
     # Build a context directory containing a marker file, plus a Dockerfile that
     # COPYs that marker out of the context into the image. This exercises *both*
     # build args together exactly as the tutorial describes them: --file selects
@@ -451,11 +495,15 @@ def test_create_modal_dockerfile_and_context(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(240)
 def test_create_named_host_new_host(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # you can name the host using the address syntax:
-    mngr create my-task@my-modal-box.modal --new-host
-    # (--host-name-style and --name-style control auto-generated name styles for hosts and agents respectively)
-    """)
+    """Tutorial block:
+        # you can name the host using the address syntax:
+        mngr create my-task@my-modal-box.modal --new-host
+        # (--host-name-style and --name-style control auto-generated name styles for hosts and agents respectively)
+
+    Scope: the `name@host.provider --new-host` address syntax names the new host;
+    the created agent appears verbatim as my-task@my-modal-box.modal in
+    `mngr list --addrs` (an explicit host name, not an auto-generated one).
+    """
     # The tutorial block relies on the user's default agent type (claude). The
     # isolated e2e profile configures no default, so substitute a lightweight
     # `--type command -- sleep` agent (the same pattern used by
@@ -483,10 +531,14 @@ def test_create_named_host_new_host(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(180)
 def test_create_modal_volume(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # you can mount persistent Modal volumes in order to share data between hosts, or have it be available even when they are offline (or after they are destroyed):
-    mngr create my-task --provider modal -b volume=my-data:/data
-    """)
+    """Tutorial block:
+        # you can mount persistent Modal volumes in order to share data between hosts, or have it be available even when they are offline (or after they are destroyed):
+        mngr create my-task --provider modal -b volume=my-data:/data
+
+    Scope: `-b volume=my-data:/data` mounts a persistent Modal volume at /data;
+    the mount point exists and is writable on the host (a sentinel written to
+    /data reads back).
+    """
     # The tutorial relies on the user's configured default agent type; the
     # isolated e2e environment configures none, so pass an explicit lightweight
     # `command` agent (matching the convention in the rest of the e2e suite).
@@ -518,10 +570,14 @@ def test_create_modal_volume(e2e: E2eSession) -> None:
 # also does a `mngr list` and a `mngr exec` round-trip to verify the work dir.
 @pytest.mark.timeout(180)
 def test_create_modal_target_path(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # you can specify the target path where the agent's work directory will be mounted:
-    mngr create my-task@.modal:/workspace
-    """)
+    """Tutorial block:
+        # you can specify the target path where the agent's work directory will be mounted:
+        mngr create my-task@.modal:/workspace
+
+    Scope: the `@.modal:/workspace` address syntax sets the target path where the
+    work dir is mounted; the agent's recorded work_dir is /workspace and it
+    actually runs there (pwd == /workspace on the host).
+    """
     # --type command -- sleep <N> stands in for the default (claude) agent so
     # the test doesn't need claude installed/authenticated on the remote host;
     # the target-path behavior under test is independent of the agent type.
@@ -558,11 +614,15 @@ def test_create_modal_target_path(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(180)
 def test_create_modal_upload_and_extra_provision_command(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # you can upload files and run custom commands during host provisioning:
         mngr create my-task --provider modal --upload-file ~/.ssh/config:/root/.ssh/config --extra-provision-command "pip install foo"
         # (provision commands run as the host's default user; prefix with sudo to run as root if it is not)
-    """)
+
+    Scope: `--upload-file` places the local file at the requested host path and
+    `--extra-provision-command` runs during provisioning; on the host both the
+    uploaded sentinel and the provision-written marker are present.
+    """
     # `pip install foo` from the tutorial would fail at provision time (no such
     # package), so the test substitutes a harmless command but still exercises
     # the upload-file + extra-provision-command flags end to end.
@@ -612,12 +672,15 @@ def test_create_modal_upload_and_extra_provision_command(e2e: E2eSession) -> Non
 @pytest.mark.rsync
 @pytest.mark.timeout(180)
 def test_create_modal_no_start_on_boot(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # by default, agents are started when a host is booted. This can be disabled:
-    mngr create my-task --provider modal --no-start-on-boot
-    # but it only makes sense to do this if you are running multiple agents on the same host
-    # that's because hosts are automatically stopped when they have no more running agents, so you have to have at least one.
-    """)
+    """Tutorial block:
+        # by default, agents are started when a host is booted. This can be disabled:
+        mngr create my-task --provider modal --no-start-on-boot
+        # but it only makes sense to do this if you are running multiple agents on the same host
+        # that's because hosts are automatically stopped when they have no more running agents, so you have to have at least one.
+
+    Scope: `--no-start-on-boot` persists the agent with start-on-boot disabled;
+    the listing reports start_on_boot is False.
+    """
     # The tutorial block omits an explicit agent type (relying on the user's
     # configured default). The test env has no default type, so substitute the
     # lightweight `command` type (with a stand-in `sleep` command), matching the
@@ -651,11 +714,14 @@ def test_create_modal_no_start_on_boot(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(360)
 def test_create_modal_pass_host_env(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # you can also set host-level environment variables (separate from agent env vars):
-    mngr create my-task --provider modal --pass-host-env MY_VAR
-    # --host-env-file and --pass-host-env work the same as their agent counterparts, and again, you should generally prefer those forms (but if you really need to you can use --host-env to specify host env vars directly)
-    """)
+    """Tutorial block:
+        # you can also set host-level environment variables (separate from agent env vars):
+        mngr create my-task --provider modal --pass-host-env MY_VAR
+        # --host-env-file and --pass-host-env work the same as their agent counterparts, and again, you should generally prefer those forms (but if you really need to you can use --host-env to specify host env vars directly)
+
+    Scope: `--pass-host-env MY_VAR` forwards the variable from the shell into the
+    host env file; exec on the host resolves MY_VAR to its forwarded value.
+    """
     # No default agent type is configured in the isolated test profile, so pass
     # --type command (with a long sleep) to stand in for the tutorial's default
     # agent. This also keeps startup fast: --pass-host-env writes MY_VAR to the
@@ -683,11 +749,15 @@ def test_create_modal_pass_host_env(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(600)
 def test_create_modal_reuse(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # another handy trick is to make the create command "idempotent" so that you don't need to worry about remembering whether you created an agent yet or not:
-    mngr create sisyphus --reuse --provider modal
-    # if that agent already exists, it will be reused (and started) instead of creating a new one. If it doesn't exist, it will be created.
-    """)
+    """Tutorial block:
+        # another handy trick is to make the create command "idempotent" so that you don't need to worry about remembering whether you created an agent yet or not:
+        mngr create sisyphus --reuse --provider modal
+        # if that agent already exists, it will be reused (and started) instead of creating a new one. If it doesn't exist, it will be created.
+
+    Scope: `--reuse` makes create idempotent -- the first run creates the agent on
+    Modal, and a second run reuses the same agent (same agent id and host id)
+    rather than duplicating it (still exactly one agent afterward).
+    """
     # The tutorial relies on a configured default agent type; the isolated e2e
     # environment has none, so stand in with `--type command -- sleep ...` (the
     # same lightweight, auth-free agent type the other create e2e tests use).
@@ -752,10 +822,14 @@ def test_create_modal_reuse(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(180)
 def test_create_modal_basic_recap(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # basic Modal agent (also covered in the CREATING AGENTS REMOTELY section above)
         mngr create my-task --provider modal
-    """)
+
+    Scope: the basic Modal create -- the agent lands on a RUNNING Modal host
+    (host.provider_name == modal, host.state == RUNNING), confirming real
+    provisioning rather than just a 0 exit code.
+    """
     # The tutorial relies on a configured default agent type (`[commands.create]
     # type`), which the isolated e2e environment does not set. Like the rest of
     # the suite's "default agent" blocks, substitute the built-in `command` type
@@ -791,13 +865,17 @@ def test_create_modal_basic_recap(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(240)
 def test_create_modal_cpu_memory_gpu(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # specify CPU, memory, and GPU resources
         mngr create my-task --provider modal -b cpu=4 -b memory=16 -b gpu=A10G
-    """)
+
+    Scope: `-b cpu=4 -b memory=16` set the new Modal host's recorded resources
+    (cpu.count 4, memory_gb 16.0). The block's gpu=A10G is dropped at execution
+    to avoid GPU quota issues, so only the cpu/memory build args are asserted.
+    """
     # GPU=A10G may not be available in the test modal env; drop the gpu arg
     # so the test exercises the cpu+memory build-args without paying for GPU
-    # capacity. Keeps the write_tutorial_block intact.
+    # capacity. The documented tutorial block (in the docstring) keeps gpu=A10G.
     result = e2e.run(
         "mngr create my-task --provider modal -b cpu=4 -b memory=16 --no-connect --no-ensure-clean",
         comment="specify CPU and memory resources (gpu omitted to avoid quota issues)",
@@ -826,10 +904,13 @@ def test_create_modal_cpu_memory_gpu(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(240)
 def test_create_modal_custom_image_base(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # use a custom Docker image as the base
         mngr create my-task --provider modal -b image=python:3.12
-    """)
+
+    Scope: `-b image=python:3.12` uses that image as the host base; `python
+    --version` on the host reports Python 3.12.
+    """
     expect(
         e2e.run(
             "mngr create my-task --provider modal -b image=python:3.12 --no-connect --no-ensure-clean",
@@ -854,10 +935,14 @@ def test_create_modal_custom_image_base(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(240)
 def test_create_modal_custom_dockerfile_only(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # use a custom Dockerfile
         mngr create my-task --provider modal -b file=./Dockerfile.agent
-    """)
+
+    Scope: `-b file=./Dockerfile.agent` builds the host from the custom
+    Dockerfile; the marker baked into the image by that Dockerfile is readable on
+    the host, proving the build did not fall back to the default base image.
+    """
     # Write a Dockerfile that bakes a distinctive marker file into the image.
     # Reading it back from the running host (below) proves the host was actually
     # built from *this* Dockerfile rather than the default Modal base image.
@@ -896,10 +981,14 @@ def test_create_modal_custom_dockerfile_only(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(240)
 def test_create_modal_volume_simple(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # mount a persistent volume for data that survives host destruction
         mngr create my-task --provider modal -b volume=my-data:/data
-    """)
+
+    Scope: `-b volume=my-data:/data` mounts a persistent volume at /data; it is a
+    writable mount (a sentinel reads back, and readlink shows /data resolves
+    elsewhere, i.e. something is mounted there rather than a plain directory).
+    """
     expect(
         e2e.run(
             "mngr create my-task --provider modal -b volume=my-data:/data --no-connect --no-ensure-clean",
@@ -933,10 +1022,14 @@ def test_create_modal_volume_simple(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(240)
 def test_create_modal_idle_timeout_120(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # set an idle timeout to avoid runaway costs
         mngr create my-task --provider modal --idle-timeout 120
-    """)
+
+    Scope: `--idle-timeout 120` applies a 120-second idle timeout to the host
+    (distinct from Modal's 800s provider default); the listing reports
+    idle_timeout_seconds == 120.
+    """
     expect(
         e2e.run(
             "mngr create my-task --provider modal --idle-timeout 120 --no-connect --no-ensure-clean",
@@ -961,10 +1054,14 @@ def test_create_modal_idle_timeout_120(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(240)
 def test_snapshot_create_checkpoint(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # create a snapshot for checkpointing (useful before risky changes)
         mngr snapshot create my-task --name "checkpoint-1"
-    """)
+
+    Scope: `mngr snapshot create --name "checkpoint-1"` creates a named snapshot
+    of the agent's host; the snapshot listing then contains a snapshot named
+    checkpoint-1.
+    """
     # The isolated test profile has no default agent type configured, so the
     # setup create (which the tutorial assumes already happened) passes an
     # explicit --type. A `command` agent running `sleep` stays RUNNING, which
@@ -1000,10 +1097,14 @@ def test_snapshot_create_checkpoint(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(240)
 def test_list_provider_modal(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # list all Modal agents
         mngr list --provider modal
-    """)
+
+    Scope: `mngr list --provider modal` lists Modal agents; a created agent
+    appears on a row attributing it to the modal provider (not merely that the
+    name printed somewhere).
+    """
     # Create a Modal agent first so the listing has a real agent to discover.
     # In a fresh environment the modal provider deliberately short-circuits as
     # empty (it will not bootstrap a Modal environment for read-only commands
@@ -1038,10 +1139,13 @@ def test_list_provider_modal(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(240)
 def test_destroy_all_modal_agents(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # destroy all Modal agents (be careful!)  Useful for cleaning up while prototyping
         mngr list --include 'host.provider == "modal"' --ids | mngr destroy -f -
-    """)
+
+    Scope: the filter+stdin pipeline destroys all Modal agents; a created agent
+    present in the Modal listing before is gone from it after the pipeline runs.
+    """
     # Create a real Modal agent so the destroy-all command has something to act
     # on -- this verifies the filter+stdin pipeline actually destroys agents
     # rather than just succeeding against an empty environment.
@@ -1080,10 +1184,13 @@ def test_destroy_all_modal_agents(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(420)
 def test_create_modal_idle_timeout_60(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # set an idle timeout (in seconds) -- the agent's host will stop after this much inactivity
         mngr create my-task --provider modal --idle-timeout 60
-    """)
+
+    Scope: `--idle-timeout 60` makes the host stop after 60 seconds of
+    inactivity; the listing reports idle_timeout_seconds == 60.
+    """
     # This test does two remote round-trips (create + list) and the create's
     # final "initial snapshot" step is slow and variable in the Modal-in-Modal
     # offload environment, so give create a more generous timeout than the
@@ -1118,7 +1225,7 @@ def test_create_modal_idle_timeout_60(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(180)
 def test_create_modal_idle_mode_ssh_timeout_300(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # control what counts as "activity" with --idle-mode:
         #   "agent" (default) -- idle when the agent process is idle
         #   "ssh" -- idle when no SSH sessions are connected
@@ -1126,7 +1233,11 @@ def test_create_modal_idle_mode_ssh_timeout_300(e2e: E2eSession) -> None:
         #   ...
         # see the idle_detection.md file for more details on idle detection strategies
         mngr create my-task --provider modal --idle-mode ssh --idle-timeout 300
-    """)
+
+    Scope: `--idle-mode ssh --idle-timeout 300` together set ssh idle detection
+    with a 300-second timeout; the listing reports idle_mode == ssh and
+    idle_timeout_seconds == 300.
+    """
     # The tutorial block relies on the user's configured default agent type;
     # the isolated e2e env has none, so we pass an explicit lightweight
     # `--type command -- sleep <N>` (matching the convention used by the other
@@ -1175,10 +1286,14 @@ def test_create_modal_idle_mode_ssh_timeout_300(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(240)
 def test_create_modal_idle_mode_run(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # for long-running scripts, "run" mode stops the host when the script finishes
         mngr create my-task --provider modal --type command --idle-mode run --idle-timeout 60 -- python long_job.py
-    """)
+
+    Scope: `--idle-mode run` (with `--type command`) stops the host when the main
+    process exits; the created command agent runs the substituted long sleep and
+    the listing reports idle_mode == run and idle_timeout_seconds == 60.
+    """
     # Substitute `sleep` for the missing long_job.py; the test wants to
     # verify --idle-mode run is accepted with --type command. The long sleep
     # never exits, so under "run" idle mode the host stays up and `mngr list`
@@ -1228,7 +1343,7 @@ def test_create_modal_idle_mode_run(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(360)
 def test_create_modal_multiple_agents_one_host(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # create a first agent on a named host
         mngr create agent-1@shared-host.modal --provider modal --new-host
         # create additional agents on the same host using the address syntax
@@ -1240,7 +1355,13 @@ def test_create_modal_multiple_agents_one_host(e2e: E2eSession) -> None:
         # stop one agent without affecting the others
         mngr stop agent-1
         # the host stays running as long as at least one agent is active.
-    """)
+
+    Scope: agent-1 is created on a new named host (`@shared-host.modal
+    --new-host`) and agent-2 joins it via the same address; `mngr list --fields
+    name,state,host.name` shows both on shared-host, and `mngr stop agent-1`
+    stops only agent-1 (it goes STOPPED) while agent-2 stays active and keeps the
+    shared host running.
+    """
     # The tutorial uses the configured default agent type; the test substitutes
     # the lightweight built-in `command` type running a long sleep so the agents
     # stay active (keeping the shared host up) without a real agent startup.
@@ -1293,10 +1414,14 @@ def test_create_modal_multiple_agents_one_host(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(180)
 def test_create_modal_upload_only(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # upload a file to the agent's host during creation
         mngr create my-task --provider modal --upload-file ~/.ssh/config:/root/.ssh/config
-    """)
+
+    Scope: `--upload-file ~/.ssh/config:/root/.ssh/config` uploads the local file
+    to the target host path during creation; its contents are present at that
+    path on the host.
+    """
     # The tutorial relies on a configured default agent type; the test pins
     # --type command (a lightweight sleep agent) so it doesn't pay claude
     # startup time, matching the substitution used by the other modal tests.
@@ -1332,10 +1457,14 @@ def test_create_modal_upload_only(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(240)
 def test_create_modal_provision_pip_install(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # run a setup command during host provisioning
         mngr create my-task --provider modal --extra-provision-command "pip install numpy pandas"
-    """)
+
+    Scope: `--extra-provision-command` runs a setup command during host
+    provisioning (the pip install is substituted for a quick marker); the marker
+    the command wrote is present on the host.
+    """
     # `pip install numpy pandas` from the tutorial would pull large packages at
     # provision time, so the test substitutes a quick command that drops a marker
     # file. Reading that marker back via `mngr exec` (below) proves the
@@ -1370,10 +1499,14 @@ def test_create_modal_provision_pip_install(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(240)
 def test_create_modal_provision_sudo_apt(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # run a command as root during provisioning (if your default user is not root, assumes passwordless sudo for that user)
         mngr create my-task --provider modal --extra-provision-command "sudo apt-get update && apt-get install -y vim"
-    """)
+
+    Scope: an `--extra-provision-command` runs with root privileges during
+    provisioning (the apt command is substituted for recording the effective
+    uid); the marker shows it ran as uid 0.
+    """
     # The tutorial block demonstrates running a provisioning command with root
     # privileges. The Modal default user is already root (ssh_user="root") and the
     # default image ships no `sudo`, so we substitute the slow, network-heavy
@@ -1413,10 +1546,14 @@ def test_create_modal_provision_sudo_apt(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(240)
 def test_create_modal_provision_append_file(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block(r"""
+    r"""Tutorial block:
         # append content to a file on the host using a provision command
         mngr create my-task --provider modal --extra-provision-command "echo 'export PATH=/opt/bin:\$PATH' >> /root/.bashrc"
-    """)
+
+    Scope: an `--extra-provision-command` appends content to a file on the host
+    (targeting a throwaway path instead of /root/.bashrc); the appended line is
+    present in that file on the host.
+    """
     # The tutorial block relies on the user's configured default agent type;
     # like every other e2e create test we pass --type command -- sleep so the
     # test is self-contained and keeps the agent alive for the exec-based
@@ -1451,13 +1588,18 @@ def test_create_modal_provision_append_file(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(300)
 def test_create_modal_combined_setup_steps(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block(r"""
+    """Tutorial block:
         # combine multiple setup steps (--extra-provision-command is repeatable and runs in order)
         mngr create my-task --provider modal \
           --upload-file ./requirements.txt:/workspace/requirements.txt \
           --extra-provision-command "apt-get update && apt-get install -y build-essential" \
           --extra-provision-command "pip install -r /workspace/requirements.txt"
-    """)
+
+    Scope: a single create combines `--upload-file` with repeated
+    `--extra-provision-command` flags, which run in the order given (apt/pip
+    substituted for quick markers); on the host the uploaded requirements.txt is
+    present and the two provision steps' markers appear in order.
+    """
     expect(e2e.run("echo 'requests==2.32.0' > requirements.txt", comment="write requirements.txt")).to_succeed()
     # Substitute the slow apt-get/pip steps with quick provision commands that each
     # append a marker line to a host file. This keeps the test fast while making

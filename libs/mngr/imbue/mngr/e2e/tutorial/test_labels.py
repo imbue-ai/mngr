@@ -13,10 +13,14 @@ from imbue.skitwright.expect import expect
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_create_with_multiple_labels(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # create agents with labels for organization
         mngr create my-task --label team=backend --label priority=high
-    """)
+
+    Scope: two `--label` flags on a single `mngr create` each attach a separate
+    agent label; both appear on the one created agent in `mngr list --format
+    json` (labels.team == backend and labels.priority == high).
+    """
     expect(
         e2e.run(
             "mngr create my-task --label team=backend --label priority=high --type command --no-ensure-clean --no-connect -- sleep 100930",
@@ -40,10 +44,14 @@ def test_create_with_multiple_labels(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
 def test_list_filter_by_label_cel(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # list agents filtered by label using CEL expressions
         mngr list --include 'labels.priority == "high"'
-    """)
+
+    Scope: `mngr list --include` with a CEL label expression keeps agents whose
+    labels.priority == "high" and drops the rest (high-pri appears in the
+    output, low-pri does not).
+    """
     # Set up two agents with different priority labels so the CEL filter has
     # something to both include and exclude. These run on the local provider:
     # the command never creates Modal state, so it does not invoke the Modal
@@ -76,10 +84,16 @@ def test_list_filter_by_label_cel(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
 def test_list_combine_include_filters(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # combine multiple filters (AND logic for --include, all must match)
         mngr list --include 'labels.team == "backend"' --include 'state == "RUNNING"'
-    """)
+
+    Scope: multiple `--include` filters AND together, so every returned agent
+    must match both labels.team == backend AND state == RUNNING. A backend
+    RUNNING agent survives, while a frontend agent (fails the team clause) and a
+    stopped backend agent (fails the state clause) are both dropped; a positive
+    backend+STOPPED combination returns exactly the stopped backend agent.
+    """
     # Set up agents that exercise both clauses of the AND filter:
     #   - backend-running:  labels.team == backend, still running
     #   - frontend-running: labels.team == frontend (fails the team clause)
@@ -144,10 +158,14 @@ def test_list_combine_include_filters(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 def test_list_exclude_filter(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # exclude agents matching a filter
         mngr list --exclude 'labels.team == "frontend"'
-    """)
+
+    Scope: `mngr list --exclude` with a CEL expression drops agents matching
+    labels.team == "frontend" and keeps the rest (frontend-agent excluded,
+    backend-agent remains), confirmed both in the table and in `--format json`.
+    """
     # Set up agents on two different teams so the exclusion is actually
     # observable (an empty list would let any filter "succeed" vacuously).
     expect(
@@ -189,10 +207,14 @@ def test_list_exclude_filter(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 def test_list_combine_exclude_filters(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # combine multiple exclusion filters (OR logic for --exclude, any can match)
         mngr list --exclude 'labels.team == "frontend"' --exclude 'labels.team == "devops"'
-    """)
+
+    Scope: multiple `--exclude` filters OR together, so an agent is dropped if it
+    matches ANY of them. Both the frontend and devops agents are excluded while
+    the backend agent remains.
+    """
     # Create one agent per team so the OR-logic exclusion actually has agents to act on.
     for index, (name, team) in enumerate(
         (("frontend-svc", "frontend"), ("devops-svc", "devops"), ("backend-svc", "backend"))
@@ -221,10 +243,15 @@ def test_list_combine_exclude_filters(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_list_compound_cel(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # you can also just do combined filters directly in the CEL expression:
         mngr list --include 'labels.team == "backend" && state == "RUNNING"'
-    """)
+
+    Scope: a single `--include` CEL expression can combine clauses with `&&`, and
+    both predicates are enforced. The backend agent passes the label clause on
+    its own but, being idle (WAITING), is dropped by the conjunction with state
+    == "RUNNING"; the frontend agent is dropped by the label clause.
+    """
     # Set up labelled agents so the compound expression has data to act on. The
     # filter keeps only agents that are BOTH labelled team=backend AND in the
     # RUNNING state. Use local command agents (sleeping) -- they are fast and
@@ -274,10 +301,14 @@ def test_list_compound_cel(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
 def test_message_filtered_backend(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # use filters with other commands: message only backend agents by passing "-" to have the list of matching agents piped in via stdin
         mngr list --include 'labels.team == "backend"' --ids | mngr message - -m "Please run the backend test suite"
-    """)
+
+    Scope: piping `mngr list ... --ids` into `mngr message -` reads the matching
+    ids from stdin, so the message targets only the filtered (backend) agents --
+    the backend agent is messaged and the frontend agent is skipped.
+    """
     # Create one backend-labeled agent (the intended message target) and one
     # frontend-labeled agent (which the filter must exclude) so the filter+stdin
     # pipeline has real agents to act on and we can verify it targets only the
@@ -306,10 +337,16 @@ def test_message_filtered_backend(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(180)
 def test_exec_filtered_remote_disk(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # use filters with exec: check disk usage on remote agents only
         mngr list --include 'host.provider == "modal"' --ids | mngr exec - "df -h /workspace"
-    """)
+
+    Scope: piping `mngr list --include 'host.provider == "modal"' --ids` into
+    `mngr exec -` runs the command only on the remote Modal agents read from
+    stdin; `df -h /workspace` actually executes on the remote host (output shows
+    the df header "Filesystem"/"Mounted on" and a per-agent success line for the
+    Modal agent).
+    """
     # Create a real Modal agent so the host.provider filter has something to
     # match and the exec actually runs on a remote host (df -h /workspace).
     # The work directory is mounted at /workspace (via --target-path) so the
@@ -341,10 +378,15 @@ def test_exec_filtered_remote_disk(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 def test_destroy_filtered_dry_run(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # use filters with destroy: clean up all stopped agents for a team
         mngr list --include 'labels.team == "backend"' --include 'state == "STOPPED"' --ids | mngr destroy - --force --dry-run
-    """)
+
+    Scope: piping a filtered `mngr list ... --ids` into `mngr destroy - --force
+    --dry-run` previews the matched stopped backend agent (it appears in the
+    output), but `--dry-run` performs no deletion -- the agent still exists
+    (STOPPED) afterward.
+    """
     # Set up a stopped, backend-labeled agent so the filter has a concrete
     # target to preview. A local command agent is sufficient here -- the
     # dry-run never touches a remote provider, so this test is not marked
@@ -377,10 +419,15 @@ def test_destroy_filtered_dry_run(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 def test_list_jq_filter(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # you can also just list agents by filtering using jq:
         mngr list --format json | jq '.agents[] | select(.labels.priority == "high")'
-    """)
+
+    Scope: `mngr list --format json` emits valid JSON whose `.agents[]` can be
+    filtered with jq; the `mngr list --format json | jq '.agents[] |
+    select(.labels.priority == "high")'` pipeline exits 0 (jq parses the output
+    without error).
+    """
     expect(
         e2e.run(
             "mngr list --format json | jq '.agents[] | select(.labels.priority == \"high\")'",
@@ -394,10 +441,15 @@ def test_list_jq_filter(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
 def test_list_jsonl_jq_stream(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # or even stream the filters with jq by using jsonl:
         mngr list --format jsonl | jq --unbuffered 'select(.labels.priority == "high")'
-    """)
+
+    Scope: `mngr list --format jsonl` emits one JSON object per line that jq can
+    stream-filter; piping through `jq --unbuffered 'select(.labels.priority ==
+    "high")'` keeps the high-priority agent line and drops the low-priority one
+    (high-task present, low-task absent).
+    """
     # The LABELS tutorial section first creates labeled agents and then filters
     # them. Seed two agents with different priority labels so the streaming jq
     # filter has a real line to select (priority=high) and a real line to drop

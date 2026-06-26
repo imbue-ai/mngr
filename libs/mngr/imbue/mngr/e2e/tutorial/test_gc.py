@@ -19,10 +19,14 @@ _REMOTE_TIMEOUT = 120.0
 @pytest.mark.rsync
 @pytest.mark.timeout(240)
 def test_gc_default(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # garbage collect all unused resources
         mngr gc
-    """)
+
+    Scope: `mngr gc` succeeds and reports a "Garbage Collection Results"
+    summary; gc only reclaims *unused* resources, so a still-active agent and
+    its Modal host survive the run (the agent is still listed afterwards).
+    """
     # `mngr gc` only reaches out to a provider once that provider's environment
     # exists: the Modal backend disables itself (raising ProviderEmptyError)
     # until its per-user environment has been bootstrapped, so gc against a
@@ -54,10 +58,14 @@ def test_gc_default(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(240)
 def test_gc_dry_run(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # if you want to see what would be cleaned before actually running garbage collection
         mngr gc --dry-run
-    """)
+
+    Scope: `mngr gc --dry-run` succeeds and announces itself as a dry run
+    ("Garbage Collection (Dry Run)", not a real cleanup), and changes nothing --
+    the active agent and its Modal host are still present after the run.
+    """
     # Like the other gc tests in this file, `mngr gc --dry-run` only reaches a
     # provider once that provider's environment exists: the Modal backend
     # disables itself (raising ProviderEmptyError) until its per-user
@@ -91,10 +99,14 @@ def test_gc_dry_run(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(300)
 def test_gc_provider_modal(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # garbage collect for a specific provider only (repeatable if you want multiple providers)
         mngr gc --provider modal
-    """)
+
+    Scope: `mngr gc --provider modal` succeeds and scans the Modal provider; an
+    active Modal agent's machine is in use, so gc must not tear it down -- it is
+    still listed in `mngr list --format json` afterwards.
+    """
     # The tutorial reaches this block after Modal has already been used, so a
     # Modal environment exists for gc to act against. Each e2e test runs in an
     # isolated host dir with a fresh (non-existent) Modal environment, so we
@@ -128,13 +140,18 @@ def test_gc_provider_modal(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_gc_background_watch(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # if you wanted, you could disable automatic garbage collection on destroy by setting the appropriate setting:
         mngr config set commands.destroy.gc false
         # then make sure you constantly run gc in the background (this runs it once every 60 seconds)
         watch -n60 mngr gc
         # this would have the effect of making your calls to "mngr destroy" somewhat faster, at the cost of needing to have this background process running
-    """)
+
+    Scope: covers the two commands of the block -- `mngr config set
+    commands.destroy.gc false` succeeds (disabling automatic gc on destroy), and
+    `watch -n60 mngr gc` can start to run gc in the background (capped with
+    `timeout 1` since watch would otherwise block indefinitely).
+    """
     expect(
         e2e.run(
             "mngr config set commands.destroy.gc false",

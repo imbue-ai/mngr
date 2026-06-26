@@ -66,6 +66,13 @@ def test_extract_tutorial_block_from_docstring() -> None:
     assert _extract_tutorial_block(body) == "    # test foo\n    mngr foo"
 
 
+def test_extract_tutorial_block_from_raw_docstring() -> None:
+    # Raw docstrings (r"""...""") are used when the block contains a backslash
+    # (e.g. a shell \$PATH); the extractor must recognize the r prefix.
+    body = 'r"""Tutorial block:\n    mngr create --cmd "echo \\$PATH"\n\nScope: prints PATH.\n"""\n    pass'
+    assert _extract_tutorial_block(body) == r'    mngr create --cmd "echo \$PATH"'
+
+
 def test_extract_tutorial_block_absent_returns_empty() -> None:
     body = dedent("""\
             \"\"\"Scope: a non-tutorial test with no block.\"\"\"

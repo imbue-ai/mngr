@@ -75,9 +75,13 @@ def _extract_docstring(body: str) -> str | None:
     indentation of the remaining lines is stripped.
     """
     stripped = body.lstrip()
-    for quote in ('"""', "'''"):
-        if stripped.startswith(quote):
-            rest = stripped[len(quote) :]
+    # Raw-prefixed forms must be checked before the plain quotes so a docstring
+    # like ``r"""..."""`` (used when the block contains backslashes, e.g. a
+    # shell ``\$PATH``) is recognized rather than mistaken for non-docstring code.
+    for prefix in ('r"""', "r'''", 'R"""', "R'''", '"""', "'''"):
+        if stripped.startswith(prefix):
+            quote = prefix[-3:]
+            rest = stripped[len(prefix) :]
             end = rest.find(quote)
             if end == -1:
                 return None
