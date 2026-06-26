@@ -149,6 +149,24 @@ LAUNCH_BACKEND_TIMEOUT = 120
 # Canned slack-mock body the agent should quote back.
 CANNED_BODY = "CI MOCK: greetings from the localhost slack mock."
 
+# Sending a chat message only auto-scrolls to the new row when the transcript
+# was already pinned to the bottom (minds-v0.3.4 behavior); a view left scrolled
+# up stays put -- e.g. after a goto()/reload() re-renders the chat. The
+# transcript also virtualizes off-screen rows, so a reply in an unmounted row
+# below the fold is absent from document.body.innerText. Scroll every
+# .app-content to its tail before reading the transcript so the tail rows mount.
+_SCROLL_CHAT_TO_TAIL_JS = (
+    "for (const el of document.querySelectorAll('.app-content')) { el.scrollTop = el.scrollHeight; }"
+)
+
+
+def _wait_for_chat_text_js(condition: str) -> str:
+    """Build a `wait_for_function` body that scrolls the (virtualized) transcript
+    to its tail each poll, then evaluates `condition` against the now-mounted
+    text. Use for any wait that reads chat-reply content."""
+    return f"() => {{ {_SCROLL_CHAT_TO_TAIL_JS} return {condition}; }}"
+
+
 SLACK_PROMPT = (
     "Please read the most recent message from any Slack channel using a "
     "read-only Slack tool. Don't post anything. Then tell me here in chat "
@@ -826,12 +844,12 @@ async def _create_workspace_and_first_message(
     await inp.press("Enter")
     with contextlib.suppress(Exception):
         await win.wait_for_function(
-            f"document.body.innerText.includes({FIRST_PROMPT!r})",
+            _wait_for_chat_text_js(f"document.body.innerText.includes({FIRST_PROMPT!r})"),
             timeout=10_000,
         )
     await snap_page(win, snaps.msg_sent)
     await win.wait_for_function(
-        f"(document.body.innerText.toLowerCase().match(/{FIRST_EXPECT}/g) || []).length >= 2",
+        _wait_for_chat_text_js(f"(document.body.innerText.toLowerCase().match(/{FIRST_EXPECT}/g) || []).length >= 2"),
         timeout=REPLY_TIMEOUT * 1000,
     )
     await asyncio.sleep(1)
@@ -870,12 +888,12 @@ async def _send_followup_and_verify(
     await inp.press("Enter")
     with contextlib.suppress(Exception):
         await win.wait_for_function(
-            f"document.body.innerText.includes({prompt!r})",
+            _wait_for_chat_text_js(f"document.body.innerText.includes({prompt!r})"),
             timeout=10_000,
         )
     await snap_page(win, snap_sent)
     await win.wait_for_function(
-        f"(document.body.innerText.toLowerCase().match(/{expect_token}/g) || []).length >= 2",
+        _wait_for_chat_text_js(f"(document.body.innerText.toLowerCase().match(/{expect_token}/g) || []).length >= 2"),
         timeout=REPLY_TIMEOUT * 1000,
     )
     await asyncio.sleep(1)
@@ -1094,6 +1112,8 @@ async def amain() -> int:
             logger.info("=== iter 15: reload W1 chat, verify history persists ===")
             await win.reload(wait_until="domcontentloaded")
             await asyncio.sleep(2)
+            with contextlib.suppress(Exception):
+                await win.evaluate(f"() => {{ {_SCROLL_CHAT_TO_TAIL_JS} }}")
             body_after_reload = await win.evaluate("document.body.innerText")
             pong_count = body_after_reload.lower().count(FIRST_EXPECT.lower())
             if pong_count < 2:
@@ -1236,16 +1256,9 @@ async def amain() -> int:
                     chat_now = await find_chat_window(ctx)
                     if chat_now is not None:
                         win = chat_now
-                    # Scroll the transcript to the live tail before reading it, as a
-                    # user reading the latest reply would. The chat virtualizes
-                    # off-screen rows, so a reply rendered below the fold (e.g. the
-                    # view was not pinned to the bottom when it arrived) is absent
-                    # from document.body.innerText until the viewport is at the tail.
+                    # Scroll the transcript to the live tail before reading it.
                     with contextlib.suppress(Exception):
-                        await win.evaluate(
-                            "() => { for (const el of document.querySelectorAll('.app-content')) "
-                            "{ el.scrollTop = el.scrollHeight; } }"
-                        )
+                        await win.evaluate(f"() => {{ {_SCROLL_CHAT_TO_TAIL_JS} }}")
                     # Check for canned body in chat (PASS).
                     body = await win.evaluate("document.body.innerText")
                     if CANNED_BODY.lower() in body.lower() and approval_stage >= 3:
