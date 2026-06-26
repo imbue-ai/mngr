@@ -671,8 +671,6 @@ def test_create_form_submit_auto_names_next_mind(tmp_path: Path) -> None:
     agent_creator.wait_for_all()
 
 
-
-
 def test_create_form_submit_rejects_invalid_host_name(tmp_path: Path) -> None:
     """POST /create with a host_name that fails HostName validation re-renders the form with an error."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
