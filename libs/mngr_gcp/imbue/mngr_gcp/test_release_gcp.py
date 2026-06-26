@@ -265,6 +265,14 @@ def test_provider_release_trip1(
     gcp_release_test_project: str,
     _gcp_release_test_firewall_prepared: None,
 ) -> None:
+    """Drive the shared Trip 1 lifecycle arc against a real GCE instance for the given isolation mode.
+
+    Provisions a real GCE host via ``mngr create``, then exercises the full provider
+    lifecycle (stop/start, exec, sketchy-kill, gc) and asserts each step against the live
+    cloud API; the assertions fail if any lifecycle operation is a no-op (e.g. ``mngr stop``
+    leaving the VM running, or gc not reaping the orphan). Parametrized over CONTAINER and
+    NONE isolation so both the Docker-container and bare-OS placements are covered.
+    """
     run_provider_release_trip1(
         _GcpReleaseProfile(gcp_release_client, isolation, gcp_release_test_project), tmp_path, temp_git_repo
     )
@@ -280,6 +288,14 @@ def test_provider_release_trip2(
     gcp_release_test_project: str,
     _gcp_release_test_firewall_prepared: None,
 ) -> None:
+    """Drive the shared Trip 2 idle-auto-shutdown contract against a real GCE instance.
+
+    Creates a GCE host with a short idle timeout and polls the live GCE API until the
+    instance genuinely reaches TERMINATED (billing actually stops), then asserts a marker
+    written before shutdown survives ``mngr start`` and the VM is running again. The probe
+    fails if auto-shutdown never stops the VM or if resume does not restore the stopped host.
+    Parametrized over CONTAINER and NONE isolation.
+    """
     run_provider_release_trip2(
         _GcpReleaseProfile(gcp_release_client, isolation, gcp_release_test_project), tmp_path, temp_git_repo
     )
@@ -295,6 +311,13 @@ def test_provider_release_trip3(
     gcp_release_test_project: str,
     _gcp_release_test_firewall_prepared: None,
 ) -> None:
+    """Drive the shared Trip 3 snapshot contract against real GCE snapshots.
+
+    Only the CONTAINER shape has snapshots here (``docker commit``); the NONE shape has none, so
+    the trip skips it. For CONTAINER, asserts the documented non-portability divergence: the
+    snapshot record is *gone* after ``mngr destroy`` (the assertion flips loudly the moment GCP
+    container snapshots become portable). Parametrized over CONTAINER and NONE isolation.
+    """
     run_provider_release_trip3(
         _GcpReleaseProfile(gcp_release_client, isolation, gcp_release_test_project), tmp_path, temp_git_repo
     )
@@ -306,6 +329,14 @@ def test_provider_release_trip4(
     gcp_release_client: GcpVpsClient,
     gcp_release_test_project: str,
 ) -> None:
+    """Drive the shared Trip 4 error-classification contract for GCP -- a no-boot CLI exercise.
+
+    Asserts ``mngr create`` surfaces the right error class and curated help without provisioning
+    anything: with ADC made unresolvable it must raise the contract ``ProviderUnavailableError``
+    ("is not available") carrying GCP's curated ``gcloud auth application-default login`` help,
+    and a ``--vps-*`` build arg must fail synchronously with the migration hint before any
+    network call. The assertions fail if the CLI swallows the error or returns the wrong class.
+    """
     # No-boot CLI error-classification trip: not parametrized over isolation (the error paths are
     # isolation-agnostic) and no ``rsync`` mark (it never provisions a host). No firewall-prepare
     # dependency either -- nothing is created.
@@ -334,5 +365,12 @@ def gcp_release_client(gcp_release_test_project: str) -> GcpVpsClient:
 
 
 def test_api_client_list_instances_does_not_error(gcp_release_client: GcpVpsClient) -> None:
+    """Smoke-test that a real, authenticated ``list_instances`` call against GCE returns a list.
+
+    Exercises the live Compute API read path end to end (real credentials, real network call):
+    the assertion fails if the client cannot authenticate or the call raises instead of
+    returning a list. It does not assert on contents -- the project may legitimately have no
+    instances -- so it only proves the read-only API path works.
+    """
     instances = gcp_release_client.list_instances()
     assert isinstance(instances, list)

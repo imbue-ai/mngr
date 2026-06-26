@@ -32,10 +32,14 @@ def _create_modal_my_task(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(240)
 def test_snapshot_create(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # create a snapshot of an agent's host
         mngr snapshot create my-task
-    """)
+
+    Scope: `mngr snapshot create my-task` records a new snapshot of the agent's
+    host, reporting a concrete snapshot id ("Created snapshot <id> for host ..."),
+    and that id then appears in `mngr snapshot list my-task`.
+    """
     _create_modal_my_task(e2e)
     create_result = e2e.run("mngr snapshot create my-task", comment="create a snapshot of an agent's host")
     expect(create_result).to_succeed()
@@ -55,10 +59,14 @@ def test_snapshot_create(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(240)
 def test_snapshot_create_short_form(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # short form
         mngr snap create my-task
-    """)
+
+    Scope: `snap` is the short-form alias for `snapshot`. `mngr snap create
+    my-task` actually creates one snapshot (reports "Created 1 snapshot(s)" and a
+    concrete id), and that id then appears in `mngr snapshot list my-task`.
+    """
     _create_modal_my_task(e2e)
     # `snap` is the short-form alias for `snapshot`. Verify it actually creates a
     # snapshot rather than merely exiting cleanly.
@@ -80,10 +88,13 @@ def test_snapshot_create_short_form(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(240)
 def test_snapshot_create_named(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # create a snapshot with a descriptive name
         mngr snapshot create my-task --name "before-refactor"
-    """)
+
+    Scope: `--name` attaches the given descriptive name to the new snapshot, so
+    the snapshot shows up under "before-refactor" in `mngr snapshot list my-task`.
+    """
     _create_modal_my_task(e2e)
     expect(
         e2e.run(
@@ -109,10 +120,15 @@ def test_snapshot_create_named(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(240)
 def test_snapshot_create_all_via_stdin(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # snapshot all agents' hosts
         mngr list --ids | mngr snapshot create -
-    """)
+
+    Scope: `snapshot create -` reads host/agent ids from stdin, so piping
+    `mngr list --ids` into it snapshots every listed agent's host -- it resolves
+    my-task ("Created snapshot ... my-task"), and that snapshot persists so a
+    fresh `mngr snapshot list my-task --format json` reports count >= 1.
+    """
     _create_modal_my_task(e2e)
     # Run the tutorial command verbatim: list every agent's host id and pipe it
     # into `snapshot create -`, which reads the ids from stdin.
@@ -136,10 +152,13 @@ def test_snapshot_create_all_via_stdin(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 def test_snapshot_list(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # list snapshots for all running agents
         mngr list --ids | mngr snapshot list -
-    """)
+
+    Scope: `snapshot list -` reads host/agent ids from stdin, so piping
+    `mngr list --ids` into it lists snapshots across all running agents and exits 0.
+    """
     expect(
         e2e.run("mngr list --ids | mngr snapshot list -", comment="list snapshots for all running agents")
     ).to_succeed()
@@ -150,10 +169,14 @@ def test_snapshot_list(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(180)
 def test_snapshot_list_for_agent(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # list snapshots for a specific agent's host
         mngr snapshot list my-task
-    """)
+
+    Scope: `mngr snapshot list my-task` lists snapshots scoped to that one agent's
+    host as a table -- the header columns (ID, NAME) plus the automatic "initial"
+    snapshot row that creating a modal host records.
+    """
     _create_modal_my_task(e2e)
     result = e2e.run("mngr snapshot list my-task", comment="list snapshots for a specific agent's host")
     expect(result).to_succeed()
@@ -170,10 +193,14 @@ def test_snapshot_list_for_agent(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(240)
 def test_snapshot_list_limit(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # limit the number of snapshots shown
         mngr snapshot list my-task --limit 5
-    """)
+
+    Scope: `--limit N` truncates the snapshot listing to at most N snapshots. With
+    >= 2 snapshots present, a generous `--limit 5` succeeds and `--limit 1` reports
+    exactly one snapshot, fewer than the unlimited listing.
+    """
     _create_modal_my_task(e2e)
     # Creating the modal host already produced an automatic "initial" snapshot;
     # add a second one so that --limit actually has more than one snapshot to
@@ -204,10 +231,14 @@ def test_snapshot_list_limit(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 def test_snapshot_destroy_by_id_fictional(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # destroy a specific snapshot
         mngr snapshot destroy my-task --snapshot snap-123abc
-    """)
+
+    Scope: `--snapshot <id>` targets one specific snapshot for destruction. With a
+    fictional id, mngr parses the flag and either exits non-zero or reports the
+    snapshot is "not found" rather than crashing.
+    """
     # snap-123abc is fictional; verify mngr parses the flag and exits cleanly
     # with an error rather than crashing.
     result = e2e.run(
@@ -222,10 +253,15 @@ def test_snapshot_destroy_by_id_fictional(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(300)
 def test_snapshot_destroy_all_for_agent(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # destroy all snapshots for an agent's host
         mngr snapshot destroy my-task --all-snapshots --force
-    """)
+
+    Scope: `--all-snapshots --force` destroys every snapshot for the agent's host
+    without prompting. Starting from a host that has snapshots, the command reports
+    "Destroyed" and afterwards `mngr snapshot list my-task` shows "No snapshots
+    found".
+    """
     _create_modal_my_task(e2e)
     # Create an explicit snapshot so there is at least one concrete snapshot to
     # destroy (the host also gets an automatic "initial" snapshot on create).
@@ -253,10 +289,14 @@ def test_snapshot_destroy_all_for_agent(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(300)
 def test_snapshot_destroy_dry_run(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # dry-run to see what would be destroyed
         mngr snapshot destroy my-task --all-snapshots --dry-run
-    """)
+
+    Scope: `--dry-run` previews the `--all-snapshots` destroy without performing
+    it -- it reports "Would destroy" and names every existing snapshot id, yet
+    leaves all of them in place (the snapshot set is unchanged afterwards).
+    """
     _create_modal_my_task(e2e)
     # Create a snapshot so the dry-run has something concrete to report on.
     expect(e2e.run("mngr snapshot create my-task", comment="create a snapshot to preview")).to_succeed()
