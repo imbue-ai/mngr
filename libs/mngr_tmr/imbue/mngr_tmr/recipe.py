@@ -162,11 +162,14 @@ class TestMapReduceRecipe(MapReduceRecipe, FrozenModel):
         ]
 
     def build_mapper_prompt(self, ctx: MapReduceContext, task: MapReduceTask) -> str:
-        # Append the e2e run-name flag so each agent's per-try artifacts land
-        # under .test_output/e2e/tmr_<run>_try_N/ rather than colliding with
-        # ad-hoc local pytest runs.
-        flags = self.testing_flags + ("--mngr-e2e-run-name", f"{self.name}_{ctx.run_name}")
-        return build_test_agent_prompt(task.id, flags)
+        # The e2e run-name flag (which lands per-try artifacts under
+        # .test_output/e2e/tmr_<run>_try_N/) is registered only by the mngr e2e
+        # conftest, so it is valid only for e2e tests. Other release tests (e.g.
+        # install/docker/cli, or the per-provider packages) would error on an
+        # unrecognized argument, so only e2e tests get it.
+        is_e2e = "/e2e/" in task.id
+        e2e_run_name = f"{self.name}_{ctx.run_name}" if is_e2e else None
+        return build_test_agent_prompt(task.id, self.testing_flags, e2e_run_name)
 
     def build_reducer_prompt(self, ctx: MapReduceContext) -> str:
         return build_integrator_prompt()

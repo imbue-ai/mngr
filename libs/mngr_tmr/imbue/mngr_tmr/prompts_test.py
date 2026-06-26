@@ -26,6 +26,28 @@ def test_build_agent_prompt_includes_pytest_flags() -> None:
     assert "-m release" in prompt
 
 
+def test_build_agent_prompt_is_docstring_anchored() -> None:
+    # The generic prompt anchors scope on the docstring, not the tutorial block.
+    prompt = build_test_agent_prompt("tests/test_x.py::test_y", ())
+    assert "docstring" in prompt.lower()
+
+
+def test_build_agent_prompt_omits_e2e_run_name_guidance_by_default() -> None:
+    # Non-e2e tests get no --mngr-e2e-run-name guidance (the flag is e2e-only).
+    prompt = build_test_agent_prompt("libs/mngr_aws/.../test_release_aws.py::test_x", ())
+    assert "--mngr-e2e-run-name" not in prompt
+
+
+def test_build_agent_prompt_includes_e2e_run_name_guidance_when_provided() -> None:
+    prompt = build_test_agent_prompt(
+        "libs/mngr/imbue/mngr/e2e/tutorial/test_basic.py::test_help",
+        (),
+        e2e_run_name="tmr_run1",
+    )
+    assert "--mngr-e2e-run-name" in prompt
+    assert "tmr_run1_try_1" in prompt
+
+
 def test_collect_tests_with_real_pytest(tmp_path: Path, cg: ConcurrencyGroup) -> None:
     test_file = tmp_path / "test_sample.py"
     test_file.write_text("def test_one(): pass\ndef test_two(): pass\n")
