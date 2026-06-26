@@ -691,9 +691,9 @@ def test_approve_workspace_override_recomputes_and_accumulates(
             f"{base_url}/permission-requests/approve/{request_id}",
             method="POST",
             headers={"Content-Type": "application/json"},
-            body=json.dumps(
-                {"permissions": ["minds-workspaces-destroy"], "target_workspace_id": target}
-            ).encode("utf-8"),
+            body=json.dumps({"permissions": ["minds-workspaces-destroy"], "target_workspace_id": target}).encode(
+                "utf-8"
+            ),
         )[0:3:2]
         assert status == 200, approve_body
 
