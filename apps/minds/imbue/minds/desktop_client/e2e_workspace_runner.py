@@ -382,19 +382,22 @@ def ensure_minds_env_defaults(setenv: Callable[[str, str], None]) -> None:
     )
 
 
-def _build_electron_env(workspace_git_url: Path, workspace_name: str) -> dict[str, str]:
+def _build_electron_env(workspace_git_url: Path) -> dict[str, str]:
     """Return the env vars the Electron child process should inherit.
 
-    Mirrors ``just minds-start``: passes the FCT path + agent name through
-    the ``MINDS_WORKSPACE_*`` prefill vars (honored only when the explicit
+    Mirrors ``just minds-start``: passes the FCT path through the
+    ``MINDS_WORKSPACE_GIT_URL`` prefill var (honored only when the explicit
     opt-in ``MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1`` is also set -- see
     ``_operator_workspace_default`` in templates.py), and scrubs any
     ANTHROPIC creds the operator's shell might have exported so they
     don't silently leak into every workspace we create.
+
+    The workspace name is not prefilled: ``_drive_create_flow`` types it into
+    the create form's "Name" field directly, which is what pins the name the
+    test later destroys by.
     """
     env = dict(os.environ)
     env["MINDS_WORKSPACE_GIT_URL"] = str(workspace_git_url)
-    env["MINDS_WORKSPACE_NAME"] = workspace_name
     # Opt into the local-worktree create-form defaults (see just minds-start).
     env["MINDS_USE_LOCAL_WORKSPACE_DEFAULTS"] = "1"
     # Pin MNGR_ROOT_NAME back to "mngr" for the Electron child so the
@@ -488,7 +491,6 @@ def _terminate_electron_process_tree(process: subprocess.Popen[bytes]) -> None:
 @contextmanager
 def _launched_electron(
     workspace_git_url: Path,
-    workspace_name: str,
     debug_port: int,
     host_config_dir: Path | None = None,
 ) -> Iterator[subprocess.Popen[bytes]]:
@@ -558,7 +560,7 @@ def _launched_electron(
         process = subprocess.Popen(
             cmd,
             cwd=str(host_config_dir or _REPO_ROOT),
-            env=_build_electron_env(workspace_git_url, workspace_name),
+            env=_build_electron_env(workspace_git_url),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             # Own session/process group so teardown can signal the whole tree.
@@ -860,7 +862,7 @@ def _attempt_create_workspace_via_electron(
     (a wedged Electron the caller should recover by relaunching). Errors from the
     create flow itself propagate unchanged so real test failures are not retried.
     """
-    with _launched_electron(fct_path, workspace_name, debug_port, host_config_dir):
+    with _launched_electron(fct_path, debug_port, host_config_dir):
         with sync_playwright() as playwright:
             try:
                 _wait_for_cdp(debug_port, _CDP_READY_TIMEOUT_SECONDS)
