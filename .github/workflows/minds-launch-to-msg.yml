@@ -965,9 +965,11 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
+      # Checkout the trigger ref (not commit_sha) so the e2e harness
+      # (playwright spec + fixtures) is the version being iterated, matching
+      # launch_to_msg. The binary under test is pinned to commit_sha via the
+      # build artifact below, not this checkout.
       - uses: actions/checkout@v6
-        with:
-          ref: ${{ inputs.commit_sha || github.sha }}
       - name: install minds.app from the build job's artifact
         run: |
           TMP=$(mktemp -d)
