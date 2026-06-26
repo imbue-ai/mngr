@@ -395,10 +395,15 @@
       var state = status && status.state;
       var text = '';
       var tone = 'bg-fill-subtle text-secondary';
+      // Clear any tooltip a prior render set; only FAILED uses one below.
+      badge.removeAttribute('title');
       if (state === 'BACKING_UP') {
         text = 'Backing up…'; tone = 'bg-accent/15 text-accent';
       } else if (state === 'BACKED_UP') {
         text = 'Backed up ' + relativeAgo(status.last_success_at); tone = 'bg-success/15 text-success';
+      } else if (state === 'FAILED') {
+        text = 'Backup setup failed'; tone = 'bg-important/15 text-important';
+        if (status && status.error) badge.title = status.error;
       } else if (state === 'NEVER') {
         text = 'Backup pending'; tone = 'bg-warning/15 text-warning';
       } else if (state === 'UNKNOWN') {

@@ -195,6 +195,12 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MNGR_PREFIX: mngrPrefix,
           MINDS_LATCHKEY_BINARY: paths.getLatchkeyPath(),
           MINDS_LATCHKEY_DIRECTORY: paths.getLatchkeyDirectory(),
+          // The prestart hook (scripts/ensure-binaries.js) downloads restic to
+          // resources/restic/restic, but the backend can't find it unless we
+          // point MINDS_RESTIC_BINARY at it -- exactly as the packaged branch
+          // does below. Without this, dev-mode backup setup falls back to a bare
+          // `restic` PATH lookup and fails with ResticNotInstalledError.
+          MINDS_RESTIC_BINARY: paths.getResticPath(),
           MINDS_RELEASE_ID: releaseId,
           MINDS_GIT_SHA: gitSha,
         };

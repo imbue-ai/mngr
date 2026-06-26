@@ -856,6 +856,7 @@ def _handle_backup_status_api() -> Response:
             "created_at": (
                 create_time_by_agent_id[agent_id].isoformat() if agent_id in create_time_by_agent_id else None
             ),
+            "error": status.error,
         }
         for agent_id, status in status_by_agent_id.items()
     }
