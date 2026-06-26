@@ -1019,14 +1019,17 @@ def _handle_establish_ssh(agent_id: str) -> Response:
     # Read the target's current authorized_keys (absent file -> empty), prune any
     # expired minds-owned grant lines, append the new grant, and write the whole
     # body back in one rewrite. Read + write are two mngr exec round-trips; the
-    # prune logic lives in workspace_ssh so it stays unit-tested.
+    # prune logic lives in workspace_ssh so it stays unit-tested. The read uses a
+    # non-login shell (``bash -c``, not ``-lc``) on purpose: its stdout is written
+    # straight back into authorized_keys, so login-profile output must not be able
+    # to leak into the captured body. ``~`` still expands without a login shell.
     read_argv = [
         mngr_binary,
         "exec",
         str(parsed_id),
         "--",
         "bash",
-        "-lc",
+        "-c",
         "cat ~/.ssh/authorized_keys 2>/dev/null || true",
     ]
     try:
