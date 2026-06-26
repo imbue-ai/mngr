@@ -845,6 +845,23 @@ def _drive_create_flow(
     logger.info("system_interface dockview rendered; workspace creation complete")
 
 
+def _attach_renderer_diagnostics(page: Page) -> None:
+    """Stream the Electron renderer's console output, JS errors, and failed
+    requests to loguru.
+
+    Electron's stderr only carries main-process output, so a renderer-side
+    fault (e.g. ``creating.js`` throwing before it attaches the onboarding Next
+    handlers, or failing to load) is otherwise invisible in CI. Mirroring those
+    events into the run log makes a stuck onboarding step diagnosable.
+    """
+    page.on("console", lambda message: logger.debug("[renderer console:{}] {}", message.type, message.text))
+    page.on("pageerror", lambda error: logger.warning("[renderer pageerror] {}", error))
+    page.on(
+        "requestfailed",
+        lambda request: logger.warning("[renderer requestfailed] {} ({})", request.url, request.failure),
+    )
+
+
 def _attempt_create_workspace_via_electron(
     fct_path: Path,
     workspace_name: str,
@@ -878,6 +895,9 @@ def _attempt_create_workspace_via_electron(
                     page = _pick_content_page(browser, _BACKEND_READY_TIMEOUT_SECONDS)
                 except (PlaywrightError, TimeoutError) as exc:
                     raise _ElectronConnectError(f"Electron CDP attach failed on port {debug_port}: {exc}") from exc
+                # Surface renderer console/JS errors into the run log so a stuck
+                # onboarding step (creating.js handlers not attaching) is diagnosable.
+                _attach_renderer_diagnostics(page)
                 _drive_create_flow(
                     page,
                     fct_path,
