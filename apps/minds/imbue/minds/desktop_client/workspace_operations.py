@@ -22,6 +22,7 @@ from typing import Final
 
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import SkipValidation
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -94,7 +95,7 @@ class InMemoryWorkspaceOperationRegistry(WorkspaceOperationRegistryInterface):
 
     record_by_agent_id: dict[AgentId, WorkspaceOperationRecord] = Field(default_factory=dict)
     log_queue_by_agent_id: dict[AgentId, "queue.Queue[str]"] = Field(default_factory=dict)
-    lock: threading.Lock = Field(default_factory=threading.Lock)
+    lock: SkipValidation[threading.Lock] = Field(default_factory=threading.Lock)
 
     def start(self, agent_id: AgentId, kind: WorkspaceOperationKind, now: datetime) -> None:
         with self.lock:

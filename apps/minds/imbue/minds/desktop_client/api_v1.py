@@ -74,12 +74,19 @@ from imbue.minds.desktop_client.sharing_handler import get_sharing_status
 from imbue.minds.desktop_client.sharing_handler import is_probeable_share_url
 from imbue.minds.desktop_client.sharing_handler import probe_share_url_readiness
 from imbue.minds.desktop_client.state import get_state
+from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
 from imbue.minds.desktop_client.workspace_create import build_backup_request_or_error
 from imbue.minds.desktop_client.workspace_create import build_create_on_created_callback
 from imbue.minds.desktop_client.workspace_create import resolve_effective_region
 from imbue.minds.desktop_client.workspace_lifecycle import MindHostAction
 from imbue.minds.desktop_client.workspace_lifecycle import perform_mind_host_action
+from imbue.minds.desktop_client.workspace_operations import OPERATION_LOG_SENTINEL
+from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
+from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
+from imbue.minds.desktop_client.workspace_recovery import RestartWorkerFailureHandler
+from imbue.minds.desktop_client.workspace_recovery import probe_workspace_health
+from imbue.minds.desktop_client.workspace_recovery import run_restart_sequence
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.primitives import AIProvider
@@ -558,6 +565,120 @@ def _handle_workspace_lifecycle(agent_id: str, action: str) -> Response:
     )
 
 
+# -- Workspace recovery routes (health probe + restart) --
+
+
+@require_api_or_cookie_auth
+def _handle_workspace_health(agent_id: str) -> Response:
+    """Return the workspace's host-health diagnostics (probes + dispatch tier).
+
+    Mirrors the old ``/api/agents/<id>/host-health`` route: a flat
+    ``HostHealthResponse`` -- a list of named probes plus a derived
+    ``dispatch_tier`` -- that the recovery page renders. 404 if the workspace is
+    unknown; 503 if no concurrency group is wired to run the in-container probe.
+    """
+    parsed_id = AgentId(agent_id)
+    state = get_state()
+    backend_resolver = state.backend_resolver
+    if parsed_id not in backend_resolver.list_known_workspace_ids():
+        return _json_error(f"Unknown workspace {agent_id}", 404)
+    parent_cg = state.root_concurrency_group
+    if parent_cg is None:
+        return _json_error("Workspace health probe is unavailable in this configuration", 503)
+    response = probe_workspace_health(
+        parsed_id,
+        backend_resolver=backend_resolver,
+        mngr_binary=state.mngr_binary,
+        mngr_host_dir=state.mngr_host_dir,
+        concurrency_group=parent_cg,
+        envelope_stream_consumer=state.envelope_stream_consumer,
+    )
+    logger.info("Workspace health probe for {}: dispatch_tier={}", parsed_id, response.dispatch_tier.value)
+    return make_response(content=response.model_dump_json(), media_type="application/json")
+
+
+@require_api_or_cookie_auth
+def _handle_workspace_restart(agent_id: str) -> Response:
+    """Dispatch a workspace restart; return an operation handle to poll.
+
+    Body: ``{"scope": "services" | "host", "host_already_stopped"?: bool}``. The
+    ``services`` scope restarts the system-services agent in place; ``host``
+    bounces the whole host (``host_already_stopped`` is honored only for the host
+    scope, letting a known-stopped host skip the redundant stop step). Returns
+    ``202`` with ``{operation_id, kind: "restart"}`` (the op id is the workspace
+    agent id), followed via ``/api/v1/workspaces/operations/<id>`` (+``/logs``)
+    exactly like create / destroy. A restart already in flight is deduped: the
+    same handle is returned without stacking a second worker.
+    """
+    parsed_id = AgentId(agent_id)
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return _json_error("Request body must be a JSON object", 400)
+    scope = body.get("scope")
+    if scope not in ("services", "host"):
+        return _json_error("'scope' must be one of: services, host", 400)
+    is_host_restart = scope == "host"
+
+    state = get_state()
+    backend_resolver = state.backend_resolver
+    if parsed_id not in backend_resolver.list_known_workspace_ids():
+        return _json_error(f"Unknown workspace {agent_id}", 404)
+    tracker: SystemInterfaceHealthTracker | None = state.system_interface_health_tracker
+    parent_cg = state.root_concurrency_group
+    if tracker is None or parent_cg is None:
+        return _json_error("Workspace restart is unavailable in this configuration", 503)
+
+    handle: dict[str, object] = {"operation_id": str(parsed_id), "kind": "restart"}
+    # A restart already in flight for this workspace -- don't stack a second
+    # worker racing the first's stop/start commands. mark_restarting decides the
+    # RESTARTING transition under its own lock and reports whether this caller won
+    # it, so this is an atomic check-and-claim against concurrent requests.
+    if not tracker.mark_restarting(parsed_id):
+        return _json_response(handle, status_code=202)
+
+    registry = state.workspace_operation_registry
+    registry.start(parsed_id, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
+
+    # host_already_stopped lets an auto-dispatched host restart skip the redundant
+    # stop step; honored only for host restarts (a manual restart may target a
+    # still-running container, which must be stopped first).
+    skip_stop = is_host_restart and bool(body.get("host_already_stopped", False))
+
+    # is_checked=False + on_failure: a crash of the one-shot worker transitions
+    # the tracker to RESTART_FAILED and the registry to FAILED (so neither the
+    # recovery page nor the operation poller hangs). The spawn itself can also
+    # raise when the group is shutting down; since we've already claimed
+    # RESTARTING, roll both into the failed state and report 503.
+    try:
+        parent_cg.start_new_thread(
+            target=run_restart_sequence,
+            kwargs={
+                "workspace_agent_id": parsed_id,
+                "is_host_restart": is_host_restart,
+                "tracker": tracker,
+                "backend_resolver": backend_resolver,
+                "mngr_binary": state.mngr_binary,
+                "mngr_host_dir": state.mngr_host_dir,
+                "concurrency_group": parent_cg,
+                "mngr_forward_port": state.mngr_forward_port or 0,
+                "mngr_forward_preauth_cookie": state.mngr_forward_preauth_cookie,
+                "registry": registry,
+                "skip_stop": skip_stop,
+            },
+            name=f"workspace-restart-{parsed_id}",
+            daemon=True,
+            is_checked=False,
+            on_failure=RestartWorkerFailureHandler(tracker=tracker, workspace_agent_id=parsed_id, registry=registry),
+        )
+    except (OSError, RuntimeError, ConcurrencyGroupError) as exc:
+        logger.warning("Failed to spawn restart worker for {}: {}", parsed_id, exc)
+        message = f"Could not start the restart worker: {exc}"
+        tracker.mark_restart_failed(parsed_id, message)
+        registry.fail(parsed_id, message)
+        return _json_error(message, 503)
+    return _json_response(handle, status_code=202)
+
+
 @require_api_or_cookie_auth
 def _handle_operation_status(operation_id: str) -> Response:
     """Report the status of a create or destroy operation, keyed by its id.
@@ -581,10 +702,25 @@ def _handle_operation_status(operation_id: str) -> Response:
             }
         )
 
+    parsed_id = AgentId(operation_id)
+    # A restart op is keyed by the workspace agent id, same as a destroy. Consult
+    # the in-memory restart registry first: a workspace is never destroyed and
+    # restarted at once, so a present restart record means this id is a restart.
+    restart_record = get_state().workspace_operation_registry.get(parsed_id)
+    if restart_record is not None:
+        return _json_response(
+            {
+                "operation_id": operation_id,
+                "kind": "restart",
+                "status": str(restart_record.status),
+                "is_done": restart_record.status == WorkspaceOperationStatus.DONE,
+                "error": restart_record.error,
+            }
+        )
+
     paths: WorkspacePaths | None = get_state().api_v1_paths
     if paths is None:
         return _json_error(f"Unknown operation {operation_id}", 404)
-    parsed_id = AgentId(operation_id)
     backend_resolver = get_state().backend_resolver
     # A destroy is only DONE once the workspace's *host* is gone (not merely the
     # workspace agent): a destroy that tore down only the agent while the host's
@@ -627,6 +763,25 @@ def _stream_create_operation_logs(log_queue: "queue.Queue[str]") -> Iterator[str
             yield ": keepalive\n\n"
             continue
         if line == LOG_SENTINEL:
+            yield _sse({"done": True})
+            return
+        yield _sse({"log": line})
+
+
+def _stream_restart_operation_logs(log_queue: "queue.Queue[str]") -> Iterator[str]:
+    """Yield SSE frames draining a restart operation's in-memory log queue.
+
+    Mirrors :func:`_stream_create_operation_logs` but keys on the restart
+    registry's ``OPERATION_LOG_SENTINEL`` end-of-stream marker.
+    """
+    shutdown_event = get_state().shutdown_event
+    while not shutdown_event.is_set():
+        try:
+            line = log_queue.get(block=True, timeout=1.0)
+        except queue.Empty:
+            yield ": keepalive\n\n"
+            continue
+        if line == OPERATION_LOG_SENTINEL:
             yield _sse({"done": True})
             return
         yield _sse({"log": line})
@@ -684,10 +839,20 @@ def _handle_operation_logs(operation_id: str) -> Response:
             _stream_create_operation_logs(log_queue), media_type="text/event-stream", headers=_SSE_HEADERS
         )
 
+    parsed_id = AgentId(operation_id)
+    # A restart op's logs come from the in-memory registry (checked first, same
+    # first-match rule as the status route).
+    registry = get_state().workspace_operation_registry
+    if registry.get(parsed_id) is not None:
+        log_queue = registry.get_log_queue(parsed_id)
+        if log_queue is not None:
+            return make_streaming_response(
+                _stream_restart_operation_logs(log_queue), media_type="text/event-stream", headers=_SSE_HEADERS
+            )
+
     paths: WorkspacePaths | None = get_state().api_v1_paths
     if paths is None:
         return _json_error(f"Unknown operation {operation_id}", 404)
-    parsed_id = AgentId(operation_id)
     is_host_still_active = destroying.is_host_still_active(get_state().backend_resolver, paths, parsed_id)
     if destroying.read_destroying(parsed_id, paths, is_host_still_active) is None:
         return _json_error(f"Unknown operation {operation_id}", 404)
@@ -1054,6 +1219,11 @@ def create_api_v1_blueprint() -> Blueprint:
         endpoint="workspace_stop",
         methods=["POST"],
     )
+    # Workspace recovery (health probe + restart). Gated by
+    # ``minds-workspaces-recover`` at the gateway.
+    blueprint.add_url_rule("/workspaces/<agent_id>/health", view_func=_handle_workspace_health, methods=["GET"])
+    blueprint.add_url_rule("/workspaces/<agent_id>/restart", view_func=_handle_workspace_restart, methods=["POST"])
+
     blueprint.add_url_rule(
         "/workspaces/operations/<operation_id>", view_func=_handle_operation_status, methods=["GET"]
     )

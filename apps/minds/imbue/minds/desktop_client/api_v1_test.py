@@ -1,5 +1,8 @@
 import json
 import os
+import time
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +32,10 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import TunnelInfo
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.workspace_operations import OPERATION_LOG_SENTINEL
+from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.primitives import CreationId
 from imbue.minds.testing import stub_mngr_host_dir
 from imbue.mngr.primitives import AgentId
@@ -374,6 +380,7 @@ def _build_client(
     imbue_cloud_cli: ImbueCloudCli | None = None,
     session_store: MultiAccountSessionStore | None = None,
     http_client: httpx.Client | None = None,
+    system_interface_health_tracker: SystemInterfaceHealthTracker | None = None,
 ) -> FlaskClient:
     """Build a desktop-client test client with the /api/v1 surface and the given deps."""
     app = create_desktop_client(
@@ -387,6 +394,7 @@ def _build_client(
         mngr_host_dir=mngr_host_dir,
         imbue_cloud_cli=imbue_cloud_cli,
         session_store=session_store,
+        system_interface_health_tracker=system_interface_health_tracker,
     )
     return app.test_client()
 
@@ -824,3 +832,226 @@ def test_sharing_readiness_not_ready_without_http_client(tmp_path: Path) -> None
 
     assert response.status_code == 200
     assert json.loads(response.data) == {"ready": False}
+
+
+# -- Workspace recovery: health probe + restart --
+
+
+def _resolver_with_services_agent(agent_id: AgentId, services_id: AgentId) -> BackendResolverInterface:
+    """Build a resolver where ``agent_id`` and a ``system-services`` peer share a host.
+
+    The restart worker resolves the system-services agent on the workspace's host;
+    a single-agent resolver returns None there (so the restart fails fast). This
+    registers both agents on the same host so ``get_system_services_agent_id``
+    resolves and the worker can run its stop/start steps.
+    """
+    agents_json = json.dumps(
+        {
+            "agents": [
+                {"id": str(agent_id), "labels": {"workspace": "true", "is_primary": "true"}},
+                {"id": str(services_id), "name": "system-services", "labels": {}},
+            ]
+        }
+    )
+    return make_resolver_with_data(agents_json)
+
+
+def test_workspace_health_returns_probes_for_known_workspace(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    # A known workspace returns the flat HostHealthResponse the recovery page
+    # renders: a probe list plus the derived dispatch tier.
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+
+    response = client.get(f"/api/v1/workspaces/{agent_id}/health", headers=_auth_header())
+
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert isinstance(body["probes"], list)
+    assert "dispatch_tier" in body
+
+
+def test_workspace_health_unknown_workspace_returns_404(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    resolver = make_resolver_with_data(make_agents_json(AgentId()))
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+
+    response = client.get(f"/api/v1/workspaces/{AgentId()}/health", headers=_auth_header())
+
+    assert response.status_code == 404
+
+
+def test_workspace_health_requires_bearer(tmp_path: Path, root_concurrency_group: ConcurrencyGroup) -> None:
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
+
+    response = client.get(f"/api/v1/workspaces/{agent_id}/health")
+
+    assert response.status_code == 401
+
+
+@pytest.mark.parametrize("scope", ["services", "host"])
+def test_workspace_restart_returns_202_operation_handle(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, scope: str
+) -> None:
+    # Both restart scopes return a 202 with the workspace's own id as the
+    # operation handle and a kind of "restart".
+    agent_id = AgentId()
+    services_id = AgentId()
+    resolver = _resolver_with_services_agent(agent_id, services_id)
+    fake_mngr = _write_fake_mngr(tmp_path / "bin")
+    client = _build_client(
+        tmp_path,
+        resolver,
+        root_concurrency_group=root_concurrency_group,
+        mngr_binary=fake_mngr,
+        mngr_host_dir=tmp_path / "host",
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
+    )
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": scope})
+
+    assert response.status_code == 202
+    assert json.loads(response.data) == {"operation_id": str(agent_id), "kind": "restart"}
+
+
+def test_workspace_restart_rejects_invalid_scope(tmp_path: Path, root_concurrency_group: ConcurrencyGroup) -> None:
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    client = _build_client(
+        tmp_path,
+        resolver,
+        root_concurrency_group=root_concurrency_group,
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
+    )
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": "nope"})
+
+    assert response.status_code == 400
+    assert "scope" in json.loads(response.data)["error"]
+
+
+def test_workspace_restart_unknown_workspace_returns_404(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    resolver = make_resolver_with_data(make_agents_json(AgentId()))
+    client = _build_client(
+        tmp_path,
+        resolver,
+        root_concurrency_group=root_concurrency_group,
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
+    )
+
+    response = client.post(
+        f"/api/v1/workspaces/{AgentId()}/restart", headers=_auth_header(), json={"scope": "services"}
+    )
+
+    assert response.status_code == 404
+
+
+def test_workspace_restart_unavailable_without_tracker_returns_503(tmp_path: Path) -> None:
+    # No system-interface health tracker / concurrency group wired, so a restart
+    # cannot be dispatched.
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    client = _build_client(tmp_path, resolver)
+
+    response = client.post(
+        f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": "services"}
+    )
+
+    assert response.status_code == 503
+
+
+def test_workspace_restart_requires_bearer(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    client = _build_client(tmp_path, resolver)
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/restart", json={"scope": "services"})
+
+    assert response.status_code == 401
+
+
+def test_workspace_restart_registers_operation_reaching_done(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    # End-to-end: a dispatched restart registers a restart operation that the
+    # operations resource reports as kind=restart and that reaches DONE once the
+    # (faked) stop/start steps complete. With no mngr_forward_port wired, a clean
+    # dispatch counts as success.
+    agent_id = AgentId()
+    services_id = AgentId()
+    resolver = _resolver_with_services_agent(agent_id, services_id)
+    fake_mngr = _write_fake_mngr(tmp_path / "bin")
+    client = _build_client(
+        tmp_path,
+        resolver,
+        root_concurrency_group=root_concurrency_group,
+        mngr_binary=fake_mngr,
+        mngr_host_dir=tmp_path / "host",
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
+    )
+
+    dispatch = client.post(
+        f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": "services"}
+    )
+    assert dispatch.status_code == 202
+
+    # Wait for the worker to finish by draining its log queue to the terminal
+    # sentinel (condition-based, no arbitrary sleeps).
+    registry = get_state(client.application).workspace_operation_registry
+    log_queue = registry.get_log_queue(agent_id)
+    assert log_queue is not None
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline:
+        if log_queue.get(timeout=15.0) == OPERATION_LOG_SENTINEL:
+            break
+
+    status_resp = client.get(f"/api/v1/workspaces/operations/{agent_id}", headers=_auth_header())
+    assert status_resp.status_code == 200
+    body = json.loads(status_resp.data)
+    assert body["kind"] == "restart"
+    assert body["is_done"] is True
+    assert body["status"] == "DONE"
+
+
+def test_operation_status_reports_restart_record_first(tmp_path: Path) -> None:
+    # A restart record keyed by the workspace agent id is reported as kind=restart
+    # by the operations resource (consulted before the destroy fallback).
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
+
+    running = json.loads(client.get(f"/api/v1/workspaces/operations/{agent_id}", headers=_auth_header()).data)
+    assert running["kind"] == "restart"
+    assert running["status"] == "RUNNING"
+    assert running["is_done"] is False
+
+    registry.complete(agent_id)
+    done = json.loads(client.get(f"/api/v1/workspaces/operations/{agent_id}", headers=_auth_header()).data)
+    assert done["is_done"] is True
+    assert done["status"] == "DONE"
+
+
+def test_operation_logs_streams_restart_log_lines(tmp_path: Path) -> None:
+    # A restart op's logs stream from the in-memory registry queue, ending with a
+    # terminal done frame when the operation completes.
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
+    registry.append_log(agent_id, "restarting now")
+    registry.complete(agent_id)
+
+    response = client.get(f"/api/v1/workspaces/operations/{agent_id}/logs", headers=_auth_header())
+
+    assert response.status_code == 200
+    text = response.get_data(as_text=True)
+    assert "restarting now" in text
+    assert '"done": true' in text

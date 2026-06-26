@@ -39,6 +39,8 @@ from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
+from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRegistryInterface
 from imbue.minds.primitives import OutputFormat
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
@@ -123,6 +125,10 @@ class DesktopClientState(MutableModel):
     )
     shutdown_event: threading.Event = Field(
         default_factory=threading.Event, description="Cross-thread flag SSE handlers poll to exit on shutdown"
+    )
+    workspace_operation_registry: WorkspaceOperationRegistryInterface = Field(
+        default_factory=InMemoryWorkspaceOperationRegistry,
+        description="In-memory registry tracking in-process workspace operations (restart) + their logs",
     )
 
 
