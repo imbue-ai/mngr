@@ -121,6 +121,20 @@ def _parse_grant_expiry(line: str) -> datetime | None:
     return datetime.fromtimestamp(0, tz=timezone.utc)
 
 
+def _grant_requester(line: str) -> str | None:
+    """Return the requester id encoded in a minds-owned grant line, else None.
+
+    Lines without our marker (keys the user added by hand) return None so they
+    are never treated as belonging to any requester and thus never superseded.
+    """
+    if _GRANT_MARKER not in line:
+        return None
+    for token in line.split():
+        if token.startswith(f"{_REQUESTER_KEY}="):
+            return token[len(_REQUESTER_KEY) + 1 :]
+    return None
+
+
 def prune_expired_grant_lines(authorized_keys_content: str, *, now: datetime) -> str:
     """Drop minds-owned grant lines whose expiry has passed; keep everything else.
 
@@ -137,18 +151,27 @@ def prune_expired_grant_lines(authorized_keys_content: str, *, now: datetime) ->
     return "\n".join(kept) + "\n" if kept else ""
 
 
-def compose_pruned_authorized_keys(existing_content: str, new_authorized_line: str, *, now: datetime) -> str:
+def compose_pruned_authorized_keys(
+    existing_content: str, new_authorized_line: str, *, requester_workspace_id: str, now: datetime
+) -> str:
     """Return the full ``authorized_keys`` body to write back for a grant.
 
-    Prunes expired minds-owned grants from the existing body (keeping every
-    user-managed key and every still-valid grant verbatim) and appends the new
-    grant line. The result is newline-terminated so the file ends cleanly. This
-    is the single source of truth for what a grant writes back, so the grant
-    flow only has to read the current body, call this, and write the result --
-    expired grants can never accumulate across repeated requests.
+    Prunes expired minds-owned grants from the existing body and also drops any
+    still-valid minds-owned grant belonging to ``requester_workspace_id`` (the
+    new grant supersedes it, so a re-request *refreshes* rather than *stacks*),
+    then appends the new grant line. Every user-managed key and every grant from
+    a *different* requester is preserved verbatim. The result is newline-
+    terminated so the file ends cleanly. This is the single source of truth for
+    what a grant writes back, so the grant flow only has to read the current
+    body, call this, and write the result -- neither expired grants nor
+    duplicate same-requester grants can accumulate across repeated requests.
     """
     pruned = prune_expired_grant_lines(existing_content, now=now)
-    return f"{pruned}{new_authorized_line}\n"
+    # Drop any still-valid grant the same requester already holds; the new line
+    # replaces it (refresh-not-stack). User keys (requester None) never match.
+    kept = [line for line in pruned.splitlines() if _grant_requester(line) != requester_workspace_id]
+    body = "\n".join(kept) + "\n" if kept else ""
+    return f"{body}{new_authorized_line}\n"
 
 
 class SshConnectionInfo(FrozenModel):

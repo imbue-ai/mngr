@@ -964,10 +964,12 @@ def _handle_establish_ssh(agent_id: str) -> Response:
     Body: ``{"public_key": "<openssh public key>", "requester_workspace_id":
     "<caller's own id>"}``. The caller's private key never leaves the caller.
     The hub reads the target's ``authorized_keys`` back over ``mngr exec``,
-    prunes any expired minds-owned grant lines, appends the new (TTL-tagged)
-    public key, writes the result back in one rewrite, and returns the target's
-    SSH ``user``/``host``/``port``. Pruning on every grant means repeated
-    requests never let stale grant lines pile up.
+    prunes any expired minds-owned grant lines, drops any still-valid grant the
+    same requester already holds (so a re-request refreshes rather than stacks),
+    appends the new (TTL-tagged) public key, writes the result back in one
+    rewrite, and returns the target's SSH ``user``/``host``/``port``. Pruning on
+    every grant means repeated requests never let stale or duplicate grant lines
+    pile up.
 
     Only *remote* targets (reachable from anywhere) are supported: a local
     (Docker/Lima) target has no hub-resolvable external SSH endpoint
@@ -1040,7 +1042,7 @@ def _handle_establish_ssh(agent_id: str) -> Response:
         return _json_error(f"Could not read the target's authorized_keys: {read_stderr.strip()}", 502)
 
     new_authorized_keys = workspace_ssh.compose_pruned_authorized_keys(
-        existing_authorized_keys, authorized_line, now=now
+        existing_authorized_keys, authorized_line, requester_workspace_id=requester_workspace_id, now=now
     )
     write_script = (
         "set -e; mkdir -p ~/.ssh; chmod 700 ~/.ssh; "
