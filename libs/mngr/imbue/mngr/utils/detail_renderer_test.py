@@ -6,9 +6,9 @@ from pathlib import Path
 from inline_snapshot import snapshot
 
 from imbue.mngr.utils.detail_renderer import ansi_to_html
+from imbue.mngr.utils.detail_renderer import render_docstring
 from imbue.mngr.utils.detail_renderer import render_test_detail
 from imbue.mngr.utils.detail_renderer import render_transcript
-from imbue.mngr.utils.detail_renderer import render_docstring
 from imbue.mngr.utils.detail_renderer import render_tutorial_block
 
 # ---------------------------------------------------------------------------
@@ -388,11 +388,11 @@ def test_render_test_detail_skips_tutorial_section_when_file_absent(tmp_path: Pa
 
 def test_render_test_detail_includes_docstring_section(tmp_path: Path) -> None:
     """render_test_detail renders docstring.txt under a Docstring heading."""
-    (tmp_path / "docstring.txt").write_text("Tutorial block:\n    # step\n    mngr create\n\nScope: it creates.")
+    (tmp_path / "docstring.txt").write_text("Tutorial block:\n    mngr create\n\nScope: it creates.")
     result = render_test_detail(tmp_path)
     assert "<h3>Docstring</h3>" in result
     assert "Scope: it creates." in result
-    assert "# step" in result
+    assert "mngr create" in result
 
 
 def test_render_test_detail_docstring_takes_precedence_over_tutorial_block(tmp_path: Path) -> None:

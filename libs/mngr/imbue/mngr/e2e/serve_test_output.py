@@ -18,8 +18,8 @@ from loguru import logger
 
 from imbue.mngr.utils.detail_renderer import ASCIINEMA_PLAYER_CSS
 from imbue.mngr.utils.detail_renderer import ASCIINEMA_PLAYER_JS
-from imbue.mngr.utils.detail_renderer import render_transcript
 from imbue.mngr.utils.detail_renderer import render_docstring
+from imbue.mngr.utils.detail_renderer import render_transcript
 from imbue.mngr.utils.detail_renderer import render_tutorial_block
 
 _E2E_DIR = Path(__file__).resolve().parent
@@ -176,6 +176,10 @@ def _test_page(run_name: str, test_name: str) -> str | None:
     elif tutorial_block_path.exists():
         parts.append("<h2>Tutorial block</h2>")
         parts.append(render_tutorial_block(tutorial_block_path.read_text()))
+    else:
+        # No block artifact for this test output (e.g. a test whose docstring was
+        # empty); render no block section.
+        pass
 
     # Collect cast files first so we can link agent names in the transcript
     cast_files = sorted(test_dir.glob("*.cast"))

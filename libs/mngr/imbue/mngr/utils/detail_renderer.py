@@ -216,6 +216,10 @@ def render_test_detail(test_dir: Path, detail_id_prefix: str = "") -> str:
     elif tutorial_path.exists():
         parts.append("<h3>Tutorial block</h3>")
         parts.append(render_tutorial_block(tutorial_path.read_text()))
+    else:
+        # No block artifact for this test output (e.g. a test whose docstring was
+        # empty); render no block section.
+        pass
 
     # Collect cast files for linkification
     cast_files = sorted(test_dir.glob("*.cast"))
