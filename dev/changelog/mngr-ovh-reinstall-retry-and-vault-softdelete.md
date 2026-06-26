@@ -1,0 +1,1 @@
+`scripts/remove_old_flat_vault_secrets.py` now treats a soft-deleted Vault secret (one whose latest version has a `deletion_time`, so `vault kv get` returns a null `data.data` rather than exit-2) as absent and skips it, instead of crashing the run.

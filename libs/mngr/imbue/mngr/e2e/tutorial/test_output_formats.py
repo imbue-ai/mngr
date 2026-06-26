@@ -10,10 +10,14 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 def test_default_output_human_readable(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # default output is human-readable
         mngr ls
-    """)
+
+    Scope: `mngr ls` defaults to human-readable output, not machine-readable: an
+    empty listing renders the prose "No agents found" rather than the "[]" that
+    `--format json` would emit.
+    """
     result = e2e.run("mngr ls", comment="default output is human-readable")
     expect(result).to_succeed()
     # The default format is human-readable, not machine-readable: an empty
@@ -28,10 +32,15 @@ def test_default_output_human_readable(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(300)
 def test_list_custom_human_format(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # use custom format templates to customize human-readable output for yourself
         mngr list --format '{name} ({state})'
-    """)
+
+    Scope: `mngr list --format '{name} ({state})'` expands the template per agent
+    into "<name> (<STATE>)". Listed fields are referenced bare ({name}, {state}),
+    with no "agent." namespace -- unknown fields (e.g. {agent.name}) expand to
+    empty strings.
+    """
     # Create a real agent so the custom format template has data to render.
     expect(
         e2e.run(
@@ -63,10 +72,14 @@ def test_list_custom_human_format(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_list_format_json_recap(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # JSON output (full array, good for programmatic use)
         mngr list --format json
-    """)
+
+    Scope: `mngr list --format json` emits a single parseable top-level object
+    (one document, in contrast to `--format jsonl`'s one-object-per-line) that
+    exposes the documented "agents" and "errors" arrays.
+    """
     result = e2e.run("mngr list --format json", comment="JSON output (full array)")
     expect(result).to_succeed()
     # `--format json` emits a single top-level object (one parseable document),
@@ -91,10 +104,14 @@ def test_list_format_json_recap(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.timeout(180)
 def test_list_format_jsonl_recap(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # JSONL output (one object per line, good for streaming/piping)
         mngr list --format jsonl
-    """)
+
+    Scope: `mngr list --format jsonl` emits one JSON object per line -- not a JSON
+    array (as `--format json` produces) and not human-readable text. With no
+    agents present the stream is empty, a valid zero-object JSONL document.
+    """
     result = e2e.run("mngr list --format jsonl", comment="JSONL output")
     expect(result).to_succeed()
     # JSONL means one JSON object per line: every non-empty stdout line must parse
@@ -115,10 +132,14 @@ def test_list_format_jsonl_recap(e2e: E2eSession) -> None:
 # than the default 10s per-test cap.
 @pytest.mark.timeout(60)
 def test_observe_discovery_recap(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # stream discovery events as JSONL (hosts and agents discovered/destroyed)
         mngr observe --discovery-only
-    """)
+
+    Scope: `mngr observe --discovery-only` streams machine-readable discovery
+    events as JSONL; the first emitted line on a fresh run is a full discovery
+    snapshot (DiscoveryEventType.DISCOVERY_FULL).
+    """
     # Pipe the stream into `head -n 1` so we capture the first emitted line and then
     # tear the pipeline down (mngr exits via SIGPIPE on its next write). The first
     # line on a fresh run is the full discovery snapshot. The outer `timeout` is
@@ -137,10 +158,15 @@ def test_observe_discovery_recap(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 def test_jsonl_works_across_commands(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # JSON and JSONL works with most commands
         mngr list --format json && mngr plugin list --format jsonl
-    """)
+
+    Scope: `--format json`/`--format jsonl` work across commands. `mngr list
+    --format json` emits a single object (with an "agents" key) on stdout, then
+    `mngr plugin list --format jsonl` emits one plugin object per line (each with
+    a "name" field); warnings go to stderr.
+    """
     # A single invocation keeps the test within its time budget (each
     # `mngr list` runs remote discovery). Both halves write to stdout: the
     # JSON document first, then the JSONL plugin lines (warnings go to stderr).
@@ -170,10 +196,15 @@ def test_jsonl_works_across_commands(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_json_with_jq_filter(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # combine json with jq for powerful filtering and transformation
         mngr list --format json | jq '.agents[] | select(.state == "RUNNING") | .name'
-    """)
+
+    Scope: piping `mngr list --format json` into jq filters/transforms it. The
+    filter dereferences `.agents[]`, pinning the JSON shape (a single object with
+    an `agents` array); with no agents the RUNNING selection yields empty output
+    and the pipeline still exits 0.
+    """
     jq_result = e2e.run(
         "mngr list --format json | jq '.agents[] | select(.state == \"RUNNING\") | .name'",
         comment="combine json with jq",
@@ -192,10 +223,13 @@ def test_json_with_jq_filter(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 def test_jsonl_with_jq_stream(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # combine jsonl with jq for streaming filtering
         mngr list --format jsonl | jq --unbuffered 'select(.state == "RUNNING") | .name'
-    """)
+
+    Scope: `mngr list --format jsonl` piped into `jq --unbuffered` streams and
+    filters one object at a time; the whole pipeline succeeds.
+    """
     expect(
         e2e.run(
             "mngr list --format jsonl | jq --unbuffered 'select(.state == \"RUNNING\") | .name'",

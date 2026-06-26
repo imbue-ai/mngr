@@ -17,6 +17,14 @@ from imbue.skitwright.expect import expect
 @pytest.mark.tmux
 @pytest.mark.timeout(300)
 def test_create_and_rename_agent(e2e: E2eSession) -> None:
+    """``mngr rename`` relabels an agent in place without disrupting it.
+
+    Verifies that renaming a running agent reports ``my-task -> renamed-task``,
+    leaves exactly one agent listed under the new name, and that this surviving
+    agent keeps its original command and stays alive (WAITING/RUNNING, not
+    STOPPED/FAILED) -- confirmed by exec'ing into it and seeing its original
+    ``sleep`` process still running.
+    """
     expect(
         e2e.run(
             "mngr create my-task --type command --no-ensure-clean -- sleep 100104",

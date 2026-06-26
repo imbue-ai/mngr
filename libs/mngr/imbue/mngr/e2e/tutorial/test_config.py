@@ -19,10 +19,14 @@ from imbue.skitwright.expect import expect
 @pytest.mark.timeout(60)
 @pytest.mark.release
 def test_config_list(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # list all configuration values
         mngr config list
-    """)
+
+    Scope: `mngr config list` exits 0 and prints the merged-scope banner
+    ("Merged configuration (all scopes):"); the default (non-`--all`) view
+    reflects a value just persisted to the local scope (headless = true).
+    """
     # Persist a known value first so we can verify that `list` actually reflects
     # what's in the config files. The default (non-`--all`) view is filtered
     # down to keys explicitly written to a scope, so a value we just set must
@@ -46,10 +50,14 @@ def test_config_list(e2e: E2eSession) -> None:
 @pytest.mark.timeout(60)
 @pytest.mark.release
 def test_config_list_json(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # list all configuration values
         mngr config list
-    """)
+
+    Scope: the machine-readable branch of the same block. `mngr config list
+    --format json` emits a parseable document carrying the persisted value under
+    a top-level "config" object (config.headless is True).
+    """
     # Same block as test_config_list, exercising the machine-readable output
     # branch: `--format json` must emit a parseable document that carries the
     # persisted value under a top-level "config" object.
@@ -70,12 +78,17 @@ def test_config_list_json(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.timeout(60)
 def test_config_list_scope(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # list configuration at a specific scope (user, project, or local)
         mngr config list --scope user
         mngr config list --scope project
         mngr config list --scope local
-    """)
+
+    Scope: each `--scope` invocation succeeds and reports the scope it actually
+    read from ("Config from <scope>"), reading only that scope's file rather than
+    the merged view -- the fixture's local-only connect_command marker
+    ("mngr-e2e-connect") appears under `--scope local` but not under user/project.
+    """
     # Each invocation must succeed and report the scope it actually read from, so a
     # passing test confirms `--scope` selects the right file rather than silently
     # falling back to the merged view. The e2e fixture writes the connect_command
@@ -106,10 +119,14 @@ def test_config_list_scope(e2e: E2eSession) -> None:
 # raise it as other multi-command e2e tests do.
 @pytest.mark.timeout(60)
 def test_config_get(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # get a specific config value
         mngr config get commands.create.provider
-    """)
+
+    Scope: `mngr config get <key>` returns exactly the value previously set at
+    the same scope (modal), confirming the value round-trips rather than just
+    that the command exited zero.
+    """
     # `config get` only returns a value for a key that is actually set, so first
     # establish the value, then read it back at the same scope. We use local
     # scope because the e2e fixture already writes `commands.create.connect_command`
@@ -130,10 +147,13 @@ def test_config_get(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_config_get_missing_key(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # get a specific config value
         mngr config get commands.create.provider
-    """)
+
+    Scope: the unhappy path of the same command. Reading a key that has not been
+    set fails with a non-zero exit and a clear "Key not found: <key>" message.
+    """
     # Unhappy path for the same tutorial command: reading a key that has not
     # been set fails with a non-zero exit and a clear "Key not found" message.
     result = e2e.run("mngr config get commands.create.provider", comment="get a specific config value")
@@ -144,10 +164,14 @@ def test_config_get_missing_key(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.timeout(60)
 def test_config_set(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # set a config value (at the default scope)
         mngr config set commands.create.provider modal
-    """)
+
+    Scope: `mngr config set` at the default scope succeeds, echoes the key,
+    value, and the scope it wrote to (project), and actually persists the value
+    into the project settings file (.<root>/settings.toml).
+    """
     result = e2e.run("mngr config set commands.create.provider modal", comment="set a config value")
     expect(result).to_succeed()
     # The command echoes the key and value it wrote, and the scope (default is
@@ -168,12 +192,14 @@ def test_config_set(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.timeout(60)
 def test_config_set_unknown_key_fails(e2e: E2eSession) -> None:
-    # Shares the CONFIGURATION `mngr config set` block; this is the unhappy path
-    # where the value is rejected because the key is not a known config field.
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # set a config value (at the default scope)
         mngr config set commands.create.provider modal
-    """)
+
+    Scope: the unhappy path of the same `mngr config set` block. Setting a key
+    that is not a known config field is rejected ("Unknown configuration fields")
+    and the rejected write is never persisted to the project settings file.
+    """
     result = e2e.run("mngr config set totally_unknown_key value", comment="setting an unknown key is rejected")
     expect(result).to_fail()
     expect(result.stderr).to_contain("Unknown configuration fields")
@@ -190,10 +216,14 @@ def test_config_set_unknown_key_fails(e2e: E2eSession) -> None:
 @pytest.mark.timeout(60)
 @pytest.mark.release
 def test_config_set_scope(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # set a config value at a specific scope
         mngr config set headless true --scope user
-    """)
+
+    Scope: `--scope user` writes to the user scope (reported in the output and
+    read back via `config get --scope user`) and does not leak into the project
+    scope, which was never written to (reading it there fails).
+    """
     set_result = e2e.run("mngr config set headless true --scope user", comment="set at a specific scope")
     expect(set_result).to_succeed()
     # The set should report that it wrote to the user scope (not the default project scope).
@@ -217,11 +247,15 @@ def test_config_set_scope(e2e: E2eSession) -> None:
 @pytest.mark.timeout(60)
 @pytest.mark.release
 def test_config_set_invalid_scope(e2e: E2eSession) -> None:
-    # Unhappy path for the same tutorial block: an unrecognized --scope value is rejected.
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # set a config value at a specific scope
         mngr config set headless true --scope user
-    """)
+
+    Scope: the unhappy path of the same block. An unrecognized `--scope` value is
+    rejected, naming the bad value and enumerating the valid scopes
+    (user/project/local), and nothing is written as a side effect (a read-back
+    from the user scope fails with "Key not found").
+    """
     result = e2e.run("mngr config set headless true --scope bogus", comment="reject an invalid scope")
     expect(result).to_fail()
     # Verify the failure is specifically the invalid-scope rejection, not some
@@ -245,10 +279,14 @@ def test_config_set_invalid_scope(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.timeout(60)
 def test_config_unset(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # unset a config value
         mngr config unset commands.create.provider
-    """)
+
+    Scope: `mngr config unset` removes a key present at the default (project)
+    scope, reports the removed key and the scope it came from (project), and the
+    value is actually gone from the settings file afterward.
+    """
     # `config unset` only succeeds for a key that is actually present in the
     # target scope (a missing key fails with "Key not found"), so first set the
     # value at the default (project) scope, then unset it the way the tutorial
@@ -279,12 +317,13 @@ def test_config_unset(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.timeout(60)
 def test_config_unset_missing_key(e2e: E2eSession, project_config_dir: Path) -> None:
-    # Unhappy path for the same tutorial block: unsetting a key that is not
-    # present in the target scope fails with a clear "Key not found" error.
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # unset a config value
         mngr config unset commands.create.provider
-    """)
+
+    Scope: the unhappy path of the same block. Unsetting a key that is not
+    present in the target scope fails with a clear "Key not found: <key>" error.
+    """
     # Seed a project config that opts into pytest but does NOT define the key.
     settings_path = project_config_dir / "settings.toml"
     settings_path.write_text("is_allowed_in_pytest = true\n")
@@ -301,10 +340,14 @@ def test_config_unset_missing_key(e2e: E2eSession, project_config_dir: Path) -> 
 # several seconds, so the cumulative runtime exceeds the default 10s func-only timeout.
 @pytest.mark.timeout(60)
 def test_config_edit(e2e: E2eSession, temp_git_repo: Path) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # open the config file in your editor
         mngr config edit
-    """)
+
+    Scope: `mngr config edit` opens the real project-scope config file in
+    $EDITOR -- a fake editor records the path it was handed (the resolved project
+    config path) and a marker it stamps in persists to that exact file.
+    """
     # `mngr config edit` opens the config file in $EDITOR. Rather than just
     # checking the command exits 0, drive it with a fake editor that records the
     # path it was handed and stamps a marker into that file. This lets us verify
@@ -344,12 +387,14 @@ def test_config_edit(e2e: E2eSession, temp_git_repo: Path) -> None:
 
 @pytest.mark.release
 def test_config_edit_editor_failure(e2e: E2eSession) -> None:
-    # Shares the `mngr config edit` tutorial block, but covers the unhappy path:
-    # when the editor exits non-zero, the command must propagate the failure.
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # open the config file in your editor
         mngr config edit
-    """)
+
+    Scope: the unhappy path of the same block. When $EDITOR exits non-zero,
+    `config edit` does not swallow the failure -- it propagates the editor's
+    exact exit code (1 from /bin/false) and reports "Editor exited with error".
+    """
     # /bin/false exits 1, standing in for an editor that the user aborted or
     # that crashed.
     result = e2e.run("EDITOR=/bin/false mngr config edit", comment="editor exits with an error")
@@ -361,10 +406,15 @@ def test_config_edit_editor_failure(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_config_edit_scope(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # open a specific scope's config file
         mngr config edit --scope project
-    """)
+
+    Scope: `config edit --scope project` opens the project-scope file (announced
+    via "Opening <project path>", confirming the flag selected that scope), and
+    editing a not-yet-existing scope file creates it from the template (the
+    "mngr configuration file" header appears on disk).
+    """
     # Resolve the project-scoped config path up front so we can verify that
     # `config edit --scope project` actually targets the project file (and not
     # the user or local scope).
@@ -394,11 +444,15 @@ def test_config_edit_scope(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_config_edit_scope_missing_editor(e2e: E2eSession) -> None:
-    """Unhappy path for `config edit --scope project`: a missing editor fails cleanly."""
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # open a specific scope's config file
         mngr config edit --scope project
-    """)
+
+    Scope: the unhappy path of the same block. With $VISUAL/$EDITOR pointing at a
+    nonexistent program, `config edit --scope project` fails cleanly with an
+    actionable "Editor not found" message naming the missing program and the
+    $EDITOR env var, rather than hanging or crashing with a bare traceback.
+    """
     # Point both $VISUAL and $EDITOR at a program that does not exist. The
     # command should fail with a non-zero exit code and a helpful error message
     # rather than hanging or crashing with a traceback.
@@ -417,10 +471,15 @@ def test_config_edit_scope_missing_editor(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_config_path(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # show the path to the config file
         mngr config path
-    """)
+
+    Scope: with no scope, `mngr config path` lists all three scopes
+    (user/project/local) with their resolved settings.toml / settings.local.toml
+    paths, each annotated with an (exists)/(not found) flag that matches the
+    actual on-disk state of the file.
+    """
     result = e2e.run("mngr config path", comment="show the path to the config file")
     expect(result).to_succeed()
     # Without a scope, the command resolves the config file for every scope and
@@ -458,10 +517,14 @@ def test_config_path(e2e: E2eSession) -> None:
 @pytest.mark.timeout(60)
 @pytest.mark.release
 def test_config_path_scope(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # show the path to a specific scope's config file
         mngr config path --scope user
-    """)
+
+    Scope: `config path --scope user` prints exactly the user-scope config path
+    (an absolute path under profiles/.../settings.toml), which is the file that
+    user-scope writes actually land in.
+    """
     result = e2e.run("mngr config path --scope user", comment="show the path to a specific scope's config file")
     expect(result).to_succeed()
     # The command prints exactly the user-scope config path: an absolute path to
@@ -480,12 +543,14 @@ def test_config_path_scope(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_config_path_invalid_scope(e2e: E2eSession) -> None:
-    # Shares the `mngr config path --scope ...` tutorial block: exercises the
-    # unhappy path where an unsupported scope is rejected by --scope validation.
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # show the path to a specific scope's config file
         mngr config path --scope user
-    """)
+
+    Scope: the unhappy path of the same block. An unsupported `--scope` value is
+    rejected by Click's choice validation with "Invalid value", naming `--scope`
+    and listing the valid choices (user, ...).
+    """
     result = e2e.run("mngr config path --scope bogus", comment="an unsupported scope is rejected")
     expect(result).to_fail()
     combined = result.stdout + result.stderr

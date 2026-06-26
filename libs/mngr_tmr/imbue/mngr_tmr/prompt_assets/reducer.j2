@@ -115,20 +115,19 @@ Whenever you have applied ANY change to the tree (an integrated cherry-pick, an
 extraction, or a FIXME resolution), verify the affected tests before publishing. If
 verification fails, back the change out or record it as unverified.
 
-## Extract shared scaffolding -- but preserve the tutorial 1:1
+## Extract shared scaffolding -- but keep each test's core action explicit
 
-Test functions often repeat the same *scaffolding* step: a verification command
-the tutorial does not itself demonstrate, e.g. running `mngr list` to confirm an
-agent launched. Genuinely-duplicated scaffolding can be extracted into a shared
-helper (on the e2e session or in conftest) to cut duplication.
+Test functions often repeat the same *scaffolding* step: a setup or verification
+command that is not itself the behavior under test, e.g. running `mngr list` to
+confirm an agent launched. Genuinely-duplicated scaffolding can be extracted into
+a shared helper (on the session object or in conftest) to cut duplication.
 
-The hard rule: a step is extractable ONLY if it does NOT appear in that test's
-tutorial block. Tests must stay 1:1 with their tutorial -- commands that come from
-the block (each test reproduces its block via `e2e.write_tutorial_block`; ground
-truth is `libs/mngr/imbue/mngr/resources/mega_tutorial.sh`) MUST stay written out
-literally in every test, even when many tests repeat them. For example, if five
-blocks each run `mngr create`, all five tests keep that line inline -- do not
-extract it into a helper.
+The hard rule: never extract a test's *core action* -- the command or behavior its
+docstring scope is about. That must stay written out explicitly in the test, even
+when many tests in a file run a similar command, so each test plainly exercises
+what its docstring says it does. Extract only the surrounding scaffolding. (Note:
+the verbatim tutorial block lives in the docstring, not the test body, so
+extracting body code never disturbs the documented tutorial.)
 
 Two more guardrails:
 

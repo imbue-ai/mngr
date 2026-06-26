@@ -1,0 +1,1 @@
+Add a blueprint plan (`blueprint/minds-google-oauth-fallback/`) for the Minds Google OAuth fallback: inserting a Minds-owned Google OAuth attempt between the credential-validity check and the self-setup browser flow, gated to `google-` services. Planning artifact only, no code changes.
