@@ -2439,6 +2439,11 @@ def _handle_chrome_events() -> Response:
                         if not _should_emit_system_interface_status(backend_resolver, tracker, aid, status):
                             continue
                         redirected_agent_ids.add(str(aid))
+                        logger.info(
+                            "Emitting STUCK recovery redirect for {}: a post-onset discovery snapshot landed, "
+                            "lifting the suppression that held the chrome on the loader",
+                            aid,
+                        )
                         yield "data: {}\n\n".format(
                             json.dumps(_system_interface_status_payload(tracker, str(aid), status))
                         )
@@ -3119,6 +3124,11 @@ def _dispatch_restart(
     # restart requests (recovery page, sidebar, landing page).
     if not tracker.mark_restarting(aid):
         return make_response(status_code=202, content="{}", media_type="application/json")
+    logger.info(
+        "Dispatching {} for {} (recovery restart of the workspace's system services)",
+        "host restart" if is_host_restart else "system-interface restart",
+        aid,
+    )
 
     # The auto-dispatched host tier (chosen only when the host-health probe
     # found the container fully stopped) passes ``host_already_stopped=1`` so
@@ -4672,6 +4682,11 @@ def _run_system_interface_health_probe_loop(
                 if probe_status == 200:
                     tracker.record_probe_success(aid)
                 else:
+                    logger.debug(
+                        "System-interface probe for {} returned {}",
+                        aid,
+                        probe_status if probe_status is not None else "transport-error",
+                    )
                     tracker.record_probe_failure(aid)
             threading.Event().wait(timeout=_HEALTH_PROBE_INTERVAL_SECONDS)
 

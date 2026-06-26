@@ -205,7 +205,13 @@ class SystemInterfaceHealthTracker(MutableModel):
             if record is None:
                 record = _AgentRecord()
                 self._records[aid_str] = record
+            was_suspect = record.is_suspect
             record.is_suspect = True
+        # Only the False -> True edge is interesting; duplicate envelopes for an
+        # already-suspect agent are noise. The background probe loop now starts
+        # polling this agent and is the sole authority on whether it goes STUCK.
+        if not was_suspect:
+            logger.debug("Enrolled {} as a system-interface probe suspect (backend-failure envelope)", agent_id)
 
     def record_probe_failure(self, agent_id: AgentId) -> None:
         """Record that a background probe observed ``agent_id`` as unreachable.
@@ -219,6 +225,8 @@ class SystemInterfaceHealthTracker(MutableModel):
         """
         aid_str = str(agent_id)
         fire_health: AgentHealth | None = None
+        run_just_started = False
+        stuck_after_seconds: float | None = None
         with self._lock:
             record = self._records.get(aid_str)
             if record is None or record.health != AgentHealth.HEALTHY:
@@ -227,12 +235,27 @@ class SystemInterfaceHealthTracker(MutableModel):
             if record.failure_run_started_at is None:
                 record.failure_run_started_at = now
                 record.failure_run_started_wall_at = datetime.now(timezone.utc)
+                run_just_started = True
             elapsed = now - record.failure_run_started_at
-            if elapsed + 1e-6 < self.stuck_threshold_seconds:
-                return
-            record.health = AgentHealth.STUCK
-            fire_health = AgentHealth.STUCK
-        if fire_health is not None:
+            if elapsed + 1e-6 >= self.stuck_threshold_seconds:
+                record.health = AgentHealth.STUCK
+                fire_health = AgentHealth.STUCK
+                stuck_after_seconds = elapsed
+        # Log the run start and the STUCK edge outside the lock. The run start is
+        # the onset the recovery redirect is gated against, and the elapsed time
+        # on the STUCK edge tells us exactly how long the workspace was failing.
+        if run_just_started and fire_health is None:
+            logger.debug(
+                "Started system-interface probe-failure run for {}; HEALTHY -> STUCK after {}s of continuous failures",
+                agent_id,
+                self.stuck_threshold_seconds,
+            )
+        if fire_health is not None and stuck_after_seconds is not None:
+            logger.info(
+                "System-interface health for {}: HEALTHY -> STUCK after {:.1f}s of continuous probe failures",
+                agent_id,
+                stuck_after_seconds,
+            )
             self._fire_on_change(agent_id, fire_health)
 
     def record_probe_success(self, agent_id: AgentId) -> None:
@@ -249,13 +272,20 @@ class SystemInterfaceHealthTracker(MutableModel):
         """
         aid_str = str(agent_id)
         fire_health: AgentHealth | None = None
+        prior_health: AgentHealth | None = None
         with self._lock:
             record = self._records.pop(aid_str, None)
             if record is None:
                 return
             if record.health != AgentHealth.HEALTHY:
+                prior_health = record.health
                 fire_health = AgentHealth.HEALTHY
         if fire_health is not None:
+            logger.info(
+                "System-interface health for {}: {} -> HEALTHY (probe succeeded)",
+                agent_id,
+                prior_health.value if prior_health is not None else "?",
+            )
             self._fire_on_change(agent_id, fire_health)
             self._fire_on_recovery(agent_id)
 
