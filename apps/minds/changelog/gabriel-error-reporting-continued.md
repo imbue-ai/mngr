@@ -1,1 +1,3 @@
 Workspace recovery page: the "Report a problem" link no longer appears on the transient "Loading workspace" spinner. It is now shown only on the terminal states that offer an action -- "Workspace unresponsive" (restart), the restart-dispatch error, and "Can't connect to ..." (provider unreachable, retry) -- where there is an actual failure to report.
+
+Get-help / error reporting (in progress): an in-workspace agent that wants to file a bug report no longer submits to Sentry directly. The authenticated report route now asks the desktop app to open the report-a-bug modal -- pre-filled with the agent's description and scoped to that workspace -- so a human reviews what to attach and submits it through the normal report path. A human now gates every send.

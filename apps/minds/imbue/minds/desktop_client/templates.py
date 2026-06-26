@@ -620,17 +620,20 @@ def render_consent_page(report_unexpected_errors: bool, include_logs: bool) -> s
 
 
 @pure
-def render_help_page(include_logs_setting: bool, workspace_agent_id: str) -> str:
+def render_help_page(include_logs_setting: bool, workspace_agent_id: str, description: str = "") -> str:
     """Render the get-help modal page (report a bug; agent help disabled for now).
 
     ``include_logs_setting`` is the persistent include-logs preference: when on, logs are always
     attached and the form hides its one-off "include logs" checkbox. ``workspace_agent_id`` is the
     workspace the help flow was opened from ("" on a general screen), enabling workspace-scoped options.
+    ``description`` pre-fills the report textarea -- non-empty when an in-workspace ``/assist`` agent
+    asked the app to open the modal with its diagnosis already written in.
     """
     return CATALOG.render(
         "pages.Help",
         include_logs_setting=include_logs_setting,
         workspace_agent_id=workspace_agent_id,
+        description=description,
     )
 
 

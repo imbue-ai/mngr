@@ -1,4 +1,4 @@
-{#def include_logs_setting=false, workspace_agent_id="" #}
+{#def include_logs_setting=false, workspace_agent_id="", description="" #}
 {#
   Get-help modal page. Loaded into the shared modal overlay view in Electron (and
   into the content frame as a fallback in browser mode), so the body is transparent
@@ -11,7 +11,9 @@
   inactive), shown in the confirmation so the user can quote it. ``include_logs_setting``
   is the persistent include-logs preference: when on, logs are always attached and the
   one-off checkbox is hidden. ``workspace_agent_id`` scopes the optional workspace
-  details to the workspace the help flow was opened from.
+  details to the workspace the help flow was opened from. ``description`` pre-fills the
+  report textarea -- non-empty when an in-workspace ``/assist`` agent asked the app to
+  open this modal with its diagnosis already written in.
 
   The diagnostics checkboxes are shown at the top level (not under a disclosure) and
   are "sticky": their checked state persists in localStorage across reports.
@@ -174,7 +176,7 @@
         <label class="block type-label text-secondary mb-1" for="help-description">What happened?</label>
         <textarea id="help-description" rows="4"
                   class="w-full rounded-md border border-default bg-surface-primary p-2 type-body text-primary"
-                  placeholder="Describe the problem you ran into..."></textarea>
+                  placeholder="Describe the problem you ran into...">{{ description }}</textarea>
 
         <p class="type-label text-secondary mt-4 mb-2">Include with the report</p>
         <div class="flex flex-col gap-2">

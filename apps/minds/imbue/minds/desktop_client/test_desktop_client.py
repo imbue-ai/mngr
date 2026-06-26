@@ -55,6 +55,7 @@ from imbue.minds.desktop_client.request_events import RequestStatus
 from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import create_latchkey_predefined_permission_request_event
 from imbue.minds.desktop_client.request_events import create_request_response_event
+from imbue.minds.desktop_client.help_modal_requests import OpenHelpRequest
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.state import get_state
@@ -2275,6 +2276,14 @@ def test_help_page_renders_report_option(tmp_path: Path) -> None:
     assert "disabled" in agent_radio
 
 
+def test_help_page_prefills_description_from_query(tmp_path: Path) -> None:
+    """When an /assist agent asks the app to open the modal, the description arrives pre-filled."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/help?description=the+database+migration+failed")
+    assert response.status_code == 200
+    assert "the database migration failed" in response.text
+
+
 def test_help_page_hides_include_logs_checkbox_when_setting_on(tmp_path: Path) -> None:
     """With the persistent include-logs setting on, logs are always attached and the checkbox is hidden."""
     MindsConfig(data_dir=tmp_path).set_include_error_logs(True)
@@ -2370,15 +2379,26 @@ def test_api_v1_bug_report_requires_bearer_token(tmp_path: Path) -> None:
     assert response.status_code == 401
 
 
-def test_api_v1_bug_report_accepts_authorized_request(tmp_path: Path) -> None:
+def test_api_v1_bug_report_opens_prefilled_modal_instead_of_submitting(tmp_path: Path) -> None:
+    """The agent report route does not submit to Sentry: it asks the app to open the report modal
+    pre-filled with the agent's description, scoped to the caller's own workspace."""
     client = _create_test_client_with_api_key(tmp_path, api_key="secret-key")
+    agent_id = AgentId()
+    received: list[OpenHelpRequest] = []
+    get_state(client.application).help_modal_request_broker.add_on_request_callback(received.append)
     response = client.post(
-        f"/api/v1/agents/{AgentId()}/report",
+        f"/api/v1/agents/{agent_id}/report",
         json={"description": "agent saw an error"},
         headers={"Authorization": "Bearer secret-key"},
     )
     assert response.status_code == 200
-    assert response.get_json()["ok"] is True
+    body = response.get_json()
+    assert body["ok"] is True
+    # No Sentry submission happens here, so there is no event_id to return.
+    assert "event_id" not in body
+    assert len(received) == 1
+    assert received[0].description == "agent saw an error"
+    assert received[0].workspace_agent_id == str(agent_id)
 
 
 def test_api_v1_bug_report_rejects_empty_description(tmp_path: Path) -> None:

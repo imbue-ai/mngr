@@ -24,10 +24,10 @@ from flask import request
 
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.api_key_auth import require_minds_api_key
+from imbue.minds.desktop_client.help_modal_requests import OpenHelpRequest
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
-from imbue.minds.desktop_client.report_collector import submit_bug_report_from_body
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.telegram.credential_store import load_agent_bot_credentials
@@ -165,27 +165,25 @@ def _handle_notification(agent_id: str) -> Response:
 
 @require_minds_api_key
 def _handle_bug_report(agent_id: str) -> Response:
-    """Submit a bug report to Imbue on behalf of an in-workspace agent.
+    """Ask the desktop app to open the report-a-bug modal pre-filled, on behalf of an in-workspace agent.
 
-    Backed by the same collector/submitter as the local help form, so an agent-initiated report and a
-    user-initiated one carry the same shape. The report is scoped to the caller's own workspace (the
-    path ``agent_id``, which the gateway has already authorized), not to whatever the body claims.
+    The agent does not submit to Sentry itself: a human gates every send. This route hands the agent's
+    description to the desktop app, which pops the report modal -- pre-filled with that description and
+    scoped to the caller's own workspace (the path ``agent_id``, which the gateway has already
+    authorized) -- in the window showing that workspace. The user then reviews, picks what to attach, and
+    submits through the same ``/help/report`` path as a manual report.
     """
     body = request.get_json(silent=True, force=True)
     if not isinstance(body, dict):
         return _json_error("Request body must be a JSON object", 400)
-    if not str(body.get("description", "")).strip():
+    description = str(body.get("description", "")).strip()
+    if not description:
         return _json_error("'description' field is required and must be a non-empty string", 400)
 
-    state = get_state()
-    event_id = submit_bug_report_from_body(
-        body={**body, "workspace_agent_id": agent_id},
-        session_store=state.session_store,
-        backend_resolver=state.backend_resolver,
-        minds_config=state.minds_config,
-        paths=state.api_v1_paths,
+    get_state().help_modal_request_broker.request_open(
+        OpenHelpRequest(description=description, workspace_agent_id=agent_id)
     )
-    return _json_response({"ok": True, "event_id": event_id})
+    return _json_response({"ok": True})
 
 
 # -- Blueprint factory --

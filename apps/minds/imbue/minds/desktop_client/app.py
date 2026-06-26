@@ -70,6 +70,7 @@ from imbue.minds.desktop_client.destroying import start_destroy
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
+from imbue.minds.desktop_client.help_modal_requests import OpenHelpRequest
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.mind_liveness import MindLiveness
@@ -542,10 +543,12 @@ def _handle_help_page() -> Response:
     minds_config: MindsConfig | None = get_state().minds_config
     include_logs_setting = minds_config.get_include_error_logs() if minds_config else False
     workspace_agent_id = request.args.get("workspace", "")
+    description = request.args.get("description", "")
     return make_html_response(
         content=render_help_page(
             include_logs_setting=include_logs_setting,
             workspace_agent_id=workspace_agent_id,
+            description=description,
         )
     )
 
@@ -2268,6 +2271,7 @@ def _handle_chrome_events() -> Response:
     """
     authenticated = _is_request_authenticated()
     backend_resolver = get_state().backend_resolver
+    help_broker = get_state().help_modal_request_broker
 
     def _event_generator() -> Iterator[str]:
         if not authenticated:
@@ -2285,11 +2289,23 @@ def _handle_chrome_events() -> Response:
         # in the main generator loop so each subscriber sees every event.
         health_queue: queue.Queue[tuple[str, AgentHealth]] = queue.Queue()
 
+        # Agent-initiated "open the pre-filled report modal" requests arrive on a
+        # Flask request thread (the /api/v1 report route) via the broker. We
+        # accumulate them per-connection and drain them in the loop, the same
+        # way health transitions are handled.
+        open_help_queue: queue.Queue[OpenHelpRequest] = queue.Queue()
+
         def _on_change() -> None:
             change_event.set()
 
         def _on_health_change(agent_id: AgentId, status: AgentHealth) -> None:
             _enqueue_health_change(health_queue, change_event, agent_id, status)
+
+        def _on_open_help(req: OpenHelpRequest) -> None:
+            open_help_queue.put(req)
+            change_event.set()
+
+        help_broker.add_on_request_callback(_on_open_help)
 
         if isinstance(backend_resolver, MngrCliBackendResolver):
             backend_resolver.add_on_change_callback(_on_change)
@@ -2414,6 +2430,18 @@ def _handle_chrome_events() -> Response:
                 if shutdown_event.is_set():
                     break
 
+                while not open_help_queue.empty():
+                    help_request = open_help_queue.get_nowait()
+                    yield "data: {}\n\n".format(
+                        json.dumps(
+                            {
+                                "type": "open_help",
+                                "description": help_request.description,
+                                "workspace_agent_id": help_request.workspace_agent_id,
+                            }
+                        )
+                    )
+
                 while not health_queue.empty():
                     aid_str, status = health_queue.get_nowait()
                     # Leaving STUCK clears the redirect latch so a later re-STUCK
@@ -2513,6 +2541,7 @@ def _handle_chrome_events() -> Response:
                         json.dumps({"type": "requests", **current_requests_payload, "auto_open": auto_open})
                     )
         finally:
+            help_broker.remove_on_request_callback(_on_open_help)
             if isinstance(backend_resolver, MngrCliBackendResolver):
                 backend_resolver.remove_on_change_callback(_on_change)
             if tracker is not None:
