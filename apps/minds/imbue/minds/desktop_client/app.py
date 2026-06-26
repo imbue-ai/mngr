@@ -51,7 +51,6 @@ from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
-from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
 from imbue.minds.desktop_client.mind_liveness import get_shutdown_capable_workspace_agent_ids
 from imbue.minds.desktop_client.minds_config import MindsConfig
@@ -76,12 +75,7 @@ from imbue.minds.desktop_client.responses import make_streaming_response
 from imbue.minds.desktop_client.responses import safe_local_redirect_path
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
-from imbue.minds.desktop_client.sharing_handler import SharingError
-from imbue.minds.desktop_client.sharing_handler import enable_sharing_via_cloudflare
-from imbue.minds.desktop_client.sharing_handler import is_probeable_share_url
 from imbue.minds.desktop_client.sharing_handler import is_share_ready_from_edge_response
-from imbue.minds.desktop_client.sharing_handler import parse_emails_form_value
-from imbue.minds.desktop_client.sharing_handler import resolve_account_email_for_workspace
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.state import set_state
@@ -119,7 +113,6 @@ from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
-from imbue.minds.primitives import ServiceName
 from imbue.mngr.api.discovery_events import DISCOVERY_STREAM_POLL_INTERVAL_SECONDS
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
@@ -784,20 +777,6 @@ def _is_host_still_active(agent_id: AgentId) -> bool:
         get_state().api_v1_paths,
         agent_id,
     )
-
-
-def _handle_destroying_dismiss_api(
-    agent_id: str,
-) -> Response:
-    """POST /api/destroying/<agent_id>/dismiss: remove the destroy record."""
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
-    paths: WorkspacePaths | None = get_state().api_v1_paths
-    if paths is None:
-        return make_response(status_code=200, content="{}", media_type="application/json")
-    parsed_id = AgentId(agent_id)
-    delete_destroying(parsed_id, paths)
-    return make_response(status_code=200, content="{}", media_type="application/json")
 
 
 def _handle_destroying_page(
@@ -1909,187 +1888,6 @@ def _handle_sharing_page(
     return make_html_response(content=html)
 
 
-def _handle_sharing_enable(
-    agent_id: str,
-    service_name: str,
-) -> Response:
-    """Enable or update sharing for a service via the workspace-settings editor.
-
-    Sharing is configured exclusively from this editor; agents no longer
-    write sharing-request events back into the inbox.
-
-    On a soft failure (no signed-in account, plugin error, etc.) the
-    handler returns 502 with a JSON ``{"error": "..."}`` body. The
-    sharing editor JS surfaces that inline instead of silently
-    redirecting to a now-empty status page.
-    """
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content="Not authenticated")
-
-    backend_resolver = get_state().backend_resolver
-    form = request.form
-    emails = parse_emails_form_value(str(form.get("emails", "[]")))
-    try:
-        enable_sharing_via_cloudflare(
-            agent_id=AgentId(agent_id),
-            service_name=ServiceName(service_name),
-            emails=emails,
-            backend_resolver=backend_resolver,
-        )
-    except SharingError as exc:
-        return make_response(
-            status_code=502,
-            content=json.dumps({"error": str(exc)}),
-            media_type="application/json",
-        )
-    return make_response(status_code=303, headers={"Location": f"/sharing/{agent_id}/{service_name}"})
-
-
-def _handle_sharing_disable(
-    agent_id: str,
-    service_name: str,
-) -> Response:
-    """Disable sharing for a service via the imbue_cloud plugin.
-
-    Removes the service from its tunnel (DNS + Access app teardown
-    happen connector-side). The tunnel itself stays around so re-
-    enabling later doesn't re-issue a fresh token.
-    """
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content="Not authenticated")
-
-    cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
-    session_store: MultiAccountSessionStore | None = get_state().session_store
-    if cli is None:
-        return make_response(
-            status_code=502,
-            content=json.dumps({"error": "imbue_cloud CLI is not configured."}),
-            media_type="application/json",
-        )
-    parsed_id = AgentId(agent_id)
-    try:
-        account_email = resolve_account_email_for_workspace(session_store, parsed_id)
-    except SharingError as exc:
-        return make_response(
-            status_code=502,
-            content=json.dumps({"error": str(exc)}),
-            media_type="application/json",
-        )
-
-    try:
-        tunnel = cli.find_tunnel_for_agent(account=account_email, agent_id=str(parsed_id))
-    except ImbueCloudCliError as exc:
-        return make_response(
-            status_code=502,
-            content=json.dumps({"error": f"Failed to look up the tunnel: {exc}"}),
-            media_type="application/json",
-        )
-    if tunnel is None:
-        # No tunnel = nothing to disable. Treat as success so the JS
-        # redirect lands on the (already-disabled) status page.
-        return make_response(status_code=303, headers={"Location": f"/sharing/{agent_id}/{service_name}"})
-
-    try:
-        cli.remove_service(account=account_email, tunnel_name=tunnel.tunnel_name, service_name=service_name)
-    except ImbueCloudCliError as exc:
-        return make_response(
-            status_code=502,
-            content=json.dumps({"error": f"Failed to disable sharing: {exc}"}),
-            media_type="application/json",
-        )
-    return make_response(status_code=303, headers={"Location": f"/sharing/{agent_id}/{service_name}"})
-
-
-def _handle_sharing_status_api(
-    agent_id: str,
-    service_name: str,
-) -> Response:
-    """JSON API to get current sharing status for the editor JS.
-
-    Reads tunnel + service + per-service auth from the imbue_cloud
-    plugin (the connector is the source of truth -- minds keeps no
-    local copy). The JS contract is::
-
-        {"enabled": bool, "url": str | null, "policy": {"emails": [str, ...], ...}}
-
-    ``policy`` is the AuthPolicy shape the plugin emits. Default policy
-    when sharing isn't yet enabled is the workspace's associated account
-    email.
-    """
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
-
-    cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
-    session_store: MultiAccountSessionStore | None = get_state().session_store
-    if cli is None:
-        return make_response(
-            content=json.dumps({"enabled": False, "url": None, "policy": {"emails": []}}),
-            media_type="application/json",
-        )
-
-    parsed_id = AgentId(agent_id)
-    try:
-        account_email = resolve_account_email_for_workspace(session_store, parsed_id)
-    except SharingError as exc:
-        # No associated account = no plugin call available; surface
-        # an empty default rather than 502 since the page itself
-        # already shows the "associate an account" affordance for
-        # this state.
-        logger.debug("Sharing status: {}", exc)
-        return make_response(
-            content=json.dumps({"enabled": False, "url": None, "policy": {"emails": []}}),
-            media_type="application/json",
-        )
-
-    default_policy = {"emails": [account_email]}
-    try:
-        tunnel = cli.find_tunnel_for_agent(account=account_email, agent_id=str(parsed_id))
-    except ImbueCloudCliError as exc:
-        logger.warning("Failed to list tunnels for {}: {}", parsed_id, exc)
-        return make_response(
-            content=json.dumps({"enabled": False, "url": None, "policy": default_policy}),
-            media_type="application/json",
-        )
-    if tunnel is None or service_name not in tunnel.services:
-        return make_response(
-            content=json.dumps({"enabled": False, "url": None, "policy": default_policy}),
-            media_type="application/json",
-        )
-
-    try:
-        service_entries = cli.list_services(account_email, tunnel.tunnel_name)
-    except ImbueCloudCliError as exc:
-        logger.warning("Failed to list services for tunnel {}: {}", tunnel.tunnel_name, exc)
-        service_entries = []
-    hostname = next(
-        (entry.get("hostname") for entry in service_entries if entry.get("service_name") == service_name),
-        None,
-    )
-
-    try:
-        policy = cli.get_service_auth(account_email, tunnel.tunnel_name, service_name)
-    except ImbueCloudCliError:
-        try:
-            policy = cli.get_tunnel_auth(account_email, tunnel.tunnel_name)
-        except ImbueCloudCliError:
-            policy = default_policy
-    if not policy.get("emails") and not policy.get("email_domains"):
-        # Empty policy means "use tunnel default"; surface the owner's
-        # email so the editor doesn't render an empty ACL.
-        policy = default_policy
-
-    return make_response(
-        content=json.dumps(
-            {
-                "enabled": True,
-                "url": f"https://{hostname}" if hostname else None,
-                "policy": policy,
-            }
-        ),
-        media_type="application/json",
-    )
-
-
 _SHARE_READINESS_PROBE_TIMEOUT_SECONDS: Final[float] = 4.0
 
 
@@ -2106,30 +1904,6 @@ def _probe_share_url_readiness(http_client: httpx.Client, url: str) -> bool:
         logger.debug("Probed share URL {} but it is not ready yet: {}", url, exc)
         return False
     return is_share_ready_from_edge_response(response.status_code, response.headers.get("location"))
-
-
-def _handle_sharing_readiness_api(
-    agent_id: str,
-    service_name: str,
-) -> Response:
-    """Probe a shared service's hostname to see if Cloudflare Access is live yet.
-
-    Cloudflare can take a few seconds after sharing is enabled to publish the
-    Access application at the edge. Until then the hostname does not return the
-    Access login redirect, so showing the URL immediately makes forwarding look
-    broken. The editor JS polls this endpoint and only reveals the link once the
-    edge returns the Access redirect (or a short client-side timeout elapses).
-    Probing from minds keeps the connector request short and lets the browser
-    drive the wait. Contract: ``{"ready": bool}``.
-    """
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
-    probe_url = request.args.get("url", "")
-    http_client: httpx.Client | None = get_state().http_client
-    if http_client is None or not is_probeable_share_url(probe_url):
-        return make_response(content=json.dumps({"ready": False}), media_type="application/json")
-    is_ready = _probe_share_url_readiness(http_client, probe_url)
-    return make_response(content=json.dumps({"ready": is_ready}), media_type="application/json")
 
 
 def _handle_request_grant(
@@ -2395,10 +2169,6 @@ def create_desktop_client(
 
     # Sharing editor routes (used by both request approval and direct editing)
     app.add_url_rule("/sharing/<agent_id>/<service_name>", view_func=_handle_sharing_page)
-    app.add_url_rule("/sharing/<agent_id>/<service_name>/enable", view_func=_handle_sharing_enable, methods=["POST"])
-    app.add_url_rule("/sharing/<agent_id>/<service_name>/disable", view_func=_handle_sharing_disable, methods=["POST"])
-    app.add_url_rule("/api/sharing-status/<agent_id>/<service_name>", view_func=_handle_sharing_status_api)
-    app.add_url_rule("/api/sharing-readiness/<agent_id>/<service_name>", view_func=_handle_sharing_readiness_api)
 
     # Agent creation routes. The create form now submits to POST
     # /api/v1/workspaces and /creating/<id> polls the v1 operations resource, so
@@ -2410,7 +2180,6 @@ def create_desktop_client(
     # Agent destruction routes. Destroy + status/log streaming are served by the
     # versioned /api/v1/workspaces surface now; only the dismiss action (no v1
     # equivalent) and the detail page remain here.
-    app.add_url_rule("/api/destroying/<agent_id>/dismiss", view_func=_handle_destroying_dismiss_api, methods=["POST"])
     app.add_url_rule("/destroying/<agent_id>", view_func=_handle_destroying_page)
 
     # Workspace-recovery page. The host-health probe and the restart actions it
