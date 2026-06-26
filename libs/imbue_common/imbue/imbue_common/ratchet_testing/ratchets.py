@@ -571,6 +571,16 @@ def check_no_import_lint_errors(project_root: Path, contract_name: str = "mngr l
         raise AssertionError("\n".join(failure_message))
 
 
+# Directory prefixes (repo-relative, posix) whose ``*.sh`` files are exempt
+# from the strict-mode ratchet because they are not runnable scripts.
+# ``.minds/template/`` holds declarative secret-schema templates -- commented
+# ``export KEY=`` files sourced by the deploy tooling
+# (``scripts/push_vault_from_file.py``, ``minds env deploy``) and copied
+# per-tier, never executed standalone -- so ``set -euo pipefail`` is meaningless
+# for them and they are not the class of script this ratchet guards.
+_STRICT_MODE_EXEMPT_DIR_PREFIXES: Final[tuple[str, ...]] = (".minds/template/",)
+
+
 def find_bash_scripts_without_strict_mode(cwd: Path) -> list[str]:
     """Find bash scripts missing 'set -euo pipefail' in the git repo containing cwd."""
     result = subprocess.run(
@@ -596,12 +606,15 @@ def find_bash_scripts_without_strict_mode(cwd: Path) -> list[str]:
 
     violations: list[str] = []
     for sh_file in sh_files:
-        # Skip files that git tracks but aren't present on disk. This happens
-        # in offload release sandboxes where .dockerignore omits some tracked
-        # paths (e.g. .minds/template/*) from the COPY context but those paths
-        # remain in the in-image .git index after the `git init + git add -A`
-        # normalization. The ratchet is about actual scripts that could run,
-        # not index entries.
+        # Skip declarative, non-runnable schema templates (see the prefix list above).
+        relative_path = sh_file.relative_to(repo_root).as_posix()
+        if any(relative_path.startswith(prefix) for prefix in _STRICT_MODE_EXEMPT_DIR_PREFIXES):
+            continue
+        # Skip files that git tracks but aren't present on disk. This happens in
+        # offload release sandboxes where the build COPY context omits some
+        # tracked paths, yet they remain in the in-image .git index after the
+        # `git init + git add -A` normalization. The ratchet is about actual
+        # scripts that could run, not index entries.
         if not sh_file.is_file():
             continue
         content = sh_file.read_text()

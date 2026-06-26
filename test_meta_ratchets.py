@@ -251,13 +251,16 @@ def test_cli_docs_are_up_to_date() -> None:
 def test_prevent_bash_without_strict_mode() -> None:
     """Ensure all bash scripts in the repo use 'set -euo pipefail' for strict error handling.
 
-    Snapshot accommodates two kinds of committed exception:
+    The secret-file templates at ``.minds/template/*.sh`` are excluded entirely
+    by ``find_bash_scripts_without_strict_mode`` (not merely accommodated in the
+    count): they are shell-sourceable env declarations (commented ``export KEY=``
+    files consumed by ``scripts/push_vault_from_file.py`` and ``minds env
+    deploy`` when seeding HCP Vault / Modal secrets), not executable scripts, so
+    ``set -euo pipefail`` is meaningless for them and would only leak strict mode
+    into whatever shell sources them.
 
-    - The secret-file templates at ``.minds/template/*.sh``. Those files are
-      shell-sourceable env declarations (consumed by
-      ``scripts/push_vault_from_file.py`` when seeding HCP Vault), not
-      executable scripts -- adding ``set -euo pipefail`` to them would leak
-      strict mode into whatever shell sources them.
+    The snapshot count below accommodates two kinds of committed exception:
+
     - The minds verify scripts ``apps/minds/scripts/first-message-verify.sh``
       and ``apps/minds/scripts/launch-and-verify.sh``, which use
       ``set -uo pipefail`` (omitting ``-e``) on purpose: they handle errors
@@ -275,12 +278,13 @@ def test_prevent_bash_without_strict_mode() -> None:
       for files that may be absent and act on non-zero exits, which ``-e`` would abort
       -- so tightening any that do not need the exemption is left to those plugins.
 
-    The count is enumerated against the full local checkout. In offload
-    sandboxes the count is lower because ``.dockerignore`` omits some of these
-    tracked paths from the build context, so they are absent on disk there.
+    The count is an upper bound enumerated against the full local checkout. In
+    offload sandboxes it can be lower: the finder skips tracked ``*.sh`` paths
+    that the build COPY context omits (they are absent on disk there), so the
+    sandbox sees a subset of the local violations.
     """
     violations = find_bash_scripts_without_strict_mode(_REPO_ROOT)
-    assert len(violations) <= snapshot(17), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
+    assert len(violations) <= snapshot(10), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
         f"  - {v}" for v in violations
     )
 
