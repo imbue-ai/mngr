@@ -640,12 +640,6 @@ class EnvelopeStreamConsumer(MutableModel):
                 status_code: int | None = int(raw_status_code) if raw_status_code is not None else None
             except (ValueError, TypeError):
                 status_code = None
-            logger.debug(
-                "Received system_interface_backend_failure envelope for {}: reason={} status_code={}",
-                agent_id,
-                reason.value,
-                status_code,
-            )
             with self._lock:
                 callbacks = list(self._on_system_interface_backend_failure_callbacks)
             for callback in callbacks:

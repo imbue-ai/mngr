@@ -224,8 +224,8 @@ class SystemInterfaceHealthTracker(MutableModel):
             was_suspect = record.is_suspect
             record.is_suspect = True
         # Only the False -> True edge is interesting; duplicate envelopes for an
-        # already-suspect agent are noise. The background probe loop now starts
-        # polling this agent and is the sole authority on whether it goes STUCK.
+        # already-suspect agent are noise. Enrollment is the entry point of the
+        # recovery lifecycle, so it is the one log worth keeping at this layer.
         if not was_suspect:
             logger.debug("Enrolled {} as a system-interface probe suspect (backend-failure envelope)", agent_id)
 
@@ -241,7 +241,6 @@ class SystemInterfaceHealthTracker(MutableModel):
         """
         aid_str = str(agent_id)
         fire_health: AgentHealth | None = None
-        run_just_started = False
         stuck_after_seconds: float | None = None
         with self._lock:
             record = self._records.get(aid_str)
@@ -251,21 +250,13 @@ class SystemInterfaceHealthTracker(MutableModel):
             if record.failure_run_started_at is None:
                 record.failure_run_started_at = now
                 record.failure_run_started_wall_at = datetime.now(timezone.utc)
-                run_just_started = True
             elapsed = now - record.failure_run_started_at
             if elapsed + 1e-6 >= self.stuck_threshold_seconds:
                 record.health = AgentHealth.STUCK
                 fire_health = AgentHealth.STUCK
                 stuck_after_seconds = elapsed
-        # Log the run start and the STUCK edge outside the lock. The run start is
-        # the onset the recovery redirect is gated against, and the elapsed time
-        # on the STUCK edge tells us exactly how long the workspace was failing.
-        if run_just_started and fire_health is None:
-            logger.debug(
-                "Started system-interface probe-failure run for {}; HEALTHY -> STUCK after {}s of continuous failures",
-                agent_id,
-                self.stuck_threshold_seconds,
-            )
+        # The STUCK edge is the key diagnostic; the elapsed time tells us exactly
+        # how long the workspace was continuously failing before it tripped.
         if fire_health is not None and stuck_after_seconds is not None:
             logger.info(
                 "System-interface health for {}: HEALTHY -> STUCK after {:.1f}s of continuous probe failures",
