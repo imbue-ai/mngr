@@ -19,6 +19,7 @@ from loguru import logger
 from imbue.mngr.utils.detail_renderer import ASCIINEMA_PLAYER_CSS
 from imbue.mngr.utils.detail_renderer import ASCIINEMA_PLAYER_JS
 from imbue.mngr.utils.detail_renderer import render_transcript
+from imbue.mngr.utils.detail_renderer import render_docstring
 from imbue.mngr.utils.detail_renderer import render_tutorial_block
 
 _E2E_DIR = Path(__file__).resolve().parent
@@ -165,9 +166,14 @@ def _test_page(run_name: str, test_name: str) -> str | None:
 
     parts: list[str] = []
 
-    # Tutorial block (the original script block this test covers)
+    # Docstring (the scope anchor: verbatim tutorial block plus crystallized
+    # scope). Falls back to the legacy tutorial_block.txt for pre-migration runs.
+    docstring_path = test_dir / "docstring.txt"
     tutorial_block_path = test_dir / "tutorial_block.txt"
-    if tutorial_block_path.exists():
+    if docstring_path.exists():
+        parts.append("<h2>Docstring</h2>")
+        parts.append(render_docstring(docstring_path.read_text()))
+    elif tutorial_block_path.exists():
         parts.append("<h2>Tutorial block</h2>")
         parts.append(render_tutorial_block(tutorial_block_path.read_text()))
 
