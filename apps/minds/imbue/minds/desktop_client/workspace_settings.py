@@ -128,9 +128,7 @@ def associate_workspace_account(
     configured.
     """
     if _is_leased_imbue_cloud_workspace(backend_resolver, agent_id):
-        raise WorkspaceAssociationError(
-            "Cannot change the account association of a host leased from imbue_cloud", 403
-        )
+        raise WorkspaceAssociationError("Cannot change the account association of a host leased from imbue_cloud", 403)
     if session_store is None:
         raise WorkspaceAssociationError("Session store is not configured", 409)
     session_store.associate_workspace(account_id, str(agent_id))

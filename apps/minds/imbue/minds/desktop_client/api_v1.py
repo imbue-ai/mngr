@@ -1104,16 +1104,10 @@ def create_api_v1_blueprint() -> Blueprint:
     )
 
     # Desktop namespace (cookie-or-bearer; no agent verb, so deny-all at the gateway).
-    blueprint.add_url_rule(
-        "/desktop/providers/<provider_name>", view_func=_handle_patch_provider, methods=["PATCH"]
-    )
-    blueprint.add_url_rule(
-        "/desktop/running-workspaces", view_func=_handle_running_workspaces, methods=["GET"]
-    )
+    blueprint.add_url_rule("/desktop/providers/<provider_name>", view_func=_handle_patch_provider, methods=["PATCH"])
+    blueprint.add_url_rule("/desktop/running-workspaces", view_func=_handle_running_workspaces, methods=["GET"])
     blueprint.add_url_rule("/desktop/stop-hosts", view_func=_handle_stop_hosts, methods=["POST"])
-    blueprint.add_url_rule(
-        "/desktop/state-container/stop", view_func=_handle_stop_state_container, methods=["POST"]
-    )
+    blueprint.add_url_rule("/desktop/state-container/stop", view_func=_handle_stop_state_container, methods=["POST"])
 
     # SSH access (establish): inject a public key + return connection info.
     blueprint.add_url_rule("/workspaces/<agent_id>/ssh", view_func=_handle_establish_ssh, methods=["POST"])
