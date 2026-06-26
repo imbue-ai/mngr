@@ -91,7 +91,7 @@ How it actually works:
 
 ## #4 — create backup + tunnel parity — DONE
 
-The create helpers were extracted into `apps/minds/imbue/minds/desktop_client/workspace_create.py` (`build_backup_request_or_error`, `build_create_on_created_callback` + `_OnCreatedCallbackFactory`, `resolve_effective_region`, `default_region_for_provider_with_config`), imported by both `app.py` and `api_v1.py` (this is also why the `main` merge had to reconcile `app.py` — the in-`app.py` copies were removed). `api_v1._handle_create_workspace` now builds `backup_request` via `build_backup_request_or_error` and the `on_created` callback via `build_create_on_created_callback` (which injects the Cloudflare tunnel token + associates the account) and passes both to `start_creation`, matching the desktop UI's create path.
+The create helpers were extracted into `apps/minds/imbue/minds/desktop_client/workspace_create.py` (`build_backup_request_or_error`, `build_create_on_created_callback` + the `CreateOnCreatedCallback` class, `resolve_effective_region`, `default_region_for_provider_with_config`), imported by both `app.py` and `api_v1.py` (this is also why the `main` merge had to reconcile `app.py` — the in-`app.py` copies were removed). `api_v1._handle_create_workspace` now builds `backup_request` via `build_backup_request_or_error` and the `on_created` callback via `build_create_on_created_callback` (which injects the Cloudflare tunnel token + associates the account) and passes both to `start_creation`, matching the desktop UI's create path.
 
 Note: legacy `/api/create-agent` (JSON) and the onboarding-questions feature were removed during the `main` merge; the browser create flow still uses the older `/api/create-agent/<id>/status|logs` *polling* routes (see #2.B).
 
