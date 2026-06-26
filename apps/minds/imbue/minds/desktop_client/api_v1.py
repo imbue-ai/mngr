@@ -1061,6 +1061,60 @@ def create_api_v1_blueprint() -> Blueprint:
         "/workspaces/operations/<operation_id>/logs", view_func=_handle_operation_logs, methods=["GET"]
     )
 
+    # Workspace metadata update (color + account association). Gated by
+    # ``minds-workspaces-update`` at the gateway.
+    blueprint.add_url_rule(
+        "/workspaces/<agent_id>",
+        view_func=_handle_patch_workspace,
+        endpoint="patch_workspace",
+        methods=["PATCH"],
+    )
+
+    # Operation dismissal (replaces /api/destroying/<id>/dismiss).
+    blueprint.add_url_rule(
+        "/workspaces/operations/<operation_id>",
+        view_func=_handle_dismiss_operation,
+        endpoint="dismiss_operation",
+        methods=["DELETE"],
+    )
+
+    # Sharing sub-resource. Gated by ``minds-workspaces-sharing`` at the gateway.
+    blueprint.add_url_rule(
+        "/workspaces/<agent_id>/sharing/<service_name>",
+        view_func=_handle_sharing_status,
+        endpoint="sharing_status",
+        methods=["GET"],
+    )
+    blueprint.add_url_rule(
+        "/workspaces/<agent_id>/sharing/<service_name>/readiness",
+        view_func=_handle_sharing_readiness,
+        methods=["GET"],
+    )
+    blueprint.add_url_rule(
+        "/workspaces/<agent_id>/sharing/<service_name>",
+        view_func=_handle_sharing_enable,
+        endpoint="sharing_enable",
+        methods=["PUT"],
+    )
+    blueprint.add_url_rule(
+        "/workspaces/<agent_id>/sharing/<service_name>",
+        view_func=_handle_sharing_disable,
+        endpoint="sharing_disable",
+        methods=["DELETE"],
+    )
+
+    # Desktop namespace (cookie-or-bearer; no agent verb, so deny-all at the gateway).
+    blueprint.add_url_rule(
+        "/desktop/providers/<provider_name>", view_func=_handle_patch_provider, methods=["PATCH"]
+    )
+    blueprint.add_url_rule(
+        "/desktop/running-workspaces", view_func=_handle_running_workspaces, methods=["GET"]
+    )
+    blueprint.add_url_rule("/desktop/stop-hosts", view_func=_handle_stop_hosts, methods=["POST"])
+    blueprint.add_url_rule(
+        "/desktop/state-container/stop", view_func=_handle_stop_state_container, methods=["POST"]
+    )
+
     # SSH access (establish): inject a public key + return connection info.
     blueprint.add_url_rule("/workspaces/<agent_id>/ssh", view_func=_handle_establish_ssh, methods=["POST"])
 
