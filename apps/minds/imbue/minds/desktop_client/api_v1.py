@@ -586,13 +586,13 @@ def _handle_destroy_workspace(agent_id: str) -> Response:
     return _json_response({"operation_id": str(parsed_id), "kind": "destroy"}, status_code=202)
 
 
-def _run_mngr_blocking(argv: list[str], parent_cg: ConcurrencyGroup) -> tuple[int, str]:
-    """Run an ``mngr`` command to completion; return ``(returncode, stderr)``."""
+def _run_mngr_blocking(argv: list[str], parent_cg: ConcurrencyGroup) -> tuple[int, str, str]:
+    """Run an ``mngr`` command to completion; return ``(returncode, stdout, stderr)``."""
     cg = parent_cg.make_concurrency_group(name="workspace-lifecycle")
     with cg:
         finished = cg.run_process_to_completion(argv, timeout=_LIFECYCLE_TIMEOUT_SECONDS, is_checked_after=False)
     returncode = finished.returncode if finished.returncode is not None else 1
-    return returncode, finished.stderr
+    return returncode, finished.stdout, finished.stderr
 
 
 @require_api_or_cookie_auth
@@ -963,14 +963,19 @@ def _handle_establish_ssh(agent_id: str) -> Response:
 
     Body: ``{"public_key": "<openssh public key>", "requester_workspace_id":
     "<caller's own id>"}``. The caller's private key never leaves the caller.
-    The hub injects the (TTL-tagged) public key into the target's
-    ``authorized_keys`` and returns the target's SSH ``user``/``host``/``port``.
+    The hub reads the target's ``authorized_keys`` back over ``mngr exec``,
+    prunes any expired minds-owned grant lines, appends the new (TTL-tagged)
+    public key, writes the result back in one rewrite, and returns the target's
+    SSH ``user``/``host``/``port``. Pruning on every grant means repeated
+    requests never let stale grant lines pile up.
 
     Only *remote* targets (reachable from anywhere) are supported: a local
-    (Docker/Lima) target has no externally reachable address, so brokering a
-    forwarding tunnel for the remote->local case is not yet implemented and the
-    route returns 501. The target must be online; authorizing the key on a
-    stopped target fails at the ``mngr exec`` step and returns 502.
+    (Docker/Lima) target has no hub-resolvable external SSH endpoint
+    (``get_ssh_info`` is ``None``; mngr reports no SSH connection info for local
+    hosts), so brokering a forwarding tunnel for the remote->local case is not
+    yet implemented and the route returns 501. The target must be online;
+    reading or writing the key on a stopped target fails at the ``mngr exec``
+    step and returns 502.
     """
     parsed_id = AgentId(agent_id)
     backend_resolver = get_state().backend_resolver
@@ -998,8 +1003,9 @@ def _handle_establish_ssh(agent_id: str) -> Response:
             501,
         )
 
+    now = datetime.now(timezone.utc)
     try:
-        expires_at = datetime.now(timezone.utc) + workspace_ssh.DEFAULT_SSH_GRANT_TTL
+        expires_at = now + workspace_ssh.DEFAULT_SSH_GRANT_TTL
         authorized_line = workspace_ssh.build_authorized_keys_line(
             public_key=public_key,
             requester_workspace_id=requester_workspace_id,
@@ -1008,19 +1014,43 @@ def _handle_establish_ssh(agent_id: str) -> Response:
     except workspace_ssh.SshGrantError as e:
         return _json_error(str(e), 400)
 
-    # Append the tagged key to the target's authorized_keys via mngr exec.
-    install_script = (
+    mngr_binary = get_state().mngr_binary
+
+    # Read the target's current authorized_keys (absent file -> empty), prune any
+    # expired minds-owned grant lines, append the new grant, and write the whole
+    # body back in one rewrite. Read + write are two mngr exec round-trips; the
+    # prune logic lives in workspace_ssh so it stays unit-tested.
+    read_argv = [
+        mngr_binary,
+        "exec",
+        str(parsed_id),
+        "--",
+        "bash",
+        "-lc",
+        "cat ~/.ssh/authorized_keys 2>/dev/null || true",
+    ]
+    try:
+        read_returncode, existing_authorized_keys, read_stderr = _run_mngr_blocking(read_argv, parent_cg)
+    except (OSError, ConcurrencyGroupError) as e:
+        return _json_error(f"Could not read the target's authorized_keys: {e}", 502)
+    if read_returncode != 0:
+        return _json_error(f"Could not read the target's authorized_keys: {read_stderr.strip()}", 502)
+
+    new_authorized_keys = workspace_ssh.compose_pruned_authorized_keys(
+        existing_authorized_keys, authorized_line, now=now
+    )
+    write_script = (
         "set -e; mkdir -p ~/.ssh; chmod 700 ~/.ssh; "
-        f"printf '%s\\n' {shlex.quote(authorized_line)} >> ~/.ssh/authorized_keys; "
+        f"printf '%s' {shlex.quote(new_authorized_keys)} > ~/.ssh/authorized_keys; "
         "chmod 600 ~/.ssh/authorized_keys"
     )
-    argv = [get_state().mngr_binary, "exec", str(parsed_id), "--", "bash", "-lc", install_script]
+    write_argv = [mngr_binary, "exec", str(parsed_id), "--", "bash", "-lc", write_script]
     try:
-        returncode, stderr = _run_mngr_blocking(argv, parent_cg)
+        write_returncode, _write_stdout, write_stderr = _run_mngr_blocking(write_argv, parent_cg)
     except (OSError, ConcurrencyGroupError) as e:
         return _json_error(f"Could not authorize SSH key on the target: {e}", 502)
-    if returncode != 0:
-        return _json_error(f"Could not authorize SSH key on the target: {stderr.strip()}", 502)
+    if write_returncode != 0:
+        return _json_error(f"Could not authorize SSH key on the target: {write_stderr.strip()}", 502)
 
     connection = workspace_ssh.SshConnectionInfo(
         user=ssh_info.user, host=ssh_info.host, port=ssh_info.port, expires_at=expires_at

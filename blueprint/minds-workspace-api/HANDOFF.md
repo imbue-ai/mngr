@@ -104,14 +104,22 @@ The create helpers were extracted into `apps/minds/imbue/minds/desktop_client/wo
 
 Note: legacy `/api/create-agent` (JSON) and the onboarding-questions feature were removed during the `main` merge; the browser create flow still uses the older `/api/create-agent/<id>/status|logs` *polling* routes (see #2.B).
 
-## #5 — SSH remote→local tunnel broker — OUTSTANDING (the main remaining work; remote-direct DONE)
+## #5 — SSH remote→local tunnel broker — PARTIALLY DONE (pruning wired; broker still outstanding, with a now-understood blocker)
 
-`POST /api/v1/workspaces/<id>/ssh` works for remote targets but returns 501 when the target is local (Docker/Lima; `get_ssh_info` is `None` — see `api_v1.py` `_handle_establish_ssh`, the explicit 501 with "brokering a forwarding tunnel for the remote->local case is not yet supported"). Build the hub-brokered tunnel for the remote-caller → local-target case (spec Q5/Q8):
-- The calling (remote) workspace self-reports its workspace id (already accepted as `requester_workspace_id`). The hub runs one `ssh` process connecting the two machines (it can reach both) and returns a loopback port reverse-forwarded into the **caller's** container, so the caller connects to `127.0.0.1:<port>`.
-- The tunnel process is owned by the Minds-app lifetime (dies with it) — own it on `get_state().root_concurrency_group`; likely a new small module + a registry of active tunnels in state.
-- **Also wire `workspace_ssh.prune_expired_grant_lines`** (already written + unit-tested, but NOT wired): on each grant (and at `minds run` startup), read the target's `authorized_keys` via `mngr exec`, prune expired minds-owned lines, write back. See `apps/minds/imbue/minds/desktop_client/api_v1.py` `_handle_establish_ssh` and `workspace_ssh.py`.
+`POST /api/v1/workspaces/<id>/ssh` works for remote targets and returns 501 when the target is local (Docker/Lima; `get_ssh_info` is `None`).
 
-Relevant: `api_v1.py` `_handle_establish_ssh`, `workspace_ssh.py`, `backend_resolver.get_ssh_info`, `mngr_forward.ssh_tunnel.RemoteSSHInfo`.
+**DONE (branch `mngr/minds-api-final`): grant pruning is wired.** `_handle_establish_ssh` no longer blindly appends — it reads the target's `~/.ssh/authorized_keys` back over `mngr exec`, prunes expired minds-owned grants, appends the new grant, and writes the whole body back in one rewrite. The compose logic is the pure, unit-tested `workspace_ssh.compose_pruned_authorized_keys` (wrapping the previously-unwired `prune_expired_grant_lines`). `_run_mngr_blocking` now also returns stdout (for the read). Tests: `workspace_ssh_test.py` (`compose_*`). A *startup* sweep across all workspaces was intentionally **not** added — it would fan `mngr exec` over every (possibly offline) workspace at boot; per-grant pruning already bounds accumulation on the target that actually grows.
+
+**OUTSTANDING: the remote-caller → local-target broker.** Spec Q5/Q8 want: the caller self-reports its id (`requester_workspace_id`); the hub runs one `ssh` process connecting the two machines and returns a loopback port reverse-forwarded into the **caller's** container (caller connects to `127.0.0.1:<port>`); the process is owned by the Minds-app lifetime (`get_state().root_concurrency_group`), with a small new module + a registry of active tunnels in state; refresh-on-re-request.
+
+**Blocker found while picking this up (read before attempting).** The hub has no *supported* way to resolve a **local** target's hub-reachable SSH endpoint. The `ssh -R <port>:<target_host>:<target_port> <caller>` design needs `<target_host>:<target_port>` reachable from the hub, but:
+- minds' `backend_resolver.get_ssh_info` only carries remote hosts (the `mngr forward` stream emits `HostSSHInfoEvent` for remote hosts only).
+- mngr's generic `Host.get_ssh_connection_info()` (`hosts/outer_host.py`) returns `None` when `is_local`, and `mngr create --format json` only emits `ssh_host`/`ssh_port` when that is non-`None`. mngr deliberately surfaces no SSH endpoint for local hosts.
+- The docker container *does* run sshd on a published port (`providers/docker/instance.py` `_get_container_ssh_port` + `docker_ssh_key`), but that is provider-internal and not exposed through any CLI minds is allowed to use.
+
+So the broker needs one of: (a) new mngr surface reporting a local host's SSH endpoint (user/host/port/key) — cleanest; or (b) a hub-side byte relay bridging to the target via `mngr exec <target> -- <python socket bridge>` fronted by `ssh -R <port>:127.0.0.1:<relay> <caller>` (supported CLI + guaranteed python, more moving parts). Either way it needs a *remote caller* to verify end-to-end, which is not possible without a cloud host. Recommend doing (a) in mngr first.
+
+Relevant: `api_v1.py` `_handle_establish_ssh`, `workspace_ssh.py` (`compose_pruned_authorized_keys`, `prune_expired_grant_lines`), `backend_resolver.get_ssh_info`, `mngr_forward.ssh_tunnel.{RemoteSSHInfo, SSHTunnelManager.setup_reverse_tunnel}`, `mngr/hosts/outer_host.py` `get_ssh_connection_info`, `mngr/providers/docker/instance.py`.
 
 ---
 

@@ -1,0 +1,1 @@
+Updates `blueprint/minds-workspace-api/HANDOFF.md` for the SSH work: marks grant pruning as done (wired in `apps/minds`), and records the now-understood blocker for the remaining remote->local SSH tunnel broker (the hub cannot resolve a local Docker/Lima target's SSH endpoint through any supported mngr surface), with two suggested ways forward.

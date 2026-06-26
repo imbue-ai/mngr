@@ -10,13 +10,17 @@ its own private key and runs ordinary ``git`` / ``rsync`` / ``ssh``.
 Private keys never move: the hub only ever handles public keys. Grants are
 ephemeral -- each authorized key carries an ``expires=`` marker so that stale
 grants can be pruned. ``prune_expired_grant_lines`` implements that pruning over
-an ``authorized_keys`` body; wiring it into the grant/startup flow (which must
-read the target's ``authorized_keys`` back over ``mngr exec``) is not done yet.
+an ``authorized_keys`` body, and ``compose_pruned_authorized_keys`` combines it
+with the new grant line in a single rewrite. The grant flow (see the route)
+reads the target's ``authorized_keys`` back over ``mngr exec``, prunes expired
+minds-owned lines, and writes the pruned body plus the new grant, so stale
+grants never accumulate across repeated requests.
 
 For a *remote* target (Modal / AWS / Vultr / imbue_cloud), the returned host is
 reachable from anywhere, so the caller connects directly. A *local* target
-(Docker / Lima) is not reachable from a remote caller; brokering a forwarding
-tunnel for that remote->local case is not yet implemented (see the route).
+(Docker / Lima) has no hub-resolvable external SSH endpoint, so brokering a
+forwarding tunnel for that remote->local case is not yet implemented (see the
+route).
 """
 
 from datetime import datetime
@@ -131,6 +135,20 @@ def prune_expired_grant_lines(authorized_keys_content: str, *, now: datetime) ->
         kept.append(line)
     # Preserve a trailing newline iff the input had non-empty content.
     return "\n".join(kept) + "\n" if kept else ""
+
+
+def compose_pruned_authorized_keys(existing_content: str, new_authorized_line: str, *, now: datetime) -> str:
+    """Return the full ``authorized_keys`` body to write back for a grant.
+
+    Prunes expired minds-owned grants from the existing body (keeping every
+    user-managed key and every still-valid grant verbatim) and appends the new
+    grant line. The result is newline-terminated so the file ends cleanly. This
+    is the single source of truth for what a grant writes back, so the grant
+    flow only has to read the current body, call this, and write the result --
+    expired grants can never accumulate across repeated requests.
+    """
+    pruned = prune_expired_grant_lines(existing_content, now=now)
+    return f"{pruned}{new_authorized_line}\n"
 
 
 class SshConnectionInfo(FrozenModel):
