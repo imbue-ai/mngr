@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-25
+
+Fixed repeated macOS system keychain access dialogs (mentioning Latchkey) that appeared during normal Minds use. The detached `latchkey ensure-browser` subprocess was spawned without `LATCHKEY_ENCRYPTION_KEY`, so Latchkey's startup key-resolution fell through to the system keychain on every spawn. The per-directory encryption key is now injected into that subprocess's environment, matching the other Latchkey invocations.
+
+Bump the pinned latchkey CLI version installed on remote VPS environments (the secondary gateway) to 2.19.1.
+
+Added: the permission-request gateway (`POST /permission-requests`) now validates `agent_id` against the canonical `AgentId` format (`agent-` followed by 32 hex characters) and rejects a malformed value with HTTP 400 before persisting it. An agent that supplies a bad `agent_id` (e.g. a hand-crafted body with a placeholder like `ENV_AGENT`) is now notified of the failure at its request, rather than silently filing an unusable request that later crashed the desktop client's permission-requests consumer. The JS check mirrors Python's `imbue.imbue_common.ids.RandomId._validate`; a cross-language test posts a freshly generated `AgentId` to guard against the two definitions drifting apart.
+
 ## 2026-06-23
 
 `LatchkeyForwardSupervisor` (and the underlying `spawn_detached_mngr_latchkey_forward`) now accept a `cwd` argument, so embedders can launch the detached `mngr latchkey forward` supervisor from a chosen working directory (e.g. `$HOME`) instead of inheriting the caller's cwd. This keeps the supervisor's `mngr` children from resolving project config out of a transient working directory.

@@ -76,6 +76,11 @@ def _get_data(path: str, *, env: dict[str, str]) -> dict[str, str] | None:
     if result.returncode != 0:
         raise RuntimeError(f"`vault kv get {path}` failed (exit {result.returncode}): {result.stderr.strip()}")
     inner = json.loads(result.stdout).get("data", {}).get("data")
+    if inner is None:
+        # A soft-deleted secret returns exit 0 with a null `data.data` (its
+        # metadata still lists a `deletion_time`). Treat it as absent -- there
+        # is no live flat secret to mirror-check or remove.
+        return None
     if not isinstance(inner, dict):
         raise RuntimeError(f"`vault kv get {path}` returned no data.data dict")
     return {str(k): str(v) for k, v in inner.items()}
