@@ -47,6 +47,10 @@ build_inputs = [
 type = "pytest"
 command = "uv run pytest"
 run_args = "--cov-fail-under=0 -p no:xdist"
+# EXPERIMENT baseline: disable test-affinity so batching matches the pre-feature
+# behavior. Compare this run against the treatment branch (default 2.0s) to
+# isolate the affinity effect with the same offload binary.
+affinity_overhead_secs = 0.0
 
 [groups.all]
 retry_count = 0
