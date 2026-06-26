@@ -721,6 +721,8 @@ async def _create_workspace_and_first_message(
     phase_durations: dict[str, float] = {}
     done = False
     done_redirect_url = ""
+    navigated_to_workspace = False
+    chat_url_re = re.compile(r"agent-[a-f0-9]+\.localhost")
     while time.time() < deadline and not done:
         stat = await win.evaluate(
             """async (id) => {
@@ -748,6 +750,20 @@ async def _create_workspace_and_first_message(
                 logger.info("[{}] creation status: (none) -> {}", label, state)
             last_status = state
             phase_started_at = now
+            if not state and not chat_url_re.search(win.url):
+                # An empty status off the workspace origin is anomalous: the
+                # /status body had no "status" field -- a 403 "Not authenticated"
+                # or 404 "Unknown agent creation". (Empty status *on* the
+                # workspace URL is the normal auto-navigate-on-DONE case, handled
+                # below.) Log the raw response to tell the anomalies apart.
+                with contextlib.suppress(Exception):
+                    logger.warning(
+                        "[{}]   empty-status detail: http={} url={} body={!r}",
+                        label,
+                        stat.get("status"),
+                        win.url,
+                        (stat.get("body") or "")[:160],
+                    )
         if state == "DONE":
             phase_durations[state] = round(time.monotonic() - phase_started_at, 2)
             done_redirect_url = payload.get("redirect_url", "")
@@ -755,6 +771,16 @@ async def _create_workspace_and_first_message(
             break
         if state == "FAILED":
             raise E2EFailure(f"[{label}] creation FAILED: {payload.get('error', stat['body'])}")
+        # On DONE, creating.js auto-navigates the page to the workspace; the
+        # /status fetch then hits the workspace origin and returns HTML, so
+        # `state` reads empty. Landing on the workspace URL *is* success -- the
+        # page is already where the redirect below would send it -- so the poll
+        # must not keep waiting for a "DONE" it already missed.
+        if not state and chat_url_re.search(win.url):
+            logger.info("[{}] creation DONE (page auto-navigated to workspace {})", label, win.url)
+            done = True
+            navigated_to_workspace = True
+            break
         if (
             state == "CREATING_WORKSPACE"
             and not any(SCREENSHOT_DIR.glob(f"{snaps.creating_mid}.*"))
@@ -769,14 +795,18 @@ async def _create_workspace_and_first_message(
             tail = EVENTS_LOG.read_text(errors="ignore").splitlines()[-60:]
             logger.error("[{}] minds-events.jsonl tail:\n{}", label, "\n".join(tail))
         raise E2EFailure(f"[{label}] creation didn't reach DONE in {CREATE_TIMEOUT}s (last={last_status})")
-    if not done_redirect_url:
+    if navigated_to_workspace:
+        # The page already navigated to the workspace on its own; no goto needed.
+        logger.info("[{}] creation DONE; already on workspace {}", label, win.url)
+        target = win.url
+    elif not done_redirect_url:
         raise E2EFailure(
             f"[{label}] creation DONE without redirect_url; check the /api/create-agent/<id>/status contract"
         )
-    target = done_redirect_url if done_redirect_url.startswith("http") else origin + done_redirect_url
-    logger.info("[{}] creation DONE; navigating directly to {}", label, target)
-    await win.goto(target)
-    chat_url_re = re.compile(r"agent-[a-f0-9]+\.localhost")
+    else:
+        target = done_redirect_url if done_redirect_url.startswith("http") else origin + done_redirect_url
+        logger.info("[{}] creation DONE; navigating directly to {}", label, target)
+        await win.goto(target)
     chat_wait_seconds = 180
     chat_deadline = time.time() + chat_wait_seconds
     while time.time() < chat_deadline and not chat_url_re.search(win.url):
@@ -1008,6 +1038,19 @@ async def amain() -> int:
         await win.goto(origin + "/")
         await snap_page(win, "02-home-after-auth")
 
+        # The post-login "Help improve Minds" error-reporting consent screen
+        # (Consent.jinja, shown while error_reporting_consent_given is False --
+        # always here, since the runner's ~/.minds is wiped each run) sits on
+        # the home page until answered. Dismiss it once via Continue; the
+        # POST /consent + reload then proceeds home, so the create flow and the
+        # later both-tiles home assertion see the home page, not the consent.
+        with contextlib.suppress(Exception):
+            consent_btn = await win.wait_for_selector("#consent-continue", timeout=8_000)
+            if consent_btn is not None:
+                await consent_btn.click()
+                await win.wait_for_selector("#consent-continue", state="detached", timeout=15_000)
+                logger.info("dismissed error-reporting consent screen")
+
         # 4-6. Create agent via UI click and drive to first message. Mirrors
         # what a user does (Configure panel, launch_mode/ai_provider/api_key
         # fields, host_name fill, submit, poll until DONE, navigate to chat,
@@ -1193,6 +1236,16 @@ async def amain() -> int:
                     chat_now = await find_chat_window(ctx)
                     if chat_now is not None:
                         win = chat_now
+                    # Scroll the transcript to the live tail before reading it, as a
+                    # user reading the latest reply would. The chat virtualizes
+                    # off-screen rows, so a reply rendered below the fold (e.g. the
+                    # view was not pinned to the bottom when it arrived) is absent
+                    # from document.body.innerText until the viewport is at the tail.
+                    with contextlib.suppress(Exception):
+                        await win.evaluate(
+                            "() => { for (const el of document.querySelectorAll('.app-content')) "
+                            "{ el.scrollTop = el.scrollHeight; } }"
+                        )
                     # Check for canned body in chat (PASS).
                     body = await win.evaluate("document.body.innerText")
                     if CANNED_BODY.lower() in body.lower() and approval_stage >= 3:
