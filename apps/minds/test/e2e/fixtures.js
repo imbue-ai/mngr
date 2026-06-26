@@ -82,64 +82,45 @@ const test = base.test.extend({
       }
     }
 
-    // Teardown. A graceful Playwright `app.close()` quits via the Cmd-Q path,
-    // which -- when local minds are running or the liveness probe is slow --
-    // pops the interactive "Shut down running minds?" prompt: a *native* Electron
-    // dialog (electron/main.js) a headless test cannot click. SIGTERM is routed
-    // through the same shutdown chain but flagged headless (`isHeadlessQuit`),
-    // skipping the dialog (the `just minds-stop` path). Bound it (SIGTERM, brief
-    // wait, else SIGKILL) so a hung backend shutdown can't wedge teardown.
+    // Teardown. macos-launch creates no mind, so no graceful shutdown is needed
+    // (and SIGKILL never pops the native "Shut down running minds?" quit dialog
+    // that a graceful `app.close()` would). Every step is hard-bounded so a cold
+    // CI mac can't wedge teardown for the full test timeout.
     const { execSync } = require('child_process');
     const proc = app.process();
     try {
-      proc.kill('SIGTERM');
+      proc.kill('SIGKILL');
     } catch (e) {
-      console.error('[fixture] SIGTERM to minds app failed:', e.message);
+      console.error('[fixture] SIGKILL to minds app failed:', e.message);
     }
-    const exitedCleanly = await new Promise((resolve) => {
-      const timer = setTimeout(() => resolve(false), 30000);
-      proc.once('exit', () => {
-        clearTimeout(timer);
-        resolve(true);
-      });
-    });
-    if (!exitedCleanly) {
-      console.error('[fixture] minds app did not exit on SIGTERM within 30s; SIGKILL');
-      try {
-        proc.kill('SIGKILL');
-      } catch (e) {
-        console.error('[fixture] SIGKILL failed:', e.message);
-      }
-    }
-    // The app spawns detached helpers that outlive the main process: the minds
-    // python backend, a `mngr latchkey forward` supervisor (its own process
-    // group, so a group-kill misses it), and the crashpad handler. Reparented to
-    // launchd, they keep the worker's inherited stdio sockets open, so the
-    // Playwright worker never exits ("worker did not exit ... force-killed it" ->
-    // nonzero exit -> the macos_launch job fails even though the test passed).
-    // Reap them by command pattern. (macos-launch runs on an ephemeral GHA Mac,
-    // so a broad minds-scoped pkill is safe.)
-    try {
-      execSync('pkill -9 -if "minds\\.app|/\\.minds/|mngr latchkey|mngr observe|Minds/Crashpad" 2>/dev/null || true', {
-        stdio: 'ignore',
-      });
-    } catch (e) {
-      /* best effort */
-    }
-    await Promise.race([
-      app.close().catch(() => {}),
-      new Promise((resolve) => setTimeout(resolve, 30000)),
-    ]);
-    // Even after reaping, Playwright's stdout/stderr forwarding leaves this
-    // worker's stdio socket handles ref'd, which alone keeps the event loop
-    // alive past teardown. Unref them so the worker exits cleanly rather than
-    // being force-killed.
+    // Unref this worker's stdio FIRST -- the app spawns detached helpers (minds
+    // python backend, `mngr latchkey forward` in its own process group, crashpad)
+    // that outlive the main process and keep the worker's inherited stdio sockets
+    // ref'd, so the worker never exits ("worker did not exit ... force-killed it"
+    // -> red job despite a passing test). Unref makes the worker exit regardless,
+    // and runs before anything that could block so it always takes effect.
     try {
       process.stdout.unref();
       process.stderr.unref();
     } catch (e) {
       /* best effort */
     }
+    // Reap those detached helpers (hygiene). BOUNDED: `execSync` has no default
+    // timeout, and an unbounded `pkill` here once hung for the entire 600s test
+    // timeout on a cold GHA mac. The `timeout` caps it. (macos-launch runs on an
+    // ephemeral GHA Mac, so a broad minds-scoped pkill is safe.)
+    try {
+      execSync('pkill -9 -if "minds\\.app|/\\.minds/|mngr latchkey|mngr observe|Minds/Crashpad" 2>/dev/null || true', {
+        stdio: 'ignore',
+        timeout: 10000,
+      });
+    } catch (e) {
+      /* best effort */
+    }
+    await Promise.race([
+      app.close().catch(() => {}),
+      new Promise((resolve) => setTimeout(resolve, 8000)),
+    ]);
   },
 });
 
