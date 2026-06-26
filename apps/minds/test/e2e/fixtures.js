@@ -84,19 +84,39 @@ const test = base.test.extend({
 
     // Teardown: a graceful Playwright `app.close()` quits via the same path as
     // Cmd-Q, which -- when local minds are running, or the liveness probe is
-    // slow -- pops the interactive "Shut down running minds?" prompt. That is a
-    // *native* Electron dialog (electron/main.js), which a headless test cannot
-    // click, so teardown blocks until the test timeout and the worker is
-    // force-killed. SIGTERM is routed through the same shutdown chain but
-    // flagged headless (`isHeadlessQuit`), so it skips the dialog -- the same
-    // path `just minds-stop` uses. Send it, then let `app.close()` reap the
-    // now-exiting process.
+    // slow -- pops the interactive "Shut down running minds?" prompt: a *native*
+    // Electron dialog (electron/main.js) a headless test cannot click, so it
+    // blocks until the test timeout. SIGTERM is routed through the same shutdown
+    // chain but flagged headless (`isHeadlessQuit`), skipping the dialog (the
+    // `just minds-stop` path). But the headless shutdown itself can still hang
+    // (e.g. backend teardown waiting on a host that never comes up), so bound
+    // it: SIGTERM, wait briefly for a clean exit, else SIGKILL, then reap the
+    // Playwright connection with a hard cap so the worker can never wedge.
+    const proc = app.process();
     try {
-      app.process().kill('SIGTERM');
+      proc.kill('SIGTERM');
     } catch (e) {
       console.error('[fixture] SIGTERM to minds app failed:', e.message);
     }
-    await app.close();
+    const exitedCleanly = await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), 30000);
+      proc.once('exit', () => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+    });
+    if (!exitedCleanly) {
+      console.error('[fixture] minds app did not exit on SIGTERM within 30s; SIGKILL');
+      try {
+        proc.kill('SIGKILL');
+      } catch (e) {
+        console.error('[fixture] SIGKILL failed:', e.message);
+      }
+    }
+    await Promise.race([
+      app.close().catch(() => {}),
+      new Promise((resolve) => setTimeout(resolve, 30000)),
+    ]);
   },
 });
 

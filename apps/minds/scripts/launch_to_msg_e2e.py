@@ -721,6 +721,8 @@ async def _create_workspace_and_first_message(
     phase_durations: dict[str, float] = {}
     done = False
     done_redirect_url = ""
+    navigated_to_workspace = False
+    chat_url_re = re.compile(r"agent-[a-f0-9]+\.localhost")
     while time.time() < deadline and not done:
         stat = await win.evaluate(
             """async (id) => {
@@ -769,6 +771,16 @@ async def _create_workspace_and_first_message(
             break
         if state == "FAILED":
             raise E2EFailure(f"[{label}] creation FAILED: {payload.get('error', stat['body'])}")
+        # On DONE, creating.js auto-navigates the page to the workspace; the
+        # /status fetch then hits the workspace origin and returns HTML, so
+        # `state` reads empty. Landing on the workspace URL *is* success -- the
+        # page is already where the redirect below would send it -- so the poll
+        # must not keep waiting for a "DONE" it already missed.
+        if not state and chat_url_re.search(win.url):
+            logger.info("[{}] creation DONE (page auto-navigated to workspace {})", label, win.url)
+            done = True
+            navigated_to_workspace = True
+            break
         if (
             state == "CREATING_WORKSPACE"
             and not any(SCREENSHOT_DIR.glob(f"{snaps.creating_mid}.*"))
@@ -783,14 +795,18 @@ async def _create_workspace_and_first_message(
             tail = EVENTS_LOG.read_text(errors="ignore").splitlines()[-60:]
             logger.error("[{}] minds-events.jsonl tail:\n{}", label, "\n".join(tail))
         raise E2EFailure(f"[{label}] creation didn't reach DONE in {CREATE_TIMEOUT}s (last={last_status})")
-    if not done_redirect_url:
-        raise E2EFailure(
-            f"[{label}] creation DONE without redirect_url; check the /api/create-agent/<id>/status contract"
-        )
-    target = done_redirect_url if done_redirect_url.startswith("http") else origin + done_redirect_url
-    logger.info("[{}] creation DONE; navigating directly to {}", label, target)
-    await win.goto(target)
-    chat_url_re = re.compile(r"agent-[a-f0-9]+\.localhost")
+    if navigated_to_workspace:
+        # The page already navigated to the workspace on its own; no goto needed.
+        logger.info("[{}] creation DONE; already on workspace {}", label, win.url)
+        target = win.url
+    else:
+        if not done_redirect_url:
+            raise E2EFailure(
+                f"[{label}] creation DONE without redirect_url; check the /api/create-agent/<id>/status contract"
+            )
+        target = done_redirect_url if done_redirect_url.startswith("http") else origin + done_redirect_url
+        logger.info("[{}] creation DONE; navigating directly to {}", label, target)
+        await win.goto(target)
     chat_wait_seconds = 180
     chat_deadline = time.time() + chat_wait_seconds
     while time.time() < chat_deadline and not chat_url_re.search(win.url):
