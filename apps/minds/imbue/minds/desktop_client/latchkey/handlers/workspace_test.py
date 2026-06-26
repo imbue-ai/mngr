@@ -195,7 +195,9 @@ def test_grant_selected_sends_override_with_target(tmp_path: Path) -> None:
     # The gateway received an approve POST with the verbs + selected target.
     assert captured["method"] == "POST"
     assert str(captured["path"]).endswith(f"/permission-requests/approve/{event.event_id}")
-    assert json.loads(captured["content"]) == {
+    sent_body = captured["content"]
+    assert isinstance(sent_body, bytes)
+    assert json.loads(sent_body) == {
         "permissions": [PERM_WORKSPACES_DESTROY],
         "target_workspace_id": str(target),
     }
@@ -231,7 +233,9 @@ def test_grant_all_sends_override_with_null_target(tmp_path: Path) -> None:
         data={"permissions": PERM_WORKSPACES_DESTROY, "target_scope": "all"},
     )
     assert response.status_code == 200, response.text
-    assert json.loads(captured["content"]) == {
+    sent_body = captured["content"]
+    assert isinstance(sent_body, bytes)
+    assert json.loads(sent_body) == {
         "permissions": [PERM_WORKSPACES_DESTROY],
         "target_workspace_id": None,
     }
