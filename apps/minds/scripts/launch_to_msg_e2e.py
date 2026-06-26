@@ -52,8 +52,10 @@ Flow:
      -- cross-checks the destroy lifecycle from a different angle
      than the UI's home-page tile state.
   9. Duplicate-name conflict: POST /api/v1/workspaces with HOST_NAME
-     already owned by W1; assert 409 with "already exists". Proves
-     the duplicate-name guard added on this branch works.
+     already owned by W1. The v1 create route resolves a submitted name
+     verbatim and returns 202; a duplicate then surfaces asynchronously
+     as a FAILED operation at the mngr-create pre-flight (not a
+     synchronous 409). This step has no implemented assertion.
   10. Teardown: revert /etc/hosts, clear latchkey, kill mock + socat
 
 Takes a `screencapture -x` whole-desktop shot at every milestone.

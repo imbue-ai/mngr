@@ -48,7 +48,16 @@ Telegram is removed from `forever-claude-template` (commit "Remove Telegram enti
 
 The only remaining `telegram` mentions in the FCT tree are incidental and *not* part of the bot teardown: a few historical `specs/`/`blueprint/` docs use telegram as an example, and `.agents/skills/latchkey/SKILL.md` lists "Telegram" as one of many third-party services latchkey *itself* can broker (unrelated to the removed minds bot). No action needed.
 
-## #2 — UI browser-JS repoint onto `/api/v1` (mostly DONE)
+## #2 — UI browser-JS repoint onto `/api/v1` — DONE
+
+> **Update:** the full route consolidation (every flow below, plus the
+> remaining old routes and the create-flow repoint) is now implemented per
+> [`blueprint/minds-api-route-consolidation/plan-minds-api-route-consolidation.md`](../minds-api-route-consolidation/plan-minds-api-route-consolidation.md):
+> the browser create posts to `POST /api/v1/workspaces`; color/association,
+> providers, recovery, sharing, desktop-lifecycle, dismiss, and the backups
+> badges all run against `/api/v1`; and the old `app.py` routes were removed
+> (`app.py` shrank ~1,130 lines). The "old routes still in use" tables below
+> are **historical** (kept for context).
 
 Most UI data calls already run against `/api/v1`. What's been repointed (verified by grepping `static/`, `templates/pages/*.jinja`, and `electron/`):
 
