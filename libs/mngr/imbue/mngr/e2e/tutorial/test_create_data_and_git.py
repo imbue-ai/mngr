@@ -22,10 +22,15 @@ from imbue.skitwright.expect import expect
 @pytest.mark.tmux
 @pytest.mark.rsync
 def test_create_with_source_path(e2e: E2eSession, tmp_path: Path) -> None:
-    e2e.write_tutorial_block("""
-    # by default, the agent uses the data from its current git repo (if any) or folder, but you can specify a different source:
-    mngr create my-task --from /path/to/some/other/project
-    """)
+    """Tutorial block:
+        # by default, the agent uses the data from its current git repo (if any) or folder, but you can specify a different source:
+        mngr create my-task --from /path/to/some/other/project
+
+    Scope: `--from <path>` makes the agent's source data come from the given
+    directory instead of the current repo/folder -- the agent is created, appears
+    in `mngr list`, and a file from the source directory is present in the agent's
+    work directory.
+    """
     source_dir = tmp_path / "other_project"
     source_dir.mkdir()
     (source_dir / "hello.txt").write_text("hello from source")
@@ -55,10 +60,14 @@ def test_create_with_source_path(e2e: E2eSession, tmp_path: Path) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_create_with_project_label(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # similarly, by default the agent is tagged with a "project" label that matches the name of the current git repo (or folder), but you can specify a different project:
-    mngr create my-task --project my-project
-    """)
+    """Tutorial block:
+        # similarly, by default the agent is tagged with a "project" label that matches the name of the current git repo (or folder), but you can specify a different project:
+        mngr create my-task --project my-project
+
+    Scope: `--project` sets the agent's project label to the given value
+    (visible as labels.project in `mngr list --format json`), overriding the
+    default repo/folder name.
+    """
     expect(
         e2e.run(
             "mngr create my-task --project my-project --type command --no-ensure-clean -- sleep 100083",
@@ -80,14 +89,15 @@ def test_create_with_project_label(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_create_default_project_label(e2e: E2eSession) -> None:
-    # Covers the first half of the same tutorial block: when --project is
-    # omitted, the agent's project label defaults to the current git repo's
-    # folder name (there is no git remote in the test repo, so it falls back to
-    # the directory name).
-    e2e.write_tutorial_block("""
-    # similarly, by default the agent is tagged with a "project" label that matches the name of the current git repo (or folder), but you can specify a different project:
-    mngr create my-task --project my-project
-    """)
+    """Tutorial block:
+        # similarly, by default the agent is tagged with a "project" label that matches the name of the current git repo (or folder), but you can specify a different project:
+        mngr create my-task --project my-project
+
+    Scope: the default half of the same block -- when `--project` is omitted, the
+    agent's project label defaults to the current git repo's folder name (there
+    is no git remote in the test repo, so it falls back to the directory name);
+    labels.project equals the repo folder name.
+    """
     pwd_result = e2e.run("pwd", comment="Get the current git repo directory")
     expect(pwd_result).to_succeed()
     repo_name = Path(pwd_result.stdout.strip()).name
@@ -115,12 +125,17 @@ def test_create_default_project_label(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(120)
 def test_create_with_source_path_no_git(e2e: E2eSession, tmp_path: Path) -> None:
-    e2e.write_tutorial_block("""
-    # mngr doesn't require git at all--if there's no git repo, it will just use the files from the folder as the source data
-    mkdir -p /tmp/my_random_folder
-    echo "print('hello world')" > /tmp/my_random_folder/script.py
-    mngr create my-task --from /tmp/my_random_folder --type command -- python script.py
-    """)
+    """Tutorial block:
+        # mngr doesn't require git at all--if there's no git repo, it will just use the files from the folder as the source data
+        mkdir -p /tmp/my_random_folder
+        echo "print('hello world')" > /tmp/my_random_folder/script.py
+        mngr create my-task --from /tmp/my_random_folder --type command -- python script.py
+
+    Scope: mngr does not require git -- creating from a non-git source folder
+    copies its files verbatim into the agent's work dir (the source script is
+    present there), creates no agent git branch, and the agent's work dir is not
+    itself a git repository.
+    """
     source_dir = tmp_path / "my_random_folder"
     source_dir.mkdir()
     (source_dir / "script.py").write_text("print('hello world')\n")
@@ -168,12 +183,16 @@ def test_create_with_source_path_no_git(e2e: E2eSession, tmp_path: Path) -> None
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_create_default_branch(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # however, if you do use git, mngr makes that convenient
-    # by default, it creates a new git branch for each agent (so that their changes don't conflict with each other):
-    mngr create my-task
-    git branch | grep mngr/my-task
-    """)
+    """Tutorial block:
+        # however, if you do use git, mngr makes that convenient
+        # by default, it creates a new git branch for each agent (so that their changes don't conflict with each other):
+        mngr create my-task
+        git branch | grep mngr/my-task
+
+    Scope: by default `mngr create` creates a new mngr/<agent> git branch off the
+    current commit -- the branch exists in the source repo, the agent worktree is
+    checked out on it, and it points at the same commit as the current HEAD.
+    """
     expect(
         e2e.run(
             "mngr create my-task --type command --no-ensure-clean -- sleep 100085",
@@ -212,12 +231,16 @@ def test_create_default_branch(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_create_default_branch_distinct_per_agent(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # however, if you do use git, mngr makes that convenient
-    # by default, it creates a new git branch for each agent (so that their changes don't conflict with each other):
-    mngr create my-task
-    git branch | grep mngr/my-task
-    """)
+    """Tutorial block:
+        # however, if you do use git, mngr makes that convenient
+        # by default, it creates a new git branch for each agent (so that their changes don't conflict with each other):
+        mngr create my-task
+        git branch | grep mngr/my-task
+
+    Scope: the per-agent branch is distinct for each agent -- two agents land on
+    their own separate mngr/<name> branches, each based on the same current
+    commit, so their changes don't conflict.
+    """
     # The tutorial's key claim is that a *separate* branch is created for *each*
     # agent so their changes don't conflict. Create two agents and verify each
     # lands on its own distinct branch, both based on the current commit.
@@ -270,14 +293,19 @@ def test_create_default_branch_distinct_per_agent(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 def test_create_with_custom_branch_pattern(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # --branch controls branch creation. The format is "BASE:NEW", where BASE is the branch to start from and NEW is the branch to create.
-    # omitting BASE (i.e. starting with ":") uses the current branch. The * in NEW is replaced by the agent name.
-    # the default is ":mngr/*", which creates a new branch named mngr/{agent_name} off the current branch.
-    # you can change the pattern:
-    mngr create my-task --branch ":feature/*"
-    git branch | grep feature/my-task
-    """)
+    """Tutorial block:
+        # --branch controls branch creation. The format is "BASE:NEW", where BASE is the branch to start from and NEW is the branch to create.
+        # omitting BASE (i.e. starting with ":") uses the current branch. The * in NEW is replaced by the agent name.
+        # the default is ":mngr/*", which creates a new branch named mngr/{agent_name} off the current branch.
+        # you can change the pattern:
+        mngr create my-task --branch ":feature/*"
+        git branch | grep feature/my-task
+
+    Scope: `--branch ":feature/*"` overrides the default ":mngr/*" pattern -- the
+    `*` is replaced by the agent name to create feature/my-task, and the leading
+    ":" (omitted BASE) bases it on the current branch's commit; the agent worktree
+    is checked out on it.
+    """
     expect(
         e2e.run(
             "mngr create my-task --branch ':feature/*' --type command --no-ensure-clean -- sleep 100086",
@@ -313,10 +341,14 @@ def test_create_with_custom_branch_pattern(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 def test_create_with_base_branch(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # you can also specify a different base branch (instead of the current branch):
-    mngr create my-task --branch "main:mngr/*"
-    """)
+    """Tutorial block:
+        # you can also specify a different base branch (instead of the current branch):
+        mngr create my-task --branch "main:mngr/*"
+
+    Scope: a BASE in `--branch "main:mngr/*"` bases the new mngr/<agent> branch on
+    the named base branch (main) rather than the current (diverged) branch -- the
+    agent branch points at main's commit and its worktree is checked out on it.
+    """
     # Record main's commit, then switch to a diverged branch so we can verify
     # that the agent branch is based on main (not on the current branch).
     main_rev_result = e2e.run(
@@ -366,10 +398,14 @@ def test_create_with_base_branch(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_create_with_nonexistent_base_branch(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # you can also specify a different base branch (instead of the current branch):
-    mngr create my-task --branch "main:mngr/*"
-    """)
+    """Tutorial block:
+        # you can also specify a different base branch (instead of the current branch):
+        mngr create my-task --branch "main:mngr/*"
+
+    Scope: the unhappy path of the same block -- naming a base branch that does
+    not exist makes create fail (stderr names the missing base branch) and leaves
+    no dangling agent branch behind.
+    """
     # Unhappy path for the same tutorial block: if the named base branch does not
     # exist, creation must fail cleanly and must not leave a dangling agent branch.
     create_result = e2e.run(
@@ -392,10 +428,14 @@ def test_create_with_nonexistent_base_branch(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 def test_create_with_explicit_branch_name(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # or set the new branch name explicitly:
-    mngr create my-task --branch ":feature/my-task"
-    """)
+    """Tutorial block:
+        # or set the new branch name explicitly:
+        mngr create my-task --branch ":feature/my-task"
+
+    Scope: `--branch ":feature/my-task"` sets the new branch name literally (no
+    `*` substitution, so the default mngr/my-task is not created); the agent
+    worktree is on feature/my-task, based on the current branch's commit.
+    """
     expect(
         e2e.run(
             "mngr create my-task --branch ':feature/my-task' --type command --no-ensure-clean -- sleep 100088",
@@ -434,11 +474,17 @@ def test_create_with_explicit_branch_name(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.rsync
 def test_create_git_mirror_with_existing_branch(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # you can disable new branch creation entirely by omitting the :NEW part:
-    mngr create my-task --branch main
-    # this checks out the existing branch in the worktree (or copy) without creating a new one
-    """)
+    """Tutorial block:
+        # you can disable new branch creation entirely by omitting the :NEW part:
+        mngr create my-task --branch main
+        # this checks out the existing branch in the worktree (or copy) without creating a new one
+
+    Scope: omitting the :NEW part (`--branch <branch>`) disables new-branch
+    creation and checks out the existing branch. Using git-mirror transfer (since
+    worktrees cannot share a branch), the agent is on the existing branch at the
+    source branch's commit, and no new mngr/<agent> branch is created in either
+    the source repo or the agent's mirror.
+    """
     current_branch_result = e2e.run(
         "git rev-parse --abbrev-ref HEAD",
         comment="Get current branch name",
@@ -505,12 +551,16 @@ def test_create_git_mirror_with_existing_branch(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(60)
 def test_create_with_transfer_none(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # you can run the agent in-place (directly in your source directory) without any transfer:
-    mngr create my-task --transfer=none
-    # mngr defaults to creating a new worktree for each agent because the whole point of mngr is to let you run multiple agents in parallel.
-    # without creating a new worktree for each, they will make conflicting changes with one another.
-    """)
+    """Tutorial block:
+        # you can run the agent in-place (directly in your source directory) without any transfer:
+        mngr create my-task --transfer=none
+        # mngr defaults to creating a new worktree for each agent because the whole point of mngr is to let you run multiple agents in parallel.
+        # without creating a new worktree for each, they will make conflicting changes with one another.
+
+    Scope: `--transfer=none` runs the agent in-place in the source directory (no
+    worktree/copy) -- the agent's reported work_dir and its runtime working
+    directory are the source directory, and no new mngr/<agent> branch is created.
+    """
     expect(
         e2e.run(
             "mngr create my-task --transfer=none --type command --no-ensure-clean -- sleep 100091",
@@ -551,11 +601,16 @@ def test_create_with_transfer_none(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_create_from_another_agent(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # you can clone from an existing agent's work directory:
-    mngr create my-task --from other-agent
-    # (--source is an alias for --from; the format supports agent@host.provider:path)
-    """)
+    """Tutorial block:
+        # you can clone from an existing agent's work directory:
+        mngr create my-task --from other-agent
+        # (--source is an alias for --from; the format supports agent@host.provider:path)
+
+    Scope: `--from <agent>` clones from an existing agent's work directory -- the
+    new agent gets its own mngr/<agent> branch and a distinct work dir on the same
+    host, and a marker file written into the source agent's work dir is present in
+    the clone.
+    """
     expect(
         e2e.run(
             "mngr create other-agent --type command --no-ensure-clean -- sleep 100092",
@@ -611,11 +666,15 @@ def test_create_from_another_agent(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_create_from_another_agent_source_alias(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # you can clone from an existing agent's work directory:
-    mngr create my-task --from other-agent
-    # (--source is an alias for --from; the format supports agent@host.provider:path)
-    """)
+    """Tutorial block:
+        # you can clone from an existing agent's work directory:
+        mngr create my-task --from other-agent
+        # (--source is an alias for --from; the format supports agent@host.provider:path)
+
+    Scope: `--source` is an alias for `--from` -- cloning from an existing agent
+    via `--source` behaves identically (clone lands on its own mngr/<agent> branch
+    and a distinct work dir, and the source agent's work-dir contents are copied).
+    """
     # The tutorial block explicitly documents that `--source` is an alias for
     # `--from`. This test exercises that alias path (the sibling
     # test_create_from_another_agent covers `--from`) and verifies it clones the

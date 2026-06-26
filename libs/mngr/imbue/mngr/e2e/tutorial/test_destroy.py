@@ -15,10 +15,14 @@ from imbue.skitwright.expect import expect
 @pytest.mark.tmux
 @pytest.mark.timeout(60)
 def test_create_and_destroy_agent(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # destroy without confirmation prompt
-    mngr destroy my-task --force
-    """)
+    """Tutorial block:
+        # destroy without confirmation prompt
+        mngr destroy my-task --force
+
+    Scope: `mngr destroy --force` skips the confirmation prompt and actually
+    destroys the named agent -- it reports "Destroyed agent: my-task" and the
+    agent (confirmed present beforehand) no longer appears in `mngr list`.
+    """
     expect(
         e2e.run(
             "mngr create my-task --type command --no-ensure-clean -- sleep 100098",
@@ -49,10 +53,15 @@ def test_create_and_destroy_agent(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_destroy_all_via_stdin(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # destroy all agents (be careful!)
         mngr list --ids | mngr destroy - --force
-    """)
+
+    Scope: piping `mngr list --ids` into `mngr destroy - --force` reads agent
+    ids from stdin and destroys every one of them in a single command -- each
+    agent is reported as destroyed and none remain in `mngr list` afterward. The
+    stdin plumbing must actually carry the ids (an empty stdin would exit 0 too).
+    """
     for name, sleep_seconds in [("agent-x", 100102), ("agent-y", 100120)]:
         expect(
             e2e.run(
@@ -97,10 +106,15 @@ def _create_my_task(e2e: E2eSession, sleep_value: int) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
 def test_destroy_specific(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # destroy a specific agent
         mngr destroy my-task
-    """)
+
+    Scope: the bare `mngr destroy my-task` (no --force) prompts for
+    confirmation; answering "y" destroys the named agent (reported as "Destroyed
+    agent: my-task") and it no longer appears in `mngr list`. The agent is
+    stopped first because a non-forced destroy refuses a running agent.
+    """
     _create_my_task(e2e, 100600)
     # The bare `mngr destroy` (no --force) refuses to destroy a *running* agent,
     # so stop it first. This lets the documented command actually destroy the
@@ -121,10 +135,15 @@ def test_destroy_specific(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_destroy_short_form(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # short form
         mngr rm my-task
-    """)
+
+    Scope: `mngr rm` is an alias for `mngr destroy`. `mngr rm my-task --force`
+    performs a real removal -- it reports "Destroyed agent: my-task" and the
+    agent no longer appears in `mngr list`. (--force is needed because the agent
+    is still running; see the companion test for the non-forced refusal.)
+    """
     _create_my_task(e2e, 100601)
     # `--force` is an extra flag (the agent created above is still running, and a
     # non-forced destroy refuses running agents -- see the companion test below).
@@ -144,13 +163,15 @@ def test_destroy_short_form(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_destroy_short_form_running_requires_force(e2e: E2eSession) -> None:
-    # Unhappy path for the same tutorial block: without --force, the short-form
-    # `rm` is safe by default and refuses to destroy a still-running agent even
-    # after the confirmation prompt is answered "y".
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # short form
         mngr rm my-task
-    """)
+
+    Scope: the unhappy path of the same block -- without --force the short-form
+    `mngr rm` is safe by default and refuses to destroy a still-running agent
+    even when the confirmation prompt is answered "y" ("Use --force to destroy
+    running agents"); the agent remains present in `mngr list`.
+    """
     _create_my_task(e2e, 100608)
     refuse_result = e2e.run("yes | mngr rm my-task", comment="short form on a running agent")
     expect(refuse_result).to_succeed()
@@ -167,11 +188,16 @@ def test_destroy_short_form_running_requires_force(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(60)
 def test_destroy_remove_branch(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # destroy and also remove the git branch that was created for the agent
         # this is not the default because it can be annoying to lose the changes, so we default to the safe option
         mngr destroy my-task --force --remove-created-branch
-    """)
+
+    Scope: `--remove-created-branch` additionally deletes the git branch
+    (mngr/my-task) that was created for the agent -- destroy reports both
+    "Destroyed agent: my-task" and "Deleted branch: mngr/my-task", and the
+    branch (confirmed present beforehand) is gone afterward.
+    """
     _create_my_task(e2e, 100602)
 
     # The default git-worktree transfer creates a branch named after the agent.
@@ -207,16 +233,17 @@ def test_destroy_remove_branch(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(60)
 def test_destroy_keeps_branch_by_default(e2e: E2eSession) -> None:
-    # Companion to test_destroy_remove_branch for the same tutorial block: the
-    # block's comment states that removing the branch is *not* the default
-    # because losing the changes can be annoying, so the safe option is the
-    # default. This test verifies that safe default -- a plain destroy (without
-    # --remove-created-branch) leaves the agent's git branch intact.
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # destroy and also remove the git branch that was created for the agent
         # this is not the default because it can be annoying to lose the changes, so we default to the safe option
         mngr destroy my-task --force --remove-created-branch
-    """)
+
+    Scope: the safe default asserted by the block's comment (companion to
+    test_destroy_remove_branch) -- a plain destroy *without*
+    --remove-created-branch destroys the agent (gone from `mngr list`) but does
+    not report "Deleted branch" and leaves the agent's git branch (mngr/my-task)
+    intact.
+    """
     _create_my_task(e2e, 100609)
 
     # The branch the default git-worktree transfer created must exist beforehand.
@@ -256,10 +283,14 @@ def test_destroy_keeps_branch_by_default(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_destroy_multiple_at_once(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # destroy multiple agents at once
         mngr destroy agent-1 agent-2 agent-3 --force
-    """)
+
+    Scope: a single `mngr destroy` with several agent names tears down all of
+    them at once -- each is reported as destroyed, the summary confirms the count
+    ("Successfully destroyed 3 agent(s)"), and none remain in `mngr list`.
+    """
     agent_names = ["agent-1", "agent-2", "agent-3"]
     for name, sleep_value in zip(agent_names, [100603, 100604, 100605], strict=True):
         expect(
@@ -298,10 +329,16 @@ def test_destroy_multiple_at_once(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(60)
 def test_destroy_dry_run(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # to preview what would be destroyed without doing it, run without --force and answer "no" at the prompt
         mngr destroy my-task
-    """)
+
+    Scope: running `mngr destroy` without --force previews what *would* be
+    destroyed (listing the agent, "will be destroyed") and prompts for
+    confirmation; answering "no" aborts with a non-zero exit and destroys nothing
+    -- the agent still exists. This confirmation preview is the supported
+    replacement for the removed --dry-run flag on multi-target commands.
+    """
     _create_my_task(e2e, 100606)
     # Running destroy without --force lists what *would* be destroyed and then
     # prompts for confirmation. Answering "no" aborts without destroying
@@ -327,10 +364,14 @@ def test_destroy_dry_run(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_destroy_with_gc(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # destroy and run garbage collection afterward (this is the default)
         mngr destroy my-task --force --gc
-    """)
+
+    Scope: `--gc` runs garbage collection after the destroy -- the agent is
+    destroyed (gone from `mngr list`) and the output shows the gc pass ("Garbage
+    collecting"), which is what distinguishes it from a plain destroy.
+    """
     _create_my_task(e2e, 100607)
     destroy_result = e2e.run(
         "mngr destroy my-task --force --gc",
@@ -355,17 +396,19 @@ def test_destroy_with_gc(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_destroy_no_gc(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # by default, gc (garbage collection) runs after destroying any agent
         # you can disable this if you want:
         mngr destroy --no-gc
         # however, note that it is generally a good idea to ensure that "mngr gc" is run periodically,
         # otherwise resources (ex: worktrees, hosts, containers, volumes, etc) will accumulate over time
-    """)
-    # The tutorial shows `mngr destroy --no-gc` in isolation to demonstrate the flag,
-    # but a real invocation needs an agent to destroy. Create one, destroy it with
-    # --no-gc, and verify both that the agent is gone AND that the post-destroy
-    # garbage-collection pass did not run (its progress output must be absent).
+
+    Scope: `--no-gc` disables the post-destroy garbage-collection pass -- the
+    agent is still destroyed (gone from `mngr list`) but the "Garbage
+    collecting" progress line is absent, which is what proves the flag took
+    effect. (The block shows the flag in isolation; a real invocation needs an
+    agent to destroy.)
+    """
     _create_my_task(e2e, 100608)
     destroy_result = e2e.run(
         "mngr destroy my-task --no-gc --force",
@@ -384,11 +427,17 @@ def test_destroy_no_gc(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_destroy_by_session_name(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # destroy has a special variant for finding an agent by its tmux session name:
         mngr destroy --session my-session-name
         # this is used primarily to implement the hotkey for exiting from tmux (ex: ctrl-q)
-    """)
+
+    Scope: the unhappy path of the --session variant -- a name that does not
+    start with the configured tmux session prefix cannot be mapped to an agent,
+    so `mngr destroy --session` exits non-zero with an error explaining the
+    session-prefix requirement ("does not match the expected format") rather than
+    crashing. It fails before reaching any agent, so it never exercises modal.
+    """
     # Unhappy path: "my-session-name" does not start with the configured tmux
     # session prefix, so mngr cannot derive an agent name from it and exits with
     # an error instead of crashing. Because it fails before reaching any agent,
@@ -409,14 +458,17 @@ def test_destroy_by_session_name(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(60)
 def test_destroy_by_session_name_happy_path(e2e: E2eSession) -> None:
-    # Shares the same tutorial block as test_destroy_by_session_name: that test
-    # covers the unhappy path (a bogus session name), while this one covers the
-    # happy path where the session name maps to a real agent that gets destroyed.
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # destroy has a special variant for finding an agent by its tmux session name:
         mngr destroy --session my-session-name
         # this is used primarily to implement the hotkey for exiting from tmux (ex: ctrl-q)
-    """)
+
+    Scope: the happy path of the --session variant (companion to
+    test_destroy_by_session_name) -- when the session name maps to a real agent
+    (its tmux session is "{prefix}{agent_name}"), `mngr destroy --session ...
+    --force` destroys that agent ("Destroyed agent: my-task") and it no longer
+    appears in `mngr list`.
+    """
     _create_my_task(e2e, 100608)
 
     # An agent's tmux session name is "{prefix}{agent_name}" (see

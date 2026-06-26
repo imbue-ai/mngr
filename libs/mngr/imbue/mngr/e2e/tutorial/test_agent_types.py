@@ -17,11 +17,18 @@ from imbue.skitwright.expect import expect
 # the verification below is robust across environments.
 @pytest.mark.timeout(120)
 def test_create_command_python_http(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # mngr supports multiple agent types out of the box (claude, codex, etc.)
         # you can also run any shell command as an "agent" using the built-in `command` type:
         mngr create my-server --type command -- python -m http.server 8080
-    """)
+
+    Scope: `mngr create --type command -- <cmd>` runs an arbitrary shell command
+    as an agent. The created agent appears in `mngr list --format json` with
+    type == command and its command set to exactly the forwarded `<cmd>`, and
+    that command is actually running as a process inside the agent (verified via
+    `mngr exec`). The real `python -m http.server` command is substituted with
+    `sleep` so the test does not bind a port.
+    """
     # python -m http.server would bind a port; substitute `sleep` so the test
     # doesn't conflict with anything else on 8080. Use a locally-bound name
     # since we assert on the exact command string below.
@@ -60,10 +67,17 @@ def test_create_command_python_http(e2e: E2eSession) -> None:
 # verification below is robust across environments.
 @pytest.mark.timeout(120)
 def test_create_command_custom_script(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # run a custom script as an agent
         mngr create my-task --type command -- my-tool --some-flag
-    """)
+
+    Scope: a custom command passed after `--` is forwarded into a running
+    `command`-type agent. The created agent appears in `mngr list --format json`
+    with type == command, its command containing the forwarded command, and a
+    running state (RUNNING/WAITING); the forwarded command is also live as a
+    process inside the agent (verified via `mngr exec`). The unavailable
+    `my-tool` is substituted with `sleep` so the agent process stays alive.
+    """
     # my-tool isn't installed; substitute sleep so the agent process stays
     # alive while still demonstrating that custom commands get forwarded.
     expect(
@@ -98,11 +112,17 @@ def test_create_command_custom_script(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_plugin_list_active_to_see_types(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # agent types are provided by plugins -- see MANAGING PLUGINS above
         # to see which agent types are available:
         mngr plugin list --active
-    """)
+
+    Scope: `mngr plugin list --active` succeeds and lists the available
+    agent-type plugins. The built-in agent types (claude, codex, command) each
+    appear as their own plugin entry in the `--format json` output and are
+    reported enabled under `--active` -- the JSON check guards against weak
+    substring matches on the human table (e.g. "claude" inside "claude_usage").
+    """
     result = e2e.run("mngr plugin list --active", comment="see which agent types are available")
     expect(result).to_succeed()
     # The point of running this command is to discover the agent types provided
@@ -138,10 +158,16 @@ def test_plugin_list_active_to_see_types(e2e: E2eSession) -> None:
 # Modal.
 @pytest.mark.timeout(120)
 def test_create_codex_positional(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # you can specify the agent type as the second positional argument to create:
         mngr create my-task codex
-    """)
+
+    Scope: the agent type can be given as the second positional argument to
+    `mngr create`. With `codex` passed positionally, the created agent appears in
+    `mngr list --format json` with type == codex (not a default fallback),
+    confirming positional-argument type resolution. Flags (-y, --no-auto-start)
+    let the type resolve without a codex binary or auth on this host.
+    """
     # codex is a real agent-type plugin now (not a command-driven stub), so it
     # can't be faked with a `command` override. Create it without launching
     # (--no-auto-start) and auto-approve workspace trust (-y), which exercises the
@@ -174,10 +200,16 @@ def test_create_codex_positional(e2e: E2eSession) -> None:
 # Modal.
 @pytest.mark.timeout(120)
 def test_create_codex_explicit_type(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # or by specifying it explicitly
         mngr create my-task --type codex
-    """)
+
+    Scope: the agent type can be given explicitly via `--type` (counterpart to
+    test_create_codex_positional). With `--type codex`, the created agent appears
+    in `mngr list --format json` with type == codex (not a silent default
+    fallback), confirming `--type` resolves the agent type. Flags (-y,
+    --no-auto-start) let it resolve without a codex binary or auth on this host.
+    """
     # codex is a real agent-type plugin now (not a command-driven stub), so it
     # can't be faked with a `command` override. Create it without launching
     # (--no-auto-start) and auto-approve workspace trust (-y): this verifies
@@ -212,7 +244,7 @@ def test_create_codex_explicit_type(e2e: E2eSession) -> None:
 # marked @pytest.mark.modal.
 @pytest.mark.timeout(120)
 def test_create_custom_yolo_agent_type(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # you can also create your own custom agent types by defining them in a config:
         # here's how to set one up using the config command:
         mngr config edit --scope project
@@ -223,7 +255,16 @@ def test_create_custom_yolo_agent_type(e2e: E2eSession) -> None:
         # then you can create agents of that type:
         mngr create my-task yolo
         # you'll have to look at the agent config class for each agent type to know what config options are supported
-    """)
+
+    Scope: a custom agent type defined in project config (an `[agent_types.<name>]`
+    section with a `parent_type`) can then be created via `mngr create <task>
+    <type>`. After defining a `yolo` type and creating an agent with it, the
+    agent appears in `mngr list --format json` with type == yolo (the custom
+    type, not a fallback) and a running state, and the parent's command runs as a
+    live process inside it (verified via `mngr exec`). To avoid needing claude
+    installed, the test parents `yolo` on the built-in `command` type with a
+    `sleep` command instead of the tutorial's claude/cli_args.
+    """
     expect(
         e2e.run(
             "EDITOR=/bin/true mngr config edit --scope project",

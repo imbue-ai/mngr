@@ -24,12 +24,19 @@ def _create_my_task(e2e: E2eSession, sleep_value: int) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
 def test_advanced_fan_out_create(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # fan-out pattern: create many agents from a list of tasks
         for task in "fix-auth" "add-logging" "update-deps" "write-docs"; do
           mngr create "$task"@.modal --no-connect --message "Work on: $task"
         done
-    """)
+
+    Scope: the fan-out shell loop creates one agent per task name -- all four
+    appear in `mngr list` -- and the loop actually launches each agent's command
+    (a matching process is running on the shared host), not merely registering
+    agent state. The test substitutes a local `--type command` sleep for the
+    block's `@.modal` agent, so it exercises the loop structure rather than the
+    Modal provider.
+    """
     tasks = ("fix-auth", "add-logging", "update-deps", "write-docs")
     # Use --type command + sleep to avoid the modal claude startup time per
     # task; the test verifies the fan-out shell loop works.
@@ -67,10 +74,14 @@ def test_advanced_fan_out_create(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_advanced_watch_dashboard_running(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # monitor all agents in a refreshing dashboard (uses Unix watch(1))
         watch -n 5 mngr list --running
-    """)
+
+    Scope: the `watch`-driven dashboard launches and exits cleanly, and the
+    `mngr list --running` query it refreshes each tick succeeds and emits a
+    well-formed dashboard (an `agents` list, empty here since nothing is running).
+    """
     # No modal mark: with no remote hosts registered, `mngr list --running`
     # only enumerates the local provider and never contacts modal. `watch`
     # clears the screen and emits terminal escape codes, so here we only assert
@@ -89,10 +100,16 @@ def test_advanced_watch_dashboard_running(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.timeout(60)
 def test_advanced_observe_stream(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # or get a JSONL stream of host/agent discovery events for programmatic consumers
         mngr observe --discovery-only
-    """)
+
+    Scope: `mngr observe --discovery-only` emits a JSONL stream for programmatic
+    consumers -- every non-blank line parses as JSON and at least one is a
+    DISCOVERY_FULL snapshot carrying the discovery source plus the
+    agents/hosts/providers collections, with the always-present local provider
+    listed and no agents in this empty environment.
+    """
     # No @pytest.mark.modal: --discovery-only only reads/lists, so it never shells
     # out to the `modal` CLI binary (the only modal usage the resource guard can
     # observe from this subprocess), which would make the mark a NEVER_INVOKED
@@ -142,13 +159,18 @@ def test_advanced_observe_stream(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(300)
 def test_advanced_collect_results_loop(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # collect results from all agents
         for agent in "fix-auth" "add-logging" "update-deps" "write-docs"; do
           echo "=== $agent ==="
           mngr exec "$agent" "git log --oneline -3"
         done
-    """)
+
+    Scope: the collect-results loop runs `mngr exec` on each agent in turn --
+    printing each `=== $agent ===` header, succeeding on every agent, and
+    surfacing the worktree's real git history ("Initial commit") -- confirming
+    exec actually ran git rather than mis-parsing its quoted command.
+    """
     for name, sleep_value in [
         ("fix-auth", 101011),
         ("add-logging", 101012),
@@ -190,11 +212,16 @@ def test_advanced_collect_results_loop(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(240)
 def test_advanced_create_reuse_modal(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # use --reuse to make create idempotent. This is handy, esp with remote scripts, so that you can detach, then hit up and enter
         # and not have to worry about remembering whether it is started, etc (because it will attach by default)
         mngr create --reuse --provider modal my-task
-    """)
+
+    Scope: `--reuse` makes `mngr create` idempotent on Modal -- the first call
+    creates the agent, and a second identical call reuses the existing agent
+    (reporting "Reusing existing agent") instead of provisioning a duplicate,
+    without re-creating the host or re-bootstrapping the Modal environment.
+    """
     # The tutorial relies on a default agent type; the isolated e2e environment
     # has none, so pin --type command (with a long sleep) to avoid modal claude
     # startup, matching the other modal tests in this file.
@@ -249,10 +276,16 @@ def test_advanced_create_reuse_modal(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_advanced_watch_list_live_dashboard(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # use watch with list to keep a live dashboard in a terminal
         watch -n 5 mngr list
-    """)
+
+    Scope: the `watch`-driven live dashboard launches and exits cleanly, and the
+    unfiltered `mngr list` content it refreshes shows the created agent alongside
+    its live state (RUNNING or WAITING). Distinct from
+    test_advanced_watch_dashboard_running, this covers plain `mngr list` (not
+    `--running`) with an agent actually present.
+    """
     # Create an agent so the live dashboard has something to display.
     _create_my_task(e2e, 101017)
     # `mngr list` is the content the dashboard refreshes. Run it directly (under
@@ -275,10 +308,15 @@ def test_advanced_watch_list_live_dashboard(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_tips_exec_env_inspect(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # use exec to quickly inspect an agent's environment
         mngr exec my-task -- env | sort
-    """)
+
+    Scope: `mngr exec my-task -- env | sort` runs inside the target agent's
+    environment -- the dumped env carries the agent-identifying variables
+    (MNGR_AGENT_NAME=my-task and the MNGR_AGENT_ID mngr records for it) -- and the
+    `| sort` pipe really orders the env output.
+    """
     _create_my_task(e2e, 101015)
     # Capture the id mngr records for my-task so we can confirm exec ran inside
     # *that* agent's environment, not merely that some env was dumped. Only one
@@ -309,10 +347,15 @@ def test_tips_exec_env_inspect(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(300)
 def test_tips_exec_filtered_hosts(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # or use exec to see something across a bunch of hosts by combining with mngr list:
         mngr list --include 'host.provider == "modal"' --ids | mngr exec - 'echo $MNGR_AGENT_ID && env | sort'
-    """)
+
+    Scope: piping a provider-filtered `mngr list --ids` into `mngr exec -` runs
+    the command on the matching modal host -- the output echoes that host's
+    `$MNGR_AGENT_ID` and dumps its env -- demonstrating exec fan-out driven by a
+    `mngr list` filter.
+    """
     # Create a modal command agent so the filtered list has a real modal host to
     # fan out across (the tutorial demonstrates exec'ing over modal hosts).
     expect(
@@ -348,10 +391,15 @@ def test_tips_exec_filtered_hosts(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(420)
 def test_tips_xargs_parallel_exec(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # if you want to get really fancy, you can use xargs to run in parallel across hosts:
         mngr list --include 'host.provider == "modal"' --ids | xargs -P 5 -I {} mngr exec {} 'echo $MNGR_AGENT_ID && pwd'
-    """)
+
+    Scope: piping a provider-filtered `mngr list --ids` into
+    `xargs -P 5 ... mngr exec` fans `mngr exec` out across the modal hosts in
+    parallel -- the output carries the host's echoed `$MNGR_AGENT_ID` and an
+    absolute `pwd` path, proving the parallel exec actually ran on the host.
+    """
     # Stand up a real modal host (a cheap `sleep` command agent) so the pipeline
     # has something to fan out across. Without a host, `mngr list` returns no ids
     # and xargs runs nothing, making the test a no-op. Creating the host also
@@ -430,11 +478,16 @@ def _seed_claude_transcript(host_dir: Path, events: list[dict[str, Any]]) -> Non
 @pytest.mark.release
 @pytest.mark.tmux
 def test_tips_transcript_tail_assistant(e2e: E2eSession, temp_host_dir: Path) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # check the transcript to see what an agent has been up to
         # (helpful to see the last messages without even having to bring the host back online!)
         mngr transcript my-task --tail 5 --role assistant
-    """)
+
+    Scope: `mngr transcript --tail 5 --role assistant` reads an offline agent's
+    seeded transcript and surfaces only the last five assistant messages -- the
+    most recent assistant turns shown, earlier ones omitted, and user messages
+    filtered out entirely by `--role assistant`.
+    """
     _create_my_task(e2e, 101016)
     # Seven assistant turns interleaved with user turns; --tail 5 --role
     # assistant should surface only the last five assistant messages.

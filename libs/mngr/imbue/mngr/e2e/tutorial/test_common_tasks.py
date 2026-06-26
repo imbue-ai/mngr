@@ -16,7 +16,7 @@ from imbue.skitwright.expect import expect
 @pytest.mark.tmux
 @pytest.mark.timeout(300)
 def test_recipe_launch_check_cleanup(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # Recipe: launch an agent on a task, check on it later, and clean up
         # 1. Create an agent with a task, don't connect (let it work in the background)
         mngr create fix-bug --provider modal --no-connect --message "Fix the failing test in test_auth.py and make a PR"
@@ -32,7 +32,15 @@ def test_recipe_launch_check_cleanup(e2e: E2eSession) -> None:
         git merge mngr/fix-bug
         # 7. When done, stop and clean up
         mngr destroy fix-bug -f --remove-created-branch
-    """)
+
+    Scope: the full launch->check->cleanup recipe, with a local `sleep` command
+    agent standing in for the modal claude agent so the test stays fast. create
+    makes a named, reachable agent (exec pwd returns an absolute path); list
+    --running succeeds; transcript fails for a command agent (which produces no
+    common transcript); msg delivers a follow-up; conn resolves the named agent
+    and begins connecting; destroy --remove-created-branch removes both the agent
+    (gone from list, no longer resolvable) and its git branch.
+    """
     # Substitute a local command agent for the modal claude agent; the recipe
     # shape (create -> list -> transcript -> msg -> conn -> merge -> destroy)
     # is what we want to verify. The only step that behaves differently for the
@@ -88,7 +96,7 @@ def test_recipe_launch_check_cleanup(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_recipe_multi_agent_parallel_workflow(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # launch multiple agents in parallel, each working on a different task
         mngr create agent-auth --no-connect --provider modal --message "Refactor the auth module to use JWT tokens"
         mngr create agent-tests --no-connect --provider modal --message "Add integration tests for the API endpoints"
@@ -107,7 +115,15 @@ def test_recipe_multi_agent_parallel_workflow(e2e: E2eSession) -> None:
         git merge mngr/agent-docs
         # when all are done, clean up
         mngr destroy --force --remove-created-branch agent-auth agent-tests agent-docs
-    """)
+
+    Scope: the parallel multi-agent recipe, with local `sleep` command agents
+    standing in for the modal claude agents. Three agents are created and each
+    runs in its own distinct worktree; list --running succeeds; the `mngr list
+    --ids | mngr exec/msg -` fan-out reaches all three (exec git diff --stat
+    names each agent, msg reports 3 agent(s)); the `&&` wait chain parses; and
+    destroy --remove-created-branch cleans up all three at once (3 agent(s),
+    none remaining in the listing).
+    """
     for name, sleep_value in [
         ("agent-auth", 100971),
         ("agent-tests", 100972),

@@ -15,14 +15,21 @@ from imbue.skitwright.expect import expect
 # tracker, which pushes the test past the default 10s per-test timeout.
 @pytest.mark.timeout(60)
 def test_command_agent_python_http(e2e: E2eSession) -> None:
+    """Tutorial block:
+        # run a Python script as a managed process
+        mngr create my-server --type command -- python -m http.server 8080
+
+    Scope: `mngr create --type command -- <cmd>` runs an arbitrary long-lived
+    process as a managed (non-agent) command agent. The process is actually
+    running inside the agent (visible via `mngr exec`), and the agent is listed
+    as a local command agent carrying the exact command it was given. The
+    tutorial's `python -m http.server 8080` is substituted with a portable sleep
+    so the test does not bind a real port.
+    """
     # The tutorial runs `python -m http.server 8080`; substitute a portable
     # long-lived sleep so the test does not bind a real port. Bind the command
     # locally so the assertions below can check for the exact string.
     expected_command = "sleep 100990"
-    e2e.write_tutorial_block("""
-        # run a Python script as a managed process
-        mngr create my-server --type command -- python -m http.server 8080
-    """)
     expect(
         e2e.run(
             f"mngr create my-server --type command --no-ensure-clean --no-connect -- {expected_command}",
@@ -59,10 +66,17 @@ def test_command_agent_python_http(e2e: E2eSession) -> None:
 @pytest.mark.modal
 @pytest.mark.timeout(300)
 def test_command_agent_data_pipeline(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # run a long-running data pipeline
         mngr create etl-job --type command --idle-mode run --idle-timeout 60 -- python etl_pipeline.py
-    """)
+
+    Scope: a command agent created with `--idle-mode run --idle-timeout 60`
+    round-trips that idle configuration onto the created agent (idle_mode == RUN,
+    idle_timeout_seconds == 60) alongside its command -- the idle settings are
+    not silently dropped. Idle detection requires a remote provider (the local
+    host cannot be stopped by mngr), so this runs on Modal, substituting the
+    python pipeline with a portable sleep.
+    """
     # Idle detection (--idle-mode/--idle-timeout) requires a remote provider --
     # the local host cannot be stopped by mngr, so it rejects these options. Run
     # on Modal to exercise the real idle path, substituting the python pipeline
@@ -99,10 +113,16 @@ def test_command_agent_data_pipeline(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 def test_command_agent_dev_server_extra_windows(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # run a dev server with extra tmux windows for logs
         mngr create dev-env --type command -w logs="tail -f /var/log/app.log" -- npm run dev
-    """)
+
+    Scope: the `-w NAME=CMD` flag adds an extra tmux window running its own
+    command alongside the agent's main command. The command agent is created with
+    its given command, and an extra tmux window named "logs" actually exists in
+    the agent's tmux session (not just the main window). The npm command and tail
+    target are substituted with portable sleeps.
+    """
     # Substitute the npm command and tail target with portable sleeps so the
     # test doesn't depend on npm or a /var/log file being present.
     expect(
@@ -149,12 +169,19 @@ def test_command_agent_dev_server_extra_windows(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(300)
 def test_command_agent_batch_job_modal(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # use --idle-mode run so the host stops when the process finishes
         mngr create batch-job --provider modal --type command --idle-mode run --idle-timeout 30 -- bash -c "python train.py && python evaluate.py"
         # the container will be automatically snapshotted when completed, so you can later come back and connect (and start) to see the results:
         mngr conn batch-job
-    """)
+
+    Scope: a Modal command agent created with `--idle-mode run --idle-timeout 30`
+    is registered on the modal provider (discoverable by name on a modal host)
+    with its idle configuration round-tripped (idle_mode == RUN,
+    idle_timeout_seconds == 30) and its bash command preserved. After it
+    completes and is snapshotted, `mngr conn batch-job` reconnects successfully.
+    The train/evaluate python commands are substituted with echoes.
+    """
     expect(
         e2e.run(
             'mngr create batch-job --provider modal --type command --idle-mode run --idle-timeout 30 --no-connect --no-ensure-clean -- bash -c "echo train && echo evaluate"',
