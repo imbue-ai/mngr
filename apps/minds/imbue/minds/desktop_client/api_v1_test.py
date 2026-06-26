@@ -836,10 +836,19 @@ def test_patch_provider_disable_with_active_workspaces_conflicts(tmp_path: Path)
     assert "active workspace" in json.loads(response.data)["error"].lower()
 
 
-def test_patch_provider_requires_enabled_bool(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},  # missing 'enabled' key -> enabled is None
+        {"enabled": "yes"},  # wrong type (string)
+        {"enabled": 1},  # wrong type (int, must not be accepted via truthiness)
+        [1, 2, 3],  # non-object JSON body
+    ],
+)
+def test_patch_provider_rejects_invalid_body(tmp_path: Path, body: object) -> None:
     client = _build_client(tmp_path, StaticBackendResolver(url_by_agent_and_service={}))
 
-    response = client.patch("/api/v1/desktop/providers/docker", headers=_auth_header(), json={})
+    response = client.patch("/api/v1/desktop/providers/docker", headers=_auth_header(), json=body)
 
     assert response.status_code == 400
 
