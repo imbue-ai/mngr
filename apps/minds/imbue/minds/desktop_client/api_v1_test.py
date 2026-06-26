@@ -416,9 +416,7 @@ class FakeSharingCli(FakeImbueCloudCli):
     def find_tunnel_for_agent(self, account: str, agent_id: str) -> TunnelInfo | None:
         return self.tunnel
 
-    def create_tunnel(
-        self, *, account: str, agent_id: str, default_policy: Any = None
-    ) -> TunnelInfo:
+    def create_tunnel(self, *, account: str, agent_id: str, default_policy: Any = None) -> TunnelInfo:
         assert self.tunnel is not None
         return self.tunnel
 
@@ -459,13 +457,9 @@ def test_patch_workspace_color_success(tmp_path: Path, root_concurrency_group: C
     agent_id = AgentId()
     resolver = make_resolver_with_data(make_agents_json(agent_id))
     fake_mngr = _write_fake_mngr(tmp_path / "bin")
-    client = _build_client(
-        tmp_path, resolver, root_concurrency_group=root_concurrency_group, mngr_binary=fake_mngr
-    )
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group, mngr_binary=fake_mngr)
 
-    response = client.patch(
-        f"/api/v1/workspaces/{agent_id}", headers=_auth_header(), json={"color": "#fff"}
-    )
+    response = client.patch(f"/api/v1/workspaces/{agent_id}", headers=_auth_header(), json={"color": "#fff"})
 
     assert response.status_code == 200
     assert json.loads(response.data)["color"] == "#ffffff"
@@ -477,9 +471,7 @@ def test_patch_workspace_color_invalid_hex(tmp_path: Path) -> None:
     agent_id = AgentId()
     client = _client_with_workspace(tmp_path, agent_id)
 
-    response = client.patch(
-        f"/api/v1/workspaces/{agent_id}", headers=_auth_header(), json={"color": "not-a-color"}
-    )
+    response = client.patch(f"/api/v1/workspaces/{agent_id}", headers=_auth_header(), json={"color": "not-a-color"})
 
     assert response.status_code == 400
     assert json.loads(response.data)["error"] == "invalid_hex"
@@ -489,9 +481,7 @@ def test_patch_workspace_color_not_primary(tmp_path: Path) -> None:
     client = _client_with_workspace(tmp_path, AgentId())
     other_id = AgentId()
 
-    response = client.patch(
-        f"/api/v1/workspaces/{other_id}", headers=_auth_header(), json={"color": "#abcdef"}
-    )
+    response = client.patch(f"/api/v1/workspaces/{other_id}", headers=_auth_header(), json={"color": "#abcdef"})
 
     assert response.status_code == 404
     assert json.loads(response.data)["error"] == "not_primary"
@@ -503,9 +493,7 @@ def test_patch_workspace_color_host_unreachable_without_concurrency_group(tmp_pa
     resolver = make_resolver_with_data(make_agents_json(agent_id))
     client = _build_client(tmp_path, resolver)
 
-    response = client.patch(
-        f"/api/v1/workspaces/{agent_id}", headers=_auth_header(), json={"color": "#abcdef"}
-    )
+    response = client.patch(f"/api/v1/workspaces/{agent_id}", headers=_auth_header(), json={"color": "#abcdef"})
 
     assert response.status_code == 502
     assert json.loads(response.data)["error"] == "host_unreachable"
@@ -520,9 +508,7 @@ def test_patch_workspace_associate_account(tmp_path: Path) -> None:
     store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
     client = _build_client(tmp_path, resolver, imbue_cloud_cli=cli, session_store=store)
 
-    response = client.patch(
-        f"/api/v1/workspaces/{agent_id}", headers=_auth_header(), json={"account_id": user_id}
-    )
+    response = client.patch(f"/api/v1/workspaces/{agent_id}", headers=_auth_header(), json={"account_id": user_id})
 
     assert response.status_code == 200
     assert json.loads(response.data)["account_id"] == user_id
@@ -538,9 +524,7 @@ def test_patch_workspace_disassociate_account_with_null(tmp_path: Path) -> None:
     store = _associated_session_store(tmp_path, cli, agent_id, user_id=user_id, email="owner@example.com")
     client = _build_client(tmp_path, resolver, imbue_cloud_cli=cli, session_store=store)
 
-    response = client.patch(
-        f"/api/v1/workspaces/{agent_id}", headers=_auth_header(), json={"account_id": None}
-    )
+    response = client.patch(f"/api/v1/workspaces/{agent_id}", headers=_auth_header(), json={"account_id": None})
 
     assert response.status_code == 200
     assert json.loads(response.data)["account_id"] is None
@@ -655,18 +639,14 @@ def test_desktop_stop_hosts_without_concurrency_group_returns_503(tmp_path: Path
     assert response.status_code == 503
 
 
-def test_desktop_stop_hosts_returns_still_running(
-    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
-) -> None:
+def test_desktop_stop_hosts_returns_still_running(tmp_path: Path, root_concurrency_group: ConcurrencyGroup) -> None:
     # No system-services sibling is resolvable for the lone workspace, so nothing
     # is stopped and the (empty) still-running set is returned.
     agent_id = AgentId()
     resolver = make_resolver_with_data(make_agents_json(agent_id))
     client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
 
-    response = client.post(
-        f"/api/v1/desktop/stop-hosts?agent_id={agent_id}", headers=_auth_header()
-    )
+    response = client.post(f"/api/v1/desktop/stop-hosts?agent_id={agent_id}", headers=_auth_header())
 
     assert response.status_code == 200
     assert json.loads(response.data) == {"still_running": []}
@@ -763,14 +743,16 @@ def test_sharing_status_disabled_when_no_tunnel(tmp_path: Path) -> None:
     assert json.loads(response.data)["enabled"] is False
 
 
-def test_sharing_enable_returns_json(tmp_path: Path) -> None:
+def test_sharing_enable_returns_json(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     agent_id = AgentId()
     cli = _fake_sharing_cli(
         tunnel=TunnelInfo(tunnel_name="tn", tunnel_id="ti", token=SecretStr("token"), services=("web",))
     )
-    # The fake mngr keeps the tunnel-token injection (an `mngr exec`) a no-op.
+    # The tunnel-token injection shells out to `mngr exec` (resolved via PATH);
+    # a fake mngr on PATH keeps that a fast no-op.
     fake_mngr_dir = tmp_path / "bin"
     _write_fake_mngr(fake_mngr_dir)
+    monkeypatch.setenv("PATH", f"{fake_mngr_dir}{os.pathsep}{os.environ['PATH']}")
     client = _sharing_client(
         tmp_path,
         agent_id,
