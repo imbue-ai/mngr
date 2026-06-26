@@ -246,13 +246,13 @@ def _should_emit_system_interface_status(
         return True
     _, last_full_snapshot_at = backend_resolver.get_freshness_timestamps()
     onset = tracker.get_failure_run_started_wall_at(agent_id) if tracker is not None else None
-    # FIXME: when discovery is *persistently* stale -- the producer/consumer
-    # pipeline has stalled, not merely a provider being down -- no post-onset
-    # snapshot ever arrives, so this gate never lets the STUCK redirect through and
-    # the user is stranded on the "Loading workspace" loader with no recourse. A
-    # discovery-health watchdog should detect a stalled pipeline (snapshot age),
-    # auto-restart it, and surface a distinct app-level state; once that exists
-    # this gate gains an escape and this FIXME should be removed.
+    # When discovery is *persistently* stale -- the producer/consumer pipeline has
+    # stalled, not merely a provider being down -- no post-onset snapshot ever
+    # arrives, so this gate keeps suppressing the STUCK redirect indefinitely. That
+    # is intentional and safe: the DiscoveryHealthWatchdog independently detects the
+    # stall (snapshot age), tries to self-heal the producer, and on failure (or a
+    # dead consumer) escalates to a terminal BLOCKED app-takeover -- so the user is
+    # never left stranded on the "Loading workspace" loader here with no recourse.
     if onset is None:
         return _is_discovery_fresh(last_full_snapshot_at)
     return last_full_snapshot_at is not None and last_full_snapshot_at >= onset
