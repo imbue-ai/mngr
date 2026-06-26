@@ -128,6 +128,22 @@ def render_tutorial_block(text: str) -> str:
     return '<pre class="transcript">' + "\n".join(rendered_lines) + "</pre>"
 
 
+def render_docstring(text: str) -> str:
+    """Render a test docstring (verbatim tutorial block plus scope) as HTML.
+
+    Comment lines (``#`` -- the tutorial block's annotations) are highlighted;
+    everything else (commands, the ``Scope:`` prose) is left at default color.
+    """
+    rendered_lines: list[str] = []
+    for line in text.splitlines():
+        escaped = html.escape(line)
+        if line.lstrip().startswith("#"):
+            rendered_lines.append(f'<span class="comment">{escaped}</span>')
+        else:
+            rendered_lines.append(escaped)
+    return '<pre class="transcript">' + "\n".join(rendered_lines) + "</pre>"
+
+
 def render_transcript(text: str, cast_stems: list[str] | None = None) -> str:
     """Render a CLI transcript into styled HTML blocks."""
     lines = text.splitlines()
@@ -189,9 +205,15 @@ def render_test_detail(test_dir: Path, detail_id_prefix: str = "") -> str:
     """
     parts: list[str] = []
 
-    # Tutorial block
+    # Docstring (the scope anchor: verbatim tutorial block plus crystallized
+    # scope). Falls back to the legacy tutorial_block.txt for any test output
+    # produced before the docstring migration.
+    docstring_path = test_dir / "docstring.txt"
     tutorial_path = test_dir / "tutorial_block.txt"
-    if tutorial_path.exists():
+    if docstring_path.exists():
+        parts.append("<h3>Docstring</h3>")
+        parts.append(render_docstring(docstring_path.read_text()))
+    elif tutorial_path.exists():
         parts.append("<h3>Tutorial block</h3>")
         parts.append(render_tutorial_block(tutorial_path.read_text()))
 

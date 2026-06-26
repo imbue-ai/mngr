@@ -4,11 +4,14 @@
 Usage: python scripts/tutorial_matcher.py <script_file> <test_directory>
 
 The script file is a shell script split into "blocks" by empty lines. The test
-directory contains pytest functions that reference blocks. Matching is done by
-checking whether every line of a script block (after stripping leading whitespace)
-appears in the function body (also stripped of leading whitespace).
+directory contains pytest functions whose docstrings carry the corresponding
+block verbatim under a ``Tutorial block:`` section. Matching is done by checking
+whether every line of a script block (after stripping leading whitespace)
+appears in that section (also stripped of leading whitespace).
 """
 
+import inspect
+import re
 import sys
 from pathlib import Path
 
@@ -56,6 +59,58 @@ def _block_lines_in_body(block: str, body: str) -> bool:
     return bi == len(block_lines)
 
 
+_TUTORIAL_BLOCK_HEADER = "Tutorial block:"
+# A docstring section header is a capitalized label at column zero ending in a
+# colon (e.g. "Tutorial block:", "Scope:"). Block content lines -- shell
+# commands and ``#`` comments -- never match this, so it reliably bounds the
+# tutorial-block section even when the block has been dedented flush.
+_SECTION_HEADER_RE = re.compile(r"^[A-Z][A-Za-z ]*:")
+
+
+def _extract_docstring(body: str) -> str | None:
+    """Extract and clean the leading docstring from a function body, or None.
+
+    ``inspect.cleandoc`` reproduces the indentation handling Python itself
+    applies: the first line is flush with the opening quotes, while the common
+    indentation of the remaining lines is stripped.
+    """
+    stripped = body.lstrip()
+    for quote in ('"""', "'''"):
+        if stripped.startswith(quote):
+            rest = stripped[len(quote) :]
+            end = rest.find(quote)
+            if end == -1:
+                return None
+            return inspect.cleandoc(rest[:end])
+    return None
+
+
+def _extract_tutorial_block(body: str) -> str:
+    """Return the verbatim ``Tutorial block:`` section of a function's docstring.
+
+    The section is the lines following the ``Tutorial block:`` header, up to the
+    next section header (e.g. ``Scope:``) or the end of the docstring. Returns ""
+    when there is no such section.
+    """
+    docstring = _extract_docstring(body)
+    if docstring is None:
+        return ""
+    lines = docstring.splitlines()
+    start: int | None = None
+    for i, line in enumerate(lines):
+        if line.strip() == _TUTORIAL_BLOCK_HEADER and _SECTION_HEADER_RE.match(line):
+            start = i + 1
+            break
+    if start is None:
+        return ""
+    section: list[str] = []
+    for sub in lines[start:]:
+        if sub.strip() and _SECTION_HEADER_RE.match(sub):
+            break
+        section.append(sub)
+    return "\n".join(section).strip("\n")
+
+
 def _parse_test_functions(source: str) -> list[tuple[str, str]]:
     """Parse test functions from Python source, returning (signature, body) tuples."""
     lines = source.splitlines()
@@ -94,7 +149,12 @@ def _parse_test_functions(source: str) -> list[tuple[str, str]]:
 
 
 def find_pytest_functions(test_dir: Path) -> list[tuple[str, str, Path]]:
-    """Find all test functions in a directory, returning (signature, body, file_path) tuples."""
+    """Find all test functions in a directory.
+
+    Returns ``(signature, tutorial_block, file_path)`` tuples, where
+    ``tutorial_block`` is the verbatim ``Tutorial block:`` section of the
+    function's docstring (empty when the function has none).
+    """
     results: list[tuple[str, str, Path]] = []
 
     for py_file in sorted(test_dir.rglob("*.py")):
@@ -102,7 +162,7 @@ def find_pytest_functions(test_dir: Path) -> list[tuple[str, str, Path]]:
             continue
         source = py_file.read_text()
         for signature, body in _parse_test_functions(source):
-            results.append((signature, body, py_file))
+            results.append((signature, _extract_tutorial_block(body), py_file))
 
     return results
 
@@ -127,15 +187,15 @@ def main() -> None:
 
     unmatched_blocks: list[str] = []
     for block in blocks:
-        has_match = any(_block_lines_in_body(block, body) for _, body, _ in pytest_funcs)
+        has_match = any(_block_lines_in_body(block, block_section) for _, block_section, _ in pytest_funcs)
         if not has_match:
             unmatched_blocks.append(block)
 
     unmatched_funcs: list[tuple[str, str, Path]] = []
-    for signature, body, file_path in pytest_funcs:
-        has_match = any(_block_lines_in_body(block, body) for block in blocks)
+    for signature, block_section, file_path in pytest_funcs:
+        has_match = any(_block_lines_in_body(block, block_section) for block in blocks)
         if not has_match:
-            unmatched_funcs.append((signature, body, file_path))
+            unmatched_funcs.append((signature, block_section, file_path))
 
     if not unmatched_blocks and not unmatched_funcs:
         print("All script blocks have corresponding pytest functions and vice versa.")

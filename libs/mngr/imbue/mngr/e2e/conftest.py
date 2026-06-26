@@ -1,3 +1,4 @@
+import inspect
 import os
 import pty
 import shlex
@@ -738,6 +739,11 @@ def e2e(
     if save_artifacts or keep_env:
         transcript_path = test_output_dir / "transcript.txt"
         transcript_path.write_text(session.transcript)
+        # Capture the test's docstring (the scope anchor: the verbatim tutorial
+        # block plus crystallized scope) so the detail renderer can show it.
+        docstring = inspect.cleandoc(request.node.function.__doc__ or "")
+        if docstring:
+            (test_output_dir / "docstring.txt").write_text(docstring + "\n")
     else:
         shutil.rmtree(test_output_dir, ignore_errors=True)
 

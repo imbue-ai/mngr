@@ -8,6 +8,7 @@ from inline_snapshot import snapshot
 from imbue.mngr.utils.detail_renderer import ansi_to_html
 from imbue.mngr.utils.detail_renderer import render_test_detail
 from imbue.mngr.utils.detail_renderer import render_transcript
+from imbue.mngr.utils.detail_renderer import render_docstring
 from imbue.mngr.utils.detail_renderer import render_tutorial_block
 
 # ---------------------------------------------------------------------------
@@ -234,6 +235,34 @@ def test_render_tutorial_block_mixed_content_preserves_order() -> None:
 
 
 # ---------------------------------------------------------------------------
+# render_docstring
+# ---------------------------------------------------------------------------
+
+
+def test_render_docstring_comment_lines_get_comment_class() -> None:
+    """The tutorial block's '#' annotation lines are highlighted as comments."""
+    result = render_docstring("# annotation")
+    assert '<span class="comment"># annotation</span>' in result
+
+
+def test_render_docstring_scope_prose_is_left_default() -> None:
+    """Non-comment lines (commands, Scope prose) are not wrapped in a prompt span."""
+    result = render_docstring("Scope: it does the thing.\nmngr create")
+    assert '<span class="prompt">' not in result
+    assert "Scope: it does the thing." in result
+    assert "mngr create" in result
+
+
+def test_render_docstring_is_wrapped_in_pre_and_escapes_html() -> None:
+    """Output is wrapped in a <pre> element and HTML-special chars are escaped."""
+    result = render_docstring("Scope: a < b & c")
+    assert result.startswith('<pre class="transcript">')
+    assert result.endswith("</pre>")
+    assert "&lt;" in result
+    assert "&amp;" in result
+
+
+# ---------------------------------------------------------------------------
 # render_transcript
 # ---------------------------------------------------------------------------
 
@@ -342,7 +371,7 @@ def test_render_transcript_empty_text_produces_only_transcript_wrapper() -> None
 
 
 def test_render_test_detail_includes_tutorial_block_section(tmp_path: Path) -> None:
-    """render_test_detail renders the tutorial_block.txt file when present."""
+    """render_test_detail renders the legacy tutorial_block.txt file when present."""
     (tmp_path / "tutorial_block.txt").write_text("# step\nmngr create")
     result = render_test_detail(tmp_path)
     assert "<h3>Tutorial block</h3>" in result
@@ -354,6 +383,24 @@ def test_render_test_detail_includes_tutorial_block_section(tmp_path: Path) -> N
 def test_render_test_detail_skips_tutorial_section_when_file_absent(tmp_path: Path) -> None:
     """render_test_detail omits the tutorial block section if no file exists."""
     result = render_test_detail(tmp_path)
+    assert "<h3>Tutorial block</h3>" not in result
+
+
+def test_render_test_detail_includes_docstring_section(tmp_path: Path) -> None:
+    """render_test_detail renders docstring.txt under a Docstring heading."""
+    (tmp_path / "docstring.txt").write_text("Tutorial block:\n    # step\n    mngr create\n\nScope: it creates.")
+    result = render_test_detail(tmp_path)
+    assert "<h3>Docstring</h3>" in result
+    assert "Scope: it creates." in result
+    assert "# step" in result
+
+
+def test_render_test_detail_docstring_takes_precedence_over_tutorial_block(tmp_path: Path) -> None:
+    """When both files exist, the docstring section is rendered and the legacy one is not."""
+    (tmp_path / "docstring.txt").write_text("Scope: only this.")
+    (tmp_path / "tutorial_block.txt").write_text("# legacy\nmngr create")
+    result = render_test_detail(tmp_path)
+    assert "<h3>Docstring</h3>" in result
     assert "<h3>Tutorial block</h3>" not in result
 
 

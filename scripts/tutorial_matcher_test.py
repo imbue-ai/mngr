@@ -2,6 +2,7 @@ from pathlib import Path
 from textwrap import dedent
 
 from scripts.tutorial_matcher import _block_lines_in_body
+from scripts.tutorial_matcher import _extract_tutorial_block
 from scripts.tutorial_matcher import find_pytest_functions
 from scripts.tutorial_matcher import parse_script_blocks
 
@@ -43,26 +44,38 @@ def test_parse_skips_empty_blocks(tmp_path: Path) -> None:
 
 def test_block_lines_match_in_indented_body() -> None:
     block = "# test foo\nmngr foo"
-    body = '    e2e.write_tutorial_block("""\n    # test foo\n    mngr foo\n    """)'
-    assert _block_lines_in_body(block, body)
+    section = "    # test foo\n    mngr foo"
+    assert _block_lines_in_body(block, section)
 
 
 def test_block_lines_do_not_match_different_body() -> None:
     block = "mngr foo"
-    body = '    e2e.write_tutorial_block("""\n    mngr bar\n    """)'
-    assert not _block_lines_in_body(block, body)
+    section = "    mngr bar"
+    assert not _block_lines_in_body(block, section)
 
 
-def test_block_lines_match_body_with_extra_content() -> None:
-    block = "mngr foo"
-    body = '    e2e.write_tutorial_block("""\n    mngr foo\n    """)\n    result = e2e.run("mngr foo")'
-    assert _block_lines_in_body(block, body)
+def test_extract_tutorial_block_from_docstring() -> None:
+    body = dedent("""\
+            \"\"\"Tutorial block:
+                # test foo
+                mngr foo
+
+            Scope: it runs foo and foo happens.
+            \"\"\"
+            result = e2e.run("mngr foo")""")
+    assert _extract_tutorial_block(body) == "    # test foo\n    mngr foo"
 
 
-def test_block_lines_match_docstring_body() -> None:
-    block = "mngr foo"
-    body = '    """\n    mngr foo\n    """\n    pass'
-    assert _block_lines_in_body(block, body)
+def test_extract_tutorial_block_absent_returns_empty() -> None:
+    body = dedent("""\
+            \"\"\"Scope: a non-tutorial test with no block.\"\"\"
+            result = e2e.run("mngr foo")""")
+    assert _extract_tutorial_block(body) == ""
+
+
+def test_extract_tutorial_block_no_docstring_returns_empty() -> None:
+    body = '    result = e2e.run("mngr foo")'
+    assert _extract_tutorial_block(body) == ""
 
 
 def test_find_pytest_functions_discovers_test_funcs(tmp_path: Path) -> None:
@@ -70,9 +83,9 @@ def test_find_pytest_functions_discovers_test_funcs(tmp_path: Path) -> None:
     test_file.write_text(
         dedent("""\
         def test_something():
-            e2e.write_tutorial_block(\"\"\"
-            mngr foo
-            \"\"\")
+            \"\"\"Tutorial block:
+                mngr foo
+            \"\"\"
             pass
 
         def helper():
@@ -87,17 +100,18 @@ def test_find_pytest_functions_discovers_test_funcs(tmp_path: Path) -> None:
     assert names == ["def test_something", "def test_other"]
 
 
-def test_find_pytest_functions_returns_body(tmp_path: Path) -> None:
+def test_find_pytest_functions_returns_tutorial_block(tmp_path: Path) -> None:
     test_file = tmp_path / "test_example.py"
     test_file.write_text(
         dedent("""\
         def test_with_block():
-            e2e.write_tutorial_block(\"\"\"
-            mngr foo
-            \"\"\")
+            \"\"\"Tutorial block:
+                mngr foo
+            \"\"\"
             pass
 
         def test_no_block():
+            \"\"\"Scope: no tutorial block here.\"\"\"
             pass
         """)
     )
