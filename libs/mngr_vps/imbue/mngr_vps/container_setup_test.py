@@ -1,10 +1,46 @@
 import shutil
 from pathlib import Path
+from typing import Any
 
 import pytest
+from pydantic import ConfigDict
 
+from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.utils.testing import run_git_command
 from imbue.mngr_vps.container_setup import _clone_build_context_for_self_contained_git
+from imbue.mngr_vps.container_setup import image_exists
+
+
+class _ImageInspectOuter(MutableModel):
+    """Outer host that succeeds only for ``docker image inspect`` of a known-present image."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    present_image: str
+
+    def execute_idempotent_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Any = None,
+        env: Any = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        is_inspect_of_present = "image inspect" in command and self.present_image in command
+        if is_inspect_of_present:
+            return CommandResult(stdout="[{}]", stderr="", success=True)
+        return CommandResult(stdout="", stderr="No such image", success=False)
+
+
+def test_image_exists_true_when_inspect_succeeds() -> None:
+    outer = _ImageInspectOuter(present_image="fct:minds-v9.9.9")
+    assert image_exists(outer, "fct:minds-v9.9.9") is True
+
+
+def test_image_exists_false_when_inspect_fails() -> None:
+    outer = _ImageInspectOuter(present_image="fct:minds-v9.9.9")
+    assert image_exists(outer, "fct:absent-tag") is False
 
 
 def test_clone_build_context_returns_none_for_non_git_context(tmp_path: Path) -> None:

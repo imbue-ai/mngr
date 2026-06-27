@@ -156,7 +156,7 @@ class LimaSliceVpsClient(VpsClientInterface):
             f"{_BOX_PATH_PREFIX} {remote_command}",
         ]
 
-    def _run_on_box(
+    def run_on_box(
         self, remote_command: str, *, timeout: float, label: str, is_streaming: bool = False
     ) -> tuple[int | None, str, str]:
         """Run a command on the box over SSH; return (returncode, stdout, stderr)."""
@@ -247,7 +247,7 @@ class LimaSliceVpsClient(VpsClientInterface):
         )
         encoded_script = base64.b64encode(reserve_script.encode()).decode()
         reserve_command = f"echo {shlex.quote(encoded_script)} | base64 -d | bash"
-        reserve_rc, reserve_out, reserve_err = self._run_on_box(
+        reserve_rc, reserve_out, reserve_err = self.run_on_box(
             reserve_command, timeout=_LIMA_RESERVE_TIMEOUT_SECONDS, label=f"reserve:{instance_name}", is_streaming=True
         )
         if reserve_rc != 0:
@@ -267,7 +267,7 @@ class LimaSliceVpsClient(VpsClientInterface):
 
         # Phase 2: boot the reserved VM (the long step), with the lock already released.
         try:
-            start_rc, _start_out, start_err = self._run_on_box(
+            start_rc, _start_out, start_err = self.run_on_box(
                 f"limactl --log-level=info start {shlex.quote(instance_name)}",
                 timeout=_LIMA_START_TIMEOUT_SECONDS,
                 label=f"start:{instance_name}",
@@ -299,7 +299,7 @@ class LimaSliceVpsClient(VpsClientInterface):
         instance_name = str(instance_id)
         disk_name = f"{instance_name}{_DISK_NAME_SUFFIX}"
         delete_command = f"limactl delete --force {shlex.quote(instance_name)}"
-        delete_rc, _out, delete_err = self._run_on_box(
+        delete_rc, _out, delete_err = self.run_on_box(
             delete_command, timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="delete"
         )
         if delete_rc != 0:
@@ -311,7 +311,7 @@ class LimaSliceVpsClient(VpsClientInterface):
                 raise LimaCommandError("delete", delete_rc or 1, delete_err)
             logger.debug("Lima instance {} already absent, skipping", instance_name)
         disk_delete_command = f"limactl disk delete --force {shlex.quote(disk_name)}"
-        disk_rc, _disk_out, disk_err = self._run_on_box(
+        disk_rc, _disk_out, disk_err = self.run_on_box(
             disk_delete_command, timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="disk-delete"
         )
         if disk_rc != 0:
@@ -323,7 +323,7 @@ class LimaSliceVpsClient(VpsClientInterface):
 
     def list_instance_names(self) -> set[str]:
         """Return the names of all lima instances currently on the box."""
-        list_rc, list_out, list_err = self._run_on_box(
+        list_rc, list_out, list_err = self.run_on_box(
             "limactl list --json", timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="list"
         )
         if list_rc != 0:
@@ -345,7 +345,7 @@ class LimaSliceVpsClient(VpsClientInterface):
 
     def list_disk_names(self) -> set[str]:
         """Return the names of all lima disks currently on the box."""
-        list_rc, list_out, list_err = self._run_on_box(
+        list_rc, list_out, list_err = self.run_on_box(
             "limactl disk list --json", timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="disk-list"
         )
         if list_rc != 0:
@@ -374,10 +374,10 @@ class LimaSliceVpsClient(VpsClientInterface):
         the disk is not actually locked, which is fine), then force-delete, tolerating the
         disk already being absent.
         """
-        self._run_on_box(
+        self.run_on_box(
             f"limactl disk unlock {shlex.quote(disk_name)}", timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="disk-unlock"
         )
-        delete_rc, _out, delete_err = self._run_on_box(
+        delete_rc, _out, delete_err = self.run_on_box(
             f"limactl disk delete --force {shlex.quote(disk_name)}",
             timeout=_LIMA_SHORT_TIMEOUT_SECONDS,
             label="disk-delete",
@@ -387,7 +387,7 @@ class LimaSliceVpsClient(VpsClientInterface):
         logger.info("Destroyed orphan slice disk {} on {}", disk_name, self.box_address)
 
     def get_instance_status(self, instance_id: VpsInstanceId) -> VpsInstanceStatus:
-        list_rc, list_out, list_err = self._run_on_box(
+        list_rc, list_out, list_err = self.run_on_box(
             "limactl list --json", timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="list"
         )
         if list_rc != 0:

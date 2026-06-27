@@ -769,6 +769,15 @@ def pull_image(outer: OuterHostInterface, image: str, timeout_seconds: float = 3
     run_docker(outer, ["pull", image], timeout_seconds=timeout_seconds)
 
 
+def image_exists(outer: OuterHostInterface, image: str) -> bool:
+    """Return whether a Docker image is already present in outer's local daemon."""
+    try:
+        run_docker(outer, ["image", "inspect", image])
+    except MngrError:
+        return False
+    return True
+
+
 def run_container(
     outer: OuterHostInterface,
     *,
