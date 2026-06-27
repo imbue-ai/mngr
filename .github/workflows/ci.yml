@@ -562,8 +562,8 @@ jobs:
 
   # Stands up one ephemeral per-run minds `ci-*` environment (real Modal env +
   # Neon project + SuperTokens app), creates the fixed CI test user, and
-  # publishes the env's freshly-minted per-env secrets to a per-run Vault path
-  # (keyed by github.run_id) so the test job can read them back. Runs in
+  # publishes the env's freshly-minted per-env secrets to a per-env Vault path
+  # (keyed by the env name) so the test job can read them back. Runs in
   # parallel with build-minds-snapshot; test-minds-snapshot needs both.
   build-minds-ci-env:
     runs-on: ubuntu-latest
