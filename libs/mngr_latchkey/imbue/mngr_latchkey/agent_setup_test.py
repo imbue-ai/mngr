@@ -107,6 +107,7 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
                 "latchkey-self-read-self-permissions",
                 "latchkey-self-read-available-permissions",
                 "minds-api-proxy-per-agent",
+                "minds-api-schema-read",
             ],
         },
     ]
@@ -142,6 +143,14 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
     assert available_path_schema == {
         "type": "string",
         "pattern": r"^/permissions/available/[a-z0-9][a-z0-9-]*$",
+    }
+    # Every agent may read the (non-agent-scoped) API schema document by default:
+    # a GET pinned to the proxy's inbound /api/schema path. It rides the
+    # domain-only latchkey-self scope (above), so no per-agent registration is
+    # needed -- a brand-new workspace can fetch it immediately.
+    assert schemas["minds-api-schema-read"]["properties"] == {
+        "method": {"const": "GET"},
+        "path": {"const": "/minds-api-proxy/api/schema"},
     }
 
 

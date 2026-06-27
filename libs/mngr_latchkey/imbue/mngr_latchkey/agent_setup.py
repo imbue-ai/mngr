@@ -100,6 +100,19 @@ _MINDS_API_PROXY_PER_AGENT_PATH_PATTERN: Final[str] = rf"^{_MINDS_API_PROXY_PER_
 _SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED: Final[str] = "minds-api-proxy-per-agent-unauthorized"
 _PERM_MINDS_API_PROXY_PER_AGENT: Final[str] = "minds-api-proxy-per-agent"
 
+# The version-agnostic, read-only API schema endpoint (an OpenAPI document
+# describing every gateway-reachable ``/api/v*`` route). Granted to every agent
+# by default -- unlike the per-agent endpoints it is not agent-scoped (the schema
+# is identical for all callers) and carries no per-target data, so a workspace
+# can always discover the Minds API surface. This is the *inbound* path the
+# gateway matches on; the proxy strips ``/minds-api-proxy`` before forwarding to
+# the desktop client's ``/api/schema``. It lives as a permission on the
+# ``latchkey-self`` scope (like ``read-self-permissions``) because that scope is
+# domain-only and so matches every gateway-self request: detent requires *every*
+# matching scope to grant, so a path it does not list would be vetoed there.
+_MINDS_API_SCHEMA_INBOUND_PATH: Final[str] = "/minds-api-proxy/api/schema"
+_PERM_MINDS_API_SCHEMA: Final[str] = "minds-api-schema-read"
+
 # The minds desktop client's cross-workspace management API
 # (``/api/v1/workspaces/...``) is gated by a separate ``minds-workspaces`` detent
 # scope. Its scope + per-verb permission schemas are NOT part of this agent
@@ -157,6 +170,8 @@ _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissi
                 _PERM_READ_AVAILABLE_PERMISSIONS,
                 # Requests that made it through the first rule (= not unauthorized agents) can now access the agent-scoped Minds API endpoint.
                 _PERM_MINDS_API_PROXY_PER_AGENT,
+                # Every agent may read the (non-agent-scoped) API schema document.
+                _PERM_MINDS_API_SCHEMA,
             ],
         },
     ),
@@ -209,6 +224,13 @@ _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissi
                     "type": "string",
                     "pattern": _AVAILABLE_PERMISSIONS_PATH_PATTERN,
                 },
+            },
+            "required": ["method", "path"],
+        },
+        _PERM_MINDS_API_SCHEMA: {
+            "properties": {
+                "method": {"const": "GET"},
+                "path": {"const": _MINDS_API_SCHEMA_INBOUND_PATH},
             },
             "required": ["method", "path"],
         },

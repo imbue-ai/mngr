@@ -33,6 +33,7 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
+from imbue.minds.desktop_client.api_schema import create_api_schema_blueprint
 from imbue.minds.desktop_client.api_v1 import create_api_v1_blueprint
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
@@ -2119,6 +2120,9 @@ def create_desktop_client(
     # Mount the REST API v1 blueprint
     if paths is not None:
         app.register_blueprint(create_api_v1_blueprint())
+        # Mount the self-describing OpenAPI document at /api/schema (describes the
+        # gateway-reachable /api/v* surface; default-allowed for agents).
+        app.register_blueprint(create_api_schema_blueprint())
         # Mount the WebDAV file server (a WSGI app) under /api/v1/files via
         # Werkzeug's dispatcher. Each share root maps URL-path == on-disk-path
         # (``~`` and ``/tmp``); the mount is gated by the same central-key
