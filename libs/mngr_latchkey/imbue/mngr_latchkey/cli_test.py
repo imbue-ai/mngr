@@ -20,9 +20,11 @@ from pathlib import Path
 from typing import Final
 from uuid import uuid4
 
+import click
 import pluggy
 import pytest
 from click.testing import CliRunner
+from loguru import logger
 
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -33,6 +35,7 @@ from imbue.mngr_latchkey.cli import ENV_LATCHKEY_BINARY
 from imbue.mngr_latchkey.cli import ENV_LATCHKEY_DIRECTORY
 from imbue.mngr_latchkey.cli import _DEFAULT_LATCHKEY_DIRECTORY
 from imbue.mngr_latchkey.cli import _resolve_latchkey_settings
+from imbue.mngr_latchkey.cli import _run_forward_with_error_reporting
 from imbue.mngr_latchkey.cli import latchkey
 from imbue.mngr_latchkey.config import LatchkeyPluginConfig
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
@@ -624,3 +627,51 @@ def test_help_text_lists_subcommands(cli_runner: CliRunner) -> None:
         "gateway-info",
     ):
         assert subcommand in result.output
+
+
+def _raise_value_error() -> None:
+    raise ValueError("kaboom")
+
+
+def _raise_click_exception() -> None:
+    raise click.ClickException("expected user-facing failure")
+
+
+def _return_normally() -> None:
+    return None
+
+
+def test_run_forward_with_error_reporting_logs_unexpected_error_and_reraises() -> None:
+    # An unexpected exception must be logged through loguru (so it reaches Sentry via our handler,
+    # which attaches the daemon's logs) and then re-raised so the CLI still exits non-zero.
+    captured: list[tuple[str, str]] = []
+    sink_id = logger.add(lambda m: captured.append((m.record["level"].name, m.record["message"])), level=0)
+    try:
+        with pytest.raises(ValueError, match="kaboom"):
+            _run_forward_with_error_reporting(_raise_value_error)
+    finally:
+        logger.remove(sink_id)
+    assert any(level == "ERROR" and "unhandled error" in message for level, message in captured)
+
+
+def test_run_forward_with_error_reporting_does_not_log_click_exceptions() -> None:
+    # ``click`` control-flow exceptions are expected user-facing exits, not faults; they must be
+    # re-raised for click to render but must not be turned into Sentry error events.
+    captured: list[str] = []
+    sink_id = logger.add(lambda m: captured.append(m.record["message"]), level=0)
+    try:
+        with pytest.raises(click.ClickException):
+            _run_forward_with_error_reporting(_raise_click_exception)
+    finally:
+        logger.remove(sink_id)
+    assert not any("unhandled error" in message for message in captured)
+
+
+def test_run_forward_with_error_reporting_does_not_log_on_clean_return() -> None:
+    captured: list[str] = []
+    sink_id = logger.add(lambda m: captured.append(m.record["message"]), level=0)
+    try:
+        _run_forward_with_error_reporting(_return_normally)
+    finally:
+        logger.remove(sink_id)
+    assert not any("unhandled error" in message for message in captured)

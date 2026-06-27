@@ -165,6 +165,8 @@ from imbue.minds.primitives import OutputFormat
 from imbue.minds.primitives import ServiceName
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.telegram.setup import TelegramSetupStatus
+from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
+from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
 from imbue.mngr.api.discovery_events import DISCOVERY_STREAM_POLL_INTERVAL_SECONDS
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.primitives import AgentId
@@ -509,6 +511,7 @@ def _handle_consent_submit() -> Response:
         minds_config.set_report_unexpected_errors(report)
         minds_config.set_include_error_logs(include_logs and report)
         minds_config.set_error_reporting_consent_given(True)
+        _sync_latchkey_forward_sentry_consent(minds_config)
     return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
 
 
@@ -530,7 +533,21 @@ def _handle_error_reporting_settings() -> Response:
             minds_config.set_report_unexpected_errors(bool(body["report_unexpected_errors"]))
         if "include_logs" in body:
             minds_config.set_include_error_logs(bool(body["include_logs"]))
+        _sync_latchkey_forward_sentry_consent(minds_config)
     return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
+
+
+def _sync_latchkey_forward_sentry_consent(minds_config: MindsConfig) -> None:
+    """Rewrite the detached ``mngr latchkey forward`` daemon's live consent file after a consent change.
+
+    The daemon reads this file live (per event) to gate what it sends, so rewriting it here is what
+    makes a grant/revoke take effect on the running daemon without respawning it.
+    """
+    write_latchkey_forward_sentry_consent(
+        latchkey_forward_sentry_consent_path(minds_config.data_dir),
+        is_error_reporting_enabled=minds_config.get_report_unexpected_errors(),
+        is_log_inclusion_enabled=minds_config.get_include_error_logs(),
+    )
 
 
 def _handle_help_page() -> Response:

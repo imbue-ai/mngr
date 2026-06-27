@@ -56,7 +56,12 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    rc.check_broad_exception_catch(_DIR, snapshot(0))
+    # The one catch is the top-level error boundary in ``_forward_command``: a long-running daemon's
+    # unhandled exception must be logged through loguru (so the Sentry report carries the daemon's
+    # logs + traceback, rather than being captured attachment-less by the SDK excepthook) and then
+    # re-raised so the CLI still exits non-zero. It deliberately catches ``Exception`` because any
+    # unexpected fault should be reported; it does not swallow (it re-raises).
+    rc.check_broad_exception_catch(_DIR, snapshot(1))
 
 
 def test_prevent_base_exception_catch() -> None:
