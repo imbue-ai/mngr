@@ -17,6 +17,9 @@ class MockBoxImageCache(BoxImageCacheInterface):
     destroyed_keys: list[TransferKey] = Field(default_factory=list, description="Ephemeral keys destroyed, in order")
     is_save_failing: bool = Field(default=False, description="Whether save_image_from_slice raises")
     is_load_failing: bool = Field(default=False, description="Whether load_image_into_slice raises")
+    is_tar_published_on_wait: bool = Field(
+        default=False, description="When set, wait_for_tar publishes the tar (simulates an in-flight seed finishing)"
+    )
 
     def has_tar(self, image_tag: str) -> bool:
         return image_tag in self.tars_present
@@ -31,6 +34,8 @@ class MockBoxImageCache(BoxImageCacheInterface):
         self.locks_held.discard(image_tag)
 
     def wait_for_tar(self, image_tag: str, *, timeout_seconds: int) -> bool:
+        if self.is_tar_published_on_wait:
+            self.tars_present.add(image_tag)
         return image_tag in self.tars_present
 
     def check_free_disk(self, required_bytes: int) -> None:

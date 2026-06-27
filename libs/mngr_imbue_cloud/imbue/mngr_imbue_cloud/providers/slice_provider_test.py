@@ -85,8 +85,10 @@ def test_seeds_when_no_tar_and_lock_is_acquired() -> None:
 
 
 def test_waits_then_loads_when_another_slice_is_seeding() -> None:
-    # The lock is held by an in-flight builder, and the tar appears while we wait.
-    cache = MockBoxImageCache(locks_held={_TAG}, tars_present={_TAG})
+    # No tar yet and the lock is held by an in-flight builder, so we must take the
+    # try_acquire (fails) -> wait_for_tar (tar appears) -> load path rather than the
+    # has_tar() fast path.
+    cache = MockBoxImageCache(locks_held={_TAG}, is_tar_published_on_wait=True)
     provider = _provider(cache)
     _ensure(provider)
     assert provider.loaded_tags == [_TAG]
