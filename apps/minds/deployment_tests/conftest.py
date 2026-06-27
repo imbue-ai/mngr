@@ -34,7 +34,6 @@ from uuid import uuid4
 import httpx
 import pytest
 from loguru import logger
-from pydantic import AnyUrl
 from pydantic import SecretStr
 
 from imbue.imbue_common.primitives import NonEmptyStr
@@ -46,9 +45,16 @@ from imbue.minds.deployment_tests.data_types import EphemeralEnvHandle
 from imbue.minds.deployment_tests.data_types import FctTemplateRef
 from imbue.minds.deployment_tests.data_types import SharedEnvHandle
 from imbue.minds.deployment_tests.data_types import VerifiedUserHandle
+from imbue.minds.deployment_tests.helpers import CI_TEST_USER_EMAIL_KEY
+from imbue.minds.deployment_tests.helpers import CI_TEST_USER_PASSWORD_KEY
+from imbue.minds.deployment_tests.helpers import SHARED_ENV_SECRET_KEYS
 from imbue.minds.deployment_tests.helpers import build_minds_env_subprocess_env
+from imbue.minds.deployment_tests.helpers import create_verified_user_via_admin_api
 from imbue.minds.deployment_tests.helpers import delete_user_via_admin_api
+from imbue.minds.deployment_tests.helpers import read_ci_test_user_credentials
+from imbue.minds.deployment_tests.helpers import read_shared_env_secrets
 from imbue.minds.deployment_tests.helpers import sweep_stale_users
+from imbue.minds.deployment_tests.primitives import CI_RUN_KEY_ENV_VAR
 from imbue.minds.deployment_tests.primitives import DEPLOYMENT_ENVS_JSON_ENV_VAR
 from imbue.minds.deployment_tests.primitives import DeploymentTestConfigError
 from imbue.minds.deployment_tests.primitives import MAILTM_ADDRESS_ENV_VAR
@@ -119,19 +125,35 @@ def shared_env(
                 f"Configured roles: {sorted(deployment_envs_config.shared_envs.keys())!r}."
             )
         urls = deployment_envs_config.shared_envs[role_key]
-        env_prefix = f"{SHARED_ENV_SECRET_ENV_VAR_PREFIX}{role.upper()}_"
-        try:
-            return SharedEnvHandle(
-                urls=urls,
-                supertokens_connection_uri=SecretStr(_require_env_var(f"{env_prefix}SUPERTOKENS_CONNECTION_URI")),
-                supertokens_api_key=SecretStr(_require_env_var(f"{env_prefix}SUPERTOKENS_API_KEY")),
-                neon_host_pool_dsn=SecretStr(_require_env_var(f"{env_prefix}NEON_HOST_POOL_DSN")),
-                neon_litellm_dsn=SecretStr(_require_env_var(f"{env_prefix}NEON_LITELLM_DSN")),
-            )
-        except DeploymentTestConfigError as exc:
-            pytest.skip(str(exc))
+        secrets = _resolve_shared_env_secrets(role=role_key, run_key=_run_key(deployment_envs_config))
+        return SharedEnvHandle(
+            urls=urls,
+            supertokens_connection_uri=SecretStr(secrets["SUPERTOKENS_CONNECTION_URI"]),
+            supertokens_api_key=SecretStr(secrets["SUPERTOKENS_API_KEY"]),
+            neon_host_pool_dsn=SecretStr(secrets["NEON_HOST_POOL_DSN"]),
+            neon_litellm_dsn=SecretStr(secrets["NEON_LITELLM_DSN"]),
+        )
 
     return _get_shared_env
+
+
+@pytest.fixture
+def ci_test_user() -> tuple[NonEmptyStr, SecretStr]:
+    """Fixed ``(email, password)`` for the CI test user the env-build step created.
+
+    Reads the credentials from env vars (set by the orchestrator / CI job) when
+    present -- the only path available inside an offload sandbox -- and otherwise
+    falls back to reading them from Vault (local runs, where the operator has a
+    Vault token).
+    """
+    email = os.environ.get(CI_TEST_USER_EMAIL_KEY)
+    password = os.environ.get(CI_TEST_USER_PASSWORD_KEY)
+    if email and password:
+        return NonEmptyStr(email), SecretStr(password)
+    try:
+        return read_ci_test_user_credentials()
+    except MindError as exc:
+        pytest.skip(f"CI test-user credentials not in env vars and Vault read failed: {exc}")
 
 
 @pytest.fixture
@@ -150,7 +172,7 @@ def verified_user(
     handle = shared_env("default")
     email = NonEmptyStr(f"test-{get_short_random_string()}@example.test")
     password = SecretStr(f"pw-{uuid4().hex}")
-    user_id, session_token = _create_verified_user_via_admin_api(
+    user_id, session_token = create_verified_user_via_admin_api(
         connection_uri=handle.supertokens_connection_uri,
         api_key=handle.supertokens_api_key,
         connector_url=handle.urls.connector_url,
@@ -305,15 +327,16 @@ def _sweep_stale_test_users(deployment_envs_config: DeploymentEnvsConfig) -> Non
     exist) -- those tests don't use ``verified_user`` so there's
     nothing to sweep against.
     """
-    if SharedEnvRole("default") not in deployment_envs_config.shared_envs:
+    default_role = SharedEnvRole("default")
+    if default_role not in deployment_envs_config.shared_envs:
         return
-    env_prefix = f"{SHARED_ENV_SECRET_ENV_VAR_PREFIX}DEFAULT_"
     try:
-        connection_uri = SecretStr(_require_env_var(f"{env_prefix}SUPERTOKENS_CONNECTION_URI"))
-        api_key = SecretStr(_require_env_var(f"{env_prefix}SUPERTOKENS_API_KEY"))
-    except DeploymentTestConfigError as exc:
+        secrets = _resolve_shared_env_secrets(role=default_role, run_key=_run_key(deployment_envs_config))
+    except (MindError, pytest.skip.Exception) as exc:
         logger.warning("Skipping stale-test-user sweep: {}", exc)
         return
+    connection_uri = SecretStr(secrets["SUPERTOKENS_CONNECTION_URI"])
+    api_key = SecretStr(secrets["SUPERTOKENS_API_KEY"])
     deleted = sweep_stale_users(
         connection_uri=connection_uri,
         api_key=api_key,
@@ -337,6 +360,29 @@ def _require_env_var(name: str) -> str:
             "invoking pytest; if you are running this test outside the orchestrator, that is the issue."
         )
     return value
+
+
+def _run_key(config: DeploymentEnvsConfig) -> str:
+    """Resolve the per-run Vault namespace key (GitHub run id in CI, else the RunId)."""
+    return os.environ.get(CI_RUN_KEY_ENV_VAR) or str(config.run_id)
+
+
+def _resolve_shared_env_secrets(*, role: SharedEnvRole, run_key: str) -> dict[str, str]:
+    """Return the per-env secrets, preferring injected env vars over a Vault read.
+
+    Env vars (``MINDS_DEPLOYMENT_TEST_SHARED_<ROLE>_<KEY>``) are the only path
+    available inside an offload sandbox, so they win when fully present. Local
+    runs that did not inject them fall back to reading the per-run Vault path
+    the env-build step wrote (the operator's Vault token is available there).
+    """
+    env_prefix = f"{SHARED_ENV_SECRET_ENV_VAR_PREFIX}{str(role).upper()}_"
+    from_env = [os.environ.get(f"{env_prefix}{key}") for key in SHARED_ENV_SECRET_KEYS]
+    if all(from_env):
+        return {key: value for key, value in zip(SHARED_ENV_SECRET_KEYS, from_env, strict=False) if value is not None}
+    try:
+        return read_shared_env_secrets(run_key=run_key, role=role)
+    except MindError as exc:
+        pytest.skip(f"Shared env secrets for role {role!r} not in env vars and Vault read failed: {exc}")
 
 
 def _mint_ephemeral_env_name() -> DevEnvName:
@@ -440,85 +486,3 @@ def _destroy_ephemeral_env(*, name: DevEnvName) -> None:
             f"`minds env destroy` for {name!r} exited {completed.returncode}.\n"
             f"--- stdout ---\n{completed.stdout}\n--- stderr ---\n{completed.stderr}"
         )
-
-
-_SUPERTOKENS_TENANT_ID = "public"
-_SUPERTOKENS_ADMIN_TIMEOUT_SECONDS = 30.0
-
-
-def _create_verified_user_via_admin_api(
-    *,
-    connection_uri: SecretStr,
-    api_key: SecretStr,
-    connector_url: AnyUrl,
-    email: NonEmptyStr,
-    password: SecretStr,
-) -> tuple[NonEmptyStr, SecretStr]:
-    """Create a user via the SuperTokens admin API, mark email verified, sign in.
-
-    Three HTTP round-trips against the SuperTokens core (auth'd with the
-    ``api-key`` header, matches what supertokens-python's recipe
-    implementations do internally), plus one signin call against the
-    deployed connector to mint a real session JWT:
-
-    1. ``POST <core>/<tenant>/recipe/signup`` -- creates the
-       emailpassword user, returns the user id.
-    2. ``POST <core>/<tenant>/recipe/user/email/verify/token`` --
-       generates a verification token for that user.
-    3. ``POST <core>/<tenant>/recipe/user/email/verify`` -- consumes
-       the token to mark the email verified (so the connector's
-       ``REQUIRED`` email-verification gate is satisfied).
-    4. ``POST <connector_url>/auth/signin`` -- signs in via the
-       connector's public endpoint to receive a SuperTokens session
-       JWT that downstream test calls can use as ``Authorization: Bearer``.
-
-    Returns ``(user_id, access_token)``. The session refresh path is
-    not used by tests today, so we deliberately only thread the
-    access_token through.
-    """
-    headers = {"api-key": api_key.get_secret_value(), "rid": "emailpassword"}
-    base = str(connection_uri.get_secret_value()).rstrip("/")
-    with httpx.Client(timeout=_SUPERTOKENS_ADMIN_TIMEOUT_SECONDS) as client:
-        signup = client.post(
-            f"{base}/{_SUPERTOKENS_TENANT_ID}/recipe/signup",
-            headers=headers,
-            json={"email": str(email), "password": password.get_secret_value()},
-        )
-        signup.raise_for_status()
-        signup_json = signup.json()
-        if signup_json.get("status") != "OK":
-            raise MindError(f"SuperTokens admin signup for {email!r} returned non-OK: {signup_json!r}")
-        user_id = NonEmptyStr(signup_json["recipeUserId"])
-
-        verify_headers = {"api-key": api_key.get_secret_value(), "rid": "emailverification"}
-        token_resp = client.post(
-            f"{base}/{_SUPERTOKENS_TENANT_ID}/recipe/user/email/verify/token",
-            headers=verify_headers,
-            json={"userId": str(user_id), "email": str(email)},
-        )
-        token_resp.raise_for_status()
-        token_json = token_resp.json()
-        if token_json.get("status") != "OK":
-            raise MindError(f"SuperTokens admin verify-token mint for {email!r} returned non-OK: {token_json!r}")
-        verification_token = token_json["token"]
-
-        verify_resp = client.post(
-            f"{base}/{_SUPERTOKENS_TENANT_ID}/recipe/user/email/verify",
-            headers=verify_headers,
-            json={"method": "token", "token": verification_token},
-        )
-        verify_resp.raise_for_status()
-        verify_json = verify_resp.json()
-        if verify_json.get("status") != "OK":
-            raise MindError(f"SuperTokens admin email-verify for {email!r} returned non-OK: {verify_json!r}")
-
-        signin_resp = client.post(
-            f"{str(connector_url).rstrip('/')}/auth/signin",
-            json={"email": str(email), "password": password.get_secret_value()},
-        )
-        signin_resp.raise_for_status()
-        signin_json = signin_resp.json()
-        if signin_json.get("status") != "OK":
-            raise MindError(f"Connector /auth/signin for {email!r} returned non-OK: {signin_json!r}")
-        access_token = signin_json["tokens"]["access_token"]
-        return user_id, SecretStr(access_token)
