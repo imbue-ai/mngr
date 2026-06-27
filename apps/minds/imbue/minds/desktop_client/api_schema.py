@@ -43,6 +43,7 @@ from pydantic import BaseModel
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.desktop_client.api_auth import require_api_or_cookie_auth
 from imbue.minds.desktop_client.api_models import AgentNotificationRequest
 from imbue.minds.desktop_client.api_models import ApiErrorResponse
 from imbue.minds.desktop_client.api_models import CreateWorkspaceRequest
@@ -54,7 +55,6 @@ from imbue.minds.desktop_client.api_models import RestartWorkspaceRequest
 from imbue.minds.desktop_client.api_models import SshConnectionResponse
 from imbue.minds.desktop_client.api_models import WorkspaceListResponse
 from imbue.minds.desktop_client.api_models import WorkspaceSummary
-from imbue.minds.desktop_client.api_v1 import require_api_or_cookie_auth
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.responses import make_response
 
