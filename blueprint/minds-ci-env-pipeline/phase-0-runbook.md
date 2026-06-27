@@ -10,12 +10,18 @@ Environment on `imbue-ai/mngr`).
 - **Terraform changes committed + draft PR opened** on `imbue-ai/vault`:
   - Branch `mngr/minds-ci-envs`, draft PR: https://github.com/imbue-ai/vault/pull/1
   - Adds OIDC role `minds_ci_env_gh` (gated on the `minds-ci-env` GitHub
-    Environment); reads the `minds/ci/*` service secrets `minds env deploy`/
-    `destroy` need, and gets read+write+delete on `minds/ci/runs/*`; token TTL 30m.
-  - Expands `minds_ci_test_gh` to also read `minds/ci/paid-accounts/*` and
-    `minds/ci/runs/*`.
-  - Extends the `jwt_role_and_policy` module with an optional `writable_secrets`
-    list (backward compatible). `terraform fmt`/`validate` pass.
+    Environment), defined **inline** (its own `vault_jwt_auth_backend_role` +
+    `vault_policy`, NOT via the shared `jwt_role_and_policy` module); reads the
+    `minds/ci/*` service secrets `minds env deploy`/`destroy` need, and gets
+    read+write+delete on `minds/ci/runs/*`; token TTL 30m.
+  - Expands `minds_ci_test_gh` (still module-based) to also read
+    `minds/ci/paid-accounts/*` and `minds/ci/runs/*`.
+  - The shared `jwt_role_and_policy` module is left **untouched** (an earlier
+    attempt to extend it re-rendered every consumer's policy string and caused
+    no-op churn across the sculptor/vault-repo roles; the role is inline to
+    avoid that). `terraform fmt`/`validate` pass; `terraform plan` against the
+    committed state is **2 to add, 1 to change, 0 to destroy** with no other
+    roles touched.
 - **Vault values written** (KV v2, namespace `admin`, mount `secrets/`):
   - `secrets/minds/ci/paid-accounts/CI_TEST_USER_EMAIL = minds-ci-test@imbue.com`
   - `secrets/minds/ci/paid-accounts/CI_TEST_USER_PASSWORD = <generated strong value>`
@@ -45,8 +51,10 @@ terraform plan      # expect: + module.minds_ci_env_gh (role+policy), ~ module.m
 terraform apply
 ```
 
-Expected plan: create the `minds_ci_env_gh` role + policy, update the
-`minds_ci_test_gh` policy. No other roles change.
+Expected plan: `Plan: 2 to add, 1 to change, 0 to destroy` — create the
+`minds_ci_env_gh` role + policy, update the `minds_ci_test_gh` policy. No other
+roles change (if you see sculptor/vault-repo policies churning, the shared
+module was modified — it should not be).
 
 ### 3. Create the `minds-ci-env` GitHub Environment on `imbue-ai/mngr`
 
