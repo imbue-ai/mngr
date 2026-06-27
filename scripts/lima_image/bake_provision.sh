@@ -14,6 +14,11 @@ export DEBIAN_FRONTEND=noninteractive
 # Pin mtimes for the cleanup pass (reproducibility helps upgrade deltas, not the
 # first full download). Fixed instant; not "now", which would differ every build.
 export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1700000000}"
+# setup_system.sh installs uv into /root/.local/bin. install_dependencies.sh and
+# build_workspace.sh add it to PATH themselves, but deferred_install.sh (Playwright)
+# does not -- without this it fails with "uv: command not found" and Chromium never
+# gets baked. Put it on PATH for the whole bake so every FCT script finds uv.
+export PATH="/root/.local/bin:$PATH"
 
 REPO_ROOT=/mngr/code
 
