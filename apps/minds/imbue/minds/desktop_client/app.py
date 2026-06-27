@@ -4702,10 +4702,11 @@ def start_discovery_health_watchdog_loop(
 ) -> None:
     """Start the background thread that drives the discovery-health watchdog.
 
-    Each tick reads the resolver's ``last_full_snapshot_at`` and hands it to
-    ``watchdog.evaluate``, which detects a producer stall, runs the
-    bounce -> restart remediations, and escalates to BLOCKED. The thread no-ops when
-    there is no concurrency group (test factories that skip background threads).
+    Each tick reads the resolver's ``last_event_at`` and hands it to
+    ``watchdog.evaluate``, which detects a producer stall (or a dead supervisor)
+    and runs producer remediation -- bounce once, then restart on a capped
+    exponential backoff, retrying forever. The thread no-ops when there is no
+    concurrency group (test factories that skip background threads).
     """
     if root_concurrency_group is None:
         return
@@ -4733,6 +4734,6 @@ def _run_discovery_health_watchdog_loop(
         )
         return
     while not root_concurrency_group.is_shutting_down():
-        _, last_full_snapshot_at = backend_resolver.get_freshness_timestamps()
-        watchdog.evaluate(last_full_snapshot_at)
+        last_event_at, _ = backend_resolver.get_freshness_timestamps()
+        watchdog.evaluate(last_event_at)
         threading.Event().wait(timeout=_DISCOVERY_WATCHDOG_POLL_INTERVAL_SECONDS)
