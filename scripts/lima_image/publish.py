@@ -127,10 +127,6 @@ class CloudflareApiObjectStore(ObjectStore):
         return response.content
 
 
-def _sha256_hex(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
