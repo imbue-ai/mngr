@@ -62,10 +62,15 @@ from imbue.minds.desktop_client.api_models import BugReportRequest
 from imbue.minds.desktop_client.api_models import CreateWorkspaceRequest
 from imbue.minds.desktop_client.api_models import EnableSharingRequest
 from imbue.minds.desktop_client.api_models import EstablishSshRequest
+from imbue.minds.desktop_client.api_models import OperationHandleResponse
 from imbue.minds.desktop_client.api_models import PatchWorkspaceRequest
 from imbue.minds.desktop_client.api_models import RestartWorkspaceRequest
 from imbue.minds.desktop_client.api_models import SetProviderEnabledRequest
+from imbue.minds.desktop_client.api_models import SshConnectionResponse
+from imbue.minds.desktop_client.api_models import WorkspaceListResponse
+from imbue.minds.desktop_client.api_models import WorkspaceSummary
 from imbue.minds.desktop_client.api_spec import API_SPEC
+from imbue.minds.desktop_client.api_spec import json_response_model
 from imbue.minds.desktop_client.backup_export import BackupExportError
 from imbue.minds.desktop_client.backup_export import export_snapshot_zip
 from imbue.minds.desktop_client.create_helpers import REMOTE_SIGNIN_REDIRECT_URL
@@ -172,8 +177,8 @@ def _handle_notification(agent_id: str) -> Response:
 # id, matching minds discovery.
 
 
-def _serialize_workspace(agent_id: AgentId) -> dict[str, object]:
-    """Build the JSON summary for one workspace from discovery + its labels."""
+def _serialize_workspace(agent_id: AgentId) -> WorkspaceSummary:
+    """Build the summary for one workspace from discovery + its labels."""
     backend_resolver = get_state().backend_resolver
     info = backend_resolver.get_agent_display_info(agent_id)
     host_id = info.host_id if info is not None else None
@@ -188,34 +193,36 @@ def _serialize_workspace(agent_id: AgentId) -> dict[str, object]:
             typed_host_id = None
         if typed_host_id is not None:
             host_state = backend_resolver.get_host_state(typed_host_id)
-    return {
-        "agent_id": str(agent_id),
-        "name": backend_resolver.get_workspace_name(agent_id) or (info.agent_name if info is not None else None),
-        "host_id": host_id,
-        "host_state": str(host_state) if host_state is not None else None,
-        "provider_name": info.provider_name if info is not None else None,
-        "create_time": info.create_time.isoformat() if info is not None and info.create_time is not None else None,
-        "original_minds_version": backend_resolver.get_agent_label(agent_id, "original_minds_version"),
-        "color": backend_resolver.get_workspace_color(agent_id),
-    }
+    return WorkspaceSummary(
+        agent_id=str(agent_id),
+        name=backend_resolver.get_workspace_name(agent_id) or (info.agent_name if info is not None else None),
+        host_id=host_id,
+        host_state=str(host_state) if host_state is not None else None,
+        provider_name=info.provider_name if info is not None else None,
+        create_time=info.create_time.isoformat() if info is not None and info.create_time is not None else None,
+        original_minds_version=backend_resolver.get_agent_label(agent_id, "original_minds_version"),
+        color=backend_resolver.get_workspace_color(agent_id),
+    )
 
 
 @require_api_or_cookie_auth
-def _handle_list_workspaces() -> Response:
+@API_SPEC.validate(resp=json_response_model(WorkspaceListResponse))
+def _handle_list_workspaces() -> WorkspaceListResponse:
     """List all workspaces, including destroyed-but-still-backed-up ones."""
     backend_resolver = get_state().backend_resolver
-    workspaces = [_serialize_workspace(agent_id) for agent_id in backend_resolver.list_known_workspace_ids()]
-    return _json_response({"workspaces": workspaces})
+    workspaces = tuple(_serialize_workspace(agent_id) for agent_id in backend_resolver.list_known_workspace_ids())
+    return WorkspaceListResponse(workspaces=workspaces)
 
 
 @require_api_or_cookie_auth
-def _handle_get_workspace(agent_id: str) -> Response:
+@API_SPEC.validate(resp=json_response_model(WorkspaceSummary))
+def _handle_get_workspace(agent_id: str) -> WorkspaceSummary | Response:
     """Return the detail summary for one workspace."""
     parsed_id = AgentId(agent_id)
     backend_resolver = get_state().backend_resolver
     if parsed_id not in backend_resolver.list_known_workspace_ids():
         return _json_error(f"Unknown workspace {agent_id}", 404)
-    return _json_response(_serialize_workspace(parsed_id))
+    return _serialize_workspace(parsed_id)
 
 
 @require_api_or_cookie_auth
@@ -332,8 +339,8 @@ def _handle_workspace_backup_export(agent_id: str, snapshot_id: str) -> Response
 
 
 @require_api_or_cookie_auth
-@API_SPEC.validate(json=CreateWorkspaceRequest)
-def _handle_create_workspace() -> Response:
+@API_SPEC.validate(json=CreateWorkspaceRequest, resp=json_response_model(OperationHandleResponse, status_code=202))
+def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response:
     """Create a new peer workspace; return an operation handle to poll.
 
     Accepts a JSON body with ``git_url`` (required) and optional ``host_name``,
@@ -490,11 +497,12 @@ def _handle_create_workspace() -> Response:
         color=color,
         original_minds_version=(branch_or_tag or branch or FALLBACK_BRANCH),
     )
-    return _json_response({"operation_id": str(creation_id), "kind": "create"}, status_code=202)
+    return OperationHandleResponse(operation_id=str(creation_id), kind="create"), 202
 
 
 @require_api_or_cookie_auth
-def _handle_destroy_workspace(agent_id: str) -> Response:
+@API_SPEC.validate(resp=json_response_model(OperationHandleResponse, status_code=202))
+def _handle_destroy_workspace(agent_id: str) -> tuple[OperationHandleResponse, int] | Response:
     """Destroy a workspace's host; return an operation handle to poll.
 
     The workspace's backups and ``restic.env`` are retained, so its backups
@@ -514,7 +522,7 @@ def _handle_destroy_workspace(agent_id: str) -> Response:
         return _json_error(f"Cannot resolve a host to destroy for {agent_id}", 409)
 
     destroying.start_destroy(parsed_id, paths, host_id, mngr_binary=get_state().mngr_binary)
-    return _json_response({"operation_id": str(parsed_id), "kind": "destroy"}, status_code=202)
+    return OperationHandleResponse(operation_id=str(parsed_id), kind="destroy"), 202
 
 
 def _run_mngr_blocking(argv: list[str], parent_cg: ConcurrencyGroup) -> tuple[int, str, str]:
@@ -601,8 +609,8 @@ def _handle_workspace_health(agent_id: str) -> Response:
 
 
 @require_api_or_cookie_auth
-@API_SPEC.validate(json=RestartWorkspaceRequest)
-def _handle_workspace_restart(agent_id: str) -> Response:
+@API_SPEC.validate(json=RestartWorkspaceRequest, resp=json_response_model(OperationHandleResponse, status_code=202))
+def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, int] | Response:
     """Dispatch a workspace restart; return an operation handle to poll.
 
     Body: ``{"scope": "services" | "host", "host_already_stopped"?: bool}``. The
@@ -632,13 +640,13 @@ def _handle_workspace_restart(agent_id: str) -> Response:
     if tracker is None or parent_cg is None:
         return _json_error("Workspace restart is unavailable in this configuration", 503)
 
-    handle: dict[str, object] = {"operation_id": str(parsed_id), "kind": "restart"}
+    handle = OperationHandleResponse(operation_id=str(parsed_id), kind="restart")
     # A restart already in flight for this workspace -- don't stack a second
     # worker racing the first's stop/start commands. mark_restarting decides the
     # RESTARTING transition under its own lock and reports whether this caller won
     # it, so this is an atomic check-and-claim against concurrent requests.
     if not tracker.mark_restarting(parsed_id):
-        return _json_response(handle, status_code=202)
+        return handle, 202
 
     registry = state.workspace_operation_registry
     registry.start(parsed_id, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
@@ -680,7 +688,7 @@ def _handle_workspace_restart(agent_id: str) -> Response:
         tracker.mark_restart_failed(parsed_id, message)
         registry.fail(parsed_id, message)
         return _json_error(message, 503)
-    return _json_response(handle, status_code=202)
+    return handle, 202
 
 
 @require_api_or_cookie_auth
@@ -890,8 +898,8 @@ def _handle_operation_logs(operation_id: str) -> Response:
 
 
 @require_api_or_cookie_auth
-@API_SPEC.validate(json=EstablishSshRequest)
-def _handle_establish_ssh(agent_id: str) -> Response:
+@API_SPEC.validate(json=EstablishSshRequest, resp=json_response_model(SshConnectionResponse))
+def _handle_establish_ssh(agent_id: str) -> SshConnectionResponse | Response:
     """Authorize temporary SSH access into a workspace and return its connection info.
 
     Body: ``{"public_key": "<openssh public key>", "requester_workspace_id":
@@ -1018,14 +1026,12 @@ def _handle_establish_ssh(agent_id: str) -> Response:
         connection = workspace_ssh.SshConnectionInfo(
             user=ssh_info.user, host=ssh_info.host, port=ssh_info.port, expires_at=expires_at
         )
-    return _json_response(
-        {
-            "agent_id": str(parsed_id),
-            "user": connection.user,
-            "host": connection.host,
-            "port": connection.port,
-            "expires_at": connection.expires_at.isoformat(),
-        }
+    return SshConnectionResponse(
+        agent_id=str(parsed_id),
+        user=connection.user,
+        host=connection.host,
+        port=connection.port,
+        expires_at=connection.expires_at.isoformat(),
     )
 
 

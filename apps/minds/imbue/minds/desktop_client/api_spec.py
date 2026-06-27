@@ -16,9 +16,22 @@ import json
 from typing import Any
 
 from flask import abort
+from pydantic import BaseModel
+from spectree import Response as SpecResponse
 from spectree import SpecTree
 
 from imbue.minds.desktop_client.responses import make_response
+
+
+def json_response_model(model: type[BaseModel], *, status_code: int = 200) -> SpecResponse:
+    """Build a spectree ``Response`` declaring ``model`` as the body for ``status_code``.
+
+    Handlers that return the model *instance* (not a hand-built ``Response``) get
+    it validated + serialized by spectree, so the documented and the enforced
+    response contract are the same object. Error responses on other status codes
+    are returned by the handler directly and pass through unvalidated.
+    """
+    return SpecResponse(**{f"HTTP_{status_code}": model})
 
 
 def _emit_custom_validation_error(
