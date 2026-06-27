@@ -88,11 +88,13 @@ class S3ObjectStore(ObjectStore):
         self._client.put_object(Bucket=self._bucket, Key=key, Body=data, ContentType=content_type)
 
     def get_optional(self, key: str) -> bytes | None:
+        # Only a genuinely-absent key maps to None. Any other ClientError
+        # (permission, throttling, transient outage) must propagate: silently
+        # treating it as "no manifest yet" would make a second-arch publish drop
+        # the first arch's already-published entry when it rewrites the manifest.
         try:
             response = self._client.get_object(Bucket=self._bucket, Key=key)
         except self._client.exceptions.NoSuchKey:
-            return None
-        except self._client.exceptions.ClientError:
             return None
         return response["Body"].read()
 
