@@ -4,6 +4,23 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-26
+
+Changed: Bumped the offload version baked into `libs/mngr/imbue/mngr/resources/Dockerfile` from `0.9.9` to `0.9.10` to track the CI pin.
+
+TMR test scope is being re-anchored from the tutorial block to each test
+function's docstring, so that TMR can run against all release tests rather than
+only the e2e tutorial tests.
+
+As part of this, the e2e test fixture now captures each test's docstring (the
+verbatim tutorial block plus its crystallized scope) and the rendered test
+detail pages show it under a "Docstring" heading.
+
+All e2e tutorial tests have been migrated to the new format: each test's tutorial
+block now lives in its docstring (under a `Tutorial block:` section) followed by a
+`Scope:` section describing what the test verifies. The `e2e.write_tutorial_block`
+helper has been removed now that no test uses it.
+
 ## 2026-06-25
 
 Bumped the offload version baked into `libs/mngr/imbue/mngr/resources/Dockerfile` from `0.9.7` to `0.9.9` to track the CI pin.

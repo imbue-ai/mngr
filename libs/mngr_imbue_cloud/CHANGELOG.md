@@ -42,6 +42,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: Host lock reporting for imbue_cloud pool hosts now derives status from a real flock held-probe rather than the lock file's presence.
 - Fixed: Slice fast-path leases no longer hang at "Waiting for initial chat agent..." — the slice bake now stops the `system-services` agent post-bake so the lease starts it fresh.
 - Fixed: Bare-metal box-prep bug that made every slice bake fail with `mkdir ~/.cache/lima: permission denied` — prep now creates and chowns the cache dir chain to the lima user (and repairs an already-root-owned `~/.cache` when re-run).
+- Fixed: `mngr imbue_cloud admin server setup` now retries the OVH OS reinstall when OVH transiently fails its OS-compatibility lookup for a valid template (the `"retrieving compatibility details"` error) instead of aborting the whole setup. The generated SSH host key is created once and reused across attempts so the pinned host key stays stable; non-transient OVH errors still propagate immediately.
 
 ## [v0.1.6] - 2026-06-18
 

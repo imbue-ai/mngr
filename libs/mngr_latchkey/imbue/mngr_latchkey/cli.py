@@ -650,6 +650,11 @@ def _run_sighup_bounce_watcher(
     signal-handler context (which must stay minimal and re-entrant-safe). The
     loop exits once ``shutdown_event`` is set (checked after each wake), so it
     does not outlive the forward command.
+
+    A single bounce failing never tears the watcher down: any error from
+    ``bounce_observe`` is logged and the loop continues, so a later SIGHUP can
+    still refresh providers. A watcher that died on one bad bounce would make
+    every subsequent provider toggle a silent no-op for this supervisor's life.
     """
     while not shutdown_event.is_set():
         bounce_event.wait()
@@ -658,8 +663,14 @@ def _run_sighup_bounce_watcher(
             return
         try:
             consumer.bounce_observe()
-        except (OSError, RuntimeError) as e:
-            logger.warning("SIGHUP observe bounce failed: {}", e)
+        except Exception as e:
+            # This watcher is a long-lived daemon thread: it must outlive any
+            # single bounce's failure. ``bounce_observe`` already handles the
+            # concurrency-group teardown/respawn errors it expects, but a
+            # genuinely unexpected error here must only skip this one bounce --
+            # never kill the thread, which would silently turn every later
+            # SIGHUP provider refresh into a no-op for this supervisor's life.
+            logger.opt(exception=e).error("SIGHUP observe bounce failed; continuing to watch for further bounces")
 
 
 def _install_signal_handlers(shutdown_event: threading.Event, bounce_event: threading.Event) -> None:

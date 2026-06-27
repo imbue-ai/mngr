@@ -3,11 +3,13 @@ import json
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import cast
 
 import docker
 import docker.errors
 import docker.models.containers
 import pytest
+import requests.exceptions
 
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.errors import ProcessTimeoutError
@@ -25,6 +27,7 @@ from imbue.mngr.interfaces.host import HostFileWriteInterface
 from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.docker.config import DockerProviderConfig
 from imbue.mngr.providers.docker.host_store import HostRecord
@@ -43,9 +46,51 @@ from imbue.mngr.providers.docker.testing import make_docker_provider
 from imbue.mngr.providers.docker.testing import make_docker_provider_with_local_volume
 from imbue.mngr.providers.docker.testing import make_offline_docker_provider
 from imbue.mngr.providers.docker.testing import write_fake_docker_context
+from imbue.mngr.providers.docker.volume import STATE_CONTAINER_TYPE_LABEL
+from imbue.mngr.providers.docker.volume import STATE_CONTAINER_TYPE_VALUE
 
 HOST_ID_A = "host-00000000000000000000000000000001"
 HOST_ID_B = "host-00000000000000000000000000000002"
+
+
+class _FakeContainer:
+    """Minimal stand-in for a docker SDK container: just the attributes
+    ``_raise_if_state_container_stopped`` reads (``labels`` + ``status``)."""
+
+    def __init__(self, labels: dict[str, str], status: str) -> None:
+        self.labels = labels
+        self.status = status
+
+
+def _fake_containers(*containers: _FakeContainer) -> list[docker.models.containers.Container]:
+    # The helper only reads ``.labels`` / ``.status``, so the duck-typed fakes
+    # stand in for real SDK containers; cast to satisfy the static type.
+    return cast(list[docker.models.containers.Container], list(containers))
+
+
+def test_raise_if_state_container_stopped_raises_when_present_but_stopped(temp_mngr_ctx: MngrContext) -> None:
+    # A stopped state container means host records are unreachable. Discovery
+    # must treat this as ProviderUnavailableError (so the retain-on-error path
+    # keeps last-known hosts) rather than silently reporting zero hosts.
+    provider = make_docker_provider(temp_mngr_ctx)
+    containers = _fake_containers(_FakeContainer({STATE_CONTAINER_TYPE_LABEL: STATE_CONTAINER_TYPE_VALUE}, "exited"))
+    with pytest.raises(ProviderUnavailableError):
+        provider._raise_if_state_container_stopped(containers)
+
+
+def test_raise_if_state_container_stopped_ok_when_running(temp_mngr_ctx: MngrContext) -> None:
+    provider = make_docker_provider(temp_mngr_ctx)
+    containers = _fake_containers(_FakeContainer({STATE_CONTAINER_TYPE_LABEL: STATE_CONTAINER_TYPE_VALUE}, "running"))
+    # A running state container is the normal case -- must not raise.
+    provider._raise_if_state_container_stopped(containers)
+
+
+def test_raise_if_state_container_stopped_noop_when_absent(temp_mngr_ctx: MngrContext) -> None:
+    # No state container in the list (e.g. a never-created / removed env): leave
+    # the genuinely-empty case alone -- only present-but-stopped raises.
+    provider = make_docker_provider(temp_mngr_ctx)
+    provider._raise_if_state_container_stopped(_fake_containers(_FakeContainer({LABEL_HOST_ID: HOST_ID_A}, "running")))
+    provider._raise_if_state_container_stopped(_fake_containers())
 
 
 # =========================================================================
@@ -768,6 +813,115 @@ def test_discover_hosts_propagates_api_error_without_marking_unavailable(
     provider.__dict__["_docker_client"] = _FakeDockerClient(docker.errors.APIError("boom"))
     with pytest.raises(docker.errors.APIError):
         provider.discover_hosts(cg=temp_mngr_ctx.concurrency_group)
+
+
+# =========================================================================
+# Connection-Error Fallback State (running container, dead inner sshd)
+# =========================================================================
+
+
+class _FakeContainer:
+    """Minimal stand-in for a docker container with a settable status."""
+
+    def __init__(self, status: str) -> None:
+        self.status = status
+
+    def reload(self) -> None:
+        """No-op: the fake container's status does not change on reload."""
+
+
+class _ContainersReturning:
+    """Stand-in for ``client.containers`` whose ``list`` returns fixed containers."""
+
+    def __init__(self, containers: list[_FakeContainer]) -> None:
+        self._containers = containers
+
+    def list(self, **kwargs: object) -> list[_FakeContainer]:
+        return list(self._containers)
+
+
+class _FakeDockerClientReturningContainers:
+    """Already-constructed docker client whose container listing returns fixed containers.
+
+    Lets tests exercise the daemon-backed container-status check without a real
+    daemon (the daemon is ground truth for container lifecycle and is reachable
+    without inner SSH).
+    """
+
+    def __init__(self, containers: list[_FakeContainer]) -> None:
+        self.containers = _ContainersReturning(containers)
+
+
+def _docker_provider_with_containers(
+    temp_mngr_ctx: MngrContext, containers: list[_FakeContainer]
+) -> DockerProviderInstance:
+    provider = make_docker_provider(temp_mngr_ctx)
+    provider.__dict__["_docker_client"] = _FakeDockerClientReturningContainers(containers)
+    return provider
+
+
+def test_connection_error_fallback_state_running_container_is_unauthenticated(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A running container whose inner sshd died reports UNAUTHENTICATED, not CRASHED.
+
+    When agent enumeration fails with a connection error but the docker daemon
+    still reports the container as running, the host is up -- we just can't get
+    inside it -- so the fallback must report a non-offline state (mirroring
+    mngr_imbue_cloud). Reporting CRASHED here makes minds' recovery flow skip
+    the stop step of a host restart and then fail to start the live container.
+    """
+    provider = _docker_provider_with_containers(temp_mngr_ctx, [_FakeContainer("running")])
+    assert provider.get_connection_error_fallback_state(HostId(HOST_ID_A)) == HostState.UNAUTHENTICATED
+
+
+def test_connection_error_fallback_state_stopped_container_returns_none(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A genuinely stopped container yields None so the default offline-state derivation stands."""
+    provider = _docker_provider_with_containers(temp_mngr_ctx, [_FakeContainer("exited")])
+    assert provider.get_connection_error_fallback_state(HostId(HOST_ID_A)) is None
+
+
+def test_connection_error_fallback_state_no_container_returns_none(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """With no container for the host, None is returned so the default derivation stands."""
+    provider = _docker_provider_with_containers(temp_mngr_ctx, [])
+    assert provider.get_connection_error_fallback_state(HostId(HOST_ID_A)) is None
+
+
+@pytest.mark.allow_warnings(match=r"Could not read docker container state for host .* during fallback")
+def test_connection_error_fallback_state_daemon_unreachable_returns_none(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A daemon that drops during the out-of-band check yields None, not an exception.
+
+    This hook runs inside the offline fallback, which must degrade gracefully:
+    if the daemon goes away in the window after host enumeration, the fallback
+    must keep the default offline-state derivation rather than propagate and
+    make the whole host vanish from the listing.
+    """
+    provider = make_docker_provider(temp_mngr_ctx)
+    provider.__dict__["_docker_client"] = _FakeDockerClient(docker.errors.APIError("boom"))
+    assert provider.get_connection_error_fallback_state(HostId(HOST_ID_A)) is None
+
+
+@pytest.mark.allow_warnings(match=r"Could not read docker container state for host .* during fallback")
+def test_connection_error_fallback_state_daemon_transport_drop_returns_none(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A transport-level daemon drop during the out-of-band check yields None, not an exception.
+
+    A socket-level drop surfaces as a ``requests.exceptions.ConnectionError`` rather
+    than a ``docker.errors.DockerException`` (the docker SDK propagates the underlying
+    transport error). The hook must treat it the same as any other daemon-unreachable
+    condition and degrade to the default offline-state derivation, rather than letting
+    it escape and break the offline fallback for the host.
+    """
+    provider = make_docker_provider(temp_mngr_ctx)
+    provider.__dict__["_docker_client"] = _FakeDockerClient(requests.exceptions.ConnectionError("socket gone"))
+    assert provider.get_connection_error_fallback_state(HostId(HOST_ID_A)) is None
 
 
 # =========================================================================

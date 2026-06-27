@@ -4,6 +4,12 @@ Full, unedited changelog entries for the `mngr_opencode` project, consolidated n
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-26
+
+Added scope docstrings to this package's release tests so the TMR (test
+map-reduce) harness can anchor each test's intended scope on its docstring
+rather than on a tutorial block. Docstring-only; no test logic changed.
+
 ## 2026-06-19
 
 No production behavior change. The OpenCode agent-config merge test now exercises the unified overlay merge pipeline (`merge_models_via_overlay`) instead of the removed `AgentTypeConfig.merge_with` helper, so it locks in the same behavior: an override's `cli_args` and `config_overrides` replace the base. The merge-rejects-other-type test was dropped because that type guard now lives in the shared `merge_models_via_overlay` path (covered by mngr's own tests).

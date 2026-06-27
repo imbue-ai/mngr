@@ -106,6 +106,7 @@ from imbue.minds.desktop_client.sharing_handler import get_sharing_status
 from imbue.minds.desktop_client.sharing_handler import is_probeable_share_url
 from imbue.minds.desktop_client.sharing_handler import probe_share_url_readiness
 from imbue.minds.desktop_client.state import get_state
+from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
 from imbue.minds.desktop_client.templates import resolve_create_host_name
@@ -665,6 +666,22 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
         return _json_error("Workspace restart is unavailable in this configuration", 503)
 
     handle = OperationHandleResponse(operation_id=str(parsed_id), kind="restart")
+    # An auto-dispatched recovery restart (fired by the recovery page off its tier
+    # classification) can race the workspace's own self-recovery: the host-health
+    # probe that picks the tier runs a slow in-container exec, and the background
+    # probe loop can flip the tracker back to HEALTHY while that exec is still in
+    # flight. Restarting a workspace that already recovered is pure harm -- it
+    # bounces a healthy backend for nothing -- so skip it and let the recovery
+    # page's refresh 302 the user back to the workspace. A manual restart carries
+    # no marker and always proceeds; the user explicitly asked.
+    if bool(body.get("auto_dispatched", False)) and tracker.get_health(parsed_id) == AgentHealth.HEALTHY:
+        logger.info(
+            "Skipping auto-dispatched {} restart for {}: workspace already recovered to HEALTHY "
+            "before the recovery probe completed",
+            scope,
+            parsed_id,
+        )
+        return handle, 202
     # A restart already in flight for this workspace -- don't stack a second
     # worker racing the first's stop/start commands. mark_restarting decides the
     # RESTARTING transition under its own lock and reports whether this caller won

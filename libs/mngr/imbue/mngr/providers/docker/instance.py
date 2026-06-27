@@ -78,6 +78,8 @@ from imbue.mngr.providers.docker.host_store import HostRecord
 from imbue.mngr.providers.docker.volume import DockerVolume
 from imbue.mngr.providers.docker.volume import LABEL_PREFIX
 from imbue.mngr.providers.docker.volume import LABEL_PROVIDER
+from imbue.mngr.providers.docker.volume import STATE_CONTAINER_TYPE_LABEL
+from imbue.mngr.providers.docker.volume import STATE_CONTAINER_TYPE_VALUE
 from imbue.mngr.providers.docker.volume import STATE_VOLUME_MOUNT_PATH
 from imbue.mngr.providers.docker.volume import ensure_state_container
 from imbue.mngr.providers.docker.volume import state_container_name
@@ -1006,6 +1008,30 @@ kill -TERM 1
         container.reload()
         return container.status == "running"
 
+    def _raise_if_state_container_stopped(self, containers: list[docker.models.containers.Container]) -> None:
+        """Raise ProviderUnavailableError if the singleton state container is present but stopped.
+
+        ``containers`` comes from :meth:`_list_containers` (``all=True``), so the
+        state container (which carries ``LABEL_PROVIDER`` + the type label) is
+        included with a freshly-listed status -- reliable even for a long-lived
+        cached provider instance whose ``_state_volume`` handle predates an
+        external stop. A stopped state container makes every host-record read
+        fail, which ``list_all_host_records`` masks as an empty list; treating it
+        as unavailable keeps discovery from misreporting "zero hosts". An absent
+        state container is left alone (the read-only emptiness guard / lazy
+        create handles that); only the present-but-stopped case raises here.
+        """
+        for container in containers:
+            labels = container.labels or {}
+            if labels.get(STATE_CONTAINER_TYPE_LABEL) != STATE_CONTAINER_TYPE_VALUE:
+                continue
+            if container.status != "running":
+                raise ProviderUnavailableError(
+                    self.name,
+                    "Docker state container is stopped; host records are unreachable",
+                )
+            return
+
     def _create_host_from_container(
         self,
         container: docker.models.containers.Container,
@@ -1598,6 +1624,46 @@ kill -TERM 1
 
         return self._create_host_from_host_record(host_record)
 
+    def get_connection_error_fallback_state(self, host_id: HostId) -> HostState | None:
+        """Report a still-running container as UNAUTHENTICATED rather than CRASHED.
+
+        The docker daemon is ground truth for container lifecycle and is
+        reachable without inner SSH. When agent enumeration fails with a
+        connection error (e.g. the inner sshd died -- "Error reading SSH
+        protocol banner") but the daemon still reports the container as running,
+        the host is up; we just cannot get inside it. Reporting
+        ``HostState.UNAUTHENTICATED`` keeps consumers such as minds' recovery
+        flow from misclassifying a live container as offline and skipping the
+        stop step of a host restart. This deliberately follows the convention
+        ``mngr_imbue_cloud`` established for the identical condition (a running
+        container whose inner SSH is unreachable; see
+        ``map_docker_status_to_host_state``), reached here by a different route:
+        imbue_cloud reads container state out-of-band on its own listing path,
+        whereas docker stays on the generic offline fallback and corrects the
+        state through this hook. Returns ``None`` (default offline derivation)
+        when no running container backs this host, or when the daemon cannot be
+        reached to confirm one -- this hook runs inside the offline fallback,
+        which must degrade gracefully rather than propagate.
+        """
+        try:
+            container = self._find_container_by_host_id(host_id)
+            if container is not None and self._is_container_running(container):
+                return HostState.UNAUTHENTICATED
+        except (
+            docker.errors.DockerException,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            MngrError,
+        ) as e:
+            # The daemon was reachable during enumeration but dropped before this
+            # out-of-band check (e.g. a daemon restart). A transport-level drop
+            # surfaces as a requests ConnectionError/Timeout rather than a
+            # DockerException (see _list_containers), so both are caught here.
+            # Keep the default offline derivation instead of breaking the offline
+            # fallback for this host.
+            logger.warning("Could not read docker container state for host {} during fallback: {}", host_id, e)
+        return None
+
     def get_host(
         self,
         host: HostId | HostName,
@@ -1657,6 +1723,21 @@ kill -TERM 1
         # daemon answered with an error) is a real fault and propagates instead.
         try:
             containers = self._list_containers()
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            raise ProviderUnavailableError(self.name, f"Cannot list Docker hosts: {e}") from e
+
+        # A present-but-stopped state container means host records are
+        # unreachable: every read exec's into a stopped container, and
+        # ``list_all_host_records`` swallows that into an empty list -- which
+        # discovery would publish as "zero hosts", dropping every host (and, for
+        # a long-lived cached provider instance, the read never restarts it).
+        # Surface it as ProviderUnavailableError so an empty list still means
+        # "genuinely zero hosts" and the retain-on-error path keeps last-known
+        # hosts instead. Read-only discovery must not start it; the owning app
+        # restarts it on launch.
+        self._raise_if_state_container_stopped(containers)
+
+        try:
             all_host_records = self._host_store.list_all_host_records()
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
             raise ProviderUnavailableError(self.name, f"Cannot list Docker hosts: {e}") from e
