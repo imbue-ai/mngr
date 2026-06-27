@@ -20,6 +20,20 @@
 
 This section is the source of truth for picking the work up cold. Everything below the `## Overview` heading is the original design; this section records what is **already landed**, the **traps discovered**, the **one open decision**, and the **exact remaining work**.
 
+### UPDATE (request-validation core landed + scoped divergences)
+
+The **request-body validation core is implemented and green** (commit `60f3858d5`; full `apps/minds/imbue/minds/desktop_client` suite = 1140 passing, plus ratchets / `ty` / `ruff`). Every JSON-body `/api/v1` route is now `@require_api_or_cookie_auth` (outer) + `@API_SPEC.validate(json=...)` (inner): auth-before-validation holds, structural failures return the uniform `422 {"errors":[{field,message}]}`, semantic checks stay in handlers. Request models got the `ApiRequestModel` base (`extra="ignore"`); added `BugReportRequest` + `SetProviderEnabledRequest` (StrictBool). Front-end `static/api_errors.js` normalizer added and wired into the create form + sharing editor. Tests updated for the 400→422 shift; `api_models_test.py` added.
+
+Three parts of the original plan were **deliberately diverged from** after measuring spectree 2.0.1's actual behavior (rationale, not laziness):
+
+1. **`/api/schema` stays the hand-built generator** (NOT re-sourced from spectree). `spectree`'s `get_model_key` emits hashed `$ref` names (`EstablishSshRequest.752aadf`) and `_generate_spec` documents the *entire* app's url_map; re-sourcing would break the clean, validator-passing doc and its drift test for no real gain (both the doc and the validators already import the same `api_models`).
+2. **Responses are document-only, not runtime-enforced.** In spectree 2.0.1, passing `resp=` *enforces* response validation (raw `Response` bytes are re-validated → 500 on any drift); there is no document-only mode. Enforcing byte-identical output across ~26 routes is precisely the "no regressions" risk to avoid, so responses are left untouched and still documented by the hand-built generator.
+3. **Operations `/<type>/<id>` restructure deferred.** It's orthogonal to validation, a breaking route change needing front-end lockstep, and removes only an internal id-prefix hack. The current routes keep working.
+
+Also note: the plan's "coverage test asserts every gateway route is spectree-decorated" was not added, because GET/no-body routes are intentionally undecorated; the existing `api_schema` drift test (documented paths == gateway-reachable routes) already guards route coverage, and per-route tests guard the models. The **content-type trap** (trap #2 below) remains by design: spectree only reads `application/json` bodies; every minds UI caller sends that header, agents/gateway send JSON, and FCT consumers are out of scope.
+
+Everything from here down is the original (pre-implementation) design + handoff, retained for reference.
+
 ### Branch / PR
 - Branch `mngr/minds-api-final` (base `josh/more-minds-api` on origin; draft PR #2315). Commit/push as you go; the reviewer stop hook is **disabled** (`.reviewer/settings.local.json`), so there is **no autofix gate — you own quality**.
 - Read `CLAUDE.md` + `style_guide.md` first (monorepo rules, `uv run` from root, FrozenModel/pydantic conventions, ratchets, changelog-per-project).
