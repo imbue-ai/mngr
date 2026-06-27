@@ -499,6 +499,7 @@ def _list_stale_ci_env_names(*, cutoff: datetime) -> list[DevEnvName]:
     result = subprocess.run(
         ["uv", "run", "modal", "environment", "list", "--json"],
         env=sub_env,
+        cwd=str(_REPO_ROOT),
         capture_output=True,
         text=True,
         timeout=_MODAL_ENV_LIST_TIMEOUT_SECONDS,
