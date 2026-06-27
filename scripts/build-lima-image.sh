@@ -109,15 +109,25 @@ limactl shell --workdir / "$INSTANCE" sudo env \
 echo "==> Stopping the VM for a consistent disk"
 limactl stop "$INSTANCE"
 
-# Lima's writable disk is an overlay (qcow2 with the base as a backing file on
-# Linux/QEMU); `qemu-img convert` follows the chain and writes a standalone image.
-DIFFDISK="$HOME/.lima/$INSTANCE/diffdisk"
-if [ ! -f "$DIFFDISK" ]; then
-  echo "ERROR: expected Lima disk not found at $DIFFDISK" >&2
+# Locate Lima's writable disk. Lima 2.x stores it as `disk`; older versions used
+# a `diffdisk` overlay (qcow2 backed by `basedisk`). `qemu-img convert` reads the
+# input format from the header and follows any backing chain, so it writes a
+# standalone image either way (run while the instance dir still has its base).
+INSTANCE_DIR="$HOME/.lima/$INSTANCE"
+DISK_FILE=""
+for candidate in disk diffdisk; do
+  if [ -f "$INSTANCE_DIR/$candidate" ]; then
+    DISK_FILE="$INSTANCE_DIR/$candidate"
+    break
+  fi
+done
+if [ -z "$DISK_FILE" ]; then
+  echo "ERROR: could not find a Lima disk under $INSTANCE_DIR" >&2
+  ls -la "$INSTANCE_DIR" >&2 || true
   exit 1
 fi
-echo "==> Flattening the Lima disk to a standalone qcow2 + raw"
-qemu-img convert -O qcow2 "$DIFFDISK" "$QCOW2_OUT"
+echo "==> Flattening the Lima disk ($DISK_FILE) to a standalone qcow2 + raw"
+qemu-img convert -O qcow2 "$DISK_FILE" "$QCOW2_OUT"
 qemu-img convert -f qcow2 -O raw "$QCOW2_OUT" "$RAW_OUT"
 
 echo ""
