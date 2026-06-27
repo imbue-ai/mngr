@@ -583,7 +583,6 @@ jobs:
       # computed minds-dev-* URLs and aborts the deploy.
       MODAL_TOKEN_ID: ${{ vars.MINDS_DEV_MODAL_TOKEN_ID }}
       MODAL_TOKEN_SECRET: ${{ secrets.MINDS_DEV_MODAL_TOKEN_SECRET }}
-      MINDS_CI_RUN_KEY: ${{ github.run_id }}
       VAULT_ADDR: https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200
       VAULT_NAMESPACE: admin
     steps:
@@ -719,9 +718,8 @@ jobs:
     env:
       MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-      # Same key the build-minds-ci-env job used to write the per-run secrets, so
-      # the minds_services fixtures read back the matching per-run Vault path.
-      MINDS_CI_RUN_KEY: ${{ github.run_id }}
+      # The minds_services fixtures read the per-env secrets back from Vault
+      # (keyed by env name, available in the downloaded deployment_envs.json).
       VAULT_ADDR: https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200
       VAULT_NAMESPACE: admin
 
@@ -859,7 +857,6 @@ jobs:
       # computed minds-dev-* URLs and aborts the deploy.
       MODAL_TOKEN_ID: ${{ vars.MINDS_DEV_MODAL_TOKEN_ID }}
       MODAL_TOKEN_SECRET: ${{ secrets.MINDS_DEV_MODAL_TOKEN_SECRET }}
-      MINDS_CI_RUN_KEY: ${{ github.run_id }}
       VAULT_ADDR: https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200
       VAULT_NAMESPACE: admin
     steps:

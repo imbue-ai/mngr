@@ -53,7 +53,6 @@ from imbue.minds.deployment_tests.helpers import create_verified_user_via_admin_
 from imbue.minds.deployment_tests.helpers import delete_user_via_admin_api
 from imbue.minds.deployment_tests.helpers import read_ci_test_user_credentials
 from imbue.minds.deployment_tests.helpers import read_shared_env_secrets
-from imbue.minds.deployment_tests.helpers import resolve_ci_run_key
 from imbue.minds.deployment_tests.helpers import sweep_stale_users
 from imbue.minds.deployment_tests.primitives import DEPLOYMENT_ENVS_JSON_ENV_VAR
 from imbue.minds.deployment_tests.primitives import DeploymentTestConfigError
@@ -125,7 +124,7 @@ def shared_env(
                 f"Configured roles: {sorted(deployment_envs_config.shared_envs.keys())!r}."
             )
         urls = deployment_envs_config.shared_envs[role_key]
-        secrets = _resolve_shared_env_secrets(role=role_key, run_key=resolve_ci_run_key(deployment_envs_config.run_id))
+        secrets = _resolve_shared_env_secrets(role=role_key, env_name=urls.env_name)
         return SharedEnvHandle(
             urls=urls,
             supertokens_connection_uri=SecretStr(secrets["SUPERTOKENS_CONNECTION_URI"]),
@@ -332,7 +331,7 @@ def _sweep_stale_test_users(deployment_envs_config: DeploymentEnvsConfig) -> Non
         return
     try:
         secrets = _resolve_shared_env_secrets(
-            role=default_role, run_key=resolve_ci_run_key(deployment_envs_config.run_id)
+            role=default_role, env_name=deployment_envs_config.shared_envs[default_role].env_name
         )
     except (MindError, pytest.skip.Exception) as exc:
         logger.warning("Skipping stale-test-user sweep: {}", exc)
@@ -364,12 +363,12 @@ def _require_env_var(name: str) -> str:
     return value
 
 
-def _resolve_shared_env_secrets(*, role: SharedEnvRole, run_key: str) -> dict[str, str]:
+def _resolve_shared_env_secrets(*, role: SharedEnvRole, env_name: DevEnvName) -> dict[str, str]:
     """Return the per-env secrets, preferring injected env vars over a Vault read.
 
     Env vars (``MINDS_DEPLOYMENT_TEST_SHARED_<ROLE>_<KEY>``) are the only path
     available inside an offload sandbox, so they win when fully present. Local
-    runs that did not inject them fall back to reading the per-run Vault path
+    runs that did not inject them fall back to reading the env-keyed Vault path
     the env-build step wrote (the operator's Vault token is available there).
     """
     env_prefix = f"{SHARED_ENV_SECRET_ENV_VAR_PREFIX}{str(role).upper()}_"
@@ -377,7 +376,7 @@ def _resolve_shared_env_secrets(*, role: SharedEnvRole, run_key: str) -> dict[st
     if all(from_env):
         return {key: value for key, value in zip(SHARED_ENV_SECRET_KEYS, from_env, strict=False) if value is not None}
     try:
-        return read_shared_env_secrets(run_key=run_key, role=role)
+        return read_shared_env_secrets(env_name=env_name, role=role)
     except MindError as exc:
         pytest.skip(f"Shared env secrets for role {role!r} not in env vars and Vault read failed: {exc}")
 

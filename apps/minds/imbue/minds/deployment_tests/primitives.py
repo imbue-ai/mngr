@@ -27,12 +27,6 @@ MAILTM_JWT_ENV_VAR: Final[str] = "MAILTM_ACCOUNT_JWT"
 # the on-disk deployment_envs.json file (which carries only URLs).
 SHARED_ENV_SECRET_ENV_VAR_PREFIX: Final[str] = "MINDS_DEPLOYMENT_TEST_SHARED_"
 
-# The key under which the per-run Vault scratch path is namespaced. The
-# orchestrator's :class:`RunId` locally, or the GitHub Actions run id in CI
-# (set via this env var by the env-build job). Both env-build (write) and the
-# test runner (read) resolve the same value, so the per-run Vault path matches.
-CI_RUN_KEY_ENV_VAR: Final[str] = "MINDS_CI_RUN_KEY"
-
 
 class RunId(NonEmptyStr):
     """Identifier the orchestrator stamps into every CI-created resource for a run.

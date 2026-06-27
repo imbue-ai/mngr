@@ -30,8 +30,6 @@ from imbue.minds.cli._activated_env import MODAL_PROFILE_ENV_VAR
 from imbue.minds.cli._activated_env import modal_profile_for_tier_or_none
 from imbue.minds.cli._activated_env import tier_for_env_name
 from imbue.minds.deployment_tests.data_types import SharedEnvHandle
-from imbue.minds.deployment_tests.primitives import CI_RUN_KEY_ENV_VAR
-from imbue.minds.deployment_tests.primitives import RunId
 from imbue.minds.deployment_tests.primitives import SharedEnvRole
 from imbue.minds.envs.paths import client_config_file
 from imbue.minds.envs.primitives import DevEnvName
@@ -49,11 +47,15 @@ _MODAL_ENV_LIST_TIMEOUT_SECONDS: Final[float] = 30.0
 _NEON_PROBE_TIMEOUT_SECONDS: Final[float] = 30.0
 _SUPERTOKENS_PROBE_TIMEOUT_SECONDS: Final[float] = 30.0
 
-# Per-run dynamic-secret handoff. A freshly-deployed ci env mints its own
+# Per-env dynamic-secret handoff. A freshly-deployed ci env mints its own
 # SuperTokens app + Neon project, so those secrets are not static Vault
-# values -- the env-build step writes them to a per-run Vault path that the
-# (possibly separate-machine) test runner reads back. The same path + key
-# names are used locally and in CI, so the fixture layer is identical in both.
+# values -- the env-build step writes them to a per-env Vault path that the
+# (possibly separate-machine) test runner + destroy/sweep jobs read back. The
+# path is keyed by the env name (not a run id) so that any job that knows the
+# env -- including the leaked-env sweep, which discovers envs by Modal
+# enumeration and never sees the original run -- can reconstruct the secrets.
+# It stays under ``.../runs/`` so the existing ``minds/ci/runs/*`` Vault policy
+# covers it without a terraform change.
 RUN_SECRETS_VAULT_ROOT: Final[str] = "secrets/minds/ci/runs"
 # The four per-env secret keys the ``shared_env`` fixture hands to a test
 # (matches the leaf names written into ``~/.minds-<env>/secrets.toml``).
@@ -71,40 +73,28 @@ CI_TEST_USER_EMAIL_KEY: Final[str] = "CI_TEST_USER_EMAIL"
 CI_TEST_USER_PASSWORD_KEY: Final[str] = "CI_TEST_USER_PASSWORD"
 
 
-def resolve_ci_run_key(run_id: RunId) -> str:
-    """Per-run Vault namespace key: the GitHub run id in CI, else the orchestrator ``RunId``.
+def env_secrets_vault_path(*, env_name: DevEnvName, role: SharedEnvRole) -> VaultPath:
+    """Vault directory holding one env's per-env secrets for ``role``.
 
-    The env-build (write) and test-runner (read) sides both call this so the
-    per-run Vault path matches across the two CI jobs (the GitHub run id is the
-    same value in every job of a workflow run). Locally, where the env var is
-    unset, both sides fall back to the orchestrator's ``RunId``.
+    Keyed by the env name so every job that knows the env (build, test,
+    destroy, sweep) resolves the same path without needing the originating run.
     """
-    return os.environ.get(CI_RUN_KEY_ENV_VAR) or str(run_id)
+    return VaultPath(f"{RUN_SECRETS_VAULT_ROOT}/{env_name}/shared-{role}")
 
 
-def run_secrets_vault_path(*, run_key: str, role: SharedEnvRole) -> VaultPath:
-    """Vault directory holding one run's per-env secrets for ``role``.
-
-    ``run_key`` is the orchestrator's :class:`RunId` locally, or the
-    GitHub Actions run id in CI -- either way it is the same value at
-    write time (env-build) and read time (test job).
-    """
-    return VaultPath(f"{RUN_SECRETS_VAULT_ROOT}/{run_key}/shared-{role}")
+def publish_shared_env_secrets(*, env_name: DevEnvName, role: SharedEnvRole, secrets: Mapping[str, str]) -> None:
+    """Write a freshly-deployed env's per-env secrets to its per-env Vault path."""
+    write_vault_kv(env_secrets_vault_path(env_name=env_name, role=role), dict(secrets))
 
 
-def publish_shared_env_secrets(*, run_key: str, role: SharedEnvRole, secrets: Mapping[str, str]) -> None:
-    """Write a freshly-deployed env's per-env secrets to its per-run Vault path."""
-    write_vault_kv(run_secrets_vault_path(run_key=run_key, role=role), dict(secrets))
-
-
-def read_shared_env_secrets(*, run_key: str, role: SharedEnvRole) -> dict[str, str]:
+def read_shared_env_secrets(*, env_name: DevEnvName, role: SharedEnvRole) -> dict[str, str]:
     """Read back the per-env secrets a prior :func:`publish_shared_env_secrets` wrote."""
-    return read_vault_kv(run_secrets_vault_path(run_key=run_key, role=role))
+    return read_vault_kv(env_secrets_vault_path(env_name=env_name, role=role))
 
 
-def delete_shared_env_secrets(*, run_key: str, role: SharedEnvRole) -> None:
-    """Delete a run's per-env secrets from Vault. Idempotent against already-gone."""
-    delete_vault_kv(run_secrets_vault_path(run_key=run_key, role=role))
+def delete_shared_env_secrets(*, env_name: DevEnvName, role: SharedEnvRole) -> None:
+    """Delete an env's per-env secrets from Vault. Idempotent against already-gone."""
+    delete_vault_kv(env_secrets_vault_path(env_name=env_name, role=role))
 
 
 def read_ci_test_user_credentials() -> tuple[NonEmptyStr, SecretStr]:

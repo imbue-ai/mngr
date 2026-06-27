@@ -62,7 +62,7 @@ from imbue.minds.deployment_tests.helpers import create_verified_user_via_admin_
 from imbue.minds.deployment_tests.helpers import delete_shared_env_secrets
 from imbue.minds.deployment_tests.helpers import publish_shared_env_secrets
 from imbue.minds.deployment_tests.helpers import read_ci_test_user_credentials
-from imbue.minds.deployment_tests.helpers import resolve_ci_run_key
+from imbue.minds.deployment_tests.helpers import read_shared_env_secrets
 from imbue.minds.deployment_tests.primitives import DEPLOYMENT_ENVS_JSON_ENV_VAR
 from imbue.minds.deployment_tests.primitives import MAILTM_ADDRESS_ENV_VAR
 from imbue.minds.deployment_tests.primitives import MAILTM_JWT_ENV_VAR
@@ -70,8 +70,10 @@ from imbue.minds.deployment_tests.primitives import RunId
 from imbue.minds.deployment_tests.primitives import SHARED_ENV_SECRET_ENV_VAR_PREFIX
 from imbue.minds.deployment_tests.primitives import SharedEnvRole
 from imbue.minds.envs.local_store import read_secrets_file
+from imbue.minds.envs.local_store import write_secrets_file
 from imbue.minds.envs.paths import client_config_file
 from imbue.minds.envs.paths import env_root_dir
+from imbue.minds.envs.paths import secrets_file
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.errors import MindError
 from imbue.minds.utils.output import write_stdout_line
@@ -374,16 +376,16 @@ def _mint_shared_env_name(*, run_id: RunId, role: SharedEnvRole) -> DevEnvName:
     return DevEnvName(f"ci-{run_id}-{short}-{role}")
 
 
-def _deploy_shared_env(*, name: DevEnvName, run_id: RunId, role: SharedEnvRole) -> SharedEnvUrls:
-    """Deploy a fresh ci env, create the fixed CI test user, publish per-run secrets; return URLs.
+def _deploy_shared_env(*, name: DevEnvName, role: SharedEnvRole) -> SharedEnvUrls:
+    """Deploy a fresh ci env, create the fixed CI test user, publish per-env secrets; return URLs.
 
     Shells out to ``minds env deploy`` with the activation env vars set
     (so it targets ``name`` without a prior ``eval activate``), parses
     the resulting ``client.toml`` for the connector + litellm URLs, reads
     the per-env secrets the deploy wrote (the freshly-minted SuperTokens
     app + Neon DSNs), creates the fixed CI test user against the new
-    SuperTokens app, and publishes those per-env secrets to the per-run
-    Vault path so the test runner can read them back.
+    SuperTokens app, and publishes those per-env secrets to the env-keyed
+    Vault path so the test runner + destroy/sweep jobs can read them back.
     """
     env_root_dir(name).mkdir(parents=True, exist_ok=True)
     sub_env = build_minds_env_subprocess_env(name)
@@ -418,7 +420,7 @@ def _deploy_shared_env(*, name: DevEnvName, run_id: RunId, role: SharedEnvRole) 
     secrets_model = read_secrets_file(name)
     secrets = {key: value.get_secret_value() for key, value in secrets_model.secrets.items()}
     _create_ci_test_user(secrets=secrets, connector_url=str(client_config.connector_url), name=name)
-    publish_shared_env_secrets(run_key=resolve_ci_run_key(run_id), role=role, secrets=secrets)
+    publish_shared_env_secrets(env_name=name, role=role, secrets=secrets)
     logger.info("Shared env {!r} deployed; connector={}", name, urls.connector_url)
     return urls
 
@@ -440,14 +442,17 @@ def _create_ci_test_user(*, secrets: dict[str, str], connector_url: str, name: D
 
 
 def _destroy_env(name: DevEnvName, *, run_id: RunId) -> None:
-    """Run ``uv run minds env destroy`` for the named env + delete its per-run Vault secrets.
+    """Run ``uv run minds env destroy`` for the named env + delete its per-env Vault secrets.
 
-    Works cross-machine (CI's deploy and destroy run on separate runners):
-    ``minds env destroy`` is name-keyed and re-derives the cloud resources
-    from Vault, so the local env root is mkdir'd only to satisfy
-    deploy-mode activation. Idempotent against an already-destroyed env.
+    Works cross-machine (CI's deploy and destroy run on separate runners, and
+    the leaked-env sweep runs on a third). ``minds env destroy`` re-derives most
+    cloud resources from Vault + the env name, but its pool-slice teardown step
+    auto-resolves the host_pool DSN from the per-env ``secrets.toml``; so we
+    first reconstruct that file from the env-keyed Vault secrets the deploy
+    published. Idempotent against an already-destroyed env.
     """
     env_root_dir(name).mkdir(parents=True, exist_ok=True)
+    _reconstruct_env_secrets_file(name)
     sub_env = build_minds_env_subprocess_env(name)
     logger.info("Destroying env {!r}", name)
     completed = subprocess.run(
@@ -466,10 +471,31 @@ def _destroy_env(name: DevEnvName, *, run_id: RunId) -> None:
         )
     for role in _DEFAULT_SHARED_ENV_ROLES:
         try:
-            delete_shared_env_secrets(run_key=resolve_ci_run_key(run_id), role=role)
+            delete_shared_env_secrets(env_name=name, role=role)
         except (MindError, httpx.HTTPError) as exc:
-            logger.warning("Failed to delete per-run Vault secrets for env {!r} role {!r}: {}", name, role, exc)
+            logger.warning("Failed to delete per-env Vault secrets for env {!r} role {!r}: {}", name, role, exc)
     _mark_status(NonEmptyStr(str(name)), kind=LedgerKind.ENV, run_id=run_id, status=LedgerStatus.DESTROYED)
+
+
+def _reconstruct_env_secrets_file(name: DevEnvName) -> None:
+    """Rebuild ``~/.minds-<name>/secrets.toml`` from the env-keyed Vault secrets.
+
+    A no-op when the local file already exists (same-machine destroy) or when no
+    per-env secrets are in Vault (already cleaned up / not a ci env we deployed).
+    """
+    if secrets_file(name).is_file():
+        return
+    for role in _DEFAULT_SHARED_ENV_ROLES:
+        try:
+            secrets = read_shared_env_secrets(env_name=name, role=role)
+        except (MindError, httpx.HTTPError) as exc:
+            logger.warning(
+                "Could not reconstruct secrets.toml for env {!r} from Vault (role {!r}): {}", name, role, exc
+            )
+            continue
+        if secrets:
+            write_secrets_file({key: SecretStr(value) for key, value in secrets.items()}, name=name)
+            return
 
 
 # ---------------------------------------------------------------------------
@@ -540,9 +566,9 @@ def _sweep_stale_envs(max_age_hours: int = _DEFAULT_MAX_RESOURCE_AGE_HOURS) -> N
     logger.info("Name+age sweep: destroying {} stale ci-* env(s) older than {}h.", len(stale), max_age_hours)
     for name in stale:
         match = _CI_ENV_NAME_PATTERN.match(str(name))
-        # The env-name timestamp is the local run_key; for envs published with a
-        # GitHub run id the per-run Vault path is reclaimed separately (those tiny
-        # entries are bounded and swept by a future Vault-side sweep).
+        # The per-env Vault secrets are keyed by env name, so _destroy_env can
+        # reconstruct secrets.toml + delete them for any leaked env here. The
+        # run_id (parsed from the env-name timestamp) is only for the ledger row.
         run_id = RunId(match.group(1)) if match is not None else _mint_run_id()
         try:
             _destroy_env(name, run_id=run_id)
@@ -663,7 +689,7 @@ def run(keep_on_failure: bool) -> None:
                     status=LedgerStatus.ACTIVE,
                 )
             )
-            shared_env_urls[role] = _deploy_shared_env(name=env_name, run_id=run_id, role=role)
+            shared_env_urls[role] = _deploy_shared_env(name=env_name, role=role)
     except MindError as exc:
         deploy_failure = exc
         logger.error("Shared env deploy failed: {}", exc)
@@ -823,7 +849,7 @@ def up(role: str) -> None:
             status=LedgerStatus.ACTIVE,
         )
     )
-    urls = _deploy_shared_env(name=env_name, run_id=run_id, role=role_key)
+    urls = _deploy_shared_env(name=env_name, role=role_key)
     state_path = _ITERATE_STATE_DIR / f"iterate-{role}.json"
     _write_deployment_envs_json(
         shared_envs={role_key: urls},
