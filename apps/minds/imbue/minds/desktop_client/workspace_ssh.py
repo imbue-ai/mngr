@@ -18,9 +18,9 @@ grants never accumulate across repeated requests.
 
 For a *remote* target (Modal / AWS / Vultr / imbue_cloud), the returned host is
 reachable from anywhere, so the caller connects directly. A *local* target
-(Docker / Lima) has no hub-resolvable external SSH endpoint, so brokering a
-forwarding tunnel for that remote->local case is not yet implemented (see the
-route).
+(Docker / Lima) publishes its sshd only on the hub's loopback, so the hub brokers
+a reverse tunnel into the caller's container (see ``workspace_ssh_tunnel`` and the
+route) and returns a ``127.0.0.1:<port>`` endpoint the caller connects to.
 """
 
 from datetime import datetime

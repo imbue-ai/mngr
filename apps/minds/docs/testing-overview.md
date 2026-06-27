@@ -184,14 +184,21 @@ cross-component behavior.
    returns the `original_minds_version` label. Today these routes are only
    unit-tested with stubbed resolvers.
 2. **SSH grant injection + pruning round-trip** [snapshot] -- treat the resumed
-   workspace as the target. `POST /api/v1/workspaces/<id>/ssh` (it is local, so
-   currently 501) is the *negative* assertion; the *positive* one is to call the
-   grant helper path directly: read `~/.ssh/authorized_keys` via `mngr exec`,
-   confirm the tagged `minds-ssh-grant` line is appended, then issue a second
-   grant whose expiry is already past and confirm the first is pruned. This is
-   the real-world cover for the `compose_pruned_authorized_keys` wiring added in
-   this change (unit-tested in `workspace_ssh_test.py`, but never exercised
-   end-to-end over `mngr exec`).
+   workspace as the target. `POST /api/v1/workspaces/<id>/ssh` now returns a
+   brokered `127.0.0.1:<port>` loopback endpoint (local target); assert the
+   tagged `minds-ssh-grant` line lands in the target's `~/.ssh/authorized_keys`
+   (via `mngr exec cat`), then re-request and confirm the same-requester line is
+   refreshed (not duplicated) and any expired line is pruned. Real-world cover
+   for the `compose_pruned_authorized_keys` wiring (unit-tested, but never
+   exercised end-to-end over `mngr exec`).
+
+2b. **SSH local->local broker connect** [snapshot] -- with two local workspaces
+   in the snapshot (or the resumed one acting as both caller and target), call
+   the `/ssh` route and then actually open an `ssh` session to the returned
+   `127.0.0.1:<port>` using a keypair whose public half was submitted. Asserts
+   the `SSHTunnelManager` reverse tunnel actually carries a connection to the
+   target's sshd. No imbue_cloud needed -- the highest-value cover for the new
+   broker.
 3. **Workspace lifecycle stop/start** [snapshot] -- `POST
    /workspaces/<id>/stop` then `/start`, asserting `host_state` transitions and
    that `system_interface` serves again after start. Complements the existing
@@ -252,9 +259,11 @@ environment today:
 14. **SSH remote->remote establish + connect** [release] -- create two remote
     workspaces, grant SSH from one to the other, and actually `ssh`/`git pull`
     across. Exercises the implemented remote-direct path.
-15. **SSH remote->local broker** [release] -- blocked until the broker is
-    implemented (see `blueprint/minds-workspace-api/HANDOFF.md` #5 and the note
-    below); needs a remote caller plus a hub-resolvable local-target endpoint.
+15. **SSH remote->local broker** [release] -- create one remote + one local
+    workspace, grant SSH from the remote caller to the local target, and connect
+    through the hub-brokered loopback endpoint. The broker itself is implemented;
+    the local->local half can run in the snapshot stage (proposal 2b below),
+    while the remote-caller half needs a cloud host so it stays release-only.
 16. **imbue_cloud create + backup/tunnel parity** [deployment] -- already covered
     in spirit by the `minds_deployment`/`minds_services` suites.
 
@@ -265,9 +274,11 @@ environment today:
   cases can only be unit-tested after the exec call is made injectable (e.g. a
   callable on `state`). Proposals 2 and 12 depend on that small refactor; the
   pure key-composition logic is already fully unit-tested.
-- The SSH **remote->local broker** (handoff #5) remains unimplemented because the
-  hub has no supported way to resolve a *local* (Docker/Lima) target's
-  SSH endpoint: mngr's `Host.get_ssh_connection_info()` returns `None` for local
-  hosts and the published container SSH port is provider-internal. Implementing
-  the broker needs new mngr surface (or a `mngr exec`-fronted byte relay) and a
-  remote caller to verify, so it cannot be exercised by the snapshot stage.
+- The SSH **remote->local broker** (handoff #5) is implemented: a local
+  Docker/Lima target's sshd is published on the hub's `127.0.0.1:<port>` (its
+  host uses an SSH connector, so discovery *does* carry its endpoint), and the
+  hub reverse-tunnels that into the caller's container via `SSHTunnelManager`.
+  The decision logic is unit-tested (`workspace_ssh_tunnel_test.py`); the tunnel
+  I/O needs a live caller+target, so its end-to-end cover belongs in the
+  snapshot stage (local->local, proposal 2b) -- the remote-caller half still
+  needs a cloud host and stays release-only.

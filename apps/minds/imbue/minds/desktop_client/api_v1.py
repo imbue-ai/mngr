@@ -50,6 +50,7 @@ from imbue.minds.desktop_client import desktop_control
 from imbue.minds.desktop_client import destroying
 from imbue.minds.desktop_client import workspace_settings
 from imbue.minds.desktop_client import workspace_ssh
+from imbue.minds.desktop_client import workspace_ssh_tunnel
 from imbue.minds.desktop_client import workspace_version
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
@@ -967,17 +968,19 @@ def _handle_establish_ssh(agent_id: str) -> Response:
     prunes any expired minds-owned grant lines, drops any still-valid grant the
     same requester already holds (so a re-request refreshes rather than stacks),
     appends the new (TTL-tagged) public key, writes the result back in one
-    rewrite, and returns the target's SSH ``user``/``host``/``port``. Pruning on
-    every grant means repeated requests never let stale or duplicate grant lines
-    pile up.
+    rewrite, and returns SSH connection info. Pruning on every grant means
+    repeated requests never let stale or duplicate grant lines pile up.
 
-    Only *remote* targets (reachable from anywhere) are supported: a local
-    (Docker/Lima) target has no hub-resolvable external SSH endpoint
-    (``get_ssh_info`` is ``None``; mngr reports no SSH connection info for local
-    hosts), so brokering a forwarding tunnel for the remote->local case is not
-    yet implemented and the route returns 501. The target must be online;
+    The returned endpoint depends on where the target lives. A *remote* target
+    (Modal/AWS/Vultr/imbue_cloud) is reachable from anywhere, so its real
+    ``user``/``host``/``port`` are returned and the caller connects directly. A
+    *local* target (Docker/Lima) publishes its sshd only on the hub's own
+    loopback, which a peer (or remote) workspace cannot reach, so the hub brokers
+    a reverse tunnel into the *caller's* container and returns
+    ``host="127.0.0.1"`` with the loopback port assigned inside that container;
+    the caller connects there with the same key. The target must be online;
     reading or writing the key on a stopped target fails at the ``mngr exec``
-    step and returns 502.
+    step (502), as does brokering a tunnel into an unreachable caller.
     """
     parsed_id = AgentId(agent_id)
     backend_resolver = get_state().backend_resolver
@@ -995,15 +998,13 @@ def _handle_establish_ssh(agent_id: str) -> Response:
     if not requester_workspace_id:
         return _json_error("'requester_workspace_id' is required", 400)
 
-    # The target must be a reachable remote host. ``get_ssh_info`` returns None
-    # for local agents (Docker/Lima), which a remote caller cannot reach.
+    # The hub must have an SSH endpoint it can reach for the target. Discovery
+    # provides one for every real provider (a remote address for remote hosts; a
+    # ``127.0.0.1:<published port>`` loopback for local Docker/Lima); only the
+    # bare local provider, which minds workspaces never use, lacks one.
     ssh_info = backend_resolver.get_ssh_info(parsed_id)
     if ssh_info is None:
-        return _json_error(
-            "Target is a local workspace with no externally reachable SSH endpoint; "
-            "brokering a forwarding tunnel for the remote->local case is not yet supported.",
-            501,
-        )
+        return _json_error("Target workspace has no SSH endpoint that this desktop client can resolve", 501)
 
     now = datetime.now(timezone.utc)
     try:
@@ -1057,9 +1058,34 @@ def _handle_establish_ssh(agent_id: str) -> Response:
     if write_returncode != 0:
         return _json_error(f"Could not authorize SSH key on the target: {write_stderr.strip()}", 502)
 
-    connection = workspace_ssh.SshConnectionInfo(
-        user=ssh_info.user, host=ssh_info.host, port=ssh_info.port, expires_at=expires_at
-    )
+    # Decide how the caller reaches the target. A routable (remote) target is
+    # connected to directly. A local target's sshd is on the hub's loopback, so
+    # broker a reverse tunnel into the caller's container and hand back the
+    # loopback endpoint the caller connects to instead.
+    if workspace_ssh_tunnel.is_loopback_host(ssh_info.host):
+        caller_ssh = backend_resolver.get_ssh_info(AgentId(requester_workspace_id))
+        if caller_ssh is None:
+            return _json_error(
+                "Cannot broker SSH to a local target: the requesting workspace has no "
+                "hub-reachable SSH endpoint (is it online and known to this desktop client?).",
+                502,
+            )
+        try:
+            broker_port = workspace_ssh_tunnel.broker_reverse_tunnel_into_caller(
+                get_state().ssh_tunnel_manager,
+                caller_ssh=caller_ssh,
+                target_ssh=ssh_info,
+                target_agent_id=str(parsed_id),
+            )
+        except workspace_ssh_tunnel.WorkspaceSshTunnelError as e:
+            return _json_error(f"Could not broker an SSH tunnel into the requesting workspace: {e}", 502)
+        connection = workspace_ssh.SshConnectionInfo(
+            user=ssh_info.user, host="127.0.0.1", port=broker_port, expires_at=expires_at
+        )
+    else:
+        connection = workspace_ssh.SshConnectionInfo(
+            user=ssh_info.user, host=ssh_info.host, port=ssh_info.port, expires_at=expires_at
+        )
     return _json_response(
         {
             "agent_id": str(parsed_id),
