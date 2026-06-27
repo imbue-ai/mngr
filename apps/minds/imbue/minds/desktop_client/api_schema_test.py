@@ -180,7 +180,7 @@ def test_published_response_models_match_the_enforced_ones(tmp_path: Path) -> No
         enforced_success_models = {
             model.__name__ for code, model in enforced.code_models.items() if code != "HTTP_422"
         }
-        for method in sorted(rule.methods - {"HEAD", "OPTIONS"}):
+        for method in sorted((rule.methods or set()) - {"HEAD", "OPTIONS"}):
             documented = _ROUTE_MODELS.get((method, openapi_path))
             documented_name = (
                 documented.response_model.__name__
