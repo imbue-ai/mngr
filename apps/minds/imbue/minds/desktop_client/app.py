@@ -1596,7 +1596,14 @@ def _handle_creating_page(
     creation_id = CreationId(agent_id)
     info = agent_creator.get_creation_info(creation_id)
     if info is None:
-        return make_response(status_code=404, content="Unknown agent creation")
+        # The creation registry is in-memory, so a ``/creating/<id>`` window that
+        # outlives its creation -- reopened after an app restart, or after a
+        # failed creation was cleaned up -- finds no info here. This is a
+        # full-page navigation, so fall back to the landing page rather than
+        # stranding the window on a bare 404. (The status/onboarding/logs
+        # endpoints below keep returning 404 -- they are XHR/SSE callers, not
+        # navigations, and their JS handles the not-found case itself.)
+        return make_redirect_response(url="/", status_code=303)
 
     html = render_creating_page(creation_id=creation_id, info=info)
     return make_html_response(content=html)
@@ -2318,6 +2325,11 @@ def _handle_chrome_events() -> Response:
             last_workspace_data = _build_workspace_list(backend_resolver, session_store)
             last_destroying_ids = _destroying_agent_ids(paths, backend_resolver)
             has_accounts = bool(session_store and session_store.list_accounts())
+            # The agent ids the shell may restore windows to: live workspaces plus
+            # any from the persisted last-good topology not yet re-discovered this
+            # session. Lets restore decline to drop a window whose workspace is
+            # merely absent from a slow/partial cold-start snapshot.
+            last_restorable_ids = [str(aid) for aid in backend_resolver.list_restorable_workspace_ids()]
             yield "data: {}\n\n".format(
                 json.dumps(
                     {
@@ -2325,6 +2337,7 @@ def _handle_chrome_events() -> Response:
                         "workspaces": last_workspace_data,
                         "destroying_agent_ids": last_destroying_ids,
                         "has_accounts": has_accounts,
+                        "restorable_workspace_ids": last_restorable_ids,
                     }
                 )
             )

@@ -106,6 +106,20 @@ class BackendResolverInterface(MutableModel, ABC):
         """
         return self.list_known_workspace_ids()
 
+    def list_restorable_workspace_ids(self) -> tuple[AgentId, ...]:
+        """Workspace agent IDs known live OR from the persisted last-good topology.
+
+        The window-restore view uses this (not :meth:`list_active_workspace_ids`):
+        a workspace that simply has not been re-discovered yet this session -- e.g.
+        a provider that enumerates slowly on cold start, so the first full snapshot
+        is missing it -- is still recognized as known, so its restored window is
+        not dropped. Absence from a partial live snapshot is not evidence of
+        destruction; the live discovery flow navigates genuinely-destroyed
+        workspaces away after restore, on positive evidence. Default: the live
+        known set (resolvers without a persisted topology have no extra knowledge).
+        """
+        return self.list_known_workspace_ids()
+
     def get_host_state(self, host_id: HostId) -> HostState | None:
         """Return the last-known lifecycle state of a host, or None if unknown.
 
@@ -771,6 +785,29 @@ class MngrCliBackendResolver(BackendResolverInterface):
                 and "is_primary" in agent.labels
                 and host_state_by_host_id.get(str(agent.host_id)) is not HostState.DESTROYED
             )
+
+    def list_restorable_workspace_ids(self) -> tuple[AgentId, ...]:
+        """Union of live primary-workspace agents and last-good workspace agents.
+
+        The live set is the ``workspace`` + ``is_primary`` agents in the current
+        snapshot (host state aside -- a restore view declines to drop on absence,
+        not on DESTROYED). The last-good set is the persisted topology's
+        system-services agents (the minds' primary agents, which carry those
+        labels live). Unioning them means a workspace that exists but hasn't been
+        re-discovered this session yet -- a slow provider on cold start -- stays
+        recognized, so its window isn't dropped before discovery catches up.
+        """
+        with self._lock:
+            ids: set[AgentId] = {
+                agent.agent_id
+                for agent in self._agents_result.discovered_agents
+                if "workspace" in agent.labels and "is_primary" in agent.labels
+            }
+            for records in self._last_good_agents_by_host.values():
+                for record in records:
+                    if str(record.agent_name) == SYSTEM_SERVICES_AGENT_NAME:
+                        ids.add(record.agent_id)
+            return tuple(ids)
 
     def get_host_state(self, host_id: HostId) -> HostState | None:
         """Return the host's lifecycle state, preferring a fresh optimistic override.
