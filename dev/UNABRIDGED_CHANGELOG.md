@@ -4,6 +4,47 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-26
+
+Changed: Bumped the offload CI pin in `.github/workflows/ci.yml` from `0.9.9` to `0.9.10` (cargo cache key, version check, and `cargo install` invocation updated to match).
+
+`scripts/tutorial_matcher.py` now reads the tutorial block from each test
+function's docstring (under a `Tutorial block:` section) instead of from a
+`write_tutorial_block(...)` call, matching the new docstring-anchored scheme for
+TMR. Added `specs/docstring-anchored-tmr.md` describing the overall change.
+
+The `sync-tutorial-to-e2e-tests` skill now emits the docstring format (verbatim
+`Tutorial block:` section plus a `Scope:` section) and crystallizes the implicit
+requirements of each block's commands into the scope, rather than calling
+`write_tutorial_block`.
+
+The TMR workflow (`.github/workflows/tmr.yml`, including the daily scheduled run)
+now defaults to all of mngr's release tests (`libs/mngr` with
+`-m "release and not docker and not docker_sdk"`) rather than only the e2e
+tutorial subset. Docker-marked release tests are excluded because they need a
+real Docker daemon and run on a GitHub runner in `release-tests.yml`, not on the
+Modal hosts TMR provisions.
+
+Added a fast, realistic minds-workspace **snapshot test suite** that runs in GitHub CI, and reconciled it with the latest `main`. This consolidates the work from #2226 (wire the snapshot suite into CI) and #2275 (CI secrets via Vault); see those PRs for the development history.
+
+Wired the suite into CI as two jobs: `build-minds-snapshot` builds a fresh Modal `vm_runtime` snapshot image (Docker-in-Docker + a real Electron-created forever-claude-template workspace, `docker stop`ped for a clean, deterministic state) once per run and exposes its image id; the dependent `test-minds-snapshot` job boots straight from that image via offload's `--override-image-id` and runs the `minds_snapshot_resume` suite. Both run on every PR (blocking), skip fork PRs, and have a one-click `DISABLE_MINDS_SNAPSHOT_CI` repo-variable kill switch.
+
+`scripts/snapshot_minds_e2e_state.py` builds the outer image, drives the shared Electron create-flow runner (no pytest, no agent destroy), `docker stop`s the workspace container, snapshots the filesystem, and prints a per-phase timing summary (`PHASE_TIMING ...`). It pins the exact Node (24.15.0) / pnpm (10.33.4) / claude-code versions minds requires, builds the Tailwind stylesheet (`pnpm run build:css`) so the onboarding flow is not silently stuck on a missing `.hidden` rule, forces `docker_runtime=runc` in the sandbox, runs `uv sync` and `pnpm install` concurrently behind a cached pre-repo Playwright layer, and supports `--image-id-output <path>` to hand the image id to the test job without scraping stdout.
+
+CI secrets now use the public `imbue-ai/use-vault-secrets` action (pinned by SHA); only `test-minds-snapshot` needs a secret (`ANTHROPIC_API_KEY` from Vault via OIDC). depot.dev was evaluated for the inner FCT container build and removed: for this ephemeral build-then-run-locally flow it measured ~2.5 min slower (it must export and re-download the whole image into the sandbox daemon), so the build uses the local docker builder.
+
+`offload-modal-minds-snapshot.toml` boots from the snapshot image and runs a single non-retrying group (a real failure should surface, not be masked), with `cpu_cores=4` / `memory_gb=8` and `vm_runtime=true` to match what produced the image so the resumed Docker-in-Docker state has the headroom to come back up. `scripts/cleanup_modal_snapshot_images.py` reclaims the snapshot images (Modal has no list-images API): it keeps a durable ledger in a Modal `Dict` with `record` / `delete` / `sweep --max-age-hours` modes, wired so the build job records each image, the test job deletes it on a fully successful run, and the periodic `cleanup-modal-environments` job sweeps leaked images as a safety net. `justfile` gains `test-offload-minds-snapshot <image-id>` and scopes the `minds_snapshot_resume` mark out of the other offload configs.
+
+The repo-wide bash strict-mode ratchet (`test_meta_ratchets.py::test_prevent_bash_without_strict_mode`) now relies on `find_bash_scripts_without_strict_mode` skipping `.minds/template/` (those are declarative secret-schema templates, not runnable scripts). The recorded snapshot is lowered from 17 to 11, pinned to the offload-CI count (the local checkout sees 10; CI counts one extra, `mac-runner-reset.sh`, only because its thin-diff image serves a stale base-image copy predating that file's own strict-mode line).
+
+`scripts/remove_old_flat_vault_secrets.py` now treats a soft-deleted Vault secret (one whose latest version has a `deletion_time`, so `vault kv get` returns a null `data.data` rather than exit-2) as absent and skips it, instead of crashing the run.
+
+Add a blueprint plan (`blueprint/minds-google-oauth-fallback/`) for the Minds Google OAuth fallback: inserting a Minds-owned Google OAuth attempt between the credential-validity check and the self-setup browser flow, gated to `google-` services. Planning artifact only, no code changes.
+
+`minds-launch-to-msg.yml`: the `macos_launch` job now checks out the trigger ref for the e2e harness (playwright spec + fixtures), matching `launch_to_msg`, instead of pinning the checkout to `commit_sha`. Previously the binary *and* the test harness were both pinned to `commit_sha`, so harness fixes on the dispatched branch were never exercised by `macos_launch` while `launch_to_msg` did pick them up — the two jobs silently tested different code. The binary under test is still pinned to `commit_sha` via the build artifact.
+
+`minds-launch-to-msg.yml`: the post-test cleanup step no longer swallows the reset script's exit code with `|| true`. The reset script now verifies the runner reached a clean state (no leaked Lima VM / `~/.minds` / app) after its best-effort cleanup and exits non-zero otherwise, so a cleanup failure that would silently rot the self-hosted runner now fails the job.
+
 ## 2026-06-25
 
 Bumped the offload CI pin in `.github/workflows/ci.yml` from `0.9.7` to `0.9.9` (the latest release), updating the cargo cache key, the version check, and the `cargo install` invocation.
