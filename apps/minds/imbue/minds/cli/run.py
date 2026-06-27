@@ -388,12 +388,13 @@ def run(
     # consumer's failure callback (registered before consumer.start() below;
     # otherwise early failures would dispatch against an empty list).
     system_interface_health_tracker = SystemInterfaceHealthTracker()
+
     # The plugin reports every non-2xx response; minds decides which ones count.
     # Only connection-level failures and infrastructure 5xx enroll a suspect --
-    # application errors are left for the background probe to adjudicate.
+    # application errors (and UNRESOLVED, a routeless warm-up) are left alone.
     consumer.add_on_system_interface_backend_failure_callback(
-        lambda agent_id, _reason, status_code: system_interface_health_tracker.record_failure(agent_id)
-        if should_enroll_suspect_for_backend_failure(status_code)
+        lambda agent_id, reason, status_code: system_interface_health_tracker.record_failure(agent_id)
+        if should_enroll_suspect_for_backend_failure(reason, status_code)
         else None
     )
 

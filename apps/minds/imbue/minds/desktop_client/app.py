@@ -246,13 +246,13 @@ def _should_emit_system_interface_status(
         return True
     _, last_full_snapshot_at = backend_resolver.get_freshness_timestamps()
     onset = tracker.get_failure_run_started_wall_at(agent_id) if tracker is not None else None
-    # FIXME: when discovery is *persistently* stale -- the producer/consumer
-    # pipeline has stalled, not merely a provider being down -- no post-onset
-    # snapshot ever arrives, so this gate never lets the STUCK redirect through and
-    # the user is stranded on the "Loading workspace" loader with no recourse. A
-    # discovery-health watchdog should detect a stalled pipeline (snapshot age),
-    # auto-restart it, and surface a distinct app-level state; once that exists
-    # this gate gains an escape and this FIXME should be removed.
+    # When discovery is *persistently* stale -- the producer/consumer pipeline has
+    # stalled, not merely a provider being down -- no post-onset snapshot ever
+    # arrives, so this gate keeps suppressing the STUCK redirect indefinitely. That
+    # is intentional and safe: the DiscoveryHealthWatchdog independently detects the
+    # stall (snapshot age), tries to self-heal the producer, and on failure (or a
+    # dead consumer) escalates to a terminal BLOCKED app-takeover -- so the user is
+    # never left stranded on the "Loading workspace" loader here with no recourse.
     if onset is None:
         return _is_discovery_fresh(last_full_snapshot_at)
     return last_full_snapshot_at is not None and last_full_snapshot_at >= onset
@@ -3125,6 +3125,23 @@ def _dispatch_restart(
     backend_resolver: BackendResolverInterface = get_state().backend_resolver
     if tracker is None or concurrency_group is None:
         return _json_error("Workspace restart is unavailable in this configuration", status_code=503)
+    # An auto-dispatched recovery restart (fired by the recovery page off its
+    # tier classification) can race the workspace's own self-recovery: the
+    # host-health probe that picks the tier runs a slow in-container exec, and
+    # the background probe loop can flip the tracker back to HEALTHY while that
+    # exec is still in flight. Restarting a workspace that already recovered is
+    # pure harm -- it bounces a healthy backend for nothing -- so skip it and let
+    # the recovery page's refresh 302 the user back to the workspace. A *manual*
+    # restart carries no marker and always proceeds; the user explicitly asked.
+    auto_dispatched = request.args.get("auto_dispatched") == "1"
+    if auto_dispatched and tracker.get_health(aid) == AgentHealth.HEALTHY:
+        logger.info(
+            "Skipping auto-dispatched {} for {}: workspace already recovered to HEALTHY "
+            "before the recovery probe completed",
+            "host restart" if is_host_restart else "system-interface restart",
+            aid,
+        )
+        return make_response(status_code=202, content="{}", media_type="application/json")
     # A restart is already in flight for this agent -- don't stack a second
     # worker thread racing the first one's stop/start commands. mark_restarting
     # decides the RESTARTING transition under its own lock and reports whether
@@ -3132,6 +3149,11 @@ def _dispatch_restart(
     # restart requests (recovery page, sidebar, landing page).
     if not tracker.mark_restarting(aid):
         return make_response(status_code=202, content="{}", media_type="application/json")
+    logger.info(
+        "Dispatching {} for {} (recovery restart of the workspace's system services)",
+        "host restart" if is_host_restart else "system-interface restart",
+        aid,
+    )
 
     # The auto-dispatched host tier (chosen only when the host-health probe
     # found the container fully stopped) passes ``host_already_stopped=1`` so
