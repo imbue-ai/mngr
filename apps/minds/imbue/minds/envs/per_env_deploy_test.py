@@ -10,6 +10,7 @@ backing store). Both DSNs come from the same per-env Neon project.
 
 from pydantic import SecretStr
 
+from imbue.minds.envs.per_env_deploy import _select_deployed_app_id
 from imbue.minds.envs.per_env_deploy import compute_per_env_overrides
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.providers.neon_db import NeonProjectRecord
@@ -64,3 +65,29 @@ def test_compute_per_env_overrides_does_not_override_unrelated_services() -> Non
         supertokens_record=_fake_supertokens_record(),
     )
     assert set(overrides.keys()) == {"supertokens", "neon", "litellm", "litellm-connector"}
+
+
+def test_select_deployed_app_id_matches_description_name_shape() -> None:
+    # Regression: `modal app list --json` reports the app name under "Description"
+    # (not "Name"). A matcher that only checks Name/name/App finds nothing, which
+    # makes the rollback container-termination silently no-op.
+    rows: list[object] = [
+        {"App ID": "ap-llm", "Description": "llm-ci", "State": "deployed", "Tasks": "0"},
+        {"App ID": "ap-rsc", "Description": "rsc-ci", "State": "deployed", "Tasks": "1"},
+    ]
+    assert _select_deployed_app_id(rows, "llm-ci") == "ap-llm"
+    assert _select_deployed_app_id(rows, "rsc-ci") == "ap-rsc"
+
+
+def test_select_deployed_app_id_skips_stopped_app() -> None:
+    rows: list[object] = [
+        {"App ID": "ap-old", "Description": "llm-ci", "State": "stopped"},
+        {"App ID": "ap-new", "Description": "llm-ci", "State": "deployed"},
+    ]
+    assert _select_deployed_app_id(rows, "llm-ci") == "ap-new"
+
+
+def test_select_deployed_app_id_returns_none_when_absent_or_empty() -> None:
+    rows: list[object] = [{"App ID": "ap-rsc", "Description": "rsc-ci", "State": "deployed"}]
+    assert _select_deployed_app_id(rows, "llm-ci") is None
+    assert _select_deployed_app_id([], "llm-ci") is None

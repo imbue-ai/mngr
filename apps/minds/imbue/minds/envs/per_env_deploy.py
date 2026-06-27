@@ -27,6 +27,7 @@ Vault entry gets populated and ``minds env deploy`` is re-run.
 import json
 import os
 import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
 
@@ -35,6 +36,7 @@ from pydantic import AnyUrl
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.logging import info_span
+from imbue.imbue_common.pure import pure
 from imbue.minds.envs.primitives import DeployStrategy
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.primitives import VaultReadError
@@ -798,17 +800,33 @@ def _find_modal_app_id(*, app_name: str, modal_env: str, parent_cg: ConcurrencyG
         raise ModalDeployError(f"`modal app list --json` returned non-JSON: {exc}") from exc
     if not isinstance(rows, list):
         return None
-    # Modal's column names have shifted across versions; check the common shapes
-    # for both name and id. Skip stopped apps so we don't try to stop containers
-    # for an already-terminated app.
+    return _select_deployed_app_id(rows, app_name)
+
+
+# `modal app list --json` column names have shifted across versions, and the
+# deployed app name is reported under "Description" (the app name doubles as its
+# description), NOT "Name". Checking only Name/name/App silently finds nothing,
+# which makes the rollback container-termination no-op so a rolled-back app keeps
+# serving its broken containers -- check every known shape.
+_MODAL_APP_NAME_KEYS: Final[tuple[str, ...]] = ("Name", "name", "App", "Description", "description")
+_MODAL_APP_ID_KEYS: Final[tuple[str, ...]] = ("App ID", "app_id", "AppID", "ID", "id")
+
+
+@pure
+def _select_deployed_app_id(rows: Sequence[object], app_name: str) -> str | None:
+    """Return the id of the non-stopped ``modal app list`` row whose name is ``app_name``.
+
+    Skips stopped apps (their containers are already gone) and returns None when
+    no live row matches.
+    """
     for row in rows:
         if not isinstance(row, dict):
             continue
-        name_value = row.get("Name") or row.get("name") or row.get("App")
-        state_value = (row.get("State") or row.get("state") or "").lower()
+        name_value = next((row[key] for key in _MODAL_APP_NAME_KEYS if row.get(key)), None)
+        state_value = str(row.get("State") or row.get("state") or "").lower()
         if name_value != app_name or "stop" in state_value:
             continue
-        for id_key in ("App ID", "app_id", "AppID", "ID", "id"):
+        for id_key in _MODAL_APP_ID_KEYS:
             id_value = row.get(id_key)
             if isinstance(id_value, str) and id_value:
                 return id_value
