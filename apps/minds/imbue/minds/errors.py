@@ -97,3 +97,44 @@ class BackupProvisioningError(MindError):
     """Raised when configuring restic backups for a workspace fails."""
 
     ...
+
+
+class LimaImageError(MindError):
+    """Base exception for the pre-baked Lima image cache."""
+
+    ...
+
+
+class LimaImageVersionUnavailableError(LimaImageError):
+    """Raised when no pre-baked image is published for the requested version+arch.
+
+    This is the *expected*, non-fatal "the CDN has nothing for this release yet"
+    case: the caller warns and falls back to building the workspace in-VM. It is
+    deliberately distinct from :class:`LimaImageDownloadError` /
+    :class:`LimaImageVerificationError`, which mean a *published* image failed to
+    download or verify and must not silently trigger the slow rebuild.
+    """
+
+    ...
+
+
+class LimaImageDownloadError(LimaImageError):
+    """Raised when downloading/assembling a published image fails (network, disk, desync)."""
+
+    ...
+
+
+class LimaImageVerificationError(LimaImageError):
+    """Raised when a downloaded manifest signature or assembled image hash does not verify.
+
+    An unverified image is never used: this is a hard failure (the create is
+    blocked with a retryable error) rather than a fall-through to build-in-VM.
+    """
+
+    ...
+
+
+class LimaImageToolError(LimaImageError):
+    """Raised when a required external tool (desync, minisign, qemu-img) is missing or errors."""
+
+    ...
