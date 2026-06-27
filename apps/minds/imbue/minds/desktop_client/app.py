@@ -2805,10 +2805,24 @@ _DISCOVERY_FRESHNESS_THRESHOLD_SECONDS: Final[float] = 3 * DISCOVERY_STREAM_POLL
 # split by tier. A surgical (in-place) restart leaves the container running, so
 # the interface should answer again quickly. A host restart cold-boots the
 # container (restore-from-snapshot + the bootstrap execing supervisord, which
-# spawns the system interface), which legitimately takes longer. Initial agent-creation
-# readiness waiting keeps its own, much longer, timeout.
+# spawns the system interface), which legitimately takes longer.
 _SURGICAL_STARTUP_WAIT_SECONDS: Final[float] = 15.0
 _HOST_RESTART_STARTUP_WAIT_SECONDS: Final[float] = 30.0
+# Modal host restarts are the slow exception, and the longer budget below applies
+# ONLY to Modal (other providers keep the fast 30s/120s values). A Modal restart
+# recreates the host from a snapshot image -- booting a brand-new sandbox over the
+# network -- which can take a minute or two. The canonical resume test
+# (test_snapshot_resume) allows 120s for system_interface to come back, so we use
+# that plus margin; otherwise a slow-but-healthy Modal restart gets declared
+# "failed" at 30s while the background probe quietly recovers it seconds later.
+_MODAL_HOST_RESTART_STARTUP_WAIT_SECONDS: Final[float] = 150.0
+# `mngr start` subprocess budget for a Modal host restart (cold boot from a
+# snapshot). The default 120s command timeout is too short; the resume test
+# allows 300s. Applies only to Modal host restarts.
+_MODAL_HOST_RESTART_MNGR_TIMEOUT_SECONDS: Final[float] = 300.0
+# The Modal provider instance name minds configures (bootstrap writes
+# [providers.modal]); used to scope the longer restart budget to Modal only.
+_MODAL_PROVIDER_NAME: Final[str] = "modal"
 # Poll cadence while waiting for the system interface to come back post-restart.
 _RESTART_PROBE_INTERVAL_SECONDS: Final[float] = 1.0
 
@@ -3039,6 +3053,18 @@ class _RestartWorkerFailureHandler(MutableModel):
         self.tracker.mark_restart_failed(self.workspace_agent_id, f"The restart worker failed unexpectedly: {exc}")
 
 
+def _is_modal_workspace(backend_resolver: BackendResolverInterface, agent_id: AgentId) -> bool:
+    """Whether the workspace's host runs on the Modal provider.
+
+    Modal host restarts cold-boot a new sandbox from a snapshot, so they need a
+    longer restart budget than other providers. Resolved from the discovery
+    snapshot's provider name; unknown agents (no display info) are treated as
+    non-Modal so they keep the fast default budget.
+    """
+    info = backend_resolver.get_agent_display_info(agent_id)
+    return info is not None and info.provider_name == _MODAL_PROVIDER_NAME
+
+
 def _run_restart_sequence(
     workspace_agent_id: AgentId,
     is_host_restart: bool,
@@ -3067,7 +3093,20 @@ def _run_restart_sequence(
     cold boot's critical path.
     """
     tier_label = "host restart" if is_host_restart else "system-interface restart"
-    startup_wait_seconds = _HOST_RESTART_STARTUP_WAIT_SECONDS if is_host_restart else _SURGICAL_STARTUP_WAIT_SECONDS
+    # Modal host restarts cold-boot a new sandbox from a snapshot, so they get a
+    # longer readiness + `mngr start` budget than other providers (the
+    # _MODAL_HOST_RESTART_* constants). Scoped to the host-restart tier and Modal
+    # only -- every other provider/tier keeps the fast defaults.
+    is_modal_host_restart = is_host_restart and _is_modal_workspace(backend_resolver, workspace_agent_id)
+    if not is_host_restart:
+        startup_wait_seconds = _SURGICAL_STARTUP_WAIT_SECONDS
+    elif is_modal_host_restart:
+        startup_wait_seconds = _MODAL_HOST_RESTART_STARTUP_WAIT_SECONDS
+    else:
+        startup_wait_seconds = _HOST_RESTART_STARTUP_WAIT_SECONDS
+    start_timeout_seconds = (
+        _MODAL_HOST_RESTART_MNGR_TIMEOUT_SECONDS if is_modal_host_restart else _MNGR_COMMAND_TIMEOUT_SECONDS
+    )
     services_agent_id = backend_resolver.get_system_services_agent_id(workspace_agent_id)
     if services_agent_id is None:
         tracker.mark_restart_failed(
@@ -3100,7 +3139,12 @@ def _run_restart_sequence(
                 return
 
     try:
-        _run_mngr(concurrency_group, _build_mngr_start_argv(mngr_binary, services_agent_id), env)
+        _run_mngr(
+            concurrency_group,
+            _build_mngr_start_argv(mngr_binary, services_agent_id),
+            env,
+            timeout_seconds=start_timeout_seconds,
+        )
     except MngrCommandError as exc:
         logger.warning("Start step of {} for {} failed: {}", tier_label, workspace_agent_id, exc)
         tracker.mark_restart_failed(workspace_agent_id, f"Start step of {tier_label} failed: {exc}")
