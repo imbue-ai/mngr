@@ -426,6 +426,98 @@ def test_resolve_agent_type_preserves_subclass_fields() -> None:
         reset_agent_config_registry()
 
 
+def test_resolve_agent_type_inherits_parent_user_config_through_multilayer_merge() -> None:
+    """A parent_type child still inherits the parent's non-default settings after the config
+    has gone through a multi-layer ``MngrConfig.merge_with``.
+
+    Regression for the overlay reparse losing each registry entry's ``model_fields_set``:
+    after a whole-config merge carried a child entry through, ``model_validate`` re-marked
+    all of its defaulted fields as explicitly set, so they clobbered the parent's non-default
+    values during the later ``parent_type`` inheritance merge. The earlier inheritance tests
+    build a config and resolve directly, never merging layers first, so they never exercised
+    this path.
+    """
+    reset_agent_class_registry()
+    reset_agent_config_registry()
+    try:
+        register_agent_class("parent-type", _FakeAgentClass)
+        register_agent_config("parent-type", _SubclassAgentConfig)
+
+        # Layer 1: parent sets a bool that defaults False; child declares only parent_type.
+        layer_one = MngrConfig(
+            agent_types={
+                AgentTypeName("parent-type"): _SubclassAgentConfig.model_construct(extra_bool=True),
+                AgentTypeName("child-type"): _SubclassAgentConfig.model_construct(
+                    parent_type=AgentTypeName("parent-type"),
+                ),
+            },
+        )
+        # Layer 2: touches only the parent (never mentions the child). The second merge is what
+        # previously re-marked the carried-through child entry as fully set.
+        layer_two = MngrConfig(
+            agent_types={
+                AgentTypeName("parent-type"): _SubclassAgentConfig.model_construct(extra_str="parent-value"),
+            },
+        )
+
+        merged_once, _ = MngrConfig().merge_with(layer_one)
+        merged_twice, _ = merged_once.merge_with(layer_two)
+
+        # The child entry must stay sparse: only the field it actually set survives the merges.
+        child_entry = merged_twice.agent_types[AgentTypeName("child-type")]
+        assert child_entry.model_fields_set == {"parent_type"}
+
+        resolved = resolve_agent_type(AgentTypeName("child-type"), merged_twice).agent_config
+        assert isinstance(resolved, _SubclassAgentConfig)
+        # Both parent settings (one per layer) are inherited rather than reset to their defaults.
+        assert resolved.extra_bool is True
+        assert resolved.extra_str == "parent-value"
+    finally:
+        reset_agent_class_registry()
+        reset_agent_config_registry()
+
+
+def test_resolve_agent_type_child_override_wins_through_multilayer_merge() -> None:
+    """A child's explicit override still wins over the inherited parent value after a
+    multi-layer merge, while an unset child field still inherits the parent's value."""
+    reset_agent_class_registry()
+    reset_agent_config_registry()
+    try:
+        register_agent_class("parent-type", _FakeAgentClass)
+        register_agent_config("parent-type", _SubclassAgentConfig)
+
+        layer_one = MngrConfig(
+            agent_types={
+                AgentTypeName("parent-type"): _SubclassAgentConfig.model_construct(extra_bool=True),
+                AgentTypeName("child-type"): _SubclassAgentConfig.model_construct(
+                    parent_type=AgentTypeName("parent-type"),
+                    extra_bool=False,
+                ),
+            },
+        )
+        layer_two = MngrConfig(
+            agent_types={
+                AgentTypeName("parent-type"): _SubclassAgentConfig.model_construct(extra_str="parent-value"),
+            },
+        )
+
+        merged_once, _ = MngrConfig().merge_with(layer_one)
+        merged_twice, _ = merged_once.merge_with(layer_two)
+
+        child_entry = merged_twice.agent_types[AgentTypeName("child-type")]
+        assert child_entry.model_fields_set == {"parent_type", "extra_bool"}
+
+        resolved = resolve_agent_type(AgentTypeName("child-type"), merged_twice).agent_config
+        assert isinstance(resolved, _SubclassAgentConfig)
+        # The child explicitly set extra_bool=False, which must beat the parent's True.
+        assert resolved.extra_bool is False
+        # extra_str is unset on the child, so it inherits the parent's value.
+        assert resolved.extra_str == "parent-value"
+    finally:
+        reset_agent_class_registry()
+        reset_agent_config_registry()
+
+
 # =============================================================================
 # resolve_agent_type disabled plugin tests
 # =============================================================================
