@@ -1,12 +1,14 @@
 import shutil
 from pathlib import Path
 from typing import Any
+from typing import cast
 
 import pytest
 from pydantic import ConfigDict
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.interfaces.data_types import CommandResult
+from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.utils.testing import run_git_command
 from imbue.mngr_vps.container_setup import _clone_build_context_for_self_contained_git
 from imbue.mngr_vps.container_setup import image_exists
@@ -34,12 +36,12 @@ class _ImageInspectOuter(MutableModel):
 
 
 def test_image_exists_true_when_inspect_succeeds() -> None:
-    outer = _ImageInspectOuter(present_image="fct:minds-v9.9.9")
+    outer = cast(OuterHostInterface, _ImageInspectOuter(present_image="fct:minds-v9.9.9"))
     assert image_exists(outer, "fct:minds-v9.9.9") is True
 
 
 def test_image_exists_false_when_inspect_fails() -> None:
-    outer = _ImageInspectOuter(present_image="fct:minds-v9.9.9")
+    outer = cast(OuterHostInterface, _ImageInspectOuter(present_image="fct:minds-v9.9.9"))
     assert image_exists(outer, "fct:absent-tag") is False
 
 
