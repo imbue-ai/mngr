@@ -14,6 +14,71 @@
 > * Operation polling is restructured from `/workspaces/operations/<id>` to `/workspaces/operations/<type>/<id>` (`type` in `create|destroy|restart`), with matching `/logs` and `DELETE`; each type gets a precise model; old untyped routes are hard-cut and pollers updated in lockstep.
 > * A coverage test asserts every gateway-reachable `/api/v1` route is spectree-decorated. Scope is the **minds repo only** (forever-claude-template agent consumers come later).
 
+---
+
+## Implementation status & handoff (READ THIS FIRST)
+
+This section is the source of truth for picking the work up cold. Everything below the `## Overview` heading is the original design; this section records what is **already landed**, the **traps discovered**, the **one open decision**, and the **exact remaining work**.
+
+### Branch / PR
+- Branch `mngr/minds-api-final` (base `josh/more-minds-api` on origin; draft PR #2315). Commit/push as you go; the reviewer stop hook is **disabled** (`.reviewer/settings.local.json`), so there is **no autofix gate — you own quality**.
+- Read `CLAUDE.md` + `style_guide.md` first (monorepo rules, `uv run` from root, FrozenModel/pydantic conventions, ratchets, changelog-per-project).
+
+### Already landed (committed + pushed, all green)
+1. **`1c3204074`** — `GET /api/schema` endpoint (hand-built generator in `api_schema.py`) + the gateway baseline grant. This is the CURRENT schema endpoint. The gateway already default-allows it: `libs/mngr_latchkey/imbue/mngr_latchkey/agent_setup.py` grants `minds-api-schema-read` (GET `/minds-api-proxy/api/schema`) on the `latchkey-self` scope. **The schema *path* is unchanged by this plan, so no further gateway change is needed.**
+2. **`34051367f`** — extracted all request/response pydantic models into `apps/minds/imbue/minds/desktop_client/api_models.py` (the single-source module). `api_schema.py` imports them.
+3. **`fb5b5bebe`** — spectree groundwork:
+   - `spectree>=1.4` added to `apps/minds/pyproject.toml` (runtime dep; `uv.lock` synced). Installed version is **2.0.1**.
+   - **`api_auth.py`** (new): `require_api_or_cookie_auth` + `json_response`/`json_error`/`json_field_error`/`handle_invalid_random_id` moved here (out of `api_v1.py`). `api_v1.py` re-imports them aliased to the old `_json_*` names (no call-site churn); `api_schema.py` imports the auth decorator from here. **The `api_schema`→`api_v1` import cycle is now broken** (handlers can safely import from `api_models`).
+   - **`api_spec.py`** (new): `API_SPEC = SpecTree("flask", openapi_version="3.1.0", ...)` with a `before` hook that reshapes any request-validation failure into the agreed **422 `{"errors": [{"field": "<dotted pydantic loc>", "message": "..."}]}`**.
+
+### Verified integration mechanics (from a throwaway spike — trust these)
+- Decorator order: **`@require_api_or_cookie_auth` OUTERMOST, `@API_SPEC.validate(json=, query=, resp=)` INNER.** `functools.wraps` propagates spectree's attributes up, so the route still appears when the spec is built, and **auth runs before validation** (unauthenticated + bad body → 401, not 422). ✅ required by the design.
+- `@API_SPEC.validate(...)` **enforces request validation at request time WITHOUT calling `API_SPEC.register(app)`** — so decorating routes does NOT expose any `/apidoc/*` doc UI. `register(app)` is only needed to *build the full spec* (for Phase A's `/api/schema`-from-spectree); when you do call it, suppress/avoid serving the public doc endpoints.
+- `openapi_version="3.1.0"` is honored and validates against the existing `openapi-spec-validator` test.
+- `API_SPEC.spec` must be read inside a Flask app context (fine for the request-time `/api/schema` handler).
+
+### Regression traps (MUST handle — these are why naive decoration breaks "no regressions")
+1. **`extra="forbid"`**: the `api_models` are `FrozenModel` (forbids extra keys). Used as request models they would **422 any request with extra fields** that handlers ignore today (notably `report`, which passes arbitrary fields through). → **Request models must be `extra="ignore"`.** (Response/doc models can stay strict.) Consider a small `_RequestModel(BaseModel)` base with `model_config = ConfigDict(extra="ignore")` for request bodies/queries.
+2. **Content-type**: spectree parses JSON only for `application/json`; handlers use `get_json(force=True)` (parses regardless). The create form + Flask test client send `application/json`, and the agent/gateway contract is JSON, so this is usually fine — but **audit callers** and ensure none rely on a missing/other content-type, or you'll newly 422 them.
+3. **Optional/absent body**: routes that tolerate an absent body today must use an all-optional request model (or skip `json=` on them) so they don't start 422-ing.
+4. **Response byte-fidelity (the 2b landmine)**: runtime-enforcing response models means returning model instances whose serialization must EXACTLY match today's JSON across ~26 routes (keys, null/optional handling, 202 status), or drift → **500**. This is the one open decision (below).
+
+### THE ONE OPEN DECISION — confirm with the user before Phase A
+**Response models: document-only (recommended) vs. runtime-enforced (original 2b).**
+- **Recommended: document-only.** Pass `resp=` models to `@API_SPEC.validate(...)` purely so the generated OpenAPI documents responses, but **keep handlers returning their existing `make_response(json.dumps(...))` Flask `Response` objects** (spectree does not enforce/serialize a raw `Response`, so there is **zero response-shape regression risk and no 500s**). This still achieves single-source-of-truth: the schema's response section is generated from the same models. It relaxes the earlier "2b enforce" answer specifically because two implementation forks showed runtime response-enforcement fights the "no regressions" requirement.
+- Alternative (strict 2b): refactor every success path to return the model instance and verify byte-fidelity per route. Higher fidelity, much higher risk + slower.
+
+The rest of this handoff assumes **document-only** unless the user says otherwise.
+
+### Remaining work
+
+**Phase A — backend (request/query validation + schema-from-spectree).** Do it in small route groups, committing green between groups.
+- In `api_models.py`: give request/query models `extra="ignore"`; add the still-missing models — query models for `sharing/<svc>/readiness?url=` and `desktop/stop-hosts?agent_id=` (repeated → list), and response (doc) models for the routes not yet covered (`version`, `backups`, `health`/`HostHealthResponse`, sharing-status, the four `/desktop/*`, and the per-type operations responses). Reuse existing models where they already match.
+- Decorate every `/api/v1` handler in `api_v1.py` with `@require_api_or_cookie_auth` (outer) + `@API_SPEC.validate(json=/query=/resp=...)` (inner). Remove only the **structural** manual checks spectree now covers (malformed/missing/typed-wrong → now 422); **keep all semantic checks** (create's account-required + `redirect_url`, `anthropic_api_key` required, invalid-name `{error, field}` 400; the readiness `url` SSRF guard `is_probeable_share_url`; 404/409/501/502 paths).
+- **Operations restructure**: replace `GET/DELETE /workspaces/operations/<operation_id>` and `.../logs` with `/workspaces/operations/<type>/<id>` (`type` ∈ `create|destroy|restart`), each with a precise response model; delete the id-prefix dispatch and the destroy-vs-restart precedence logic in `_handle_operation_status`/`_handle_operation_logs`/`_handle_dismiss_operation`. Update the create/destroy/restart handlers that build the polled/redirect URLs (e.g. the create `redirect_url`, the 202 handles) to the typed form.
+- **`/api/schema`**: replace the hand-built generator internals in `api_schema.py` with: `API_SPEC.register(app)` (docs NOT publicly served) + serve `API_SPEC.spec` **filtered to gateway-reachable routes** (keep the existing `_is_gateway_reachable_path` exclusions: `/api/v1/desktop/`, `/api/v1/files`) wrapped by `require_api_or_cookie_auth`. Keep the path `/api/schema`. Update `api_schema_test.py` to validate the spectree-sourced doc and keep the drift assertion (documented paths == gateway-reachable routes).
+- **Coverage test**: assert every gateway-reachable `/api/v1` route appears in the generated spec (i.e. is decorated) — a new undecorated route fails CI.
+- Update `api_v1_test.py`: malformed/missing-field input now expects the **422 `{"errors":[...]}`** shape; old untyped operations URLs → typed; keep all semantic-error, 401, 404, 501 assertions.
+
+**Phase B — front-end (lockstep, or the UI breaks).**
+- Add `apps/minds/imbue/minds/desktop_client/static/api_errors.js`: normalize any API error response — the 422 `{"errors":[{field,message}]}` list OR create's 400 `{error, field, redirect_url}` — into `{message, field}`.
+- Route every server-error display through it: `static/creating.js`, `static/sharing.js`, `static/destroying.js`, `static/workspace_settings.js`, `templates/pages/Create.jinja`, `templates/Associate.jinja`, `templates/pages/Landing.jinja`, `electron/main.js`. **Create contract to preserve** (`Create.jinja#submitCreate`/`showCreateError(message, field)`): on `202` + `{operation_id}` → navigate `/creating/<id>`; else if `{redirect_url}` → navigate; else `showCreateError(error, field)` which reveals the advanced view and rings `document.getElementById(field)`. The normalizer must yield a `field` that matches the form input ids for create's field-level errors.
+- Update the create/destroy/restart pollers and the Electron restart/recovery flows to call the typed `/api/v1/workspaces/operations/<type>/<id>` (+`/logs`, +`DELETE`) URLs.
+- Manual verification: the desktop UI flows need a real Electron run (`just minds-start`); pytest cannot verify JS.
+
+### How to verify / test (per CLAUDE.md)
+- `just test-quick "apps/minds/imbue/minds/desktop_client"` (full suite, currently 1134 passing) + `apps/minds/imbue/minds/test_ratchets.py` (stage changes first) + `uv run ty check` on changed files + `ruff format`/`ruff check`. Touch latchkey tests only if you change `mngr_latchkey`. Do **not** run full `just test-offload`; CI runs the rest.
+- Manually exercise (build app via `create_desktop_client`, hit routes): `GET /api/schema` → valid filtered OpenAPI; malformed body → 422 custom shape; unauthenticated → 401; create no-account → 400 with `redirect_url`; a success response is byte-identical to before (document-only); a typed operations URL works.
+- Changelog: update `apps/minds/changelog/mngr-minds-api-final.md`; add a `dev/changelog/mngr-minds-api-final.md` note if you touch root config; `libs/mngr_latchkey` already has an entry from prior work (only touch if you change it).
+
+### Key files
+- `apps/minds/imbue/minds/desktop_client/`: `api_v1.py` (26 routes, handlers to decorate), `api_models.py` (the models), `api_auth.py` (auth + json helpers), `api_spec.py` (`API_SPEC` + 422 hook), `api_schema.py` (current hand-built `/api/schema`, to be re-sourced), `state.py`, `app.py` (blueprint registration + where `API_SPEC.register` would go), `responses.py` (`make_response` etc.).
+- Tests: `api_v1_test.py`, `api_schema_test.py`. Front-end: `static/*.js`, `templates/**/*.jinja`, `electron/main.js`.
+- Gateway (done, reference only): `libs/mngr_latchkey/imbue/mngr_latchkey/agent_setup.py` (`_PERM_MINDS_API_SCHEMA`).
+
+---
+
 ## Overview
 
 - Make pydantic models the **single source of truth** for the `/api/v1` surface: one set of models both validates requests/responses at runtime (via **spectree**) and generates the published OpenAPI -- eliminating the current split where `api_schema.py` holds documentation-only models that can silently drift from the hand-written handler logic.
