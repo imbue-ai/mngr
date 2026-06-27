@@ -22,6 +22,7 @@
 #}
 {% set _default_restic_env = "# see docs linked above for available options\n# for example:\nRESTIC_REPOSITORY=s3:s3.amazonaws.com/<bucket_name>\nAWS_ACCESS_KEY_ID=\nAWS_SECRET_ACCESS_KEY=\n" %}
 {% set _scripts %}
+<script src="/_static/api_errors.js"></script>
 <script>
   (function() {
     // The remote (Imbue Cloud) preset needs an Imbue account. When a signed-out
@@ -245,12 +246,16 @@
           window.location = '/creating/' + res.data.operation_id;
           return;
         }
-        // The no-account imbue_cloud backstop carries a sign-up redirect target.
-        if (res.data.redirect_url) {
-          window.location = res.data.redirect_url;
+        // Normalize both the structural 422 contract and the handler's semantic
+        // {error, field, redirect_url} into one shape. The no-account imbue_cloud
+        // backstop carries a sign-up redirect target; a field error rings the
+        // matching input (the 422 field names line up with the form input ids).
+        var err = normalizeApiError(res.data);
+        if (err.redirect_url) {
+          window.location = err.redirect_url;
           return;
         }
-        showCreateError(res.data.error, res.data.field);
+        showCreateError(err.message, err.field);
       }).catch(function () {
         showCreateError('Could not reach the server. Please try again.');
       });

@@ -46,6 +46,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.api_auth import require_api_or_cookie_auth
 from imbue.minds.desktop_client.api_models import AgentNotificationRequest
 from imbue.minds.desktop_client.api_models import ApiErrorResponse
+from imbue.minds.desktop_client.api_models import BugReportRequest
 from imbue.minds.desktop_client.api_models import CreateWorkspaceRequest
 from imbue.minds.desktop_client.api_models import EnableSharingRequest
 from imbue.minds.desktop_client.api_models import EstablishSshRequest
@@ -95,6 +96,7 @@ class _RouteModels(FrozenModel):
 # Routes absent here are still listed, just without body schemas.
 _ROUTE_MODELS: Final[Mapping[tuple[str, str], _RouteModels]] = {
     ("POST", "/api/v1/agents/{agent_id}/notifications"): _RouteModels(request_model=AgentNotificationRequest),
+    ("POST", "/api/v1/agents/{agent_id}/report"): _RouteModels(request_model=BugReportRequest),
     ("GET", "/api/v1/workspaces"): _RouteModels(response_model=WorkspaceListResponse),
     ("POST", "/api/v1/workspaces"): _RouteModels(
         request_model=CreateWorkspaceRequest, response_model=OperationHandleResponse, success_status=202

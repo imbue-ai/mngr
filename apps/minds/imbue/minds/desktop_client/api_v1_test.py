@@ -487,8 +487,9 @@ def test_create_workspace_rejects_invalid_backup_provider(
     root_concurrency_group: ConcurrencyGroup,
     notification_dispatcher: NotificationDispatcher,
 ) -> None:
-    # A malformed backup_provider must fail validation up front (400), before
-    # any background creation is started.
+    # A malformed backup_provider is a structural (enum) failure, so spectree
+    # rejects it up front with the uniform 422 contract, before any background
+    # creation is started.
     client = _client_with_agent_creator(tmp_path, root_concurrency_group, notification_dispatcher)
 
     response = client.post(
@@ -497,8 +498,9 @@ def test_create_workspace_rejects_invalid_backup_provider(
         json={"git_url": "https://example/repo", "backup_provider": "NOT_A_PROVIDER"},
     )
 
-    assert response.status_code == 400
-    assert "backup_provider" in json.loads(response.data)["error"]
+    assert response.status_code == 422
+    errors = json.loads(response.data)["errors"]
+    assert any(error["field"] == "backup_provider" for error in errors)
 
 
 def test_create_workspace_rejects_imbue_cloud_backup_without_account(
@@ -576,7 +578,25 @@ def test_establish_ssh_requires_bearer(tmp_path: Path) -> None:
 
     response = client.post(f"/api/v1/workspaces/{agent_id}/ssh", json={})
 
+    # Auth runs before validation, so an unauthenticated request with an invalid
+    # body is rejected with 401 -- never a pre-auth 422 (which would leak that the
+    # route exists and echo input back).
     assert response.status_code == 401
+
+
+def test_establish_ssh_missing_fields_returns_422_with_field_errors(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+
+    # An authenticated request with a structurally-invalid body (required fields
+    # absent) gets the uniform 422 contract: one {field, message} per failure.
+    response = client.post(f"/api/v1/workspaces/{agent_id}/ssh", headers=_auth_header(), json={})
+
+    assert response.status_code == 422
+    errors = json.loads(response.data)["errors"]
+    failed_fields = {error["field"] for error in errors}
+    assert failed_fields == {"public_key", "requester_workspace_id"}
+    assert all(error["message"] for error in errors)
 
 
 def test_operation_logs_unknown_create_id_returns_404(tmp_path: Path) -> None:
@@ -898,7 +918,10 @@ def test_patch_provider_rejects_invalid_body(tmp_path: Path, body: object) -> No
 
     response = client.patch("/api/v1/desktop/providers/docker", headers=_auth_header(), json=body)
 
-    assert response.status_code == 400
+    # Structural validation (required strict bool) is now enforced by spectree,
+    # so a missing/wrong-typed ``enabled`` yields the uniform 422 contract.
+    assert response.status_code == 422
+    assert "errors" in json.loads(response.data)
 
 
 def test_patch_provider_requires_bearer(tmp_path: Path) -> None:
@@ -1216,6 +1239,9 @@ def test_workspace_restart_rejects_invalid_scope(tmp_path: Path, root_concurrenc
 
     response = client.post(f"/api/v1/workspaces/{agent_id}/restart", headers=_auth_header(), json={"scope": "nope"})
 
+    # ``scope`` is structurally a string (so it passes spectree), but its *value*
+    # must be one of services/host -- a value-semantic check the handler keeps,
+    # emitting the field-naming 400.
     assert response.status_code == 400
     assert "scope" in json.loads(response.data)["error"]
 

@@ -57,6 +57,15 @@ from imbue.minds.desktop_client.api_auth import json_error as _json_error
 from imbue.minds.desktop_client.api_auth import json_field_error as _json_field_error
 from imbue.minds.desktop_client.api_auth import json_response as _json_response
 from imbue.minds.desktop_client.api_auth import require_api_or_cookie_auth
+from imbue.minds.desktop_client.api_models import AgentNotificationRequest
+from imbue.minds.desktop_client.api_models import BugReportRequest
+from imbue.minds.desktop_client.api_models import CreateWorkspaceRequest
+from imbue.minds.desktop_client.api_models import EnableSharingRequest
+from imbue.minds.desktop_client.api_models import EstablishSshRequest
+from imbue.minds.desktop_client.api_models import PatchWorkspaceRequest
+from imbue.minds.desktop_client.api_models import RestartWorkspaceRequest
+from imbue.minds.desktop_client.api_models import SetProviderEnabledRequest
+from imbue.minds.desktop_client.api_spec import API_SPEC
 from imbue.minds.desktop_client.backup_export import BackupExportError
 from imbue.minds.desktop_client.backup_export import export_snapshot_zip
 from imbue.minds.desktop_client.create_helpers import REMOTE_SIGNIN_REDIRECT_URL
@@ -118,28 +127,22 @@ _DESTROY_LOG_POLL_SECONDS: float = 1.0
 
 
 @require_api_or_cookie_auth
+@API_SPEC.validate(json=AgentNotificationRequest)
 def _handle_notification(agent_id: str) -> Response:
     """Send a notification on behalf of the named agent."""
     dispatcher: NotificationDispatcher | None = get_state().notification_dispatcher
     if dispatcher is None:
         return _json_error("Notification dispatch not configured", 501)
 
-    # force=True parses the body regardless of Content-Type, matching the old
-    # FastAPI ``await request.json()`` (which ignored the header).
-    body = request.get_json(silent=True, force=True)
-    if body is None:
-        return _json_error("Invalid JSON body", 400)
-    if not isinstance(body, dict):
-        return _json_error("Request body must be a JSON object", 400)
-
+    # Structure (object shape + ``message`` present and a string) is enforced by
+    # the spectree model; the remaining checks here are value-semantic.
+    body = request.get_json(silent=True, force=True) or {}
     message = body.get("message")
-    if not message or not isinstance(message, str):
+    if not message:
         return _json_error("'message' field is required and must be a string", 400)
 
     title = body.get("title")
-    if title is not None and not isinstance(title, str):
-        return _json_error("'title' field must be a string", 400)
-    urgency_str = body.get("urgency", "NORMAL")
+    urgency_str = body.get("urgency") or "NORMAL"
     try:
         urgency = NotificationUrgency(urgency_str.upper())
     except (ValueError, AttributeError):
@@ -329,6 +332,7 @@ def _handle_workspace_backup_export(agent_id: str, snapshot_id: str) -> Response
 
 
 @require_api_or_cookie_auth
+@API_SPEC.validate(json=CreateWorkspaceRequest)
 def _handle_create_workspace() -> Response:
     """Create a new peer workspace; return an operation handle to poll.
 
@@ -362,9 +366,9 @@ def _handle_create_workspace() -> Response:
     if agent_creator is None:
         return _json_error("Agent creation not configured", 501)
 
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
-        return _json_error("Request body must be a JSON object", 400)
+    # Object shape + ``git_url`` presence/type are enforced by the spectree model;
+    # the value-semantic checks below (empty-after-strip, provider rules) stay here.
+    body = request.get_json(silent=True, force=True) or {}
     git_url = str(body.get("git_url", "")).strip()
     if not git_url:
         return _json_field_error("Repository URL is required.", "git_url")
@@ -597,6 +601,7 @@ def _handle_workspace_health(agent_id: str) -> Response:
 
 
 @require_api_or_cookie_auth
+@API_SPEC.validate(json=RestartWorkspaceRequest)
 def _handle_workspace_restart(agent_id: str) -> Response:
     """Dispatch a workspace restart; return an operation handle to poll.
 
@@ -610,9 +615,9 @@ def _handle_workspace_restart(agent_id: str) -> Response:
     same handle is returned without stacking a second worker.
     """
     parsed_id = AgentId(agent_id)
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
-        return _json_error("Request body must be a JSON object", 400)
+    # The spectree model enforces ``scope`` is a required string; its value (one
+    # of services/host) is a value-semantic check kept here.
+    body = request.get_json(silent=True, force=True) or {}
     scope = body.get("scope")
     if scope not in ("services", "host"):
         return _json_error("'scope' must be one of: services, host", 400)
@@ -885,6 +890,7 @@ def _handle_operation_logs(operation_id: str) -> Response:
 
 
 @require_api_or_cookie_auth
+@API_SPEC.validate(json=EstablishSshRequest)
 def _handle_establish_ssh(agent_id: str) -> Response:
     """Authorize temporary SSH access into a workspace and return its connection info.
 
@@ -916,9 +922,9 @@ def _handle_establish_ssh(agent_id: str) -> Response:
     if parent_cg is None:
         return _json_error("SSH access not configured", 501)
 
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
-        return _json_error("Request body must be a JSON object", 400)
+    # Body shape (``public_key`` + ``requester_workspace_id`` present, strings) is
+    # enforced by the spectree model; the empty-after-strip check below is semantic.
+    body = request.get_json(silent=True, force=True) or {}
     public_key = str(body.get("public_key", ""))
     requester_workspace_id = str(body.get("requester_workspace_id", "")).strip()
     if not requester_workspace_id:
@@ -1027,6 +1033,7 @@ def _handle_establish_ssh(agent_id: str) -> Response:
 
 
 @require_api_or_cookie_auth
+@API_SPEC.validate(json=BugReportRequest)
 def _handle_bug_report(agent_id: str) -> Response:
     """Submit a bug report to Imbue on behalf of an in-workspace agent.
 
@@ -1034,9 +1041,9 @@ def _handle_bug_report(agent_id: str) -> Response:
     user-initiated one carry the same shape. The report is scoped to the caller's own workspace (the
     path ``agent_id``, which the gateway has already authorized), not to whatever the body claims.
     """
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
-        return _json_error("Request body must be a JSON object", 400)
+    # ``description`` presence/type is enforced by the spectree model; the
+    # whitespace-only rejection below is value-semantic.
+    body = request.get_json(silent=True, force=True) or {}
     if not str(body.get("description", "")).strip():
         return _json_error("'description' field is required and must be a non-empty string", 400)
 
@@ -1055,6 +1062,7 @@ def _handle_bug_report(agent_id: str) -> Response:
 
 
 @require_api_or_cookie_auth
+@API_SPEC.validate(json=PatchWorkspaceRequest)
 def _handle_patch_workspace(agent_id: str) -> Response:
     """Partially update a workspace's metadata (color and/or account association).
 
@@ -1065,9 +1073,9 @@ def _handle_patch_workspace(agent_id: str) -> Response:
     ``account_id`` that was set).
     """
     parsed_id = AgentId(agent_id)
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
-        return _json_error("Request body must be a JSON object", 400)
+    # The spectree model validates the (all-optional) body shape; only keys present
+    # in the raw body are applied, so an empty body is a no-op.
+    body = request.get_json(silent=True, force=True) or {}
 
     state = get_state()
     backend_resolver = state.backend_resolver
@@ -1155,16 +1163,13 @@ def _handle_sharing_readiness(agent_id: str, service_name: str) -> Response:
 
 
 @require_api_or_cookie_auth
+@API_SPEC.validate(json=EnableSharingRequest)
 def _handle_sharing_enable(agent_id: str, service_name: str) -> Response:
     """Enable or update sharing for a service. Body: ``{"emails": [...]}``."""
     parsed_id = AgentId(agent_id)
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
-        return _json_error("Request body must be a JSON object", 400)
-    emails_raw = body.get("emails", [])
-    if not isinstance(emails_raw, list):
-        return _json_error("'emails' must be a JSON array of strings", 400)
-    emails = [str(email) for email in emails_raw]
+    # The spectree model validates that ``emails`` (when present) is a list of strings.
+    body = request.get_json(silent=True, force=True) or {}
+    emails = [str(email) for email in body.get("emails", [])]
     try:
         enable_sharing_via_cloudflare(
             agent_id=parsed_id,
@@ -1196,6 +1201,7 @@ def _handle_sharing_disable(agent_id: str, service_name: str) -> Response:
 
 
 @require_api_or_cookie_auth
+@API_SPEC.validate(json=SetProviderEnabledRequest)
 def _handle_patch_provider(provider_name: str) -> Response:
     """Set a provider's ``is_enabled`` flag. Body: ``{"enabled": bool}``.
 
@@ -1203,12 +1209,9 @@ def _handle_patch_provider(provider_name: str) -> Response:
     workspaces (409) -- disabling it would drop those live workspaces off
     discovery.
     """
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
-        return _json_error("Request body must be a JSON object", 400)
-    enabled = body.get("enabled")
-    if not isinstance(enabled, bool):
-        return _json_error("Body must include 'enabled' as a bool", 400)
+    # ``enabled`` (a required bool) is validated by the spectree model.
+    body = request.get_json(silent=True, force=True) or {}
+    enabled = bool(body.get("enabled"))
     state = get_state()
     try:
         changed = desktop_control.set_provider_enabled(

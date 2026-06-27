@@ -1719,7 +1719,10 @@ def test_api_v1_bug_report_rejects_empty_description(tmp_path: Path) -> None:
         json={"description": ""},
         headers={"Authorization": "Bearer secret-key"},
     )
-    assert response.status_code == 400
+    # An empty description fails the request model's min-length structurally, so
+    # it is rejected with the uniform 422 validation contract.
+    assert response.status_code == 422
+    assert any(error["field"] == "description" for error in response.get_json()["errors"])
 
 
 # -- system-interface restart + recovery tests --

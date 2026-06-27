@@ -13,13 +13,30 @@ same models into the handlers as spectree request/response validators so the
 documented contract and the enforced contract can never drift.
 """
 
+from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import StrictBool
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupEncryptionMethod
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import LaunchMode
+
+
+class ApiRequestModel(FrozenModel):
+    """Base for request-body models.
+
+    Unlike :class:`FrozenModel` (which forbids extra keys), request bodies must
+    *ignore* unknown keys: several handlers accept a superset of the validated
+    fields and pass the raw body straight through (e.g. the bug-report route
+    forwards arbitrary extra fields to the collector). Forbidding extras would
+    turn those previously-accepted requests into a spurious 422, a regression.
+    Only the structural shape of the *known* fields is validated here; semantic
+    checks stay in the handlers.
+    """
+
+    model_config = ConfigDict(extra="ignore")
 
 
 class ApiErrorResponse(FrozenModel):
@@ -50,7 +67,7 @@ class OperationHandleResponse(FrozenModel):
     kind: str = Field(description="Operation kind: create, destroy, or restart")
 
 
-class AgentNotificationRequest(FrozenModel):
+class AgentNotificationRequest(ApiRequestModel):
     """Body for sending a desktop notification on behalf of an agent."""
 
     message: str = Field(description="Notification body text")
@@ -58,7 +75,7 @@ class AgentNotificationRequest(FrozenModel):
     urgency: str | None = Field(default=None, description="One of: low, normal (default), critical")
 
 
-class EstablishSshRequest(FrozenModel):
+class EstablishSshRequest(ApiRequestModel):
     """Body for requesting temporary SSH access into a target workspace."""
 
     public_key: str = Field(
@@ -77,7 +94,7 @@ class SshConnectionResponse(FrozenModel):
     expires_at: str = Field(description="UTC ISO 8601 expiry of the key grant")
 
 
-class CreateWorkspaceRequest(FrozenModel):
+class CreateWorkspaceRequest(ApiRequestModel):
     """Body for creating a new peer workspace."""
 
     git_url: str = Field(description="Template repository URL or local path (required)")
@@ -102,26 +119,50 @@ class CreateWorkspaceRequest(FrozenModel):
     backup_api_key_env: str | None = Field(default=None, description="KEY=VALUE block for an API_KEY backup provider")
 
 
-class PatchWorkspaceRequest(FrozenModel):
+class PatchWorkspaceRequest(ApiRequestModel):
     """Body for partially updating a workspace's metadata."""
 
     color: str | None = Field(default=None, description="New hex color")
     account_id: str | None = Field(default=None, description="Account id to associate, or null/empty to disassociate")
 
 
-class RestartWorkspaceRequest(FrozenModel):
+class RestartWorkspaceRequest(ApiRequestModel):
     """Body for restarting a workspace's services or whole host."""
 
+    # ``scope`` is structurally a required string; the route validates that its
+    # value is one of services/host (a value-semantic check kept in the handler,
+    # since the lowercase wire values can't be a standard UpperCaseStrEnum).
     scope: str = Field(description="'services' (restart system-services in place) or 'host' (bounce the host)")
     host_already_stopped: bool | None = Field(
         default=None, description="Skip the redundant stop step (host scope only) when the host is known stopped"
     )
 
 
-class EnableSharingRequest(FrozenModel):
+class EnableSharingRequest(ApiRequestModel):
     """Body for enabling/updating Cloudflare sharing of a workspace service."""
 
-    emails: tuple[str, ...] = Field(description="Emails allowed by the Cloudflare Access policy")
+    emails: tuple[str, ...] = Field(
+        default=(), description="Emails allowed by the Cloudflare Access policy (empty = open to all)"
+    )
+
+
+class BugReportRequest(ApiRequestModel):
+    """Body for submitting a bug report on behalf of an in-workspace agent.
+
+    Only ``description`` is part of the validated contract; the handler forwards
+    the full (extra-field-bearing) body to the shared report collector, so extra
+    keys are ignored here rather than rejected.
+    """
+
+    description: str = Field(min_length=1, description="What went wrong (required, non-empty)")
+
+
+class SetProviderEnabledRequest(ApiRequestModel):
+    """Body for toggling a provider's enabled flag."""
+
+    # StrictBool (not bool) so a non-boolean like ``1`` or ``"yes"`` is rejected
+    # rather than truthiness-coerced, matching the route's prior isinstance check.
+    enabled: StrictBool = Field(description="Desired enabled state for the provider")
 
 
 class WorkspaceSummary(FrozenModel):
