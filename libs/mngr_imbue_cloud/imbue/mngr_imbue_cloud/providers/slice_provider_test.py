@@ -1,14 +1,22 @@
+import base64
+from collections.abc import Mapping
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
+from typing import cast
 
 import pytest
 from pydantic import ConfigDict
 from pydantic import Field
 
+from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr_imbue_cloud.errors import BoxImageCacheError
 from imbue.mngr_imbue_cloud.providers.slice_provider import SliceVpsDockerProvider
+from imbue.mngr_imbue_cloud.providers.slice_provider import _DEFERRED_INSTALL_MARKER
+from imbue.mngr_imbue_cloud.providers.slice_provider import _PLAYWRIGHT_CTX_DIR
 from imbue.mngr_imbue_cloud.slices.box_image_cache import BoxImageCacheInterface
 from imbue.mngr_imbue_cloud.slices.mock_box_image_cache_test import MockBoxImageCache
 
@@ -103,3 +111,54 @@ def test_raises_when_lock_held_and_tar_never_appears() -> None:
         _ensure(provider)
     assert provider.seeded_tags == []
     assert provider.loaded_tags == []
+
+
+class _RecordingOuter(MutableModel):
+    """Outer host that records every command and reports success, for command-render assertions."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    recorded: list[str] = Field(default_factory=list)
+
+    def execute_idempotent_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        self.recorded.append(command)
+        return CommandResult(stdout="", stderr="", success=True)
+
+
+def test_build_playwright_derived_image_renders_marker_and_build_command() -> None:
+    provider = SliceVpsDockerProvider.model_construct()
+    outer = _RecordingOuter()
+    provider._build_playwright_derived_image(
+        outer=cast(OuterHostInterface, outer), base_image="mngr-build-xyz", target_tag=_TAG
+    )
+    # The staged context Dockerfile is shipped base64-encoded; decode it and assert the
+    # baked-Playwright + deferred-install-marker contract every loaded slice relies on.
+    stage_command = next(c for c in outer.recorded if "base64 -d" in c)
+    encoded = stage_command.split("echo ")[1].split(" | base64 -d")[0].strip().strip("'")
+    dockerfile = base64.b64decode(encoded).decode()
+    assert dockerfile.startswith("FROM mngr-build-xyz")
+    assert "playwright install --with-deps chromium" in dockerfile
+    assert _DEFERRED_INSTALL_MARKER in dockerfile
+    build_command = next(c for c in outer.recorded if "docker build" in c)
+    assert _TAG in build_command
+    assert f"{_PLAYWRIGHT_CTX_DIR}/Dockerfile" in build_command
+
+
+def test_transfer_key_authorize_and_deauthorize_render_expected_commands() -> None:
+    provider = SliceVpsDockerProvider.model_construct()
+    outer = _RecordingOuter()
+    public_key = "ssh-ed25519 AAAATESTKEY"
+    provider._authorize_transfer_key(cast(OuterHostInterface, outer), public_key)
+    provider._deauthorize_transfer_key(cast(OuterHostInterface, outer), public_key)
+    authorize_command, deauthorize_command = outer.recorded
+    assert ">> /root/.ssh/authorized_keys" in authorize_command
+    assert public_key in authorize_command
+    assert "grep -vF" in deauthorize_command
+    assert public_key in deauthorize_command
