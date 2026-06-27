@@ -68,6 +68,10 @@ _PLAYWRIGHT_BUILD_ATTEMPTS: Final[int] = 3
 _PLAYWRIGHT_BUILD_TIMEOUT_SECONDS: Final[float] = 900.0
 _PLAYWRIGHT_CTX_DIR: Final[str] = "/tmp/fct-playwright-ctx"
 _BUILDER_PRUNE_TIMEOUT_SECONDS: Final[float] = 120.0
+# The FCT Dockerfile relocates the built workspace here (off the /mngr volume mount)
+# before first boot; the Playwright derive runs ``uv run`` from it. This is an FCT image
+# contract -- if FCT moves it, the derive's guard fails fast with a clear message.
+_FCT_BUILD_CODE_DIR: Final[str] = "/docker_build_code"
 # Where the FCT deferred-install service writes its success marker; baking it into
 # the seeded image makes ``[program:deferred-install]`` a no-op on every loaded slice.
 _DEFERRED_INSTALL_MARKER_DIR: Final[str] = "/var/lib/minds/deferred-install"
@@ -442,6 +446,11 @@ class SliceVpsDockerProvider(VpsProvider):
         """Build the FCT image (+ baked Playwright) and seed the box tar; this slice runs that image too."""
         logger.info("Building + seeding box tar {} (first slice on this box for this tag)", image_tag)
         parsed = self._parse_build_args(build_args)
+        # Build the base FCT image via the same shared helper the realizer's build path
+        # uses (DockerRealizer._build_image_on_vps) -- so any future build preprocessing
+        # belongs in build_image_on_outer_from_build_args, not the per-caller wrapper, and
+        # is picked up here too. We pass a longer timeout than the realizer default because
+        # the FCT build is the seed's long pole.
         base_image = build_image_on_outer_from_build_args(
             outer,
             self.mngr_ctx.concurrency_group,
@@ -473,10 +482,20 @@ class SliceVpsDockerProvider(VpsProvider):
         unchanged while letting every loaded slice skip the deferred install. The
         browser cache lands in /root/.cache/ms-playwright -- outside the /mngr volume
         and untouched by fct-seed, so it survives into every container.
+
+        The RUN first guards that the FCT build-code dir exists, so a future FCT image
+        that relocates it fails fast with a clear message instead of a confusing
+        ``cd``-not-found build failure buried in retries.
         """
+        guard = (
+            f"test -d {_FCT_BUILD_CODE_DIR} || "
+            f"{{ echo 'FCT build-code dir {_FCT_BUILD_CODE_DIR} missing; FCT image layout changed -- "
+            "update _FCT_BUILD_CODE_DIR' >&2; exit 1; }"
+        )
         dockerfile = (
             f"FROM {base_image}\n"
-            "RUN cd /docker_build_code && uv run playwright install --with-deps chromium "
+            f"RUN {guard} "
+            f"&& cd {_FCT_BUILD_CODE_DIR} && uv run playwright install --with-deps chromium "
             f"&& mkdir -p {_DEFERRED_INSTALL_MARKER_DIR} && touch {_DEFERRED_INSTALL_MARKER}\n"
         )
         encoded_dockerfile = base64.b64encode(dockerfile.encode()).decode()
