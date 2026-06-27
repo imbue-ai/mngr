@@ -49,6 +49,7 @@ from imbue.minds.desktop_client.backup_provisioning import configure_backups_for
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
+from imbue.minds.desktop_client.lima_image_prefetch import prebaked_image_mngr_setting_args
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
@@ -57,6 +58,7 @@ from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
+from imbue.minds.lima_image.primitives import get_current_image_arch
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
@@ -525,6 +527,7 @@ def _build_mngr_create_command(
     latchkey_env: Mapping[str, str] | None = None,
     color: str | None = None,
     original_minds_version: str | None = None,
+    prebaked_lima_image_qcow2_path: Path | None = None,
 ) -> list[str]:
     """Build the ``mngr create`` command for a freshly-provisioned workspace.
 
@@ -688,6 +691,14 @@ def _build_mngr_create_command(
         case LaunchMode.LIMA:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "lima"])
             mngr_command.extend(_remote_host_env_flags())
+            # When the caller resolved a ready pre-baked image (issue #2306),
+            # point Lima at the local qcow2 via the provider's existing per-arch
+            # image-url override, so the VM boots the baked toolchain instead of
+            # building it. No provider code change is needed to consume it.
+            if prebaked_lima_image_qcow2_path is not None:
+                mngr_command.extend(
+                    prebaked_image_mngr_setting_args(get_current_image_arch(), prebaked_lima_image_qcow2_path)
+                )
         case LaunchMode.VULTR:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "vultr"])
             mngr_command.extend(_remote_host_env_flags())
