@@ -463,6 +463,7 @@ class SliceVpsDockerProvider(VpsProvider):
         retry=retry_if_exception_type(MngrError),
         stop=stop_after_attempt(_PLAYWRIGHT_BUILD_ATTEMPTS),
         wait=wait_exponential(multiplier=1, min=1, max=10),
+        reraise=True,
     )
     def _build_playwright_derived_image(self, *, outer: OuterHostInterface, base_image: str, target_tag: str) -> None:
         """Build target_tag as base_image + a baked Playwright/Chromium layer (and the done marker).
