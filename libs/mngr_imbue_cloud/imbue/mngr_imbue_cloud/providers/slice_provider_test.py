@@ -66,7 +66,8 @@ def _ensure(provider: _OrchestrationProvider) -> None:
     )
 
 
-_FAKE_OUTER: Any = object()  # never used by the overridden seed/load seams
+# Never used by the overridden seed/load seams; passed only to satisfy the signature.
+_FAKE_OUTER: Any = object()
 
 
 def test_loads_when_tar_already_present() -> None:

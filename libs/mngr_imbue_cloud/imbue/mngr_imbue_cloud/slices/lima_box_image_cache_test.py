@@ -29,7 +29,7 @@ class _ScriptedBoxClient(LimaSliceVpsClient):
         return self.responder(remote_command)
 
 
-def _cache(responder: Callable[[str], tuple[int | None, str, str]]) -> LimaBoxImageCache:
+def _build(responder: Callable[[str], tuple[int | None, str, str]]) -> tuple[_ScriptedBoxClient, LimaBoxImageCache]:
     client = _ScriptedBoxClient(
         box_address="box.example",
         box_ssh_user="limahost",
@@ -37,7 +37,11 @@ def _cache(responder: Callable[[str], tuple[int | None, str, str]]) -> LimaBoxIm
         responder=responder,
         recorded=[],
     )
-    return LimaBoxImageCache(slice_client=client, cache_dir=_CACHE_DIR)
+    return client, LimaBoxImageCache(slice_client=client, cache_dir=_CACHE_DIR)
+
+
+def _cache(responder: Callable[[str], tuple[int | None, str, str]]) -> LimaBoxImageCache:
+    return _build(responder)[1]
 
 
 def test_has_tar_reflects_test_f_exit_code() -> None:
@@ -54,7 +58,8 @@ def test_try_acquire_build_lock_fails_when_lock_is_fresh() -> None:
         if command.startswith("mkdir"):
             return 1, "", "File exists"
         if "stat -c %Y" in command:
-            return 0, "100\n", ""  # 100s old, well under the TTL
+            # 100s old, well under the TTL.
+            return 0, "100\n", ""
         return 0, "", ""
 
     assert _cache(responder).try_acquire_build_lock(_TAG) is False
@@ -69,7 +74,8 @@ def test_try_acquire_build_lock_reclaims_a_stale_lock() -> None:
             # First mkdir loses (lock present); the post-reclaim retry wins.
             return (1, "", "File exists") if state["mkdir_calls"] == 1 else (0, "", "")
         if "stat -c %Y" in command:
-            return 0, "99999\n", ""  # far older than the TTL -> reclaimable
+            # Far older than the TTL -> reclaimable.
+            return 0, "99999\n", ""
         return 0, "", ""
 
     cache = _cache(responder)
@@ -78,29 +84,30 @@ def test_try_acquire_build_lock_reclaims_a_stale_lock() -> None:
 
 
 def test_save_image_renders_atomic_save_and_prune() -> None:
-    cache = _cache(lambda cmd: (0, "", ""))
+    client, cache = _build(lambda cmd: (0, "", ""))
     cache.save_image_from_slice(_TAG, vm_ssh_port=2200, transfer_key=_KEY)
-    save_cmd = next(c for c in cache.slice_client.recorded if "docker save" in c)  # type: ignore[attr-defined]
+    save_cmd = next(c for c in client.recorded if "docker save" in c)
     assert "docker save fct:minds-v0.3.2" in save_cmd
     assert "-p 2200 root@127.0.0.1" in save_cmd
     assert ".tar.tmp" in save_cmd and "mv" in save_cmd
-    assert "-delete" in save_cmd  # prunes other tags
+    # The save also prunes every other tag's tar.
+    assert "-delete" in save_cmd
 
 
 def test_save_image_raises_and_cleans_tmp_on_failure() -> None:
     def responder(command: str) -> tuple[int | None, str, str]:
         return (1, "", "boom") if "docker save" in command else (0, "", "")
 
-    cache = _cache(responder)
+    client, cache = _build(responder)
     with pytest.raises(BoxImageCacheError):
         cache.save_image_from_slice(_TAG, vm_ssh_port=2200, transfer_key=_KEY)
-    assert any(c.startswith("rm -f") and ".tar.tmp" in c for c in cache.slice_client.recorded)  # type: ignore[attr-defined]
+    assert any(c.startswith("rm -f") and ".tar.tmp" in c for c in client.recorded)
 
 
 def test_load_image_renders_cat_into_docker_load() -> None:
-    cache = _cache(lambda cmd: (0, "", ""))
+    client, cache = _build(lambda cmd: (0, "", ""))
     cache.load_image_into_slice(_TAG, vm_ssh_port=2244, transfer_key=_KEY)
-    load_cmd = next(c for c in cache.slice_client.recorded if "docker load" in c)  # type: ignore[attr-defined]
+    load_cmd = next(c for c in client.recorded if "docker load" in c)
     assert load_cmd.startswith("cat ")
     assert "docker load" in load_cmd and "-p 2244 root@127.0.0.1" in load_cmd
 
