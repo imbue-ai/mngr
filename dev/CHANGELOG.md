@@ -4,6 +4,28 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-06-26
+
+### Added
+
+- Added: Fast, realistic minds-workspace **snapshot test suite** wired into CI as two jobs. `build-minds-snapshot` builds a fresh Modal `vm_runtime` snapshot image (Docker-in-Docker + a real Electron-created forever-claude-template workspace, `docker stop`ped) once per run; `test-minds-snapshot` boots from that image via offload's `--override-image-id` and runs the `minds_snapshot_resume` suite. Both run on every PR (blocking), skip fork PRs, and have a one-click `DISABLE_MINDS_SNAPSHOT_CI` kill switch. Adds `scripts/snapshot_minds_e2e_state.py`, `scripts/cleanup_modal_snapshot_images.py`, `offload-modal-minds-snapshot.toml`, and `just test-offload-minds-snapshot <image-id>`.
+- Added: CI secrets now use the public `imbue-ai/use-vault-secrets` action (pinned by SHA); only `test-minds-snapshot` needs a secret (`ANTHROPIC_API_KEY` from Vault via OIDC).
+- Added: Spec `specs/docstring-anchored-tmr.md` describing the overall move from tutorial-block-anchored to docstring-anchored TMR scope.
+- Added: Blueprint plan `blueprint/minds-google-oauth-fallback/` for inserting a Minds-owned Google OAuth attempt between the credential-validity check and the self-setup browser flow.
+
+### Changed
+
+- Changed: Bumped the offload CI pin in `.github/workflows/ci.yml` from `0.9.9` to `0.9.10` (cargo cache key, version check, and `cargo install` invocation updated to match).
+- Changed: TMR workflow (`.github/workflows/tmr.yml`, including the daily scheduled run) now defaults to all of mngr's release tests (`libs/mngr` with `-m "release and not docker and not docker_sdk"`) rather than only the e2e tutorial subset. Docker-marked release tests are excluded because they need a real Docker daemon and run on a GitHub runner in `release-tests.yml`, not on the Modal hosts TMR provisions.
+- Changed: `scripts/tutorial_matcher.py` now reads the tutorial block from each test function's docstring (under a `Tutorial block:` section) instead of from a `write_tutorial_block(...)` call. The `sync-tutorial-to-e2e-tests` skill now emits the docstring format (verbatim `Tutorial block:` section plus a `Scope:` section) and crystallizes the implicit requirements of each block's commands into the scope.
+- Changed: Bash strict-mode ratchet (`test_meta_ratchets.py::test_prevent_bash_without_strict_mode`) now relies on `find_bash_scripts_without_strict_mode` skipping `.minds/template/` (declarative secret-schema templates, not runnable scripts). Recorded snapshot lowered from 17 to 11, pinned to the offload-CI count.
+- Changed: `minds-launch-to-msg.yml` `macos_launch` job now checks out the trigger ref for the e2e harness (playwright spec + fixtures), matching `launch_to_msg`, instead of pinning the checkout to `commit_sha`. Previously `macos_launch` silently tested a stale harness while `launch_to_msg` picked up harness fixes on the dispatched branch. The binary under test is still pinned to `commit_sha` via the build artifact.
+- Changed: `minds-launch-to-msg.yml` post-test cleanup step no longer swallows the reset script's exit code with `|| true`. The reset script now verifies the runner reached a clean state (no leaked Lima VM / `~/.minds` / app) after its best-effort cleanup and exits non-zero otherwise, so a cleanup failure that would silently rot the self-hosted runner now fails the job.
+
+### Fixed
+
+- Fixed: `scripts/remove_old_flat_vault_secrets.py` now treats a soft-deleted Vault secret (one whose latest version has a `deletion_time`, so `vault kv get` returns a null `data.data` rather than exit-2) as absent and skips it, instead of crashing the run.
+
 ## 2026-06-25
 
 ### Added
