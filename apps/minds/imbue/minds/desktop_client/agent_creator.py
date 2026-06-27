@@ -910,6 +910,7 @@ def run_mngr_create(
     latchkey_env: Mapping[str, str] | None = None,
     color: str | None = None,
     original_minds_version: str | None = None,
+    prebaked_lima_image_qcow2_path: Path | None = None,
     *,
     parent_cg: ConcurrencyGroup | None = None,
 ) -> tuple[AgentId, HostId]:
@@ -947,6 +948,7 @@ def run_mngr_create(
         latchkey_env=latchkey_env,
         color=color,
         original_minds_version=original_minds_version,
+        prebaked_lima_image_qcow2_path=prebaked_lima_image_qcow2_path,
     )
 
     # Build the subprocess env from the parent's env + any secrets we inject

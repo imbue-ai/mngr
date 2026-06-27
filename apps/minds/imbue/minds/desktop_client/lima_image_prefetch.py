@@ -19,6 +19,7 @@ from pydantic import Field
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import ClientEnvConfig
+from imbue.minds.errors import LimaImageDownloadError
 from imbue.minds.errors import LimaImageError
 from imbue.minds.lima_image.cache_layout import LimaImageCacheLayout
 from imbue.minds.lima_image.data_types import LimaImagePrefetchState
@@ -187,6 +188,57 @@ class LimaImagePrefetcher(MutableModel):
             updated_at=datetime.now(timezone.utc),
             error=message,
         )
+
+
+def resolve_ready_prebaked_lima_image(
+    *,
+    prefetcher: "LimaImagePrefetcher | None",
+    is_lima_launch_mode: bool,
+    repo_url: str,
+    branch_or_tag: str | None,
+    current_release_tag: str,
+    default_repo_url: str,
+    is_dev_loop: bool,
+    environ: Mapping[str, str],
+    wait_timeout_seconds: float,
+    poll_interval_seconds: float,
+) -> Path | None:
+    """Resolve the baked qcow2 path to use for a create, or None to build in-VM.
+
+    Returns None when the gate does not apply (non-default workspace, no prefetcher,
+    kill switch, dev loop) or when no image is published for this release+arch
+    (VERSION_UNAVAILABLE -> build in-VM). Raises ``LimaImageDownloadError`` when a
+    *published* image cannot be made ready in time (FAILED or timeout): a retryable
+    hard failure the create surfaces rather than silently rebuilding the slow way.
+    """
+    if prefetcher is None:
+        return None
+    if not should_use_prebaked_lima_image(
+        is_lima_launch_mode=is_lima_launch_mode,
+        repo_url=repo_url,
+        branch_or_tag=branch_or_tag,
+        current_release_tag=current_release_tag,
+        default_repo_url=default_repo_url,
+        source=prefetcher.source,
+        is_dev_loop=is_dev_loop,
+        environ=environ,
+    ):
+        return None
+    state = prefetcher.wait_until_terminal(wait_timeout_seconds, poll_interval_seconds)
+    if state is None:
+        raise LimaImageDownloadError("Pre-baked Lima image is not ready yet; please retry.")
+    match state.status:
+        case LimaImagePrefetchStatus.READY:
+            if state.qcow2_path is None:
+                raise LimaImageDownloadError("Pre-baked Lima image reported ready without a path; please retry.")
+            return state.qcow2_path
+        case LimaImagePrefetchStatus.VERSION_UNAVAILABLE:
+            logger.info("No pre-baked Lima image published for {}; building in-VM", current_release_tag)
+            return None
+        case _:
+            raise LimaImageDownloadError(
+                state.error or f"Pre-baked Lima image not ready (status {state.status.value}); please retry."
+            )
 
 
 def lima_image_cache_dir(data_dir: Path) -> Path:

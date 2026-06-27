@@ -3,6 +3,7 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 
+import pytest
 from pydantic import AnyUrl
 
 from imbue.imbue_common.primitives import NonNegativeInt
@@ -11,7 +12,9 @@ from imbue.minds.desktop_client.lima_image_prefetch import LimaImagePrefetcher
 from imbue.minds.desktop_client.lima_image_prefetch import is_lima_image_cache_disabled
 from imbue.minds.desktop_client.lima_image_prefetch import make_lima_image_source
 from imbue.minds.desktop_client.lima_image_prefetch import prebaked_image_mngr_setting_args
+from imbue.minds.desktop_client.lima_image_prefetch import resolve_ready_prebaked_lima_image
 from imbue.minds.desktop_client.lima_image_prefetch import should_use_prebaked_lima_image
+from imbue.minds.errors import LimaImageDownloadError
 from imbue.minds.lima_image.cache_layout import manifest_signature_url
 from imbue.minds.lima_image.cache_layout import manifest_url
 from imbue.minds.lima_image.data_types import LimaImageEntry
@@ -175,3 +178,80 @@ def test_wait_until_terminal_returns_ready(tmp_path: Path) -> None:
     )
     state = prefetcher.wait_until_terminal(timeout_seconds=1.0, poll_interval_seconds=0.01)
     assert state is not None and state.status is LimaImagePrefetchStatus.READY
+
+
+def _resolve(
+    prefetcher: LimaImagePrefetcher | None,
+    *,
+    branch_or_tag: str | None = _TAG,
+    wait_timeout_seconds: float = 1.0,
+) -> Path | None:
+    return resolve_ready_prebaked_lima_image(
+        prefetcher=prefetcher,
+        is_lima_launch_mode=True,
+        repo_url=_DEFAULT_REPO,
+        branch_or_tag=branch_or_tag,
+        current_release_tag=_TAG,
+        default_repo_url=_DEFAULT_REPO,
+        is_dev_loop=False,
+        environ={},
+        wait_timeout_seconds=wait_timeout_seconds,
+        poll_interval_seconds=0.01,
+    )
+
+
+def _seed(
+    sink: RecordingProgressSink, status: LimaImagePrefetchStatus, *, qcow2_path: Path | None, error: str | None
+) -> None:
+    sink.write_state(
+        LimaImagePrefetchState(
+            status=status,
+            minds_version=MindsImageVersion(_TAG),
+            arch=ImageArch.X86_64,
+            updated_at=datetime.now(timezone.utc),
+            qcow2_path=qcow2_path,
+            error=error,
+        )
+    )
+
+
+def test_resolve_returns_none_without_prefetcher() -> None:
+    assert _resolve(None) is None
+
+
+def test_resolve_returns_none_when_gate_false(tmp_path: Path) -> None:
+    sink = RecordingProgressSink()
+    prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
+    _seed(sink, LimaImagePrefetchStatus.READY, qcow2_path=tmp_path / "i.qcow2", error=None)
+    assert _resolve(prefetcher, branch_or_tag="main") is None
+
+
+def test_resolve_returns_path_when_ready(tmp_path: Path) -> None:
+    sink = RecordingProgressSink()
+    prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
+    qcow2 = tmp_path / "image.qcow2"
+    _seed(sink, LimaImagePrefetchStatus.READY, qcow2_path=qcow2, error=None)
+    assert _resolve(prefetcher) == qcow2
+
+
+def test_resolve_returns_none_when_version_unavailable(tmp_path: Path) -> None:
+    sink = RecordingProgressSink()
+    prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
+    _seed(sink, LimaImagePrefetchStatus.VERSION_UNAVAILABLE, qcow2_path=None, error=None)
+    assert _resolve(prefetcher) is None
+
+
+def test_resolve_raises_when_failed(tmp_path: Path) -> None:
+    sink = RecordingProgressSink()
+    prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
+    _seed(sink, LimaImagePrefetchStatus.FAILED, qcow2_path=None, error="network down")
+    with pytest.raises(LimaImageDownloadError):
+        _resolve(prefetcher)
+
+
+def test_resolve_raises_on_timeout_without_terminal_state(tmp_path: Path) -> None:
+    sink = RecordingProgressSink()
+    prefetcher = _prefetcher(InMemoryManifestFetcher(), FixedRawChunkStore(), sink, tmp_path)
+    # No terminal state ever written -> wait times out -> retryable raise.
+    with pytest.raises(LimaImageDownloadError):
+        _resolve(prefetcher, wait_timeout_seconds=0.05)
