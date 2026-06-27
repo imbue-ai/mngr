@@ -3,10 +3,12 @@
 Per-dev-env state is split into two files under ``~/.minds-<env-name>/``:
 
 * ``client.toml`` (mode 0644) -- non-secret config (connector + LiteLLM
-  URLs). Shape is exactly :class:`ClientEnvConfig`, so the same file
-  can be passed to ``minds run --config-file`` directly. ``write_client_config``
-  refuses to serialize anything other than the URL fields so a dev
-  ``client.toml`` is shape-identical to a staging / production one.
+  URLs, plus the optional pre-baked Lima image source: a CDN URL and its
+  minisign public key). Shape is exactly :class:`ClientEnvConfig`, so the
+  same file can be passed to ``minds run --config-file`` directly.
+  ``write_client_config`` serializes only :class:`ClientEnvConfig` fields
+  (never a ``[secrets]`` block) so a dev ``client.toml`` is shape-identical
+  to a staging / production one.
 * ``secrets.toml`` (mode 0600) -- the values ``minds env deploy``
   generated on this machine (Neon DSN, SuperTokens connection URI,
   SuperTokens API key). Staging / production fetch the same values from
