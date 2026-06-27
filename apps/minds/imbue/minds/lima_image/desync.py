@@ -14,7 +14,8 @@ from imbue.minds.lima_image.interfaces import ProcessOutputCallback
 # retries transient chunk fetches (-e) within this window.
 DESYNC_EXTRACT_TIMEOUT_SECONDS: Final[float] = 3600.0
 
-# Per-chunk network retry count handed to desync (linear backoff via -b).
+# Per-chunk network retry count handed to desync via -e. desync applies its own
+# (default) linear backoff between attempts; we only override the retry count.
 DESYNC_ERROR_RETRY_COUNT: Final[int] = 5
 
 
@@ -41,7 +42,8 @@ class DesyncImageChunkStore(ImageChunkStoreInterface):
         output_file.parent.mkdir(parents=True, exist_ok=True)
         # -k keeps the partial output on error so a re-run resumes instead of
         # re-fetching completed chunks; -c is a local chunk cache that survives
-        # across runs; -e/-b bound transient network retries.
+        # across runs; -e bounds transient network retries (desync applies its
+        # own default linear backoff between attempts).
         command: list[str] = [
             self.desync_binary,
             "extract",
