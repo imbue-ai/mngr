@@ -166,7 +166,7 @@ Build one arch per native host (QEMU TCG cross-builds are too slow), then publis
 ./scripts/build-lima-image.sh --fct-ref "$VERSION"            # emits qcow2 + raw under scripts/packer/output-*/
 # Publish the raw image (chunk + sign + upload). Needs R2 creds + the minisign key.
 uv run python scripts/lima_image/publish.py \
-  --version "$VERSION" --arch "$(uname -m | sed 's/aarch64/aarch64/;s/x86_64/x86_64/')" \
+  --version "$VERSION" --arch "$(uname -m | sed 's/arm64/aarch64/')" \
   --raw-image scripts/packer/output-mngr-lima-*/mngr-lima-*.raw \
   --bucket "$LIMA_IMAGE_R2_BUCKET" --secret-key-file "$MINISIGN_KEY" --uploader s3
 ```
