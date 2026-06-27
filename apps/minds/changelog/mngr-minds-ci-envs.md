@@ -6,6 +6,6 @@ Added a per-run minds CI environment to the snapshot test pipeline so live tests
 
 - New `minds_services` integration test: log in to the per-run env as the fixed CI user, mint a LiteLLM key, and make a live LLM call. Runs on every push.
 
-- Test tiers: `minds_services` runs in the integration tier (every push); `minds_deployment` (deploy / rollback / destroy round-trip) runs in a manual release tier. See `apps/minds/deployment_tests/README.md` for the capability-mark + tier matrix and local-invocation recipes.
+- Test tiers: `minds_services` runs in the integration tier (every push); `minds_deployment` runs in a manual release tier (`workflow_dispatch`). See `apps/minds/deployment_tests/README.md` for the capability-mark + tier matrix and local-invocation recipes. `test_deploy_new_version` and `test_deploy_round_trip` pass; `test_deploy_rollback` is skipped because it surfaced a real `minds env recover` gap (broken v2 containers are not terminated on auto-rollback, so `/version` keeps reporting the failed deploy_id) that needs a recover/terminate fix.
 
 - `test_litellm_via_workspace` and `test_signup_tunnel` are wired into the flow but remain `@pytest.mark.skip`ped with explicit notes: their bodies are still stubs and need debugging (real FCT Docker workspace creation, Cloudflare tunnels, the mail.tm signup flow) before they will pass.
