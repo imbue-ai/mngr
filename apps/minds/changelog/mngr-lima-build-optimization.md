@@ -6,6 +6,6 @@ Accelerated local Lima workspace creation by adding a pre-baked Lima VM image ca
 
 - Fallback behavior: when no image is published for the selected release+arch, the app warns and builds the workspace in-VM as before; when a published image fails to download or verify, the create fails with a clear, retryable error (downloads resume on retry) rather than silently rebuilding. Background auto-retry runs while the app is open. A `MINDS_DISABLE_LIMA_IMAGE_CACHE=1` env var disables the path entirely (for testing/dev).
 
-- The per-env chunk-store base URL and trusted minisign public key come from `client.toml` (`lima_image_base_url`, `lima_image_minisign_public_key`); when unset, the pre-baked path is disabled and the app builds in-VM. Each minds env keeps its own image cache under its data root.
+- The per-env chunk-store base URL and trusted minisign public key come from `client.toml` (`lima_image_base_url`, `lima_image_minisign_public_key`); when unset, the pre-baked path is disabled and the app builds in-VM. Each minds env keeps its own image cache under its data root. The dev-env `client.toml` writer round-trips these two fields when set, so a dev env can opt into a pre-baked image source; `apps/minds/docs/release.md` documents the per-tier setup + per-release publish runbook.
 
 - Bundled the `desync` binary alongside `uv`/`git`/`lima` in the Electron resources (macOS/Linux) and added it to the backend PATH.
