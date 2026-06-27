@@ -418,7 +418,7 @@ def test_create_operation_status_includes_status_text(
         tmp_path, root_concurrency_group, notification_dispatcher, agent_creator=creator
     )
 
-    response = client.get(f"/api/v1/workspaces/operations/{creation_id}", headers=_auth_header())
+    response = client.get(f"/api/v1/workspaces/operations/create/{creation_id}", headers=_auth_header())
 
     assert response.status_code == 200
     body = json.loads(response.data)
@@ -545,7 +545,7 @@ def test_operation_status_unknown_create_id_returns_404(tmp_path: Path) -> None:
     client = _client_with_workspace(tmp_path, AgentId())
     creation_id = CreationId()
 
-    response = client.get(f"/api/v1/workspaces/operations/{creation_id}", headers=_auth_header())
+    response = client.get(f"/api/v1/workspaces/operations/create/{creation_id}", headers=_auth_header())
 
     assert response.status_code == 404
 
@@ -554,7 +554,7 @@ def test_operation_status_unknown_destroy_id_returns_404(tmp_path: Path) -> None
     client = _client_with_workspace(tmp_path, AgentId())
     other_id = AgentId()
 
-    response = client.get(f"/api/v1/workspaces/operations/{other_id}", headers=_auth_header())
+    response = client.get(f"/api/v1/workspaces/operations/destroy/{other_id}", headers=_auth_header())
 
     assert response.status_code == 404
 
@@ -603,7 +603,7 @@ def test_operation_logs_unknown_create_id_returns_404(tmp_path: Path) -> None:
     client = _client_with_workspace(tmp_path, AgentId())
     creation_id = CreationId()
 
-    response = client.get(f"/api/v1/workspaces/operations/{creation_id}/logs", headers=_auth_header())
+    response = client.get(f"/api/v1/workspaces/operations/create/{creation_id}/logs", headers=_auth_header())
 
     assert response.status_code == 404
 
@@ -612,7 +612,7 @@ def test_operation_logs_unknown_destroy_id_returns_404(tmp_path: Path) -> None:
     client = _client_with_workspace(tmp_path, AgentId())
     other_id = AgentId()
 
-    response = client.get(f"/api/v1/workspaces/operations/{other_id}/logs", headers=_auth_header())
+    response = client.get(f"/api/v1/workspaces/operations/destroy/{other_id}/logs", headers=_auth_header())
 
     assert response.status_code == 404
 
@@ -620,7 +620,7 @@ def test_operation_logs_unknown_destroy_id_returns_404(tmp_path: Path) -> None:
 def test_operation_logs_requires_bearer(tmp_path: Path) -> None:
     client = _client_with_workspace(tmp_path, AgentId())
 
-    response = client.get(f"/api/v1/workspaces/operations/{CreationId()}/logs")
+    response = client.get(f"/api/v1/workspaces/operations/create/{CreationId()}/logs")
 
     assert response.status_code == 401
 
@@ -841,22 +841,13 @@ def test_patch_workspace_disassociate_leased_host_returns_403(tmp_path: Path) ->
     assert "leased from imbue_cloud" in json.loads(response.data)["error"]
 
 
-# -- DELETE /api/v1/workspaces/operations/<id> (dismiss) --
-
-
-def test_dismiss_create_operation_is_idempotent_noop(tmp_path: Path) -> None:
-    client = _client_with_workspace(tmp_path, AgentId())
-
-    response = client.delete(f"/api/v1/workspaces/operations/{CreationId()}", headers=_auth_header())
-
-    assert response.status_code == 200
-    assert json.loads(response.data) == {}
+# -- DELETE /api/v1/workspaces/operations/destroy/<id> (dismiss) --
 
 
 def test_dismiss_destroy_operation_is_idempotent_noop(tmp_path: Path) -> None:
     client = _client_with_workspace(tmp_path, AgentId())
 
-    response = client.delete(f"/api/v1/workspaces/operations/{AgentId()}", headers=_auth_header())
+    response = client.delete(f"/api/v1/workspaces/operations/destroy/{AgentId()}", headers=_auth_header())
 
     assert response.status_code == 200
     assert json.loads(response.data) == {}
@@ -865,7 +856,7 @@ def test_dismiss_destroy_operation_is_idempotent_noop(tmp_path: Path) -> None:
 def test_dismiss_operation_requires_bearer(tmp_path: Path) -> None:
     client = _client_with_workspace(tmp_path, AgentId())
 
-    response = client.delete(f"/api/v1/workspaces/operations/{AgentId()}")
+    response = client.delete(f"/api/v1/workspaces/operations/destroy/{AgentId()}")
 
     assert response.status_code == 401
 
@@ -1323,7 +1314,7 @@ def test_workspace_restart_registers_operation_reaching_done(
         if log_queue.get(timeout=15.0) == OPERATION_LOG_SENTINEL:
             break
 
-    status_resp = client.get(f"/api/v1/workspaces/operations/{agent_id}", headers=_auth_header())
+    status_resp = client.get(f"/api/v1/workspaces/operations/restart/{agent_id}", headers=_auth_header())
     assert status_resp.status_code == 200
     body = json.loads(status_resp.data)
     assert body["kind"] == "restart"
@@ -1331,30 +1322,29 @@ def test_workspace_restart_registers_operation_reaching_done(
     assert body["status"] == "DONE"
 
 
-def test_operation_status_reports_restart_record_first(tmp_path: Path) -> None:
-    # A restart record keyed by the workspace agent id is reported as kind=restart
-    # by the operations resource (consulted before the destroy fallback).
+def test_restart_operation_status_reports_registry_record(tmp_path: Path) -> None:
+    # The typed restart endpoint reports a restart registry record keyed by the
+    # workspace agent id as kind=restart, transitioning RUNNING -> DONE.
     agent_id = AgentId()
     client = _client_with_workspace(tmp_path, agent_id)
     registry = get_state(client.application).workspace_operation_registry
     registry.start(agent_id, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
 
-    running = json.loads(client.get(f"/api/v1/workspaces/operations/{agent_id}", headers=_auth_header()).data)
+    running = json.loads(client.get(f"/api/v1/workspaces/operations/restart/{agent_id}", headers=_auth_header()).data)
     assert running["kind"] == "restart"
     assert running["status"] == "RUNNING"
     assert running["is_done"] is False
 
     registry.complete(agent_id)
-    done = json.loads(client.get(f"/api/v1/workspaces/operations/{agent_id}", headers=_auth_header()).data)
+    done = json.loads(client.get(f"/api/v1/workspaces/operations/restart/{agent_id}", headers=_auth_header()).data)
     assert done["is_done"] is True
     assert done["status"] == "DONE"
 
 
-def test_operation_status_destroy_is_not_shadowed_by_stale_restart_record(tmp_path: Path) -> None:
-    # The in-memory restart registry is never pruned, so a completed restart
-    # record for a workspace lingers for the rest of the app session. A later
-    # destroy of that same workspace -- keyed by the same agent id -- must report
-    # as kind=destroy, not be shadowed by the stale restart record.
+def test_typed_operation_routes_report_independently_for_one_agent_id(tmp_path: Path) -> None:
+    # The whole point of type-segmenting the operations resource: a destroy and a
+    # (stale, never-pruned) restart record for the *same* workspace agent id no
+    # longer shadow each other -- each typed endpoint reports only its own kind.
     agent_id = AgentId()
     client = _client_with_workspace(tmp_path, agent_id)
     registry = get_state(client.application).workspace_operation_registry
@@ -1367,9 +1357,16 @@ def test_operation_status_destroy_is_not_shadowed_by_stale_restart_record(tmp_pa
     destroy_dir.mkdir(parents=True)
     (destroy_dir / "pid").write_text(f"{os.getpid()}\n")
 
-    body = json.loads(client.get(f"/api/v1/workspaces/operations/{agent_id}", headers=_auth_header()).data)
-    assert body["kind"] == "destroy"
-    assert body["status"] == "RUNNING"
+    destroy_body = json.loads(
+        client.get(f"/api/v1/workspaces/operations/destroy/{agent_id}", headers=_auth_header()).data
+    )
+    assert destroy_body["kind"] == "destroy"
+    assert destroy_body["status"] == "RUNNING"
+
+    restart_body = json.loads(
+        client.get(f"/api/v1/workspaces/operations/restart/{agent_id}", headers=_auth_header()).data
+    )
+    assert restart_body["kind"] == "restart"
 
 
 def test_operation_logs_streams_restart_log_lines(tmp_path: Path) -> None:
@@ -1382,7 +1379,7 @@ def test_operation_logs_streams_restart_log_lines(tmp_path: Path) -> None:
     registry.append_log(agent_id, "restarting now")
     registry.complete(agent_id)
 
-    response = client.get(f"/api/v1/workspaces/operations/{agent_id}/logs", headers=_auth_header())
+    response = client.get(f"/api/v1/workspaces/operations/restart/{agent_id}/logs", headers=_auth_header())
 
     assert response.status_code == 200
     text = response.get_data(as_text=True)

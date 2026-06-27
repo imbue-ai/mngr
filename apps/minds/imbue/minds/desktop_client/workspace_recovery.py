@@ -12,7 +12,7 @@ passive discovery resolver plus a batched in-container ``mngr exec`` probe.
 start``, then await recovery) that drives both the
 :class:`SystemInterfaceHealthTracker` (so the existing recovery page keeps
 working) and a :class:`WorkspaceOperationRegistryInterface` (so the v1
-``/workspaces/operations/<id>`` resource can report restart status + logs).
+``/workspaces/operations/restart/<id>`` resource can report restart status + logs).
 """
 
 import os
@@ -202,7 +202,7 @@ def run_restart_sequence(
     tier's startup-wait budget (the host tier cold-boots a container, so it waits
     longer than the in-place surgical tier). In lockstep it appends progress lines
     to, and completes / fails, the v1 ``registry`` operation so the
-    ``/workspaces/operations/<id>`` resource can report the same restart. A crash
+    ``/workspaces/operations/restart/<id>`` resource can report the same restart. A crash
     of this worker is turned into RESTART_FAILED by ``RestartWorkerFailureHandler``,
     wired as the thread's ``on_failure`` callback.
 

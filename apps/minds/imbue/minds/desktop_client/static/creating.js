@@ -138,7 +138,7 @@
     }
   }
   function pollStatus() {
-    fetch('/api/v1/workspaces/operations/' + agentId)
+    fetch('/api/v1/workspaces/operations/create/' + agentId)
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(applyStatus)
       .catch(function () {});
@@ -161,7 +161,7 @@
     logsEl.scrollTop = logsEl.scrollHeight;
   }
 
-  var source = new EventSource('/api/v1/workspaces/operations/' + agentId + '/logs');
+  var source = new EventSource('/api/v1/workspaces/operations/create/' + agentId + '/logs');
   source.onmessage = function (event) {
     var data;
     try {

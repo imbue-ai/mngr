@@ -48,12 +48,16 @@ from imbue.minds.desktop_client.api_models import AgentNotificationRequest
 from imbue.minds.desktop_client.api_models import ApiErrorResponse
 from imbue.minds.desktop_client.api_models import BugReportRequest
 from imbue.minds.desktop_client.api_models import BugReportResponse
+from imbue.minds.desktop_client.api_models import CreateOperationStatusResponse
 from imbue.minds.desktop_client.api_models import CreateWorkspaceRequest
+from imbue.minds.desktop_client.api_models import DestroyOperationStatusResponse
+from imbue.minds.desktop_client.api_models import EmptyResponse
 from imbue.minds.desktop_client.api_models import EnableSharingRequest
 from imbue.minds.desktop_client.api_models import EstablishSshRequest
 from imbue.minds.desktop_client.api_models import OkResponse
 from imbue.minds.desktop_client.api_models import OperationHandleResponse
 from imbue.minds.desktop_client.api_models import PatchWorkspaceRequest
+from imbue.minds.desktop_client.api_models import RestartOperationStatusResponse
 from imbue.minds.desktop_client.api_models import RestartWorkspaceRequest
 from imbue.minds.desktop_client.api_models import SharingReadinessResponse
 from imbue.minds.desktop_client.api_models import SharingToggleResponse
@@ -124,7 +128,16 @@ _ROUTE_MODELS: Final[Mapping[tuple[str, str], _RouteModels]] = {
     ),
     ("POST", "/api/v1/workspaces/{agent_id}/start"): _RouteModels(response_model=WorkspaceLifecycleResponse),
     ("POST", "/api/v1/workspaces/{agent_id}/stop"): _RouteModels(response_model=WorkspaceLifecycleResponse),
-    ("GET", "/api/v1/workspaces/operations/{operation_id}"): _RouteModels(response_model=OperationHandleResponse),
+    ("GET", "/api/v1/workspaces/operations/create/{operation_id}"): _RouteModels(
+        response_model=CreateOperationStatusResponse
+    ),
+    ("GET", "/api/v1/workspaces/operations/destroy/{operation_id}"): _RouteModels(
+        response_model=DestroyOperationStatusResponse
+    ),
+    ("GET", "/api/v1/workspaces/operations/restart/{operation_id}"): _RouteModels(
+        response_model=RestartOperationStatusResponse
+    ),
+    ("DELETE", "/api/v1/workspaces/operations/destroy/{operation_id}"): _RouteModels(response_model=EmptyResponse),
     ("POST", "/api/v1/workspaces/{agent_id}/ssh"): _RouteModels(
         request_model=EstablishSshRequest, response_model=SshConnectionResponse
     ),

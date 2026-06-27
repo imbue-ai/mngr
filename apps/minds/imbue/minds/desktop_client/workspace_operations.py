@@ -7,9 +7,9 @@ durability requirement and its operation record lives purely in memory,
 consistent with how create is tracked (in :class:`AgentCreator`). Killing the
 app mid-restart simply abandons the restart; nothing is leaked.
 
-The ``/api/v1/workspaces/operations/<id>`` resource reads restart status and a
-status-log stream from here, keyed by the workspace's agent id (which is the
-operation id, disambiguated from a destroy by consulting this registry first).
+The ``/api/v1/workspaces/operations/restart/<id>`` resource reads restart status
+and a status-log stream from here, keyed by the workspace's agent id (which is the
+operation id; the type-segmented route means it is never confused with a destroy).
 """
 
 import queue

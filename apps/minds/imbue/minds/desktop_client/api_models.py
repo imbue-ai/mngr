@@ -63,8 +63,45 @@ class ApiValidationErrorResponse(FrozenModel):
 class OperationHandleResponse(FrozenModel):
     """A handle for a long-running create/destroy/restart operation, to poll."""
 
-    operation_id: str = Field(description="Poll at /api/v1/workspaces/operations/<operation_id>")
+    operation_id: str = Field(description="Poll at /api/v1/workspaces/operations/<kind>/<operation_id>")
     kind: str = Field(description="Operation kind: create, destroy, or restart")
+
+
+class CreateOperationStatusResponse(FrozenModel):
+    """Status of a create operation (polled at /operations/create/<id>)."""
+
+    operation_id: str = Field(description="The creation id being polled")
+    kind: str = Field(description="Always 'create'")
+    status: str = Field(description="Raw creation status")
+    status_text: str = Field(description="Human-readable, mode-aware stage caption for the creating page")
+    is_done: bool = Field(description="Whether creation has finished successfully")
+    agent_id: str | None = Field(default=None, description="The created workspace agent id, once known")
+    redirect_url: str | None = Field(default=None, description="Absolute /goto/<agent>/ URL to navigate to when done")
+    error: str | None = Field(default=None, description="Failure message, when the creation failed")
+
+
+class DestroyOperationStatusResponse(FrozenModel):
+    """Status of a destroy operation (polled at /operations/destroy/<id>)."""
+
+    operation_id: str = Field(description="The workspace agent id being destroyed")
+    kind: str = Field(description="Always 'destroy'")
+    status: str = Field(description="Raw destroy status")
+    is_done: bool = Field(description="Whether the host is fully gone")
+    agent_id: str = Field(description="The workspace agent id (same as operation_id)")
+
+
+class RestartOperationStatusResponse(FrozenModel):
+    """Status of a restart operation (polled at /operations/restart/<id>)."""
+
+    operation_id: str = Field(description="The workspace agent id being restarted")
+    kind: str = Field(description="Always 'restart'")
+    status: str = Field(description="Raw restart status")
+    is_done: bool = Field(description="Whether the restart has finished")
+    error: str | None = Field(default=None, description="Failure message, when the restart failed")
+
+
+class EmptyResponse(FrozenModel):
+    """An empty ``{}`` success body (e.g. an idempotent dismissal)."""
 
 
 class AgentNotificationRequest(ApiRequestModel):

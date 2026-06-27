@@ -696,7 +696,7 @@ def _handle_creating_page(
     The page shows the setting-up progress screen while the workspace is
     created in the background, then redirects into the workspace once
     creation finishes. The page's JS polls the versioned operations resource
-    (``/api/v1/workspaces/operations/<creation_id>`` + ``/logs``) for status
+    (``/api/v1/workspaces/operations/create/<creation_id>`` + ``/logs``) for status
     and live logs, keyed by the same ``creation_id`` carried in the route.
     """
     if not _is_request_authenticated():
@@ -2182,8 +2182,8 @@ def create_desktop_client(
     app.add_url_rule("/creating/<agent_id>", view_func=_handle_creating_page)
 
     # Agent destruction routes. Destroy, status/log streaming, and dismiss
-    # (DELETE /api/v1/workspaces/operations/<id>) are all served by the versioned
-    # /api/v1/workspaces surface now; only the detail page remains here.
+    # (DELETE /api/v1/workspaces/operations/destroy/<id>) are all served by the
+    # versioned /api/v1/workspaces surface now; only the detail page remains here.
     app.add_url_rule("/destroying/<agent_id>", view_func=_handle_destroying_page)
 
     # Workspace-recovery page. The host-health probe and the restart actions it

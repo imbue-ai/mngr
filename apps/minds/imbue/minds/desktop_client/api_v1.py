@@ -61,13 +61,17 @@ from imbue.minds.desktop_client.api_models import AgentNotificationRequest
 from imbue.minds.desktop_client.api_models import BackupSnapshotSummary
 from imbue.minds.desktop_client.api_models import BugReportRequest
 from imbue.minds.desktop_client.api_models import BugReportResponse
+from imbue.minds.desktop_client.api_models import CreateOperationStatusResponse
 from imbue.minds.desktop_client.api_models import CreateWorkspaceRequest
+from imbue.minds.desktop_client.api_models import DestroyOperationStatusResponse
+from imbue.minds.desktop_client.api_models import EmptyResponse
 from imbue.minds.desktop_client.api_models import EnableSharingRequest
 from imbue.minds.desktop_client.api_models import EstablishSshRequest
 from imbue.minds.desktop_client.api_models import OkResponse
 from imbue.minds.desktop_client.api_models import OperationHandleResponse
 from imbue.minds.desktop_client.api_models import PatchWorkspaceRequest
 from imbue.minds.desktop_client.api_models import ProviderToggleResponse
+from imbue.minds.desktop_client.api_models import RestartOperationStatusResponse
 from imbue.minds.desktop_client.api_models import RestartWorkspaceRequest
 from imbue.minds.desktop_client.api_models import SetProviderEnabledRequest
 from imbue.minds.desktop_client.api_models import SharingReadinessResponse
@@ -358,7 +362,7 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     for compute/AI -- required when ``launch_mode`` or ``ai_provider`` is
     ``IMBUE_CLOUD``), ``anthropic_api_key`` (required when ``ai_provider`` is
     ``API_KEY``), and ``region``. Returns ``202`` with an ``operation_id`` the
-    caller polls at ``/api/v1/workspaces/operations/<operation_id>``; the
+    caller polls at ``/api/v1/workspaces/operations/create/<operation_id>``; the
     canonical workspace id appears there once ``mngr create`` returns.
 
     This is the single create front door for both agents and the browser. To let
@@ -626,9 +630,9 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
     bounces the whole host (``host_already_stopped`` is honored only for the host
     scope, letting a known-stopped host skip the redundant stop step). Returns
     ``202`` with ``{operation_id, kind: "restart"}`` (the op id is the workspace
-    agent id), followed via ``/api/v1/workspaces/operations/<id>`` (+``/logs``)
-    exactly like create / destroy. A restart already in flight is deduped: the
-    same handle is returned without stacking a second worker.
+    agent id), followed via ``/api/v1/workspaces/operations/restart/<id>``
+    (+``/logs``) exactly like create / destroy. A restart already in flight is
+    deduped: the same handle is returned without stacking a second worker.
     """
     parsed_id = AgentId(agent_id)
     # The spectree model enforces ``scope`` is a required string; its value (one
@@ -699,84 +703,83 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
     return handle, 202
 
 
+# Operation polling is segmented by type -- ``/operations/<type>/<id>`` -- so the
+# id no longer has to be disambiguated by prefix, and a destroy and a restart of
+# the same workspace (both keyed by the agent id) can't shadow each other. The
+# caller always knows the type (the creating / destroying / recovery flows each
+# poll their own), so each type has its own handler + precise response model.
+
+
 @require_api_or_cookie_auth
-def _handle_operation_status(operation_id: str) -> Response:
-    """Report the status of a create, destroy, or restart operation, keyed by its id.
+@API_SPEC.validate(resp=json_response_model(CreateOperationStatusResponse))
+def _handle_create_operation_status(operation_id: str) -> CreateOperationStatusResponse | Response:
+    """Report the status of a create operation (the id is a ``creation-...`` id)."""
+    agent_creator: AgentCreator | None = get_state().agent_creator
+    info = agent_creator.get_creation_info(CreationId(operation_id)) if agent_creator is not None else None
+    if info is None:
+        return _json_error(f"Unknown operation {operation_id}", 404)
+    return CreateOperationStatusResponse(
+        operation_id=operation_id,
+        kind="create",
+        status=str(info.status),
+        # Human-readable stage caption for the creating page (e.g. "Cloning
+        # repository...", "Failed: ..."), mode-aware. Restores the live caption
+        # the old per-stage SSE status frames carried.
+        status_text=status_text_for(str(info.status), error=info.error, launch_mode=info.launch_mode),
+        is_done=info.status == AgentCreationStatus.DONE,
+        agent_id=str(info.agent_id) if info.agent_id is not None else None,
+        # The absolute ``/goto/<agent>/`` URL the creating page navigates to once
+        # the workspace is ready. Built by the creator (it knows the ``mngr
+        # forward`` port) and populated atomically with DONE, so the page
+        # redirects without reconstructing it client-side.
+        redirect_url=info.redirect_url,
+        error=info.error,
+    )
 
-    Create operations are keyed by a ``creation-...`` id (from the create route);
-    destroy and restart operations are both keyed by the workspace's agent id (a
-    destroy by its on-disk record, a restart by the in-memory registry).
-    """
-    if operation_id.startswith(f"{CreationId.PREFIX}-"):
-        agent_creator: AgentCreator | None = get_state().agent_creator
-        info = agent_creator.get_creation_info(CreationId(operation_id)) if agent_creator is not None else None
-        if info is None:
-            return _json_error(f"Unknown operation {operation_id}", 404)
-        return _json_response(
-            {
-                "operation_id": operation_id,
-                "kind": "create",
-                "status": str(info.status),
-                # Human-readable stage caption for the creating page (e.g.
-                # "Cloning repository...", "Failed: ..."), mode-aware. Restores
-                # the live caption the old per-stage SSE status frames carried.
-                "status_text": status_text_for(str(info.status), error=info.error, launch_mode=info.launch_mode),
-                "is_done": info.status == AgentCreationStatus.DONE,
-                "agent_id": str(info.agent_id) if info.agent_id is not None else None,
-                # The absolute ``/goto/<agent>/`` URL the creating page navigates
-                # to once the workspace is ready. Built by the creator (it knows
-                # the ``mngr forward`` port) and populated atomically with DONE,
-                # so the page redirects without reconstructing it client-side.
-                "redirect_url": info.redirect_url,
-                "error": info.error,
-            }
-        )
 
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(DestroyOperationStatusResponse))
+def _handle_destroy_operation_status(operation_id: str) -> DestroyOperationStatusResponse | Response:
+    """Report the status of a destroy operation (the id is the workspace agent id)."""
     parsed_id = AgentId(operation_id)
-    # A destroy op and a restart op are both keyed by the workspace agent id, so
-    # consult the on-disk destroy record *first*. Once a destroy is started it is
-    # the authoritative operation for that workspace, whereas the in-memory
-    # restart registry is never pruned -- a restart record left over from earlier
-    # in this app session would otherwise shadow a later destroy of the same
-    # workspace. A restart never overlaps a destroy (you cannot restart a
-    # destroyed workspace), so during a live restart no destroy record exists on
-    # disk and we correctly fall through to the registry below.
     paths: WorkspacePaths | None = get_state().api_v1_paths
-    if paths is not None:
-        backend_resolver = get_state().backend_resolver
-        # A destroy is only DONE once the workspace's *host* is gone (not merely
-        # the workspace agent): a destroy that tore down only the agent while the
-        # host's ``system-services`` kept it alive must read as FAILED, not a
-        # false DONE. ``destroying.is_host_still_active`` answers that (active-set
-        # membership OR a host not yet in ``DESTROYED``); see
-        # :func:`destroying.read_destroying`.
-        record = destroying.read_destroying(
-            parsed_id, paths, destroying.is_host_still_active(backend_resolver, paths, parsed_id)
-        )
-        if record is not None:
-            return _json_response(
-                {
-                    "operation_id": operation_id,
-                    "kind": "destroy",
-                    "status": str(record.status),
-                    "is_done": record.status == destroying.DestroyingStatus.DONE,
-                    "agent_id": operation_id,
-                }
-            )
+    if paths is None:
+        return _json_error(f"Unknown operation {operation_id}", 404)
+    backend_resolver = get_state().backend_resolver
+    # A destroy is only DONE once the workspace's *host* is gone (not merely the
+    # workspace agent): a destroy that tore down only the agent while the host's
+    # ``system-services`` kept it alive must read as FAILED, not a false DONE.
+    # ``destroying.is_host_still_active`` answers that (active-set membership OR a
+    # host not yet in ``DESTROYED``); see :func:`destroying.read_destroying`.
+    record = destroying.read_destroying(
+        parsed_id, paths, destroying.is_host_still_active(backend_resolver, paths, parsed_id)
+    )
+    if record is None:
+        return _json_error(f"Unknown operation {operation_id}", 404)
+    return DestroyOperationStatusResponse(
+        operation_id=operation_id,
+        kind="destroy",
+        status=str(record.status),
+        is_done=record.status == destroying.DestroyingStatus.DONE,
+        agent_id=operation_id,
+    )
 
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(RestartOperationStatusResponse))
+def _handle_restart_operation_status(operation_id: str) -> RestartOperationStatusResponse | Response:
+    """Report the status of a restart operation (the id is the workspace agent id)."""
+    parsed_id = AgentId(operation_id)
     restart_record = get_state().workspace_operation_registry.get(parsed_id)
-    if restart_record is not None:
-        return _json_response(
-            {
-                "operation_id": operation_id,
-                "kind": "restart",
-                "status": str(restart_record.status),
-                "is_done": restart_record.status == WorkspaceOperationStatus.DONE,
-                "error": restart_record.error,
-            }
-        )
-
-    return _json_error(f"Unknown operation {operation_id}", 404)
+    if restart_record is None:
+        return _json_error(f"Unknown operation {operation_id}", 404)
+    return RestartOperationStatusResponse(
+        operation_id=operation_id,
+        kind="restart",
+        status=str(restart_record.status),
+        is_done=restart_record.status == WorkspaceOperationStatus.DONE,
+        error=restart_record.error,
+    )
 
 
 def _sse(payload: dict[str, object]) -> str:
@@ -859,47 +862,43 @@ def _stream_destroy_operation_logs(agent_id: AgentId, paths: WorkspacePaths) -> 
 
 
 @require_api_or_cookie_auth
-def _handle_operation_logs(operation_id: str) -> Response:
-    """Stream a create, destroy, or restart operation's logs as server-sent events.
+def _handle_create_operation_logs(operation_id: str) -> Response:
+    """Stream a create operation's in-memory log queue as server-sent events."""
+    agent_creator: AgentCreator | None = get_state().agent_creator
+    log_queue = agent_creator.get_log_queue(CreationId(operation_id)) if agent_creator is not None else None
+    if log_queue is None:
+        return _json_error(f"Unknown operation {operation_id}", 404)
+    return make_streaming_response(
+        _stream_create_operation_logs(log_queue), media_type="text/event-stream", headers=_SSE_HEADERS
+    )
 
-    Create operations (``creation-...`` id) stream the in-memory creation log;
-    destroy operations (workspace agent id) tail the detached destroy
-    subprocess's on-disk log until the host is gone; restart operations (also the
-    workspace agent id) drain the in-memory registry's log queue.
-    """
-    if operation_id.startswith(f"{CreationId.PREFIX}-"):
-        agent_creator: AgentCreator | None = get_state().agent_creator
-        log_queue = agent_creator.get_log_queue(CreationId(operation_id)) if agent_creator is not None else None
-        if log_queue is None:
-            return _json_error(f"Unknown operation {operation_id}", 404)
-        return make_streaming_response(
-            _stream_create_operation_logs(log_queue), media_type="text/event-stream", headers=_SSE_HEADERS
-        )
 
+@require_api_or_cookie_auth
+def _handle_destroy_operation_logs(operation_id: str) -> Response:
+    """Tail a destroy operation's on-disk log to completion as server-sent events."""
     parsed_id = AgentId(operation_id)
-    # A destroy op's logs take precedence over a restart op's, mirroring the
-    # status route: both are keyed by the workspace agent id, and a started
-    # destroy is the authoritative operation, so a stale restart record left in
-    # the (never-pruned) registry from earlier in the session must not shadow it.
-    # During a live restart no destroy record exists on disk, so we fall through
-    # to the in-memory registry below.
     paths: WorkspacePaths | None = get_state().api_v1_paths
-    if paths is not None:
-        is_host_still_active = destroying.is_host_still_active(get_state().backend_resolver, paths, parsed_id)
-        if destroying.read_destroying(parsed_id, paths, is_host_still_active) is not None:
-            return make_streaming_response(
-                _stream_destroy_operation_logs(parsed_id, paths), media_type="text/event-stream", headers=_SSE_HEADERS
-            )
+    if paths is None:
+        return _json_error(f"Unknown operation {operation_id}", 404)
+    is_host_still_active = destroying.is_host_still_active(get_state().backend_resolver, paths, parsed_id)
+    if destroying.read_destroying(parsed_id, paths, is_host_still_active) is None:
+        return _json_error(f"Unknown operation {operation_id}", 404)
+    return make_streaming_response(
+        _stream_destroy_operation_logs(parsed_id, paths), media_type="text/event-stream", headers=_SSE_HEADERS
+    )
 
+
+@require_api_or_cookie_auth
+def _handle_restart_operation_logs(operation_id: str) -> Response:
+    """Drain a restart operation's in-memory registry log queue as server-sent events."""
+    parsed_id = AgentId(operation_id)
     registry = get_state().workspace_operation_registry
-    if registry.get(parsed_id) is not None:
-        log_queue = registry.get_log_queue(parsed_id)
-        if log_queue is not None:
-            return make_streaming_response(
-                _stream_restart_operation_logs(log_queue), media_type="text/event-stream", headers=_SSE_HEADERS
-            )
-
-    return _json_error(f"Unknown operation {operation_id}", 404)
+    log_queue = registry.get_log_queue(parsed_id) if registry.get(parsed_id) is not None else None
+    if log_queue is None:
+        return _json_error(f"Unknown operation {operation_id}", 404)
+    return make_streaming_response(
+        _stream_restart_operation_logs(log_queue), media_type="text/event-stream", headers=_SSE_HEADERS
+    )
 
 
 # -- SSH access route --
@@ -1133,20 +1132,17 @@ def _handle_patch_workspace(agent_id: str) -> Response:
 
 
 @require_api_or_cookie_auth
-def _handle_dismiss_operation(operation_id: str) -> Response:
-    """Dismiss a finished operation card (replaces ``/api/destroying/<id>/dismiss``).
+@API_SPEC.validate(resp=json_response_model(EmptyResponse))
+def _handle_dismiss_destroy_operation(operation_id: str) -> EmptyResponse:
+    """Dismiss a finished destroy operation card (replaces ``/api/destroying/<id>/dismiss``).
 
-    For a destroy operation (the id is an ``AgentId``), removes the on-disk
-    destroy record. For a create operation (``creation-...`` id) or an unknown
-    id, this is an idempotent no-op. Always returns 200 ``{}``.
+    Removes the on-disk destroy record (the id is the workspace ``AgentId``).
+    Idempotent: an unknown id, or a missing data dir, is a no-op. Always 200 ``{}``.
     """
-    if operation_id.startswith(f"{CreationId.PREFIX}-"):
-        return _json_response({})
     paths: WorkspacePaths | None = get_state().api_v1_paths
-    if paths is None:
-        return _json_response({})
-    destroying.delete_destroying(AgentId(operation_id), paths)
-    return _json_response({})
+    if paths is not None:
+        destroying.delete_destroying(AgentId(operation_id), paths)
+    return EmptyResponse()
 
 
 # -- Sharing sub-resource routes --
@@ -1324,11 +1320,44 @@ def create_api_v1_blueprint() -> Blueprint:
     blueprint.add_url_rule("/workspaces/<agent_id>/health", view_func=_handle_workspace_health, methods=["GET"])
     blueprint.add_url_rule("/workspaces/<agent_id>/restart", view_func=_handle_workspace_restart, methods=["POST"])
 
+    # Operation polling is type-segmented: ``/operations/<type>/<id>`` (type in
+    # create | destroy | restart). The caller always knows the type, so each gets
+    # a dedicated handler + precise response model (no id-prefix dispatch).
     blueprint.add_url_rule(
-        "/workspaces/operations/<operation_id>", view_func=_handle_operation_status, methods=["GET"]
+        "/workspaces/operations/create/<operation_id>",
+        view_func=_handle_create_operation_status,
+        endpoint="create_operation_status",
+        methods=["GET"],
     )
     blueprint.add_url_rule(
-        "/workspaces/operations/<operation_id>/logs", view_func=_handle_operation_logs, methods=["GET"]
+        "/workspaces/operations/destroy/<operation_id>",
+        view_func=_handle_destroy_operation_status,
+        endpoint="destroy_operation_status",
+        methods=["GET"],
+    )
+    blueprint.add_url_rule(
+        "/workspaces/operations/restart/<operation_id>",
+        view_func=_handle_restart_operation_status,
+        endpoint="restart_operation_status",
+        methods=["GET"],
+    )
+    blueprint.add_url_rule(
+        "/workspaces/operations/create/<operation_id>/logs",
+        view_func=_handle_create_operation_logs,
+        endpoint="create_operation_logs",
+        methods=["GET"],
+    )
+    blueprint.add_url_rule(
+        "/workspaces/operations/destroy/<operation_id>/logs",
+        view_func=_handle_destroy_operation_logs,
+        endpoint="destroy_operation_logs",
+        methods=["GET"],
+    )
+    blueprint.add_url_rule(
+        "/workspaces/operations/restart/<operation_id>/logs",
+        view_func=_handle_restart_operation_logs,
+        endpoint="restart_operation_logs",
+        methods=["GET"],
     )
 
     # Workspace metadata update (color + account association). Gated by
@@ -1340,11 +1369,12 @@ def create_api_v1_blueprint() -> Blueprint:
         methods=["PATCH"],
     )
 
-    # Operation dismissal (replaces /api/destroying/<id>/dismiss).
+    # Operation dismissal (replaces /api/destroying/<id>/dismiss). Only a destroy
+    # operation has a dismissable on-disk record; create/restart cards self-clear.
     blueprint.add_url_rule(
-        "/workspaces/operations/<operation_id>",
-        view_func=_handle_dismiss_operation,
-        endpoint="dismiss_operation",
+        "/workspaces/operations/destroy/<operation_id>",
+        view_func=_handle_dismiss_destroy_operation,
+        endpoint="dismiss_destroy_operation",
         methods=["DELETE"],
     )
 

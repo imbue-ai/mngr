@@ -1345,9 +1345,9 @@ def render_destroying_page(
 ) -> str:
     """Render the detail page for an in-flight or recently-completed destroy.
 
-    The page polls ``/api/v1/workspaces/operations/<agent_id>`` for status and
-    streams its log over SSE from ``.../operations/<agent_id>/logs``; once
-    status flips to ``done`` it redirects to ``/``. ``status`` is the initial
+    The page polls ``/api/v1/workspaces/operations/destroy/<agent_id>`` for status
+    and streams its log over SSE from ``.../operations/destroy/<agent_id>/logs``;
+    once status flips to ``done`` it redirects to ``/``. ``status`` is the initial
     server-side computed value (``running``/``failed``/``done``) so the page
     renders correctly even before the first poll completes.
     """
