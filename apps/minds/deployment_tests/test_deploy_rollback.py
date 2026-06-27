@@ -94,14 +94,16 @@ def test_deploy_auto_rollback_on_broken_healthcheck(ephemeral_env: EphemeralEnvH
     )
     logger.info("=== v2 deploy stdout ({}) ===\n{}", ephemeral_env.name, completed.stdout)
     logger.info("=== v2 deploy stderr ({}) ===\n{}", ephemeral_env.name, completed.stderr)
-    # The CLI uses ``os.execvp`` to chain into ``minds env recover`` on
-    # MindError, so the returncode is the recover process's exit code.
-    # Successful rollback => recover exited 0 => subprocess exits 0.
-    # A non-zero returncode means recover itself failed (RecoverFailedError)
-    # -- surface the stderr so the operator can diagnose.
-    assert completed.returncode == 0, (
-        f"Broken-v2 deploy + auto-recover for {ephemeral_env.name!r} exited {completed.returncode}. "
-        f"Stderr tail:\n{completed.stderr[-2000:]}"
+    # On a health-check failure the CLI auto-chains into ``minds env recover``
+    # and then exits NON-ZERO to reflect that the deploy failed -- even though
+    # the rollback itself succeeded ("Exiting non-zero to reflect the deploy
+    # failure (the rollback itself succeeded)"). So a broken-healthcheck deploy
+    # MUST exit non-zero; a zero exit would mean the broken health check was not
+    # detected. The rollback success is verified below (the env is restored to
+    # v1) -- if recover had itself failed, those assertions would catch it.
+    assert completed.returncode != 0, (
+        f"Broken-v2 deploy for {ephemeral_env.name!r} unexpectedly exited 0; the injected broken "
+        f"health check should have failed the deploy. Stderr tail:\n{completed.stderr[-2000:]}"
     )
 
     # Post-rollback, /version should report v1's deploy_id again (the
