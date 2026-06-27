@@ -25,9 +25,11 @@ Environment on `imbue-ai/mngr`).
 - **Vault values written** (KV v2, namespace `admin`, mount `secrets/`):
   - `secrets/minds/ci/paid-accounts/CI_TEST_USER_EMAIL = minds-ci-test@imbue.com`
   - `secrets/minds/ci/paid-accounts/CI_TEST_USER_PASSWORD = <generated strong value>`
-  - Written via `vault kv patch`, so the pre-existing `PAID_ACCOUNT_SUFFIXES`
-    key was preserved. The `@imbue.com` email is paid out of the box because the
-    `ci` tier's `deploy.toml [paid]` already seeds `paid_domains = ["imbue.com"]`.
+  - Written as **child leaves** (each its own KV path holding a single `value`
+    field), matching the split-secret layout `read_vault_kv` expects -- NOT as
+    extra fields on the parent `paid-accounts` secret. The `@imbue.com` email is
+    paid out of the box because the `ci` tier's `deploy.toml [paid]` already
+    seeds `paid_domains = ["imbue.com"]`.
 
 ## What YOU need to do to deploy
 
@@ -77,14 +79,15 @@ Already written, but if you want to set your own values:
 ```bash
 export VAULT_ADDR="https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200"
 export VAULT_NAMESPACE="admin"
-vault kv patch secrets/minds/ci/paid-accounts \
-  CI_TEST_USER_EMAIL="minds-ci-test@imbue.com" \
-  CI_TEST_USER_PASSWORD="<a strong password: upper+lower+digit+special>"
+# Write each key as its own child leaf (split-secret layout), NOT as fields on
+# the parent paid-accounts secret -- read_vault_kv lists child leaves and reads
+# each one's `value` field.
+vault kv put -mount=secrets minds/ci/paid-accounts/CI_TEST_USER_EMAIL value="minds-ci-test@imbue.com"
+vault kv put -mount=secrets minds/ci/paid-accounts/CI_TEST_USER_PASSWORD value="<a strong password: upper+lower+digit+special>"
 ```
 
-(Use `kv patch`, not `kv put`, to preserve `PAID_ACCOUNT_SUFFIXES`. The email
-must be `@imbue.com` — or another domain seeded into `paid_domains` — so the
-account can mint LiteLLM keys.)
+(The email must be `@imbue.com` — or another domain seeded into `paid_domains`
+— so the account can mint LiteLLM keys.)
 
 ## Notes
 

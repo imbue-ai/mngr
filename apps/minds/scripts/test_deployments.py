@@ -717,6 +717,24 @@ def run(keep_on_failure: bool) -> None:
 
 
 @cli.command()
+@click.option(
+    "--max-age-hours",
+    type=int,
+    default=_DEFAULT_MAX_RESOURCE_AGE_HOURS,
+    help="Destroy ci-* envs whose embedded timestamp is older than this many hours.",
+)
+def sweep(max_age_hours: int) -> None:
+    """Enumerate ci-* Modal envs and destroy any older than the age threshold.
+
+    The cross-run leaked-resource backstop (a per-run destroy that never
+    fired because its job hard-crashed / was cancelled). Run on its own CI
+    runner, so it relies on the Modal-side enumeration rather than local
+    state.
+    """
+    _sweep_stale_envs(max_age_hours=max_age_hours)
+
+
+@cli.command()
 def cleanup() -> None:
     """Walk every ledger entry across all prior runs; tear each down; drop the file when drained."""
     entries = _read_ledger_entries()
