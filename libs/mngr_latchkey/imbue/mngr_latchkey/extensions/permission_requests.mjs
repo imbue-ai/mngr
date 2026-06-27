@@ -270,6 +270,19 @@ const FILE_SHARING_PROXY_PATH_PREFIX = '/minds-api-proxy/api/v1/files';
 const FILE_SHARING_SCOPE_NAME = 'latchkey-self';
 const FILE_SHARING_PERMISSION_PREFIX = 'minds-file-server-';
 
+// The agent baseline's ``latchkey-self`` scope is *domain-only*: its schema
+// matches every request whose ``domain`` is ``latchkey-self.invalid`` with no
+// path constraint, so it matches the whole gateway-self surface. detent
+// evaluates a permissions file's rules in order and treats the FIRST rule whose
+// *scope* matches as authoritative -- it allows when one of that rule's
+// permissions matches and otherwise rejects outright, without falling through to
+// later rules. A narrower same-domain scope (e.g. ``minds-workspaces``) must
+// therefore be ordered BEFORE ``latchkey-self``; if it lands after, the
+// domain-only catch-all matches first, finds none of its own permissions cover
+// the request, and vetoes it -- even though the later rule would have granted
+// it. ``mergeRules`` keeps this scope last for exactly that reason.
+const GATEWAY_SELF_CATCHALL_SCOPE_NAME = 'latchkey-self';
+
 // Access modes the agent can request for a file. ``READ`` grants the
 // non-mutating WebDAV verbs only; ``WRITE`` is a superset that also
 // grants the verbs that change the file or its properties. Read-only
@@ -1634,6 +1647,15 @@ function mergeRules(existingRules, effectRules) {
       }
     }
     rules[existingIndex] = { [scopeKey]: merged };
+  }
+  // Keep the domain-only ``latchkey-self`` catch-all last so any narrower
+  // same-domain scope just appended above it (e.g. ``minds-workspaces``) is
+  // evaluated first. See ``GATEWAY_SELF_CATCHALL_SCOPE_NAME`` for why detent's
+  // first-matching-scope-wins evaluation makes this ordering load-bearing.
+  const catchAllIndex = rules.findIndex((rule) => ruleKeyOf(rule) === GATEWAY_SELF_CATCHALL_SCOPE_NAME);
+  if (catchAllIndex !== -1 && catchAllIndex !== rules.length - 1) {
+    const [catchAllRule] = rules.splice(catchAllIndex, 1);
+    rules.push(catchAllRule);
   }
   return rules;
 }
