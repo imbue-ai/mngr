@@ -223,7 +223,7 @@ cross-component behavior.
 8. **Create -> v1 destroy round-trip** [electron] -- extend the existing create
    e2e: after `system_interface` renders, drive `POST
    /api/v1/workspaces/<id>/destroy`, poll `GET
-   /workspaces/operations/<id>` to DONE, and assert the host is gone (the
+   /workspaces/operations/destroy/<id>` to DONE, and assert the host is gone (the
    operator harness `scripts/electron_full_flow_e2e.py` already does a superset;
    this would crystallize the destroy half as a CI-run acceptance test).
 9. **Browser create posts to `/api/v1/workspaces`** [electron] -- once the create
