@@ -819,9 +819,10 @@ def _select_deployed_app_id(rows: Sequence[object], app_name: str) -> str | None
     Skips stopped apps (their containers are already gone) and returns None when
     no live row matches.
     """
-    for row in rows:
-        if not isinstance(row, dict):
+    for raw_row in rows:
+        if not isinstance(raw_row, dict):
             continue
+        row: dict[str, object] = {str(key): value for key, value in raw_row.items()}
         name_value = next((row[key] for key in _MODAL_APP_NAME_KEYS if row.get(key)), None)
         state_value = str(row.get("State") or row.get("state") or "").lower()
         if name_value != app_name or "stop" in state_value:
