@@ -62,7 +62,7 @@ from imbue.minds.deployment_tests.helpers import create_verified_user_via_admin_
 from imbue.minds.deployment_tests.helpers import delete_shared_env_secrets
 from imbue.minds.deployment_tests.helpers import publish_shared_env_secrets
 from imbue.minds.deployment_tests.helpers import read_ci_test_user_credentials
-from imbue.minds.deployment_tests.primitives import CI_RUN_KEY_ENV_VAR
+from imbue.minds.deployment_tests.helpers import resolve_ci_run_key
 from imbue.minds.deployment_tests.primitives import DEPLOYMENT_ENVS_JSON_ENV_VAR
 from imbue.minds.deployment_tests.primitives import MAILTM_ADDRESS_ENV_VAR
 from imbue.minds.deployment_tests.primitives import MAILTM_JWT_ENV_VAR
@@ -102,15 +102,6 @@ _MODAL_ENV_LIST_TIMEOUT_SECONDS: Final[int] = 60
 # Used only to resolve the ci tier's Modal workspace when listing envs for the
 # sweep; never materialized as a real env.
 _CI_TIER_PROBE_ENV_NAME: Final[str] = "ci-probe"
-
-
-def _run_key(run_id: RunId) -> str:
-    """Per-run Vault namespace key: the GitHub run id in CI, else the RunId.
-
-    Both the env-build (write) and test-runner (read) sides resolve the same
-    value, so the per-run Vault path matches across the two CI jobs.
-    """
-    return os.environ.get(CI_RUN_KEY_ENV_VAR) or str(run_id)
 
 
 # ---------------------------------------------------------------------------
@@ -427,7 +418,7 @@ def _deploy_shared_env(*, name: DevEnvName, run_id: RunId, role: SharedEnvRole) 
     secrets_model = read_secrets_file(name)
     secrets = {key: value.get_secret_value() for key, value in secrets_model.secrets.items()}
     _create_ci_test_user(secrets=secrets, connector_url=str(client_config.connector_url), name=name)
-    publish_shared_env_secrets(run_key=_run_key(run_id), role=role, secrets=secrets)
+    publish_shared_env_secrets(run_key=resolve_ci_run_key(run_id), role=role, secrets=secrets)
     logger.info("Shared env {!r} deployed; connector={}", name, urls.connector_url)
     return urls
 
@@ -475,7 +466,7 @@ def _destroy_env(name: DevEnvName, *, run_id: RunId) -> None:
         )
     for role in _DEFAULT_SHARED_ENV_ROLES:
         try:
-            delete_shared_env_secrets(run_key=_run_key(run_id), role=role)
+            delete_shared_env_secrets(run_key=resolve_ci_run_key(run_id), role=role)
         except (MindError, httpx.HTTPError) as exc:
             logger.warning("Failed to delete per-run Vault secrets for env {!r} role {!r}: {}", name, role, exc)
     _mark_status(NonEmptyStr(str(name)), kind=LedgerKind.ENV, run_id=run_id, status=LedgerStatus.DESTROYED)

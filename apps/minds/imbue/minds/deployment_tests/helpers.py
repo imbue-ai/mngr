@@ -30,6 +30,8 @@ from imbue.minds.cli._activated_env import MODAL_PROFILE_ENV_VAR
 from imbue.minds.cli._activated_env import modal_profile_for_tier_or_none
 from imbue.minds.cli._activated_env import tier_for_env_name
 from imbue.minds.deployment_tests.data_types import SharedEnvHandle
+from imbue.minds.deployment_tests.primitives import CI_RUN_KEY_ENV_VAR
+from imbue.minds.deployment_tests.primitives import RunId
 from imbue.minds.deployment_tests.primitives import SharedEnvRole
 from imbue.minds.envs.paths import client_config_file
 from imbue.minds.envs.primitives import DevEnvName
@@ -67,6 +69,17 @@ SHARED_ENV_SECRET_KEYS: Final[tuple[str, ...]] = (
 CI_PAID_ACCOUNTS_VAULT_PATH: Final[VaultPath] = VaultPath("secrets/minds/ci/paid-accounts")
 CI_TEST_USER_EMAIL_KEY: Final[str] = "CI_TEST_USER_EMAIL"
 CI_TEST_USER_PASSWORD_KEY: Final[str] = "CI_TEST_USER_PASSWORD"
+
+
+def resolve_ci_run_key(run_id: RunId) -> str:
+    """Per-run Vault namespace key: the GitHub run id in CI, else the orchestrator ``RunId``.
+
+    The env-build (write) and test-runner (read) sides both call this so the
+    per-run Vault path matches across the two CI jobs (the GitHub run id is the
+    same value in every job of a workflow run). Locally, where the env var is
+    unset, both sides fall back to the orchestrator's ``RunId``.
+    """
+    return os.environ.get(CI_RUN_KEY_ENV_VAR) or str(run_id)
 
 
 def run_secrets_vault_path(*, run_key: str, role: SharedEnvRole) -> VaultPath:

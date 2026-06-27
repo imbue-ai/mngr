@@ -53,8 +53,8 @@ from imbue.minds.deployment_tests.helpers import create_verified_user_via_admin_
 from imbue.minds.deployment_tests.helpers import delete_user_via_admin_api
 from imbue.minds.deployment_tests.helpers import read_ci_test_user_credentials
 from imbue.minds.deployment_tests.helpers import read_shared_env_secrets
+from imbue.minds.deployment_tests.helpers import resolve_ci_run_key
 from imbue.minds.deployment_tests.helpers import sweep_stale_users
-from imbue.minds.deployment_tests.primitives import CI_RUN_KEY_ENV_VAR
 from imbue.minds.deployment_tests.primitives import DEPLOYMENT_ENVS_JSON_ENV_VAR
 from imbue.minds.deployment_tests.primitives import DeploymentTestConfigError
 from imbue.minds.deployment_tests.primitives import MAILTM_ADDRESS_ENV_VAR
@@ -125,7 +125,7 @@ def shared_env(
                 f"Configured roles: {sorted(deployment_envs_config.shared_envs.keys())!r}."
             )
         urls = deployment_envs_config.shared_envs[role_key]
-        secrets = _resolve_shared_env_secrets(role=role_key, run_key=_run_key(deployment_envs_config))
+        secrets = _resolve_shared_env_secrets(role=role_key, run_key=resolve_ci_run_key(deployment_envs_config.run_id))
         return SharedEnvHandle(
             urls=urls,
             supertokens_connection_uri=SecretStr(secrets["SUPERTOKENS_CONNECTION_URI"]),
@@ -331,7 +331,9 @@ def _sweep_stale_test_users(deployment_envs_config: DeploymentEnvsConfig) -> Non
     if default_role not in deployment_envs_config.shared_envs:
         return
     try:
-        secrets = _resolve_shared_env_secrets(role=default_role, run_key=_run_key(deployment_envs_config))
+        secrets = _resolve_shared_env_secrets(
+            role=default_role, run_key=resolve_ci_run_key(deployment_envs_config.run_id)
+        )
     except (MindError, pytest.skip.Exception) as exc:
         logger.warning("Skipping stale-test-user sweep: {}", exc)
         return
@@ -360,11 +362,6 @@ def _require_env_var(name: str) -> str:
             "invoking pytest; if you are running this test outside the orchestrator, that is the issue."
         )
     return value
-
-
-def _run_key(config: DeploymentEnvsConfig) -> str:
-    """Resolve the per-run Vault namespace key (GitHub run id in CI, else the RunId)."""
-    return os.environ.get(CI_RUN_KEY_ENV_VAR) or str(config.run_id)
 
 
 def _resolve_shared_env_secrets(*, role: SharedEnvRole, run_key: str) -> dict[str, str]:
