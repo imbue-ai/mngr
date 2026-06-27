@@ -18,10 +18,10 @@ reversal steps and ``modal app rollback``s both apps to their captured
 pre-deploy versions.
 
 The subprocess exits with the recover process's exit code (``os.execvp``
-replaces the deploy process with recover). Successful rollback ->
-recover exits 0 -> subprocess returncode 0. The actual assertion is on
-``/version``: after rollback the connector reports v1's ``deploy_id``,
-not v2's.
+replaces the deploy process with recover). On a broken-healthcheck deploy
+the CLI exits NON-ZERO to reflect the deploy failure even though the
+rollback itself succeeded. The substantive assertion is on ``/version``:
+after rollback the connector reports v1's ``deploy_id``, not v2's.
 """
 
 import subprocess
@@ -80,8 +80,8 @@ def test_deploy_auto_rollback_on_broken_healthcheck(ephemeral_env: EphemeralEnvH
     2. Run ``minds env deploy`` against the same env with
        ``MINDS_INJECT_BROKEN_HEALTHCHECK=1`` in the subprocess env.
        ``await_apps_healthy`` fails -> auto-recover fires -> recover
-       rolls Modal apps back -> subprocess exits 0 (recover succeeded
-       at restoring the pre-v2 state).
+       rolls Modal apps back -> subprocess exits non-zero (the deploy
+       failed, even though the rollback itself succeeded).
     3. Poll ``GET <connector>/version`` and assert ``deploy_id`` matches
        v1's id (and the response is 200 -- proving v1 is actually
        serving traffic, not just that the dashboard label moved back).
