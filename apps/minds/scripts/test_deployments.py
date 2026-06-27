@@ -14,15 +14,15 @@ Plain-Python (click-driven) entrypoint -- NOT a pytest wrapper. Owns:
   (``-m minds_deployment`` first, then ``-m minds_services``).
 * Per-run ledger at ``.minds/ci-test-deploys.jsonl``: append-on-create,
   walked for end-of-run teardown, paired cleanup mode for prior runs.
-* Name + age sweep: enumerates ``ci-*`` envs and ``ci-*`` FCT
-  branches, destroys anything older than 4 hours.
+* Name + age sweep: enumerates ``ci-*`` Modal envs and destroys
+  anything older than 4 hours.
 
-Wired up to satisfy the spec's command surface; the heavyweight steps
-(``minds env deploy`` shellout, SuperTokens admin teardown, the OVH /
-Cloudflare / Neon enumeration arm of the sweep) are real where simple
-and explicitly-stubbed where iteration with the user is needed -- the
-stubs log a clear "not implemented yet" warning rather than silently
-no-op-ing.
+Wired up to satisfy the spec's command surface. The env lifecycle --
+the ``minds env deploy`` / ``destroy`` shellouts, the per-run secret
+handoff, the fixed CI test-user creation, and the name+age sweep -- is
+implemented. The FCT branch push/delete steps remain explicitly stubbed
+for Phase 2 and log a clear "not implemented yet" warning rather than
+silently no-op-ing.
 """
 
 import json
