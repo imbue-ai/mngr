@@ -101,7 +101,25 @@ mounts: []
 EOF
 
 echo "==> Starting Lima instance (downloads base + boots)"
-limactl start --name="$INSTANCE" --tty=false "$TMP_YAML"
+# `limactl start` occasionally fails transiently -- e.g. a TLS timeout on the
+# base-image freshness check can leave the instance half-initialized
+# ("open .../image: no such file"). Retry a few times, deleting the partial
+# instance and backing off between attempts.
+START_ATTEMPTS=3
+start_ok=0
+for attempt in $(seq 1 "$START_ATTEMPTS"); do
+  if limactl start --name="$INSTANCE" --tty=false "$TMP_YAML"; then
+    start_ok=1
+    break
+  fi
+  echo "WARN: 'limactl start' failed (attempt $attempt/$START_ATTEMPTS); cleaning up + retrying" >&2
+  limactl delete -f "$INSTANCE" >/dev/null 2>&1 || true
+  [ "$attempt" -lt "$START_ATTEMPTS" ] && sleep $((attempt * 10))
+done
+if [ "$start_ok" != "1" ]; then
+  echo "ERROR: 'limactl start' failed after $START_ATTEMPTS attempts" >&2
+  exit 1
+fi
 rm -f "$TMP_YAML"; TMP_YAML=""
 
 echo "==> Copying the bake provisioner into the VM"
