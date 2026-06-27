@@ -2,7 +2,7 @@
 """Chunk, sign, and publish a pre-baked Lima image to an R2 chunk store.
 
 This is the local, operator-run publish half of the Lima image distribution (the
-build half is ``scripts/lima_image/build.sh``). It is intentionally NOT wired
+build half is ``scripts/build-lima-image.sh``). It is intentionally NOT wired
 into CI: the R2 credentials and the minisign signing key stay on the operator's
 machine, never in GitHub.
 
