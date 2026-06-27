@@ -7,21 +7,21 @@ Environment on `imbue-ai/mngr`).
 
 ## Already done (by the agent)
 
-- **Terraform changes committed + draft PR opened** on `imbue-ai/vault`:
-  - Branch `mngr/minds-ci-envs`, draft PR: https://github.com/imbue-ai/vault/pull/1
-  - Adds OIDC role `minds_ci_env_gh` (gated on the `minds-ci-env` GitHub
-    Environment), defined **inline** (its own `vault_jwt_auth_backend_role` +
-    `vault_policy`, NOT via the shared `jwt_role_and_policy` module); reads the
-    `minds/ci/*` service secrets `minds env deploy`/`destroy` need, and gets
-    read+write+delete on `minds/ci/runs/*`; token TTL 30m.
-  - Expands `minds_ci_test_gh` (still module-based) to also read
-    `minds/ci/paid-accounts/*` and `minds/ci/runs/*`.
-  - The shared `jwt_role_and_policy` module is left **untouched** (an earlier
-    attempt to extend it re-rendered every consumer's policy string and caused
-    no-op churn across the sculptor/vault-repo roles; the role is inline to
-    avoid that). `terraform fmt`/`validate` pass; `terraform plan` against the
-    committed state is **2 to add, 1 to change, 0 to destroy** with no other
-    roles touched.
+- **Terraform changes on `imbue-ai/vault`** (two PRs):
+  - **PR #1 (MERGED):** https://github.com/imbue-ai/vault/pull/1 — added OIDC
+    role `minds_ci_env_gh` (gated on the `minds-ci-env` GitHub Environment;
+    reads the `minds/ci/*` service secrets `minds env deploy`/`destroy` need +
+    read/write/delete on `minds/ci/runs/*`, 30m TTL) and expanded
+    `minds_ci_test_gh` to read `minds/ci/paid-accounts/*` + `minds/ci/runs/*`.
+    This version extended the shared `jwt_role_and_policy` module, which caused
+    one-time whitespace churn across all module-based policies (sculptor/etc.).
+  - **PR #2 (OPEN — the cleanup):** https://github.com/imbue-ai/vault/pull/2 —
+    restores the shared module to its upstream form and re-defines
+    `minds_ci_env_gh` **inline** (same role/claims/secrets/TTL), so the shared
+    module is no longer churned. `terraform fmt`/`validate` pass; plan vs the
+    committed baseline is **2 to add, 1 to change, 0 to destroy**.
+  - Net of both PRs: the role exists with the right access; the shared module
+    is back to upstream. Merge + apply #2 to land the clean state.
 - **Vault values written** (KV v2, namespace `admin`, mount `secrets/`):
   - `secrets/minds/ci/paid-accounts/CI_TEST_USER_EMAIL = minds-ci-test@imbue.com`
   - `secrets/minds/ci/paid-accounts/CI_TEST_USER_PASSWORD = <generated strong value>`
