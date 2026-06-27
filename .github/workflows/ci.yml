@@ -5,6 +5,15 @@ on:
     branches: [main]
   pull_request:
     branches: ['**']
+  # Manual trigger for the minds release tier: the heavy `minds_deployment`
+  # tests (each mints + destroys its own ephemeral ci env). Off by default; the
+  # `test-minds-release` job runs only when dispatched with this input set.
+  workflow_dispatch:
+    inputs:
+      run_minds_release_tests:
+        description: "Run the minds release-tier tests (minds_deployment: deploy/rollback/round-trip)"
+        type: boolean
+        default: false
 
 jobs:
   # Changelog gate. Runs on the orchestrator (not in an offload
@@ -901,3 +910,64 @@ jobs:
           path: .minds
       - name: Destroy the per-run ci env
         run: uv run python apps/minds/scripts/test_deployments.py down
+
+  # Release tier (manual). Runs the heavy minds_deployment tests -- each mints +
+  # destroys its own ephemeral ci env (deploy / rollback / destroy round-trip),
+  # which is why they are gated to a manual run rather than every push. Dispatch
+  # via the Actions UI (or `gh workflow run ci.yml -f run_minds_release_tests=true`).
+  # Uses the minds-dev Modal workspace + the broad minds_ci_env_gh Vault role
+  # (the tests deploy envs and read neon-admin/supertokens), like build-minds-ci-env.
+  # Self-contained (no shared env needed): the `deployment-only` orchestrator
+  # command writes a shared-env-free deployment_envs.json and runs `pytest -m
+  # minds_deployment`; the ephemeral_env fixture deploys + tears down per test.
+  test-minds-release:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.run_minds_release_tests &&
+      vars.DISABLE_MINDS_SNAPSHOT_CI != 'true'
+    environment: minds-ci-env
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      MODAL_TOKEN_ID: ${{ vars.MINDS_DEV_MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MINDS_DEV_MODAL_TOKEN_SECRET }}
+      VAULT_ADDR: https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200
+      VAULT_NAMESPACE: admin
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+      - name: Install Python dependencies
+        run: uv sync --all-packages
+      - name: Install Vault CLI
+        run: |
+          set -euo pipefail
+          VAULT_VERSION=1.18.3
+          curl -sSLo /tmp/vault.zip "https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_linux_amd64.zip"
+          unzip -o /tmp/vault.zip -d /tmp/vault-bin
+          sudo mv /tmp/vault-bin/vault /usr/local/bin/vault
+      - name: Authenticate to Vault via GitHub OIDC
+        run: |
+          set -euo pipefail
+          OIDC=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=imbue-vault" | jq -r '.value')
+          VAULT_TOKEN=$(vault write -field=token auth/jwt_github_actions/login role=minds_ci_env_gh jwt="$OIDC")
+          echo "::add-mask::$VAULT_TOKEN"
+          printf '%s' "$VAULT_TOKEN" > "$HOME/.vault-token"
+      - name: Write throwaway Modal profile
+        run: |
+          cat > "$HOME/.modal.toml" <<'EOF'
+          [minds-dev]
+          token_id = "${{ vars.MINDS_DEV_MODAL_TOKEN_ID }}"
+          token_secret = "${{ secrets.MINDS_DEV_MODAL_TOKEN_SECRET }}"
+          active = true
+          EOF
+      - name: Run minds release-tier tests (minds_deployment)
+        run: uv run python apps/minds/scripts/test_deployments.py deployment-only
