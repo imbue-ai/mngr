@@ -58,17 +58,28 @@ from imbue.minds.desktop_client.api_auth import json_field_error as _json_field_
 from imbue.minds.desktop_client.api_auth import json_response as _json_response
 from imbue.minds.desktop_client.api_auth import require_api_or_cookie_auth
 from imbue.minds.desktop_client.api_models import AgentNotificationRequest
+from imbue.minds.desktop_client.api_models import BackupSnapshotSummary
 from imbue.minds.desktop_client.api_models import BugReportRequest
+from imbue.minds.desktop_client.api_models import BugReportResponse
 from imbue.minds.desktop_client.api_models import CreateWorkspaceRequest
 from imbue.minds.desktop_client.api_models import EnableSharingRequest
 from imbue.minds.desktop_client.api_models import EstablishSshRequest
+from imbue.minds.desktop_client.api_models import OkResponse
 from imbue.minds.desktop_client.api_models import OperationHandleResponse
 from imbue.minds.desktop_client.api_models import PatchWorkspaceRequest
+from imbue.minds.desktop_client.api_models import ProviderToggleResponse
 from imbue.minds.desktop_client.api_models import RestartWorkspaceRequest
 from imbue.minds.desktop_client.api_models import SetProviderEnabledRequest
+from imbue.minds.desktop_client.api_models import SharingReadinessResponse
+from imbue.minds.desktop_client.api_models import SharingToggleResponse
 from imbue.minds.desktop_client.api_models import SshConnectionResponse
+from imbue.minds.desktop_client.api_models import StopStateContainerResponse
+from imbue.minds.desktop_client.api_models import UpgradeMergeSummary
+from imbue.minds.desktop_client.api_models import WorkspaceBackupsResponse
+from imbue.minds.desktop_client.api_models import WorkspaceLifecycleResponse
 from imbue.minds.desktop_client.api_models import WorkspaceListResponse
 from imbue.minds.desktop_client.api_models import WorkspaceSummary
+from imbue.minds.desktop_client.api_models import WorkspaceVersionResponse
 from imbue.minds.desktop_client.api_spec import API_SPEC
 from imbue.minds.desktop_client.api_spec import json_response_model
 from imbue.minds.desktop_client.backup_export import BackupExportError
@@ -132,8 +143,8 @@ _DESTROY_LOG_POLL_SECONDS: float = 1.0
 
 
 @require_api_or_cookie_auth
-@API_SPEC.validate(json=AgentNotificationRequest)
-def _handle_notification(agent_id: str) -> Response:
+@API_SPEC.validate(json=AgentNotificationRequest, resp=json_response_model(OkResponse))
+def _handle_notification(agent_id: str) -> OkResponse | Response:
     """Send a notification on behalf of the named agent."""
     dispatcher: NotificationDispatcher | None = get_state().notification_dispatcher
     if dispatcher is None:
@@ -164,7 +175,7 @@ def _handle_notification(agent_id: str) -> Response:
     agent_display_name = agent_info.agent_name if agent_info else str(parsed_agent_id)
 
     dispatcher.dispatch(notification_request, agent_display_name)
-    return _json_response({"ok": True})
+    return OkResponse(ok=True)
 
 
 # -- Cross-workspace management routes --
@@ -226,7 +237,8 @@ def _handle_get_workspace(agent_id: str) -> WorkspaceSummary | Response:
 
 
 @require_api_or_cookie_auth
-def _handle_workspace_version(agent_id: str) -> Response:
+@API_SPEC.validate(resp=json_response_model(WorkspaceVersionResponse))
+def _handle_workspace_version(agent_id: str) -> WorkspaceVersionResponse | Response:
     """Return version info: the immutable created-at version plus, when online, git-derived current + history.
 
     ``original_minds_version`` (the create-time label) is always returned.
@@ -249,25 +261,24 @@ def _handle_workspace_version(agent_id: str) -> Response:
             agent_id=parsed_id,
             parent_cg=parent_cg,
         )
-    return _json_response(
-        {
-            "agent_id": str(parsed_id),
-            "original_minds_version": original,
-            "current_minds_version": git_version.current_minds_version,
-            "upgrade_merges": [
-                {
-                    "commit_sha": merge.commit_sha,
-                    "committed_at": merge.committed_at.isoformat() if merge.committed_at is not None else None,
-                    "summary": merge.summary,
-                }
-                for merge in git_version.upgrade_merges
-            ],
-        }
+    return WorkspaceVersionResponse(
+        agent_id=str(parsed_id),
+        original_minds_version=original,
+        current_minds_version=git_version.current_minds_version,
+        upgrade_merges=tuple(
+            UpgradeMergeSummary(
+                commit_sha=merge.commit_sha,
+                committed_at=merge.committed_at.isoformat() if merge.committed_at is not None else None,
+                summary=merge.summary,
+            )
+            for merge in git_version.upgrade_merges
+        ),
     )
 
 
 @require_api_or_cookie_auth
-def _handle_workspace_backups(agent_id: str) -> Response:
+@API_SPEC.validate(resp=json_response_model(WorkspaceBackupsResponse))
+def _handle_workspace_backups(agent_id: str) -> WorkspaceBackupsResponse | Response:
     """List a workspace's restic backup snapshots (works even when it is offline/destroyed)."""
     parsed_id = AgentId(agent_id)
     paths: WorkspacePaths | None = get_state().api_v1_paths
@@ -286,23 +297,21 @@ def _handle_workspace_backups(agent_id: str) -> Response:
     is_backing_up = backup_status.is_workspace_backing_up(
         paths, parsed_id, now=datetime.now(timezone.utc), parent_cg=get_state().root_concurrency_group
     )
-    return _json_response(
-        {
-            "agent_id": str(parsed_id),
-            "is_backing_up": is_backing_up,
-            "snapshots": [
-                {
-                    "snapshot_id": snapshot.snapshot_id,
-                    "short_id": snapshot.short_id,
-                    "time": snapshot.time.isoformat(),
-                    "paths": list(snapshot.paths),
-                    "hostname": snapshot.hostname,
-                    "tags": list(snapshot.tags),
-                    "total_size_bytes": snapshot.total_size_bytes,
-                }
-                for snapshot in snapshots
-            ],
-        }
+    return WorkspaceBackupsResponse(
+        agent_id=str(parsed_id),
+        is_backing_up=is_backing_up,
+        snapshots=tuple(
+            BackupSnapshotSummary(
+                snapshot_id=snapshot.snapshot_id,
+                short_id=snapshot.short_id,
+                time=snapshot.time.isoformat(),
+                paths=tuple(snapshot.paths),
+                hostname=snapshot.hostname,
+                tags=tuple(snapshot.tags),
+                total_size_bytes=snapshot.total_size_bytes,
+            )
+            for snapshot in snapshots
+        ),
     )
 
 
@@ -535,7 +544,8 @@ def _run_mngr_blocking(argv: list[str], parent_cg: ConcurrencyGroup) -> tuple[in
 
 
 @require_api_or_cookie_auth
-def _handle_workspace_lifecycle(agent_id: str, action: str) -> Response:
+@API_SPEC.validate(resp=json_response_model(WorkspaceLifecycleResponse))
+def _handle_workspace_lifecycle(agent_id: str, action: str) -> WorkspaceLifecycleResponse | Response:
     """Start or stop a workspace's host, blocking until the transition resolves."""
     parsed_id = AgentId(agent_id)
     parent_cg = get_state().root_concurrency_group
@@ -567,12 +577,10 @@ def _handle_workspace_lifecycle(agent_id: str, action: str) -> Response:
             host_state = backend_resolver.get_host_state(HostId(info.host_id))
         except ValueError:
             host_state = None
-    return _json_response(
-        {
-            "agent_id": str(parsed_id),
-            "action": action,
-            "host_state": str(host_state) if host_state is not None else None,
-        }
+    return WorkspaceLifecycleResponse(
+        agent_id=str(parsed_id),
+        action=action,
+        host_state=str(host_state) if host_state is not None else None,
     )
 
 
@@ -1039,8 +1047,8 @@ def _handle_establish_ssh(agent_id: str) -> SshConnectionResponse | Response:
 
 
 @require_api_or_cookie_auth
-@API_SPEC.validate(json=BugReportRequest)
-def _handle_bug_report(agent_id: str) -> Response:
+@API_SPEC.validate(json=BugReportRequest, resp=json_response_model(BugReportResponse))
+def _handle_bug_report(agent_id: str) -> BugReportResponse | Response:
     """Submit a bug report to Imbue on behalf of an in-workspace agent.
 
     Backed by the same collector/submitter as the local help form, so an agent-initiated report and a
@@ -1061,7 +1069,7 @@ def _handle_bug_report(agent_id: str) -> Response:
         minds_config=state.minds_config,
         paths=state.api_v1_paths,
     )
-    return _json_response({"ok": True, "event_id": event_id})
+    return BugReportResponse(ok=True, event_id=event_id)
 
 
 # -- Workspace metadata update route (color + account association) --
@@ -1155,7 +1163,8 @@ def _handle_sharing_status(agent_id: str, service_name: str) -> Response:
 
 
 @require_api_or_cookie_auth
-def _handle_sharing_readiness(agent_id: str, service_name: str) -> Response:
+@API_SPEC.validate(resp=json_response_model(SharingReadinessResponse))
+def _handle_sharing_readiness(agent_id: str, service_name: str) -> SharingReadinessResponse:
     """Probe a shared service's hostname to see if Cloudflare Access is live yet.
 
     The hostname to probe comes from the ``url`` query param; restricted to
@@ -1164,13 +1173,13 @@ def _handle_sharing_readiness(agent_id: str, service_name: str) -> Response:
     probe_url = request.args.get("url", "")
     http_client = get_state().http_client
     if http_client is None or not is_probeable_share_url(probe_url):
-        return _json_response({"ready": False})
-    return _json_response({"ready": probe_share_url_readiness(http_client, probe_url)})
+        return SharingReadinessResponse(ready=False)
+    return SharingReadinessResponse(ready=probe_share_url_readiness(http_client, probe_url))
 
 
 @require_api_or_cookie_auth
-@API_SPEC.validate(json=EnableSharingRequest)
-def _handle_sharing_enable(agent_id: str, service_name: str) -> Response:
+@API_SPEC.validate(json=EnableSharingRequest, resp=json_response_model(SharingToggleResponse))
+def _handle_sharing_enable(agent_id: str, service_name: str) -> SharingToggleResponse | Response:
     """Enable or update sharing for a service. Body: ``{"emails": [...]}``."""
     parsed_id = AgentId(agent_id)
     # The spectree model validates that ``emails`` (when present) is a list of strings.
@@ -1185,18 +1194,19 @@ def _handle_sharing_enable(agent_id: str, service_name: str) -> Response:
         )
     except SharingError as exc:
         return _json_error(str(exc), 502)
-    return _json_response({"agent_id": str(parsed_id), "service_name": service_name, "enabled": True})
+    return SharingToggleResponse(agent_id=str(parsed_id), service_name=service_name, enabled=True)
 
 
 @require_api_or_cookie_auth
-def _handle_sharing_disable(agent_id: str, service_name: str) -> Response:
+@API_SPEC.validate(resp=json_response_model(SharingToggleResponse))
+def _handle_sharing_disable(agent_id: str, service_name: str) -> SharingToggleResponse | Response:
     """Disable sharing for a service (removes it from its tunnel; the tunnel persists)."""
     state = get_state()
     try:
         disable_sharing(AgentId(agent_id), ServiceName(service_name), state.imbue_cloud_cli, state.session_store)
     except SharingError as exc:
         return _json_error(str(exc), 502)
-    return _json_response({"agent_id": agent_id, "service_name": service_name, "enabled": False})
+    return SharingToggleResponse(agent_id=agent_id, service_name=service_name, enabled=False)
 
 
 # -- Desktop namespace routes (cookie-or-bearer; no agent verb) --
@@ -1207,8 +1217,8 @@ def _handle_sharing_disable(agent_id: str, service_name: str) -> Response:
 
 
 @require_api_or_cookie_auth
-@API_SPEC.validate(json=SetProviderEnabledRequest)
-def _handle_patch_provider(provider_name: str) -> Response:
+@API_SPEC.validate(json=SetProviderEnabledRequest, resp=json_response_model(ProviderToggleResponse))
+def _handle_patch_provider(provider_name: str) -> ProviderToggleResponse | Response:
     """Set a provider's ``is_enabled`` flag. Body: ``{"enabled": bool}``.
 
     Idempotent desired-state. Refuses to disable a provider that still has active
@@ -1225,7 +1235,7 @@ def _handle_patch_provider(provider_name: str) -> Response:
         )
     except desktop_control.ProviderHasActiveWorkspacesError as exc:
         return _json_error(str(exc), 409)
-    return _json_response({"provider_name": provider_name, "enabled": enabled, "changed": changed})
+    return ProviderToggleResponse(provider_name=provider_name, enabled=enabled, changed=changed)
 
 
 @require_api_or_cookie_auth
@@ -1253,18 +1263,19 @@ def _handle_stop_hosts() -> Response:
 
 
 @require_api_or_cookie_auth
-def _handle_stop_state_container() -> Response:
+@API_SPEC.validate(resp=json_response_model(StopStateContainerResponse))
+def _handle_stop_state_container() -> StopStateContainerResponse | Response:
     """Stop this env's mngr Docker state container, to fully free local resources at quit."""
     state = get_state()
     parent_cg = state.root_concurrency_group
     if parent_cg is None:
-        return _json_response({"stopped": False})
+        return StopStateContainerResponse(stopped=False)
     try:
         stopped = desktop_control.stop_state_container(state.mngr_host_dir, parent_cg)
     except DockerCleanupError as exc:
         logger.warning("Failed to stop the Docker state container at shutdown: {}", exc)
         return _json_error(f"Could not stop the Docker state container: {exc}", 500)
-    return _json_response({"stopped": stopped})
+    return StopStateContainerResponse(stopped=stopped)
 
 
 # -- Blueprint factory --

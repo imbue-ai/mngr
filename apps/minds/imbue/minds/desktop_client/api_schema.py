@@ -47,15 +47,22 @@ from imbue.minds.desktop_client.api_auth import require_api_or_cookie_auth
 from imbue.minds.desktop_client.api_models import AgentNotificationRequest
 from imbue.minds.desktop_client.api_models import ApiErrorResponse
 from imbue.minds.desktop_client.api_models import BugReportRequest
+from imbue.minds.desktop_client.api_models import BugReportResponse
 from imbue.minds.desktop_client.api_models import CreateWorkspaceRequest
 from imbue.minds.desktop_client.api_models import EnableSharingRequest
 from imbue.minds.desktop_client.api_models import EstablishSshRequest
+from imbue.minds.desktop_client.api_models import OkResponse
 from imbue.minds.desktop_client.api_models import OperationHandleResponse
 from imbue.minds.desktop_client.api_models import PatchWorkspaceRequest
 from imbue.minds.desktop_client.api_models import RestartWorkspaceRequest
+from imbue.minds.desktop_client.api_models import SharingReadinessResponse
+from imbue.minds.desktop_client.api_models import SharingToggleResponse
 from imbue.minds.desktop_client.api_models import SshConnectionResponse
+from imbue.minds.desktop_client.api_models import WorkspaceBackupsResponse
+from imbue.minds.desktop_client.api_models import WorkspaceLifecycleResponse
 from imbue.minds.desktop_client.api_models import WorkspaceListResponse
 from imbue.minds.desktop_client.api_models import WorkspaceSummary
+from imbue.minds.desktop_client.api_models import WorkspaceVersionResponse
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.responses import make_response
 
@@ -95,26 +102,42 @@ class _RouteModels(FrozenModel):
 # Keys use the OpenAPI ``{param}`` path form (see ``_flask_path_to_openapi``).
 # Routes absent here are still listed, just without body schemas.
 _ROUTE_MODELS: Final[Mapping[tuple[str, str], _RouteModels]] = {
-    ("POST", "/api/v1/agents/{agent_id}/notifications"): _RouteModels(request_model=AgentNotificationRequest),
-    ("POST", "/api/v1/agents/{agent_id}/report"): _RouteModels(request_model=BugReportRequest),
+    ("POST", "/api/v1/agents/{agent_id}/notifications"): _RouteModels(
+        request_model=AgentNotificationRequest, response_model=OkResponse
+    ),
+    ("POST", "/api/v1/agents/{agent_id}/report"): _RouteModels(
+        request_model=BugReportRequest, response_model=BugReportResponse
+    ),
     ("GET", "/api/v1/workspaces"): _RouteModels(response_model=WorkspaceListResponse),
     ("POST", "/api/v1/workspaces"): _RouteModels(
         request_model=CreateWorkspaceRequest, response_model=OperationHandleResponse, success_status=202
     ),
     ("GET", "/api/v1/workspaces/{agent_id}"): _RouteModels(response_model=WorkspaceSummary),
     ("PATCH", "/api/v1/workspaces/{agent_id}"): _RouteModels(request_model=PatchWorkspaceRequest),
+    ("GET", "/api/v1/workspaces/{agent_id}/version"): _RouteModels(response_model=WorkspaceVersionResponse),
+    ("GET", "/api/v1/workspaces/{agent_id}/backups"): _RouteModels(response_model=WorkspaceBackupsResponse),
     ("POST", "/api/v1/workspaces/{agent_id}/destroy"): _RouteModels(
         response_model=OperationHandleResponse, success_status=202
     ),
     ("POST", "/api/v1/workspaces/{agent_id}/restart"): _RouteModels(
         request_model=RestartWorkspaceRequest, response_model=OperationHandleResponse, success_status=202
     ),
+    ("POST", "/api/v1/workspaces/{agent_id}/start"): _RouteModels(response_model=WorkspaceLifecycleResponse),
+    ("POST", "/api/v1/workspaces/{agent_id}/stop"): _RouteModels(response_model=WorkspaceLifecycleResponse),
     ("GET", "/api/v1/workspaces/operations/{operation_id}"): _RouteModels(response_model=OperationHandleResponse),
     ("POST", "/api/v1/workspaces/{agent_id}/ssh"): _RouteModels(
         request_model=EstablishSshRequest, response_model=SshConnectionResponse
     ),
     ("PATCH", "/api/v1/workspaces/{agent_id}/sharing/{service_name}"): _RouteModels(),
-    ("PUT", "/api/v1/workspaces/{agent_id}/sharing/{service_name}"): _RouteModels(request_model=EnableSharingRequest),
+    ("PUT", "/api/v1/workspaces/{agent_id}/sharing/{service_name}"): _RouteModels(
+        request_model=EnableSharingRequest, response_model=SharingToggleResponse
+    ),
+    ("DELETE", "/api/v1/workspaces/{agent_id}/sharing/{service_name}"): _RouteModels(
+        response_model=SharingToggleResponse
+    ),
+    ("GET", "/api/v1/workspaces/{agent_id}/sharing/{service_name}/readiness"): _RouteModels(
+        response_model=SharingReadinessResponse
+    ),
 }
 
 # Always published so the ``default`` error response on every operation can $ref it.

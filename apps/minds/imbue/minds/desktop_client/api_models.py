@@ -182,3 +182,91 @@ class WorkspaceListResponse(FrozenModel):
     """The list of all known workspaces (including destroyed-but-backed-up ones)."""
 
     workspaces: tuple[WorkspaceSummary, ...] = Field(description="All known workspaces")
+
+
+class OkResponse(FrozenModel):
+    """A minimal ``{"ok": true}`` acknowledgement."""
+
+    ok: bool = Field(description="Whether the operation succeeded")
+
+
+class BugReportResponse(FrozenModel):
+    """Acknowledgement for a submitted bug report."""
+
+    ok: bool = Field(description="Whether the report was accepted")
+    event_id: str | None = Field(default=None, description="Id of the recorded report event, when one was written")
+
+
+class WorkspaceLifecycleResponse(FrozenModel):
+    """Result of a workspace host start/stop action."""
+
+    agent_id: str = Field(description="The workspace agent id")
+    action: str = Field(description="The action performed: start or stop")
+    host_state: str | None = Field(default=None, description="The resulting host lifecycle state, when known")
+
+
+class UpgradeMergeSummary(FrozenModel):
+    """One minds-version upgrade merge in a workspace's git history."""
+
+    commit_sha: str = Field(description="Full commit hash of the merge")
+    committed_at: str | None = Field(default=None, description="Commit time (UTC ISO 8601), when parseable")
+    summary: str = Field(description="First line of the merge commit message")
+
+
+class WorkspaceVersionResponse(FrozenModel):
+    """A workspace's minds version: the immutable create-time version + git-derived current/history."""
+
+    agent_id: str = Field(description="The workspace agent id")
+    original_minds_version: str | None = Field(default=None, description="Immutable create-time minds version label")
+    current_minds_version: str | None = Field(default=None, description="Current minds version from the workspace git")
+    upgrade_merges: tuple[UpgradeMergeSummary, ...] = Field(
+        default=(), description="Upgrade merges applied since creation (best-effort)"
+    )
+
+
+class BackupSnapshotSummary(FrozenModel):
+    """One restic backup snapshot of a workspace."""
+
+    snapshot_id: str = Field(description="Full snapshot id (hex)")
+    short_id: str = Field(description="Abbreviated snapshot id restic also accepts")
+    time: str = Field(description="When the snapshot was created (UTC ISO 8601)")
+    paths: tuple[str, ...] = Field(default=(), description="Absolute paths captured in the snapshot")
+    hostname: str = Field(default="", description="Hostname recorded in the snapshot")
+    tags: tuple[str, ...] = Field(default=(), description="Tags recorded on the snapshot")
+    total_size_bytes: int | None = Field(default=None, description="Total snapshot size in bytes, when known")
+
+
+class WorkspaceBackupsResponse(FrozenModel):
+    """A workspace's restic backup snapshots plus whether a backup is running now."""
+
+    agent_id: str = Field(description="The workspace agent id")
+    is_backing_up: bool = Field(description="Whether a (non-stale) restic backup is currently running")
+    snapshots: tuple[BackupSnapshotSummary, ...] = Field(default=(), description="All snapshots, newest-first")
+
+
+class SharingReadinessResponse(FrozenModel):
+    """Whether a shared service's hostname is live yet at the Cloudflare edge."""
+
+    ready: bool = Field(description="Whether the shared URL is reachable yet")
+
+
+class SharingToggleResponse(FrozenModel):
+    """Result of enabling/disabling sharing for a workspace service."""
+
+    agent_id: str = Field(description="The workspace agent id")
+    service_name: str = Field(description="The service whose sharing was changed")
+    enabled: bool = Field(description="Whether sharing is now enabled")
+
+
+class ProviderToggleResponse(FrozenModel):
+    """Result of toggling a provider's enabled flag."""
+
+    provider_name: str = Field(description="The provider that was toggled")
+    enabled: bool = Field(description="The provider's new enabled state")
+    changed: bool = Field(description="Whether the state actually changed")
+
+
+class StopStateContainerResponse(FrozenModel):
+    """Result of stopping the local mngr Docker state container."""
+
+    stopped: bool = Field(description="Whether the state container was stopped")
