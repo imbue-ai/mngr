@@ -1,4 +1,0 @@
-# Packer build artifacts + downloaded base images (issue #2306 Lima bake).
-output-mngr-lima-*/
-packer_cache/
-provision.smoke.sh

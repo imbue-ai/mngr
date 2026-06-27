@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Provision the pre-baked Lima image (issue #2306). Runs as root inside the VM.
+# Bake the forever-claude-template toolchain into a Lima VM (issue 2306).
+# Runs as root inside the VM (invoked by build-lima-image.sh via `limactl shell`).
 #
-# Bakes the forever-claude-template toolchain into the Debian 12 base by running
-# the exact FCT build scripts the Lima provider runs at create time, so at create
-# time the provisioning `command -v ... || install` guards short-circuit and the
-# per-create workspace build hits warm caches. Finishes with cheap reproducibility
-# cleanups so consecutive releases produce small casync/desync deltas.
+# Runs the exact FCT build scripts the Lima provider runs at create time, so at
+# create time the provisioning `command -v ... || install` guards short-circuit
+# and the per-create workspace build hits warm caches. Finishes with cheap
+# reproducibility cleanups so consecutive releases produce small desync deltas.
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
@@ -26,6 +26,7 @@ mkdir -p /code && chmod 777 /code
 
 echo "==> Cloning forever-claude-template ${FCT_REF} into ${REPO_ROOT}"
 mkdir -p "$(dirname "$REPO_ROOT")"
+rm -rf "$REPO_ROOT"
 git clone --depth 1 --branch "$FCT_REF" "$FCT_REPO_URL" "$REPO_ROOT"
 git config --global --add safe.directory "$REPO_ROOT"
 
@@ -52,7 +53,9 @@ find / -xdev -name '*.pyc' -delete 2>/dev/null || true
 find / -xdev -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true
 # Truncate logs rather than delete (keep the files cloud-init/systemd expect).
 find /var/log -type f -exec truncate -s 0 {} + 2>/dev/null || true
-rm -f /etc/ssh/ssh_host_* 2>/dev/null || true   # provider injects/regenerates host keys at create
+# Drop the bake instance's SSH host keys; the Lima provider injects/regenerates
+# its own at create time.
+rm -f /etc/ssh/ssh_host_* 2>/dev/null || true
 : > /etc/machine-id 2>/dev/null || true
 rm -f /var/lib/dbus/machine-id 2>/dev/null || true
 

@@ -159,15 +159,15 @@ gh workflow run minds-launch-to-msg.yml -R imbue-ai/mngr \
 
 Optional but recommended once the tag exists: bake + publish the pre-baked Lima VM image so local Lima creates of the default workspace boot the toolchain instead of building it in-VM. This is **operator-run, not CI** — the R2 credentials and the minisign signing key stay on your machine.
 
-Build one arch per native host (QEMU TCG cross-builds are too slow), then publish each:
+The bake runs *with Lima itself* (so the image is built by the same virtualizer that consumes it — `vz` on Apple Silicon, accelerated QEMU on Linux). Build one arch per native host, then publish each:
 
 ```bash
-# amd64 on a KVM-enabled Linux host; arm64 on an Apple-Silicon Mac (HVF).
-./scripts/build-lima-image.sh --fct-ref "$VERSION"            # emits qcow2 + raw under scripts/packer/output-*/
+# amd64 on a KVM-enabled Linux host; arm64 on an Apple-Silicon Mac (vz).
+./scripts/build-lima-image.sh --fct-ref "$VERSION"            # emits qcow2 + raw under scripts/lima_image/output-<arch>/
 # Publish the raw image (chunk + sign + upload). Needs R2 creds + the minisign key.
 uv run python scripts/lima_image/publish.py \
   --version "$VERSION" --arch "$(uname -m | sed 's/arm64/aarch64/')" \
-  --raw-image scripts/packer/output-mngr-lima-*/mngr-lima-*.raw \
+  --raw-image scripts/lima_image/output-*/mngr-lima-*.raw \
   --bucket "$LIMA_IMAGE_R2_BUCKET" --secret-key-file "$MINISIGN_KEY" --uploader s3
 ```
 
