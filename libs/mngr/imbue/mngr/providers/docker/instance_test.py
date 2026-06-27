@@ -820,7 +820,7 @@ def test_discover_hosts_propagates_api_error_without_marking_unavailable(
 # =========================================================================
 
 
-class _FakeContainer:
+class _FakeStatusContainer:
     """Minimal stand-in for a docker container with a settable status."""
 
     def __init__(self, status: str) -> None:
@@ -833,10 +833,10 @@ class _FakeContainer:
 class _ContainersReturning:
     """Stand-in for ``client.containers`` whose ``list`` returns fixed containers."""
 
-    def __init__(self, containers: list[_FakeContainer]) -> None:
+    def __init__(self, containers: list[_FakeStatusContainer]) -> None:
         self._containers = containers
 
-    def list(self, **kwargs: object) -> list[_FakeContainer]:
+    def list(self, **kwargs: object) -> list[_FakeStatusContainer]:
         return list(self._containers)
 
 
@@ -848,12 +848,12 @@ class _FakeDockerClientReturningContainers:
     without inner SSH).
     """
 
-    def __init__(self, containers: list[_FakeContainer]) -> None:
+    def __init__(self, containers: list[_FakeStatusContainer]) -> None:
         self.containers = _ContainersReturning(containers)
 
 
 def _docker_provider_with_containers(
-    temp_mngr_ctx: MngrContext, containers: list[_FakeContainer]
+    temp_mngr_ctx: MngrContext, containers: list[_FakeStatusContainer]
 ) -> DockerProviderInstance:
     provider = make_docker_provider(temp_mngr_ctx)
     provider.__dict__["_docker_client"] = _FakeDockerClientReturningContainers(containers)
@@ -871,7 +871,7 @@ def test_connection_error_fallback_state_running_container_is_unauthenticated(
     mngr_imbue_cloud). Reporting CRASHED here makes minds' recovery flow skip
     the stop step of a host restart and then fail to start the live container.
     """
-    provider = _docker_provider_with_containers(temp_mngr_ctx, [_FakeContainer("running")])
+    provider = _docker_provider_with_containers(temp_mngr_ctx, [_FakeStatusContainer("running")])
     assert provider.get_connection_error_fallback_state(HostId(HOST_ID_A)) == HostState.UNAUTHENTICATED
 
 
@@ -879,7 +879,7 @@ def test_connection_error_fallback_state_stopped_container_returns_none(
     temp_mngr_ctx: MngrContext,
 ) -> None:
     """A genuinely stopped container yields None so the default offline-state derivation stands."""
-    provider = _docker_provider_with_containers(temp_mngr_ctx, [_FakeContainer("exited")])
+    provider = _docker_provider_with_containers(temp_mngr_ctx, [_FakeStatusContainer("exited")])
     assert provider.get_connection_error_fallback_state(HostId(HOST_ID_A)) is None
 
 
