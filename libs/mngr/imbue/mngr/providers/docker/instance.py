@@ -1598,6 +1598,46 @@ kill -TERM 1
 
         return self._create_host_from_host_record(host_record)
 
+    def get_connection_error_fallback_state(self, host_id: HostId) -> HostState | None:
+        """Report a still-running container as UNAUTHENTICATED rather than CRASHED.
+
+        The docker daemon is ground truth for container lifecycle and is
+        reachable without inner SSH. When agent enumeration fails with a
+        connection error (e.g. the inner sshd died -- "Error reading SSH
+        protocol banner") but the daemon still reports the container as running,
+        the host is up; we just cannot get inside it. Reporting
+        ``HostState.UNAUTHENTICATED`` keeps consumers such as minds' recovery
+        flow from misclassifying a live container as offline and skipping the
+        stop step of a host restart. This deliberately follows the convention
+        ``mngr_imbue_cloud`` established for the identical condition (a running
+        container whose inner SSH is unreachable; see
+        ``map_docker_status_to_host_state``), reached here by a different route:
+        imbue_cloud reads container state out-of-band on its own listing path,
+        whereas docker stays on the generic offline fallback and corrects the
+        state through this hook. Returns ``None`` (default offline derivation)
+        when no running container backs this host, or when the daemon cannot be
+        reached to confirm one -- this hook runs inside the offline fallback,
+        which must degrade gracefully rather than propagate.
+        """
+        try:
+            container = self._find_container_by_host_id(host_id)
+            if container is not None and self._is_container_running(container):
+                return HostState.UNAUTHENTICATED
+        except (
+            docker.errors.DockerException,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            MngrError,
+        ) as e:
+            # The daemon was reachable during enumeration but dropped before this
+            # out-of-band check (e.g. a daemon restart). A transport-level drop
+            # surfaces as a requests ConnectionError/Timeout rather than a
+            # DockerException (see _list_containers), so both are caught here.
+            # Keep the default offline derivation instead of breaking the offline
+            # fallback for this host.
+            logger.warning("Could not read docker container state for host {} during fallback: {}", host_id, e)
+        return None
+
     def get_host(
         self,
         host: HostId | HostName,

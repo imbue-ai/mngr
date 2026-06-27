@@ -214,6 +214,69 @@ def test_connection_error_during_agent_detail_building_falls_back_to_offline(
     assert agent_details_list[0].state == AgentLifecycleState.STOPPED
 
 
+def test_connection_error_fallback_applies_provider_state_override(
+    host_id: HostId, provider: MockProviderInstance, temp_mngr_ctx: MngrContext
+) -> None:
+    """A provider that confirms the host is up out-of-band overrides the offline state.
+
+    Mirrors a docker container that is still running but whose inner sshd has
+    died: the connection-error fallback must report the provider's override
+    (UNAUTHENTICATED) on both the host and every agent's nested host, not the
+    default offline-derived CRASHED that would make minds skip a host restart's
+    stop step.
+    """
+    online_host = _make_mock_online_host(host_id)
+    online_host.get_agents.side_effect = HostConnectionError("Error reading SSH protocol banner")
+
+    offline_host = _make_offline_host(host_id, provider, temp_mngr_ctx)
+    provider.mock_hosts = [online_host, offline_host]
+    provider.mock_offline_hosts = {str(host_id): offline_host}
+    provider.mock_connection_error_fallback_state = HostState.UNAUTHENTICATED
+
+    host_ref = DiscoveredHost(
+        host_id=host_id,
+        host_name=HostName("test-host"),
+        provider_name=provider.name,
+    )
+    agent_ref = _make_agent_ref(host_id, AgentId.generate(), provider.name)
+
+    host_details, agent_details_list = provider.get_host_and_agent_details(host_ref, [agent_ref])
+
+    assert host_details.state == HostState.UNAUTHENTICATED
+    assert len(agent_details_list) == 1
+    assert agent_details_list[0].host.state == HostState.UNAUTHENTICATED
+
+
+def test_connection_error_fallback_without_override_uses_offline_state(
+    host_id: HostId, provider: MockProviderInstance, temp_mngr_ctx: MngrContext
+) -> None:
+    """Without a provider override, the fallback keeps the default offline-derived state.
+
+    A shutdown-capable provider with no recorded stop reason derives CRASHED.
+    This pins that the override hook is purely additive: a provider that does
+    not implement it is unaffected.
+    """
+    online_host = _make_mock_online_host(host_id)
+    online_host.get_agents.side_effect = HostConnectionError("Error reading SSH protocol banner")
+
+    offline_host = _make_offline_host(host_id, provider, temp_mngr_ctx)
+    provider.mock_hosts = [online_host, offline_host]
+    provider.mock_offline_hosts = {str(host_id): offline_host}
+    # mock_connection_error_fallback_state left at its default (None).
+
+    host_ref = DiscoveredHost(
+        host_id=host_id,
+        host_name=HostName("test-host"),
+        provider_name=provider.name,
+    )
+    agent_ref = _make_agent_ref(host_id, AgentId.generate(), provider.name)
+
+    host_details, agent_details_list = provider.get_host_and_agent_details(host_ref, [agent_ref])
+
+    assert host_details.state == HostState.CRASHED
+    assert agent_details_list[0].host.state == HostState.CRASHED
+
+
 def test_offline_field_generators_populate_plugin_data_via_get_host_and_agent_details(
     host_id: HostId, provider: MockProviderInstance, temp_mngr_ctx: MngrContext
 ) -> None:
