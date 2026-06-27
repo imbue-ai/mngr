@@ -100,6 +100,10 @@ _DEFAULT_SHARED_ENV_ROLES: Final[tuple[SharedEnvRole, ...]] = (SharedEnvRole("de
 
 _MINDS_DEPLOY_TIMEOUT_SECONDS: Final[int] = 15 * 60
 _MINDS_DESTROY_TIMEOUT_SECONDS: Final[int] = 10 * 60
+# Global pytest-session deadline for the deployment/services suites. They each
+# stand up real cloud envs and legitimately run for many minutes (the three
+# minds_deployment tests together are ~10-12 min), far beyond the default.
+_PYTEST_MAX_DURATION_SECONDS: Final[int] = 60 * 60
 _MODAL_ENV_LIST_TIMEOUT_SECONDS: Final[int] = 60
 # Used only to resolve the ci tier's Modal workspace when listing envs for the
 # sweep; never materialized as a real env.
@@ -609,6 +613,12 @@ def _build_pytest_env(
     """
     env = dict(os.environ)
     env[DEPLOYMENT_ENVS_JSON_ENV_VAR] = str(deployment_envs_json_path)
+    # The deployment/services tests each deploy real cloud envs and run for
+    # minutes; raise the pytest global-duration deadline well above the default
+    # so the suite isn't failed for simply being slow (an operator override of
+    # the env var still wins). The per-test `@pytest.mark.timeout` decorators
+    # remain the real per-test guards.
+    env.setdefault("PYTEST_MAX_DURATION_SECONDS", str(_PYTEST_MAX_DURATION_SECONDS))
     if mailtm_address and mailtm_jwt:
         env[MAILTM_ADDRESS_ENV_VAR] = mailtm_address
         env[MAILTM_JWT_ENV_VAR] = mailtm_jwt.get_secret_value()
