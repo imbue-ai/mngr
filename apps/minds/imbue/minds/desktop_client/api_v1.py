@@ -547,10 +547,8 @@ def _run_mngr_blocking(argv: list[str], parent_cg: ConcurrencyGroup) -> tuple[in
     return returncode, finished.stdout, finished.stderr
 
 
-@require_api_or_cookie_auth
-@API_SPEC.validate(resp=json_response_model(WorkspaceLifecycleResponse))
-def _handle_workspace_lifecycle(agent_id: str, action: str) -> WorkspaceLifecycleResponse | Response:
-    """Start or stop a workspace's host, blocking until the transition resolves."""
+def _perform_workspace_lifecycle(agent_id: str, action: str) -> WorkspaceLifecycleResponse | Response:
+    """Shared start/stop implementation; the two routes are thin named wrappers (so each is documented)."""
     parsed_id = AgentId(agent_id)
     parent_cg = get_state().root_concurrency_group
     if parent_cg is None:
@@ -586,6 +584,20 @@ def _handle_workspace_lifecycle(agent_id: str, action: str) -> WorkspaceLifecycl
         action=action,
         host_state=str(host_state) if host_state is not None else None,
     )
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(WorkspaceLifecycleResponse))
+def _handle_workspace_start(agent_id: str) -> WorkspaceLifecycleResponse | Response:
+    """Start a workspace's host, blocking until the transition resolves."""
+    return _perform_workspace_lifecycle(agent_id, "start")
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(WorkspaceLifecycleResponse))
+def _handle_workspace_stop(agent_id: str) -> WorkspaceLifecycleResponse | Response:
+    """Stop a workspace's host, blocking until the transition resolves."""
+    return _perform_workspace_lifecycle(agent_id, "stop")
 
 
 # -- Workspace recovery routes (health probe + restart) --
@@ -1305,13 +1317,13 @@ def create_api_v1_blueprint() -> Blueprint:
     blueprint.add_url_rule("/workspaces/<agent_id>/destroy", view_func=_handle_destroy_workspace, methods=["POST"])
     blueprint.add_url_rule(
         "/workspaces/<agent_id>/start",
-        view_func=lambda agent_id: _handle_workspace_lifecycle(agent_id, "start"),
+        view_func=_handle_workspace_start,
         endpoint="workspace_start",
         methods=["POST"],
     )
     blueprint.add_url_rule(
         "/workspaces/<agent_id>/stop",
-        view_func=lambda agent_id: _handle_workspace_lifecycle(agent_id, "stop"),
+        view_func=_handle_workspace_stop,
         endpoint="workspace_stop",
         methods=["POST"],
     )
