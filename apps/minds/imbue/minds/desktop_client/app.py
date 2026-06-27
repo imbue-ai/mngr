@@ -2815,11 +2815,11 @@ _HOST_RESTART_STARTUP_WAIT_SECONDS: Final[float] = 30.0
 # (test_snapshot_resume) allows 120s for system_interface to come back, so we use
 # that plus margin; otherwise a slow-but-healthy Modal restart gets declared
 # "failed" at 30s while the background probe quietly recovers it seconds later.
-_MODAL_HOST_RESTART_STARTUP_WAIT_SECONDS: Final[float] = 150.0
+_MODAL_HOST_RESTART_STARTUP_WAIT_SECONDS: Final[float] = 300.0
 # `mngr start` subprocess budget for a Modal host restart (cold boot from a
-# snapshot). The default 120s command timeout is too short; the resume test
-# allows 300s. Applies only to Modal host restarts.
-_MODAL_HOST_RESTART_MNGR_TIMEOUT_SECONDS: Final[float] = 300.0
+# snapshot). The default 120s command timeout is too short. Applies only to
+# Modal host restarts.
+_MODAL_HOST_RESTART_MNGR_TIMEOUT_SECONDS: Final[float] = 600.0
 # The Modal provider instance name minds configures (bootstrap writes
 # [providers.modal]); used to scope the longer restart budget to Modal only.
 _MODAL_PROVIDER_NAME: Final[str] = "modal"
