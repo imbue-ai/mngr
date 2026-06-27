@@ -17,6 +17,7 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.errors import LimaImageDownloadError
@@ -239,6 +240,45 @@ def resolve_ready_prebaked_lima_image(
             raise LimaImageDownloadError(
                 state.error or f"Pre-baked Lima image not ready (status {state.status.value}); please retry."
             )
+
+
+class LimaImageCreateGate(FrozenModel):
+    """Bundles everything the Lima create path needs to consult the pre-baked image.
+
+    Built at startup (where the release tag + default repo URL + dev-loop signal
+    are known) and handed to the ``AgentCreator`` so the create worker can resolve
+    a ready image without importing the templates module (which would form an
+    import cycle: templates already imports ``AgentCreationInfo`` from agent_creator).
+    """
+
+    prefetcher: LimaImagePrefetcher = Field(description="The background image prefetcher")
+    current_release_tag: str = Field(description="Release tag the baked image is keyed to (FALLBACK_BRANCH)")
+    default_repo_url: str = Field(description="Default forever-claude-template repo URL")
+    is_dev_loop: bool = Field(description="Whether the operator opted into local-worktree dev defaults")
+
+    def resolve_qcow2_for_create(
+        self,
+        *,
+        is_lima_launch_mode: bool,
+        repo_url: str,
+        branch_or_tag: str | None,
+        environ: Mapping[str, str],
+        wait_timeout_seconds: float,
+        poll_interval_seconds: float,
+    ) -> Path | None:
+        """Resolve the baked qcow2 path for a create (or None to build in-VM); raises on a published-but-unready image."""
+        return resolve_ready_prebaked_lima_image(
+            prefetcher=self.prefetcher,
+            is_lima_launch_mode=is_lima_launch_mode,
+            repo_url=repo_url,
+            branch_or_tag=branch_or_tag,
+            current_release_tag=self.current_release_tag,
+            default_repo_url=self.default_repo_url,
+            is_dev_loop=self.is_dev_loop,
+            environ=environ,
+            wait_timeout_seconds=wait_timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+        )
 
 
 def lima_image_cache_dir(data_dir: Path) -> Path:

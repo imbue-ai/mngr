@@ -49,6 +49,7 @@ from imbue.minds.desktop_client.backup_provisioning import configure_backups_for
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
+from imbue.minds.desktop_client.lima_image_prefetch import LimaImageCreateGate
 from imbue.minds.desktop_client.lima_image_prefetch import prebaked_image_mngr_setting_args
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
@@ -514,6 +515,13 @@ _FAST_MODE_PREVENT: Final[str] = "prevent"
 # human-formatted error text) to fall back to the slow path. Kept in sync with
 # ``imbue.mngr_imbue_cloud.errors.FastPathUnavailableError``.
 _FAST_PATH_UNAVAILABLE_ERROR_CLASS: Final[str] = "FastPathUnavailableError"
+
+# How long a gated Lima create blocks waiting for the prefetched image to become
+# ready before surfacing a retryable error. Generous because a cold first-run
+# download of a multi-GB image can take a while; the background prefetch usually
+# wins this race long before a user clicks create.
+_PREBAKED_IMAGE_WAIT_TIMEOUT_SECONDS: Final[float] = 1800.0
+_PREBAKED_IMAGE_POLL_INTERVAL_SECONDS: Final[float] = 1.0
 
 
 def _build_mngr_create_command(
@@ -1073,6 +1081,8 @@ class _MngrCreateAttemptParams(FrozenModel):
     parent_cg: ConcurrencyGroup | None
     color: str | None
     original_minds_version: str | None
+    # Resolved ready pre-baked Lima qcow2 path (issue #2306), or None to build in-VM.
+    prebaked_lima_image_qcow2_path: Path | None = None
 
 
 def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams) -> tuple[AgentId, HostId]:
@@ -1107,6 +1117,7 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         anthropic_base_url=params.anthropic_base_url,
         color=params.color,
         original_minds_version=params.original_minds_version,
+        prebaked_lima_image_qcow2_path=params.prebaked_lima_image_qcow2_path,
         parent_cg=params.parent_cg,
     )
 
@@ -1190,6 +1201,15 @@ class AgentCreator(MutableModel):
         description=(
             "Dispatcher for surfacing failures from background tasks (e.g. the detached "
             "Cloudflare tunnel setup task) to the user as OS notifications."
+        ),
+    )
+    lima_image_gate: LimaImageCreateGate | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Pre-baked Lima image create gate (issue #2306). When set and the create matches the "
+            "default workspace (Lima + default FCT repo + current release tag), the create gates on "
+            "the verified image and points Lima at it; None disables the path."
         ),
     )
     mngr_forward_port: int = Field(
@@ -1634,6 +1654,26 @@ class AgentCreator(MutableModel):
                 parsed_host = HostName(host_name)
                 log_queue.put("[minds] Creating workspace '{}' (mode: {})...".format(host_name, launch_mode.value))
 
+                # Pre-baked Lima image gate (issue #2306): for the default
+                # workspace (Lima + default FCT repo + current release tag) wait on
+                # the prefetched, verified image and point Lima at it. Returns None
+                # (build in-VM) for any non-default create or unpublished version;
+                # raises a retryable error if a published image can't be readied.
+                prebaked_lima_image_qcow2_path: Path | None = None
+                if self.lima_image_gate is not None:
+                    if launch_mode is LaunchMode.LIMA:
+                        log_queue.put("[minds] Checking for a pre-baked Lima image...")
+                    prebaked_lima_image_qcow2_path = self.lima_image_gate.resolve_qcow2_for_create(
+                        is_lima_launch_mode=launch_mode is LaunchMode.LIMA,
+                        repo_url=repo_source or "",
+                        branch_or_tag=branch_or_tag,
+                        environ=os.environ,
+                        wait_timeout_seconds=_PREBAKED_IMAGE_WAIT_TIMEOUT_SECONDS,
+                        poll_interval_seconds=_PREBAKED_IMAGE_POLL_INTERVAL_SECONDS,
+                    )
+                    if prebaked_lima_image_qcow2_path is not None:
+                        log_queue.put("[minds] Using pre-baked Lima image (fast create).")
+
                 # ``fast_mode`` is the only knob that varies between the fast-
                 # path and slow-path attempts; bundle the rest of the per-
                 # creation inputs so each attempt takes just it.
@@ -1652,6 +1692,7 @@ class AgentCreator(MutableModel):
                     parent_cg=self.root_concurrency_group,
                     color=color,
                     original_minds_version=original_minds_version or None,
+                    prebaked_lima_image_qcow2_path=prebaked_lima_image_qcow2_path,
                 )
 
                 if launch_mode is LaunchMode.IMBUE_CLOUD:
