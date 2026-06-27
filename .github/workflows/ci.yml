@@ -576,8 +576,13 @@ jobs:
       contents: read
       id-token: write
     env:
-      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      # The ci tier deploys to the minds-dev Modal workspace, so use that
+      # workspace's tokens. The default MODAL_TOKEN_ID is the imbue workspace,
+      # and Modal env tokens override the ~/.modal.toml profile -- using imbue
+      # here makes `modal deploy` report imbue-* hostnames that mismatch the
+      # computed minds-dev-* URLs and aborts the deploy.
+      MODAL_TOKEN_ID: ${{ vars.MINDS_DEV_MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MINDS_DEV_MODAL_TOKEN_SECRET }}
       MINDS_CI_RUN_KEY: ${{ github.run_id }}
       VAULT_ADDR: https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200
       VAULT_NAMESPACE: admin
@@ -620,8 +625,8 @@ jobs:
         run: |
           cat > "$HOME/.modal.toml" <<'EOF'
           [minds-dev]
-          token_id = "${{ vars.MODAL_TOKEN_ID }}"
-          token_secret = "${{ secrets.MODAL_TOKEN_SECRET }}"
+          token_id = "${{ vars.MINDS_DEV_MODAL_TOKEN_ID }}"
+          token_secret = "${{ secrets.MINDS_DEV_MODAL_TOKEN_SECRET }}"
           active = true
           EOF
       - name: Deploy the per-run ci env
@@ -648,8 +653,9 @@ jobs:
       contents: read
       id-token: write
     env:
-      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      # ci envs live in the minds-dev Modal workspace (see build-minds-ci-env).
+      MODAL_TOKEN_ID: ${{ vars.MINDS_DEV_MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MINDS_DEV_MODAL_TOKEN_SECRET }}
       VAULT_ADDR: https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200
       VAULT_NAMESPACE: admin
     steps:
@@ -682,8 +688,8 @@ jobs:
         run: |
           cat > "$HOME/.modal.toml" <<'EOF'
           [minds-dev]
-          token_id = "${{ vars.MODAL_TOKEN_ID }}"
-          token_secret = "${{ secrets.MODAL_TOKEN_SECRET }}"
+          token_id = "${{ vars.MINDS_DEV_MODAL_TOKEN_ID }}"
+          token_secret = "${{ secrets.MINDS_DEV_MODAL_TOKEN_SECRET }}"
           active = true
           EOF
       - name: Sweep leaked ci-* envs older than 1 hour
@@ -846,8 +852,13 @@ jobs:
       contents: read
       id-token: write
     env:
-      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      # The ci tier deploys to the minds-dev Modal workspace, so use that
+      # workspace's tokens. The default MODAL_TOKEN_ID is the imbue workspace,
+      # and Modal env tokens override the ~/.modal.toml profile -- using imbue
+      # here makes `modal deploy` report imbue-* hostnames that mismatch the
+      # computed minds-dev-* URLs and aborts the deploy.
+      MODAL_TOKEN_ID: ${{ vars.MINDS_DEV_MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MINDS_DEV_MODAL_TOKEN_SECRET }}
       MINDS_CI_RUN_KEY: ${{ github.run_id }}
       VAULT_ADDR: https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200
       VAULT_NAMESPACE: admin
@@ -881,8 +892,8 @@ jobs:
         run: |
           cat > "$HOME/.modal.toml" <<'EOF'
           [minds-dev]
-          token_id = "${{ vars.MODAL_TOKEN_ID }}"
-          token_secret = "${{ secrets.MODAL_TOKEN_SECRET }}"
+          token_id = "${{ vars.MINDS_DEV_MODAL_TOKEN_ID }}"
+          token_secret = "${{ secrets.MINDS_DEV_MODAL_TOKEN_SECRET }}"
           active = true
           EOF
       - name: Download deployment env config
