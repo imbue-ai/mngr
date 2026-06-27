@@ -58,6 +58,5 @@ The `shared_env` / `ci_test_user` fixtures resolve their secrets from injected e
 ## Status
 
 - `test_logged_in_smoke` (`minds_services`) and `test_ci_env_litellm` (`minds_services`: login → mint LiteLLM key → live LLM call) run in the integration tier and pass in CI.
-- `test_deploy_new_version` and `test_deploy_round_trip` (`minds_deployment`) run in the release tier and pass.
-- `test_deploy_rollback` (`minds_deployment`) is **`@pytest.mark.skip`ped**: it surfaced a real `minds env recover` gap (after auto-rollback the broken v2 containers are not terminated, so `/version` still reports the failed deploy_id). It needs a fix in the recover/terminate path before it can pass; see its skip note.
+- `test_deploy_new_version`, `test_deploy_rollback`, and `test_deploy_round_trip` (`minds_deployment`) run in the release tier and pass. (`test_deploy_rollback` originally surfaced a real `minds env recover` gap -- rolled-back apps' broken containers weren't terminated because the Modal app-id lookup missed the `Description` field -- which this work fixed.)
 - `test_litellm_via_workspace` and `test_signup_tunnel` are wired into the flow but **`@pytest.mark.skip`ped**: their bodies are still stubs and need debugging/implementation (real FCT Docker workspace creation, Cloudflare tunnels, the mail.tm signup flow) before they will pass. Each carries an explicit skip note.
