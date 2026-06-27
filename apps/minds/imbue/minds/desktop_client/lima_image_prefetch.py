@@ -34,7 +34,7 @@ from imbue.minds.lima_image.interfaces import LimaImageProgressSinkInterface
 from imbue.minds.lima_image.interfaces import ManifestFetcherInterface
 from imbue.minds.lima_image.interfaces import SignatureVerifierInterface
 from imbue.minds.lima_image.manifest_fetcher import HttpxManifestFetcher
-from imbue.minds.lima_image.minisign import MinisignSignatureVerifier
+from imbue.minds.lima_image.minisign_verify import PythonMinisignSignatureVerifier
 from imbue.minds.lima_image.primitives import ImageArch
 from imbue.minds.lima_image.primitives import MindsImageVersion
 from imbue.minds.lima_image.primitives import get_current_image_arch
@@ -301,7 +301,7 @@ def make_lima_image_prefetcher(
         arch=get_current_image_arch(),
         cache_dir=cache_dir,
         fetcher=HttpxManifestFetcher(),
-        verifier=MinisignSignatureVerifier(concurrency_group=concurrency_group),
+        verifier=PythonMinisignSignatureVerifier(),
         chunk_store=DesyncImageChunkStore(concurrency_group=concurrency_group),
         converter=QemuImageFormatConverter(concurrency_group=concurrency_group),
         progress_sink=FileLimaImageProgressSink(state_file=LimaImageCacheLayout(cache_dir=cache_dir).state_file),

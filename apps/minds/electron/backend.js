@@ -204,6 +204,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         const uvBinDir = paths.getUvBinDir();
         const gitBinDir = paths.getGitBinDir();
         const limaBinDir = paths.getLimaBinDir();
+        const desyncBinDir = paths.getDesyncBinDir();
         const uvCacheDir = paths.getUvCacheDir();
         const uvPythonDir = paths.getUvPythonDir();
         const pyprojectDir = paths.getPyprojectDir();
@@ -244,7 +245,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           : systemPath;
         env = {
           ...process.env,
-          PATH: `${uvBinDir}:${gitBinDir}:${limaBinDir}:${augmentedSystemPath}`,
+          PATH: `${uvBinDir}:${gitBinDir}:${limaBinDir}:${desyncBinDir}:${augmentedSystemPath}`,
           UV_CACHE_DIR: uvCacheDir,
           UV_PYTHON_INSTALL_DIR: uvPythonDir,
           MINDS_ELECTRON: '1',

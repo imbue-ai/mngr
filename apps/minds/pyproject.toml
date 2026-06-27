@@ -122,7 +122,6 @@ omit = [
   # binaries are absent (the offload sandboxes), so they can't reach coverage
   # there. The pure orchestration (ensure.py) is covered via mock_lima_image_test.
   "*/imbue/minds/lima_image/desync.py",
-  "*/imbue/minds/lima_image/minisign.py",
   "*/imbue/minds/lima_image/manifest_fetcher.py",
   "*/imbue/minds/lima_image/qemu_converter.py",
 ]

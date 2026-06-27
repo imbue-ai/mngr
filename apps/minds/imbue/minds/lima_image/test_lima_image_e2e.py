@@ -31,7 +31,7 @@ from imbue.minds.lima_image.data_types import RootManifest
 from imbue.minds.lima_image.desync import DesyncImageChunkStore
 from imbue.minds.lima_image.ensure import ensure_current_lima_image
 from imbue.minds.lima_image.manifest_fetcher import HttpxManifestFetcher
-from imbue.minds.lima_image.minisign import MinisignSignatureVerifier
+from imbue.minds.lima_image.minisign_verify import PythonMinisignSignatureVerifier
 from imbue.minds.lima_image.primitives import ImageArch
 from imbue.minds.lima_image.primitives import MindsImageVersion
 from imbue.minds.lima_image.primitives import Sha256Hex
@@ -133,7 +133,7 @@ def _ensure(cg: ConcurrencyGroup, base_url: str, public_key: str, version: Minds
         arch=_ARCH,
         cache_dir=cache_dir,
         fetcher=HttpxManifestFetcher(),
-        verifier=MinisignSignatureVerifier(concurrency_group=cg),
+        verifier=PythonMinisignSignatureVerifier(),
         chunk_store=DesyncImageChunkStore(concurrency_group=cg),
         converter=QemuImageFormatConverter(concurrency_group=cg),
         progress_sink=FileLimaImageProgressSink(state_file=LimaImageCacheLayout(cache_dir=cache_dir).state_file),
