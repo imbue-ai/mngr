@@ -11,6 +11,7 @@ from pydantic_core import core_schema
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.minds.errors import InvalidSha256HexError
 
 # The minisign-signed root manifest and per-arch indexes live under these
 # fixed prefixes within a release's chunk-store base URL. Kept here (the
@@ -37,7 +38,7 @@ class Sha256Hex(str):
     def __new__(cls, value: str) -> Self:
         normalized = value.strip().lower()
         if not _SHA256_HEX_PATTERN.match(normalized):
-            raise ValueError(f"Not a valid lowercase hex SHA-256 digest: {value!r}")
+            raise InvalidSha256HexError(f"Not a valid lowercase hex SHA-256 digest: {value!r}")
         return super().__new__(cls, normalized)
 
     @classmethod

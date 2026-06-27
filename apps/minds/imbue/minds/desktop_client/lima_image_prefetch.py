@@ -1,4 +1,4 @@
-"""Desktop-client glue for the pre-baked Lima image cache (issue #2306).
+"""Desktop-client glue for the pre-baked Lima image cache (issue 2306).
 
 Resolves the per-env image source from config, decides when a create should use
 the pre-baked image (the gate), and runs the background prefetch worker that
@@ -6,6 +6,7 @@ keeps the current release's image present + verified. The heavy lifting lives in
 ``imbue.minds.lima_image``; this module is the minds-app-level wiring.
 """
 
+import threading
 import time
 from collections.abc import Mapping
 from datetime import datetime
@@ -166,17 +167,19 @@ class LimaImagePrefetcher(MutableModel):
     ) -> LimaImagePrefetchState | None:
         """Poll the persisted state until a terminal status or timeout; None if no state yet at timeout."""
         deadline = time.monotonic() + timeout_seconds
-        while True:
-            state = self.progress_sink.read_state()
-            if state is not None and state.status in (
-                LimaImagePrefetchStatus.READY,
-                LimaImagePrefetchStatus.VERSION_UNAVAILABLE,
-                LimaImagePrefetchStatus.FAILED,
-            ):
-                return state
-            if time.monotonic() >= deadline:
-                return state
-            time.sleep(poll_interval_seconds)
+        terminal_statuses = (
+            LimaImagePrefetchStatus.READY,
+            LimaImagePrefetchStatus.VERSION_UNAVAILABLE,
+            LimaImagePrefetchStatus.FAILED,
+        )
+        # A throwaway Event gives an interruptible sleep without time.sleep (the
+        # codebase's standard poll idiom); it is never set, so wait() just delays.
+        waiter = threading.Event()
+        latest_state = self.progress_sink.read_state()
+        while (latest_state is None or latest_state.status not in terminal_statuses) and time.monotonic() < deadline:
+            waiter.wait(poll_interval_seconds)
+            latest_state = self.progress_sink.read_state()
+        return latest_state
 
     def _record_failure(self, message: str) -> None:
         self.progress_sink.write_state(self._failure_state(message))
@@ -247,8 +250,8 @@ class LimaImageCreateGate(FrozenModel):
 
     Built at startup (where the release tag + default repo URL + dev-loop signal
     are known) and handed to the ``AgentCreator`` so the create worker can resolve
-    a ready image without importing the templates module (which would form an
-    import cycle: templates already imports ``AgentCreationInfo`` from agent_creator).
+    a ready image without importing the templates module (which would form a
+    cycle, since templates already pulls ``AgentCreationInfo`` from agent_creator).
     """
 
     prefetcher: LimaImagePrefetcher = Field(description="The background image prefetcher")

@@ -138,3 +138,13 @@ class LimaImageToolError(LimaImageError):
     """Raised when a required external tool (desync, minisign, qemu-img) is missing or errors."""
 
     ...
+
+
+class InvalidSha256HexError(LimaImageError, ValueError):
+    """Raised when a string is not a valid lowercase hex SHA-256 digest.
+
+    Subclasses ``ValueError`` so pydantic treats it as a validation failure when
+    raised from the ``Sha256Hex`` primitive's constructor.
+    """
+
+    ...

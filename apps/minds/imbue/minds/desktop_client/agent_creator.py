@@ -699,7 +699,7 @@ def _build_mngr_create_command(
         case LaunchMode.LIMA:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "lima"])
             mngr_command.extend(_remote_host_env_flags())
-            # When the caller resolved a ready pre-baked image (issue #2306),
+            # When the caller resolved a ready pre-baked image (issue 2306),
             # point Lima at the local qcow2 via the provider's existing per-arch
             # image-url override, so the VM boots the baked toolchain instead of
             # building it. No provider code change is needed to consume it.
@@ -1081,7 +1081,7 @@ class _MngrCreateAttemptParams(FrozenModel):
     parent_cg: ConcurrencyGroup | None
     color: str | None
     original_minds_version: str | None
-    # Resolved ready pre-baked Lima qcow2 path (issue #2306), or None to build in-VM.
+    # Resolved ready pre-baked Lima qcow2 path (issue 2306), or None to build in-VM.
     prebaked_lima_image_qcow2_path: Path | None = None
 
 
@@ -1207,7 +1207,7 @@ class AgentCreator(MutableModel):
         default=None,
         frozen=True,
         description=(
-            "Pre-baked Lima image create gate (issue #2306). When set and the create matches the "
+            "Pre-baked Lima image create gate (issue 2306). When set and the create matches the "
             "default workspace (Lima + default FCT repo + current release tag), the create gates on "
             "the verified image and points Lima at it; None disables the path."
         ),
@@ -1654,7 +1654,7 @@ class AgentCreator(MutableModel):
                 parsed_host = HostName(host_name)
                 log_queue.put("[minds] Creating workspace '{}' (mode: {})...".format(host_name, launch_mode.value))
 
-                # Pre-baked Lima image gate (issue #2306): for the default
+                # Pre-baked Lima image gate (issue 2306): for the default
                 # workspace (Lima + default FCT repo + current release tag) wait on
                 # the prefetched, verified image and point Lima at it. Returns None
                 # (build in-VM) for any non-default create or unpublished version;

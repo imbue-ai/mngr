@@ -84,7 +84,7 @@ class ClientEnvConfig(FrozenModel):
     lima_image_base_url: str | None = Field(
         default=None,
         description=(
-            "Root URL of the pre-baked Lima image chunk store / CDN for this env (issue #2306). "
+            "Root URL of the pre-baked Lima image chunk store / CDN for this env (issue 2306). "
             "When set together with `lima_image_minisign_public_key`, the desktop app prefetches the "
             "current release's image and points Lima at it for fast local creates. None disables the "
             "pre-baked path (the app always builds the workspace in-VM)."

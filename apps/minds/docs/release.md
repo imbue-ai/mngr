@@ -155,6 +155,24 @@ gh workflow run minds-launch-to-msg.yml -R imbue-ai/mngr \
 
 **Green here concludes the release.** Note the build ID in the `build` summary.
 
+### 8b. Build + publish the pre-baked Lima image (issue 2306)
+
+Optional but recommended once the tag exists: bake + publish the pre-baked Lima VM image so local Lima creates of the default workspace boot the toolchain instead of building it in-VM. This is **operator-run, not CI** — the R2 credentials and the minisign signing key stay on your machine.
+
+Build one arch per native host (QEMU TCG cross-builds are too slow), then publish each:
+
+```bash
+# amd64 on a KVM-enabled Linux host; arm64 on an Apple-Silicon Mac (HVF).
+./scripts/build-lima-image.sh --fct-ref "$VERSION"            # emits qcow2 + raw under scripts/packer/output-*/
+# Publish the raw image (chunk + sign + upload). Needs R2 creds + the minisign key.
+uv run python scripts/lima_image/publish.py \
+  --version "$VERSION" --arch "$(uname -m | sed 's/aarch64/aarch64/;s/x86_64/x86_64/')" \
+  --raw-image scripts/packer/output-mngr-lima-*/mngr-lima-*.raw \
+  --bucket "$LIMA_IMAGE_R2_BUCKET" --secret-key-file "$MINISIGN_KEY" --uploader s3
+```
+
+Re-publishing a near-identical image only uploads the changed chunks (content-addressed dedup). The desktop app picks up the new image via the per-env `lima_image_base_url` + `lima_image_minisign_public_key` in `client.toml`; if no image is published for the tag, the app simply builds in-VM as before. Measure the `desync` delta between two consecutive real builds before pushing reproducibility further.
+
 ### 9. Optional: dev verify + ship
 
 Drive the build's ToDesktop zip (`https://dl.todesktop.com/26032588hqdzk/builds/<build_id>/mac/zip/arm64`, replaces `/Applications/Minds.app`) or the dev build through create-agent → first message. To publish, click **Release** at `https://app.todesktop.com/apps/26032588hqdzk/builds/<build_id>` (the `todesktop release` CLI is auth-blocked); auto-updater picks it up on next launch.

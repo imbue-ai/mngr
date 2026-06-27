@@ -1,15 +1,16 @@
 import hashlib
 import shutil
-from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Final
 
 from loguru import logger
+from pydantic import Field
 from pydantic import ValidationError
 
 from imbue.imbue_common.logging import log_span
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.errors import LimaImageVerificationError
 from imbue.minds.lima_image.cache_layout import LimaImageCacheLayout
 from imbue.minds.lima_image.cache_layout import LimaImageCurrentPointer
@@ -36,9 +37,6 @@ from imbue.minds.lima_image.primitives import Sha256Hex
 
 _SHA256_READ_CHUNK_BYTES: Final[int] = 1024 * 1024
 
-# Reports a phase transition: (status, optional human detail, optional ready qcow2 path).
-ProgressReporter = Callable[[LimaImagePrefetchStatus, str | None, Path | None], None]
-
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -47,10 +45,7 @@ def _now() -> datetime:
 def _sha256_of_file(path: Path) -> Sha256Hex:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
-        while True:
-            block = handle.read(_SHA256_READ_CHUNK_BYTES)
-            if not block:
-                break
+        for block in iter(lambda: handle.read(_SHA256_READ_CHUNK_BYTES), b""):
             digest.update(block)
     return Sha256Hex(digest.hexdigest())
 
@@ -88,23 +83,25 @@ def _prune_other_versions(layout: LimaImageCacheLayout, keep_version: MindsImage
                 shutil.rmtree(arch_path, ignore_errors=True)
 
 
-def _make_progress_reporter(
-    *, progress_sink: LimaImageProgressSinkInterface, minds_version: MindsImageVersion, arch: ImageArch
-) -> ProgressReporter:
-    def _report(status: LimaImagePrefetchStatus, detail: str | None, qcow2_path: Path | None) -> None:
-        progress_sink.write_state(
+class _ProgressReporter(MutableModel):
+    """Persists ensure-image progress for one (version, arch) run via the injected sink."""
+
+    progress_sink: LimaImageProgressSinkInterface = Field(frozen=True, description="Where progress is written")
+    minds_version: MindsImageVersion = Field(frozen=True, description="Release tag being ensured")
+    arch: ImageArch = Field(frozen=True, description="Architecture being ensured")
+
+    def emit(self, status: LimaImagePrefetchStatus, detail: str | None, qcow2_path: Path | None) -> None:
+        self.progress_sink.write_state(
             LimaImagePrefetchState(
                 status=status,
-                minds_version=minds_version,
-                arch=arch,
+                minds_version=self.minds_version,
+                arch=self.arch,
                 updated_at=_now(),
                 qcow2_path=qcow2_path,
                 detail=detail,
                 error=None,
             )
         )
-
-    return _report
 
 
 def _fetch_and_verify_manifest(
@@ -187,26 +184,26 @@ def ensure_current_lima_image(
     for a published-but-unfetchable/unverifiable image -- never a silent rebuild.
     """
     layout = LimaImageCacheLayout(cache_dir=cache_dir)
-    report = _make_progress_reporter(progress_sink=progress_sink, minds_version=minds_version, arch=arch)
+    reporter = _ProgressReporter(progress_sink=progress_sink, minds_version=minds_version, arch=arch)
 
     # Fast path: the image for this exact version is already assembled.
     current = _read_current_pointer(layout)
     if current is not None and current.minds_version == minds_version and current.arch == arch:
         if current.qcow2_path.exists():
-            report(LimaImagePrefetchStatus.READY, None, current.qcow2_path)
+            reporter.emit(LimaImagePrefetchStatus.READY, None, current.qcow2_path)
             return EnsureImageResult(status=LimaImagePrefetchStatus.READY, qcow2_path=current.qcow2_path)
 
-    report(LimaImagePrefetchStatus.FETCHING_MANIFEST, None, None)
+    reporter.emit(LimaImagePrefetchStatus.FETCHING_MANIFEST, None, None)
     manifest = _fetch_and_verify_manifest(
         source=source, minds_version=minds_version, layout=layout, fetcher=fetcher, verifier=verifier
     )
     if manifest is None:
-        report(LimaImagePrefetchStatus.VERSION_UNAVAILABLE, None, None)
+        reporter.emit(LimaImagePrefetchStatus.VERSION_UNAVAILABLE, None, None)
         return EnsureImageResult(status=LimaImagePrefetchStatus.VERSION_UNAVAILABLE, qcow2_path=None)
     entry = manifest.entry_for_arch(arch)
     if entry is None:
         logger.info("Manifest for {} has no image for arch {}", minds_version, arch.value)
-        report(LimaImagePrefetchStatus.VERSION_UNAVAILABLE, None, None)
+        reporter.emit(LimaImagePrefetchStatus.VERSION_UNAVAILABLE, None, None)
         return EnsureImageResult(status=LimaImagePrefetchStatus.VERSION_UNAVAILABLE, qcow2_path=None)
 
     qcow2_path = _assemble_and_install_image(
@@ -219,9 +216,9 @@ def ensure_current_lima_image(
         fetcher=fetcher,
         chunk_store=chunk_store,
         converter=converter,
-        report=report,
+        reporter=reporter,
     )
-    report(LimaImagePrefetchStatus.READY, None, qcow2_path)
+    reporter.emit(LimaImagePrefetchStatus.READY, None, qcow2_path)
     return EnsureImageResult(status=LimaImagePrefetchStatus.READY, qcow2_path=qcow2_path)
 
 
@@ -236,7 +233,7 @@ def _assemble_and_install_image(
     fetcher: ManifestFetcherInterface,
     chunk_store: ImageChunkStoreInterface,
     converter: ImageFormatConverterInterface,
-    report: ProgressReporter,
+    reporter: _ProgressReporter,
 ) -> Path:
     # Download the per-arch index next to the chunk store.
     layout.tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -250,7 +247,7 @@ def _assemble_and_install_image(
 
     # Assemble the raw image (resumable, seeded).
     assembled_raw = layout.tmp_dir / f"{minds_version}-{arch.value}.raw"
-    report(LimaImagePrefetchStatus.DOWNLOADING, None, None)
+    reporter.emit(LimaImagePrefetchStatus.DOWNLOADING, None, None)
     with log_span("Assembling raw lima image {} ({})", minds_version, arch.value):
         chunk_store.extract_image(
             index_file=downloaded_index,
@@ -259,11 +256,11 @@ def _assemble_and_install_image(
             local_cache_dir=layout.desync_cache_dir,
             seed_index_file=seed_index_file,
             seed_blob_file=seed_blob_file,
-            on_output=lambda line, is_stdout: _report_download_line(report, line),
+            on_output=lambda line, is_stdout: _report_download_line(reporter, line),
         )
 
     # Verify the assembled raw against the signed manifest hash before using it.
-    report(LimaImagePrefetchStatus.VERIFYING, None, None)
+    reporter.emit(LimaImagePrefetchStatus.VERIFYING, None, None)
     actual_sha = _sha256_of_file(assembled_raw)
     if actual_sha != entry.raw_image_sha256:
         assembled_raw.unlink(missing_ok=True)
@@ -272,7 +269,7 @@ def _assemble_and_install_image(
         )
 
     # Convert raw -> qcow2 (the format Lima consumes), staged then atomically swapped.
-    report(LimaImagePrefetchStatus.CONVERTING, None, None)
+    reporter.emit(LimaImagePrefetchStatus.CONVERTING, None, None)
     version_dir = layout.version_dir(minds_version, arch)
     version_dir.mkdir(parents=True, exist_ok=True)
     staged_qcow2 = layout.tmp_dir / f"{minds_version}-{arch.value}.qcow2"
@@ -298,7 +295,7 @@ def _assemble_and_install_image(
     return final_qcow2
 
 
-def _report_download_line(report: ProgressReporter, line: str) -> None:
+def _report_download_line(reporter: _ProgressReporter, line: str) -> None:
     stripped = line.strip()
     if stripped:
-        report(LimaImagePrefetchStatus.DOWNLOADING, stripped, None)
+        reporter.emit(LimaImagePrefetchStatus.DOWNLOADING, stripped, None)

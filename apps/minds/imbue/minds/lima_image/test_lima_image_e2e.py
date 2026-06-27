@@ -16,6 +16,7 @@ from collections.abc import Iterator
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -48,7 +49,13 @@ pytestmark = pytest.mark.skipif(
 
 
 class _QuietHandler(http.server.SimpleHTTPRequestHandler):
-    def log_message(self, format: str, *args: object) -> None:
+    # Set per-fixture before the server starts; serves files from this root.
+    directory_root: str = "."
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, directory=type(self).directory_root, **kwargs)
+
+    def log_message(self, format: str, *args: Any) -> None:
         return None
 
 
@@ -100,8 +107,8 @@ def origin(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[str, str,
     )
     public_key = (origin_dir / "minisign.pub").read_text().splitlines()[1]
 
-    handler = lambda *args, **kwargs: _QuietHandler(*args, directory=str(origin_dir), **kwargs)  # noqa: E731
-    server = socketserver.TCPServer(("127.0.0.1", 0), handler)
+    _QuietHandler.directory_root = str(origin_dir)
+    server = socketserver.TCPServer(("127.0.0.1", 0), _QuietHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base_url = f"http://127.0.0.1:{server.server_address[1]}"
@@ -114,7 +121,8 @@ def origin(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[str, str,
 
 def _make_raw_image(path: Path, *, marker: bytes) -> None:
     """Write a multi-MB pseudo image: a shared body plus a per-version tail (for delta seeding)."""
-    body = (b"COMMON-BLOCK-" * 64) * 4096  # ~3.3 MB shared across versions
+    # ~3.3 MB body shared across versions, plus a per-version tail.
+    body = (b"COMMON-BLOCK-" * 64) * 4096
     path.write_bytes(body + marker * 8192)
 
 
