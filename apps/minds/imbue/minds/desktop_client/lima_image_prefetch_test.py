@@ -99,17 +99,17 @@ def test_make_source_requires_both_fields() -> None:
     base_only = ClientEnvConfig(
         connector_url=AnyUrl("https://c.example"),
         litellm_proxy_url=AnyUrl("https://l.example"),
-        lima_image_base_url="https://cdn.example",
+        lima_image_base_url=AnyUrl("https://cdn.example/lima"),
     )
     assert make_lima_image_source(base_only) is None
     both = ClientEnvConfig(
         connector_url=AnyUrl("https://c.example"),
         litellm_proxy_url=AnyUrl("https://l.example"),
-        lima_image_base_url="https://cdn.example",
+        lima_image_base_url=AnyUrl("https://cdn.example/lima"),
         lima_image_minisign_public_key="RWkey",
     )
     source = make_lima_image_source(both)
-    assert source is not None and source.base_url == "https://cdn.example"
+    assert source is not None and source.base_url == "https://cdn.example/lima"
 
 
 def test_setting_args_point_lima_at_local_qcow2() -> None:

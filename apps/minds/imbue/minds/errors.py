@@ -105,19 +105,6 @@ class LimaImageError(MindError):
     ...
 
 
-class LimaImageVersionUnavailableError(LimaImageError):
-    """Raised when no pre-baked image is published for the requested version+arch.
-
-    This is the *expected*, non-fatal "the CDN has nothing for this release yet"
-    case: the caller warns and falls back to building the workspace in-VM. It is
-    deliberately distinct from :class:`LimaImageDownloadError` /
-    :class:`LimaImageVerificationError`, which mean a *published* image failed to
-    download or verify and must not silently trigger the slow rebuild.
-    """
-
-    ...
-
-
 class LimaImageDownloadError(LimaImageError):
     """Raised when downloading/assembling a published image fails (network, disk, desync)."""
 

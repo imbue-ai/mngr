@@ -68,7 +68,8 @@ def make_lima_image_source(client_env_config: ClientEnvConfig | None) -> LimaIma
     public_key = client_env_config.lima_image_minisign_public_key
     if base_url is None or public_key is None:
         return None
-    return LimaImageSource(base_url=base_url, public_key=public_key)
+    # config validated it as a URL; the cache layer works in plain strings.
+    return LimaImageSource(base_url=str(base_url), public_key=public_key)
 
 
 def should_use_prebaked_lima_image(

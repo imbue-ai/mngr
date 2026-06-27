@@ -108,7 +108,12 @@ class CloudflareApiObjectStore(ObjectStore):
 
     def exists(self, key: str) -> bool:
         response = httpx.head(f"{self._base}/{key}", headers=self._headers, timeout=30.0)
-        return response.status_code == httpx.codes.OK
+        if response.status_code == httpx.codes.NOT_FOUND:
+            return False
+        # Fail loud on auth/5xx rather than treating them as "absent", which would
+        # skip a chunk that never gets uploaded.
+        response.raise_for_status()
+        return True
 
     def put(self, key: str, data: bytes, content_type: str) -> None:
         response = httpx.put(
