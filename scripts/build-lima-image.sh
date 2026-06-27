@@ -67,14 +67,19 @@ QCOW2_OUT="$OUTPUT_DIR/mngr-lima-$ARCH_TAG.qcow2"
 RAW_OUT="$OUTPUT_DIR/mngr-lima-$ARCH_TAG.raw"
 mkdir -p "$OUTPUT_DIR"
 
-cleanup_instance() {
+# Lima's per-instance state dir (honor LIMA_HOME, as limactl itself does).
+LIMA_INSTANCE_DIR="${LIMA_HOME:-$HOME/.lima}/$INSTANCE"
+
+TMP_YAML=""
+cleanup() {
+  [ -n "$TMP_YAML" ] && rm -f "$TMP_YAML"
   if [ "$KEEP" = "1" ]; then
     echo "(--keep) leaving Lima instance '$INSTANCE' in place"
   else
     limactl delete -f "$INSTANCE" >/dev/null 2>&1 || true
   fi
 }
-trap cleanup_instance EXIT
+trap cleanup EXIT
 
 echo "Building Lima image: arch=$ARCH instance=$INSTANCE fct_ref=$FCT_REF"
 
@@ -97,7 +102,7 @@ EOF
 
 echo "==> Starting Lima instance (downloads base + boots)"
 limactl start --name="$INSTANCE" --tty=false "$TMP_YAML"
-rm -f "$TMP_YAML"
+rm -f "$TMP_YAML"; TMP_YAML=""
 
 echo "==> Copying the bake provisioner into the VM"
 limactl copy "$LIMA_IMAGE_DIR/bake_provision.sh" "$INSTANCE:/tmp/bake_provision.sh"
@@ -113,17 +118,16 @@ limactl stop "$INSTANCE"
 # a `diffdisk` overlay (qcow2 backed by `basedisk`). `qemu-img convert` reads the
 # input format from the header and follows any backing chain, so it writes a
 # standalone image either way (run while the instance dir still has its base).
-INSTANCE_DIR="$HOME/.lima/$INSTANCE"
 DISK_FILE=""
 for candidate in disk diffdisk; do
-  if [ -f "$INSTANCE_DIR/$candidate" ]; then
-    DISK_FILE="$INSTANCE_DIR/$candidate"
+  if [ -f "$LIMA_INSTANCE_DIR/$candidate" ]; then
+    DISK_FILE="$LIMA_INSTANCE_DIR/$candidate"
     break
   fi
 done
 if [ -z "$DISK_FILE" ]; then
-  echo "ERROR: could not find a Lima disk under $INSTANCE_DIR" >&2
-  ls -la "$INSTANCE_DIR" >&2 || true
+  echo "ERROR: could not find a Lima disk under $LIMA_INSTANCE_DIR" >&2
+  ls -la "$LIMA_INSTANCE_DIR" >&2 || true
   exit 1
 fi
 echo "==> Flattening the Lima disk ($DISK_FILE) to a standalone qcow2 + raw"
