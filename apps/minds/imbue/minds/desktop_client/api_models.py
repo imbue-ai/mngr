@@ -193,7 +193,11 @@ class EnableSharingRequest(ApiRequestModel):
     """Body for enabling/updating Cloudflare sharing of a workspace service."""
 
     emails: tuple[str, ...] = Field(
-        default=(), description="Emails allowed by the Cloudflare Access policy (empty = open to all)"
+        min_length=1,
+        description=(
+            "Emails allowed by the Cloudflare Access policy; at least one is required. "
+            "An empty list is rejected because it would expose the service publicly."
+        ),
     )
 
 

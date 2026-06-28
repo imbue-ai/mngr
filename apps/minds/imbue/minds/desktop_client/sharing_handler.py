@@ -145,6 +145,14 @@ def enable_sharing_via_cloudflare(
     no backend URL, plugin error -- raises :class:`SharingError` with a
     user-presentable message.
     """
+    # Require at least one email: sharing with an empty Access policy would leave
+    # the service publicly reachable (and the readiness probe would never go green,
+    # since no Cloudflare Access redirect is ever installed). Reject up front,
+    # before creating any tunnel/service side effects.
+    if not emails:
+        raise SharingError(
+            "Sharing requires at least one email to grant access to; an empty list would expose the service publicly."
+        )
     cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
     if cli is None:
         raise SharingError("imbue_cloud CLI is not configured on this app.")
@@ -176,16 +184,17 @@ def enable_sharing_via_cloudflare(
     except ImbueCloudCliError as exc:
         raise SharingError(f"Failed to register service '{service_name}' on the tunnel: {exc}") from exc
 
-    if emails:
-        try:
-            cli.set_service_auth(
-                account=account_email,
-                tunnel_name=tunnel.tunnel_name,
-                service_name=str(service_name),
-                policy={"emails": list(emails)},
-            )
-        except ImbueCloudCliError as exc:
-            raise SharingError(f"Failed to apply the access policy: {exc}") from exc
+    # ``emails`` is guaranteed non-empty (checked at the top), so the Access policy
+    # is always applied -- a share is never created without one.
+    try:
+        cli.set_service_auth(
+            account=account_email,
+            tunnel_name=tunnel.tunnel_name,
+            service_name=str(service_name),
+            policy={"emails": list(emails)},
+        )
+    except ImbueCloudCliError as exc:
+        raise SharingError(f"Failed to apply the access policy: {exc}") from exc
     return tunnel
 
 

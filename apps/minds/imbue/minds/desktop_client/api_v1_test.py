@@ -1314,6 +1314,32 @@ def test_sharing_enable_returns_json(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     assert "web" in cli.added_services
 
 
+def test_sharing_enable_rejects_empty_emails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # An enable with no emails is rejected (422) rather than silently creating an
+    # unprotected, never-ready public share: the request is refused before any
+    # tunnel/service side effects.
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(tunnel=TunnelInfo(tunnel_name="tn", tunnel_id="ti", token=SecretStr("token"), services=()))
+    fake_mngr_dir = tmp_path / "bin"
+    _write_fake_mngr(fake_mngr_dir)
+    monkeypatch.setenv("PATH", f"{fake_mngr_dir}{os.pathsep}{os.environ['PATH']}")
+    client = _sharing_client(
+        tmp_path,
+        agent_id,
+        cli,
+        service_logs={str(agent_id): make_service_log("web", "http://127.0.0.1:9000")},
+    )
+
+    response = client.put(
+        f"/api/v1/workspaces/{agent_id}/sharing/web",
+        headers=_auth_header(),
+        json={"emails": []},
+    )
+
+    assert response.status_code == 422
+    assert not cli.added_services
+
+
 def test_sharing_disable_returns_json(tmp_path: Path) -> None:
     agent_id = AgentId()
     cli = _fake_sharing_cli(tunnel=TunnelInfo(tunnel_name="tn", tunnel_id="ti", services=("web",)))
