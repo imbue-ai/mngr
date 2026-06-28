@@ -4,6 +4,22 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-27
+
+Fix custom `parent_type` agent types losing their inherited settings after a multi-layer config load.
+
+A custom agent type that declares only `parent_type` (e.g. `[agent_types.worker]` with `parent_type = "claude"`) is supposed to inherit all of its parent type's non-default settings (`use_env_config_dir`, `auto_dismiss_dialogs`, `cli_args`, etc.). This worked when the config was resolved straight after a single merge, but once the real config load applied a second settings layer, every inherited value was silently reset to the child config class's defaults -- so a `worker` built on `claude` came out with permissions, env-config-dir, and dialog-dismissal handling all turned off.
+
+The cause was in the overlay merge pipeline (`config/overlay_merge.py`): each whole-config merge reparses the merged result with `model_validate`, which marks every present field as explicitly set. A registry entry carried through unchanged from the base layer therefore lost its sparse `model_fields_set`, so when `parent_type` inheritance later folded the child onto the parent (using `exclude_unset` semantics), the child's defaulted fields looked explicitly set and clobbered the parent's values.
+
+The merge now restores each merged model's `model_fields_set` (recursively, including nested sub-models and registry entries) to the union of the base's and the override's actually-set fields, rather than "all fields". Inheritance through any number of config layers is now correct: a `parent_type` child inherits the parent's non-default settings, while a field the child does set still wins.
+
+Fixed the docker provider reporting a running container as `CRASHED` when its inner sshd had died (e.g. "Error reading SSH protocol banner"). Previously, when agent enumeration failed to SSH into such a host, `mngr list` / `mngr forward` fell back to the offline view and derived `host.state = CRASHED` (a shutdown-capable provider with no recorded clean stop is treated as crashed) -- even though the docker daemon, the ground truth for container lifecycle, still reported the container as running. The docker provider now consults the daemon in that fallback and reports `UNAUTHENTICATED` (the host is up; we just can't get inside it), mirroring how the imbue_cloud provider reads container state out-of-band. This matches the actual host condition and stops downstream consumers from treating a live-but-unreachable container as fully offline. If the daemon itself cannot be reached for this out-of-band check, the provider keeps the default offline-state derivation instead of failing, so the offline fallback still degrades gracefully.
+
+Added a `get_connection_error_fallback_state` provider hook (default: no override) that `get_host_and_agent_details` consults when a non-authentication connection failure forces the offline fallback. Only the docker provider overrides it; the generic offline-state derivation and every other provider's behavior are unchanged.
+
+The Docker provider's discovery now treats a present-but-stopped state container as a provider error (`ProviderUnavailableError`) rather than silently reporting zero hosts. The state container holds every docker host's records; when it is stopped, reads fail and previously collapsed to an empty host list, which discovery published as "no hosts" -- dropping every host. Now an empty list always means "genuinely zero hosts," and the existing retain-on-error path keeps last-known hosts while the container is unavailable.
+
 ## 2026-06-26
 
 Changed: Bumped the offload version baked into `libs/mngr/imbue/mngr/resources/Dockerfile` from `0.9.9` to `0.9.10` to track the CI pin.

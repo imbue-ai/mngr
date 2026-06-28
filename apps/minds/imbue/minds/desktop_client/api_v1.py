@@ -455,11 +455,10 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     submitted_region = str(body.get("region", "")).strip()
 
     # The workspace name is chosen automatically unless one was submitted (the
-    # advanced view's optional "Name" field): a submitted value, else the
-    # operator ``MINDS_WORKSPACE_NAME`` override, else the next free ``mind-N``
-    # name (computed from the host names already in use across every provider).
-    # Resolve it eagerly so an invalid name surfaces as a 400 here rather than as
-    # a deferred FAILED status on the creating page.
+    # advanced view's optional "Name" field): a submitted value, else the next
+    # free ``mind-N`` name (computed from the host names already in use across
+    # every provider). Resolve it eagerly so an invalid name surfaces as a 400
+    # here rather than as a deferred FAILED status on the creating page.
     backend_resolver = get_state().backend_resolver
     try:
         resolved_host_name = resolve_create_host_name(host_name, existing_workspace_host_names(backend_resolver))
