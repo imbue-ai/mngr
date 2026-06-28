@@ -240,6 +240,30 @@ def test_get_workspace_returns_detail(tmp_path: Path) -> None:
     assert body["agent_id"] == str(agent_id)
 
 
+def test_get_workspace_surfaces_git_url_from_remote_label(tmp_path: Path) -> None:
+    # git_url is sourced from the agent's ``remote`` label (the create-time repo
+    # URL/path), so the detail readout surfaces it instead of returning null.
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(
+        make_agents_json(
+            agent_id,
+            labels={"workspace": "mind-1", "is_primary": "true", "remote": "https://example/repo.git"},
+        ),
+    )
+    app = create_desktop_client(
+        auth_store=FileAuthStore(data_directory=tmp_path / "auth"),
+        backend_resolver=resolver,
+        http_client=None,
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        minds_api_key=_TEST_KEY,
+    )
+
+    response = app.test_client().get(f"/api/v1/workspaces/{agent_id}", headers=_auth_header())
+
+    assert response.status_code == 200
+    assert json.loads(response.data)["git_url"] == "https://example/repo.git"
+
+
 def test_get_unknown_workspace_returns_404(tmp_path: Path) -> None:
     client = _client_with_workspace(tmp_path, AgentId())
     other_id = AgentId()
@@ -663,7 +687,8 @@ def test_establish_ssh_passes_command_as_single_mngr_exec_arg(
     """
     target = AgentId()
     resolver = StaticBackendResolver(
-        url_by_agent_and_service={str(target): {}},  # makes the target a known workspace
+        # makes the target a known workspace
+        url_by_agent_and_service={str(target): {}},
         ssh_info_by_agent_id={
             str(target): RemoteSSHInfo(user="root", host="ssh.example.com", port=2222, key_path=Path("/k"))
         },

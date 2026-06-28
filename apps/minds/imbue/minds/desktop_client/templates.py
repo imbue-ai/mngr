@@ -1158,6 +1158,18 @@ _RECOVERY_SCRIPT: Final[str] = """\
             scheduleHealthyPoll();
             return;
           }
+          // The in-container probe shows the interface is actually answering
+          // (HTTP 200), so there is nothing to restart -- on EVERY entry path
+          // (live auto-dispatch and restart_failed alike). Reload the recovery
+          // route; once the background tracker also confirms HEALTHY it 302s the
+          // user back to the workspace. If the tracker is still catching up the
+          // route re-renders here, we re-probe, see HEALTHY again, and converge
+          // -- never dispatching a restart against a working backend.
+          if (tier === 'healthy') {
+            renderLoading();
+            scheduleRefresh();
+            return;
+          }
           if (!autoDispatch) {
             // restart_failed entry: render unresponsive so the failure reason and
             // the diagnostics list both stay visible.

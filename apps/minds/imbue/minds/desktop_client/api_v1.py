@@ -214,6 +214,7 @@ def _serialize_workspace(agent_id: AgentId) -> WorkspaceSummary:
         name=backend_resolver.get_workspace_name(agent_id) or (info.agent_name if info is not None else None),
         host_id=host_id,
         host_state=str(host_state) if host_state is not None else None,
+        git_url=backend_resolver.get_agent_label(agent_id, "remote"),
         provider_name=info.provider_name if info is not None else None,
         create_time=info.create_time.isoformat() if info is not None and info.create_time is not None else None,
         original_minds_version=backend_resolver.get_agent_label(agent_id, "original_minds_version"),
@@ -1032,6 +1033,7 @@ def _handle_establish_ssh(agent_id: str) -> SshConnectionResponse | Response:
         read_result = json.loads(read_stdout)
         existing_authorized_keys = str(read_result["results"][0]["stdout"])
     except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
+        logger.warning("Could not parse the target's authorized_keys read for {}: {}", parsed_id, e)
         return _json_error(f"Could not parse the target's authorized_keys read: {e}", 502)
 
     new_authorized_keys = workspace_ssh.compose_pruned_authorized_keys(

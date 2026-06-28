@@ -217,6 +217,10 @@ class WorkspaceSummary(FrozenModel):
     name: str | None = Field(default=None, description="Workspace display name")
     host_id: str | None = Field(default=None, description="Host id, when known")
     host_state: str | None = Field(default=None, description="Host lifecycle state, when known")
+    git_url: str | None = Field(
+        default=None,
+        description="Template repo URL or local path the workspace was created from (the agent's 'remote' label), when known",
+    )
     provider_name: str | None = Field(default=None, description="Provider backend name")
     create_time: str | None = Field(default=None, description="Creation time (UTC ISO 8601)")
     original_minds_version: str | None = Field(default=None, description="Immutable create-time minds version label")
