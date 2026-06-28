@@ -998,17 +998,19 @@ def _handle_establish_ssh(agent_id: str) -> SshConnectionResponse | Response:
     # Read the target's current authorized_keys (absent file -> empty), prune any
     # expired minds-owned grant lines, append the new grant, and write the whole
     # body back in one rewrite. Read + write are two mngr exec round-trips; the
-    # prune logic lives in workspace_ssh so it stays unit-tested. The read uses a
-    # non-login shell (``bash -c``, not ``-lc``) on purpose: its stdout is written
-    # straight back into authorized_keys, so login-profile output must not be able
-    # to leak into the captured body. ``~`` still expands without a login shell.
+    # prune logic lives in workspace_ssh so it stays unit-tested.
+    #
+    # ``mngr exec`` takes the command as a single trailing COMMAND argument
+    # (its CLI is ``mngr exec [AGENTS]... COMMAND``) and runs it in a shell with
+    # the agent's env sourced, so ``~`` expands and the redirection works. We
+    # must NOT pass ``-- bash -c <script>``: the extra ``bash``/``-c`` tokens are
+    # parsed as additional agent names (``-c`` fails agent-name validation) and
+    # the whole call errors out. The env-sourcing prefix is silent, so the read's
+    # stdout is just the file body -- which is exactly what we write back.
     read_argv = [
         mngr_binary,
         "exec",
         str(parsed_id),
-        "--",
-        "bash",
-        "-c",
         "cat ~/.ssh/authorized_keys 2>/dev/null || true",
     ]
     try:
@@ -1026,7 +1028,8 @@ def _handle_establish_ssh(agent_id: str) -> SshConnectionResponse | Response:
         f"printf '%s' {shlex.quote(new_authorized_keys)} > ~/.ssh/authorized_keys; "
         "chmod 600 ~/.ssh/authorized_keys"
     )
-    write_argv = [mngr_binary, "exec", str(parsed_id), "--", "bash", "-lc", write_script]
+    # Single trailing COMMAND arg (see the read above) -- mngr exec runs it in a shell.
+    write_argv = [mngr_binary, "exec", str(parsed_id), write_script]
     try:
         write_returncode, _write_stdout, write_stderr = _run_mngr_blocking(write_argv, parent_cg)
     except (OSError, ConcurrencyGroupError) as e:

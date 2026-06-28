@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -49,6 +50,7 @@ from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.testing import stub_mngr_host_dir
 from imbue.mngr.primitives import AgentId
+from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 _TEST_KEY = "test-minds-api-key"
 
@@ -598,6 +600,75 @@ def test_establish_ssh_missing_fields_returns_422_with_field_errors(tmp_path: Pa
     failed_fields = {error["field"] for error in errors}
     assert failed_fields == {"public_key", "requester_workspace_id"}
     assert all(error["message"] for error in errors)
+
+
+def _write_recording_fake_mngr(directory: Path, record_path: Path) -> str:
+    """Fake ``mngr`` that records each invocation's argv, then exits 0 with empty stdout.
+
+    Args are NUL-delimited within an invocation and invocations are separated by
+    a record-separator byte (0x1e), so args that legitimately contain newlines
+    (the authorized_keys write script) round-trip intact.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    script = directory / "mngr"
+    rec = shlex.quote(str(record_path))
+    script.write_text(
+        f"#!/bin/sh\nfor a in \"$@\"; do printf '%s\\0' \"$a\" >> {rec}; done\nprintf '\\036' >> {rec}\nexit 0\n"
+    )
+    script.chmod(0o755)
+    return str(script)
+
+
+def _recorded_mngr_invocations(record_path: Path) -> list[list[str]]:
+    """Parse the file written by ``_write_recording_fake_mngr`` into a list of argvs."""
+    raw = record_path.read_bytes().decode()
+    return [[arg for arg in inv.split("\0") if arg != ""] for inv in raw.split("\x1e") if inv != ""]
+
+
+def test_establish_ssh_passes_command_as_single_mngr_exec_arg(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """The authorized_keys read/write must use mngr exec's single trailing COMMAND
+    form (``mngr exec <agent> <command>``), never ``-- bash -c <script>``.
+
+    ``mngr exec``'s CLI is ``mngr exec [AGENTS]... COMMAND``, so passing
+    ``-- bash -c <script>`` makes ``bash``/``-c`` parse as extra agent names and
+    the call errors on ``-c`` -- which 502'd the whole SSH grant. A routable
+    (remote) target is used so the route returns a direct connection and the only
+    mngr work is the read + write we are guarding.
+    """
+    target = AgentId()
+    resolver = StaticBackendResolver(
+        url_by_agent_and_service={str(target): {}},  # makes the target a known workspace
+        ssh_info_by_agent_id={
+            str(target): RemoteSSHInfo(user="root", host="ssh.example.com", port=2222, key_path=Path("/k"))
+        },
+    )
+    record_path = tmp_path / "mngr_argv.bin"
+    fake_mngr = _write_recording_fake_mngr(tmp_path / "bin", record_path)
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group, mngr_binary=fake_mngr)
+
+    response = client.post(
+        f"/api/v1/workspaces/{target}/ssh",
+        headers=_auth_header(),
+        json={
+            "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5TESTKEYMATERIAL",
+            "requester_workspace_id": str(AgentId()),
+        },
+    )
+    assert response.status_code == 200, response.data
+
+    invocations = _recorded_mngr_invocations(record_path)
+    # Exactly the read then the write -- each a well-formed `mngr exec <id> <command>`.
+    assert len(invocations) == 2, invocations
+    for argv in invocations:
+        assert argv[0] == "exec"
+        assert argv[1] == str(target)
+        assert len(argv) == 3, f"command must be a single arg, got {argv!r}"
+        assert "--" not in argv and "bash" not in argv and "-c" not in argv and "-lc" not in argv
+    # The read is the non-mutating cat; the write carries the rewrite script.
+    assert invocations[0][2] == "cat ~/.ssh/authorized_keys 2>/dev/null || true"
+    assert "authorized_keys" in invocations[1][2]
 
 
 def test_operation_logs_unknown_create_id_returns_404(tmp_path: Path) -> None:
