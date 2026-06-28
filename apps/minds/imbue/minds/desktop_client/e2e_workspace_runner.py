@@ -1306,7 +1306,7 @@ def run_full_workspace_flow(
     """
     results: dict[str, str] = {}
     agent_id: str | None = None
-    with _launched_electron(fct_path, workspace_name, debug_port, host_config_dir=None):
+    with _launched_electron(fct_path, debug_port, host_config_dir=None):
         with sync_playwright() as playwright:
             _wait_for_cdp(debug_port, _CDP_READY_TIMEOUT_SECONDS)
             browser = playwright.chromium.connect_over_cdp(
