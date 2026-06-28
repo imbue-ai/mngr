@@ -438,7 +438,12 @@ class DockerGvisorEphemeralRootfsError(HostCreationError):
             f"     (or per-invocation: MNGR__PROVIDERS__{provider_name.upper()}__DOCKER_RUNTIME=runc)\n"
             f"  2. Re-register the gVisor runtime so writes persist, then restart Docker:\n"
             f"       sudo runsc install -- --overlay2=none\n"
-            f"       sudo systemctl restart docker"
+            f"       sudo systemctl restart docker\n"
+            f"     With option 2, if the container runs supervisord (or anything that installs a unix\n"
+            f"     socket via a hard link under /run), ALSO mount /run as a tmpfs -- e.g. set\n"
+            f'     default_start_args=["--tmpfs", "/run"] on this provider. --overlay2=none puts /run\n'
+            f"     on gVisor's gofer filesystem, where os.link() of a socket fails (EOPNOTSUPP), so\n"
+            f"     supervisord wedges and never starts its services without a tmpfs /run."
         )
 
 
