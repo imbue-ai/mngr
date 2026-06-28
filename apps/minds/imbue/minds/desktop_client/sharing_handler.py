@@ -272,8 +272,11 @@ def disable_sharing(
         tunnel = cli.find_tunnel_for_agent(account=account_email, agent_id=str(agent_id))
     except ImbueCloudCliError as exc:
         raise SharingError(f"Failed to look up the tunnel: {exc}") from exc
-    if tunnel is None:
-        # No tunnel = nothing to disable; treat as success.
+    if tunnel is None or str(service_name) not in tunnel.services:
+        # Nothing to disable: either no tunnel exists yet, or the service is
+        # already absent from it (e.g. a repeated disable). Idempotent success --
+        # ``tunnel.services`` is the same authoritative list ``get_sharing_status``
+        # reads, so this never skips a service that is actually still shared.
         return
     try:
         cli.remove_service(account=account_email, tunnel_name=tunnel.tunnel_name, service_name=str(service_name))

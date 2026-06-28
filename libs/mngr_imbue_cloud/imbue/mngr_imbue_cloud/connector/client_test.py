@@ -24,6 +24,7 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotEmptyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotFoundError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudTunnelError
 
 
 def _make_client(handler) -> tuple[ImbueCloudConnectorClient, httpx.MockTransport]:
@@ -437,3 +438,71 @@ def test_paid_list_unauthenticated_raises_auth_error(monkeypatch: pytest.MonkeyP
     client = _install_mock_httpx(monkeypatch, handler)
     with pytest.raises(ImbueCloudAuthError):
         client.list_paid_domains(SecretStr("wrong"), paid_only=False)
+
+
+# -- Transient-transport retry (_send) --
+#
+# The connector is a scale-to-zero Modal app, so a call can fail at the transport
+# layer (DNS / reset / connect-timeout) before any HTTP response. ``_send`` rides
+# those out with a bounded retry and, on terminal failure, raises a clean domain
+# error (never the raw httpx traceback). HTTP *status* errors are NOT transport
+# errors and must not be retried. One helper installs a flaky ``httpx.get`` so the
+# monkeypatch ratchet counts a single occurrence across these tests.
+
+
+def _install_flaky_httpx_get(
+    monkeypatch: pytest.MonkeyPatch,
+    fail_times: int,
+    handler,
+) -> tuple[ImbueCloudConnectorClient, dict]:
+    transport = httpx.MockTransport(handler)
+    state = {"calls": 0}
+
+    def _get(*args, **kwargs):
+        state["calls"] += 1
+        if state["calls"] <= fail_times:
+            raise httpx.ConnectError("[Errno -2] Name or service not known")
+        with httpx.Client(transport=transport) as inner:
+            return inner.get(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "get", _get)
+    return ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com")), state
+
+
+def test_send_retries_transient_transport_error_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[])
+
+    client, state = _install_flaky_httpx_get(monkeypatch, fail_times=1, handler=handler)
+    # One transport failure then a success: the retry rides it out and the call
+    # returns normally rather than surfacing the blip.
+    assert client.list_tunnels(SecretStr("tok")) == []
+    assert state["calls"] == 2
+
+
+def test_send_wraps_terminal_transport_error_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The handler is never reached: every attempt fails at the transport layer.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[])
+
+    client, state = _install_flaky_httpx_get(monkeypatch, fail_times=99, handler=handler)
+    with pytest.raises(ImbueCloudTunnelError) as exc_info:
+        client.list_tunnels(SecretStr("tok"))
+    # Retried up to the cap, then a clean domain error -- no raw traceback leaks
+    # into the message that routes surface to API callers.
+    assert state["calls"] == 3
+    message = str(exc_info.value)
+    assert "could not reach the imbue_cloud connector" in message
+    assert "Traceback" not in message
+
+
+def test_send_does_not_retry_http_status_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="boom")
+
+    client, state = _install_flaky_httpx_get(monkeypatch, fail_times=0, handler=handler)
+    # A 5xx is a response, not a transport error: it surfaces immediately via
+    # ``_check`` without any retry.
+    with pytest.raises(ImbueCloudTunnelError):
+        client.list_tunnels(SecretStr("tok"))
+    assert state["calls"] == 1
