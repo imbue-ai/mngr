@@ -1028,6 +1028,10 @@ changelog-trigger:
     # load the repo's .mngr/settings.toml, whose plugins won't import here.
     export MNGR_ROOT_NAME="mngr-changelog-schedule"
     unset MNGR_HOST_DIR MNGR_PREFIX
+    # Pin the user_id (and thus the Modal environment) to the committed constant
+    # so the on-demand run targets the same deployment changelog_deploy.sh
+    # created, regardless of this machine's random per-profile user_id.
+    export MNGR_USER_ID="$(uv run python scripts/changelog_schedule_utils.py --print-user-id)"
     provider="$(uv run python scripts/changelog_schedule_utils.py --print-provider)"
     disable_args="$(uv run python scripts/changelog_schedule_utils.py --print-disable-plugin-args)"
     uv run mngr schedule run changelog-consolidation --provider "$provider" $disable_args
