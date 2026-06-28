@@ -4,6 +4,50 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-27
+
+Fixed AWS workspaces failing to start ("workspace unresponsive"). On the AWS
+provider path the container's `/run` lives on gVisor's gofer-backed filesystem,
+which rejects `os.link()` of a socket inode with `EOPNOTSUPP`. supervisord
+installs its control socket via a hard link, so on AWS that link failed forever
+("Unlinking stale socket"), and supervisord never started `system_interface` or
+any other service. The per-region `[providers.aws-<region>]` blocks minds writes
+now include `default_start_args = ["--tmpfs", "/run"]`, mounting `/run` as a
+tmpfs where the hard link succeeds. Scoped to the AWS blocks only; the
+ovh/vultr/imbue_cloud paths (which already provide a tmpfs `/run`) are unchanged.
+
+Changed: the discovery-pipeline health watchdog no longer gives up on a stalled discovery *producer*. Previously a producer stall ran one bounce + one restart and then, if freshness still hadn't returned, surfaced the terminal "Minds has disconnected from your workspaces" takeover screen — a dead end that even "Restart Minds" couldn't reliably clear, since a freshly-respawned supervisor could re-stall the same way. Now a stall keeps the app in the silent, background `reconnecting` state and keeps retrying forever: one bounce, then repeated supervisor restarts on a capped exponential backoff (15s → 30s → 60s → 120s → … capped at 5 min). The backoff is deliberate — a full restart re-provisions every managed host, so hammering a merely-slow producer would make things worse.
+
+Changed: the stall signal is now the age of the last discovery *event* (any update from the producer) rather than the last full *snapshot*. A producer that is alive and still emitting — just slow to complete a full re-poll because, say, one provider is down — is now correctly treated as healthy and left alone, rather than being needlessly bounced/restarted. (A dead supervisor manifests the same way, since its discovery producer stops emitting, so the freshness signal covers it too.)
+
+Changed: the full-screen "disconnected from your workspaces" takeover is now reserved for the genuinely-unusable case — the forwarding subprocess (which is also the HTTP traffic proxy) dying. A producer stall, where the currently-open workspace still works, no longer escalates to that screen.
+
+Fixed: when the takeover screen does appear, its "Show details" panel is now populated with the tail of the log instead of being an empty box, matching the app's other error screens.
+
+Fixed a slow cold-start / wake-from-sleep load where opening a perfectly healthy imbue-cloud workspace would sit on "Loading workspace…" for tens of seconds and then needlessly restart the workspace's system services.
+
+On a cold start the freshly-spawned `mngr forward` has not yet resolved the workspace's route, so probes fail (`UNRESOLVED` / 503) for the ~10s it takes discovery to warm up. That warm-up was being mistaken for an outage: the workspace was marked STUCK and the recovery flow auto-restarted it.
+
+Two fixes:
+
+- Suspect enrollment now ignores an `UNRESOLVED` backend failure outright. `UNRESOLVED` means the forward has no route for the agent at all -- a cold-start warm-up (which self-resolves) or a genuinely-gone agent (which a restart cannot revive) -- and a restart routes through the forward either way. A workspace that is present but unreachable does not land here: discovery retains its route, so the dial failure surfaces as `CONNECT_ERROR` / a 5xx, which still enrolls and still drives recovery.
+
+- The recovery page's auto-dispatched restart now no-ops if the workspace has already recovered to HEALTHY by the time it fires (the host-health probe is slow, so the background probe loop can flip the workspace healthy while it is in flight). A manual restart is unaffected and always proceeds.
+
+Also added focused diagnostic logging at the system-interface health / recovery lifecycle points (suspect enrollment with the failure reason, the HEALTHY → STUCK transition with its failure-run duration, the recovery → HEALTHY transition, and restart dispatch / auto-dispatch skip), and removed a stale recovery-gate FIXME now that the discovery-health watchdog backstops a persistently-stalled pipeline with its BLOCKED app-takeover.
+
+Fixed window-reopening bugs:
+
+Windows restored on app relaunch now reopen to the mind they were showing, instead of all landing on the main page. (Workspace windows were persisted with the agent subdomain stripped off, so they reopened against the minds backend root; they are now persisted and restored by agent identity.)
+
+A reopened "create workspace" window whose creation no longer exists (after an app restart, or a failed creation) now redirects to the landing page instead of getting stuck on a black "Unknown agent creation" screen.
+
+Quitting with "Shut down all" stops the docker state container that holds local minds' host records; the app now restarts it early on the next launch, before discovery runs. Without this, reopening right after "Shut down all" could find the state backend still down, discover zero local minds, and drop the restored windows onto the create-workspace form.
+
+Launching with Docker paused (or otherwise unable to start that state container) no longer crashes the app with "Failed to start minds". The launch-time restart is best-effort, but the failure was escaping wrapped in a ConcurrencyExceptionGroup that the surrounding handler could not catch; the docker cleanup helpers now raise their DockerCleanupError outside the concurrency-group scope, so the handler catches it and startup proceeds (discovery degrades gracefully rather than aborting). The same wrapping affected the quit-time stop and env teardown paths, which are fixed too.
+
+Window restore no longer drops a window just because its mind is missing from the first discovery snapshot. Providers enumerate at different speeds on cold start (a cloud mind can appear in ~1s while local docker minds take ~15-20s), so the first "complete" snapshot could be missing the local minds entirely. Restore now keeps a window if its mind is known from the persisted last-good topology (carried across restarts), dropping it only on positive evidence the mind was destroyed -- so a slow provider can no longer cost you a window.
+
 ## 2026-06-26
 
 Added the `minds_snapshot_resume` test suite and reconciled it with the latest `main` (which had merged the error-reporting/Sentry work into the minds desktop client). This consolidates the snapshot-test work from #2226 and #2275; see those PRs for the development history.
