@@ -302,7 +302,7 @@ _WORKSPACE_DEFAULTS_OPT_IN_ENV_VAR: Final[str] = "MINDS_USE_LOCAL_WORKSPACE_DEFA
 def _operator_workspace_default(env_var: str, fallback: str) -> str:
     """Return ``env_var`` only when the operator explicitly opted in; else ``fallback``.
 
-    The MINDS_WORKSPACE_GIT_URL / _NAME / _BRANCH env vars wire the create-form
+    The MINDS_WORKSPACE_GIT_URL / _BRANCH env vars wire the create-form
     defaults to the operator's local FCT worktree. They are honored only when
     ``MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1`` is set in the same environment
     (``just minds-start`` and the e2e runner set it). An end-user ``minds run``
@@ -357,31 +357,24 @@ def make_unique_host_name(base: str, existing_host_names: Collection[str], *, al
 def resolve_create_host_name(submitted_host_name: str, existing_host_names: Collection[str] = ()) -> HostName:
     """Resolve the host name for a new workspace.
 
-    The create form no longer asks for a name; it is chosen automatically.
-    Resolution order:
+    The name defaults to an automatic ``mind-N`` unless the operator types one
+    into the create form's advanced "Name" field. Resolution order:
 
     1. the user-submitted name, if any, used verbatim (validated as a
        ``HostName``);
-    2. the operator override ``MINDS_WORKSPACE_NAME``, honored only under the
-       explicit opt-in (see ``_operator_workspace_default``) -- this is how the
-       e2e runner / ``just minds-start <name>`` pin a known name, also used
-       verbatim;
-    3. the next free ``mind-N`` name (smallest positive ``N`` whose ``mind-N``
+    2. the next free ``mind-N`` name (smallest positive ``N`` whose ``mind-N``
        is not already in ``existing_host_names``).
 
-    The two named paths (1, 2) are used verbatim and never uniquified -- an
-    explicit collision is the API's 409 to reject, not ours to silently rename
-    (a duplicate name fails the ``mngr create`` pre-flight). Only the generated
+    The submitted name is used verbatim and never uniquified -- an explicit
+    collision is the API's 409 to reject, not ours to silently rename (a
+    duplicate name fails the ``mngr create`` pre-flight). Only the generated
     ``mind-N`` fallback consults ``existing_host_names`` to pick a free name.
 
-    Raises ``InvalidName`` if a non-empty submitted or operator name is not
-    a valid host name; the generated fallback is always valid.
+    Raises ``InvalidName`` if a non-empty submitted name is not a valid host
+    name; the generated fallback is always valid.
     """
     if submitted_host_name:
         return HostName(submitted_host_name)
-    operator_name = _operator_workspace_default("MINDS_WORKSPACE_NAME", "")
-    if operator_name:
-        return HostName(operator_name)
     return make_unique_host_name(_DEFAULT_HOST_NAME_BASE, existing_host_names, always_number=True)
 
 
