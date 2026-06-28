@@ -1827,17 +1827,19 @@ function ensureChromeSSELoopRunning() {
   }
 }
 
-// POST a restart endpoint (``restart-system-interface`` or ``restart-host``)
-// and resolve once the server has acknowledged the 202 dispatch (or the
-// request errors / times out). The endpoints return 202 immediately and
-// drive recovery asynchronously; the 202 also means the health tracker is
-// already RESTARTING, so callers navigate to the recovery page afterward,
-// which shows restart progress and returns to the workspace once healthy.
+// POST the v1 restart endpoint with a ``scope`` ('services' to restart just the
+// system-services agent, 'host' to restart the whole host) and resolve once the
+// server has acknowledged the 202 dispatch (or the request errors / times out).
+// The route returns 202 immediately (with an ``{operation_id, kind}`` handle we
+// don't need here) and drives recovery asynchronously; the 202 also means the
+// health tracker is already RESTARTING, so callers navigate to the recovery
+// page afterward, which polls health, shows restart progress, and returns to
+// the workspace once healthy.
 //
 // Always resolves (never rejects) so callers can chain navigation
 // regardless of network outcome.
 const RESTART_REQUEST_TIMEOUT_MS = 10000;
-function postRestart(agentId, endpointPath) {
+function postRestart(agentId, scope) {
   return new Promise((resolve) => {
     if (!agentId || !backendBaseUrl) {
       resolve();
@@ -1846,10 +1848,11 @@ function postRestart(agentId, endpointPath) {
     let req;
     try {
       req = net.request({
-        url: `${backendBaseUrl}/api/agents/${encodeURIComponent(agentId)}/${endpointPath}`,
+        url: `${backendBaseUrl}/api/v1/workspaces/${encodeURIComponent(agentId)}/restart`,
         method: 'POST',
         useSessionCookies: true,
       });
+      req.setHeader('Content-Type', 'application/json');
     } catch (e) {
       console.warn('[restart] failed to construct restart request:', e);
       resolve();
@@ -1885,6 +1888,7 @@ function postRestart(agentId, endpointPath) {
       clearTimeout(timer);
       settle();
     });
+    req.write(JSON.stringify({ scope }));
     req.end();
   });
 }
@@ -1906,7 +1910,8 @@ function sleepInterruptible(ms) {
 
 // ---------- Mind shutdown on quit + landing Stop button ----------
 
-// Timeout for the instant, in-memory liveness lookup (GET /api/minds/running).
+// Timeout for the instant, in-memory liveness lookup (GET
+// /api/v1/desktop/running-workspaces).
 const MIND_HTTP_TIMEOUT_MS = 10000;
 // Timeout for the synchronous command endpoints (single/bulk host stop, state
 // container stop). These block until the underlying ``mngr``/docker command
@@ -1914,10 +1919,10 @@ const MIND_HTTP_TIMEOUT_MS = 10000;
 // above it here so the server-side failure surfaces rather than a client abort.
 const MIND_COMMAND_TIMEOUT_MS = 150000;
 
-// GET /api/minds/running -> { ok, running }. ``running`` is an array of
-// {id, name}; ``ok`` is false when the check itself failed (network, parse, no
-// backend) so the caller can distinguish "nothing running" from "couldn't tell"
-// instead of silently treating a failed check as an empty list.
+// GET /api/v1/desktop/running-workspaces -> { ok, running }. ``running`` is an
+// array of {id, name}; ``ok`` is false when the check itself failed (network,
+// parse, no backend) so the caller can distinguish "nothing running" from
+// "couldn't tell" instead of silently treating a failed check as an empty list.
 function getRunningMinds() {
   return new Promise((resolve) => {
     if (!backendBaseUrl) {
@@ -1927,7 +1932,7 @@ function getRunningMinds() {
     }
     let req;
     try {
-      req = net.request({ url: backendBaseUrl + '/api/minds/running', method: 'GET', useSessionCookies: true });
+      req = net.request({ url: backendBaseUrl + '/api/v1/desktop/running-workspaces', method: 'GET', useSessionCookies: true });
     } catch (e) {
       console.warn('[mind-shutdown] failed to construct running-minds request:', e);
       resolve({ ok: false, running: [] });
@@ -1964,9 +1969,11 @@ function getRunningMinds() {
   });
 }
 
-// POST /api/agents/<id>/stop-host (synchronous). Resolves true when the server
+// POST /api/v1/workspaces/<id>/stop (synchronous). Resolves true when the server
 // reports the stop succeeded (<400), false otherwise. Used by the single-row
-// landing Stop relay.
+// landing Stop relay. (The v1 route blocks until the host transition resolves,
+// same as the legacy /api/agents/<id>/stop-host it replaced; cookie auth is
+// accepted via useSessionCookies.)
 function postMindStop(agentId) {
   return new Promise((resolve) => {
     if (!agentId || !backendBaseUrl) {
@@ -1977,7 +1984,7 @@ function postMindStop(agentId) {
     let req;
     try {
       req = net.request({
-        url: `${backendBaseUrl}/api/agents/${encodeURIComponent(agentId)}/stop-host`,
+        url: `${backendBaseUrl}/api/v1/workspaces/${encodeURIComponent(agentId)}/stop`,
         method: 'POST',
         useSessionCookies: true,
       });
@@ -2006,9 +2013,9 @@ function postMindStop(agentId) {
   });
 }
 
-// POST /api/minds/stop-hosts?agent_id=...&agent_id=... (synchronous). Issues ONE
-// ``mngr stop <ids...> --stop-host`` server-side (mngr stops the hosts
-// concurrently). Resolves { ok, stillRunning }: ``stillRunning`` is the subset
+// POST /api/v1/desktop/stop-hosts?agent_id=...&agent_id=... (synchronous).
+// Issues ONE ``mngr stop <ids...> --stop-host`` server-side (mngr stops the
+// hosts concurrently). Resolves { ok, stillRunning }: ``stillRunning`` is the subset
 // of requested minds the server still sees running after the attempt; ``ok`` is
 // false when the request itself failed (so the caller treats it as "couldn't
 // stop" rather than "all stopped").
@@ -2022,7 +2029,7 @@ function postStopMinds(agentIds) {
     const query = agentIds.map((id) => 'agent_id=' + encodeURIComponent(id)).join('&');
     let req;
     try {
-      req = net.request({ url: `${backendBaseUrl}/api/minds/stop-hosts?${query}`, method: 'POST', useSessionCookies: true });
+      req = net.request({ url: `${backendBaseUrl}/api/v1/desktop/stop-hosts?${query}`, method: 'POST', useSessionCookies: true });
     } catch (e) {
       console.warn('[mind-shutdown] failed to construct bulk-stop request:', e);
       resolve({ ok: false, stillRunning: [] });
@@ -2059,9 +2066,9 @@ function postStopMinds(agentIds) {
   });
 }
 
-// POST /api/minds/stop-state-container -- stops this env's mngr docker "state
-// container" (provider bookkeeping) so nothing minds-related is left running
-// after a full shutdown. Best-effort: resolves regardless of outcome, but logs.
+// POST /api/v1/desktop/state-container/stop -- stops this env's mngr docker
+// "state container" (provider bookkeeping) so nothing minds-related is left
+// running after a full shutdown. Best-effort: resolves regardless of outcome, but logs.
 function postStopStateContainer() {
   return new Promise((resolve) => {
     if (!backendBaseUrl) {
@@ -2071,7 +2078,7 @@ function postStopStateContainer() {
     }
     let req;
     try {
-      req = net.request({ url: backendBaseUrl + '/api/minds/stop-state-container', method: 'POST', useSessionCookies: true });
+      req = net.request({ url: backendBaseUrl + '/api/v1/desktop/state-container/stop', method: 'POST', useSessionCookies: true });
     } catch (e) {
       console.warn('[mind-shutdown] failed to construct stop-state-container request:', e);
       resolve();
@@ -2987,10 +2994,10 @@ ipcMain.on('close-modal', (event) => {
 
 // Settings-page color picker: optimistic chrome-titlebar paint for the
 // bundle the picker is in, so the user sees the new color immediately
-// without waiting for the POST -> mngr label subprocess -> SSE
+// without waiting for the PATCH -> mngr label subprocess -> SSE
 // round-trip. The actual persistence still goes through the
-// /api/workspaces/<id>/color POST endpoint; this just shortcuts the
-// local-window UI feedback. Only content-relay-preload.js can emit
+// PATCH /api/v1/workspaces/<id> endpoint (color field); this just
+// shortcuts the local-window UI feedback. Only content-relay-preload.js can emit
 // this channel, and it validates the agent id + accent shape there;
 // we re-validate here defensively and only forward to the *sending
 // bundle's* chrome view so a stray sender can't paint another
@@ -3075,7 +3082,7 @@ ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
       // Close the sidebar first so the user gets immediate visual feedback
       // while the restart dispatch is acknowledged.
       closeModal(bundle);
-      await postRestart(agentId, 'restart-system-interface');
+      await postRestart(agentId, 'services');
       goToRecoveryView();
     },
   });
@@ -3094,7 +3101,7 @@ ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
       });
       if (response !== 1) return;
       closeModal(bundle);
-      await postRestart(agentId, 'restart-host');
+      await postRestart(agentId, 'host');
       goToRecoveryView();
     },
   });

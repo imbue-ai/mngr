@@ -1,37 +1,25 @@
-"""Unit tests for the providers-panel endpoint and payload builder added in this branch.
+"""Unit tests for the providers-panel SSE payload builders.
 
-Covers:
-- POST ``/api/providers/{provider_name}/toggle`` (``_handle_provider_toggle``):
-  authn, body validation, and the happy-path settings.toml write.
-- ``_build_providers_state_payload``: combines resolver-tracked providers,
-  errored providers, and disabled-on-disk providers into the SSE payload.
+Covers ``_build_providers_state_payload`` (combines resolver-tracked providers,
+errored providers, and disabled-on-disk providers into the SSE payload) and
+``_build_workspace_list`` (stale marking + color emission).
 
-The toggle endpoint also bounces the detached ``mngr latchkey forward``
-supervisor (the single discovery observer) via
-``bounce_latchkey_forward_supervisor``. Tests deliberately do not wire a
-supervisor (``create_desktop_client`` defaults the slot to ``None``); the
-helper's ``if supervisor is None`` guard makes the bounce a no-op in that
-case. This file focuses on the new routing/validation/serialization logic.
+Provider enable/disable now lives on ``PATCH /api/v1/desktop/providers/<name>``
+and is tested in ``api_v1_test.py``.
 """
 
-import tomllib
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 
 import pytest
-from flask.testing import FlaskClient
 
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.desktop_client.app import _build_providers_state_payload
 from imbue.minds.desktop_client.app import _build_workspace_list
-from imbue.minds.desktop_client.app import create_desktop_client
-from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
-from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
-from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.testing import stub_mngr_host_dir
 from imbue.mngr.api.discovery_events import DiscoveredProvider
@@ -46,147 +34,6 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 
 _ROOT_NAME = "minds-dev-tname"
-
-
-def _make_test_client(tmp_path: Path) -> tuple[FlaskClient, FileAuthStore]:
-    """Build a desktop client backed by a real MngrCliBackendResolver + on-disk authn."""
-    auth_dir = tmp_path / "auth"
-    auth_store = FileAuthStore(data_directory=auth_dir)
-    resolver = MngrCliBackendResolver()
-    app = create_desktop_client(
-        auth_store=auth_store,
-        backend_resolver=resolver,
-        http_client=None,
-    )
-    return app.test_client(), auth_store
-
-
-def _authenticate(client: FlaskClient, auth_store: FileAuthStore) -> None:
-    cookie_value = create_session_cookie(signing_key=auth_store.get_signing_key())
-    client.set_cookie(SESSION_COOKIE_NAME, cookie_value)
-
-
-# -- _handle_provider_toggle -----------------------------------------------
-
-
-def test_provider_toggle_requires_authentication(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Unauthenticated POST is rejected with 403 and does not touch settings."""
-    monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, _ROOT_NAME)
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, _ROOT_NAME)
-    client, _ = _make_test_client(tmp_path)
-
-    response = client.post("/api/providers/modal/toggle", json={"is_enabled": False})
-
-    assert response.status_code == 403
-    assert not settings_path.exists()
-
-
-def test_provider_toggle_returns_400_on_non_json_body(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A non-JSON body is rejected with 400 and settings are not modified."""
-    monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, _ROOT_NAME)
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, _ROOT_NAME)
-    client, auth_store = _make_test_client(tmp_path)
-    _authenticate(client, auth_store)
-
-    response = client.post(
-        "/api/providers/modal/toggle",
-        data=b"not json",
-        headers={"Content-Type": "application/json"},
-    )
-
-    assert response.status_code == 400
-    assert not settings_path.exists()
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        {},
-        {"is_enabled": "yes"},
-        {"is_enabled": 1},
-        {"is_enabled": None},
-    ],
-)
-def test_provider_toggle_returns_400_when_is_enabled_missing_or_wrong_type(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: dict[str, object]
-) -> None:
-    """``is_enabled`` must be present and a bool; otherwise 400 and no settings write."""
-    monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, _ROOT_NAME)
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, _ROOT_NAME)
-    client, auth_store = _make_test_client(tmp_path)
-    _authenticate(client, auth_store)
-
-    response = client.post("/api/providers/modal/toggle", json=body)
-
-    assert response.status_code == 400
-    assert not settings_path.exists()
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        [1, 2, 3],
-        "a string",
-        42,
-        True,
-        None,
-    ],
-)
-def test_provider_toggle_returns_400_on_non_object_json_body(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: object
-) -> None:
-    """A valid-JSON body that is not an object (array, string, number, bool, null) is rejected with 400.
-
-    Without the explicit isinstance(body, dict) guard, calling ``body.get(...)`` on a
-    non-dict crashes with AttributeError and the handler returns a 500 instead of the
-    expected 400. This test pins the structured rejection.
-    """
-    monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, _ROOT_NAME)
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, _ROOT_NAME)
-    client, auth_store = _make_test_client(tmp_path)
-    _authenticate(client, auth_store)
-
-    response = client.post("/api/providers/modal/toggle", json=body)
-
-    assert response.status_code == 400
-    assert not settings_path.exists()
-
-
-def test_provider_toggle_writes_settings_and_returns_changed_true(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Happy path: flips ``is_enabled`` in the toml file and returns ``changed=True``."""
-    monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, _ROOT_NAME)
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, _ROOT_NAME)
-    client, auth_store = _make_test_client(tmp_path)
-    _authenticate(client, auth_store)
-
-    response = client.post("/api/providers/modal/toggle", json={"is_enabled": False})
-
-    assert response.status_code == 200
-    payload = response.get_json()
-    assert payload == {"provider_name": "modal", "is_enabled": False, "changed": True}
-    parsed = tomllib.loads(settings_path.read_text())
-    assert parsed["providers"]["modal"] == {"is_enabled": False}
-
-
-def test_provider_toggle_is_idempotent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A second identical call returns ``changed=False`` without rewriting the file."""
-    monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, _ROOT_NAME)
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, _ROOT_NAME)
-    client, auth_store = _make_test_client(tmp_path)
-    _authenticate(client, auth_store)
-
-    first = client.post("/api/providers/modal/toggle", json={"is_enabled": False})
-    assert first.status_code == 200
-    assert first.get_json()["changed"] is True
-    mtime_after_first = settings_path.stat().st_mtime_ns
-
-    second = client.post("/api/providers/modal/toggle", json={"is_enabled": False})
-    assert second.status_code == 200
-    assert second.get_json()["changed"] is False
-    # File untouched
-    assert settings_path.stat().st_mtime_ns == mtime_after_first
 
 
 # -- _build_providers_state_payload ----------------------------------------

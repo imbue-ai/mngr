@@ -126,8 +126,18 @@ class DispatchTier(str, Enum):
     unattended host restart; HOST_UNRESPONSIVE -> ask the user first).
     """
 
+    HEALTHY = "healthy"
+    """Container running, exec works, and the inner web server answers GET / with
+    200 -- the interface is demonstrably responding, so there is nothing to
+    recover. The recovery page returns the user to the workspace instead of
+    restarting. The in-container HTTP probe is direct proof the interface is up,
+    which can race ahead of the slower background health tracker that triggered
+    the recovery page, so this tier is what prevents an unnecessary restart of a
+    workspace that has already come back."""
+
     INTERFACE_UNRESPONSIVE = "interface_unresponsive"
-    """Container running and exec works -- restart the system-services agent in place."""
+    """Container running and exec works, but the inner web server does not answer
+    GET / with 200 -- restart the system-services agent in place."""
 
     HOST_OFFLINE = "host_offline"
     """Container is offline -- restart the host (no live work to interrupt)."""
@@ -556,9 +566,16 @@ def _classify_dispatch_tier(
       provider's own message, offer Retry, and wait for it to recover.
     * HOST_OFFLINE when the container is offline: nothing live to interrupt, so
       a host restart can run unattended.
-    * INTERFACE_UNRESPONSIVE when both container and exec are healthy: the
-      system-services agent can be restarted in place without touching the
-      user's agents.
+    * HEALTHY when both container and exec are healthy AND the inner web server
+      answers GET / with 200: the interface is demonstrably responding, so there
+      is nothing to recover. A live 200 is direct proof and is trusted over the
+      slower background health tracker that triggered the page, so a workspace
+      that has already come back is sent home instead of needlessly restarted.
+    * INTERFACE_UNRESPONSIVE when container and exec are healthy but the inner
+      server does NOT confirm a 200: the system-services agent can be restarted
+      in place without touching the user's agents. A listening-but-not-answering
+      (or unprobeable) interface is exactly the wedge that restart fixes, so we
+      classify it here rather than as HEALTHY.
     * HOST_UNRESPONSIVE when the container claims running but we can't exec into
       it (or on any other ambiguous host state): a host restart bounces a live
       container, so it requires explicit user consent. The recovery page is only
@@ -573,6 +590,13 @@ def _classify_dispatch_tier(
         return DispatchTier.HOST_OFFLINE
     can_run = answers.get(_QUESTION_CAN_RUN_COMMANDS_INSIDE)
     if container_running == ProbeAnswer.YES and can_run == ProbeAnswer.YES:
+        # Container up and exec works. Consult the most direct evidence we have --
+        # the live in-container HTTP GET / -- before assuming the interface is at
+        # fault. A confirmed 200 means it is actually responding (HEALTHY); only a
+        # non-200, errored, or unprobeable result falls through to the
+        # by-elimination INTERFACE_UNRESPONSIVE surgical restart.
+        if answers.get(_QUESTION_CURL_OK) == ProbeAnswer.YES:
+            return DispatchTier.HEALTHY
         return DispatchTier.INTERFACE_UNRESPONSIVE
     return DispatchTier.HOST_UNRESPONSIVE
 

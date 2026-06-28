@@ -230,8 +230,20 @@ class ImbueCloudCli(MutableModel):
             exc.stdout = result.stdout
             exc.stderr = result.stderr
             raise exc
+        # Log the full subprocess output server-side -- it may be a multi-line
+        # Python traceback (e.g. an httpx transport error inside the connector
+        # subprocess) -- but keep the exception *message* clean and
+        # traceback-free, so routes that surface ``str(exc)`` to an API caller
+        # never leak it. The full detail stays on ``.stderr`` for any caller that
+        # wants it programmatically.
+        logger.warning(
+            "{} failed (exit {}); full subprocess output:\n{}",
+            command_repr,
+            exit_code,
+            result.stderr or result.stdout or "(no output)",
+        )
         plain_exc = ImbueCloudCliError(
-            f"{command_repr} failed (exit {exit_code}): {_short(result.stderr or result.stdout)}"
+            f"{command_repr} failed (exit {exit_code}); see the desktop client logs for details"
         )
         plain_exc.exit_code = exit_code
         plain_exc.stdout = result.stdout

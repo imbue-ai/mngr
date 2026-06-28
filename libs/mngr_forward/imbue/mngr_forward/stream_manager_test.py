@@ -415,6 +415,86 @@ def test_multiple_observe_lines_serialize_through_envelope(
     assert all(env["stream"] == "observe" for env in envelopes)
 
 
+class _FakeEventsProcess:
+    """Stand-in for a per-agent events RunningProcess with a controllable liveness.
+
+    ``poll()`` returns None while "alive" and a non-None return code once
+    marked dead, mirroring the real RunningProcess contract used by
+    ``_start_events_stream``.
+    """
+
+    def __init__(self) -> None:
+        self._poll_value: int | None = None
+
+    def mark_dead(self, returncode: int) -> None:
+        self._poll_value = returncode
+
+    def poll(self) -> int | None:
+        return self._poll_value
+
+    @property
+    def returncode(self) -> int | None:
+        return self._poll_value
+
+
+class _RecordingConcurrencyGroup:
+    """Minimal ConcurrencyGroup double that records every background spawn.
+
+    Only the two methods ``_start_events_stream`` touches are implemented:
+    ``is_shutting_down`` (always False so the spawn path runs) and
+    ``run_process_in_background`` (records and returns a fresh live fake).
+    """
+
+    def __init__(self) -> None:
+        self.spawned: list[_FakeEventsProcess] = []
+
+    def is_shutting_down(self) -> bool:
+        return False
+
+    def run_process_in_background(self, **_kwargs: object) -> _FakeEventsProcess:
+        process = _FakeEventsProcess()
+        self.spawned.append(process)
+        return process
+
+
+def _start_events(manager: ForwardStreamManager, agent_id: AgentId) -> None:
+    """Invoke the manager's private per-agent events-stream starter (test hook)."""
+    manager._start_events_stream(agent_id)  # noqa: SLF001
+
+
+def _install_recording_cg(manager: ForwardStreamManager, fake_cg: "_RecordingConcurrencyGroup") -> None:
+    """Swap in a recording ConcurrencyGroup double so spawns are observable (test hook)."""
+    manager._cg = fake_cg  # ty: ignore[invalid-assignment] # noqa: SLF001
+
+
+def test_dead_events_stream_is_respawned_on_next_start(
+    setup: tuple[ForwardStreamManager, ForwardResolver, io.StringIO, list[int]],
+) -> None:
+    """A per-agent events stream that has exited must be respawned, not skipped.
+
+    Regression for the forward wedging on "Loading workspace": when an agent's
+    host restarts, the long-lived ``mngr event ... --follow`` child exits
+    non-zero. The old guard skipped any agent already present in
+    ``_events_processes`` -- including dead entries -- so the resolver's
+    per-agent service map stayed empty forever and ``resolve`` returned None.
+    """
+    manager, _resolver, _buf, _counter = setup
+    fake_cg = _RecordingConcurrencyGroup()
+    _install_recording_cg(manager, fake_cg)
+
+    # First start spawns a live stream; a second start leaves the live stream
+    # alone (no duplicate spawn).
+    _start_events(manager, TEST_AGENT_ID_1)
+    _start_events(manager, TEST_AGENT_ID_1)
+    assert len(fake_cg.spawned) == 1
+
+    # Once the stream exits (host restart broke --follow), the next start must
+    # drop the dead entry and respawn a fresh one rather than skip the agent.
+    fake_cg.spawned[0].mark_dead(1)
+    _start_events(manager, TEST_AGENT_ID_1)
+    assert len(fake_cg.spawned) == 2
+
+
 def test_observe_via_file_tails_discovery_log_without_spawning_observe(tmp_path: Path) -> None:
     """With ``discovery_events_path`` set (``--observe-via-file``), the manager drives
     discovery by tailing a file written by another process and spawns no ``mngr observe``."""

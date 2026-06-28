@@ -39,6 +39,7 @@ from imbue.mngr.providers.docker.instance import LABEL_PROVIDER
 from imbue.mngr.providers.docker.instance import LABEL_TAGS
 from imbue.mngr.providers.docker.instance import _get_docker_context_host
 from imbue.mngr.providers.docker.instance import _get_ssh_host_from_docker_config
+from imbue.mngr.providers.docker.instance import _is_gvisor_runtime_rootfs_ephemeral
 from imbue.mngr.providers.docker.instance import build_container_labels
 from imbue.mngr.providers.docker.instance import parse_container_labels
 from imbue.mngr.providers.docker.instance import verify_engine_version_supports_volume_subpath
@@ -820,7 +821,7 @@ def test_discover_hosts_propagates_api_error_without_marking_unavailable(
 # =========================================================================
 
 
-class _FakeContainer:
+class _FakeStatusContainer:
     """Minimal stand-in for a docker container with a settable status."""
 
     def __init__(self, status: str) -> None:
@@ -833,10 +834,10 @@ class _FakeContainer:
 class _ContainersReturning:
     """Stand-in for ``client.containers`` whose ``list`` returns fixed containers."""
 
-    def __init__(self, containers: list[_FakeContainer]) -> None:
+    def __init__(self, containers: list[_FakeStatusContainer]) -> None:
         self._containers = containers
 
-    def list(self, **kwargs: object) -> list[_FakeContainer]:
+    def list(self, **kwargs: object) -> list[_FakeStatusContainer]:
         return list(self._containers)
 
 
@@ -848,12 +849,12 @@ class _FakeDockerClientReturningContainers:
     without inner SSH).
     """
 
-    def __init__(self, containers: list[_FakeContainer]) -> None:
+    def __init__(self, containers: list[_FakeStatusContainer]) -> None:
         self.containers = _ContainersReturning(containers)
 
 
 def _docker_provider_with_containers(
-    temp_mngr_ctx: MngrContext, containers: list[_FakeContainer]
+    temp_mngr_ctx: MngrContext, containers: list[_FakeStatusContainer]
 ) -> DockerProviderInstance:
     provider = make_docker_provider(temp_mngr_ctx)
     provider.__dict__["_docker_client"] = _FakeDockerClientReturningContainers(containers)
@@ -871,7 +872,7 @@ def test_connection_error_fallback_state_running_container_is_unauthenticated(
     mngr_imbue_cloud). Reporting CRASHED here makes minds' recovery flow skip
     the stop step of a host restart and then fail to start the live container.
     """
-    provider = _docker_provider_with_containers(temp_mngr_ctx, [_FakeContainer("running")])
+    provider = _docker_provider_with_containers(temp_mngr_ctx, [_FakeStatusContainer("running")])
     assert provider.get_connection_error_fallback_state(HostId(HOST_ID_A)) == HostState.UNAUTHENTICATED
 
 
@@ -879,7 +880,7 @@ def test_connection_error_fallback_state_stopped_container_returns_none(
     temp_mngr_ctx: MngrContext,
 ) -> None:
     """A genuinely stopped container yields None so the default offline-state derivation stands."""
-    provider = _docker_provider_with_containers(temp_mngr_ctx, [_FakeContainer("exited")])
+    provider = _docker_provider_with_containers(temp_mngr_ctx, [_FakeStatusContainer("exited")])
     assert provider.get_connection_error_fallback_state(HostId(HOST_ID_A)) is None
 
 
@@ -977,3 +978,32 @@ def test_docker_build_timeout_error_help_text_mentions_config_setting() -> None:
     assert error.user_help_text is not None
     assert "build_timeout_seconds" in error.user_help_text
     assert "my-docker" in error.user_help_text
+
+
+def test_gvisor_runsc_without_overlay_none_is_ephemeral() -> None:
+    """A runsc runtime registered without --overlay2=none has an ephemeral root fs."""
+    runtimes = {"runsc": {"path": "/usr/bin/runsc"}}
+    assert _is_gvisor_runtime_rootfs_ephemeral("runsc", runtimes) is True
+
+
+def test_gvisor_runsc_with_other_args_but_not_overlay_none_is_ephemeral() -> None:
+    """Other runtimeArgs do not make the root fs persistent -- only --overlay2=none does."""
+    runtimes = {"runsc": {"path": "/usr/bin/runsc", "runtimeArgs": ["--network=none"]}}
+    assert _is_gvisor_runtime_rootfs_ephemeral("runsc", runtimes) is True
+
+
+def test_gvisor_runsc_with_overlay_none_is_persistent() -> None:
+    """--overlay2=none writes the root layer through to the persistent Docker layer."""
+    runtimes = {"runsc": {"path": "/usr/bin/runsc", "runtimeArgs": ["--overlay2=none"]}}
+    assert _is_gvisor_runtime_rootfs_ephemeral("runsc", runtimes) is False
+
+
+def test_non_gvisor_runtime_is_not_treated_as_ephemeral() -> None:
+    """A non-runsc runtime's overlay semantics are unknown, so it is never flagged."""
+    runtimes = {"runc": {"path": "runc"}}
+    assert _is_gvisor_runtime_rootfs_ephemeral("runc", runtimes) is False
+
+
+def test_unregistered_runtime_is_not_treated_as_ephemeral() -> None:
+    """A runtime absent from the daemon config is left to Docker's own unknown-runtime error."""
+    assert _is_gvisor_runtime_rootfs_ephemeral("runsc", {}) is False

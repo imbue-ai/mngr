@@ -191,15 +191,15 @@
   // ``fetch`` only rejects on network failure -- a 4xx/5xx response is
   // a successful Promise. Wrap it so callers can treat both transport
   // errors and server-side errors uniformly.
-  function postWithErrorCheck(url, body) {
-    return fetch(url, { method: 'POST', body: body }).then(function (r) {
+  function requestWithErrorCheck(url, options) {
+    return fetch(url, options).then(function (r) {
       if (r.ok) return r;
       return r.text().then(function (text) {
         var detail = text;
         try {
-          var parsed = JSON.parse(text);
-          if (parsed && typeof parsed.error === 'string') detail = parsed.error;
-          else if (parsed && typeof parsed.detail === 'string') detail = parsed.detail;
+          // Route both the structural 422 contract and the handler's semantic
+          // {error}/{detail} shapes through the shared normalizer.
+          detail = window.normalizeApiError(JSON.parse(text)).message;
         } catch (_) { /* leave detail as raw text */ }
         var err = new Error(detail || ('HTTP ' + r.status));
         err.httpStatus = r.status;
@@ -211,10 +211,12 @@
   window.submitUpdate = function () {
     clearError();
     setSubmitting(true);
-    var form = new FormData();
-    form.append('emails', JSON.stringify(getFinalEmails()));
-    var url = '/sharing/' + agentId + '/' + serviceName + '/enable';
-    postWithErrorCheck(url, form)
+    var url = '/api/v1/workspaces/' + agentId + '/sharing/' + serviceName;
+    requestWithErrorCheck(url, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ emails: getFinalEmails() }),
+    })
       .then(function () { window.location.href = '/sharing/' + agentId + '/' + serviceName; })
       .catch(function (err) { showError('Could not save sharing changes: ' + err.message); setSubmitting(false); });
   };
@@ -222,7 +224,7 @@
   window.submitDisable = function () {
     clearError();
     setSubmitting(true);
-    postWithErrorCheck('/sharing/' + agentId + '/' + serviceName + '/disable', null)
+    requestWithErrorCheck('/api/v1/workspaces/' + agentId + '/sharing/' + serviceName, { method: 'DELETE' })
       .then(function () { window.location.href = '/sharing/' + agentId + '/' + serviceName; })
       .catch(function (err) { showError('Could not disable sharing: ' + err.message); setSubmitting(false); });
   };
@@ -259,7 +261,7 @@
     var attempts = 0;
     function poll() {
       attempts++;
-      var probeUrl = '/api/sharing-readiness/' + agentId + '/' + serviceName + '?url=' + encodeURIComponent(url);
+      var probeUrl = '/api/v1/workspaces/' + agentId + '/sharing/' + serviceName + '/readiness?url=' + encodeURIComponent(url);
       fetch(probeUrl)
         .then(function (r) { return r.ok ? r.json() : { ready: false }; })
         .catch(function () { return { ready: false }; })
@@ -283,15 +285,13 @@
     return policy.emails.slice();
   }
 
-  fetch('/api/sharing-status/' + agentId + '/' + serviceName)
+  fetch('/api/v1/workspaces/' + agentId + '/sharing/' + serviceName)
     .then(function (r) {
       if (!r.ok) {
         return r.text().then(function (text) {
           var detail = text;
           try {
-            var parsed = JSON.parse(text);
-            if (parsed && typeof parsed.error === 'string') detail = parsed.error;
-            else if (parsed && typeof parsed.detail === 'string') detail = parsed.detail;
+            detail = window.normalizeApiError(JSON.parse(text)).message;
           } catch (_) { /* leave as raw */ }
           throw new Error(detail || ('HTTP ' + r.status));
         });

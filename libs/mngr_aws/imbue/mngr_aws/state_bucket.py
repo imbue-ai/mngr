@@ -14,6 +14,7 @@ from pydantic import PrivateAttr
 
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.volume import Volume
+from imbue.mngr_aws.boto_config import AWS_BOTO_CONFIG
 from imbue.mngr_vps import state_keys
 from imbue.mngr_vps.state_bucket_base import BaseObjectStoreVolume
 from imbue.mngr_vps.state_bucket_base import BaseStateBucket
@@ -58,7 +59,7 @@ class S3StateBucket(BaseStateBucket):
     def _s3(self) -> Any:
         """Return the S3 client, building and caching it from the session on first use."""
         if self._cached_s3_client is None:
-            self._cached_s3_client = self.session.client("s3", region_name=self.region)
+            self._cached_s3_client = self.session.client("s3", region_name=self.region, config=AWS_BOTO_CONFIG)
         return self._cached_s3_client
 
     @property
@@ -206,7 +207,7 @@ class S3Volume(BaseObjectStoreVolume):
 
     def _s3(self) -> Any:
         if self._cached_s3_client is None:
-            self._cached_s3_client = self.session.client("s3", region_name=self.region)
+            self._cached_s3_client = self.session.client("s3", region_name=self.region, config=AWS_BOTO_CONFIG)
         return self._cached_s3_client
 
     def _translate_errors(self) -> AbstractContextManager[None]:
