@@ -195,7 +195,11 @@ def _handle_notification(agent_id: str) -> OkResponse | Response:
 
 def _serialize_workspace(agent_id: AgentId) -> WorkspaceSummary:
     """Build the summary for one workspace from discovery + its labels."""
-    backend_resolver = get_state().backend_resolver
+    state = get_state()
+    backend_resolver = state.backend_resolver
+    # The owning signed-in account (None when private or no session store), so the
+    # detail readout can confirm an association rather than leaving it invisible.
+    account = state.session_store.get_account_for_workspace(str(agent_id)) if state.session_store is not None else None
     info = backend_resolver.get_agent_display_info(agent_id)
     host_id = info.host_id if info is not None else None
     # ``host_id`` is the real ``host-<hex>`` id from discovery; static / in-memory
@@ -216,6 +220,8 @@ def _serialize_workspace(agent_id: AgentId) -> WorkspaceSummary:
         host_state=str(host_state) if host_state is not None else None,
         git_url=backend_resolver.get_agent_label(agent_id, "remote"),
         branch=backend_resolver.get_agent_label(agent_id, "original_branch"),
+        account_id=account.user_id if account is not None else None,
+        account_email=account.email if account is not None else None,
         provider_name=info.provider_name if info is not None else None,
         create_time=info.create_time.isoformat() if info is not None and info.create_time is not None else None,
         original_minds_version=backend_resolver.get_agent_label(agent_id, "original_minds_version"),
@@ -1167,10 +1173,13 @@ def _handle_patch_workspace(agent_id: str) -> Response:
                 applied["account_id"] = None
             else:
                 account_id = str(account_value).strip()
-                workspace_settings.associate_workspace_account(
+                account = workspace_settings.associate_workspace_account(
                     parsed_id, account_id, backend_resolver, state.session_store
                 )
-                applied["account_id"] = account_id
+                # Echo the *resolved* id (the input may have been an email) plus the
+                # email, so the caller can confirm exactly which account was bound.
+                applied["account_id"] = account.user_id
+                applied["account_email"] = account.email
         except workspace_settings.WorkspaceAssociationError as exc:
             return _json_error(str(exc), exc.status_code)
 

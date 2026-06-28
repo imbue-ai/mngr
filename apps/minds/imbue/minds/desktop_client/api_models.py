@@ -160,7 +160,13 @@ class PatchWorkspaceRequest(ApiRequestModel):
     """Body for partially updating a workspace's metadata."""
 
     color: str | None = Field(default=None, description="New hex color")
-    account_id: str | None = Field(default=None, description="Account id to associate, or null/empty to disassociate")
+    account_id: str | None = Field(
+        default=None,
+        description=(
+            "Signed-in account to associate -- either the account id or its email; "
+            "null/empty to disassociate. An id/email that matches no signed-in account is rejected (404)."
+        ),
+    )
 
 
 class RestartWorkspaceRequest(ApiRequestModel):
@@ -225,6 +231,10 @@ class WorkspaceSummary(FrozenModel):
         default=None,
         description="Branch/tag the workspace was created from (the create-time value); null when none was specified",
     )
+    account_id: str | None = Field(
+        default=None, description="Signed-in account id the workspace is associated with, when any"
+    )
+    account_email: str | None = Field(default=None, description="Email of the associated signed-in account, when any")
     provider_name: str | None = Field(default=None, description="Provider backend name")
     create_time: str | None = Field(default=None, description="Creation time (UTC ISO 8601)")
     original_minds_version: str | None = Field(default=None, description="Immutable create-time minds version label")

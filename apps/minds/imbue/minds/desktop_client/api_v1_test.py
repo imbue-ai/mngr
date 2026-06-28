@@ -940,6 +940,66 @@ def test_patch_workspace_disassociate_account_with_null(tmp_path: Path) -> None:
     assert store.get_account_for_workspace(str(agent_id)) is None
 
 
+def test_patch_workspace_associate_account_by_email(tmp_path: Path) -> None:
+    # Associating by email (not just id) resolves to the signed-in account and
+    # echoes the canonical id + email back -- this is what unblocks an agent that
+    # only knows the user's email.
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    cli = _fake_sharing_cli()
+    user_id = "33333333-3333-3333-3333-333333333333"
+    cli.add_account(user_id=user_id, email="owner@example.com")
+    store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
+    client = _build_client(tmp_path, resolver, imbue_cloud_cli=cli, session_store=store)
+
+    response = client.patch(
+        f"/api/v1/workspaces/{agent_id}", headers=_auth_header(), json={"account_id": "owner@example.com"}
+    )
+
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body["account_id"] == user_id
+    assert body["account_email"] == "owner@example.com"
+    account = store.get_account_for_workspace(str(agent_id))
+    assert account is not None and str(account.user_id) == user_id
+
+
+def test_patch_workspace_associate_unknown_account_returns_404(tmp_path: Path) -> None:
+    # A value matching no signed-in account is rejected (404) instead of being
+    # silently accepted then garbage-collected -- the previous false-success bug.
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    cli = _fake_sharing_cli()
+    cli.add_account(user_id="44444444-4444-4444-4444-444444444444", email="owner@example.com")
+    store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
+    client = _build_client(tmp_path, resolver, imbue_cloud_cli=cli, session_store=store)
+
+    response = client.patch(
+        f"/api/v1/workspaces/{agent_id}", headers=_auth_header(), json={"account_id": "nobody@example.com"}
+    )
+
+    assert response.status_code == 404
+    assert store.get_account_for_workspace(str(agent_id)) is None
+
+
+def test_get_workspace_surfaces_associated_account(tmp_path: Path) -> None:
+    # After association the detail readout exposes account_id + account_email so a
+    # caller can confirm it (previously there was no account field at all).
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    cli = _fake_sharing_cli()
+    user_id = "55555555-5555-5555-5555-555555555555"
+    store = _associated_session_store(tmp_path, cli, agent_id, user_id=user_id, email="owner@example.com")
+    client = _build_client(tmp_path, resolver, imbue_cloud_cli=cli, session_store=store)
+
+    response = client.get(f"/api/v1/workspaces/{agent_id}", headers=_auth_header())
+
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body["account_id"] == user_id
+    assert body["account_email"] == "owner@example.com"
+
+
 def test_patch_workspace_requires_bearer(tmp_path: Path) -> None:
     agent_id = AgentId()
     client = _client_with_workspace(tmp_path, agent_id)
