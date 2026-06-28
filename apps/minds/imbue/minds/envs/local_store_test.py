@@ -55,6 +55,28 @@ def test_write_client_config_round_trip(_isolated_home: Path) -> None:
     assert str(loaded.litellm_proxy_url) == "https://test-litellm.modal.run/"
 
 
+def test_write_client_config_round_trips_lima_image_fields(_isolated_home: Path) -> None:
+    """When set, the optional pre-baked Lima image source (issue 2306) is written + reloaded."""
+    config = ClientEnvConfig(
+        connector_url=AnyUrl("https://test-connector.modal.run"),
+        litellm_proxy_url=AnyUrl("https://test-litellm.modal.run"),
+        lima_image_base_url=AnyUrl("https://lima-images.example.com/minds"),
+        lima_image_minisign_public_key="RWQexamplepublickeybase64",
+    )
+    write_client_config(config, name=DevEnvName("dev-lima"))
+    loaded = read_client_config_file(DevEnvName("dev-lima"))
+    assert str(loaded.lima_image_base_url) == "https://lima-images.example.com/minds"
+    assert loaded.lima_image_minisign_public_key == "RWQexamplepublickeybase64"
+
+
+def test_write_client_config_omits_lima_image_fields_when_unset(_isolated_home: Path) -> None:
+    """An env that doesn't configure a chunk store writes no lima_image_* keys (client falls back to in-VM build)."""
+    target = write_client_config(_make_client(), name=DevEnvName("dev-nolima"))
+    raw = tomllib.loads(target.read_text())
+    assert "lima_image_base_url" not in raw
+    assert "lima_image_minisign_public_key" not in raw
+
+
 def test_write_client_config_is_loadable_as_client_config(_isolated_home: Path) -> None:
     """The per-dev-env client.toml must be consumable by `minds run --config-file <path>`.
 

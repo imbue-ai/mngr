@@ -155,6 +155,50 @@ gh workflow run minds-launch-to-msg.yml -R imbue-ai/mngr \
 
 **Green here concludes the release.** Note the build ID in the `build` summary.
 
+### 8b. Build + publish the pre-baked Lima image (issue 2306)
+
+Optional but recommended once the tag exists: bake + publish the pre-baked Lima VM image so local Lima creates of the default workspace boot the baked toolchain instead of building it in-VM. **Operator-run, not CI** — the R2 credentials and the minisign signing **private** key stay on your machine; only a public URL + public key are committed.
+
+The bake runs *with Lima itself* (the image is built by the same virtualizer that consumes it — `vz` on Apple Silicon, accelerated QEMU on Linux). What a desktop client uses is decided entirely by the per-tier `client.toml` (`lima_image_base_url` + `lima_image_minisign_public_key`); if those are unset, or no image is published for the tag/arch, the client **backs off to building in-VM** (so this whole step is safe to skip and safe to half-finish).
+
+#### One-time tier setup (do once per tier, not per release)
+
+1. **Generate the tier's minisign keypair** and store the secret key somewhere durable + private (a password manager / the operator's machine — never the repo, never CI):
+   ```bash
+   minisign -G -p minds-lima-<tier>.pub -s minds-lima-<tier>.key   # protect the .key
+   ```
+2. **Create the R2 bucket** (convention: `minds-lima-images-<tier>`, e.g. `minds-lima-images-production`) and enable a public origin. For dev/test the managed `r2.dev` domain is fine; for **production prefer a custom CDN domain** (`r2.dev` is rate-limited and not meant for production traffic). Either way, note the public base URL (e.g. `https://lima-images.minds.example`).
+3. **Commit the public values** into the tier's `config/envs/<tier>/client.toml`:
+   ```toml
+   lima_image_base_url = "https://lima-images.minds.example"          # the public CDN/r2.dev base
+   lima_image_minisign_public_key = "RW...."                          # contents of minds-lima-<tier>.pub line 2
+   ```
+   These are public (a URL + a public key), so they belong in the committed `client.toml` next to the other URLs. A dev env can set the same two keys in `~/.minds-<name>/client.toml` (the `minds env deploy` writer round-trips them when present on the `ClientEnvConfig`).
+
+#### Per-release publish
+
+Build one arch per native host (amd64 on a KVM Linux host, arm64 on an Apple-Silicon Mac), then publish each into the tier bucket. Credentials: the simplest path reuses the tier's existing Vault `cloudflare` account token (it already has `Workers R2 Storage: Edit`) with `--uploader cloudflare-api`; alternatively mint dedicated R2 S3 keys and use `--uploader s3` with `R2_ACCOUNT_ID`/`R2_ACCESS_KEY_ID`/`R2_SECRET_ACCESS_KEY`.
+
+```bash
+export VAULT_ADDR=https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200 VAULT_NAMESPACE=admin
+export CLOUDFLARE_API_TOKEN=$(vault kv get -mount=secrets -field=value minds/production/cloudflare/CLOUDFLARE_API_TOKEN)
+export CLOUDFLARE_ACCOUNT_ID=$(vault kv get -mount=secrets -field=value minds/production/cloudflare/CLOUDFLARE_ACCOUNT_ID)
+
+./scripts/build-lima-image.sh --fct-ref "$VERSION"     # emits qcow2 + raw under scripts/lima_image/output-<arch>/
+uv run python scripts/lima_image/publish.py \
+  --version "$VERSION" --arch "$(uname -m | sed 's/arm64/aarch64/')" \
+  --raw-image scripts/lima_image/output-*/mngr-lima-*.raw \
+  --bucket minds-lima-images-production \
+  --secret-key-file /path/to/minds-lima-production.key \
+  --uploader cloudflare-api
+```
+
+Notes:
+- **Publish for the tag the binary requests** — `--version` must equal the binary's `FALLBACK_BRANCH` (`$VERSION`). A mismatch isn't fatal (clients just back off to in-VM) but you lose the speedup.
+- Re-publishing a near-identical image only uploads the changed chunks (content-addressed dedup); chunks are immutable, so this is safe to re-run.
+- Both arches publish into the **same** bucket (the per-(version, arch) index + the shared chunk store), and the signed root manifest merges arch entries, so publishing arm64 after amd64 adds to the manifest rather than replacing it.
+- Measure the real `desync` delta between two consecutive builds before investing further in reproducibility (the dominant residual churn is `/root/.cache/uv`, which `desync` largely dedups by content).
+
 ### 9. Optional: dev verify + ship
 
 Drive the build's ToDesktop zip (`https://dl.todesktop.com/26032588hqdzk/builds/<build_id>/mac/zip/arm64`, replaces `/Applications/Minds.app`) or the dev build through create-agent → first message. To publish, click **Release** at `https://app.todesktop.com/apps/26032588hqdzk/builds/<build_id>` (the `todesktop release` CLI is auth-blocked); auto-updater picks it up on next launch.
