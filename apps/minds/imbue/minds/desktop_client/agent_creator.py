@@ -525,6 +525,7 @@ def _build_mngr_create_command(
     latchkey_env: Mapping[str, str] | None = None,
     color: str | None = None,
     original_minds_version: str | None = None,
+    original_branch: str | None = None,
 ) -> list[str]:
     """Build the ``mngr create`` command for a freshly-provisioned workspace.
 
@@ -625,6 +626,16 @@ def _build_mngr_create_command(
     if original_minds_version:
         version_label_args = ["--label", f"original_minds_version={original_minds_version}"]
 
+    # Stamp the branch/tag the workspace was created from -- the literal value the
+    # user entered in the create form / API ``branch`` field -- as an immutable
+    # label, read back by ``/api/v1/workspaces/<id>`` as the ``branch`` field.
+    # Absent when the field was left blank (the provider's default branch was
+    # used). Distinct from ``original_minds_version`` (the resolved template ref,
+    # which for imbue_cloud can be a semver tag rather than a branch).
+    branch_label_args: list[str] = []
+    if original_branch:
+        branch_label_args = ["--label", f"original_branch={original_branch}"]
+
     mngr_command: list[str] = [
         MNGR_BINARY,
         "create",
@@ -649,6 +660,7 @@ def _build_mngr_create_command(
         "is_primary=true",
         *color_label_args,
         *version_label_args,
+        *branch_label_args,
     ]
 
     match launch_mode:
@@ -899,6 +911,7 @@ def run_mngr_create(
     latchkey_env: Mapping[str, str] | None = None,
     color: str | None = None,
     original_minds_version: str | None = None,
+    original_branch: str | None = None,
     *,
     parent_cg: ConcurrencyGroup | None = None,
 ) -> tuple[AgentId, HostId]:
@@ -936,6 +949,7 @@ def run_mngr_create(
         latchkey_env=latchkey_env,
         color=color,
         original_minds_version=original_minds_version,
+        original_branch=original_branch,
     )
 
     # Build the subprocess env from the parent's env + any secrets we inject
@@ -1060,6 +1074,7 @@ class _MngrCreateAttemptParams(FrozenModel):
     parent_cg: ConcurrencyGroup | None
     color: str | None
     original_minds_version: str | None
+    original_branch: str | None
 
 
 def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams) -> tuple[AgentId, HostId]:
@@ -1094,6 +1109,7 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         anthropic_base_url=params.anthropic_base_url,
         color=params.color,
         original_minds_version=params.original_minds_version,
+        original_branch=params.original_branch,
         parent_cg=params.parent_cg,
     )
 
@@ -1639,6 +1655,7 @@ class AgentCreator(MutableModel):
                     parent_cg=self.root_concurrency_group,
                     color=color,
                     original_minds_version=original_minds_version or None,
+                    original_branch=branch or None,
                 )
 
                 if launch_mode is LaunchMode.IMBUE_CLOUD:

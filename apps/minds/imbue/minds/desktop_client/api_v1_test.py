@@ -240,14 +240,20 @@ def test_get_workspace_returns_detail(tmp_path: Path) -> None:
     assert body["agent_id"] == str(agent_id)
 
 
-def test_get_workspace_surfaces_git_url_from_remote_label(tmp_path: Path) -> None:
-    # git_url is sourced from the agent's ``remote`` label (the create-time repo
-    # URL/path), so the detail readout surfaces it instead of returning null.
+def test_get_workspace_surfaces_git_url_and_branch_from_labels(tmp_path: Path) -> None:
+    # git_url and branch are sourced from the agent's ``remote`` / ``original_branch``
+    # labels (the create-time repo URL/path and branch), so the detail readout
+    # surfaces them instead of returning null.
     agent_id = AgentId()
     resolver = make_resolver_with_data(
         make_agents_json(
             agent_id,
-            labels={"workspace": "mind-1", "is_primary": "true", "remote": "https://example/repo.git"},
+            labels={
+                "workspace": "mind-1",
+                "is_primary": "true",
+                "remote": "https://example/repo.git",
+                "original_branch": "feature/my-branch",
+            },
         ),
     )
     app = create_desktop_client(
@@ -261,7 +267,9 @@ def test_get_workspace_surfaces_git_url_from_remote_label(tmp_path: Path) -> Non
     response = app.test_client().get(f"/api/v1/workspaces/{agent_id}", headers=_auth_header())
 
     assert response.status_code == 200
-    assert json.loads(response.data)["git_url"] == "https://example/repo.git"
+    body = json.loads(response.data)
+    assert body["git_url"] == "https://example/repo.git"
+    assert body["branch"] == "feature/my-branch"
 
 
 def test_get_unknown_workspace_returns_404(tmp_path: Path) -> None:

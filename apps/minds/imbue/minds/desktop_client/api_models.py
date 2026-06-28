@@ -221,6 +221,10 @@ class WorkspaceSummary(FrozenModel):
         default=None,
         description="Template repo URL or local path the workspace was created from (the agent's 'remote' label), when known",
     )
+    branch: str | None = Field(
+        default=None,
+        description="Branch/tag the workspace was created from (the create-time value); null when none was specified",
+    )
     provider_name: str | None = Field(default=None, description="Provider backend name")
     create_time: str | None = Field(default=None, description="Creation time (UTC ISO 8601)")
     original_minds_version: str | None = Field(default=None, description="Immutable create-time minds version label")

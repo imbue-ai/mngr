@@ -215,6 +215,7 @@ def _serialize_workspace(agent_id: AgentId) -> WorkspaceSummary:
         host_id=host_id,
         host_state=str(host_state) if host_state is not None else None,
         git_url=backend_resolver.get_agent_label(agent_id, "remote"),
+        branch=backend_resolver.get_agent_label(agent_id, "original_branch"),
         provider_name=info.provider_name if info is not None else None,
         create_time=info.create_time.isoformat() if info is not None and info.create_time is not None else None,
         original_minds_version=backend_resolver.get_agent_label(agent_id, "original_minds_version"),
