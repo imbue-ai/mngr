@@ -1005,20 +1005,34 @@ def _handle_establish_ssh(agent_id: str) -> SshConnectionResponse | Response:
     # the agent's env sourced, so ``~`` expands and the redirection works. We
     # must NOT pass ``-- bash -c <script>``: the extra ``bash``/``-c`` tokens are
     # parsed as additional agent names (``-c`` fails agent-name validation) and
-    # the whole call errors out. The env-sourcing prefix is silent, so the read's
-    # stdout is just the file body -- which is exactly what we write back.
+    # the whole call errors out.
+    #
+    # The read is captured with ``--format json`` and the command's own stdout is
+    # pulled out of the structured envelope. In its default (human) format
+    # ``mngr exec`` appends a ``Command succeeded on agent <name>`` status line to
+    # stdout after the command's output; reading that raw would write the status
+    # line straight back into the target's authorized_keys -- and, because the
+    # prune step only drops minds-owned grant lines, it would accumulate another
+    # copy on every re-grant. The JSON envelope keeps the captured body clean.
     read_argv = [
         mngr_binary,
         "exec",
         str(parsed_id),
         "cat ~/.ssh/authorized_keys 2>/dev/null || true",
+        "--format",
+        "json",
     ]
     try:
-        read_returncode, existing_authorized_keys, read_stderr = _run_mngr_blocking(read_argv, parent_cg)
+        read_returncode, read_stdout, read_stderr = _run_mngr_blocking(read_argv, parent_cg)
     except (OSError, ConcurrencyGroupError) as e:
         return _json_error(f"Could not read the target's authorized_keys: {e}", 502)
     if read_returncode != 0:
         return _json_error(f"Could not read the target's authorized_keys: {read_stderr.strip()}", 502)
+    try:
+        read_result = json.loads(read_stdout)
+        existing_authorized_keys = str(read_result["results"][0]["stdout"])
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
+        return _json_error(f"Could not parse the target's authorized_keys read: {e}", 502)
 
     new_authorized_keys = workspace_ssh.compose_pruned_authorized_keys(
         existing_authorized_keys, authorized_line, requester_workspace_id=requester_workspace_id, now=now

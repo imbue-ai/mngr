@@ -603,17 +603,41 @@ def test_establish_ssh_missing_fields_returns_422_with_field_errors(tmp_path: Pa
 
 
 def _write_recording_fake_mngr(directory: Path, record_path: Path) -> str:
-    """Fake ``mngr`` that records each invocation's argv, then exits 0 with empty stdout.
+    """Fake ``mngr`` that records each invocation's argv, then exits 0.
 
     Args are NUL-delimited within an invocation and invocations are separated by
     a record-separator byte (0x1e), so args that legitimately contain newlines
     (the authorized_keys write script) round-trip intact.
+
+    When invoked with ``--format json`` (the authorized_keys read), it emits a
+    realistic ``mngr exec --format json`` envelope on stdout whose inner
+    ``stdout`` is empty. This mirrors real ``mngr``: its default (human) output
+    appends a ``Command succeeded on agent ...`` status line to stdout that the
+    route must not write back, so the route reads in JSON and extracts the inner
+    body. Other invocations (the write, which discards stdout) emit nothing.
     """
     directory.mkdir(parents=True, exist_ok=True)
     script = directory / "mngr"
     rec = shlex.quote(str(record_path))
+    envelope = json.dumps(
+        {
+            "results": [{"agent": "t", "stdout": "", "stderr": "", "success": True}],
+            "failed_agents": [],
+            "total_executed": 1,
+            "total_failed": 0,
+        }
+    )
     script.write_text(
-        f"#!/bin/sh\nfor a in \"$@\"; do printf '%s\\0' \"$a\" >> {rec}; done\nprintf '\\036' >> {rec}\nexit 0\n"
+        "#!/bin/sh\n"
+        f'for a in "$@"; do printf \'%s\\0\' "$a" >> {rec}; done\n'
+        f"printf '\\036' >> {rec}\n"
+        'for a in "$@"; do\n'
+        '  if [ "$a" = "json" ]; then\n'
+        f"    printf '%s' {shlex.quote(envelope)}\n"
+        "    exit 0\n"
+        "  fi\n"
+        "done\n"
+        "exit 0\n"
     )
     script.chmod(0o755)
     return str(script)
@@ -659,16 +683,29 @@ def test_establish_ssh_passes_command_as_single_mngr_exec_arg(
     assert response.status_code == 200, response.data
 
     invocations = _recorded_mngr_invocations(record_path)
-    # Exactly the read then the write -- each a well-formed `mngr exec <id> <command>`.
+    # Exactly the read then the write.
     assert len(invocations) == 2, invocations
-    for argv in invocations:
-        assert argv[0] == "exec"
-        assert argv[1] == str(target)
-        assert len(argv) == 3, f"command must be a single arg, got {argv!r}"
-        assert "--" not in argv and "bash" not in argv and "-c" not in argv and "-lc" not in argv
-    # The read is the non-mutating cat; the write carries the rewrite script.
-    assert invocations[0][2] == "cat ~/.ssh/authorized_keys 2>/dev/null || true"
-    assert "authorized_keys" in invocations[1][2]
+    read_argv, write_argv = invocations
+    # Read: `mngr exec <id> <cat command> --format json` -- the command is a
+    # single COMMAND arg (never `-- bash -c <script>`), and JSON format keeps the
+    # captured body to the command's own stdout (no human status line to write
+    # back).
+    assert read_argv[0] == "exec"
+    assert read_argv[1] == str(target)
+    assert read_argv[2] == "cat ~/.ssh/authorized_keys 2>/dev/null || true"
+    assert read_argv[3:] == ["--format", "json"]
+    assert "bash" not in read_argv and "-c" not in read_argv and "-lc" not in read_argv and "--" not in read_argv
+    # Write: `mngr exec <id> <write script>` -- single trailing COMMAND arg.
+    assert write_argv[0] == "exec"
+    assert write_argv[1] == str(target)
+    assert len(write_argv) == 3, f"write command must be a single arg, got {write_argv!r}"
+    assert "bash" not in write_argv and "-c" not in write_argv and "-lc" not in write_argv and "--" not in write_argv
+    # The write body is composed only from the parsed inner stdout: neither the
+    # JSON envelope text nor any human-format status line may reach the file.
+    write_script = write_argv[2]
+    assert "authorized_keys" in write_script
+    assert "Command succeeded" not in write_script
+    assert '"results"' not in write_script
 
 
 def test_operation_logs_unknown_create_id_returns_404(tmp_path: Path) -> None:
