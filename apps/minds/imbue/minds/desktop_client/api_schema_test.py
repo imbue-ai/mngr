@@ -62,6 +62,7 @@ def test_is_gateway_reachable_path(path: str, expected: bool) -> None:
 def test_build_openapi_document_is_valid_and_filters_unreachable_routes() -> None:
     rules = [
         ("/api/v1/workspaces", frozenset({"GET", "POST", "HEAD", "OPTIONS"}), (), "api_v1.list"),
+        ("/api/v1/accounts", frozenset({"GET", "HEAD", "OPTIONS"}), (), "api_v1.accounts"),
         ("/api/v1/workspaces/<agent_id>/ssh", frozenset({"POST", "OPTIONS"}), ("agent_id",), "api_v1.ssh"),
         ("/api/v1/desktop/running-workspaces", frozenset({"GET"}), (), "api_v1.desktop"),
         ("/api/v1/files/x", frozenset({"GET"}), (), "api_v1.files"),
@@ -78,6 +79,7 @@ def test_build_openapi_document_is_valid_and_filters_unreachable_routes() -> Non
     paths = document["paths"]
     assert "/api/v1/workspaces" in paths
     assert "/api/v1/workspaces/{agent_id}/ssh" in paths
+    assert "/api/v1/accounts" in paths
     assert "/api/schema" in paths
     # Cookie-only / non-proxied surfaces are excluded so an agent only sees what it can reach.
     assert "/api/v1/desktop/running-workspaces" not in paths

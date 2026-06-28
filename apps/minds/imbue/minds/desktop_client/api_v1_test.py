@@ -240,6 +240,38 @@ def test_get_workspace_returns_detail(tmp_path: Path) -> None:
     assert body["agent_id"] == str(agent_id)
 
 
+def test_list_accounts_returns_signed_in_accounts(tmp_path: Path) -> None:
+    # The accounts route lets a caller turn a known email into the account id the
+    # association API needs. (At the gateway it is gated by the must-ask
+    # ``minds-accounts-read`` permission; here we exercise the route directly.)
+    cli = _fake_sharing_cli()
+    cli.add_account(user_id="11111111-1111-1111-1111-111111111111", email="owner@example.com")
+    store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
+    client = _build_client(
+        tmp_path,
+        StaticBackendResolver(url_by_agent_and_service={}),
+        imbue_cloud_cli=cli,
+        session_store=store,
+    )
+
+    response = client.get("/api/v1/accounts", headers=_auth_header())
+
+    assert response.status_code == 200
+    accounts = json.loads(response.data)["accounts"]
+    assert any(
+        a["account_id"] == "11111111-1111-1111-1111-111111111111" and a["email"] == "owner@example.com"
+        for a in accounts
+    )
+
+
+def test_list_accounts_requires_bearer(tmp_path: Path) -> None:
+    client = _build_client(tmp_path, StaticBackendResolver(url_by_agent_and_service={}))
+
+    response = client.get("/api/v1/accounts")
+
+    assert response.status_code == 401
+
+
 def test_get_workspace_surfaces_git_url_and_branch_from_labels(tmp_path: Path) -> None:
     # git_url and branch are sourced from the agent's ``remote`` / ``original_branch``
     # labels (the create-time repo URL/path and branch), so the detail readout

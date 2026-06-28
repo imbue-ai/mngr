@@ -247,6 +247,20 @@ class WorkspaceListResponse(FrozenModel):
     workspaces: tuple[WorkspaceSummary, ...] = Field(description="All known workspaces")
 
 
+class AccountSummary(FrozenModel):
+    """One signed-in account on this device."""
+
+    account_id: str = Field(description="Account id (the value to pass to the workspace-association API)")
+    email: str = Field(description="Account email")
+    display_name: str | None = Field(default=None, description="Account display name, when known")
+
+
+class AccountsResponse(FrozenModel):
+    """The accounts signed in on this device (for associating a workspace with one)."""
+
+    accounts: tuple[AccountSummary, ...] = Field(description="All signed-in accounts")
+
+
 class OkResponse(FrozenModel):
     """A minimal ``{"ok": true}`` acknowledgement."""
 

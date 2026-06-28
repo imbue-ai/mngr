@@ -35,12 +35,14 @@ from imbue.imbue_common.event_envelope import EventSource
 from imbue.imbue_common.event_envelope import EventType
 from imbue.imbue_common.event_envelope import IsoTimestamp
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.desktop_client.latchkey.gateway_client import AccountsRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.gateway_client import WorkspaceRequestPayload
+from imbue.minds.desktop_client.request_events import LatchkeyAccountsPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import LatchkeyWorkspacePermissionRequestEvent
@@ -121,6 +123,18 @@ def streamed_request_to_event(streamed: StreamedPermissionRequest) -> RequestEve
             permissions_target_path=streamed.target,
             permissions=payload.permissions,
             target_workspace_id=payload.target_workspace_id,
+            rationale=streamed.rationale,
+        )
+    if isinstance(payload, AccountsRequestPayload):
+        return LatchkeyAccountsPermissionRequestEvent(
+            timestamp=_now_iso(),
+            type=EventType("accounts_permission_request"),
+            event_id=EventId(streamed.request_id),
+            source=EventSource(REQUESTS_EVENT_SOURCE_NAME),
+            agent_id=streamed.agent_id,
+            request_type=str(RequestType.ACCOUNTS_PERMISSION),
+            is_user_requested=False,
+            permissions_target_path=streamed.target,
             rationale=streamed.rationale,
         )
     assert_never(payload)

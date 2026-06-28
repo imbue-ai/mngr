@@ -587,6 +587,49 @@ def test_post_rejects_unknown_type(node_extension: tuple[str, Path, Path]) -> No
     assert "type" in json.loads(body)["error"]
 
 
+# -- POST /permission-requests: accounts type --
+
+
+def test_post_creates_accounts_request_with_fixed_permission_under_latchkey_self(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    base_url, _latchkey_directory, _permissions_config_path = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "needs to discover an account to associate",
+            "type": "accounts",
+            "payload": {},
+        },
+    )
+    assert status == 201
+    parsed = json.loads(body)
+    assert parsed["request_type"] == "accounts"
+    assert parsed["payload"] == {}
+    effect = parsed["effect"]
+    # A single fixed permission under the pre-existing ``latchkey-self`` scope --
+    # no new scope is minted (mirrors file-sharing).
+    assert effect["rules"] == [{"latchkey-self": ["minds-accounts-read"]}]
+    schema = effect["schemas"]["minds-accounts-read"]
+    assert schema["properties"]["method"] == {"const": "GET"}
+    assert schema["properties"]["path"]["pattern"] == r"^/minds-api-proxy/api/v1/accounts(/|$)"
+
+
+def test_post_rejects_accounts_payload_with_fields(node_extension: tuple[str, Path, Path]) -> None:
+    base_url, *_ = node_extension
+    status, _body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "x",
+            "type": "accounts",
+            "payload": {"permissions": ["minds-accounts-read"]},
+        },
+    )
+    assert status == 400
+
+
 # -- POST /permission-requests: workspace type --
 
 

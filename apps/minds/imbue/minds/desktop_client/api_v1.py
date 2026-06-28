@@ -57,6 +57,8 @@ from imbue.minds.desktop_client.api_auth import json_error as _json_error
 from imbue.minds.desktop_client.api_auth import json_field_error as _json_field_error
 from imbue.minds.desktop_client.api_auth import json_response as _json_response
 from imbue.minds.desktop_client.api_auth import require_api_or_cookie_auth
+from imbue.minds.desktop_client.api_models import AccountSummary
+from imbue.minds.desktop_client.api_models import AccountsResponse
 from imbue.minds.desktop_client.api_models import AgentNotificationRequest
 from imbue.minds.desktop_client.api_models import BackupSnapshotSummary
 from imbue.minds.desktop_client.api_models import BugReportRequest
@@ -236,6 +238,29 @@ def _handle_list_workspaces() -> WorkspaceListResponse:
     backend_resolver = get_state().backend_resolver
     workspaces = tuple(_serialize_workspace(agent_id) for agent_id in backend_resolver.list_known_workspace_ids())
     return WorkspaceListResponse(workspaces=workspaces)
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(AccountsResponse))
+def _handle_list_accounts() -> AccountsResponse:
+    """List the accounts signed in on this device (id + email + display name).
+
+    Lets a caller turn a known email into the account id the
+    workspace-association API (``PATCH /api/v1/workspaces/<id>``) accepts. Empty
+    when no session store is configured. This route is gated by the
+    ``minds-accounts-read`` permission, which is NOT in the agent baseline -- an
+    agent must be granted it explicitly before it can enumerate accounts.
+    """
+    session_store = get_state().session_store
+    accounts = (
+        tuple(
+            AccountSummary(account_id=account.user_id, email=account.email, display_name=account.display_name)
+            for account in session_store.list_accounts()
+        )
+        if session_store is not None
+        else ()
+    )
+    return AccountsResponse(accounts=accounts)
 
 
 @require_api_or_cookie_auth
@@ -1350,6 +1375,8 @@ def create_api_v1_blueprint() -> Blueprint:
     # ``minds-workspaces`` detent scope at the gateway.
     blueprint.add_url_rule("/workspaces", view_func=_handle_list_workspaces, methods=["GET"])
     blueprint.add_url_rule("/workspaces/<agent_id>", view_func=_handle_get_workspace, methods=["GET"])
+    # Gated by the must-ask ``minds-accounts-read`` permission (not in the agent baseline).
+    blueprint.add_url_rule("/accounts", view_func=_handle_list_accounts, methods=["GET"])
     blueprint.add_url_rule("/workspaces/<agent_id>/version", view_func=_handle_workspace_version, methods=["GET"])
     blueprint.add_url_rule("/workspaces/<agent_id>/backups", view_func=_handle_workspace_backups, methods=["GET"])
     blueprint.add_url_rule(

@@ -130,6 +130,36 @@ def render_file_sharing_permission_dialog(
 
 
 @pure
+def render_accounts_permission_dialog(
+    agent_id: str,
+    request_id: str,
+    ws_name: str,
+    rationale: str,
+    mngr_forward_origin: str = "",
+) -> str:
+    """Render the accounts permission detail fragment.
+
+    Mirrors the file-sharing dialog's header, rationale card, and submission form
+    (via the shared Permissions* JinjaX components), but the accounts read grant
+    is all-or-nothing with no parameters, so there is no path/access/verb input --
+    just a short explanation and a hidden ``permissions`` input so the inbox
+    shell's Approve button enables on first paint.
+
+    ``mngr_forward_origin`` is the bare origin of the ``mngr forward`` plugin;
+    the workspace link in the fragment points at ``{mngr_forward_origin}/goto/<agent>/``.
+    """
+    return CATALOG.render(
+        "pages.LatchkeyAccountsPermission",
+        agent_id=agent_id,
+        request_id=request_id,
+        ws_name=ws_name,
+        rationale=rationale,
+        display_name="Account access",
+        mngr_forward_origin=mngr_forward_origin,
+    )
+
+
+@pure
 def render_workspace_permission_dialog(
     agent_id: str,
     request_id: str,
