@@ -39,6 +39,7 @@ from imbue.mngr.providers.docker.instance import LABEL_PROVIDER
 from imbue.mngr.providers.docker.instance import LABEL_TAGS
 from imbue.mngr.providers.docker.instance import _get_docker_context_host
 from imbue.mngr.providers.docker.instance import _get_ssh_host_from_docker_config
+from imbue.mngr.providers.docker.instance import _is_gvisor_runtime_rootfs_ephemeral
 from imbue.mngr.providers.docker.instance import build_container_labels
 from imbue.mngr.providers.docker.instance import parse_container_labels
 from imbue.mngr.providers.docker.instance import verify_engine_version_supports_volume_subpath
@@ -977,3 +978,32 @@ def test_docker_build_timeout_error_help_text_mentions_config_setting() -> None:
     assert error.user_help_text is not None
     assert "build_timeout_seconds" in error.user_help_text
     assert "my-docker" in error.user_help_text
+
+
+def test_gvisor_runsc_without_overlay_none_is_ephemeral() -> None:
+    """A runsc runtime registered without --overlay2=none has an ephemeral root fs."""
+    runtimes = {"runsc": {"path": "/usr/bin/runsc"}}
+    assert _is_gvisor_runtime_rootfs_ephemeral("runsc", runtimes) is True
+
+
+def test_gvisor_runsc_with_other_args_but_not_overlay_none_is_ephemeral() -> None:
+    """Other runtimeArgs do not make the root fs persistent -- only --overlay2=none does."""
+    runtimes = {"runsc": {"path": "/usr/bin/runsc", "runtimeArgs": ["--network=none"]}}
+    assert _is_gvisor_runtime_rootfs_ephemeral("runsc", runtimes) is True
+
+
+def test_gvisor_runsc_with_overlay_none_is_persistent() -> None:
+    """--overlay2=none writes the root layer through to the persistent Docker layer."""
+    runtimes = {"runsc": {"path": "/usr/bin/runsc", "runtimeArgs": ["--overlay2=none"]}}
+    assert _is_gvisor_runtime_rootfs_ephemeral("runsc", runtimes) is False
+
+
+def test_non_gvisor_runtime_is_not_treated_as_ephemeral() -> None:
+    """A non-runsc runtime's overlay semantics are unknown, so it is never flagged."""
+    runtimes = {"runc": {"path": "runc"}}
+    assert _is_gvisor_runtime_rootfs_ephemeral("runc", runtimes) is False
+
+
+def test_unregistered_runtime_is_not_treated_as_ephemeral() -> None:
+    """A runtime absent from the daemon config is left to Docker's own unknown-runtime error."""
+    assert _is_gvisor_runtime_rootfs_ephemeral("runsc", {}) is False

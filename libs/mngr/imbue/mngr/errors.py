@@ -410,6 +410,38 @@ class DockerRuntimeNotRegisteredError(HostCreationError):
         )
 
 
+class DockerGvisorEphemeralRootfsError(HostCreationError):
+    """Raised when a configured gVisor (`runsc`) Docker runtime lacks `--overlay2=none`.
+
+    gVisor's default root overlay (`--overlay2=root:self`) keeps each container's root
+    filesystem in a per-sandbox overlay that is discarded whenever the container stops,
+    so mngr's SSH provisioning (the injected host key, `authorized_keys`, and the
+    self-healing-entrypoint marker) is lost the first time the container restarts --
+    leaving the host running but unreachable. Registering the runtime with
+    `--overlay2=none` writes the root layer through to the persistent Docker layer.
+    """
+
+    def __init__(self, provider_name: ProviderInstanceName, runtime_name: str) -> None:
+        self.runtime_name = runtime_name
+        super().__init__(
+            provider_name,
+            f"Docker runtime '{runtime_name}' (gVisor) for provider '{provider_name}' is registered "
+            f"without '--overlay2=none', so each container's root filesystem is ephemeral: gVisor's "
+            f"default overlay ('--overlay2=root:self') discards all root-filesystem writes when the "
+            f"container stops, so mngr's SSH provisioning is lost on the first restart and the host "
+            f"becomes unreachable.",
+        )
+        self.user_help_text = (
+            f"Fix this in one of two ways:\n"
+            f"  1. Run containers under the standard runtime instead of gVisor -- set docker_runtime to 'runc':\n"
+            f"       mngr config set --scope user providers.{provider_name}.docker_runtime runc\n"
+            f"     (or per-invocation: MNGR__PROVIDERS__{provider_name.upper()}__DOCKER_RUNTIME=runc)\n"
+            f"  2. Re-register the gVisor runtime so writes persist, then restart Docker:\n"
+            f"       sudo runsc install -- --overlay2=none\n"
+            f"       sudo systemctl restart docker"
+        )
+
+
 class HostNameConflictError(ProviderError):
     """A host with this name already exists."""
 
