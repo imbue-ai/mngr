@@ -3,6 +3,7 @@ from typing import Final
 from typing import Literal
 
 import boto3
+import botocore.session
 from botocore.exceptions import BotoCoreError
 from botocore.exceptions import ClientError
 from loguru import logger
@@ -12,6 +13,8 @@ from pydantic import PrivateAttr
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import ProviderBackendName
+from imbue.mngr_aws.boto_config import AWS_BOTO_CONFIG
+from imbue.mngr_aws.boto_config import IMDS_CREDENTIAL_PROVIDER_NAME
 from imbue.mngr_aws.state_bucket import S3StateBucket
 from imbue.mngr_vps.config import PublicIpVpsProviderConfig
 
@@ -162,21 +165,41 @@ class AwsProviderConfig(PublicIpVpsProviderConfig):
             "True terminates it (ephemeral / self-cleaning)."
         ),
     )
+    use_ec2_instance_metadata: bool = Field(
+        default=False,
+        description=(
+            "Whether to consult the EC2 instance-metadata service (IMDS, 169.254.169.254) as a "
+            "credential source. Off by default: on a host that is not an EC2 instance, IMDS is "
+            "frequently routed-but-blackholed, so probing it blocks on the OS TCP connect timeout "
+            "(tens of seconds) instead of failing fast, which can stall discovery. Set True only "
+            "when running mngr on an EC2 instance that should authenticate via its attached IAM "
+            "instance role."
+        ),
+    )
 
     def get_session(self) -> boto3.Session:
         """Build a boto3 Session that resolves credentials via boto3's default chain.
 
+        By default the EC2 instance-metadata (IMDS) credential provider is removed
+        from the chain (see ``use_ec2_instance_metadata``), so a non-EC2 host fails
+        fast instead of hanging on a blackholed ``169.254.169.254`` probe. All
+        other sources (``AWS_*`` env vars, ``~/.aws/credentials``, ``~/.aws/config``,
+        SSO, etc.) are unaffected.
+
         Raises ``AwsConfigError`` (a ``ValueError``) when no credentials are
-        resolvable from any source (``AWS_*`` env vars, ``~/.aws/credentials``,
-        ``~/.aws/config``, EC2 IMDS). Lets ``botocore.exceptions.BotoCoreError``
-        subclasses (e.g., ``ProfileNotFound``) propagate when boto3 itself
-        rejects the environment.
+        resolvable from any (enabled) source. Lets ``botocore.exceptions.BotoCoreError``
+        subclasses (e.g., ``ProfileNotFound``) propagate when boto3 itself rejects
+        the environment.
         """
-        session = boto3.Session(region_name=self.default_region)
+        botocore_session = botocore.session.Session()
+        if not self.use_ec2_instance_metadata:
+            botocore_session.get_component("credential_provider").remove(IMDS_CREDENTIAL_PROVIDER_NAME)
+        session = boto3.Session(botocore_session=botocore_session, region_name=self.default_region)
         if session.get_credentials() is None:
             raise AwsConfigError(
                 "AWS credentials not configured. Set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, "
-                "configure ~/.aws/credentials, set AWS_PROFILE, or attach an EC2 instance role."
+                "configure ~/.aws/credentials, set AWS_PROFILE, or (when running on an EC2 instance) "
+                "set use_ec2_instance_metadata=true on the provider config to use its instance role."
             )
         return session
 
@@ -225,7 +248,9 @@ class AwsProviderConfig(PublicIpVpsProviderConfig):
         if self._cached_account_id is not None:
             return self._cached_account_id
         try:
-            identity = session.client("sts", region_name=self.default_region).get_caller_identity()
+            identity = session.client(
+                "sts", region_name=self.default_region, config=AWS_BOTO_CONFIG
+            ).get_caller_identity()
         except (ClientError, BotoCoreError) as e:
             logger.warning("Could not resolve AWS account id via sts:GetCallerIdentity: {}", e)
             return None

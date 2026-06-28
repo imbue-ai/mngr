@@ -16,6 +16,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Shared `AgentUpdatePolicy` (`AUTO` / `ASK` / `NEVER`) used by agent plugins to govern an agent CLI's self-updater. Defaults to `NEVER` for unattended agents and `ASK` for attended agents that implement an interactive update flow.
 - Added: Shared `verify_pinned_cli_version` installation helper for agent plugins to verify an installed CLI matches a pinned version. It matches the user's pinned string verbatim against the `--version` banner (no version scheme assumed, so pre-release / four-component pins work).
 - Added: Shared operator-command output helpers in `mngr.cli.output_helpers` (`emit_operator_result`, `OperatorResultPart.shown`, `shown_if`, `write_event_line`), used by the `mngr aws` / `mngr azure` / `mngr gcp` prepare/cleanup commands to render JSON / JSONL / human output in one place.
+- Added: `get_connection_error_fallback_state` provider hook (default: no override) consulted by `get_host_and_agent_details` when a non-authentication connection failure forces the offline fallback. Only the docker provider overrides it; the generic offline-state derivation and every other provider's behavior are unchanged.
 
 ### Changed
 
@@ -26,7 +27,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `mngr config set` / `extend` / `assign` now render configuration errors through the central CLI error handler.
 - Changed: `mngr config` is now exempt from the settings-narrowing guard, so a config that would otherwise narrow can still be loaded in order to *edit* it (`mngr config set` / `unset` previously failed with the narrowing error themselves — a catch-22).
 - Changed: Hardened agent process-tree teardown so a long-lived daemon launched under an agent can no longer outlive the agent and collide with a relaunch. New `reap_agent_process_tree(agent)` helper kills the agent's tmux-session pane descendants and any `MNGR_AGENT_ID`-tagged orphans that reparented to PID 1. `start_agents` reaps any stale process tree for an agent id before launching, but only when that agent isn't already running.
-- Changed: Bumped the offload version baked into the host Dockerfile from `0.9.7` to `0.9.9` to track the CI pin.
+- Changed: Bumped the offload version baked into the host Dockerfile from `0.9.7` to `0.9.10` to track the CI pin.
+- Changed: e2e test fixture now captures each test's docstring (verbatim tutorial block plus its crystallized scope), and rendered test-detail pages show it under a "Docstring" heading. All e2e tutorial tests migrated to the docstring-anchored format (tutorial block in a `Tutorial block:` section followed by a `Scope:` section).
 
 ### Fixed
 
@@ -37,10 +39,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: `mngr plugin list` mislabeling opt-in plugins (e.g. `claude_subagent_proxy`) as `enabled=true` when they were actually blocked. `config.disabled_plugins` now faithfully includes opt-in plugins that are disabled by default, so every consumer of that field sees the correct effective disabled set.
 - Fixed: `mngr transcript` failing with "Unknown agent type" for config-defined agent subtypes (a custom `[agent_types.X]` with `parent_type = "claude"`). The command now resolves the type through its parent chain.
 - Fixed: An expected (`MngrError`) error raised during agent provisioning (e.g. a settings-narrowing `ConfigParseError`) now surfaces as a clean one-line error instead of "Unexpected error" with a full traceback. `provision_agent` runs inside a concurrency group; the `create` flow now unwraps a single expected error from that group's `ConcurrencyExceptionGroup` before it reaches the CLI.
+- Fixed: Custom `parent_type` agent types losing their inherited parent settings (`use_env_config_dir`, `auto_dismiss_dialogs`, `cli_args`, etc.) after a multi-layer config load. The overlay merge now restores each merged model's `model_fields_set` (recursively, including nested sub-models and registry entries) to the union of the base's and the override's actually-set fields rather than treating every field as explicitly set, so `parent_type` inheritance through any number of config layers is correct again.
+- Fixed: Docker provider reporting a live but ssh-unreachable container as `CRASHED` (e.g. when the inner sshd had died with "Error reading SSH protocol banner"). The provider now consults the docker daemon in the offline-fallback path and reports `UNAUTHENTICATED` instead (host is up; we just can't get inside it), mirroring how the imbue_cloud provider reads container state out-of-band; if the daemon itself can't be reached the default offline derivation still applies.
+- Fixed: Docker provider discovery silently reporting "zero hosts" when its state container was present but stopped, dropping every host. It now raises `ProviderUnavailableError`, so the existing retain-on-error path keeps last-known hosts while the state container is unavailable, and an empty host list once again means "genuinely zero hosts".
 
 ### Removed
 
 - Removed: `TagLimitExceededError` (it existed only to flag the EC2 50-tag ceiling for the AWS provider's offline tag mirror, which is now replaced by the S3 state bucket).
+- Removed: `e2e.write_tutorial_block` helper, now that no test uses it (tutorial blocks live in each test's docstring instead).
 
 ## [v0.2.17] - 2026-06-18
 

@@ -4,6 +4,100 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-27
+
+Fixed AWS workspaces failing to start ("workspace unresponsive"). On the AWS
+provider path the container's `/run` lives on gVisor's gofer-backed filesystem,
+which rejects `os.link()` of a socket inode with `EOPNOTSUPP`. supervisord
+installs its control socket via a hard link, so on AWS that link failed forever
+("Unlinking stale socket"), and supervisord never started `system_interface` or
+any other service. The per-region `[providers.aws-<region>]` blocks minds writes
+now include `default_start_args = ["--tmpfs", "/run"]`, mounting `/run` as a
+tmpfs where the hard link succeeds. Scoped to the AWS blocks only; the
+ovh/vultr/imbue_cloud paths (which already provide a tmpfs `/run`) are unchanged.
+
+Changed: the discovery-pipeline health watchdog no longer gives up on a stalled discovery *producer*. Previously a producer stall ran one bounce + one restart and then, if freshness still hadn't returned, surfaced the terminal "Minds has disconnected from your workspaces" takeover screen — a dead end that even "Restart Minds" couldn't reliably clear, since a freshly-respawned supervisor could re-stall the same way. Now a stall keeps the app in the silent, background `reconnecting` state and keeps retrying forever: one bounce, then repeated supervisor restarts on a capped exponential backoff (15s → 30s → 60s → 120s → … capped at 5 min). The backoff is deliberate — a full restart re-provisions every managed host, so hammering a merely-slow producer would make things worse.
+
+Changed: the stall signal is now the age of the last discovery *event* (any update from the producer) rather than the last full *snapshot*. A producer that is alive and still emitting — just slow to complete a full re-poll because, say, one provider is down — is now correctly treated as healthy and left alone, rather than being needlessly bounced/restarted. (A dead supervisor manifests the same way, since its discovery producer stops emitting, so the freshness signal covers it too.)
+
+Changed: the full-screen "disconnected from your workspaces" takeover is now reserved for the genuinely-unusable case — the forwarding subprocess (which is also the HTTP traffic proxy) dying. A producer stall, where the currently-open workspace still works, no longer escalates to that screen.
+
+Fixed: when the takeover screen does appear, its "Show details" panel is now populated with the tail of the log instead of being an empty box, matching the app's other error screens.
+
+Fixed a slow cold-start / wake-from-sleep load where opening a perfectly healthy imbue-cloud workspace would sit on "Loading workspace…" for tens of seconds and then needlessly restart the workspace's system services.
+
+On a cold start the freshly-spawned `mngr forward` has not yet resolved the workspace's route, so probes fail (`UNRESOLVED` / 503) for the ~10s it takes discovery to warm up. That warm-up was being mistaken for an outage: the workspace was marked STUCK and the recovery flow auto-restarted it.
+
+Two fixes:
+
+- Suspect enrollment now ignores an `UNRESOLVED` backend failure outright. `UNRESOLVED` means the forward has no route for the agent at all -- a cold-start warm-up (which self-resolves) or a genuinely-gone agent (which a restart cannot revive) -- and a restart routes through the forward either way. A workspace that is present but unreachable does not land here: discovery retains its route, so the dial failure surfaces as `CONNECT_ERROR` / a 5xx, which still enrolls and still drives recovery.
+
+- The recovery page's auto-dispatched restart now no-ops if the workspace has already recovered to HEALTHY by the time it fires (the host-health probe is slow, so the background probe loop can flip the workspace healthy while it is in flight). A manual restart is unaffected and always proceeds.
+
+Also added focused diagnostic logging at the system-interface health / recovery lifecycle points (suspect enrollment with the failure reason, the HEALTHY → STUCK transition with its failure-run duration, the recovery → HEALTHY transition, and restart dispatch / auto-dispatch skip), and removed a stale recovery-gate FIXME now that the discovery-health watchdog backstops a persistently-stalled pipeline with its BLOCKED app-takeover.
+
+Fixed window-reopening bugs:
+
+Windows restored on app relaunch now reopen to the mind they were showing, instead of all landing on the main page. (Workspace windows were persisted with the agent subdomain stripped off, so they reopened against the minds backend root; they are now persisted and restored by agent identity.)
+
+A reopened "create workspace" window whose creation no longer exists (after an app restart, or a failed creation) now redirects to the landing page instead of getting stuck on a black "Unknown agent creation" screen.
+
+Quitting with "Shut down all" stops the docker state container that holds local minds' host records; the app now restarts it early on the next launch, before discovery runs. Without this, reopening right after "Shut down all" could find the state backend still down, discover zero local minds, and drop the restored windows onto the create-workspace form.
+
+Launching with Docker paused (or otherwise unable to start that state container) no longer crashes the app with "Failed to start minds". The launch-time restart is best-effort, but the failure was escaping wrapped in a ConcurrencyExceptionGroup that the surrounding handler could not catch; the docker cleanup helpers now raise their DockerCleanupError outside the concurrency-group scope, so the handler catches it and startup proceeds (discovery degrades gracefully rather than aborting). The same wrapping affected the quit-time stop and env teardown paths, which are fixed too.
+
+Window restore no longer drops a window just because its mind is missing from the first discovery snapshot. Providers enumerate at different speeds on cold start (a cloud mind can appear in ~1s while local docker minds take ~15-20s), so the first "complete" snapshot could be missing the local minds entirely. Restore now keeps a window if its mind is known from the persisted last-good topology (carried across restarts), dropping it only on positive evidence the mind was destroyed -- so a slow provider can no longer cost you a window.
+
+## 2026-06-26
+
+Added the `minds_snapshot_resume` test suite and reconciled it with the latest `main` (which had merged the error-reporting/Sentry work into the minds desktop client). This consolidates the snapshot-test work from #2226 and #2275; see those PRs for the development history.
+
+`apps/minds/test_snapshot_resume.py` exercises a sandbox booted from a minds-workspace snapshot:
+
+- asserts the snapshot captured a `docker stop`ped FCT workspace container in a clean `exited` state;
+
+- a `running_workspace` fixture resumes it (docker-start the container, restart the system-services agent so the bootstrap respawns its services) and asserts that `system_interface` serves HTTP, the system-services agent is alive, and the core services (system_interface, web, terminal) re-register in `runtime/applications.toml`;
+
+- `test_minds_recovery_restores_dead_system_interface` drives minds' real recovery flow end-to-end: it breaks the workspace (stops system-services), confirms minds' in-container recovery probe diagnoses `system_interface` as unhealthy, performs minds' surgical restart, and confirms recovery.
+
+The shared Electron e2e create-flow driver (`imbue/minds/desktop_client/e2e_workspace_runner.py`) -- used by both the `minds_electron` acceptance test and the snapshot build script -- now streams the Electron renderer's console output, JS errors, and failed requests into the run log, so a renderer-side fault during workspace creation is diagnosable from CI output instead of being hidden behind Electron's main-process-only stderr.
+
+The create flow was re-verified end-to-end against the merged frontend (Electron launch, advanced-config create form, FCT Docker workspace build + start, `system_interface` render); no selector or flow changes were required, and the `test_ratchets.py` snapshots were reconciled with the merge.
+
+Release minds v0.3.4: bump `apps/minds/package.json` to `0.3.4` and point the shipped binary's `FALLBACK_BRANCH` at the `minds-v0.3.4` forever-claude-template tag. This rolls up all mngr/minds changes that landed on `main` since `minds-v0.3.3`.
+
+Also overhauled the release runbook (`apps/minds/docs/release.md`):
+
+- Reframed the release as two **branches**, not "two PRs": neither `main` is branch-protected, so a PR is never a merge gate. A PR's only role is as a CI surface, because `ci.yml` runs on PRs and on push to `main` but **not on a bare branch push**. The FCT `vendor/mngr` refresh is opened as a PR purely to run its `test` job (it is generated and reproduction-verified, not reviewed).
+
+- Named the actual critical path: the `minds-launch-to-msg` end-to-end run is the only verification `main` never does and is the wall-clock long pole, so fire it as early as the FCT branch exists; traditional CI on a version-bump-only mngr branch is redundant with a green `main` and should not be serialized against.
+
+- Replaced the unreliable `diff -r` vendor-match check with a content-exact `git ls-tree` blob-hash comparison of the FCT vendor tree against the tagged mngr SHA's tree. The only expected delta is the files FCT's `**/.minds/` gitignore strips (Vault policies + deploy scripts, not part of the installed mngr package).
+
+Bump the bundled Latchkey version to 2.19.1.
+
+When a mind needs a Google API and its credentials are not valid, Minds now tries the Minds-provided Google OAuth consent screen first, and only falls back to the old "create your own Google project" self-setup flow if that fails. Most users no longer see the self-setup step. The flow applies to an explicit list of OAuth Google services (Gmail, Calendar, Drive, Docs, Sheets, People, Analytics); `google-directions` (which uses an API key, not OAuth) and all non-Google services are unchanged.
+
+This logic now lives entirely in the shared Latchkey wrapper's browser sign-in, so granting a permission runs the same sign-in path for every service. The sign-in is attempted optimistically and only registers the Minds OAuth client when the service has no client yet, which avoids an expensive per-service credential probe. A user's own Google OAuth client is never cleared -- only a Minds client that we just registered and that then failed to sign in is discarded before the self-setup fallback runs.
+
+CI: fixed a flaky `launch-to-msg` timeout in the chat-reply checks (the failure that blocked the minds-v0.3.4 release run). The chat only auto-scrolls to a new message when the transcript is already pinned to the bottom; after the e2e navigates away and back (cross-workspace follow-up) or reloads, the view stays scrolled up, and the virtualized transcript leaves the just-sent prompt and the agent's reply in unmounted rows absent from `document.body.innerText`. The reply-count waits then timed out (8 min) even though the agent had replied.
+
+All chat-transcript reads — the first-message reply, the cross-workspace follow-ups, and the post-reload history check — now scroll the transcript to its tail before reading, via a shared `wait_for_function` helper that scrolls on every poll. Previously only the Slack canned-body check did this.
+
+CI: hardened the `launch-to-msg` end-to-end test against several behaviors introduced on `main`:
+
+- Treat the creating page auto-navigating to the workspace as creation success. On `DONE`, `creating.js` redirects the page to the workspace origin, so the `/api/create-agent/<id>/status` poll then hit the workspace (HTML, not JSON) and read an empty status -- the test never observed `DONE` and timed out after 900s. It now recognizes the workspace URL as done (and skips its own redirect when already there).
+
+- Tear the app down with SIGTERM (then a bounded SIGKILL fallback) instead of a graceful close, so the new "Shut down running minds?" quit prompt -- a native Electron dialog a headless test cannot click -- does not block teardown until the test timeout. SIGTERM is routed through the same shutdown chain but flagged headless, matching `just minds-stop`.
+
+- Scroll the chat transcript to the live tail before checking for the agent's reply (the chat virtualizes off-screen rows, so a reply rendered below the fold was absent from the DOM the test read).
+
+- Made the self-hosted mac-runner reset (`mac-runner-reset.sh`) best-effort *and* fail-loud on a dirty runner: dropped `set -e` so a single failing cleanup step (e.g. a `df`/`find` pipe) can no longer abort the script and skip the remaining Lima-VM / disk cleanup; then, after every step runs, the script verifies the end state (no surviving `minds-e2e` Lima VM, no `~/.minds`, app removed) and exits non-zero if the runner is not actually clean. The post-test cleanup step no longer wraps it in `|| true`, so a leaked VM that would otherwise silently rot this non-ephemeral runner now fails the job. The optional app-install block still fails loud so a run never proceeds against a stale app.
+
+- Dismiss the new post-login "Help improve Minds" error-reporting consent screen (`Consent.jinja`) before creating workspaces, so the home-page "both tiles render" assertion sees the home page rather than the consent screen.
+
+- Fixed the `macos_launch` smoke test's worker-exit hang (and the resulting red job despite a passing assertion): the app spawns detached helpers (the minds python backend, a `mngr latchkey forward` supervisor in its own process group, the crashpad handler) that outlive the main process and keep the Playwright worker's inherited stdio sockets open, so the worker was force-killed after 300s. Teardown now reaps those processes by command pattern and unrefs stdout/stderr so the worker exits cleanly.
+
 ## 2026-06-25
 
 Error reporting is now controlled by the user instead of environment variables.

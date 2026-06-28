@@ -197,9 +197,9 @@
       return r.text().then(function (text) {
         var detail = text;
         try {
-          var parsed = JSON.parse(text);
-          if (parsed && typeof parsed.error === 'string') detail = parsed.error;
-          else if (parsed && typeof parsed.detail === 'string') detail = parsed.detail;
+          // Route both the structural 422 contract and the handler's semantic
+          // {error}/{detail} shapes through the shared normalizer.
+          detail = window.normalizeApiError(JSON.parse(text)).message;
         } catch (_) { /* leave detail as raw text */ }
         var err = new Error(detail || ('HTTP ' + r.status));
         err.httpStatus = r.status;
@@ -291,9 +291,7 @@
         return r.text().then(function (text) {
           var detail = text;
           try {
-            var parsed = JSON.parse(text);
-            if (parsed && typeof parsed.error === 'string') detail = parsed.error;
-            else if (parsed && typeof parsed.detail === 'string') detail = parsed.detail;
+            detail = window.normalizeApiError(JSON.parse(text)).message;
           } catch (_) { /* leave as raw */ }
           throw new Error(detail || ('HTTP ' + r.status));
         });

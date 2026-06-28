@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-26
+
+`mngr imbue_cloud admin server setup` now retries the OVH OS reinstall when OVH transiently fails its OS-compatibility lookup for a valid template (the `"retrieving compatibility details"` error), instead of aborting the whole setup. The kickoff POST is retried for up to 5 minutes (15s interval); the generated SSH host key is created once and reused across attempts so the pinned host key stays stable. Any non-transient OVH error still propagates immediately.
+
 ## 2026-06-24
 
 `mngr imbue_cloud admin pool create` now validates `--region` against the known lease regions (`US-EAST-VA`, `US-WEST-OR`) and fails fast with a clear error if given anything else -- most importantly a raw OVH datacenter code (e.g. `vin`, which `admin server list` prints). Previously the region was accepted as a free-form string and stamped verbatim onto the `pool_hosts` row; a datacenter code there made the host permanently unleasable, because the connector's lease-time region filter is an exact, never-relaxed string match against the lease label the create form requests.

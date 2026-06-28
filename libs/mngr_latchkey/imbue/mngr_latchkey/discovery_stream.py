@@ -26,6 +26,7 @@ import json
 import threading
 from collections.abc import Callable
 from pathlib import Path
+from subprocess import TimeoutExpired
 from typing import Any
 from typing import Final
 
@@ -33,7 +34,9 @@ from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
@@ -60,6 +63,24 @@ class DiscoveryStreamError(LatchkeyError, RuntimeError):
 # path via the ``mngr_binary`` field for environments where ``mngr`` is
 # not on ``PATH``.
 MNGR_BINARY: Final[str] = "mngr"
+
+# Failure modes that bouncing the observe subprocess can surface from the
+# ``ConcurrencyGroup`` -- both tearing the old child down (``terminate``)
+# and spawning the replacement (``run_process_in_background``). Beyond a
+# plain ``OSError`` / ``RuntimeError``, a force-kill that overruns its
+# grace period raises ``TimeoutExpired``, and the group's strand/shutdown
+# checks raise ``ConcurrencyGroupError`` or wrap failures in a
+# ``ConcurrencyExceptionGroup``. A bounce runs on the long-lived SIGHUP
+# watcher thread, so it must treat any of these as "the bounce did not
+# complete" (log and carry on) rather than let an unexpected type escape
+# and kill the watcher, which would silently disable every later refresh.
+_OBSERVE_BOUNCE_ERRORS: Final = (
+    OSError,
+    RuntimeError,
+    TimeoutExpired,
+    ConcurrencyGroupError,
+    ConcurrencyExceptionGroup,
+)
 
 # Callback signatures fired by the consumer for every observe-stream
 # transition that matters to the plugin. Tuples instead of bespoke
@@ -127,10 +148,18 @@ class DiscoveryStreamConsumer(MutableModel):
         """Spawn the ``mngr observe`` subprocess and begin dispatching events."""
         if self._process is not None:
             raise DiscoveryStreamError("DiscoveryStreamConsumer.start already called")
+        # ``is_checked_by_group=False``: this is a long-running stream that we
+        # stop explicitly via ``.terminate()`` (on bounce and on shutdown),
+        # which delivers SIGTERM and yields a non-zero exit code. Left checked,
+        # that deliberate teardown would surface as a ``ProcessError`` ->
+        # ``ConcurrencyExceptionGroup`` the next time the group inspects its
+        # strands (e.g. the respawn below, or supervisor exit), turning every
+        # intentional bounce into a spurious failure.
         self._process = self.concurrency_group.run_process_in_background(
             command=self._observe_command(),
             on_output=self._on_observe_output,
             cwd=Path.home(),
+            is_checked_by_group=False,
         )
 
     def bounce_observe(self) -> None:
@@ -150,15 +179,19 @@ class DiscoveryStreamConsumer(MutableModel):
         logger.info("Bouncing mngr observe subprocess")
         try:
             self._process.terminate()
-        except (OSError, RuntimeError) as e:
+        except _OBSERVE_BOUNCE_ERRORS as e:
             logger.warning("Failed to terminate observe process during bounce: {}", e)
+        # ``is_checked_by_group=False`` for the same reason as ``start``: the
+        # replacement stream is also stopped explicitly, so its eventual
+        # SIGTERM exit must not be checked.
         try:
             self._process = self.concurrency_group.run_process_in_background(
                 command=self._observe_command(),
                 on_output=self._on_observe_output,
                 cwd=Path.home(),
+                is_checked_by_group=False,
             )
-        except (OSError, RuntimeError) as e:
+        except _OBSERVE_BOUNCE_ERRORS as e:
             logger.warning("Failed to respawn observe process during bounce: {}", e)
             self._process = None
 
@@ -168,7 +201,11 @@ class DiscoveryStreamConsumer(MutableModel):
             return
         try:
             self._process.terminate()
-        except (OSError, RuntimeError) as e:
+        except _OBSERVE_BOUNCE_ERRORS as e:
+            # Same terminate() failure modes as a bounce (notably TimeoutExpired
+            # on a force-kill overrun): swallow them so the rest of the forward
+            # shutdown sequence (tunnel cleanup, gateway stop, forward-info
+            # deletion) still runs instead of being aborted mid-teardown.
             logger.trace("Error terminating observe subprocess: {}", e)
         self._process = None
 

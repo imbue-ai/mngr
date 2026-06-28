@@ -6,6 +6,7 @@ import pytest
 
 from imbue.minds.desktop_client.workspace_ssh import SshGrantError
 from imbue.minds.desktop_client.workspace_ssh import build_authorized_keys_line
+from imbue.minds.desktop_client.workspace_ssh import compose_pruned_authorized_keys
 from imbue.minds.desktop_client.workspace_ssh import prune_expired_grant_lines
 
 _NOW = datetime(2026, 6, 25, 12, 0, 0, tzinfo=timezone.utc)
@@ -103,6 +104,77 @@ def test_prune_expired_grant_lines_drops_grant_with_corrupt_expiry() -> None:
 
     assert "requester=old" not in pruned
     assert "requester=new" in pruned
+
+
+def test_compose_pruned_authorized_keys_appends_new_grant_to_empty_file() -> None:
+    new_line = build_authorized_keys_line(
+        public_key=_KEY, requester_workspace_id="caller", expires_at=_NOW + timedelta(hours=24)
+    )
+
+    composed = compose_pruned_authorized_keys("", new_line, requester_workspace_id="caller", now=_NOW)
+
+    assert composed == f"{new_line}\n"
+
+
+def test_compose_pruned_authorized_keys_prunes_expired_and_keeps_user_and_live_grants() -> None:
+    user_key = "ssh-rsa AAAAUSERKEY user@laptop"
+    expired = build_authorized_keys_line(
+        public_key=_KEY, requester_workspace_id="stale", expires_at=_NOW - timedelta(hours=1)
+    )
+    live = build_authorized_keys_line(
+        public_key=_KEY, requester_workspace_id="still-good", expires_at=_NOW + timedelta(hours=1)
+    )
+    new_line = build_authorized_keys_line(
+        public_key=_KEY, requester_workspace_id="caller", expires_at=_NOW + timedelta(hours=24)
+    )
+    existing = f"{user_key}\n{expired}\n{live}\n"
+
+    composed = compose_pruned_authorized_keys(existing, new_line, requester_workspace_id="caller", now=_NOW)
+
+    # The user's hand-managed key and the still-valid grant (a different
+    # requester) survive; the expired grant is dropped; the new grant is appended
+    # last; the body ends in a newline.
+    assert user_key in composed
+    assert "requester=still-good" in composed
+    assert "requester=stale" not in composed
+    assert composed.endswith(f"{new_line}\n")
+    assert "requester=caller" in composed
+
+
+def test_compose_pruned_authorized_keys_does_not_duplicate_newlines() -> None:
+    user_key = "ssh-rsa AAAAUSERKEY user@laptop"
+    new_line = build_authorized_keys_line(
+        public_key=_KEY, requester_workspace_id="caller", expires_at=_NOW + timedelta(hours=24)
+    )
+
+    composed = compose_pruned_authorized_keys(f"{user_key}\n", new_line, requester_workspace_id="caller", now=_NOW)
+
+    assert composed == f"{user_key}\n{new_line}\n"
+    assert "\n\n" not in composed
+
+
+def test_compose_pruned_authorized_keys_replaces_prior_grant_for_same_requester() -> None:
+    user_key = "ssh-rsa AAAAUSERKEY user@laptop"
+    prior_same_requester = build_authorized_keys_line(
+        public_key=_KEY, requester_workspace_id="caller", expires_at=_NOW + timedelta(hours=1)
+    )
+    other_requester = build_authorized_keys_line(
+        public_key=_KEY, requester_workspace_id="someone-else", expires_at=_NOW + timedelta(hours=1)
+    )
+    new_line = build_authorized_keys_line(
+        public_key=_KEY, requester_workspace_id="caller", expires_at=_NOW + timedelta(hours=24)
+    )
+    existing = f"{user_key}\n{prior_same_requester}\n{other_requester}\n"
+
+    composed = compose_pruned_authorized_keys(existing, new_line, requester_workspace_id="caller", now=_NOW)
+
+    # A re-request refreshes rather than stacks: the caller's prior still-valid
+    # grant is replaced by the new one (exactly one caller grant remains), while
+    # the user key and the unrelated requester's grant are untouched.
+    assert composed.count("requester=caller") == 1
+    assert composed.endswith(f"{new_line}\n")
+    assert user_key in composed
+    assert "requester=someone-else" in composed
 
 
 def test_prune_expired_grant_lines_drops_grant_with_naive_expiry() -> None:

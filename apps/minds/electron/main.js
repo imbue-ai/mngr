@@ -1325,6 +1325,17 @@ function readLastLogLines(lineCount) {
 // transparently on first read. The titlebar accent is NOT persisted: a
 // restored window re-derives it from its own saved ``url`` (the content URL
 // it reopens to), so there is nothing per-window to remember.
+//
+// A workspace window's live content URL is on the agent subdomain
+// (``agent-<id>.localhost:<mngr_forward_port>/...``), whose host AND port both
+// change between runs, so it can't be replayed verbatim. ``toPersistedContentUrl``
+// canonicalises such windows to the port-independent ``/goto/<agent>/``
+// auth-bridge path; ``toRestoredContentUrl`` rebuilds the live workspace URL
+// from it on launch. The mind itself persists its panel layout server-side and
+// restores it on a fresh load of its root, so reopening the root is enough to
+// land the user back where they were. Non-workspace screens (Home, Create,
+// ``/workspace/<id>/settings``, ...) live on the minds backend and round-trip
+// as plain backend-relative paths.
 
 function loadSessionState() {
   try {
@@ -1361,6 +1372,38 @@ function toRelativeBackendUrl(url) {
   }
 }
 
+// Canonicalise a window's live content URL into the form persisted in
+// ``window-state.json``. A workspace window's URL is on the agent subdomain
+// (``agent-<id>.localhost:<mngr_forward_port>/...``); stripping that to a bare
+// relative path loses the agent identity (the subdomain host) and would
+// reopen against the minds backend (the landing page) on restore. Persist the
+// port-independent ``/goto/<agent>/`` auth-bridge path instead -- it carries
+// the agent id, is recognised by ``parseWorkspaceId`` (so dead-workspace
+// filtering works), and ``toRestoredContentUrl`` rebuilds the live origin from
+// it. Everything else round-trips as a minds-backend-relative path.
+function toPersistedContentUrl(url) {
+  const agentId = parseWorkspaceId(url);
+  if (agentId) return `/goto/${encodeURIComponent(agentId)}/`;
+  return toRelativeBackendUrl(url);
+}
+
+// Inverse of ``toPersistedContentUrl``: turn a persisted entry's ``url`` back
+// into a loadable absolute URL. Workspace entries (``/goto/<agent>/``) are
+// rebuilt through ``workspaceUrlForAgent`` so the bridge targets the CURRENT
+// run's mngr_forward origin; other entries resolve against the minds backend.
+// Persisted urls are backend-relative, so resolve to absolute BEFORE parsing
+// the workspace id -- ``parseWorkspaceId`` runs ``new URL(url)``, which throws
+// (yielding null) on a bare relative path.
+function toRestoredContentUrl(entry) {
+  const absolute = toAbsoluteUrl(entry.url);
+  const agentId = parseWorkspaceId(absolute);
+  if (agentId) {
+    const workspaceUrl = workspaceUrlForAgent(agentId);
+    if (workspaceUrl) return workspaceUrl;
+  }
+  return absolute;
+}
+
 function saveSessionState() {
   try {
     const windows = [];
@@ -1371,12 +1414,12 @@ function saveSessionState() {
     for (const b of mruWindows) {
       if (b.window.isDestroyed()) continue;
       const url = b.preErrorUrl || b.currentContentUrl;
-      const relative = toRelativeBackendUrl(url);
-      if (!relative) continue;
+      const persisted = toPersistedContentUrl(url);
+      if (!persisted) continue;
       const bounds = b.window.getBounds();
       const display = screen.getDisplayMatching(bounds);
       windows.push({
-        url: relative,
+        url: persisted,
         x: bounds.x,
         y: bounds.y,
         width: bounds.width,
@@ -1414,7 +1457,10 @@ function filterRestorableUrls(state, knownAgentIdsSet) {
   if (!knownAgentIdsSet) return state.slice();
   const results = [];
   for (const entry of state) {
-    const agentId = parseWorkspaceId(entry.url);
+    // Persisted urls are backend-relative; resolve to absolute so
+    // ``parseWorkspaceId`` (``new URL``) can read the workspace id rather than
+    // throwing on the bare path.
+    const agentId = parseWorkspaceId(toAbsoluteUrl(entry.url));
     if (agentId && !knownAgentIdsSet.has(agentId)) {
       continue; // workspace no longer exists, skip silently
     }
@@ -1592,16 +1638,18 @@ function handleChromeSSEEvent(evt) {
     }
   } else if (evt.type === 'discovery_health') {
     // App-global discovery-pipeline health. Only the terminal `blocked` state is
-    // ever sent (the reconnecting tier heals silently in the background). The
-    // watchdog has exhausted its self-healing -- or the consumer died -- so agent
-    // forwarding is down / the app is unusable. Take over every window with the
-    // error screen; its Retry button runs the existing restart path (shut down +
-    // restart the backend, respawning the discovery producer + consumer).
+    // ever sent (the reconnecting tier heals silently in the background, retrying
+    // forever). `blocked` means the consumer subprocess died -- it is also the
+    // HTTP traffic proxy, so agent forwarding is down / the app is unusable. Take
+    // over every window with the error screen; its Restart button runs the
+    // existing retry path (shut down + restart the backend, respawning the
+    // consumer). Surface the tail of the log as details so "Show details" isn't
+    // an empty box (matches the other takeover sites).
     if (evt.state === 'blocked' && !discoveryBlockedShown) {
       discoveryBlockedShown = true;
       showErrorInAllWindows(
         "Minds has disconnected from your workspaces and can't automatically reconnect. Restart the app to recover. Your data has not been lost.",
-        null,
+        readLastLogLines(50),
         'Restart Minds',
         // The Python backend is still up in this takeover (only the discovery pipeline
         // stalled), so the shell's report button can use the full /help modal.
@@ -2135,19 +2183,26 @@ async function promptMindShutdown() {
   return { proceed: true, stop: true, running };
 }
 
-function fetchInitialChromeState(timeoutMs = 10000) {
-  // Drives one round-trip to /_chrome/events (SSE) to learn both auth status
-  // and the current workspace list. Returns:
-  //   { authenticated: true, workspaces: [...] }  on authenticated success
-  //   { authenticated: false }                     when the backend says auth_required
-  //   null                                          on timeout / network error
+function fetchInitialChromeState(timeoutMs = 25000) {
+  // Drives one round-trip to /_chrome/events (SSE) to learn auth status and the
+  // workspace list, resolving on the first ``workspaces`` snapshot. Returns:
+  //   { authenticated: true, workspaces: [...], hasAccounts, restorableWorkspaceIds }
+  //                                                 on the first workspaces snapshot
+  //   { authenticated: false }                      when the backend says auth_required
+  //   null                                          on timeout (no snapshot) / network error
   //
-  // The timeout must comfortably exceed the connect-time snapshot's slowest
-  // blocking step: the backend computes ``has_accounts`` (a cold ``mngr
-  // imbue_cloud auth list`` subprocess, ~5s on first call) before emitting the
-  // first ``workspaces`` event. A timeout shorter than that returned ``null``,
-  // which the startup path treats as unauthenticated and routes to /welcome --
-  // bouncing an already-signed-in user to the onboarding page.
+  // We resolve on the first snapshot even though discovery may still be mid-sweep
+  // (providers enumerate at different speeds): window restore filters against
+  // ``restorableWorkspaceIds`` -- the live workspaces UNION the persisted last-good
+  // topology -- so a workspace that hasn't been re-discovered yet is still kept,
+  // and a window is never dropped just because the snapshot is partial.
+  //
+  // The timeout only fires when NO snapshot arrives at all. It must comfortably
+  // exceed the connect-time snapshot's slowest blocking step: the backend computes
+  // ``has_accounts`` (a cold ``mngr imbue_cloud auth list`` subprocess, ~5s on
+  // first call) before emitting the first ``workspaces`` event. A timeout shorter
+  // than that returns ``null``, which the startup path treats as unauthenticated
+  // and routes to /welcome -- bouncing an already-signed-in user.
   return new Promise((resolve) => {
     if (!backendBaseUrl) {
       resolve(null);
@@ -2196,7 +2251,14 @@ function fetchInitialChromeState(timeoutMs = 10000) {
             const parsed = JSON.parse(payload);
             if (parsed.type === 'workspaces' && Array.isArray(parsed.workspaces)) {
               clearTimeout(timer);
-              finish({ authenticated: true, workspaces: parsed.workspaces, hasAccounts: !!parsed.has_accounts });
+              finish({
+                authenticated: true,
+                workspaces: parsed.workspaces,
+                hasAccounts: !!parsed.has_accounts,
+                restorableWorkspaceIds: Array.isArray(parsed.restorable_workspace_ids)
+                  ? parsed.restorable_workspace_ids.map(String)
+                  : [],
+              });
               return;
             }
             if (parsed.type === 'auth_required') {
@@ -2587,15 +2649,26 @@ async function startBackendWithRetry() {
         }));
       }
 
-      const knownAgentIdsSet = authenticated
-        ? new Set(workspaceList.map((w) => w.id))
+      // Filter restored windows against the backend's *restorable* workspace ids
+      // -- live workspaces UNION the persisted last-good topology -- rather than
+      // the live list alone. The last-good entries keep a window whose workspace
+      // exists but a slow provider hasn't re-listed yet this session (e.g. local
+      // docker lagging the cloud provider on cold start); absence from an
+      // incomplete live snapshot is not evidence a workspace was destroyed (the
+      // live discovery flow navigates genuinely-destroyed workspaces away later).
+      // When nothing is known yet (empty live AND empty last-good -- first launch,
+      // or a wiped topology), pass ``null`` to keep every saved window rather than
+      // drop them all against an empty set.
+      const restorableWorkspaceIds = (authenticated && chromeState.restorableWorkspaceIds) || [];
+      const knownAgentIdsSet = restorableWorkspaceIds.length > 0
+        ? new Set(restorableWorkspaceIds.map(String))
         : null;
       const restorable = authenticated
         ? filterRestorableUrls(savedState.windows, knownAgentIdsSet)
         : [];
       // (A workspace that no longer exists needs no special accent handling
-      // here: ``filterRestorableUrls`` already drops windows whose saved URL
-      // points at a destroyed workspace, and the accent is re-derived from
+      // here: ``filterRestorableUrls`` drops windows whose saved URL points at a
+      // workspace absent from the known set, and the accent is re-derived from
       // whatever URL each restored window actually reopens to.)
 
       initialBundle.isLoadingState = false;
@@ -2637,13 +2710,13 @@ async function startBackendWithRetry() {
         // so no separately-persisted accent is needed.
         const [first, ...rest] = restorable;
         restoreWindowBounds(initialBundle, first);
-        loadUrlIntoBundleContentView(initialBundle, toAbsoluteUrl(first.url));
+        loadUrlIntoBundleContentView(initialBundle, toRestoredContentUrl(first));
         // Open the lesser-MRU windows without stealing focus, so the
         // MRU-zero window (already focused as initialBundle) stays focused
         // after restore completes.
         const restoredBundles = [];
         for (const entry of rest) {
-          const bundle = openNewWindow(toAbsoluteUrl(entry.url), { showInactive: true });
+          const bundle = openNewWindow(toRestoredContentUrl(entry), { showInactive: true });
           restoreWindowBounds(bundle, entry);
           restoredBundles.push(bundle);
         }

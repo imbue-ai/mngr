@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-26
+
+`find_bash_scripts_without_strict_mode` (the helper behind the repo-wide bash strict-mode ratchet) now skips `*.sh` files under `.minds/template/`. Those are declarative secret-schema templates -- commented `export KEY=` files sourced by the deploy tooling (`scripts/push_vault_from_file.py`, `minds env deploy`) and copied per-tier, never executed standalone -- so `set -euo pipefail` is meaningless for them and they are not the class of runnable script the ratchet guards. This also removes a local-vs-CI count skew, since those templates were already absent from the offload build context.
+
 ## 2026-06-24
 
 Updated the `PREVENT_HARDCODED_CLAUDE_DIR` ratchet's guidance text to reference

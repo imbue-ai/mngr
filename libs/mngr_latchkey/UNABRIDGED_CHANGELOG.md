@@ -4,6 +4,32 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-27
+
+Fixed: a SIGHUP provider refresh (sent whenever a workspace toggles a discovery provider, e.g. disabling OVH) could permanently wedge the `mngr latchkey forward` supervisor's discovery pipeline. The supervisor's `mngr observe` child was tracked as a *checked* concurrency-group strand, so terminating it during a bounce (SIGTERM, a non-zero exit) was re-checked as a failure and raised a `ConcurrencyExceptionGroup`. That group escaped the bounce watcher's narrow `(OSError, RuntimeError)` guard and killed the watcher thread, turning every later SIGHUP bounce into a silent no-op for the rest of that supervisor's life.
+
+The observe stream is now spawned with `is_checked_by_group=False` (it is stopped deliberately on every bounce and on shutdown, so its SIGTERM exit is expected, not a failure), and the SIGHUP bounce watcher now survives any single bounce's error -- it logs and keeps watching instead of dying -- so a later provider toggle can still take effect. `bounce_observe`'s own teardown/respawn guards were likewise widened to cover the concurrency-group failure types they can encounter, and the shutdown `stop()` teardown now tolerates the same `terminate()` failure modes (notably a `TimeoutExpired` force-kill overrun) so a slow-to-die observe child can no longer abort the rest of the forward's clean shutdown.
+
+Stopped duplicate background discovery producers from accumulating, which made the Minds app keep showing errors for providers you had disabled and contributed to a running mind intermittently disappearing (redirecting to the "create a mind" page with "0 minds").
+
+`LatchkeyForwardSupervisor.ensure_running()` previously only reconciled the `mngr latchkey forward` recorded in `latchkey_forward.json`. When that record was missing or stale, it spawned a fresh supervisor without noticing that *other* `mngr latchkey forward` processes (left by a prior or concurrent app instance) were still running against the same latchkey directory. Each of those orphans runs its own `mngr observe --discovery-only` child, so several producers ended up writing the one shared discovery-events file with divergent, frozen-at-startup provider configs: orphans kept polling (and erroring on) providers you had since disabled, and their conflicting snapshots made the consumer flap agents in and out.
+
+`ensure_running()` now enforces one forward per latchkey directory: it reaps every `mngr latchkey forward` bound to the same `--latchkey-directory` (along with that forward's child subprocesses -- its `mngr observe` producer, the `latchkey gateway`, and reverse `ssh` tunnels) except the one that matches the live on-disk record. An unrecorded orphan is always replaced rather than adopted, since it may be running stale code or config. The scan is scoped by resolved `--latchkey-directory` equality, so a supervisor for one profile never signals a sibling profile's forward (e.g. `.minds` vs `.minds-staging`).
+
+Scope: this removes the duplicate/stale-producer source of the problem -- it fully addresses disabled providers continuing to error, and removes the cross-producer snapshot divergence. It does not, on its own, fully fix a mind disappearing: a single discovery producer can still momentarily report a provider as healthy while omitting one of its agents (e.g. the Docker provider intermittently returning no containers without raising), and the consumer currently drops an agent the first time that happens. Hardening that consumer-side retention (and the Docker provider's empty/error behavior) is separate follow-up work.
+
+## 2026-06-26
+
+Bump the pinned latchkey CLI version installed on remote VPS environments (the secondary gateway) to 2.19.1.
+
+`Latchkey.auth_browser` now owns the full Minds Google OAuth flow, so all of the auth logic lives in one place. It attempts the browser sign-in optimistically and, only when latchkey reports that the service has no registered client yet, prefers the Minds-provided OAuth client: for a Minds-OAuth Google service it registers that client (`auth prepare`) and retries against the Minds consent screen before falling back to the user self-setup flow (`auth browser-prepare`). This removes the previous up-front `auth list` probe, which was expensive because it queried every service.
+
+The registered Minds client is cleared (`auth clear`) only when we just registered it and its sign-in then failed; a client that was already registered (for example a user's own) is never cleared.
+
+Add the supporting `Latchkey` primitives used by that flow: `auth_prepare` (register an OAuth client id/secret for a service), `auth_browser_login` (a bare `auth browser` sign-in with no self-setup fallback), and `auth_clear` (`latchkey auth clear -y <service>`). Add an explicit set of Minds-OAuth Google services (`MINDS_GOOGLE_OAUTH_SERVICES`) used to gate the flow -- `google-directions` is deliberately excluded because it authenticates with an API key, not OAuth, so it must not go through the Minds OAuth client -- plus the Minds Google OAuth client id/secret as hardcoded constants (an installed/desktop-app OAuth client, where the "secret" is not truly confidential since it ships inside the distributed client).
+
+Raise the minimum supported latchkey CLI version (`LATCHKEY_MIN_VERSION`) to 2.19.1, kept in lockstep with the version installed/bundled. The package now refuses to operate against gateways older than 2.19.1 (2.18.0 introduced the `auth prepare` subcommand the flow depends on).
+
 ## 2026-06-25
 
 Fixed repeated macOS system keychain access dialogs (mentioning Latchkey) that appeared during normal Minds use. The detached `latchkey ensure-browser` subprocess was spawned without `LATCHKEY_ENCRYPTION_KEY`, so Latchkey's startup key-resolution fell through to the system keychain on every spawn. The per-directory encryption key is now injected into that subprocess's environment, matching the other Latchkey invocations.

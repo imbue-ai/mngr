@@ -19,6 +19,7 @@ from pydantic import PrivateAttr
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.errors import MngrError
 from imbue.mngr.utils.polling import wait_for
+from imbue.mngr_aws.boto_config import AWS_BOTO_CONFIG
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.config import SecurityGroupSpec
@@ -119,7 +120,7 @@ class AwsVpsClient(VpsClientInterface):
     def _ec2(self) -> Any:
         """Return the EC2 client, building and caching it from the session on first use."""
         if self._cached_ec2_client is None:
-            self._cached_ec2_client = self.session.client("ec2", region_name=self.region)
+            self._cached_ec2_client = self.session.client("ec2", region_name=self.region, config=AWS_BOTO_CONFIG)
         return self._cached_ec2_client
 
     @contextmanager

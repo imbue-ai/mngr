@@ -296,7 +296,7 @@ _WORKSPACE_DEFAULTS_OPT_IN_ENV_VAR: Final[str] = "MINDS_USE_LOCAL_WORKSPACE_DEFA
 def _operator_workspace_default(env_var: str, fallback: str) -> str:
     """Return ``env_var`` only when the operator explicitly opted in; else ``fallback``.
 
-    The MINDS_WORKSPACE_GIT_URL / _NAME / _BRANCH env vars wire the create-form
+    The MINDS_WORKSPACE_GIT_URL / _BRANCH env vars wire the create-form
     defaults to the operator's local FCT worktree. They are honored only when
     ``MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1`` is set in the same environment
     (``just minds-start`` and the e2e runner set it). An end-user ``minds run``
@@ -351,31 +351,24 @@ def make_unique_host_name(base: str, existing_host_names: Collection[str], *, al
 def resolve_create_host_name(submitted_host_name: str, existing_host_names: Collection[str] = ()) -> HostName:
     """Resolve the host name for a new workspace.
 
-    The create form no longer asks for a name; it is chosen automatically.
-    Resolution order:
+    The name defaults to an automatic ``mind-N`` unless the operator types one
+    into the create form's advanced "Name" field. Resolution order:
 
     1. the user-submitted name, if any, used verbatim (validated as a
        ``HostName``);
-    2. the operator override ``MINDS_WORKSPACE_NAME``, honored only under the
-       explicit opt-in (see ``_operator_workspace_default``) -- this is how the
-       e2e runner / ``just minds-start <name>`` pin a known name, also used
-       verbatim;
-    3. the next free ``mind-N`` name (smallest positive ``N`` whose ``mind-N``
+    2. the next free ``mind-N`` name (smallest positive ``N`` whose ``mind-N``
        is not already in ``existing_host_names``).
 
-    The two named paths (1, 2) are used verbatim and never uniquified -- an
-    explicit collision is the API's 409 to reject, not ours to silently rename
-    (a duplicate name fails the ``mngr create`` pre-flight). Only the generated
+    The submitted name is used verbatim and never uniquified -- an explicit
+    collision is the API's 409 to reject, not ours to silently rename (a
+    duplicate name fails the ``mngr create`` pre-flight). Only the generated
     ``mind-N`` fallback consults ``existing_host_names`` to pick a free name.
 
-    Raises ``InvalidName`` if a non-empty submitted or operator name is not
-    a valid host name; the generated fallback is always valid.
+    Raises ``InvalidName`` if a non-empty submitted name is not a valid host
+    name; the generated fallback is always valid.
     """
     if submitted_host_name:
         return HostName(submitted_host_name)
-    operator_name = _operator_workspace_default("MINDS_WORKSPACE_NAME", "")
-    if operator_name:
-        return HostName(operator_name)
     return make_unique_host_name(_DEFAULT_HOST_NAME_BASE, existing_host_names, always_number=True)
 
 
@@ -1158,22 +1151,37 @@ _RECOVERY_SCRIPT: Final[str] = """\
             scheduleHealthyPoll();
             return;
           }
+          // The in-container probe shows the interface is actually answering
+          // (HTTP 200), so there is nothing to restart -- on EVERY entry path
+          // (live auto-dispatch and restart_failed alike). Reload the recovery
+          // route; once the background tracker also confirms HEALTHY it 302s the
+          // user back to the workspace. If the tracker is still catching up the
+          // route re-renders here, we re-probe, see HEALTHY again, and converge
+          // -- never dispatching a restart against a working backend.
+          if (tier === 'healthy') {
+            renderLoading();
+            scheduleRefresh();
+            return;
+          }
           if (!autoDispatch) {
             // restart_failed entry: render unresponsive so the failure reason and
             // the diagnostics list both stay visible.
             renderUnresponsive();
             return;
           }
+          // ``auto_dispatched=1`` marks these as recovery-page auto-restarts (not
+          // a manual sidebar restart), so the endpoint can skip the bounce if the
+          // workspace self-recovered while the slow host-health probe was in flight.
           if (tier === 'host_offline') {
             // Container fully stopped: nothing live to interrupt, dispatch
             // unattended. Tell the endpoint the host is already stopped so it
             // skips the redundant stop step and cold-boots straight away.
-            postRestart({ scope: 'host', host_already_stopped: true });
+            postRestart({ scope: 'host', host_already_stopped: true, auto_dispatched: true });
             return;
           }
           if (tier === 'interface_unresponsive') {
             // Container running, exec works: restart the system-services agent in place.
-            postRestart({ scope: 'services' });
+            postRestart({ scope: 'services', auto_dispatched: true });
             return;
           }
           // 'host_unresponsive' or anything else: require explicit user consent for a host restart.
@@ -1345,9 +1353,9 @@ def render_destroying_page(
 ) -> str:
     """Render the detail page for an in-flight or recently-completed destroy.
 
-    The page polls ``/api/v1/workspaces/operations/<agent_id>`` for status and
-    streams its log over SSE from ``.../operations/<agent_id>/logs``; once
-    status flips to ``done`` it redirects to ``/``. ``status`` is the initial
+    The page polls ``/api/v1/workspaces/operations/destroy/<agent_id>`` for status
+    and streams its log over SSE from ``.../operations/destroy/<agent_id>/logs``;
+    once status flips to ``done`` it redirects to ``/``. ``status`` is the initial
     server-side computed value (``running``/``failed``/``done``) so the page
     renders correctly even before the first poll completes.
     """

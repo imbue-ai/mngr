@@ -691,7 +691,7 @@ async def _create_workspace_and_first_message(
     """Drive create-form -> first-message for one workspace; navigate `win` to its chat.
 
     Steps: navigate to /create, fill the form for `host_name`, submit,
-    poll /api/v1/workspaces/operations/<id> until DONE, follow the
+    poll /api/v1/workspaces/operations/create/<id> until DONE, follow the
     redirect_url to the agent chat URL on `win`, send FIRST_PROMPT,
     wait for a >=2-occurrence reply of FIRST_EXPECT. Snaps each
     milestone with names from `snaps`.
@@ -746,7 +746,7 @@ async def _create_workspace_and_first_message(
     while time.time() < deadline and not done:
         stat = await win.evaluate(
             """async (id) => {
-                const r = await fetch('/api/v1/workspaces/operations/' + id);
+                const r = await fetch('/api/v1/workspaces/operations/create/' + id);
                 return {status: r.status, body: await r.text()};
             }""",
             creation_id,
@@ -821,7 +821,7 @@ async def _create_workspace_and_first_message(
         target = win.url
     elif not done_redirect_url:
         raise E2EFailure(
-            f"[{label}] creation DONE without redirect_url; check the /api/v1/workspaces/operations/<id> contract"
+            f"[{label}] creation DONE without redirect_url; check the /api/v1/workspaces/operations/create/<id> contract"
         )
     else:
         target = done_redirect_url if done_redirect_url.startswith("http") else origin + done_redirect_url
@@ -1522,7 +1522,7 @@ async def amain() -> int:
             await win.wait_for_url(origin + "/", timeout=30_000)
             await snap_page(win, "18c-w2-destroy-initiated")
 
-            # Poll /api/v1/workspaces/operations/<id> until the host is actually gone
+            # Poll /api/v1/workspaces/operations/destroy/<id> until the host is actually gone
             # (status 'DONE', or 404 once the record is cleaned up). Lima VM
             # stop+delete typically takes 30-90s; 4-min budget gives comfortable
             # headroom.
@@ -1541,7 +1541,7 @@ async def amain() -> int:
             while time.time() < destroy_deadline:
                 resp = await win.evaluate(
                     """async (aid) => {
-                        const r = await fetch('/api/v1/workspaces/operations/' + aid);
+                        const r = await fetch('/api/v1/workspaces/operations/destroy/' + aid);
                         return {status: r.status, body: await r.text()};
                     }""",
                     w2_agent_id,

@@ -26,15 +26,11 @@ on the caller's host".
 """
 
 import json
-import os
 import queue
 import shlex
-from collections.abc import Callable
 from collections.abc import Iterator
 from datetime import datetime
 from datetime import timezone
-from functools import wraps
-from typing import ParamSpec
 
 from flask import Blueprint
 from flask import Response
@@ -50,16 +46,50 @@ from imbue.minds.desktop_client import desktop_control
 from imbue.minds.desktop_client import destroying
 from imbue.minds.desktop_client import workspace_settings
 from imbue.minds.desktop_client import workspace_ssh
+from imbue.minds.desktop_client import workspace_ssh_tunnel
 from imbue.minds.desktop_client import workspace_version
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
 from imbue.minds.desktop_client.agent_creator import resolve_template_version
-from imbue.minds.desktop_client.api_key_auth import is_request_authenticated
+from imbue.minds.desktop_client.api_auth import handle_invalid_random_id as _handle_invalid_random_id
+from imbue.minds.desktop_client.api_auth import json_error as _json_error
+from imbue.minds.desktop_client.api_auth import json_field_error as _json_field_error
+from imbue.minds.desktop_client.api_auth import json_response as _json_response
+from imbue.minds.desktop_client.api_auth import require_api_or_cookie_auth
+from imbue.minds.desktop_client.api_models import AccountSummary
+from imbue.minds.desktop_client.api_models import AccountsResponse
+from imbue.minds.desktop_client.api_models import AgentNotificationRequest
+from imbue.minds.desktop_client.api_models import BackupSnapshotSummary
+from imbue.minds.desktop_client.api_models import BugReportRequest
+from imbue.minds.desktop_client.api_models import BugReportResponse
+from imbue.minds.desktop_client.api_models import CreateOperationStatusResponse
+from imbue.minds.desktop_client.api_models import CreateWorkspaceRequest
+from imbue.minds.desktop_client.api_models import DestroyOperationStatusResponse
+from imbue.minds.desktop_client.api_models import EmptyResponse
+from imbue.minds.desktop_client.api_models import EnableSharingRequest
+from imbue.minds.desktop_client.api_models import EstablishSshRequest
+from imbue.minds.desktop_client.api_models import OkResponse
+from imbue.minds.desktop_client.api_models import OperationHandleResponse
+from imbue.minds.desktop_client.api_models import PatchWorkspaceRequest
+from imbue.minds.desktop_client.api_models import ProviderToggleResponse
+from imbue.minds.desktop_client.api_models import RestartOperationStatusResponse
+from imbue.minds.desktop_client.api_models import RestartWorkspaceRequest
+from imbue.minds.desktop_client.api_models import SetProviderEnabledRequest
+from imbue.minds.desktop_client.api_models import SharingReadinessResponse
+from imbue.minds.desktop_client.api_models import SharingToggleResponse
+from imbue.minds.desktop_client.api_models import SshConnectionResponse
+from imbue.minds.desktop_client.api_models import StopStateContainerResponse
+from imbue.minds.desktop_client.api_models import UpgradeMergeSummary
+from imbue.minds.desktop_client.api_models import WorkspaceBackupsResponse
+from imbue.minds.desktop_client.api_models import WorkspaceLifecycleResponse
+from imbue.minds.desktop_client.api_models import WorkspaceListResponse
+from imbue.minds.desktop_client.api_models import WorkspaceSummary
+from imbue.minds.desktop_client.api_models import WorkspaceVersionResponse
+from imbue.minds.desktop_client.api_spec import API_SPEC
+from imbue.minds.desktop_client.api_spec import json_response_model
 from imbue.minds.desktop_client.backup_export import BackupExportError
 from imbue.minds.desktop_client.backup_export import export_snapshot_zip
-from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
-from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
 from imbue.minds.desktop_client.create_helpers import REMOTE_SIGNIN_REDIRECT_URL
 from imbue.minds.desktop_client.create_helpers import color_for_new_workspace
 from imbue.minds.desktop_client.create_helpers import existing_workspace_host_names
@@ -78,6 +108,7 @@ from imbue.minds.desktop_client.sharing_handler import get_sharing_status
 from imbue.minds.desktop_client.sharing_handler import is_probeable_share_url
 from imbue.minds.desktop_client.sharing_handler import probe_share_url_readiness
 from imbue.minds.desktop_client.state import get_state
+from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
 from imbue.minds.desktop_client.templates import resolve_create_host_name
@@ -105,8 +136,6 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import InvalidName
 
-_ViewParams = ParamSpec("_ViewParams")
-
 # A blocking lifecycle (start/stop) call shells out to ``mngr`` and waits for
 # the host transition to resolve before returning the final state.
 _LIFECYCLE_TIMEOUT_SECONDS: float = 300.0
@@ -117,102 +146,26 @@ _SSE_HEADERS: dict[str, str] = {"Cache-Control": "no-cache", "X-Accel-Buffering"
 _DESTROY_LOG_POLL_SECONDS: float = 1.0
 
 
-def _json_response(data: dict[str, object], status_code: int = 200) -> Response:
-    return make_response(
-        content=json.dumps(data),
-        media_type="application/json",
-        status_code=status_code,
-    )
-
-
-def _json_error(message: str, status_code: int) -> Response:
-    return _json_response({"error": message}, status_code=status_code)
-
-
-def _json_field_error(message: str, field: str, status_code: int = 400) -> Response:
-    """A 400-style validation error that also names the offending form field.
-
-    The browser create page reads the ``field`` key to render the message inline
-    next to the right input; agents (the other caller of this route) simply
-    ignore the extra key, so it stays backward compatible.
-    """
-    return _json_response({"error": message, "field": field}, status_code=status_code)
-
-
-def _handle_invalid_random_id(error: InvalidRandomIdError) -> Response:
-    """Map a malformed workspace/operation id in the URL path to a 400 instead of a 500.
-
-    Every ``/workspaces/<id>`` route constructs an ``AgentId``/``CreationId`` from
-    the raw path param up front; a malformed id raises ``InvalidRandomIdError``
-    (a ``ValueError``). Registered blueprint-wide so that surfaces as a clean 400
-    rather than an uncaught 500.
-    """
-    return _json_error(f"Invalid id: {error}", 400)
-
-
-def _is_cookie_authenticated() -> bool:
-    """Whether the request carries a valid desktop-client session cookie.
-
-    Mirrors the bare-origin app's own session check (same signing key + cookie
-    name) so the browser UI can call these routes with its session cookie.
-    """
-    if os.getenv("SKIP_AUTH", "0") == "1":
-        return True
-    cookie_value = request.cookies.get(SESSION_COOKIE_NAME)
-    if cookie_value is None:
-        return False
-    return verify_session_cookie(cookie_value=cookie_value, signing_key=get_state().auth_store.get_signing_key())
-
-
-def _is_bearer_authenticated() -> bool:
-    """Whether the request carries the central minds API bearer key."""
-    expected_key = get_state().minds_api_key
-    return expected_key is not None and is_request_authenticated(request.headers.get("authorization"), expected_key)
-
-
-def require_api_or_cookie_auth(view: Callable[_ViewParams, Response]) -> Callable[_ViewParams, Response]:
-    """Allow either the central bearer key (agents, via the gateway) or the session cookie (the UI).
-
-    The cross-workspace routes are reached both by in-workspace agents (which
-    present the gateway-injected bearer) and by the desktop UI itself (which
-    presents the session cookie), so they accept either credential.
-    """
-
-    @wraps(view)
-    def wrapper(*args: _ViewParams.args, **kwargs: _ViewParams.kwargs) -> Response:
-        if _is_bearer_authenticated() or _is_cookie_authenticated():
-            return view(*args, **kwargs)
-        return _json_error("Not authenticated", 401)
-
-    return wrapper
-
-
 # -- Notification route --
 
 
 @require_api_or_cookie_auth
-def _handle_notification(agent_id: str) -> Response:
+@API_SPEC.validate(json=AgentNotificationRequest, resp=json_response_model(OkResponse))
+def _handle_notification(agent_id: str) -> OkResponse | Response:
     """Send a notification on behalf of the named agent."""
     dispatcher: NotificationDispatcher | None = get_state().notification_dispatcher
     if dispatcher is None:
         return _json_error("Notification dispatch not configured", 501)
 
-    # force=True parses the body regardless of Content-Type, matching the old
-    # FastAPI ``await request.json()`` (which ignored the header).
-    body = request.get_json(silent=True, force=True)
-    if body is None:
-        return _json_error("Invalid JSON body", 400)
-    if not isinstance(body, dict):
-        return _json_error("Request body must be a JSON object", 400)
-
+    # Structure (object shape + ``message`` present and a string) is enforced by
+    # the spectree model; the remaining checks here are value-semantic.
+    body = request.get_json(silent=True, force=True) or {}
     message = body.get("message")
-    if not message or not isinstance(message, str):
+    if not message:
         return _json_error("'message' field is required and must be a string", 400)
 
     title = body.get("title")
-    if title is not None and not isinstance(title, str):
-        return _json_error("'title' field must be a string", 400)
-    urgency_str = body.get("urgency", "NORMAL")
+    urgency_str = body.get("urgency") or "NORMAL"
     try:
         urgency = NotificationUrgency(urgency_str.upper())
     except (ValueError, AttributeError):
@@ -229,7 +182,7 @@ def _handle_notification(agent_id: str) -> Response:
     agent_display_name = agent_info.agent_name if agent_info else str(parsed_agent_id)
 
     dispatcher.dispatch(notification_request, agent_display_name)
-    return _json_response({"ok": True})
+    return OkResponse(ok=True)
 
 
 # -- Cross-workspace management routes --
@@ -242,9 +195,13 @@ def _handle_notification(agent_id: str) -> Response:
 # id, matching minds discovery.
 
 
-def _serialize_workspace(agent_id: AgentId) -> dict[str, object]:
-    """Build the JSON summary for one workspace from discovery + its labels."""
-    backend_resolver = get_state().backend_resolver
+def _serialize_workspace(agent_id: AgentId) -> WorkspaceSummary:
+    """Build the summary for one workspace from discovery + its labels."""
+    state = get_state()
+    backend_resolver = state.backend_resolver
+    # The owning signed-in account (None when private or no session store), so the
+    # detail readout can confirm an association rather than leaving it invisible.
+    account = state.session_store.get_account_for_workspace(str(agent_id)) if state.session_store is not None else None
     info = backend_resolver.get_agent_display_info(agent_id)
     host_id = info.host_id if info is not None else None
     # ``host_id`` is the real ``host-<hex>`` id from discovery; static / in-memory
@@ -258,38 +215,68 @@ def _serialize_workspace(agent_id: AgentId) -> dict[str, object]:
             typed_host_id = None
         if typed_host_id is not None:
             host_state = backend_resolver.get_host_state(typed_host_id)
-    return {
-        "agent_id": str(agent_id),
-        "name": backend_resolver.get_workspace_name(agent_id) or (info.agent_name if info is not None else None),
-        "host_id": host_id,
-        "host_state": str(host_state) if host_state is not None else None,
-        "provider_name": info.provider_name if info is not None else None,
-        "create_time": info.create_time.isoformat() if info is not None and info.create_time is not None else None,
-        "original_minds_version": backend_resolver.get_agent_label(agent_id, "original_minds_version"),
-        "color": backend_resolver.get_workspace_color(agent_id),
-    }
+    return WorkspaceSummary(
+        agent_id=str(agent_id),
+        name=backend_resolver.get_workspace_name(agent_id) or (info.agent_name if info is not None else None),
+        host_id=host_id,
+        host_state=str(host_state) if host_state is not None else None,
+        git_url=backend_resolver.get_agent_label(agent_id, "remote"),
+        branch=backend_resolver.get_agent_label(agent_id, "original_branch"),
+        account_id=account.user_id if account is not None else None,
+        account_email=account.email if account is not None else None,
+        provider_name=info.provider_name if info is not None else None,
+        create_time=info.create_time.isoformat() if info is not None and info.create_time is not None else None,
+        original_minds_version=backend_resolver.get_agent_label(agent_id, "original_minds_version"),
+        color=backend_resolver.get_workspace_color(agent_id),
+    )
 
 
 @require_api_or_cookie_auth
-def _handle_list_workspaces() -> Response:
+@API_SPEC.validate(resp=json_response_model(WorkspaceListResponse))
+def _handle_list_workspaces() -> WorkspaceListResponse:
     """List all workspaces, including destroyed-but-still-backed-up ones."""
     backend_resolver = get_state().backend_resolver
-    workspaces = [_serialize_workspace(agent_id) for agent_id in backend_resolver.list_known_workspace_ids()]
-    return _json_response({"workspaces": workspaces})
+    workspaces = tuple(_serialize_workspace(agent_id) for agent_id in backend_resolver.list_known_workspace_ids())
+    return WorkspaceListResponse(workspaces=workspaces)
 
 
 @require_api_or_cookie_auth
-def _handle_get_workspace(agent_id: str) -> Response:
+@API_SPEC.validate(resp=json_response_model(AccountsResponse))
+def _handle_list_accounts() -> AccountsResponse:
+    """List the accounts signed in on this device (id + email + display name).
+
+    Lets a caller turn a known email into the account id the
+    workspace-association API (``PATCH /api/v1/workspaces/<id>``) accepts. Empty
+    when no session store is configured. This route is gated by the
+    ``minds-accounts-read`` permission, which is NOT in the agent baseline -- an
+    agent must be granted it explicitly before it can enumerate accounts.
+    """
+    session_store = get_state().session_store
+    accounts = (
+        tuple(
+            AccountSummary(account_id=account.user_id, email=account.email, display_name=account.display_name)
+            for account in session_store.list_accounts()
+        )
+        if session_store is not None
+        else ()
+    )
+    return AccountsResponse(accounts=accounts)
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(WorkspaceSummary))
+def _handle_get_workspace(agent_id: str) -> WorkspaceSummary | Response:
     """Return the detail summary for one workspace."""
     parsed_id = AgentId(agent_id)
     backend_resolver = get_state().backend_resolver
     if parsed_id not in backend_resolver.list_known_workspace_ids():
         return _json_error(f"Unknown workspace {agent_id}", 404)
-    return _json_response(_serialize_workspace(parsed_id))
+    return _serialize_workspace(parsed_id)
 
 
 @require_api_or_cookie_auth
-def _handle_workspace_version(agent_id: str) -> Response:
+@API_SPEC.validate(resp=json_response_model(WorkspaceVersionResponse))
+def _handle_workspace_version(agent_id: str) -> WorkspaceVersionResponse | Response:
     """Return version info: the immutable created-at version plus, when online, git-derived current + history.
 
     ``original_minds_version`` (the create-time label) is always returned.
@@ -312,25 +299,24 @@ def _handle_workspace_version(agent_id: str) -> Response:
             agent_id=parsed_id,
             parent_cg=parent_cg,
         )
-    return _json_response(
-        {
-            "agent_id": str(parsed_id),
-            "original_minds_version": original,
-            "current_minds_version": git_version.current_minds_version,
-            "upgrade_merges": [
-                {
-                    "commit_sha": merge.commit_sha,
-                    "committed_at": merge.committed_at.isoformat() if merge.committed_at is not None else None,
-                    "summary": merge.summary,
-                }
-                for merge in git_version.upgrade_merges
-            ],
-        }
+    return WorkspaceVersionResponse(
+        agent_id=str(parsed_id),
+        original_minds_version=original,
+        current_minds_version=git_version.current_minds_version,
+        upgrade_merges=tuple(
+            UpgradeMergeSummary(
+                commit_sha=merge.commit_sha,
+                committed_at=merge.committed_at.isoformat() if merge.committed_at is not None else None,
+                summary=merge.summary,
+            )
+            for merge in git_version.upgrade_merges
+        ),
     )
 
 
 @require_api_or_cookie_auth
-def _handle_workspace_backups(agent_id: str) -> Response:
+@API_SPEC.validate(resp=json_response_model(WorkspaceBackupsResponse))
+def _handle_workspace_backups(agent_id: str) -> WorkspaceBackupsResponse | Response:
     """List a workspace's restic backup snapshots (works even when it is offline/destroyed)."""
     parsed_id = AgentId(agent_id)
     paths: WorkspacePaths | None = get_state().api_v1_paths
@@ -349,23 +335,21 @@ def _handle_workspace_backups(agent_id: str) -> Response:
     is_backing_up = backup_status.is_workspace_backing_up(
         paths, parsed_id, now=datetime.now(timezone.utc), parent_cg=get_state().root_concurrency_group
     )
-    return _json_response(
-        {
-            "agent_id": str(parsed_id),
-            "is_backing_up": is_backing_up,
-            "snapshots": [
-                {
-                    "snapshot_id": snapshot.snapshot_id,
-                    "short_id": snapshot.short_id,
-                    "time": snapshot.time.isoformat(),
-                    "paths": list(snapshot.paths),
-                    "hostname": snapshot.hostname,
-                    "tags": list(snapshot.tags),
-                    "total_size_bytes": snapshot.total_size_bytes,
-                }
-                for snapshot in snapshots
-            ],
-        }
+    return WorkspaceBackupsResponse(
+        agent_id=str(parsed_id),
+        is_backing_up=is_backing_up,
+        snapshots=tuple(
+            BackupSnapshotSummary(
+                snapshot_id=snapshot.snapshot_id,
+                short_id=snapshot.short_id,
+                time=snapshot.time.isoformat(),
+                paths=tuple(snapshot.paths),
+                hostname=snapshot.hostname,
+                tags=tuple(snapshot.tags),
+                total_size_bytes=snapshot.total_size_bytes,
+            )
+            for snapshot in snapshots
+        ),
     )
 
 
@@ -402,7 +386,8 @@ def _handle_workspace_backup_export(agent_id: str, snapshot_id: str) -> Response
 
 
 @require_api_or_cookie_auth
-def _handle_create_workspace() -> Response:
+@API_SPEC.validate(json=CreateWorkspaceRequest, resp=json_response_model(OperationHandleResponse, status_code=202))
+def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response:
     """Create a new peer workspace; return an operation handle to poll.
 
     Accepts a JSON body with ``git_url`` (required) and optional ``host_name``,
@@ -411,7 +396,7 @@ def _handle_create_workspace() -> Response:
     for compute/AI -- required when ``launch_mode`` or ``ai_provider`` is
     ``IMBUE_CLOUD``), ``anthropic_api_key`` (required when ``ai_provider`` is
     ``API_KEY``), and ``region``. Returns ``202`` with an ``operation_id`` the
-    caller polls at ``/api/v1/workspaces/operations/<operation_id>``; the
+    caller polls at ``/api/v1/workspaces/operations/create/<operation_id>``; the
     canonical workspace id appears there once ``mngr create`` returns.
 
     This is the single create front door for both agents and the browser. To let
@@ -435,9 +420,9 @@ def _handle_create_workspace() -> Response:
     if agent_creator is None:
         return _json_error("Agent creation not configured", 501)
 
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
-        return _json_error("Request body must be a JSON object", 400)
+    # Object shape + ``git_url`` presence/type are enforced by the spectree model;
+    # the value-semantic checks below (empty-after-strip, provider rules) stay here.
+    body = request.get_json(silent=True, force=True) or {}
     git_url = str(body.get("git_url", "")).strip()
     if not git_url:
         return _json_field_error("Repository URL is required.", "git_url")
@@ -470,11 +455,10 @@ def _handle_create_workspace() -> Response:
     submitted_region = str(body.get("region", "")).strip()
 
     # The workspace name is chosen automatically unless one was submitted (the
-    # advanced view's optional "Name" field): a submitted value, else the
-    # operator ``MINDS_WORKSPACE_NAME`` override, else the next free ``mind-N``
-    # name (computed from the host names already in use across every provider).
-    # Resolve it eagerly so an invalid name surfaces as a 400 here rather than as
-    # a deferred FAILED status on the creating page.
+    # advanced view's optional "Name" field): a submitted value, else the next
+    # free ``mind-N`` name (computed from the host names already in use across
+    # every provider). Resolve it eagerly so an invalid name surfaces as a 400
+    # here rather than as a deferred FAILED status on the creating page.
     backend_resolver = get_state().backend_resolver
     try:
         resolved_host_name = resolve_create_host_name(host_name, existing_workspace_host_names(backend_resolver))
@@ -559,11 +543,12 @@ def _handle_create_workspace() -> Response:
         color=color,
         original_minds_version=(branch_or_tag or branch or FALLBACK_BRANCH),
     )
-    return _json_response({"operation_id": str(creation_id), "kind": "create"}, status_code=202)
+    return OperationHandleResponse(operation_id=str(creation_id), kind="create"), 202
 
 
 @require_api_or_cookie_auth
-def _handle_destroy_workspace(agent_id: str) -> Response:
+@API_SPEC.validate(resp=json_response_model(OperationHandleResponse, status_code=202))
+def _handle_destroy_workspace(agent_id: str) -> tuple[OperationHandleResponse, int] | Response:
     """Destroy a workspace's host; return an operation handle to poll.
 
     The workspace's backups and ``restic.env`` are retained, so its backups
@@ -583,21 +568,20 @@ def _handle_destroy_workspace(agent_id: str) -> Response:
         return _json_error(f"Cannot resolve a host to destroy for {agent_id}", 409)
 
     destroying.start_destroy(parsed_id, paths, host_id, mngr_binary=get_state().mngr_binary)
-    return _json_response({"operation_id": str(parsed_id), "kind": "destroy"}, status_code=202)
+    return OperationHandleResponse(operation_id=str(parsed_id), kind="destroy"), 202
 
 
-def _run_mngr_blocking(argv: list[str], parent_cg: ConcurrencyGroup) -> tuple[int, str]:
-    """Run an ``mngr`` command to completion; return ``(returncode, stderr)``."""
+def _run_mngr_blocking(argv: list[str], parent_cg: ConcurrencyGroup) -> tuple[int, str, str]:
+    """Run an ``mngr`` command to completion; return ``(returncode, stdout, stderr)``."""
     cg = parent_cg.make_concurrency_group(name="workspace-lifecycle")
     with cg:
         finished = cg.run_process_to_completion(argv, timeout=_LIFECYCLE_TIMEOUT_SECONDS, is_checked_after=False)
     returncode = finished.returncode if finished.returncode is not None else 1
-    return returncode, finished.stderr
+    return returncode, finished.stdout, finished.stderr
 
 
-@require_api_or_cookie_auth
-def _handle_workspace_lifecycle(agent_id: str, action: str) -> Response:
-    """Start or stop a workspace's host, blocking until the transition resolves."""
+def _perform_workspace_lifecycle(agent_id: str, action: str) -> WorkspaceLifecycleResponse | Response:
+    """Shared start/stop implementation; the two routes are thin named wrappers (so each is documented)."""
     parsed_id = AgentId(agent_id)
     parent_cg = get_state().root_concurrency_group
     if parent_cg is None:
@@ -628,13 +612,25 @@ def _handle_workspace_lifecycle(agent_id: str, action: str) -> Response:
             host_state = backend_resolver.get_host_state(HostId(info.host_id))
         except ValueError:
             host_state = None
-    return _json_response(
-        {
-            "agent_id": str(parsed_id),
-            "action": action,
-            "host_state": str(host_state) if host_state is not None else None,
-        }
+    return WorkspaceLifecycleResponse(
+        agent_id=str(parsed_id),
+        action=action,
+        host_state=str(host_state) if host_state is not None else None,
     )
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(WorkspaceLifecycleResponse))
+def _handle_workspace_start(agent_id: str) -> WorkspaceLifecycleResponse | Response:
+    """Start a workspace's host, blocking until the transition resolves."""
+    return _perform_workspace_lifecycle(agent_id, "start")
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(WorkspaceLifecycleResponse))
+def _handle_workspace_stop(agent_id: str) -> WorkspaceLifecycleResponse | Response:
+    """Stop a workspace's host, blocking until the transition resolves."""
+    return _perform_workspace_lifecycle(agent_id, "stop")
 
 
 # -- Workspace recovery routes (health probe + restart) --
@@ -670,7 +666,8 @@ def _handle_workspace_health(agent_id: str) -> Response:
 
 
 @require_api_or_cookie_auth
-def _handle_workspace_restart(agent_id: str) -> Response:
+@API_SPEC.validate(json=RestartWorkspaceRequest, resp=json_response_model(OperationHandleResponse, status_code=202))
+def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, int] | Response:
     """Dispatch a workspace restart; return an operation handle to poll.
 
     Body: ``{"scope": "services" | "host", "host_already_stopped"?: bool}``. The
@@ -678,14 +675,14 @@ def _handle_workspace_restart(agent_id: str) -> Response:
     bounces the whole host (``host_already_stopped`` is honored only for the host
     scope, letting a known-stopped host skip the redundant stop step). Returns
     ``202`` with ``{operation_id, kind: "restart"}`` (the op id is the workspace
-    agent id), followed via ``/api/v1/workspaces/operations/<id>`` (+``/logs``)
-    exactly like create / destroy. A restart already in flight is deduped: the
-    same handle is returned without stacking a second worker.
+    agent id), followed via ``/api/v1/workspaces/operations/restart/<id>``
+    (+``/logs``) exactly like create / destroy. A restart already in flight is
+    deduped: the same handle is returned without stacking a second worker.
     """
     parsed_id = AgentId(agent_id)
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
-        return _json_error("Request body must be a JSON object", 400)
+    # The spectree model enforces ``scope`` is a required string; its value (one
+    # of services/host) is a value-semantic check kept here.
+    body = request.get_json(silent=True, force=True) or {}
     scope = body.get("scope")
     if scope not in ("services", "host"):
         return _json_error("'scope' must be one of: services, host", 400)
@@ -700,13 +697,29 @@ def _handle_workspace_restart(agent_id: str) -> Response:
     if tracker is None or parent_cg is None:
         return _json_error("Workspace restart is unavailable in this configuration", 503)
 
-    handle: dict[str, object] = {"operation_id": str(parsed_id), "kind": "restart"}
+    handle = OperationHandleResponse(operation_id=str(parsed_id), kind="restart")
+    # An auto-dispatched recovery restart (fired by the recovery page off its tier
+    # classification) can race the workspace's own self-recovery: the host-health
+    # probe that picks the tier runs a slow in-container exec, and the background
+    # probe loop can flip the tracker back to HEALTHY while that exec is still in
+    # flight. Restarting a workspace that already recovered is pure harm -- it
+    # bounces a healthy backend for nothing -- so skip it and let the recovery
+    # page's refresh 302 the user back to the workspace. A manual restart carries
+    # no marker and always proceeds; the user explicitly asked.
+    if bool(body.get("auto_dispatched", False)) and tracker.get_health(parsed_id) == AgentHealth.HEALTHY:
+        logger.info(
+            "Skipping auto-dispatched {} restart for {}: workspace already recovered to HEALTHY "
+            "before the recovery probe completed",
+            scope,
+            parsed_id,
+        )
+        return handle, 202
     # A restart already in flight for this workspace -- don't stack a second
     # worker racing the first's stop/start commands. mark_restarting decides the
     # RESTARTING transition under its own lock and reports whether this caller won
     # it, so this is an atomic check-and-claim against concurrent requests.
     if not tracker.mark_restarting(parsed_id):
-        return _json_response(handle, status_code=202)
+        return handle, 202
 
     registry = state.workspace_operation_registry
     registry.start(parsed_id, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
@@ -748,87 +761,86 @@ def _handle_workspace_restart(agent_id: str) -> Response:
         tracker.mark_restart_failed(parsed_id, message)
         registry.fail(parsed_id, message)
         return _json_error(message, 503)
-    return _json_response(handle, status_code=202)
+    return handle, 202
+
+
+# Operation polling is segmented by type -- ``/operations/<type>/<id>`` -- so the
+# id no longer has to be disambiguated by prefix, and a destroy and a restart of
+# the same workspace (both keyed by the agent id) can't shadow each other. The
+# caller always knows the type (the creating / destroying / recovery flows each
+# poll their own), so each type has its own handler + precise response model.
 
 
 @require_api_or_cookie_auth
-def _handle_operation_status(operation_id: str) -> Response:
-    """Report the status of a create, destroy, or restart operation, keyed by its id.
+@API_SPEC.validate(resp=json_response_model(CreateOperationStatusResponse))
+def _handle_create_operation_status(operation_id: str) -> CreateOperationStatusResponse | Response:
+    """Report the status of a create operation (the id is a ``creation-...`` id)."""
+    agent_creator: AgentCreator | None = get_state().agent_creator
+    info = agent_creator.get_creation_info(CreationId(operation_id)) if agent_creator is not None else None
+    if info is None:
+        return _json_error(f"Unknown operation {operation_id}", 404)
+    return CreateOperationStatusResponse(
+        operation_id=operation_id,
+        kind="create",
+        status=str(info.status),
+        # Human-readable stage caption for the creating page (e.g. "Cloning
+        # repository...", "Failed: ..."), mode-aware. Restores the live caption
+        # the old per-stage SSE status frames carried.
+        status_text=status_text_for(str(info.status), error=info.error, launch_mode=info.launch_mode),
+        is_done=info.status == AgentCreationStatus.DONE,
+        agent_id=str(info.agent_id) if info.agent_id is not None else None,
+        # The absolute ``/goto/<agent>/`` URL the creating page navigates to once
+        # the workspace is ready. Built by the creator (it knows the ``mngr
+        # forward`` port) and populated atomically with DONE, so the page
+        # redirects without reconstructing it client-side.
+        redirect_url=info.redirect_url,
+        error=info.error,
+    )
 
-    Create operations are keyed by a ``creation-...`` id (from the create route);
-    destroy and restart operations are both keyed by the workspace's agent id (a
-    destroy by its on-disk record, a restart by the in-memory registry).
-    """
-    if operation_id.startswith(f"{CreationId.PREFIX}-"):
-        agent_creator: AgentCreator | None = get_state().agent_creator
-        info = agent_creator.get_creation_info(CreationId(operation_id)) if agent_creator is not None else None
-        if info is None:
-            return _json_error(f"Unknown operation {operation_id}", 404)
-        return _json_response(
-            {
-                "operation_id": operation_id,
-                "kind": "create",
-                "status": str(info.status),
-                # Human-readable stage caption for the creating page (e.g.
-                # "Cloning repository...", "Failed: ..."), mode-aware. Restores
-                # the live caption the old per-stage SSE status frames carried.
-                "status_text": status_text_for(str(info.status), error=info.error, launch_mode=info.launch_mode),
-                "is_done": info.status == AgentCreationStatus.DONE,
-                "agent_id": str(info.agent_id) if info.agent_id is not None else None,
-                # The absolute ``/goto/<agent>/`` URL the creating page navigates
-                # to once the workspace is ready. Built by the creator (it knows
-                # the ``mngr forward`` port) and populated atomically with DONE,
-                # so the page redirects without reconstructing it client-side.
-                "redirect_url": info.redirect_url,
-                "error": info.error,
-            }
-        )
 
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(DestroyOperationStatusResponse))
+def _handle_destroy_operation_status(operation_id: str) -> DestroyOperationStatusResponse | Response:
+    """Report the status of a destroy operation (the id is the workspace agent id)."""
     parsed_id = AgentId(operation_id)
-    # A destroy op and a restart op are both keyed by the workspace agent id, so
-    # consult the on-disk destroy record *first*. Once a destroy is started it is
-    # the authoritative operation for that workspace, whereas the in-memory
-    # restart registry is never pruned -- a restart record left over from earlier
-    # in this app session would otherwise shadow a later destroy of the same
-    # workspace. A restart never overlaps a destroy (you cannot restart a
-    # destroyed workspace), so during a live restart no destroy record exists on
-    # disk and we correctly fall through to the registry below.
     paths: WorkspacePaths | None = get_state().api_v1_paths
-    if paths is not None:
-        backend_resolver = get_state().backend_resolver
-        # A destroy is only DONE once the workspace's *host* is gone (not merely
-        # the workspace agent): a destroy that tore down only the agent while the
-        # host's ``system-services`` kept it alive must read as FAILED, not a
-        # false DONE. ``destroying.is_host_still_active`` answers that (active-set
-        # membership OR a host not yet in ``DESTROYED``); see
-        # :func:`destroying.read_destroying`.
-        record = destroying.read_destroying(
-            parsed_id, paths, destroying.is_host_still_active(backend_resolver, paths, parsed_id)
-        )
-        if record is not None:
-            return _json_response(
-                {
-                    "operation_id": operation_id,
-                    "kind": "destroy",
-                    "status": str(record.status),
-                    "is_done": record.status == destroying.DestroyingStatus.DONE,
-                    "agent_id": operation_id,
-                }
-            )
+    if paths is None:
+        return _json_error(f"Unknown operation {operation_id}", 404)
+    backend_resolver = get_state().backend_resolver
+    # A destroy is only DONE once the workspace's *host* is gone (not merely the
+    # workspace agent): a destroy that tore down only the agent while the host's
+    # ``system-services`` kept it alive must read as FAILED, not a false DONE.
+    # ``destroying.is_host_still_active`` answers that (active-set membership OR a
+    # host not yet in ``DESTROYED``); see :func:`destroying.read_destroying`.
+    record = destroying.read_destroying(
+        parsed_id, paths, destroying.is_host_still_active(backend_resolver, paths, parsed_id)
+    )
+    if record is None:
+        return _json_error(f"Unknown operation {operation_id}", 404)
+    return DestroyOperationStatusResponse(
+        operation_id=operation_id,
+        kind="destroy",
+        status=str(record.status),
+        is_done=record.status == destroying.DestroyingStatus.DONE,
+        agent_id=operation_id,
+    )
 
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(RestartOperationStatusResponse))
+def _handle_restart_operation_status(operation_id: str) -> RestartOperationStatusResponse | Response:
+    """Report the status of a restart operation (the id is the workspace agent id)."""
+    parsed_id = AgentId(operation_id)
     restart_record = get_state().workspace_operation_registry.get(parsed_id)
-    if restart_record is not None:
-        return _json_response(
-            {
-                "operation_id": operation_id,
-                "kind": "restart",
-                "status": str(restart_record.status),
-                "is_done": restart_record.status == WorkspaceOperationStatus.DONE,
-                "error": restart_record.error,
-            }
-        )
-
-    return _json_error(f"Unknown operation {operation_id}", 404)
+    if restart_record is None:
+        return _json_error(f"Unknown operation {operation_id}", 404)
+    return RestartOperationStatusResponse(
+        operation_id=operation_id,
+        kind="restart",
+        status=str(restart_record.status),
+        is_done=restart_record.status == WorkspaceOperationStatus.DONE,
+        error=restart_record.error,
+    )
 
 
 def _sse(payload: dict[str, object]) -> str:
@@ -911,66 +923,72 @@ def _stream_destroy_operation_logs(agent_id: AgentId, paths: WorkspacePaths) -> 
 
 
 @require_api_or_cookie_auth
-def _handle_operation_logs(operation_id: str) -> Response:
-    """Stream a create, destroy, or restart operation's logs as server-sent events.
+def _handle_create_operation_logs(operation_id: str) -> Response:
+    """Stream a create operation's in-memory log queue as server-sent events."""
+    agent_creator: AgentCreator | None = get_state().agent_creator
+    log_queue = agent_creator.get_log_queue(CreationId(operation_id)) if agent_creator is not None else None
+    if log_queue is None:
+        return _json_error(f"Unknown operation {operation_id}", 404)
+    return make_streaming_response(
+        _stream_create_operation_logs(log_queue), media_type="text/event-stream", headers=_SSE_HEADERS
+    )
 
-    Create operations (``creation-...`` id) stream the in-memory creation log;
-    destroy operations (workspace agent id) tail the detached destroy
-    subprocess's on-disk log until the host is gone; restart operations (also the
-    workspace agent id) drain the in-memory registry's log queue.
-    """
-    if operation_id.startswith(f"{CreationId.PREFIX}-"):
-        agent_creator: AgentCreator | None = get_state().agent_creator
-        log_queue = agent_creator.get_log_queue(CreationId(operation_id)) if agent_creator is not None else None
-        if log_queue is None:
-            return _json_error(f"Unknown operation {operation_id}", 404)
-        return make_streaming_response(
-            _stream_create_operation_logs(log_queue), media_type="text/event-stream", headers=_SSE_HEADERS
-        )
 
+@require_api_or_cookie_auth
+def _handle_destroy_operation_logs(operation_id: str) -> Response:
+    """Tail a destroy operation's on-disk log to completion as server-sent events."""
     parsed_id = AgentId(operation_id)
-    # A destroy op's logs take precedence over a restart op's, mirroring the
-    # status route: both are keyed by the workspace agent id, and a started
-    # destroy is the authoritative operation, so a stale restart record left in
-    # the (never-pruned) registry from earlier in the session must not shadow it.
-    # During a live restart no destroy record exists on disk, so we fall through
-    # to the in-memory registry below.
     paths: WorkspacePaths | None = get_state().api_v1_paths
-    if paths is not None:
-        is_host_still_active = destroying.is_host_still_active(get_state().backend_resolver, paths, parsed_id)
-        if destroying.read_destroying(parsed_id, paths, is_host_still_active) is not None:
-            return make_streaming_response(
-                _stream_destroy_operation_logs(parsed_id, paths), media_type="text/event-stream", headers=_SSE_HEADERS
-            )
+    if paths is None:
+        return _json_error(f"Unknown operation {operation_id}", 404)
+    is_host_still_active = destroying.is_host_still_active(get_state().backend_resolver, paths, parsed_id)
+    if destroying.read_destroying(parsed_id, paths, is_host_still_active) is None:
+        return _json_error(f"Unknown operation {operation_id}", 404)
+    return make_streaming_response(
+        _stream_destroy_operation_logs(parsed_id, paths), media_type="text/event-stream", headers=_SSE_HEADERS
+    )
 
+
+@require_api_or_cookie_auth
+def _handle_restart_operation_logs(operation_id: str) -> Response:
+    """Drain a restart operation's in-memory registry log queue as server-sent events."""
+    parsed_id = AgentId(operation_id)
     registry = get_state().workspace_operation_registry
-    if registry.get(parsed_id) is not None:
-        log_queue = registry.get_log_queue(parsed_id)
-        if log_queue is not None:
-            return make_streaming_response(
-                _stream_restart_operation_logs(log_queue), media_type="text/event-stream", headers=_SSE_HEADERS
-            )
-
-    return _json_error(f"Unknown operation {operation_id}", 404)
+    log_queue = registry.get_log_queue(parsed_id) if registry.get(parsed_id) is not None else None
+    if log_queue is None:
+        return _json_error(f"Unknown operation {operation_id}", 404)
+    return make_streaming_response(
+        _stream_restart_operation_logs(log_queue), media_type="text/event-stream", headers=_SSE_HEADERS
+    )
 
 
 # -- SSH access route --
 
 
 @require_api_or_cookie_auth
-def _handle_establish_ssh(agent_id: str) -> Response:
+@API_SPEC.validate(json=EstablishSshRequest, resp=json_response_model(SshConnectionResponse))
+def _handle_establish_ssh(agent_id: str) -> SshConnectionResponse | Response:
     """Authorize temporary SSH access into a workspace and return its connection info.
 
     Body: ``{"public_key": "<openssh public key>", "requester_workspace_id":
     "<caller's own id>"}``. The caller's private key never leaves the caller.
-    The hub injects the (TTL-tagged) public key into the target's
-    ``authorized_keys`` and returns the target's SSH ``user``/``host``/``port``.
+    The hub reads the target's ``authorized_keys`` back over ``mngr exec``,
+    prunes any expired minds-owned grant lines, drops any still-valid grant the
+    same requester already holds (so a re-request refreshes rather than stacks),
+    appends the new (TTL-tagged) public key, writes the result back in one
+    rewrite, and returns SSH connection info. Pruning on every grant means
+    repeated requests never let stale or duplicate grant lines pile up.
 
-    Only *remote* targets (reachable from anywhere) are supported: a local
-    (Docker/Lima) target has no externally reachable address, so brokering a
-    forwarding tunnel for the remote->local case is not yet implemented and the
-    route returns 501. The target must be online; authorizing the key on a
-    stopped target fails at the ``mngr exec`` step and returns 502.
+    The returned endpoint depends on where the target lives. A *remote* target
+    (Modal/AWS/Vultr/imbue_cloud) is reachable from anywhere, so its real
+    ``user``/``host``/``port`` are returned and the caller connects directly. A
+    *local* target (Docker/Lima) publishes its sshd only on the hub's own
+    loopback, which a peer (or remote) workspace cannot reach, so the hub brokers
+    a reverse tunnel into the *caller's* container and returns
+    ``host="127.0.0.1"`` with the loopback port assigned inside that container;
+    the caller connects there with the same key. The target must be online;
+    reading or writing the key on a stopped target fails at the ``mngr exec``
+    step (502), as does brokering a tunnel into an unreachable caller.
     """
     parsed_id = AgentId(agent_id)
     backend_resolver = get_state().backend_resolver
@@ -980,26 +998,25 @@ def _handle_establish_ssh(agent_id: str) -> Response:
     if parent_cg is None:
         return _json_error("SSH access not configured", 501)
 
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
-        return _json_error("Request body must be a JSON object", 400)
+    # Body shape (``public_key`` + ``requester_workspace_id`` present, strings) is
+    # enforced by the spectree model; the empty-after-strip check below is semantic.
+    body = request.get_json(silent=True, force=True) or {}
     public_key = str(body.get("public_key", ""))
     requester_workspace_id = str(body.get("requester_workspace_id", "")).strip()
     if not requester_workspace_id:
         return _json_error("'requester_workspace_id' is required", 400)
 
-    # The target must be a reachable remote host. ``get_ssh_info`` returns None
-    # for local agents (Docker/Lima), which a remote caller cannot reach.
+    # The hub must have an SSH endpoint it can reach for the target. Discovery
+    # provides one for every real provider (a remote address for remote hosts; a
+    # ``127.0.0.1:<published port>`` loopback for local Docker/Lima); only the
+    # bare local provider, which minds workspaces never use, lacks one.
     ssh_info = backend_resolver.get_ssh_info(parsed_id)
     if ssh_info is None:
-        return _json_error(
-            "Target is a local workspace with no externally reachable SSH endpoint; "
-            "brokering a forwarding tunnel for the remote->local case is not yet supported.",
-            501,
-        )
+        return _json_error("Target workspace has no SSH endpoint that this desktop client can resolve", 501)
 
+    now = datetime.now(timezone.utc)
     try:
-        expires_at = datetime.now(timezone.utc) + workspace_ssh.DEFAULT_SSH_GRANT_TTL
+        expires_at = now + workspace_ssh.DEFAULT_SSH_GRANT_TTL
         authorized_line = workspace_ssh.build_authorized_keys_line(
             public_key=public_key,
             requester_workspace_id=requester_workspace_id,
@@ -1008,31 +1025,99 @@ def _handle_establish_ssh(agent_id: str) -> Response:
     except workspace_ssh.SshGrantError as e:
         return _json_error(str(e), 400)
 
-    # Append the tagged key to the target's authorized_keys via mngr exec.
-    install_script = (
+    mngr_binary = get_state().mngr_binary
+
+    # Read the target's current authorized_keys (absent file -> empty), prune any
+    # expired minds-owned grant lines, append the new grant, and write the whole
+    # body back in one rewrite. Read + write are two mngr exec round-trips; the
+    # prune logic lives in workspace_ssh so it stays unit-tested.
+    #
+    # ``mngr exec`` takes the command as a single trailing COMMAND argument
+    # (its CLI is ``mngr exec [AGENTS]... COMMAND``) and runs it in a shell with
+    # the agent's env sourced, so ``~`` expands and the redirection works. We
+    # must NOT pass ``-- bash -c <script>``: the extra ``bash``/``-c`` tokens are
+    # parsed as additional agent names (``-c`` fails agent-name validation) and
+    # the whole call errors out.
+    #
+    # The read is captured with ``--format json`` and the command's own stdout is
+    # pulled out of the structured envelope. In its default (human) format
+    # ``mngr exec`` appends a ``Command succeeded on agent <name>`` status line to
+    # stdout after the command's output; reading that raw would write the status
+    # line straight back into the target's authorized_keys -- and, because the
+    # prune step only drops minds-owned grant lines, it would accumulate another
+    # copy on every re-grant. The JSON envelope keeps the captured body clean.
+    read_argv = [
+        mngr_binary,
+        "exec",
+        str(parsed_id),
+        "cat ~/.ssh/authorized_keys 2>/dev/null || true",
+        "--format",
+        "json",
+    ]
+    try:
+        read_returncode, read_stdout, read_stderr = _run_mngr_blocking(read_argv, parent_cg)
+    except (OSError, ConcurrencyGroupError) as e:
+        return _json_error(f"Could not read the target's authorized_keys: {e}", 502)
+    if read_returncode != 0:
+        return _json_error(f"Could not read the target's authorized_keys: {read_stderr.strip()}", 502)
+    try:
+        read_result = json.loads(read_stdout)
+        existing_authorized_keys = str(read_result["results"][0]["stdout"])
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
+        logger.warning("Could not parse the target's authorized_keys read for {}: {}", parsed_id, e)
+        return _json_error(f"Could not parse the target's authorized_keys read: {e}", 502)
+
+    new_authorized_keys = workspace_ssh.compose_pruned_authorized_keys(
+        existing_authorized_keys, authorized_line, requester_workspace_id=requester_workspace_id, now=now
+    )
+    write_script = (
         "set -e; mkdir -p ~/.ssh; chmod 700 ~/.ssh; "
-        f"printf '%s\\n' {shlex.quote(authorized_line)} >> ~/.ssh/authorized_keys; "
+        f"printf '%s' {shlex.quote(new_authorized_keys)} > ~/.ssh/authorized_keys; "
         "chmod 600 ~/.ssh/authorized_keys"
     )
-    argv = [get_state().mngr_binary, "exec", str(parsed_id), "--", "bash", "-lc", install_script]
+    # Single trailing COMMAND arg (see the read above) -- mngr exec runs it in a shell.
+    write_argv = [mngr_binary, "exec", str(parsed_id), write_script]
     try:
-        returncode, stderr = _run_mngr_blocking(argv, parent_cg)
+        write_returncode, _write_stdout, write_stderr = _run_mngr_blocking(write_argv, parent_cg)
     except (OSError, ConcurrencyGroupError) as e:
         return _json_error(f"Could not authorize SSH key on the target: {e}", 502)
-    if returncode != 0:
-        return _json_error(f"Could not authorize SSH key on the target: {stderr.strip()}", 502)
+    if write_returncode != 0:
+        return _json_error(f"Could not authorize SSH key on the target: {write_stderr.strip()}", 502)
 
-    connection = workspace_ssh.SshConnectionInfo(
-        user=ssh_info.user, host=ssh_info.host, port=ssh_info.port, expires_at=expires_at
-    )
-    return _json_response(
-        {
-            "agent_id": str(parsed_id),
-            "user": connection.user,
-            "host": connection.host,
-            "port": connection.port,
-            "expires_at": connection.expires_at.isoformat(),
-        }
+    # Decide how the caller reaches the target. A routable (remote) target is
+    # connected to directly. A local target's sshd is on the hub's loopback, so
+    # broker a reverse tunnel into the caller's container and hand back the
+    # loopback endpoint the caller connects to instead.
+    if workspace_ssh_tunnel.is_loopback_host(ssh_info.host):
+        caller_ssh = backend_resolver.get_ssh_info(AgentId(requester_workspace_id))
+        if caller_ssh is None:
+            return _json_error(
+                "Cannot broker SSH to a local target: the requesting workspace has no "
+                "hub-reachable SSH endpoint (is it online and known to this desktop client?).",
+                502,
+            )
+        try:
+            broker_port = workspace_ssh_tunnel.broker_reverse_tunnel_into_caller(
+                get_state().ssh_tunnel_manager,
+                caller_ssh=caller_ssh,
+                target_ssh=ssh_info,
+                target_agent_id=str(parsed_id),
+            )
+        except workspace_ssh_tunnel.WorkspaceSshTunnelError as e:
+            return _json_error(f"Could not broker an SSH tunnel into the requesting workspace: {e}", 502)
+        connection = workspace_ssh.SshConnectionInfo(
+            user=ssh_info.user, host="127.0.0.1", port=broker_port, expires_at=expires_at
+        )
+    else:
+        connection = workspace_ssh.SshConnectionInfo(
+            user=ssh_info.user, host=ssh_info.host, port=ssh_info.port, expires_at=expires_at
+        )
+    return SshConnectionResponse(
+        agent_id=str(parsed_id),
+        user=connection.user,
+        host=connection.host,
+        port=connection.port,
+        expires_at=connection.expires_at.isoformat(),
     )
 
 
@@ -1040,16 +1125,17 @@ def _handle_establish_ssh(agent_id: str) -> Response:
 
 
 @require_api_or_cookie_auth
-def _handle_bug_report(agent_id: str) -> Response:
+@API_SPEC.validate(json=BugReportRequest, resp=json_response_model(BugReportResponse))
+def _handle_bug_report(agent_id: str) -> BugReportResponse | Response:
     """Submit a bug report to Imbue on behalf of an in-workspace agent.
 
     Backed by the same collector/submitter as the local help form, so an agent-initiated report and a
     user-initiated one carry the same shape. The report is scoped to the caller's own workspace (the
     path ``agent_id``, which the gateway has already authorized), not to whatever the body claims.
     """
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
-        return _json_error("Request body must be a JSON object", 400)
+    # ``description`` presence/type is enforced by the spectree model; the
+    # whitespace-only rejection below is value-semantic.
+    body = request.get_json(silent=True, force=True) or {}
     if not str(body.get("description", "")).strip():
         return _json_error("'description' field is required and must be a non-empty string", 400)
 
@@ -1061,13 +1147,14 @@ def _handle_bug_report(agent_id: str) -> Response:
         minds_config=state.minds_config,
         paths=state.api_v1_paths,
     )
-    return _json_response({"ok": True, "event_id": event_id})
+    return BugReportResponse(ok=True, event_id=event_id)
 
 
 # -- Workspace metadata update route (color + account association) --
 
 
 @require_api_or_cookie_auth
+@API_SPEC.validate(json=PatchWorkspaceRequest)
 def _handle_patch_workspace(agent_id: str) -> Response:
     """Partially update a workspace's metadata (color and/or account association).
 
@@ -1078,9 +1165,9 @@ def _handle_patch_workspace(agent_id: str) -> Response:
     ``account_id`` that was set).
     """
     parsed_id = AgentId(agent_id)
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
-        return _json_error("Request body must be a JSON object", 400)
+    # The spectree model validates the (all-optional) body shape; only keys present
+    # in the raw body are applied, so an empty body is a no-op.
+    body = request.get_json(silent=True, force=True) or {}
 
     state = get_state()
     backend_resolver = state.backend_resolver
@@ -1110,10 +1197,13 @@ def _handle_patch_workspace(agent_id: str) -> Response:
                 applied["account_id"] = None
             else:
                 account_id = str(account_value).strip()
-                workspace_settings.associate_workspace_account(
+                account = workspace_settings.associate_workspace_account(
                     parsed_id, account_id, backend_resolver, state.session_store
                 )
-                applied["account_id"] = account_id
+                # Echo the *resolved* id (the input may have been an email) plus the
+                # email, so the caller can confirm exactly which account was bound.
+                applied["account_id"] = account.user_id
+                applied["account_email"] = account.email
         except workspace_settings.WorkspaceAssociationError as exc:
             return _json_error(str(exc), exc.status_code)
 
@@ -1124,20 +1214,17 @@ def _handle_patch_workspace(agent_id: str) -> Response:
 
 
 @require_api_or_cookie_auth
-def _handle_dismiss_operation(operation_id: str) -> Response:
-    """Dismiss a finished operation card (replaces ``/api/destroying/<id>/dismiss``).
+@API_SPEC.validate(resp=json_response_model(EmptyResponse))
+def _handle_dismiss_destroy_operation(operation_id: str) -> EmptyResponse:
+    """Dismiss a finished destroy operation card (replaces ``/api/destroying/<id>/dismiss``).
 
-    For a destroy operation (the id is an ``AgentId``), removes the on-disk
-    destroy record. For a create operation (``creation-...`` id) or an unknown
-    id, this is an idempotent no-op. Always returns 200 ``{}``.
+    Removes the on-disk destroy record (the id is the workspace ``AgentId``).
+    Idempotent: an unknown id, or a missing data dir, is a no-op. Always 200 ``{}``.
     """
-    if operation_id.startswith(f"{CreationId.PREFIX}-"):
-        return _json_response({})
     paths: WorkspacePaths | None = get_state().api_v1_paths
-    if paths is None:
-        return _json_response({})
-    destroying.delete_destroying(AgentId(operation_id), paths)
-    return _json_response({})
+    if paths is not None:
+        destroying.delete_destroying(AgentId(operation_id), paths)
+    return EmptyResponse()
 
 
 # -- Sharing sub-resource routes --
@@ -1154,7 +1241,8 @@ def _handle_sharing_status(agent_id: str, service_name: str) -> Response:
 
 
 @require_api_or_cookie_auth
-def _handle_sharing_readiness(agent_id: str, service_name: str) -> Response:
+@API_SPEC.validate(resp=json_response_model(SharingReadinessResponse))
+def _handle_sharing_readiness(agent_id: str, service_name: str) -> SharingReadinessResponse:
     """Probe a shared service's hostname to see if Cloudflare Access is live yet.
 
     The hostname to probe comes from the ``url`` query param; restricted to
@@ -1163,21 +1251,18 @@ def _handle_sharing_readiness(agent_id: str, service_name: str) -> Response:
     probe_url = request.args.get("url", "")
     http_client = get_state().http_client
     if http_client is None or not is_probeable_share_url(probe_url):
-        return _json_response({"ready": False})
-    return _json_response({"ready": probe_share_url_readiness(http_client, probe_url)})
+        return SharingReadinessResponse(ready=False)
+    return SharingReadinessResponse(ready=probe_share_url_readiness(http_client, probe_url))
 
 
 @require_api_or_cookie_auth
-def _handle_sharing_enable(agent_id: str, service_name: str) -> Response:
+@API_SPEC.validate(json=EnableSharingRequest, resp=json_response_model(SharingToggleResponse))
+def _handle_sharing_enable(agent_id: str, service_name: str) -> SharingToggleResponse | Response:
     """Enable or update sharing for a service. Body: ``{"emails": [...]}``."""
     parsed_id = AgentId(agent_id)
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
-        return _json_error("Request body must be a JSON object", 400)
-    emails_raw = body.get("emails", [])
-    if not isinstance(emails_raw, list):
-        return _json_error("'emails' must be a JSON array of strings", 400)
-    emails = [str(email) for email in emails_raw]
+    # The spectree model validates that ``emails`` (when present) is a list of strings.
+    body = request.get_json(silent=True, force=True) or {}
+    emails = [str(email) for email in body.get("emails", [])]
     try:
         enable_sharing_via_cloudflare(
             agent_id=parsed_id,
@@ -1187,18 +1272,19 @@ def _handle_sharing_enable(agent_id: str, service_name: str) -> Response:
         )
     except SharingError as exc:
         return _json_error(str(exc), 502)
-    return _json_response({"agent_id": str(parsed_id), "service_name": service_name, "enabled": True})
+    return SharingToggleResponse(agent_id=str(parsed_id), service_name=service_name, enabled=True)
 
 
 @require_api_or_cookie_auth
-def _handle_sharing_disable(agent_id: str, service_name: str) -> Response:
+@API_SPEC.validate(resp=json_response_model(SharingToggleResponse))
+def _handle_sharing_disable(agent_id: str, service_name: str) -> SharingToggleResponse | Response:
     """Disable sharing for a service (removes it from its tunnel; the tunnel persists)."""
     state = get_state()
     try:
         disable_sharing(AgentId(agent_id), ServiceName(service_name), state.imbue_cloud_cli, state.session_store)
     except SharingError as exc:
         return _json_error(str(exc), 502)
-    return _json_response({"agent_id": agent_id, "service_name": service_name, "enabled": False})
+    return SharingToggleResponse(agent_id=agent_id, service_name=service_name, enabled=False)
 
 
 # -- Desktop namespace routes (cookie-or-bearer; no agent verb) --
@@ -1209,19 +1295,17 @@ def _handle_sharing_disable(agent_id: str, service_name: str) -> Response:
 
 
 @require_api_or_cookie_auth
-def _handle_patch_provider(provider_name: str) -> Response:
+@API_SPEC.validate(json=SetProviderEnabledRequest, resp=json_response_model(ProviderToggleResponse))
+def _handle_patch_provider(provider_name: str) -> ProviderToggleResponse | Response:
     """Set a provider's ``is_enabled`` flag. Body: ``{"enabled": bool}``.
 
     Idempotent desired-state. Refuses to disable a provider that still has active
     workspaces (409) -- disabling it would drop those live workspaces off
     discovery.
     """
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
-        return _json_error("Request body must be a JSON object", 400)
-    enabled = body.get("enabled")
-    if not isinstance(enabled, bool):
-        return _json_error("Body must include 'enabled' as a bool", 400)
+    # ``enabled`` (a required bool) is validated by the spectree model.
+    body = request.get_json(silent=True, force=True) or {}
+    enabled = bool(body.get("enabled"))
     state = get_state()
     try:
         changed = desktop_control.set_provider_enabled(
@@ -1229,7 +1313,7 @@ def _handle_patch_provider(provider_name: str) -> Response:
         )
     except desktop_control.ProviderHasActiveWorkspacesError as exc:
         return _json_error(str(exc), 409)
-    return _json_response({"provider_name": provider_name, "enabled": enabled, "changed": changed})
+    return ProviderToggleResponse(provider_name=provider_name, enabled=enabled, changed=changed)
 
 
 @require_api_or_cookie_auth
@@ -1257,18 +1341,19 @@ def _handle_stop_hosts() -> Response:
 
 
 @require_api_or_cookie_auth
-def _handle_stop_state_container() -> Response:
+@API_SPEC.validate(resp=json_response_model(StopStateContainerResponse))
+def _handle_stop_state_container() -> StopStateContainerResponse | Response:
     """Stop this env's mngr Docker state container, to fully free local resources at quit."""
     state = get_state()
     parent_cg = state.root_concurrency_group
     if parent_cg is None:
-        return _json_response({"stopped": False})
+        return StopStateContainerResponse(stopped=False)
     try:
         stopped = desktop_control.stop_state_container(state.mngr_host_dir, parent_cg)
     except DockerCleanupError as exc:
         logger.warning("Failed to stop the Docker state container at shutdown: {}", exc)
         return _json_error(f"Could not stop the Docker state container: {exc}", 500)
-    return _json_response({"stopped": stopped})
+    return StopStateContainerResponse(stopped=stopped)
 
 
 # -- Blueprint factory --
@@ -1289,6 +1374,8 @@ def create_api_v1_blueprint() -> Blueprint:
     # ``minds-workspaces`` detent scope at the gateway.
     blueprint.add_url_rule("/workspaces", view_func=_handle_list_workspaces, methods=["GET"])
     blueprint.add_url_rule("/workspaces/<agent_id>", view_func=_handle_get_workspace, methods=["GET"])
+    # Gated by the must-ask ``minds-accounts-read`` permission (not in the agent baseline).
+    blueprint.add_url_rule("/accounts", view_func=_handle_list_accounts, methods=["GET"])
     blueprint.add_url_rule("/workspaces/<agent_id>/version", view_func=_handle_workspace_version, methods=["GET"])
     blueprint.add_url_rule("/workspaces/<agent_id>/backups", view_func=_handle_workspace_backups, methods=["GET"])
     blueprint.add_url_rule(
@@ -1302,13 +1389,13 @@ def create_api_v1_blueprint() -> Blueprint:
     blueprint.add_url_rule("/workspaces/<agent_id>/destroy", view_func=_handle_destroy_workspace, methods=["POST"])
     blueprint.add_url_rule(
         "/workspaces/<agent_id>/start",
-        view_func=lambda agent_id: _handle_workspace_lifecycle(agent_id, "start"),
+        view_func=_handle_workspace_start,
         endpoint="workspace_start",
         methods=["POST"],
     )
     blueprint.add_url_rule(
         "/workspaces/<agent_id>/stop",
-        view_func=lambda agent_id: _handle_workspace_lifecycle(agent_id, "stop"),
+        view_func=_handle_workspace_stop,
         endpoint="workspace_stop",
         methods=["POST"],
     )
@@ -1317,11 +1404,44 @@ def create_api_v1_blueprint() -> Blueprint:
     blueprint.add_url_rule("/workspaces/<agent_id>/health", view_func=_handle_workspace_health, methods=["GET"])
     blueprint.add_url_rule("/workspaces/<agent_id>/restart", view_func=_handle_workspace_restart, methods=["POST"])
 
+    # Operation polling is type-segmented: ``/operations/<type>/<id>`` (type in
+    # create | destroy | restart). The caller always knows the type, so each gets
+    # a dedicated handler + precise response model (no id-prefix dispatch).
     blueprint.add_url_rule(
-        "/workspaces/operations/<operation_id>", view_func=_handle_operation_status, methods=["GET"]
+        "/workspaces/operations/create/<operation_id>",
+        view_func=_handle_create_operation_status,
+        endpoint="create_operation_status",
+        methods=["GET"],
     )
     blueprint.add_url_rule(
-        "/workspaces/operations/<operation_id>/logs", view_func=_handle_operation_logs, methods=["GET"]
+        "/workspaces/operations/destroy/<operation_id>",
+        view_func=_handle_destroy_operation_status,
+        endpoint="destroy_operation_status",
+        methods=["GET"],
+    )
+    blueprint.add_url_rule(
+        "/workspaces/operations/restart/<operation_id>",
+        view_func=_handle_restart_operation_status,
+        endpoint="restart_operation_status",
+        methods=["GET"],
+    )
+    blueprint.add_url_rule(
+        "/workspaces/operations/create/<operation_id>/logs",
+        view_func=_handle_create_operation_logs,
+        endpoint="create_operation_logs",
+        methods=["GET"],
+    )
+    blueprint.add_url_rule(
+        "/workspaces/operations/destroy/<operation_id>/logs",
+        view_func=_handle_destroy_operation_logs,
+        endpoint="destroy_operation_logs",
+        methods=["GET"],
+    )
+    blueprint.add_url_rule(
+        "/workspaces/operations/restart/<operation_id>/logs",
+        view_func=_handle_restart_operation_logs,
+        endpoint="restart_operation_logs",
+        methods=["GET"],
     )
 
     # Workspace metadata update (color + account association). Gated by
@@ -1333,11 +1453,12 @@ def create_api_v1_blueprint() -> Blueprint:
         methods=["PATCH"],
     )
 
-    # Operation dismissal (replaces /api/destroying/<id>/dismiss).
+    # Operation dismissal (replaces /api/destroying/<id>/dismiss). Only a destroy
+    # operation has a dismissable on-disk record; create/restart cards self-clear.
     blueprint.add_url_rule(
-        "/workspaces/operations/<operation_id>",
-        view_func=_handle_dismiss_operation,
-        endpoint="dismiss_operation",
+        "/workspaces/operations/destroy/<operation_id>",
+        view_func=_handle_dismiss_destroy_operation,
+        endpoint="dismiss_destroy_operation",
         methods=["DELETE"],
     )
 

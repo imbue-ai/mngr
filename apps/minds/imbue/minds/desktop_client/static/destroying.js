@@ -1,9 +1,9 @@
-// Destroy detail page: drives the log tail + status badge from the versioned
+// Destroy detail page: drives the log tail + status badge from the type-segmented
 // operation resource. Status is polled from
-// /api/v1/workspaces/operations/<id> (authoritative completion signal) and the
-// live log streams over SSE from .../operations/<id>/logs. Retry re-issues the
-// v1 destroy; dismiss clears the operation record via
-// DELETE /api/v1/workspaces/operations/<id>. Reads the agent id from
+// /api/v1/workspaces/operations/destroy/<id> (authoritative completion signal)
+// and the live log streams over SSE from .../operations/destroy/<id>/logs. Retry
+// re-issues the v1 destroy; dismiss clears the operation record via
+// DELETE /api/v1/workspaces/operations/destroy/<id>. Reads the agent id from
 // #destroying-page data-agent-id so the template stays JS-free.
 (function () {
   var pageEl = document.getElementById('destroying-page');
@@ -71,7 +71,7 @@
   }
 
   function pollStatus() {
-    fetch('/api/v1/workspaces/operations/' + encodeURIComponent(agentId))
+    fetch('/api/v1/workspaces/operations/destroy/' + encodeURIComponent(agentId))
       .then(function (resp) { return resp.ok ? resp.json() : null; })
       .then(function (data) {
         if (data && data.status) applyStatus(String(data.status).toLowerCase());
@@ -84,7 +84,7 @@
   // completion signal alongside the status poll.
   function openSource() {
     closeSource();
-    source = new EventSource('/api/v1/workspaces/operations/' + encodeURIComponent(agentId) + '/logs');
+    source = new EventSource('/api/v1/workspaces/operations/destroy/' + encodeURIComponent(agentId) + '/logs');
     source.onmessage = function (event) {
       var data;
       try { data = JSON.parse(event.data); } catch (e) { return; }
@@ -132,7 +132,7 @@
   if (dismissBtn) {
     dismissBtn.addEventListener('click', function () {
       dismissBtn.disabled = true;
-      fetch('/api/v1/workspaces/operations/' + encodeURIComponent(agentId), { method: 'DELETE' })
+      fetch('/api/v1/workspaces/operations/destroy/' + encodeURIComponent(agentId), { method: 'DELETE' })
         .finally(function () { window.location.href = '/'; });
     });
   }

@@ -34,6 +34,7 @@ from typing import Final
 import pytest
 
 from imbue.mngr.primitives import AgentId
+from imbue.mngr_latchkey.agent_setup import _AGENT_BASELINE_PERMISSIONS
 from imbue.mngr_latchkey.workspace_permissions import MINDS_WORKSPACES_SCOPE
 from imbue.mngr_latchkey.workspace_permissions import WORKSPACE_VERBS
 
@@ -586,6 +587,49 @@ def test_post_rejects_unknown_type(node_extension: tuple[str, Path, Path]) -> No
     assert "type" in json.loads(body)["error"]
 
 
+# -- POST /permission-requests: accounts type --
+
+
+def test_post_creates_accounts_request_with_fixed_permission_under_latchkey_self(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    base_url, _latchkey_directory, _permissions_config_path = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "needs to discover an account to associate",
+            "type": "accounts",
+            "payload": {},
+        },
+    )
+    assert status == 201
+    parsed = json.loads(body)
+    assert parsed["request_type"] == "accounts"
+    assert parsed["payload"] == {}
+    effect = parsed["effect"]
+    # A single fixed permission under the pre-existing ``latchkey-self`` scope --
+    # no new scope is minted (mirrors file-sharing).
+    assert effect["rules"] == [{"latchkey-self": ["minds-accounts-read"]}]
+    schema = effect["schemas"]["minds-accounts-read"]
+    assert schema["properties"]["method"] == {"const": "GET"}
+    assert schema["properties"]["path"]["pattern"] == r"^/minds-api-proxy/api/v1/accounts(/|$)"
+
+
+def test_post_rejects_accounts_payload_with_fields(node_extension: tuple[str, Path, Path]) -> None:
+    base_url, *_ = node_extension
+    status, _body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "x",
+            "type": "accounts",
+            "payload": {"permissions": ["minds-accounts-read"]},
+        },
+    )
+    assert status == 400
+
+
 # -- POST /permission-requests: workspace type --
 
 
@@ -772,6 +816,64 @@ def test_approve_workspace_all_override_grants_broadly(
     # The broad (all-workspaces) schema is keyed by the plain verb name.
     assert "minds-workspaces-destroy" in applied["schemas"]
     assert f"minds-workspaces-destroy-{target}" not in applied["schemas"]
+
+
+def test_approve_workspace_grant_keeps_catchall_last_so_grant_is_reachable(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """A workspace grant approved on top of the real agent baseline is ordered before
+    the domain-only ``latchkey-self`` catch-all.
+
+    The baseline's ``latchkey-self`` scope matches every gateway-self request on
+    ``domain`` alone. detent treats the first rule whose scope matches as
+    authoritative -- it rejects outright if that rule's permissions do not cover
+    the request, without consulting later rules. So if the ``minds-workspaces``
+    grant were appended *after* ``latchkey-self`` (as it was before this fix), the
+    catch-all would match first and veto every ``/workspaces`` request even though
+    the grant covers it. The approve merge must keep ``latchkey-self`` last. Rule
+    order is exactly what determines detent's verdict, so asserting the order is
+    asserting the proxy call would be allowed.
+
+    Unlike the other approve tests, this one seeds the target file with the real
+    baseline first (the others start empty, where ``minds-workspaces`` is the only
+    rule and so is never shadowed -- which is why they did not catch this).
+    """
+    base_url, _latchkey_directory, permissions_config_path = node_extension
+    # Seed the exact per-host baseline a live host has: the per-agent gate followed
+    # by the domain-only ``latchkey-self`` catch-all.
+    permissions_config_path.write_text(json.dumps(_AGENT_BASELINE_PERMISSIONS.model_dump()))
+
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "manage sibling workspaces",
+            "type": "workspace",
+            "payload": {
+                "permissions": ["minds-workspaces-read", "minds-workspaces-create"],
+                "target_workspace_id": None,
+            },
+        },
+    )
+    assert status == 201, body
+    request_id = json.loads(body)["request_id"]
+    status, approve_body = _http(
+        f"{base_url}/permission-requests/approve/{request_id}",
+        method="POST",
+        headers={"Content-Type": "application/json"},
+        body=json.dumps(
+            {"permissions": ["minds-workspaces-read", "minds-workspaces-create"], "target_workspace_id": None}
+        ).encode("utf-8"),
+    )[0:3:2]
+    assert status == 200, approve_body
+
+    applied = json.loads(permissions_config_path.read_text())
+    rule_keys = [next(iter(rule.keys())) for rule in applied["rules"]]
+    # The domain-only catch-all must remain last, with the workspace grant before it.
+    assert rule_keys[-1] == "latchkey-self"
+    assert rule_keys.index(MINDS_WORKSPACES_SCOPE) < rule_keys.index("latchkey-self")
+    workspace_rule = next(rule for rule in applied["rules"] if MINDS_WORKSPACES_SCOPE in rule)
+    assert set(workspace_rule[MINDS_WORKSPACES_SCOPE]) == {"minds-workspaces-read", "minds-workspaces-create"}
 
 
 def test_approve_workspace_rejects_unknown_verb_in_override(

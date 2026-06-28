@@ -33,6 +33,7 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
+from imbue.minds.desktop_client.api_schema import create_api_schema_blueprint
 from imbue.minds.desktop_client.api_v1 import create_api_v1_blueprint
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
@@ -188,13 +189,13 @@ def _should_emit_system_interface_status(
         return True
     _, last_full_snapshot_at = backend_resolver.get_freshness_timestamps()
     onset = tracker.get_failure_run_started_wall_at(agent_id) if tracker is not None else None
-    # FIXME: when discovery is *persistently* stale -- the producer/consumer
-    # pipeline has stalled, not merely a provider being down -- no post-onset
-    # snapshot ever arrives, so this gate never lets the STUCK redirect through and
-    # the user is stranded on the "Loading workspace" loader with no recourse. A
-    # discovery-health watchdog should detect a stalled pipeline (snapshot age),
-    # auto-restart it, and surface a distinct app-level state; once that exists
-    # this gate gains an escape and this FIXME should be removed.
+    # When discovery is *persistently* stale -- the producer/consumer pipeline has
+    # stalled, not merely a provider being down -- no post-onset snapshot ever
+    # arrives, so this gate keeps suppressing the STUCK redirect indefinitely. That
+    # is intentional and safe: the DiscoveryHealthWatchdog independently detects the
+    # stall (snapshot age), tries to self-heal the producer, and on failure (or a
+    # dead consumer) escalates to a terminal BLOCKED app-takeover -- so the user is
+    # never left stranded on the "Loading workspace" loader here with no recourse.
     if onset is None:
         return _is_discovery_fresh(last_full_snapshot_at)
     return last_full_snapshot_at is not None and last_full_snapshot_at >= onset
@@ -695,7 +696,7 @@ def _handle_creating_page(
     The page shows the setting-up progress screen while the workspace is
     created in the background, then redirects into the workspace once
     creation finishes. The page's JS polls the versioned operations resource
-    (``/api/v1/workspaces/operations/<creation_id>`` + ``/logs``) for status
+    (``/api/v1/workspaces/operations/create/<creation_id>`` + ``/logs``) for status
     and live logs, keyed by the same ``creation_id`` carried in the route.
     """
     if not _is_request_authenticated():
@@ -711,7 +712,14 @@ def _handle_creating_page(
     creation_id = CreationId(agent_id)
     info = agent_creator.get_creation_info(creation_id)
     if info is None:
-        return make_response(status_code=404, content="Unknown agent creation")
+        # The creation registry is in-memory, so a ``/creating/<id>`` window that
+        # outlives its creation -- reopened after an app restart, or after a
+        # failed creation was cleaned up -- finds no info here. This is a
+        # full-page navigation, so fall back to the landing page rather than
+        # stranding the window on a bare 404. (The status/onboarding/logs
+        # endpoints below keep returning 404 -- they are XHR/SSE callers, not
+        # navigations, and their JS handles the not-found case itself.)
+        return make_redirect_response(url="/", status_code=303)
 
     html = render_creating_page(creation_id=creation_id, info=info)
     return make_html_response(content=html)
@@ -932,6 +940,11 @@ def _handle_chrome_events() -> Response:
             last_workspace_data = _build_workspace_list(backend_resolver, session_store)
             last_destroying_ids = _destroying_agent_ids(paths, backend_resolver)
             has_accounts = bool(session_store and session_store.list_accounts())
+            # The agent ids the shell may restore windows to: live workspaces plus
+            # any from the persisted last-good topology not yet re-discovered this
+            # session. Lets restore decline to drop a window whose workspace is
+            # merely absent from a slow/partial cold-start snapshot.
+            last_restorable_ids = [str(aid) for aid in backend_resolver.list_restorable_workspace_ids()]
             yield "data: {}\n\n".format(
                 json.dumps(
                     {
@@ -939,6 +952,7 @@ def _handle_chrome_events() -> Response:
                         "workspaces": last_workspace_data,
                         "destroying_agent_ids": last_destroying_ids,
                         "has_accounts": has_accounts,
+                        "restorable_workspace_ids": last_restorable_ids,
                     }
                 )
             )
@@ -2119,6 +2133,9 @@ def create_desktop_client(
     # Mount the REST API v1 blueprint
     if paths is not None:
         app.register_blueprint(create_api_v1_blueprint())
+        # Mount the self-describing OpenAPI document at /api/schema (describes the
+        # gateway-reachable /api/v* surface; default-allowed for agents).
+        app.register_blueprint(create_api_schema_blueprint())
         # Mount the WebDAV file server (a WSGI app) under /api/v1/files via
         # Werkzeug's dispatcher. Each share root maps URL-path == on-disk-path
         # (``~`` and ``/tmp``); the mount is gated by the same central-key
@@ -2178,8 +2195,8 @@ def create_desktop_client(
     app.add_url_rule("/creating/<agent_id>", view_func=_handle_creating_page)
 
     # Agent destruction routes. Destroy, status/log streaming, and dismiss
-    # (DELETE /api/v1/workspaces/operations/<id>) are all served by the versioned
-    # /api/v1/workspaces surface now; only the detail page remains here.
+    # (DELETE /api/v1/workspaces/operations/destroy/<id>) are all served by the
+    # versioned /api/v1/workspaces surface now; only the detail page remains here.
     app.add_url_rule("/destroying/<agent_id>", view_func=_handle_destroying_page)
 
     # Workspace-recovery page. The host-health probe and the restart actions it
@@ -2301,10 +2318,11 @@ def start_discovery_health_watchdog_loop(
 ) -> None:
     """Start the background thread that drives the discovery-health watchdog.
 
-    Each tick reads the resolver's ``last_full_snapshot_at`` and hands it to
-    ``watchdog.evaluate``, which detects a producer stall, runs the
-    bounce -> restart remediations, and escalates to BLOCKED. The thread no-ops when
-    there is no concurrency group (test factories that skip background threads).
+    Each tick reads the resolver's ``last_event_at`` and hands it to
+    ``watchdog.evaluate``, which detects a producer stall (or a dead supervisor)
+    and runs producer remediation -- bounce once, then restart on a capped
+    exponential backoff, retrying forever. The thread no-ops when there is no
+    concurrency group (test factories that skip background threads).
     """
     if root_concurrency_group is None:
         return
@@ -2332,6 +2350,6 @@ def _run_discovery_health_watchdog_loop(
         )
         return
     while not root_concurrency_group.is_shutting_down():
-        _, last_full_snapshot_at = backend_resolver.get_freshness_timestamps()
-        watchdog.evaluate(last_full_snapshot_at)
+        last_event_at, _ = backend_resolver.get_freshness_timestamps()
+        watchdog.evaluate(last_event_at)
         threading.Event().wait(timeout=_DISCOVERY_WATCHDOG_POLL_INTERVAL_SECONDS)

@@ -11,10 +11,12 @@ from pathlib import Path
 import httpx
 import pytest
 
+from imbue.minds.desktop_client.latchkey.gateway_client import AccountsRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequestPayload
+from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.gateway_client import WorkspaceRequestPayload
 
 
@@ -163,6 +165,28 @@ def test_iter_permission_requests_parses_jsonl_stream() -> None:
     assert isinstance(workspace_payload, WorkspaceRequestPayload)
     assert workspace_payload.permissions == ("minds-workspaces-destroy",)
     assert workspace_payload.target_workspace_id == "agent-" + "1" * 32
+
+
+def test_streamed_request_payload_selected_by_request_type() -> None:
+    """The payload variant is chosen from ``request_type``, not pydantic shape.
+
+    The ``accounts`` and ``workspace`` payloads are both satisfiable by an empty
+    object, so without ``request_type`` discrimination an accounts request would
+    mis-parse as a workspace one. This pins the deterministic selection.
+    """
+    base = {"request_id": "r", "agent_id": "a", "rationale": "why", "target": "/tmp/p.json", "effect": {}}
+
+    accounts = StreamedPermissionRequest.model_validate({**base, "request_type": "accounts", "payload": {}})
+    assert isinstance(accounts.payload, AccountsRequestPayload)
+
+    workspace_empty = StreamedPermissionRequest.model_validate({**base, "request_type": "workspace", "payload": {}})
+    assert isinstance(workspace_empty.payload, WorkspaceRequestPayload)
+
+    workspace_verbs = StreamedPermissionRequest.model_validate(
+        {**base, "request_type": "workspace", "payload": {"permissions": ["minds-workspaces-read"]}}
+    )
+    assert isinstance(workspace_verbs.payload, WorkspaceRequestPayload)
+    assert workspace_verbs.payload.permissions == ("minds-workspaces-read",)
 
 
 def test_iter_permission_requests_skips_malformed_lines() -> None:

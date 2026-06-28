@@ -151,10 +151,19 @@ const REQUEST_TYPE_FILE_SHARING = 'file-sharing';
 // workspace, the target workspace id. The grant effect is computed here and
 // applied via ``/approve`` like file-sharing.
 const REQUEST_TYPE_WORKSPACE = 'workspace';
+// ``accounts`` grants the agent read access to ``GET /api/v1/accounts`` (the list
+// of signed-in accounts, so it can discover an account id/email to associate a
+// workspace with). It is all-or-nothing with no parameters; like file-sharing it
+// mints a single fixed permission under the pre-existing ``latchkey-self`` scope
+// (no new detent scope), but unlike file-sharing the permission's path is fixed
+// rather than per-file. It is deliberately NOT in the agent baseline, so it must
+// be granted on request.
+const REQUEST_TYPE_ACCOUNTS = 'accounts';
 const VALID_REQUEST_TYPES = new Set([
   REQUEST_TYPE_PREDEFINED,
   REQUEST_TYPE_FILE_SHARING,
   REQUEST_TYPE_WORKSPACE,
+  REQUEST_TYPE_ACCOUNTS,
 ]);
 
 // The ``minds-workspaces`` verb catalog is a *shared* definition file read by
@@ -269,6 +278,27 @@ const ALWAYS_AVAILABLE_PERMISSION = 'any';
 const FILE_SHARING_PROXY_PATH_PREFIX = '/minds-api-proxy/api/v1/files';
 const FILE_SHARING_SCOPE_NAME = 'latchkey-self';
 const FILE_SHARING_PERMISSION_PREFIX = 'minds-file-server-';
+
+// The accounts read grant. Like file-sharing it activates a fixed permission
+// under the pre-existing ``latchkey-self`` scope (so no scope schema is minted),
+// but the permission's path is fixed (the accounts list endpoint) and there is a
+// single permission name (no per-resource suffix, no access mode).
+const ACCOUNTS_PROXY_PATH_PREFIX = '/minds-api-proxy/api/v1/accounts';
+const ACCOUNTS_SCOPE_NAME = 'latchkey-self';
+const ACCOUNTS_PERMISSION_NAME = 'minds-accounts-read';
+
+// The agent baseline's ``latchkey-self`` scope is *domain-only*: its schema
+// matches every request whose ``domain`` is ``latchkey-self.invalid`` with no
+// path constraint, so it matches the whole gateway-self surface. detent
+// evaluates a permissions file's rules in order and treats the FIRST rule whose
+// *scope* matches as authoritative -- it allows when one of that rule's
+// permissions matches and otherwise rejects outright, without falling through to
+// later rules. A narrower same-domain scope (e.g. ``minds-workspaces``) must
+// therefore be ordered BEFORE ``latchkey-self``; if it lands after, the
+// domain-only catch-all matches first, finds none of its own permissions cover
+// the request, and vetoes it -- even though the later rule would have granted
+// it. ``mergeRules`` keeps this scope last for exactly that reason.
+const GATEWAY_SELF_CATCHALL_SCOPE_NAME = 'latchkey-self';
 
 // Access modes the agent can request for a file. ``READ`` grants the
 // non-mutating WebDAV verbs only; ``WRITE`` is a superset that also
@@ -750,6 +780,21 @@ function validateFileSharingPayload(payload) {
 }
 
 /**
+ * Validate the payload for an ``accounts`` permission request. The accounts read
+ * grant is all-or-nothing with no parameters, so the payload must be an empty
+ * JSON object; any field is rejected. A parameter-free payload is also what keeps
+ * the persisted-request payload shape distinct from the other request types on
+ * the Python side.
+ */
+function validateAccountsPayload(payload) {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+    throw new InvalidRequestBodyError("'payload' must be a JSON object for type 'accounts'.");
+  }
+  ensureNoExtraneousFields('payload ', [], payload);
+  return {};
+}
+
+/**
  * Validate a ``{permissions, target_workspace_id}`` object for a ``workspace``
  * request, shared by the create payload and the approve override body.
  *
@@ -864,6 +909,9 @@ async function parsePermissionRequestBody(request) {
     case REQUEST_TYPE_WORKSPACE:
       payload = validateWorkspacePayload(parsed.payload);
       break;
+    case REQUEST_TYPE_ACCOUNTS:
+      payload = validateAccountsPayload(parsed.payload);
+      break;
     default:
       // Unreachable because VALID_REQUEST_TYPES has already gated the
       // value; the default branch satisfies linting.
@@ -901,6 +949,8 @@ function computeEffect(type, payload) {
       return computeFileSharingEffect(payload.path, payload.access);
     case REQUEST_TYPE_WORKSPACE:
       return computeWorkspaceEffect(payload.permissions, payload.target_workspace_id);
+    case REQUEST_TYPE_ACCOUNTS:
+      return computeAccountsEffect();
     default:
       // Already validated by parsePermissionRequestBody; this branch
       // exists only to satisfy the type system / linters.
@@ -1050,6 +1100,30 @@ function computeFileSharingEffect(filePath, access) {
     // and the merge logic in ``handleApproveRequest`` unions the new
     // permission name into that scope's existing permission list.
     rules: [{ [FILE_SHARING_SCOPE_NAME]: [permissionSchemaName] }],
+  };
+}
+
+/**
+ * Compute the ``effect`` for an ``accounts`` request: a single fixed permission
+ * (``minds-accounts-read``) matching ``GET`` on the accounts list endpoint,
+ * attached to the pre-existing ``latchkey-self`` scope. Like file-sharing, no
+ * scope schema is minted (the baseline already declares ``latchkey-self``); the
+ * merge in ``handleApproveRequest`` unions the permission name into that scope.
+ * Unlike file-sharing, the path is fixed and there is no access mode, so the
+ * effect takes no arguments.
+ */
+function computeAccountsEffect() {
+  return {
+    schemas: {
+      [ACCOUNTS_PERMISSION_NAME]: {
+        properties: {
+          method: { const: 'GET' },
+          path: { type: 'string', pattern: `^${ACCOUNTS_PROXY_PATH_PREFIX}(/|$)` },
+        },
+        required: ['method', 'path'],
+      },
+    },
+    rules: [{ [ACCOUNTS_SCOPE_NAME]: [ACCOUNTS_PERMISSION_NAME] }],
   };
 }
 
@@ -1634,6 +1708,15 @@ function mergeRules(existingRules, effectRules) {
       }
     }
     rules[existingIndex] = { [scopeKey]: merged };
+  }
+  // Keep the domain-only ``latchkey-self`` catch-all last so any narrower
+  // same-domain scope just appended above it (e.g. ``minds-workspaces``) is
+  // evaluated first. See ``GATEWAY_SELF_CATCHALL_SCOPE_NAME`` for why detent's
+  // first-matching-scope-wins evaluation makes this ordering load-bearing.
+  const catchAllIndex = rules.findIndex((rule) => ruleKeyOf(rule) === GATEWAY_SELF_CATCHALL_SCOPE_NAME);
+  if (catchAllIndex !== -1 && catchAllIndex !== rules.length - 1) {
+    const [catchAllRule] = rules.splice(catchAllIndex, 1);
+    rules.push(catchAllRule);
   }
   return rules;
 }

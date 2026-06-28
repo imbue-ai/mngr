@@ -104,14 +104,19 @@ The create helpers were extracted into `apps/minds/imbue/minds/desktop_client/wo
 
 Note: legacy `/api/create-agent` (JSON) and the onboarding-questions feature were removed during the `main` merge; the browser create flow still uses the older `/api/create-agent/<id>/status|logs` *polling* routes (see #2.B).
 
-## #5 — SSH remote→local tunnel broker — OUTSTANDING (the main remaining work; remote-direct DONE)
+## #5 — SSH access between workspaces — DONE (pruning + refresh-not-stack + remote→local broker)
 
-`POST /api/v1/workspaces/<id>/ssh` works for remote targets but returns 501 when the target is local (Docker/Lima; `get_ssh_info` is `None` — see `api_v1.py` `_handle_establish_ssh`, the explicit 501 with "brokering a forwarding tunnel for the remote->local case is not yet supported"). Build the hub-brokered tunnel for the remote-caller → local-target case (spec Q5/Q8):
-- The calling (remote) workspace self-reports its workspace id (already accepted as `requester_workspace_id`). The hub runs one `ssh` process connecting the two machines (it can reach both) and returns a loopback port reverse-forwarded into the **caller's** container, so the caller connects to `127.0.0.1:<port>`.
-- The tunnel process is owned by the Minds-app lifetime (dies with it) — own it on `get_state().root_concurrency_group`; likely a new small module + a registry of active tunnels in state.
-- **Also wire `workspace_ssh.prune_expired_grant_lines`** (already written + unit-tested, but NOT wired): on each grant (and at `minds run` startup), read the target's `authorized_keys` via `mngr exec`, prune expired minds-owned lines, write back. See `apps/minds/imbue/minds/desktop_client/api_v1.py` `_handle_establish_ssh` and `workspace_ssh.py`.
+`POST /api/v1/workspaces/<id>/ssh` now works for **both** remote and local targets.
 
-Relevant: `api_v1.py` `_handle_establish_ssh`, `workspace_ssh.py`, `backend_resolver.get_ssh_info`, `mngr_forward.ssh_tunnel.RemoteSSHInfo`.
+**Grant pruning + refresh-not-stack.** `_handle_establish_ssh` no longer blindly appends — it reads the target's `~/.ssh/authorized_keys` back over `mngr exec` (with a non-login `bash -c`, since the captured stdout is written back), prunes expired minds-owned grants, drops any still-valid grant the *same requester* already holds (re-request refreshes, not stacks), appends the new grant, and writes the body back in one rewrite. Compose logic is the pure, unit-tested `workspace_ssh.compose_pruned_authorized_keys`. A *startup* sweep was intentionally **not** added — per-grant pruning already bounds the only accumulation that grows.
+
+**Remote→local broker (the earlier "blocker" was wrong).** My first pass claimed the hub couldn't resolve a local target's SSH endpoint. That was incorrect: a docker/lima host uses an **SSH connector** (`create_pyinfra_host("127.0.0.1", <published 22/tcp>, docker_ssh_key)`), so its `is_local` is **False**, `get_ssh_connection_info()` returns the real `("root", "127.0.0.1", <published port>, key)`, discovery emits a `HostSSHInfoEvent` for it, and `backend_resolver.get_ssh_info(<local target>)` returns `127.0.0.1:<published port>` — hub-reachable. (`is_local` is True only for the bare `@`-prefixed local provider, which minds never uses.)
+
+So the broker just reuses `mngr_forward`'s `SSHTunnelManager`: for a target whose `get_ssh_info().host` is loopback, the route calls `setup_reverse_tunnel(caller_ssh, local_port=target.port, remote_port=0)` — the caller's container gets a fresh loopback listener that paramiko relays, via the hub, to the hub's `127.0.0.1:<target published port>` (the target's sshd). The route returns `host="127.0.0.1", port=<assigned>`; the caller `ssh`es there with its own key. Reuse is automatic (keyed on caller+target-port → refresh-on-re-request). The manager lives on `DesktopClientState.ssh_tunnel_manager` (default-constructed, idle until first use) and is `cleanup()`-ed in `_shutdown_desktop_client`. Remote targets keep the direct path (return their real address).
+
+New module `workspace_ssh_tunnel.py` (`is_loopback_host`, `broker_reverse_tunnel_into_caller`, `WorkspaceSshTunnelError`) holds the minds-specific glue + error wrapping; tests in `workspace_ssh_tunnel_test.py`. The reverse-tunnel I/O itself needs a live caller+target, so true end-to-end coverage belongs in the modal-snapshot stage (local→local) — no imbue_cloud needed.
+
+Relevant: `api_v1.py` `_handle_establish_ssh`, `workspace_ssh.py`, `workspace_ssh_tunnel.py`, `state.py` (`ssh_tunnel_manager`), `server.py` (teardown), `backend_resolver.get_ssh_info`, `mngr_forward.ssh_tunnel.{RemoteSSHInfo, SSHTunnelManager}`.
 
 ---
 

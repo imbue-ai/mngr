@@ -221,6 +221,28 @@ def test_build_mngr_create_command_omits_version_label_when_unset() -> None:
     assert "original_minds_version=" not in joined
 
 
+def test_build_mngr_create_command_stamps_original_branch_label() -> None:
+    """The create-time branch/tag is stamped as an immutable ``original_branch``
+    label so the workspace detail API can report which branch it was created
+    from even when the workspace is offline."""
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
+        host_name=HostName("hello"),
+        original_branch="feature/my-branch",
+    )
+    joined = " ".join(command)
+    assert "--label original_branch=feature/my-branch" in joined
+
+
+def test_build_mngr_create_command_omits_branch_label_when_unset() -> None:
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
+        host_name=HostName("hello"),
+    )
+    joined = " ".join(command)
+    assert "original_branch=" not in joined
+
+
 def test_build_mngr_create_command_does_not_inject_minds_api_key() -> None:
     """The per-agent ``MINDS_API_KEY`` is gone.
 

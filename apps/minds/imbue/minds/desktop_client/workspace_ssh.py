@@ -10,13 +10,17 @@ its own private key and runs ordinary ``git`` / ``rsync`` / ``ssh``.
 Private keys never move: the hub only ever handles public keys. Grants are
 ephemeral -- each authorized key carries an ``expires=`` marker so that stale
 grants can be pruned. ``prune_expired_grant_lines`` implements that pruning over
-an ``authorized_keys`` body; wiring it into the grant/startup flow (which must
-read the target's ``authorized_keys`` back over ``mngr exec``) is not done yet.
+an ``authorized_keys`` body, and ``compose_pruned_authorized_keys`` combines it
+with the new grant line in a single rewrite. The grant flow (see the route)
+reads the target's ``authorized_keys`` back over ``mngr exec``, prunes expired
+minds-owned lines, and writes the pruned body plus the new grant, so stale
+grants never accumulate across repeated requests.
 
 For a *remote* target (Modal / AWS / Vultr / imbue_cloud), the returned host is
 reachable from anywhere, so the caller connects directly. A *local* target
-(Docker / Lima) is not reachable from a remote caller; brokering a forwarding
-tunnel for that remote->local case is not yet implemented (see the route).
+(Docker / Lima) publishes its sshd only on the hub's loopback, so the hub brokers
+a reverse tunnel into the caller's container (see ``workspace_ssh_tunnel`` and the
+route) and returns a ``127.0.0.1:<port>`` endpoint the caller connects to.
 """
 
 from datetime import datetime
@@ -92,6 +96,22 @@ def build_authorized_keys_line(*, public_key: str, requester_workspace_id: str, 
     return f"{key_type} {key_material} {marker}"
 
 
+def _marker_token_value(line: str, token_key: str) -> str | None:
+    """Return the value of the ``<token_key>=`` token in a minds-owned grant line, else None.
+
+    Lines without our marker (keys the user added by hand) return None, as do
+    minds-owned lines that simply lack the requested token. This is the single
+    place that knows how grant marker tokens are encoded.
+    """
+    if _GRANT_MARKER not in line:
+        return None
+    prefix = f"{token_key}="
+    for token in line.split():
+        if token.startswith(prefix):
+            return token[len(prefix) :]
+    return None
+
+
 def _parse_grant_expiry(line: str) -> datetime | None:
     """Return the expiry encoded in a minds-owned authorized_keys line, else None.
 
@@ -104,17 +124,24 @@ def _parse_grant_expiry(line: str) -> datetime | None:
     """
     if _GRANT_MARKER not in line:
         return None
-    for token in line.split():
-        if token.startswith(f"{_EXPIRES_KEY}="):
-            raw = token[len(_EXPIRES_KEY) + 1 :]
-            try:
-                parsed = datetime.fromisoformat(raw)
-            except ValueError:
-                return datetime.fromtimestamp(0, tz=timezone.utc)
-            if parsed.tzinfo is None:
-                return datetime.fromtimestamp(0, tz=timezone.utc)
-            return parsed
-    return datetime.fromtimestamp(0, tz=timezone.utc)
+    epoch = datetime.fromtimestamp(0, tz=timezone.utc)
+    raw = _marker_token_value(line, _EXPIRES_KEY)
+    if raw is None:
+        return epoch
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return epoch
+    return parsed if parsed.tzinfo is not None else epoch
+
+
+def _grant_requester(line: str) -> str | None:
+    """Return the requester id encoded in a minds-owned grant line, else None.
+
+    Lines without our marker (keys the user added by hand) return None so they
+    are never treated as belonging to any requester and thus never superseded.
+    """
+    return _marker_token_value(line, _REQUESTER_KEY)
 
 
 def prune_expired_grant_lines(authorized_keys_content: str, *, now: datetime) -> str:
@@ -131,6 +158,29 @@ def prune_expired_grant_lines(authorized_keys_content: str, *, now: datetime) ->
         kept.append(line)
     # Preserve a trailing newline iff the input had non-empty content.
     return "\n".join(kept) + "\n" if kept else ""
+
+
+def compose_pruned_authorized_keys(
+    existing_content: str, new_authorized_line: str, *, requester_workspace_id: str, now: datetime
+) -> str:
+    """Return the full ``authorized_keys`` body to write back for a grant.
+
+    Prunes expired minds-owned grants from the existing body and also drops any
+    still-valid minds-owned grant belonging to ``requester_workspace_id`` (the
+    new grant supersedes it, so a re-request *refreshes* rather than *stacks*),
+    then appends the new grant line. Every user-managed key and every grant from
+    a *different* requester is preserved verbatim. The result is newline-
+    terminated so the file ends cleanly. This is the single source of truth for
+    what a grant writes back, so the grant flow only has to read the current
+    body, call this, and write the result -- neither expired grants nor
+    duplicate same-requester grants can accumulate across repeated requests.
+    """
+    pruned = prune_expired_grant_lines(existing_content, now=now)
+    # Drop any still-valid grant the same requester already holds; the new line
+    # replaces it (refresh-not-stack). User keys (requester None) never match.
+    kept = [line for line in pruned.splitlines() if _grant_requester(line) != requester_workspace_id]
+    body = "\n".join(kept) + "\n" if kept else ""
+    return f"{body}{new_authorized_line}\n"
 
 
 class SshConnectionInfo(FrozenModel):

@@ -43,6 +43,7 @@ class RequestType(UpperCaseStrEnum):
     LATCHKEY_PERMISSION = auto()
     FILE_SHARING_PERMISSION = auto()
     WORKSPACE_PERMISSION = auto()
+    ACCOUNTS_PERMISSION = auto()
 
 
 class RequestStatus(UpperCaseStrEnum):
@@ -186,6 +187,27 @@ class LatchkeyWorkspacePermissionRequestEvent(RequestEvent):
     )
 
 
+class LatchkeyAccountsPermissionRequestEvent(RequestEvent):
+    """A request for the user to let the agent list the device's signed-in accounts.
+
+    Delivered to the inbox when an agent submits a ``type=accounts`` permission
+    request to the gateway. The grant is all-or-nothing (read access to
+    ``GET /api/v1/accounts``) with no parameters, so -- unlike the workspace
+    request -- it carries no verb list or target; the user simply approves or
+    denies.
+    """
+
+    rationale: str = Field(description="One-paragraph human-readable reason the agent needs this access.")
+    permissions_target_path: str | None = Field(
+        default=None,
+        description=(
+            "Absolute path of the permissions.json the agent's gateway JWT resolves to "
+            "(the streamed request's ``target`` field, i.e. the agent's opaque permissions "
+            "handle). ``None`` when the event did not originate from the gateway stream."
+        ),
+    )
+
+
 class RequestResponseEvent(EventEnvelope):
     """A response to a request, written by the desktop client."""
 
@@ -265,6 +287,24 @@ def create_latchkey_workspace_permission_request_event(
         is_user_requested=is_user_requested,
         permissions=permissions,
         target_workspace_id=target_workspace_id,
+        rationale=rationale,
+    )
+
+
+def create_latchkey_accounts_permission_request_event(
+    agent_id: str,
+    rationale: str,
+    is_user_requested: bool = False,
+) -> "LatchkeyAccountsPermissionRequestEvent":
+    """Create a new accounts-permission request event with auto-generated metadata."""
+    return LatchkeyAccountsPermissionRequestEvent(
+        timestamp=_now_iso(),
+        type=EventType("accounts_permission_request"),
+        event_id=_generate_event_id(),
+        source=EventSource(REQUESTS_EVENT_SOURCE_NAME),
+        agent_id=agent_id,
+        request_type=str(RequestType.ACCOUNTS_PERMISSION),
+        is_user_requested=is_user_requested,
         rationale=rationale,
     )
 
@@ -385,6 +425,8 @@ def parse_request_event(line: str) -> RequestEvent | None:
             return LatchkeyFileSharingPermissionRequestEvent.model_validate(data)
         elif request_type == str(RequestType.WORKSPACE_PERMISSION):
             return LatchkeyWorkspacePermissionRequestEvent.model_validate(data)
+        elif request_type == str(RequestType.ACCOUNTS_PERMISSION):
+            return LatchkeyAccountsPermissionRequestEvent.model_validate(data)
         else:
             return RequestEvent.model_validate(data)
     except (json.JSONDecodeError, ValueError, TypeError) as e:

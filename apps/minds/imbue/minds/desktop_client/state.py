@@ -42,6 +42,7 @@ from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHe
 from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRegistryInterface
 from imbue.minds.primitives import OutputFormat
+from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
 _STATE_KEY: Final[str] = "minds_desktop_client_state"
@@ -129,6 +130,13 @@ class DesktopClientState(MutableModel):
     workspace_operation_registry: WorkspaceOperationRegistryInterface = Field(
         default_factory=InMemoryWorkspaceOperationRegistry,
         description="In-memory registry tracking in-process workspace operations (restart) + their logs",
+    )
+    ssh_tunnel_manager: SSHTunnelManager = Field(
+        default_factory=SSHTunnelManager,
+        description=(
+            "Reverse-SSH-tunnel manager owning hub-brokered tunnels into calling workspaces "
+            "(local cross-workspace SSH access). Idle until first use; torn down on shutdown."
+        ),
     )
 
 

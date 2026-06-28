@@ -202,7 +202,7 @@ def test_prevent_trailing_comments() -> None:
     # S603 suppression must be on the same line as the call for ruff to
     # recognize it; the noqa marker is intentionally not in the
     # trailing-comment exempt list.
-    rc.check_trailing_comments(_DIR, snapshot(3))
+    rc.check_trailing_comments(_DIR, snapshot(4))
 
 
 def test_prevent_init_docstrings() -> None:
