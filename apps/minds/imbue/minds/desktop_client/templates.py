@@ -1071,22 +1071,6 @@ _RECOVERY_SCRIPT: Final[str] = """\
         // but unreachable (bouncing it would interrupt user agents, so we want
         // explicit consent before doing so).
         function renderUnresponsive() {
-          // If the last restart failed because the host has no resumable state (e.g. a
-          // Modal sandbox terminated without a clean stop -- only its create-time snapshot
-          // exists), a restart can never succeed. Guide the user to recreate instead of
-          // looping on a Restart button that cannot work. Keyed off the error text, so it
-          // applies to any provider that surfaces the same "no resumable" failure.
-          var errText = errorEl ? (errorEl.textContent || '') : '';
-          if (errText.indexOf('no resumable workspace state') !== -1) {
-            titleEl.textContent = 'Workspace cannot be recovered';
-            messageEl.textContent =
-              'This workspace was terminated and has no saved state to restore. '
-              + 'Recreate the workspace to continue.';
-            show(spinnerEl, false);
-            show(errorEl, true);
-            show(hostBtn, false);
-            return;
-          }
           titleEl.textContent = 'Workspace unresponsive';
           messageEl.textContent =
             'This workspace needs a restart to recover. In-progress work in all agents will be '

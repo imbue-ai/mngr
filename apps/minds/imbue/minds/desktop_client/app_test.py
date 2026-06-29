@@ -1,9 +1,7 @@
 from pathlib import Path
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.minds.desktop_client.app import _is_modal_workspace
 from imbue.minds.desktop_client.app import _run_restart_sequence
-from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
@@ -11,19 +9,13 @@ from imbue.mngr.primitives import AgentId
 
 
 class _FakeResolver(StaticBackendResolver):
-    """StaticBackendResolver that returns a fixed system-services agent id and an
-    optional provider name (the two resolver methods the restart worker uses)."""
+    """StaticBackendResolver that returns a fixed system-services agent id (the
+    resolver method the restart worker uses)."""
 
     services_agent_id: AgentId
-    provider_name: str | None = None
 
     def get_system_services_agent_id(self, workspace_agent_id: AgentId) -> AgentId | None:
         return self.services_agent_id
-
-    def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
-        if self.provider_name is None:
-            return None
-        return AgentDisplayInfo(agent_name="ws", host_id="h", provider_name=self.provider_name)
 
 
 def _write_fake_mngr(tmp_path: Path, stop_host_stderr: str) -> str:
@@ -82,21 +74,3 @@ def test_run_restart_sequence_still_fails_on_other_stop_error(tmp_path: Path) ->
     """A genuine stop failure (not the unsupported-shutdown signal) still fails the restart."""
     tracker, workspace_id = _run(tmp_path, "some unrelated stop failure")
     assert tracker.get_health(workspace_id) == AgentHealth.RESTART_FAILED
-
-
-def test_is_modal_workspace_true_for_modal() -> None:
-    """A workspace whose discovery provider is 'modal' is treated as Modal (longer restart budget)."""
-    resolver = _FakeResolver(url_by_agent_and_service={}, services_agent_id=AgentId.generate(), provider_name="modal")
-    assert _is_modal_workspace(resolver, AgentId.generate()) is True
-
-
-def test_is_modal_workspace_false_for_other_provider() -> None:
-    """Non-Modal providers keep the fast default restart budget."""
-    resolver = _FakeResolver(url_by_agent_and_service={}, services_agent_id=AgentId.generate(), provider_name="docker")
-    assert _is_modal_workspace(resolver, AgentId.generate()) is False
-
-
-def test_is_modal_workspace_false_for_unknown_agent() -> None:
-    """An agent with no discovery display info is treated as non-Modal."""
-    resolver = _FakeResolver(url_by_agent_and_service={}, services_agent_id=AgentId.generate())
-    assert _is_modal_workspace(resolver, AgentId.generate()) is False

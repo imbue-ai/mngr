@@ -252,7 +252,7 @@ def _ensure_mngr_settings(root_name: str) -> None:
         recursive_plugin = plugins.get("recursive", {})
         default_imbue_cloud = providers.get(_IMBUE_CLOUD_BACKEND_NAME, {})
         default_aws = providers.get(_AWS_BACKEND_NAME, {})
-        modal_direct = providers.get(_MODAL_DIRECT_PROVIDER_NAME, {})
+        modal_provider = providers.get(_MODAL_PROVIDER_NAME, {})
         if (
             recursive_plugin.get("enabled") is False
             and "ssh" not in providers
@@ -266,9 +266,9 @@ def _ensure_mngr_settings(root_name: str) -> None:
             # check matters: an older build wrote is_persistent=false, which makes
             # Modal create an ephemeral app that nukes the sandbox the moment
             # `mngr create` exits -- this catches + overwrites that stale value.
-            and modal_direct.get("mode") == _MODAL_MODE_DIRECT
-            and modal_direct.get("is_enabled") is True
-            and modal_direct.get("is_persistent") is True
+            and modal_provider.get("mode") == _MODAL_MODE_DIRECT
+            and modal_provider.get("is_enabled") is True
+            and modal_provider.get("is_persistent") is True
         ):
             # Already in the desired shape -- recursive disabled, no stale
             # ssh provider section, default imbue_cloud + aws instances
@@ -318,7 +318,7 @@ def _ensure_mngr_settings(root_name: str) -> None:
 
     # ``[providers.modal]`` (DIRECT) for the "Modal (1-day ephemeral) - Direct"
     # compute option. Always written; uses the local Modal token at create time.
-    providers_section[_MODAL_DIRECT_PROVIDER_NAME] = _build_modal_direct_provider_block()
+    providers_section[_MODAL_PROVIDER_NAME] = _build_modal_provider_block()
 
     plugins_section = doc.setdefault("plugins", tomlkit.table())
     recursive_block = tomlkit.table()
@@ -564,11 +564,11 @@ _AWS_PROVIDER_NAME_PREFIX: Final[str] = "aws-"
 # unavailable during discovery. Sizing (2 CPU / 4 GB) and the 24h sandbox timeout
 # come from the ModalProviderConfig defaults; only ``is_persistent`` is forced.
 _MODAL_BACKEND_NAME: Final[str] = "modal"
-_MODAL_DIRECT_PROVIDER_NAME: Final[str] = "modal"
+_MODAL_PROVIDER_NAME: Final[str] = "modal"
 _MODAL_MODE_DIRECT: Final[str] = "DIRECT"
 
 
-def _build_modal_direct_provider_block() -> Table:
+def _build_modal_provider_block() -> Table:
     """Build the ``[providers.modal]`` block (DIRECT mode).
 
     ``is_persistent=True`` is set EXPLICITLY (not inherited): each ``mngr create``

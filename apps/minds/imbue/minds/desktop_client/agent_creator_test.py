@@ -257,10 +257,10 @@ def test_build_mngr_create_command_forwards_region_for_imbue_cloud() -> None:
     assert "region=US-WEST-OR" in command
 
 
-def test_build_mngr_create_command_modal_direct_targets_modal_provider() -> None:
-    """Modal Direct addresses the ``modal`` provider instance (local-token mode)."""
+def test_build_mngr_create_command_modal_targets_modal_provider() -> None:
+    """Modal addresses the ``modal`` provider instance (local-token mode)."""
     command = _build_mngr_create_command(
-        launch_mode=LaunchMode.MODAL_DIRECT,
+        launch_mode=LaunchMode.MODAL,
         host_name=HostName("hello"),
     )
     # Exact list-element match so it can't be confused with ``modal_proxied``.

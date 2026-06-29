@@ -591,7 +591,7 @@ def _build_mngr_create_command(
                 raise MngrCommandError("IMBUE_CLOUD mode requires imbue_cloud_account")
             slug = _slugify_account(imbue_cloud_account)
             address = f"{_DEFAULT_AGENT_NAME}@{host_name}.imbue_cloud_{slug}"
-        case LaunchMode.MODAL_DIRECT:
+        case LaunchMode.MODAL:
             # The ``modal`` provider instance talks to Modal with the local token
             # (``modal token new``).
             address = f"{_DEFAULT_AGENT_NAME}@{host_name}.modal"
@@ -723,7 +723,7 @@ def _build_mngr_create_command(
             # "no capacity in <region>" error if none is available there.
             if region:
                 mngr_command.extend(["-b", f"region={region}"])
-        case LaunchMode.MODAL_DIRECT:
+        case LaunchMode.MODAL:
             # Same remote shape as vultr/aws: the ``main`` + ``modal`` templates
             # run the provisioning chain over SSH on the freshly-created sandbox.
             mngr_command.extend(["--new-host", "--template", "main", "--template", "modal"])

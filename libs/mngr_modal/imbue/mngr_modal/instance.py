@@ -100,7 +100,6 @@ from imbue.mngr.providers.ssh_host_setup import parse_warnings_from_output
 from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.errors import ModalMngrError
 from imbue.mngr_modal.errors import ModalSandboxTimeoutMngrError
-from imbue.mngr_modal.errors import NoResumableSnapshotModalMngrError
 from imbue.mngr_modal.errors import NoSnapshotsModalMngrError
 from imbue.mngr_modal.routes.deployment import deploy_function
 from imbue.mngr_modal.routes.deployment import get_function_url
@@ -153,29 +152,6 @@ MODAL_VOLUME_NAME_MAX_LENGTH: Final[int] = 64
 
 # Fixed namespace for deterministic VolumeId derivation from Modal volume names.
 _MODAL_VOLUME_ID_NAMESPACE: Final[uuid.UUID] = uuid.UUID("c8f1a2b3-d4e5-6789-abcd-ef0123456789")
-
-# Snapshot names used by the modal provider. The "initial" snapshot is captured
-# right after provisioning (before the agent runs), so it carries no workspace
-# state; "stop" is captured on graceful stop/pause and carries the user's work.
-# Auto-restart must skip the bare "initial" snapshot or it would spin a sandbox
-# with no agent -- an agent-less, billing orphan.
-INITIAL_SNAPSHOT_NAME: Final[str] = "initial"
-STOP_SNAPSHOT_NAME: Final[str] = "stop"
-
-
-def select_latest_resumable_snapshot(snapshots: Sequence[SnapshotRecord]) -> SnapshotRecord | None:
-    """Return the most recent *resumable* snapshot, or None if there is none.
-
-    The bare "initial" snapshot is captured right after provisioning (before the
-    agent ran), so it carries no workspace state and is never auto-selected for
-    restart -- restoring it would spin a sandbox with no agent. A host whose only
-    snapshot is the initial one therefore has no resumable state (returns None).
-    """
-    resumable = [snap for snap in snapshots if snap.name != INITIAL_SNAPSHOT_NAME]
-    if not resumable:
-        return None
-    return sorted(resumable, key=lambda snap: snap.created_at, reverse=True)[0]
-
 
 P = ParamSpec("P")
 T = TypeVar("T")
@@ -1915,7 +1891,7 @@ log "=== Shutdown script completed ==="
         if sandbox and create_snapshot:
             try:
                 with log_span("Creating snapshot before termination", host_id=str(host_id)):
-                    self.create_snapshot(host_id, SnapshotName(STOP_SNAPSHOT_NAME))
+                    self.create_snapshot(host_id, SnapshotName("stop"))
             except (MngrError, ModalProxyError) as e:
                 logger.warning("Failed to create snapshot before termination: {}", e)
 
@@ -1984,13 +1960,6 @@ log "=== Shutdown script completed ==="
 
         If neither snapshot was created (e.g., is_snapshotted_after_create=False
         and the sandbox was hard-killed), this method raises NoSnapshotsModalMngrError.
-
-        When snapshot_id is None, auto-selection skips the bare "initial" snapshot
-        (captured right after provisioning, before the agent ran): restoring it
-        would produce a sandbox with no agent -- an agent-less, billing orphan. A
-        host whose only snapshot is the initial one is not auto-resumable and
-        raises NoResumableSnapshotModalMngrError (recreate the workspace instead).
-        An explicit snapshot_id still restores whatever snapshot is named.
         """
         host_id = host.id if isinstance(host, HostInterface) else host
 
@@ -2028,20 +1997,21 @@ log "=== Shutdown script completed ==="
                     "Cannot restart. Create a new host instead."
                 )
 
-            # Auto-select the most recent *resumable* snapshot. The bare "initial"
-            # snapshot carries no workspace state; auto-restoring it would spin a
-            # sandbox with no agent -- an agent-less, billing orphan. (An explicit
-            # snapshot_id can still restore the initial snapshot.)
-            selected_snapshot = select_latest_resumable_snapshot(host_record.certified_host_data.snapshots)
-            if selected_snapshot is None:
-                # NOTE: the substring "no resumable workspace state" is matched by minds
-                # (desktop_client/app.py::_NO_RESUMABLE_SNAPSHOT_ERROR_SIGNAL) to surface a
-                # "recreate the workspace" reason -- keep them in sync if you reword this.
-                raise NoResumableSnapshotModalMngrError(
+            # Auto-select the most recent snapshot, skipping the bare "initial" one
+            # (captured right after provisioning, before the agent ran): auto-restoring
+            # it would spin a sandbox with no agent. An explicit snapshot_id can still
+            # name the initial snapshot.
+            resumable_snapshots = sorted(
+                (snap for snap in host_record.certified_host_data.snapshots if snap.name != "initial"),
+                key=lambda snap: snap.created_at,
+                reverse=True,
+            )
+            if not resumable_snapshots:
+                raise NoSnapshotsModalMngrError(
                     f"Modal sandbox {host_id} has only its initial snapshot and no resumable "
-                    "workspace state. Recreate the workspace instead of restarting it."
+                    "state. Create a new host instead."
                 )
-            snapshot_id = SnapshotId(selected_snapshot.id)
+            snapshot_id = SnapshotId(resumable_snapshots[0].id)
             logger.info("Using most recent resumable snapshot for restart", snapshot_id=str(snapshot_id))
 
         # Load host record from volume
@@ -2057,17 +2027,6 @@ log "=== Shutdown script completed ==="
 
         if snapshot_data is None:
             raise SnapshotNotFoundError(self.name, snapshot_id)
-
-        # An explicit snapshot_id can name the bare "initial" snapshot (captured right
-        # after provisioning, before the agent ran). The auto-select path refuses it via
-        # select_latest_resumable_snapshot, but the explicit path does not, so warn that
-        # the resulting sandbox is stateless (no agent, no workspace state).
-        if snapshot_data.name == INITIAL_SNAPSHOT_NAME:
-            logger.warning(
-                "Restoring host {} from its bare 'initial' snapshot: this produces a stateless "
-                "sandbox with no agent or workspace state.",
-                host_id,
-            )
 
         # The snapshot id is the Modal image ID
         modal_image_id = snapshot_data.id
@@ -3080,7 +3039,7 @@ log "=== Shutdown script completed ==="
         is True, ensuring the host can be restarted after being stopped.
         The initial state after SSH setup is captured as the "initial" snapshot.
         """
-        return self._record_snapshot(sandbox, host_id, SnapshotName(INITIAL_SNAPSHOT_NAME))
+        return self._record_snapshot(sandbox, host_id, SnapshotName("initial"))
 
     @handle_modal_auth_error
     def create_snapshot(

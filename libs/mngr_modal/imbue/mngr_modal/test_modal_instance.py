@@ -16,7 +16,6 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.utils.polling import wait_for
-from imbue.mngr_modal.errors import NoResumableSnapshotModalMngrError
 from imbue.mngr_modal.errors import NoSnapshotsModalMngrError
 from imbue.mngr_modal.instance import ModalProviderInstance
 from imbue.mngr_modal.volume import ModalVolume
@@ -442,7 +441,7 @@ def test_auto_restart_after_hard_kill_with_only_initial_snapshot_is_refused(
     is_snapshotted_after_create=True, then a hard kill (terminate the sandbox
     without a graceful stop) leaves only the "initial" snapshot. Auto-restarting
     from it would produce a sandbox with no agent -- an agent-less, billing
-    orphan -- so start_host (no snapshot_id) raises NoResumableSnapshotModalMngrError.
+    orphan -- so start_host (no snapshot_id) raises NoSnapshotsModalMngrError.
     An explicit snapshot_id can still restore the initial snapshot.
     """
     host = None
@@ -468,7 +467,7 @@ def test_auto_restart_after_hard_kill_with_only_initial_snapshot_is_refused(
         initial_snapshot_provider._uncache_sandbox(host_id, host_name)
 
         # Auto-restart must refuse the bare initial-only snapshot (no resumable state).
-        with pytest.raises(NoResumableSnapshotModalMngrError):
+        with pytest.raises(NoSnapshotsModalMngrError):
             initial_snapshot_provider.start_host(host_id)
 
         # But an explicit snapshot_id can still restore the initial snapshot.
