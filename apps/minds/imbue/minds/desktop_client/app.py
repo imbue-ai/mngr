@@ -70,6 +70,7 @@ from imbue.minds.desktop_client.destroying import start_destroy
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
+from imbue.minds.desktop_client.assist_chat import spawn_assist_chat
 from imbue.minds.desktop_client.help_modal_requests import OpenHelpRequest
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
@@ -166,6 +167,7 @@ from imbue.minds.primitives import OutputFormat
 from imbue.minds.primitives import ServiceName
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.telegram.setup import TelegramSetupStatus
+from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.mngr.api.discovery_events import DISCOVERY_STREAM_POLL_INTERVAL_SECONDS
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.primitives import AgentId
@@ -585,6 +587,51 @@ def _handle_help_report() -> Response:
         content=json.dumps({"ok": True, "event_id": event_id}),
         media_type="application/json",
     )
+
+
+def _handle_help_assist() -> Response:
+    """Spawn an in-workspace ``/assist`` chat to help with a problem (POST /help/assist).
+
+    Only valid when the help flow was opened from a loaded workspace: the body carries that
+    workspace's agent id and the user's description. The desktop app runs ``mngr create`` inside that
+    workspace's container (via ``mngr exec``) to spawn a new chat seeded with ``/assist <description>``;
+    the system interface auto-opens its tab. Returns as soon as the spawn is dispatched -- the chat
+    appears asynchronously.
+    """
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return make_response(
+            status_code=400, content='{"error": "Request body must be a JSON object"}', media_type="application/json"
+        )
+    description = str(body.get("description", "")).strip()
+    if not description:
+        return make_response(
+            status_code=400, content='{"error": "A description is required"}', media_type="application/json"
+        )
+    workspace_agent_id_raw = str(body.get("workspace_agent_id", "")).strip()
+    if not workspace_agent_id_raw:
+        return make_response(
+            status_code=400,
+            content='{"error": "Agent help is only available inside a workspace"}',
+            media_type="application/json",
+        )
+    try:
+        workspace_agent_id = AgentId(workspace_agent_id_raw)
+    except ValueError:
+        return make_response(
+            status_code=400, content='{"error": "Invalid workspace_agent_id"}', media_type="application/json"
+        )
+
+    state = get_state()
+    workspace_name = state.backend_resolver.get_workspace_name(workspace_agent_id)
+    spawn_assist_chat(
+        mngr_caller=get_default_mngr_caller(),
+        concurrency_group=state.root_concurrency_group,
+        workspace_agent_id=workspace_agent_id,
+        workspace_name=workspace_name,
+        description=description,
+    )
+    return make_response(status_code=200, content=json.dumps({"ok": True}), media_type="application/json")
 
 
 def _existing_workspace_host_names(backend_resolver: BackendResolverInterface) -> set[str]:
@@ -4529,6 +4576,7 @@ def create_desktop_client(
     app.add_url_rule("/_chrome/error-reporting", view_func=_handle_error_reporting_settings, methods=["POST"])
     app.add_url_rule("/help", view_func=_handle_help_page)
     app.add_url_rule("/help/report", view_func=_handle_help_report, methods=["POST"])
+    app.add_url_rule("/help/assist", view_func=_handle_help_assist, methods=["POST"])
     app.add_url_rule("/welcome", view_func=_handle_welcome_page)
     app.add_url_rule("/login", view_func=_handle_login)
     app.add_url_rule("/authenticate", view_func=_handle_authenticate)

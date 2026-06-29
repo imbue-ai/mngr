@@ -2277,6 +2277,29 @@ def test_help_page_renders_report_option(tmp_path: Path) -> None:
     assert "disabled" in agent_radio
 
 
+def test_help_page_enables_agent_option_in_a_workspace(tmp_path: Path) -> None:
+    """Opened from a loaded workspace, the agent-help option is enabled and the default choice."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get(f"/help?workspace={AgentId()}")
+    assert response.status_code == 200
+    agent_radio = response.text.split('value="agent"')[1].split(">")[0]
+    assert "disabled" not in agent_radio
+    assert "checked" in agent_radio
+
+
+def test_help_assist_requires_a_workspace(tmp_path: Path) -> None:
+    """Agent help is only available inside a workspace, so a request without one is rejected."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.post("/help/assist", json={"description": "it broke"})
+    assert response.status_code == 400
+
+
+def test_help_assist_requires_a_description(tmp_path: Path) -> None:
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.post("/help/assist", json={"description": "  ", "workspace_agent_id": str(AgentId())})
+    assert response.status_code == 400
+
+
 def test_help_page_prefills_description_from_query(tmp_path: Path) -> None:
     """When an /assist agent asks the app to open the modal, the description arrives pre-filled."""
     client, _ = _create_test_client_with_stores(tmp_path)

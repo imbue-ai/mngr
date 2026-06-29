@@ -4,11 +4,15 @@
   into the content frame as a fallback in browser mode), so the body is transparent
   and a dim backdrop reveals what's behind it -- matching the inbox modal.
 
-  Two options are offered: "have an agent help" (disabled for now) and "report a bug
-  to Imbue" (the active path). Submitting POSTs the description plus the chosen
-  diagnostics to /help/report, which collects state and sends a manually-tagged
-  Sentry report; the response carries the Sentry ``event_id`` (or null when Sentry is
-  inactive), shown in the confirmation so the user can quote it. ``include_logs_setting``
+  Two options are offered: "have an agent help" and "report a bug to Imbue". Agent
+  help is available (and the default) only when opened from a loaded workspace --
+  ``workspace_agent_id`` is set; submitting POSTs the description to /help/assist,
+  which spawns an ``/assist`` chat in that workspace. Report mode POSTs the
+  description plus the chosen diagnostics to /help/report, which collects state and
+  sends a manually-tagged Sentry report; the response carries the Sentry ``event_id``
+  (or null when Sentry is inactive), shown in the confirmation so the user can quote
+  it. The report diagnostics are hidden in agent mode (the agent gathers its own
+  context). ``include_logs_setting``
   is the persistent include-logs preference: when on, logs are always attached and the
   one-off checkbox is hidden. ``workspace_agent_id`` scopes the optional workspace
   details to the workspace the help flow was opened from. ``description`` pre-fills the
@@ -63,11 +67,69 @@
     var status = document.getElementById("help-status");
     var submit = document.getElementById("help-submit");
 
+    // The two modes differ in what the submit button does and which options are
+    // shown: agent help spawns an /assist chat (the agent gathers its own
+    // context, so the report diagnostics are hidden), while report sends a bug
+    // report with the chosen diagnostics.
+    function selectedMode() {
+      var checked = document.querySelector('input[name="help-mode"]:checked');
+      return checked ? checked.value : "report";
+    }
+    function applyMode() {
+      var isAgent = selectedMode() === "agent";
+      var reportOptions = document.getElementById("help-report-options");
+      if (reportOptions) reportOptions.classList.toggle("hidden", isAgent);
+      submit.textContent = isAgent ? "Start agent" : "Send report";
+    }
+    Array.prototype.forEach.call(document.querySelectorAll('input[name="help-mode"]'), function (radio) {
+      radio.addEventListener("change", applyMode);
+    });
+    applyMode();
+
+    function showAgentStarted() {
+      document.getElementById("help-sent-title").textContent = "On it";
+      document.getElementById("help-sent-body").textContent =
+        "An agent is starting in this workspace to help. Watch for a new chat tab.";
+      document.getElementById("help-event-id-row").classList.add("hidden");
+      document.getElementById("help-form").classList.add("hidden");
+      document.getElementById("help-sent").classList.remove("hidden");
+    }
+
+    function submitAgentHelp(description) {
+      submit.disabled = true;
+      status.textContent = "Starting an agent to help...";
+      status.className = "type-helper text-tertiary mt-2";
+      fetch("/help/assist", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ description: description, workspace_agent_id: WORKSPACE_AGENT_ID }),
+      }).then(function (resp) {
+        return resp.json().then(function (data) { return { ok: resp.ok, data: data }; });
+      }).then(function (result) {
+        if (result.ok) {
+          showAgentStarted();
+        } else {
+          submit.disabled = false;
+          status.textContent = (result.data && result.data.error) || "Could not start an agent.";
+          status.className = "type-helper text-danger mt-2";
+        }
+      }).catch(function () {
+        submit.disabled = false;
+        status.textContent = "Network error starting the agent.";
+        status.className = "type-helper text-danger mt-2";
+      });
+    }
+
     submit.addEventListener("click", function () {
       var description = document.getElementById("help-description").value.trim();
       if (!description) {
         status.textContent = "Please describe the problem first.";
         status.className = "type-helper text-danger mt-2";
+        return;
+      }
+      if (selectedMode() === "agent") {
+        submitAgentHelp(description);
         return;
       }
       var logsBox = document.getElementById("help-include-logs");
@@ -157,15 +219,27 @@
         <p class="type-body text-primary mb-4">Seems like you're running into a problem &mdash; we can help.</p>
 
         <div class="flex flex-col gap-2 mb-4">
+          {% if workspace_agent_id %}
+          {# In a loaded workspace, agent help is available and is the default choice. #}
+          <label class="flex items-start gap-3 cursor-pointer">
+            <input type="radio" name="help-mode" value="agent" class="mt-1 shrink-0" checked>
+            <span>
+              <span class="type-body text-primary font-semibold">Have an agent help fix the problem</span>
+              <span class="block type-helper text-tertiary">Opens a new chat in this workspace that diagnoses the issue and fixes what it can.</span>
+            </span>
+          </label>
+          {% else %}
+          {# Outside a workspace, agent help is not yet available (a future phase launches a new mind). #}
           <label class="flex items-start gap-3 cursor-not-allowed opacity-50">
             <input type="radio" name="help-mode" value="agent" class="mt-1 shrink-0" disabled>
             <span>
               <span class="type-body text-primary font-semibold">Have an agent help fix the problem</span>
-              <span class="block type-helper text-tertiary">Coming soon.</span>
+              <span class="block type-helper text-tertiary">Open a workspace to use this.</span>
             </span>
           </label>
+          {% endif %}
           <label class="flex items-start gap-3 cursor-pointer">
-            <input type="radio" name="help-mode" value="report" class="mt-1 shrink-0" checked>
+            <input type="radio" name="help-mode" value="report" class="mt-1 shrink-0" {% if not workspace_agent_id %}checked{% endif %}>
             <span>
               <span class="type-body text-primary font-semibold">Report a bug to Imbue</span>
               <span class="block type-helper text-tertiary">Send us a description and diagnostics so we can investigate.</span>
@@ -178,28 +252,31 @@
                   class="w-full rounded-md border border-default bg-surface-primary p-2 type-body text-primary"
                   placeholder="Describe the problem you ran into...">{{ description }}</textarea>
 
-        <p class="type-label text-secondary mt-4 mb-2">Include with the report</p>
-        <div class="flex flex-col gap-2">
-          {% if not include_logs_setting %}
-          <label class="flex items-center gap-2 cursor-pointer">
-            <input type="checkbox" id="help-include-logs" class="shrink-0">
-            <span class="type-body text-primary">Logs</span>
-          </label>
-          {% endif %}
-          <label class="flex items-center gap-2 cursor-pointer">
-            <input type="checkbox" id="help-app-diagnostics" class="shrink-0">
-            <span class="type-body text-primary">App diagnostics (versions, accounts, workspaces, system)</span>
-          </label>
-          {% if workspace_agent_id %}
-          <label class="flex items-center gap-2 cursor-pointer">
-            <input type="checkbox" id="help-workspace-details" class="shrink-0">
-            <span class="type-body text-primary">Details about the current workspace</span>
-          </label>
-          {% endif %}
-          <label class="flex items-center gap-2 cursor-pointer">
-            <input type="checkbox" id="help-remote-access" class="shrink-0">
-            <span class="type-body text-primary">Allow Imbue to request remote access to help debug</span>
-          </label>
+        {# Report-only options. Hidden in agent-help mode, where the agent gathers its own context. #}
+        <div id="help-report-options">
+          <p class="type-label text-secondary mt-4 mb-2">Include with the report</p>
+          <div class="flex flex-col gap-2">
+            {% if not include_logs_setting %}
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" id="help-include-logs" class="shrink-0">
+              <span class="type-body text-primary">Logs</span>
+            </label>
+            {% endif %}
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" id="help-app-diagnostics" class="shrink-0">
+              <span class="type-body text-primary">App diagnostics (versions, accounts, workspaces, system)</span>
+            </label>
+            {% if workspace_agent_id %}
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" id="help-workspace-details" class="shrink-0">
+              <span class="type-body text-primary">Details about the current workspace</span>
+            </label>
+            {% endif %}
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" id="help-remote-access" class="shrink-0">
+              <span class="type-body text-primary">Allow Imbue to request remote access to help debug</span>
+            </label>
+          </div>
         </div>
 
         <Button variant="primary" block id="help-submit" extra="mt-4">Send report</Button>
@@ -207,8 +284,8 @@
       </div>
 
       <div id="help-sent" class="p-4 hidden text-center">
-        <h2 class="type-heading text-primary mb-2">Thanks!</h2>
-        <p class="type-body text-secondary mb-4">Your report was sent to Imbue.</p>
+        <h2 id="help-sent-title" class="type-heading text-primary mb-2">Thanks!</h2>
+        <p id="help-sent-body" class="type-body text-secondary mb-4">Your report was sent to Imbue.</p>
         <div id="help-event-id-row" class="hidden mb-4 text-left">
           <p class="type-label text-secondary mb-1">Report ID</p>
           <div class="flex items-center gap-2">
