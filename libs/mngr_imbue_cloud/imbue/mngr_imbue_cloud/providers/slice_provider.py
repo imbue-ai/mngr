@@ -1,12 +1,19 @@
+import base64
+import shlex
 from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import contextmanager
+from typing import Final
 
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
+from tenacity import retry
+from tenacity import retry_if_exception_type
+from tenacity import stop_after_attempt
+from tenacity import wait_exponential
 
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.host import Host
@@ -23,13 +30,21 @@ from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
+from imbue.mngr_imbue_cloud.errors import BoxImageCacheError
 from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_BOOT_DISK_GIB
+from imbue.mngr_imbue_cloud.slices.bare_metal import box_fct_cache_dir
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
+from imbue.mngr_imbue_cloud.slices.box_image_cache import BoxImageCacheInterface
+from imbue.mngr_imbue_cloud.slices.box_image_cache import TransferKey
+from imbue.mngr_imbue_cloud.slices.box_image_cache import WAIT_FOR_TAR_TIMEOUT_SECONDS
+from imbue.mngr_imbue_cloud.slices.lima_box_image_cache import LimaBoxImageCache
 from imbue.mngr_imbue_cloud.slices.lima_slice_client import LimaSliceVpsClient
 from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
 from imbue.mngr_vps.build_args import extract_git_depth
 from imbue.mngr_vps.build_args import raise_if_vps_migration_arg
 from imbue.mngr_vps.config import VpsProviderConfig
+from imbue.mngr_vps.container_setup import build_image_on_outer_from_build_args
+from imbue.mngr_vps.container_setup import run_docker
 from imbue.mngr_vps.instance import VpsProvider
 from imbue.mngr_vps.interfaces import HostRealizer
 from imbue.mngr_vps.primitives import VpsInstanceId
@@ -40,6 +55,27 @@ from imbue.mngr_vps.primitives import VpsInstanceId
 # unknown; the slice bake always passes the real region via ``slice_region``.
 _FALLBACK_SLICE_REGION: str = "lima"
 _SLICE_PLAN: str = "slice"
+
+# Conservative free-disk requirement (bytes) checked on the box before saving the
+# FCT image tar -- the box boot disk is shared, so fail early rather than fill it.
+_ESTIMATED_FCT_IMAGE_BYTES: Final[int] = 15 * 1024**3
+# Generous cap for the seeding slice's base FCT image build (the inner create budget
+# is 45 min; the build is the long pole, the Playwright derive + save the rest).
+_SEED_BASE_BUILD_TIMEOUT_SECONDS: Final[float] = 1800.0
+# The Playwright-derived image RUNs a chromium download + apt; retry transient
+# failures a few times before hard-failing the seed.
+_PLAYWRIGHT_BUILD_ATTEMPTS: Final[int] = 3
+_PLAYWRIGHT_BUILD_TIMEOUT_SECONDS: Final[float] = 900.0
+_PLAYWRIGHT_CTX_DIR: Final[str] = "/tmp/fct-playwright-ctx"
+_BUILDER_PRUNE_TIMEOUT_SECONDS: Final[float] = 120.0
+# The FCT Dockerfile relocates the built workspace here (off the /mngr volume mount)
+# before first boot; the Playwright derive runs ``uv run`` from it. This is an FCT image
+# contract -- if FCT moves it, the derive's guard fails fast with a clear message.
+_FCT_BUILD_CODE_DIR: Final[str] = "/docker_build_code"
+# Where the FCT deferred-install service writes its success marker; baking it into
+# the seeded image makes ``[program:deferred-install]`` a no-op on every loaded slice.
+_DEFERRED_INSTALL_MARKER_DIR: Final[str] = "/var/lib/minds/deferred-install"
+_DEFERRED_INSTALL_MARKER: Final[str] = f"{_DEFERRED_INSTALL_MARKER_DIR}/done.playwright"
 
 
 class SliceVpsDockerProviderConfig(VpsProviderConfig):
@@ -114,6 +150,15 @@ class SliceVpsDockerProviderConfig(VpsProviderConfig):
     )
     slice_port_range_start: int | None = Field(default=None, description="Box host-port range start (no default)")
     slice_port_range_end: int | None = Field(default=None, description="Box host-port range end (no default)")
+    fct_cache_tag: str | None = Field(
+        default=None,
+        description=(
+            "When set (production --from-tag bakes only, e.g. 'fct:minds-v0.3.2'), enable the per-box FCT "
+            "image cache: the first slice on the box builds + seeds a box-local 'docker save' tar under this "
+            "tag, and subsequent slices 'docker load' it instead of rebuilding. None disables caching "
+            "(dev --workspace-dir bakes always build)."
+        ),
+    )
 
 
 class SliceVpsDockerProvider(VpsProvider):
@@ -282,6 +327,26 @@ class SliceVpsDockerProvider(VpsProvider):
             wait_for_sshd(hostname=box, port=vm_ssh_port, timeout_seconds=self.config.ssh_connect_timeout)
 
             with self._make_outer_for_vps_ip(box) as outer:
+                # Production (--from-tag) bakes use the per-box FCT image cache: ensure the
+                # tagged image is present in the slice's dockerd (build + seed it as the first
+                # slice on the box, or docker-load the box tar), then run it as-is instead of
+                # rebuilding. Dev bakes leave fct_cache_tag None and build from the Dockerfile.
+                fct_cache_tag = self.slice_config.fct_cache_tag
+                if fct_cache_tag is not None:
+                    self._ensure_cached_image_present(
+                        outer=outer,
+                        host_id=host_id,
+                        vm_ssh_port=vm_ssh_port,
+                        image_tag=fct_cache_tag,
+                        build_args=build_args,
+                    )
+                    create_image: ImageReference | None = ImageReference(fct_cache_tag)
+                    create_build_args: Sequence[str] | None = ()
+                    is_local_image_used = True
+                else:
+                    create_image = image
+                    create_build_args = build_args
+                    is_local_image_used = False
                 host = self.create_host_on_existing_vps(
                     outer=outer,
                     host_id=host_id,
@@ -292,13 +357,14 @@ class SliceVpsDockerProvider(VpsProvider):
                     vps_host_public_key=vps_host_public_key,
                     region=region,
                     plan=_SLICE_PLAN,
-                    image=image,
+                    image=create_image,
                     tags=tags,
-                    build_args=build_args,
+                    build_args=create_build_args,
                     start_args=start_args,
                     lifecycle=lifecycle,
                     known_hosts=known_hosts,
                     authorized_keys=effective_authorized_keys,
+                    allow_local_image=is_local_image_used,
                 )
             logger.info("Slice host {} created (instance {})", name, instance_id)
             is_baked = True
@@ -310,6 +376,183 @@ class SliceVpsDockerProvider(VpsProvider):
                     self.lima_client.destroy_instance(instance_id)
                 except MngrError as cleanup_err:
                     logger.warning("Failed to clean up slice VM {}: {}", instance_id, cleanup_err)
+
+    # ------------------------------------------------------------------
+    # Per-box FCT image cache (build once per box, docker-load per slice)
+    # ------------------------------------------------------------------
+
+    def _make_box_image_cache(self) -> BoxImageCacheInterface:
+        return LimaBoxImageCache(
+            slice_client=self.lima_client, cache_dir=box_fct_cache_dir(self.slice_config.box_ssh_user)
+        )
+
+    def _ensure_cached_image_present(
+        self,
+        *,
+        outer: OuterHostInterface,
+        host_id: HostId,
+        vm_ssh_port: int,
+        image_tag: str,
+        build_args: Sequence[str] | None,
+    ) -> None:
+        """Make image_tag present in the slice's dockerd: load the box tar, or seed it as the first slice.
+
+        Block-then-load: only the build-lock holder builds + seeds; everyone else
+        waits for the tar then loads. At most two rounds, so a stale lock left by a
+        builder that died mid-seed is reclaimed (try_acquire_build_lock reclaims it)
+        rather than wedging the box's pool fill.
+        """
+        cache = self._make_box_image_cache()
+        if cache.has_tar(image_tag):
+            self._load_cached_image(cache=cache, outer=outer, vm_ssh_port=vm_ssh_port, image_tag=image_tag)
+            return
+        for _attempt in range(2):
+            if cache.try_acquire_build_lock(image_tag):
+                try:
+                    self._seed_box_image(
+                        cache=cache,
+                        outer=outer,
+                        host_id=host_id,
+                        vm_ssh_port=vm_ssh_port,
+                        image_tag=image_tag,
+                        build_args=build_args,
+                    )
+                finally:
+                    cache.release_build_lock(image_tag)
+                return
+            if cache.wait_for_tar(image_tag, timeout_seconds=WAIT_FOR_TAR_TIMEOUT_SECONDS):
+                self._load_cached_image(cache=cache, outer=outer, vm_ssh_port=vm_ssh_port, image_tag=image_tag)
+                return
+        raise BoxImageCacheError(f"timed out waiting for the box FCT image tar for {image_tag}")
+
+    def _load_cached_image(
+        self, *, cache: BoxImageCacheInterface, outer: OuterHostInterface, vm_ssh_port: int, image_tag: str
+    ) -> None:
+        logger.info("Loading FCT image {} from box tar into slice", image_tag)
+        with self._transfer_key_authorized(cache, outer) as transfer_key:
+            cache.load_image_into_slice(image_tag, vm_ssh_port=vm_ssh_port, transfer_key=transfer_key)
+        logger.info("Loaded FCT image {} from box tar", image_tag)
+
+    def _seed_box_image(
+        self,
+        *,
+        cache: BoxImageCacheInterface,
+        outer: OuterHostInterface,
+        host_id: HostId,
+        vm_ssh_port: int,
+        image_tag: str,
+        build_args: Sequence[str] | None,
+    ) -> None:
+        """Build the FCT image (+ baked Playwright) and seed the box tar; this slice runs that image too."""
+        logger.info("Building + seeding box tar {} (first slice on this box for this tag)", image_tag)
+        parsed = self._parse_build_args(build_args)
+        # Build the base FCT image via the same shared helper the realizer's build path
+        # uses (DockerRealizer._build_image_on_vps) -- so any future build preprocessing
+        # belongs in build_image_on_outer_from_build_args, not the per-caller wrapper, and
+        # is picked up here too. We pass a longer timeout than the realizer default because
+        # the FCT build is the seed's long pole.
+        base_image = build_image_on_outer_from_build_args(
+            outer,
+            self.mngr_ctx.concurrency_group,
+            host_id=host_id,
+            docker_build_args=parsed.docker_build_args,
+            git_depth=parsed.git_depth,
+            builder=self.config.builder,
+            build_timeout_seconds=_SEED_BASE_BUILD_TIMEOUT_SECONDS,
+        )
+        self._build_playwright_derived_image(outer=outer, base_image=base_image, target_tag=image_tag)
+        cache.check_free_disk(_ESTIMATED_FCT_IMAGE_BYTES)
+        with self._transfer_key_authorized(cache, outer) as transfer_key:
+            cache.save_image_from_slice(image_tag, vm_ssh_port=vm_ssh_port, transfer_key=transfer_key)
+        # Reclaim the builder slice's build-cache headroom so it matches a loading slice.
+        run_docker(outer, ["builder", "prune", "-af"], timeout_seconds=_BUILDER_PRUNE_TIMEOUT_SECONDS)
+        logger.info("Built + seeded box tar {}", image_tag)
+
+    @retry(
+        retry=retry_if_exception_type(MngrError),
+        stop=stop_after_attempt(_PLAYWRIGHT_BUILD_ATTEMPTS),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        reraise=True,
+    )
+    def _build_playwright_derived_image(self, *, outer: OuterHostInterface, base_image: str, target_tag: str) -> None:
+        """Build target_tag as base_image + a baked Playwright/Chromium layer (and the done marker).
+
+        Playwright is deliberately not in the FCT Dockerfile (it is shared with the
+        desktop Lima path); baking it cloud-side here keeps the desktop path
+        unchanged while letting every loaded slice skip the deferred install. The
+        browser cache lands in /root/.cache/ms-playwright -- outside the /mngr volume
+        and untouched by fct-seed, so it survives into every container.
+
+        The RUN first guards that the FCT build-code dir exists, so a future FCT image
+        that relocates it fails fast with a clear message instead of a confusing
+        ``cd``-not-found build failure buried in retries.
+        """
+        guard = (
+            f"test -d {_FCT_BUILD_CODE_DIR} || "
+            f"{{ echo 'FCT build-code dir {_FCT_BUILD_CODE_DIR} missing; FCT image layout changed -- "
+            "update _FCT_BUILD_CODE_DIR' >&2; exit 1; }"
+        )
+        dockerfile = (
+            f"FROM {base_image}\n"
+            f"RUN {guard} "
+            f"&& cd {_FCT_BUILD_CODE_DIR} && uv run playwright install --with-deps chromium "
+            f"&& mkdir -p {_DEFERRED_INSTALL_MARKER_DIR} && touch {_DEFERRED_INSTALL_MARKER}\n"
+        )
+        encoded_dockerfile = base64.b64encode(dockerfile.encode()).decode()
+        stage_command = (
+            f"rm -rf {_PLAYWRIGHT_CTX_DIR} && mkdir -p {_PLAYWRIGHT_CTX_DIR} && "
+            f"echo {shlex.quote(encoded_dockerfile)} | base64 -d > {_PLAYWRIGHT_CTX_DIR}/Dockerfile"
+        )
+        stage_result = outer.execute_idempotent_command(stage_command, timeout_seconds=30.0)
+        if not stage_result.success:
+            raise BoxImageCacheError(
+                f"failed to stage the Playwright Dockerfile on the slice: {stage_result.stderr.strip()}"
+            )
+        run_docker(
+            outer,
+            ["build", "-t", target_tag, "-f", f"{_PLAYWRIGHT_CTX_DIR}/Dockerfile", _PLAYWRIGHT_CTX_DIR],
+            timeout_seconds=_PLAYWRIGHT_BUILD_TIMEOUT_SECONDS,
+        )
+
+    @contextmanager
+    def _transfer_key_authorized(
+        self, cache: BoxImageCacheInterface, outer: OuterHostInterface
+    ) -> Iterator[TransferKey]:
+        """Yield a unique ephemeral transfer key authorized on the slice's VM root; tear it down after.
+
+        The box uses the key to docker save/load over its own loopback to the slice's
+        VM-root sshd. The key is destroyed (private key off the box, public key out of
+        the slice's authorized_keys) whether the transfer succeeds or fails, so no
+        standing box->slice root key survives the bake.
+        """
+        transfer_key = cache.create_transfer_key()
+        try:
+            self._authorize_transfer_key(outer, transfer_key.public_key)
+            yield transfer_key
+        finally:
+            cache.destroy_transfer_key(transfer_key)
+            self._deauthorize_transfer_key(outer, transfer_key.public_key)
+
+    def _authorize_transfer_key(self, outer: OuterHostInterface, public_key: str) -> None:
+        command = (
+            f"install -d -m 700 /root/.ssh && printf '%s\\n' {shlex.quote(public_key)} >> /root/.ssh/authorized_keys"
+        )
+        result = outer.execute_idempotent_command(command, timeout_seconds=30.0)
+        if not result.success:
+            raise BoxImageCacheError(f"failed to authorize the transfer key on the slice: {result.stderr.strip()}")
+
+    def _deauthorize_transfer_key(self, outer: OuterHostInterface, public_key: str) -> None:
+        # Best-effort: teardown runs in a finally and must not mask a prior error.
+        command = (
+            "if [ -f /root/.ssh/authorized_keys ]; then "
+            f"grep -vF {shlex.quote(public_key)} /root/.ssh/authorized_keys > /root/.ssh/authorized_keys.tmp "
+            "&& mv /root/.ssh/authorized_keys.tmp /root/.ssh/authorized_keys; fi"
+        )
+        result = outer.execute_idempotent_command(command, timeout_seconds=30.0)
+        if not result.success:
+            logger.warning(
+                "Failed to remove the transfer key from the slice authorized_keys: {}", result.stderr.strip()
+            )
 
     # ------------------------------------------------------------------
     # Per-host-port seam overrides (the bake reaches the VM via box:port)
