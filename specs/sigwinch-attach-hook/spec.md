@@ -7,6 +7,7 @@ Tracks [issue #2322](https://github.com/imbue-ai/mngr/issues/2322).
 - Today the post-attach `SIGWINCH` "redraw nudge" is sent **only** from `mngr connect`'s own SSH attach wrapper (`sigwinch_step` in `_build_ssh_activity_wrapper_script`, `libs/mngr/imbue/mngr/api/connect.py`). A raw `tmux attach`, the ttyd agent terminal, or a web-shell `tmux attach` never receives it.
 - When a client attaches at a different size than the agent's session (created at `200x50`, `window-size=latest`), the agent's TUI is resized but can be left with a stale, unpainted frame -- especially under minds' `alternate-screen off`. This visually corrupts the pane and also breaks message sending (the paste-visibility `capture-pane` fuzzy-match fails on a garbled pane).
 - The fix: move the nudge into a persistent tmux **`client-attached` hook** on the agent's session, so it fires on *every* attach (including `mngr connect`'s own). Then remove the now-redundant `sigwinch_step` from the connect path.
+- **Decided: per-session hook set at creation** (a persistent `client-attached[98]` on the agent's primary window in `_build_start_agent_shell_command`), rather than a global `set-hook -g` in the host tmux config. This matches the existing onboarding `client-attached[99]` pattern, bakes the session name in as a plain shell arg (no `#{hook_session}` resolution needed), and keeps the wiring local to session creation.
 - The hook body must run a **shipped resource script** (`run-shell "bash <path> <session>"`) rather than an inline pipeline. This is required, not just convenient: tmux performs `#{...}` format-expansion on `run-shell` arguments, which would corrupt the script's `-F '#{pane_pid}'` and `-F '#I'` formats. Putting the loop in a `.sh` file keeps all `#{...}` out of any string tmux parses.
 - The session name is passed to the script as a plain shell argument, so no `#{hook_session}` / `#{session_name}` interpolation is needed in the hook string (mirrors how the session name is already baked into `build_post_attach_sigwinch_script`).
 
@@ -82,7 +83,6 @@ Tracks [issue #2322](https://github.com/imbue-ai/mngr/issues/2322).
 
 ## Open questions
 
-- **Hook placement: per-session vs global.** Recommended: per-session persistent `client-attached[98]` at creation (baked session arg, closest to the existing onboarding `[99]` pattern, no `#{hook_session}` needed). Alternative: a single global `set-hook -g client-attached` in the host tmux config (`_create_host_tmux_config`) that covers all current + future sessions in one place but must resolve the attaching session via `#{hook_session}` and still call the shipped `.sh`. Which do we want?
 - **Canonical source of the pipeline.** Make `sigwinch_panes.sh` the single source and delete `build_post_attach_sigwinch_script`, or keep the Python builder and have the `.sh` be a thin wrapper that calls it? Avoid duplicating the pipeline in two places.
 - **Fire-ordering / race.** `sigwinch_step` used `(sleep 3; ...)` to let the window resize before nudging. Does `client-attached` reliably fire *after* the resize so no delay is needed, or should the hook body keep a short backgrounded delay? Verify against tmux behavior; prefer no sleep if safe.
 - **Manual-pin guard location.** Keep the `window-size == manual` guard inside `sigwinch_panes.sh` (recommended), or drop it and accept a harmless no-op repaint on pinned windows?
@@ -94,5 +94,5 @@ Tracks [issue #2322](https://github.com/imbue-ai/mngr/issues/2322).
 ## Assumptions made (template selection was skipped)
 
 - Used the **Default** plan template (Overview / Expected behavior / Implementation plan / Implementation phases / Testing strategy / Open questions).
-- Recommended the **per-session persistent hook + shipped resource script** approach (the issue lists this as the closest match to existing patterns) rather than the global-config hook; surfaced as the first open question.
+- Chose the **per-session persistent hook + shipped resource script** approach (confirmed by the user; closest match to the existing onboarding `client-attached[99]` pattern) rather than the global-config hook.
 - Treated this `/blueprint` invocation as "produce and commit a plan" given the standing instruction to make a best guess and proceed without blocking on questions.
