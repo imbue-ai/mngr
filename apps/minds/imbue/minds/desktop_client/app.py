@@ -546,13 +546,21 @@ def _handle_help_assist() -> Response:
 
     state = get_state()
     workspace_name = state.backend_resolver.get_workspace_name(workspace_agent_id)
-    spawn_assist_chat(
+    # Wait for the create to finish before responding so the get-help modal keeps its
+    # "starting..." state until the chat exists, rather than dismissing into a blank gap
+    # while the agent boots. The cheroot WSGI pool (50 threads) absorbs the blocking call.
+    started = spawn_assist_chat(
         mngr_caller=get_default_mngr_caller(),
-        concurrency_group=state.root_concurrency_group,
         workspace_agent_id=workspace_agent_id,
         workspace_name=workspace_name,
         description=description,
     )
+    if not started:
+        return make_response(
+            status_code=502,
+            content=json.dumps({"error": "Could not start an agent in this workspace. Please try again."}),
+            media_type="application/json",
+        )
     return make_response(status_code=200, content=json.dumps({"ok": True}), media_type="application/json")
 
 

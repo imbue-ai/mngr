@@ -17,12 +17,10 @@ the ``--message`` argument.
 
 import secrets
 import shlex
-from collections.abc import Callable
 from typing import Final
 
 from loguru import logger
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.mngr.primitives import AgentId
 
@@ -80,36 +78,21 @@ def build_assist_chat_mngr_args(
     return ["exec", "--agent", str(workspace_agent_id), inner_command]
 
 
-def _run_assist_spawn(mngr_caller: MngrCaller, args: list[str], workspace_agent_id: AgentId) -> None:
-    """Run the spawn command and log a non-zero exit.
-
-    Does not swallow exceptions from ``mngr_caller.call``; in the production background-thread
-    path ``spawn_assist_chat`` dispatches this with an ``on_failure`` hook that logs any raise.
-    """
-    result = mngr_caller.call(args, timeout=_ASSIST_SPAWN_TIMEOUT_SECONDS)
-    if result.returncode != 0:
-        logger.error(
-            "Spawning /assist chat in workspace {} exited {}: {}",
-            workspace_agent_id,
-            result.returncode,
-            result.stderr.strip(),
-        )
-
-
 def spawn_assist_chat(
     mngr_caller: MngrCaller,
-    concurrency_group: ConcurrencyGroup | None,
     workspace_agent_id: AgentId,
     workspace_name: str | None,
     description: str,
     chat_name: str | None = None,
-) -> None:
-    """Spawn the /assist chat in the background; return immediately.
+) -> bool:
+    """Spawn the /assist chat and wait for ``mngr create`` to finish; return whether it succeeded.
 
-    Dispatches on ``concurrency_group`` when provided (production); falls back to a
-    synchronous run when it is ``None`` (e.g. tests with no app concurrency group).
-    Failures are logged, not raised -- the user sees the result as the chat tab
-    appearing (or not).
+    Runs synchronously (it blocks for the duration of the inner ``mngr create``, which spawns the
+    agent + its claude process) so the caller -- the ``/help/assist`` route -- can hold the get-help
+    modal in its "starting..." state until the chat actually exists, rather than dismissing into a
+    blank several-second gap before the tab appears. The desktop server is a 50-thread WSGI pool, so
+    blocking one request thread for the create does not stall other requests or the SSE streams. A
+    non-zero exit is logged and surfaced to the caller as ``False`` so the modal can show an error.
     """
     resolved_chat_name = chat_name if chat_name is not None else generate_assist_chat_name()
     args = build_assist_chat_mngr_args(
@@ -118,16 +101,13 @@ def spawn_assist_chat(
         description=description,
         chat_name=resolved_chat_name,
     )
-    on_failure: Callable[[BaseException], None] = lambda exc: logger.opt(exception=True).error(
-        "Failed to spawn /assist chat in workspace {}: {}", workspace_agent_id, exc
-    )
-    if concurrency_group is None:
-        _run_assist_spawn(mngr_caller, args, workspace_agent_id)
-        return
-    concurrency_group.start_new_thread(
-        _run_assist_spawn,
-        args=(mngr_caller, args, workspace_agent_id),
-        name="assist-chat-spawn",
-        is_checked=False,
-        on_failure=on_failure,
-    )
+    result = mngr_caller.call(args, timeout=_ASSIST_SPAWN_TIMEOUT_SECONDS)
+    if result.returncode != 0:
+        logger.error(
+            "Spawning /assist chat in workspace {} exited {}: {}",
+            workspace_agent_id,
+            result.returncode,
+            result.stderr.strip(),
+        )
+        return False
+    return True

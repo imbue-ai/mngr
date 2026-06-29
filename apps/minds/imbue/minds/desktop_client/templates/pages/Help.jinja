@@ -87,9 +87,9 @@
     applyMode();
 
     function showAgentStarted() {
-      document.getElementById("help-sent-title").textContent = "On it";
+      document.getElementById("help-sent-title").textContent = "Agent ready";
       document.getElementById("help-sent-body").textContent =
-        "An agent is starting in this workspace to help. Watch for a new chat tab.";
+        "Your agent is in a new chat tab in this workspace.";
       document.getElementById("help-event-id-row").classList.add("hidden");
       document.getElementById("help-form").classList.add("hidden");
       document.getElementById("help-sent").classList.remove("hidden");
@@ -97,7 +97,9 @@
 
     function submitAgentHelp(description) {
       submit.disabled = true;
-      status.textContent = "Starting an agent to help...";
+      // The request blocks until the chat is created (~15s), so the spinner stays up the
+      // whole time rather than dismissing into a blank gap before the tab appears.
+      status.textContent = "Starting an agent to help. This can take a few seconds…";
       status.className = "type-helper text-tertiary mt-2";
       fetch("/help/assist", {
         method: "POST",
