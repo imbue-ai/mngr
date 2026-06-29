@@ -10,6 +10,9 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 def test_invalid_provider_fails(e2e: E2eSession) -> None:
+    """`mngr create` with an unknown --provider fails, names the offending provider in
+    stderr, and registers no agent (a failed create leaves nothing half-created behind).
+    """
     # A valid agent type is supplied so the failure is genuinely attributable to
     # the unknown provider, not to an unrelated missing-type error that would be
     # raised first.
@@ -36,6 +39,11 @@ def test_invalid_provider_fails(e2e: E2eSession) -> None:
 # the client waits on a connection. Allow extra headroom for the verification.
 @pytest.mark.timeout(120)
 def test_create_duplicate_name_fails(e2e: E2eSession) -> None:
+    """Creating a second agent with an already-used name fails with an "already exists"
+    error, and the duplicate leaves the original untouched: exactly one agent of that name
+    remains and it is still running its ORIGINAL command (not the duplicate's), proving the
+    rejection neither clobbered nor restarted the existing agent.
+    """
     expect(
         e2e.run(
             "mngr create my-task --type command --no-ensure-clean --no-connect -- sleep 100099",
@@ -73,6 +81,10 @@ def test_create_duplicate_name_fails(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_create_with_dirty_tree_fails(e2e: E2eSession) -> None:
+    """`mngr create` without --no-ensure-clean in a dirty git tree aborts at the clean-tree
+    guard: stderr cites the uncommitted changes and points to --no-ensure-clean, and the
+    abort happens before any host is resolved so no agent is registered.
+    """
     expect(
         e2e.run(
             "echo 'dirty' > dirty.txt && git add dirty.txt",

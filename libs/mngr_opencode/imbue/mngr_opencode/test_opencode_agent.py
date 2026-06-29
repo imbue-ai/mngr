@@ -134,6 +134,19 @@ class _OpenCodeReleaseProfile(AgentReleaseProfile):
 @pytest.mark.rsync
 @pytest.mark.timeout(1500)
 def test_opencode_agent_full_lifecycle(tmp_path: Path) -> None:
+    """End-to-end: the opencode agent survives the full shared agent release lifecycle.
+
+    Drives the real ``mngr`` CLI against the real ``opencode`` binary (free OpenCode-Zen
+    model, no API key) through create -> WAITING -> message -> transcript -> stop/start
+    resume -> destroy -> adopt-from-preserved, via the shared
+    ``run_agent_release_lifecycle`` arc parameterized by ``_OpenCodeReleaseProfile``. The
+    arc's assertions confirm opencode actually performs each step: the agent reaches
+    WAITING, a forced bash tool call produces transcript output, a stop/start cycle
+    resumes the same session, and after destroy the preserved ``opencode.db`` is adopted
+    into a fresh worktree where the agent recalls a pre-destroy secret -- so the test
+    fails (not no-ops) if seeding, transcript capture, resume, or session preservation
+    breaks. Token-usage assertion is off because opencode's free model reports none.
+    """
     run_agent_release_lifecycle(_OpenCodeReleaseProfile(), tmp_path)
 
 

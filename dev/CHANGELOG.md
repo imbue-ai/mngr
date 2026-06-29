@@ -4,6 +4,63 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-06-28
+
+### Added
+
+- Added: Per-run minds CI environment in the snapshot test pipeline. New `build-minds-ci-env` job deploys a `ci-*` env and publishes its per-run secrets to Vault; `test-minds-snapshot` runs `minds_services` live tests (login + mint LiteLLM key + live LLM call) against it; `destroy-minds-ci-env` (`always()`) tears it down, with a parallel `cleanup-minds-ci-envs` backstop sweeping leaked `ci-*` envs older than 1 hour. New Vault-OIDC `minds_ci_env_gh` / `minds_ci_test_gh` roles. Opt-in: standing up a `ci-*` env requires `workflow_dispatch` with `run_minds_release_tests=true`; normal pushes still run `minds_snapshot_resume` (needs only the snapshot image).
+- Added: Manual release-tier CI job `test-minds-release` (same `run_minds_release_tests` switch) runs the heavy `minds_deployment` tests (deploy / rollback / round-trip), each minting and destroying its own ephemeral env.
+- Added: `just minds-test-electron-flow` recipe drives the full minds Electron workspace lifecycle end-to-end under `xvfb` (create local Docker workspace -> chat round-trip -> terminal -> home -> v1 destroy), complementing the create-only `just minds-test-electron`.
+- Added: `openapi-spec-validator` in the root dev dependency group; used to validate the minds `GET /api/schema` OpenAPI document in tests (test-only, not shipped in the minds wheel).
+- Added: Design and blueprint documents — `blueprint/accelerate-slice-bake/plan-accelerate-slice-bake.md`, `blueprint/minds-workspace-api/plan-minds-workspace-api.md` + `HANDOFF.md`, `blueprint/minds-api-spectree/plan-minds-api-spectree.md`, and `blueprint/minds-api-route-consolidation/plan-minds-api-route-consolidation.md`.
+
+### Changed
+
+- Changed: Removed the dedicated `test-docker-electron` CI job and consolidated all Electron e2e coverage into `test-minds-snapshot`. The Electron create+chat test now carries the `minds_snapshot_resume` mark and runs in the snapshot offload sandbox, reusing the snapshot image's already-baked Electron/Playwright/Xvfb toolchain instead of cold-installing them on every push.
+- Changed: Snapshot-test offload pin unified to `0.9.10`.
+- Changed: Pinned the changelog-consolidation schedule's mngr `user_id` to a committed constant (`USER_ID` in `scripts/changelog_schedule_utils.py`, exposed via `--print-user-id`). `changelog_deploy.sh` and the `changelog-trigger` justfile recipe now export it as `MNGR_USER_ID`, so deploys and on-demand triggers always target the same Modal environment regardless of which machine runs them. Previously the environment name depended on a random per-profile `user_id`, so redeploying from a fresh checkout would silently fork the schedule into a new, empty environment.
+- Changed: `just minds-start` no longer takes an `agent_name` argument or sets `MINDS_WORKSPACE_NAME`. Its parameters are now `branch` and `fct` (positional, in that order). The workspace gets an automatic `mind-N` name unless typed into the create form's advanced "Name" field — type a name there if you want a predictable handle for `just propagate-changes <name>` / `just forward-system-interface <name>`.
+
+### Fixed
+
+- Fixed: `just sync-vendor-mngr` now resolves the forever-claude-template path to an absolute path before use, so passing a relative path no longer breaks the recipe's second `cd`.
+
+## 2026-06-26
+
+### Added
+
+- Added: Fast, realistic minds-workspace **snapshot test suite** wired into CI as two jobs. `build-minds-snapshot` builds a fresh Modal `vm_runtime` snapshot image (Docker-in-Docker + a real Electron-created forever-claude-template workspace, `docker stop`ped) once per run; `test-minds-snapshot` boots from that image via offload's `--override-image-id` and runs the `minds_snapshot_resume` suite. Both run on every PR (blocking), skip fork PRs, and have a one-click `DISABLE_MINDS_SNAPSHOT_CI` kill switch. Adds `scripts/snapshot_minds_e2e_state.py`, `scripts/cleanup_modal_snapshot_images.py`, `offload-modal-minds-snapshot.toml`, and `just test-offload-minds-snapshot <image-id>`.
+- Added: CI secrets now use the public `imbue-ai/use-vault-secrets` action (pinned by SHA); only `test-minds-snapshot` needs a secret (`ANTHROPIC_API_KEY` from Vault via OIDC).
+- Added: Spec `specs/docstring-anchored-tmr.md` describing the overall move from tutorial-block-anchored to docstring-anchored TMR scope.
+- Added: Blueprint plan `blueprint/minds-google-oauth-fallback/` for inserting a Minds-owned Google OAuth attempt between the credential-validity check and the self-setup browser flow.
+
+### Changed
+
+- Changed: Bumped the offload CI pin in `.github/workflows/ci.yml` from `0.9.9` to `0.9.10` (cargo cache key, version check, and `cargo install` invocation updated to match).
+- Changed: TMR workflow (`.github/workflows/tmr.yml`, including the daily scheduled run) now defaults to all of mngr's release tests (`libs/mngr` with `-m "release and not docker and not docker_sdk"`) rather than only the e2e tutorial subset. Docker-marked release tests are excluded because they need a real Docker daemon and run on a GitHub runner in `release-tests.yml`, not on the Modal hosts TMR provisions.
+- Changed: `scripts/tutorial_matcher.py` now reads the tutorial block from each test function's docstring (under a `Tutorial block:` section) instead of from a `write_tutorial_block(...)` call. The `sync-tutorial-to-e2e-tests` skill now emits the docstring format (verbatim `Tutorial block:` section plus a `Scope:` section) and crystallizes the implicit requirements of each block's commands into the scope.
+- Changed: Bash strict-mode ratchet (`test_meta_ratchets.py::test_prevent_bash_without_strict_mode`) now relies on `find_bash_scripts_without_strict_mode` skipping `.minds/template/` (declarative secret-schema templates, not runnable scripts). Recorded snapshot lowered from 17 to 11, pinned to the offload-CI count.
+- Changed: `minds-launch-to-msg.yml` `macos_launch` job now checks out the trigger ref for the e2e harness (playwright spec + fixtures), matching `launch_to_msg`, instead of pinning the checkout to `commit_sha`. Previously `macos_launch` silently tested a stale harness while `launch_to_msg` picked up harness fixes on the dispatched branch. The binary under test is still pinned to `commit_sha` via the build artifact.
+- Changed: `minds-launch-to-msg.yml` post-test cleanup step no longer swallows the reset script's exit code with `|| true`. The reset script now verifies the runner reached a clean state (no leaked Lima VM / `~/.minds` / app) after its best-effort cleanup and exits non-zero otherwise, so a cleanup failure that would silently rot the self-hosted runner now fails the job.
+
+### Fixed
+
+- Fixed: `scripts/remove_old_flat_vault_secrets.py` now treats a soft-deleted Vault secret (one whose latest version has a `deletion_time`, so `vault kv get` returns a null `data.data` rather than exit-2) as absent and skips it, instead of crashing the run.
+
+## 2026-06-25
+
+### Added
+
+- Added: Blueprint planning document for the minds error-reporting & "get help" work (`blueprint/minds-error-reporting-help/`), scoping the full four-phase design (phases 1-2 implemented in this run; 3-4 will follow as stacked PRs).
+- Added: Design doc `specs/tmr-bounded-convergence-and-normalization.md` for improving the e2e tests TMR generates — tutorial-anchored convergence with deletion as a first-class action, plus a suite-level normalization stage in the reducer and a FIXME-resolution/escalation lifecycle.
+- Added: Design blueprint `blueprint/gateway-agent-id-validation/` documenting the decision to reject malformed permission-request `agent_id`s at the latchkey gateway instead of only guarding against them on the consumer side.
+
+### Changed
+
+- Changed: Bumped the offload CI pin in `.github/workflows/ci.yml` from `0.9.7` to `0.9.9` (cargo cache key, version check, and `cargo install` invocation updated to match).
+- Changed: `just minds-start` no longer defaults the workspace name to `mindtest`. Its `agent_name` argument defaults to empty, so a plain `just minds-start` leaves `MINDS_WORKSPACE_NAME` unset and the create form generates an automatic `mind-N` name — matching what a shipped binary does. Pass a name explicitly to pin it (a collision now errors at create time rather than being auto-suffixed).
+- Changed: Nightly changelog consolidation automation now merges its PR immediately instead of leaving it for a human to review and merge. The in-run accuracy review remains the quality gate.
+
 ## 2026-06-24
 
 ### Added

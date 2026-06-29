@@ -157,6 +157,56 @@
       user-select: text;
     }
     .details.visible { display: block; }
+    /* One-shot report outcome (shown when the backend is down and we report the
+       on-screen error directly via the main-process Sentry). */
+    #report-result {
+      display: none;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 16px;
+      font-size: 13px;
+      color: rgba(0, 0, 0, 0.7);
+      -webkit-app-region: no-drag;
+    }
+    #report-result.visible { display: flex; }
+    #report-result code {
+      font-family: "SF Mono", "Fira Code", Menlo, monospace;
+      background: #f4f4f5;
+      border-radius: 4px;
+      padding: 2px 6px;
+      user-select: text;
+    }
+    #report-copy-btn {
+      background: #e4e4e7;
+      color: #000000;
+      border: none;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      padding: 4px 10px;
+      cursor: pointer;
+    }
+    #report-copy-btn:hover { background: #d4d4d8; }
+    /* Per-report "include logs" opt-in for the one-shot backend-down report. Shown
+       only when the persistent include-logs setting is off (see the report flow). */
+    #report-options {
+      display: none;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      margin-bottom: 16px;
+      font-size: 13px;
+      color: rgba(0, 0, 0, 0.7);
+      -webkit-app-region: no-drag;
+    }
+    #report-options.visible { display: flex; }
+    #report-options label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      user-select: none;
+    }
   </style>
 </head>
 <body>
@@ -173,7 +223,19 @@
     <p class="message" id="error-message">Minds stopped unexpectedly.</p>
     <div class="actions">
       <button class="btn-primary" id="retry-btn">Retry</button>
+      <button class="btn-secondary" id="report-btn">Report a bug</button>
       <button class="btn-secondary" id="log-btn">View full log</button>
+    </div>
+    <div id="report-options">
+      <label>
+        <input type="checkbox" id="report-include-logs">
+        <span>Include recent logs</span>
+      </label>
+    </div>
+    <div id="report-result">
+      <span id="report-result-text"></span>
+      <code id="report-event-id"></code>
+      <button id="report-copy-btn" type="button">Copy</button>
     </div>
     <button class="toggle-details" id="toggle-details-btn">Show details</button>
     <pre class="details" id="error-details"></pre>
@@ -191,11 +253,74 @@
       statusLine.textContent = 'Quitting…';
     }
 
+    // The latest error-details payload, retained so the report button knows whether the
+    // backend is still up (use the full /help modal) or down (one-shot main-process report).
+    var lastErrorData = null;
+
     document.getElementById('retry-btn').addEventListener('click', function() {
       if (window.minds) window.minds.retry();
     });
     document.getElementById('log-btn').addEventListener('click', function() {
       if (window.minds) window.minds.openLogFile();
+    });
+
+    var reportBtn = document.getElementById('report-btn');
+    var reportOptions = document.getElementById('report-options');
+    var reportIncludeLogs = document.getElementById('report-include-logs');
+    var reportResult = document.getElementById('report-result');
+    var reportResultText = document.getElementById('report-result-text');
+    var reportEventId = document.getElementById('report-event-id');
+    var reportCopyBtn = document.getElementById('report-copy-btn');
+
+    function showReportResult(text, eventId) {
+      reportResultText.textContent = text;
+      if (eventId) {
+        reportEventId.textContent = eventId;
+        reportEventId.style.display = '';
+        reportCopyBtn.style.display = '';
+      } else {
+        reportEventId.textContent = '';
+        reportEventId.style.display = 'none';
+        reportCopyBtn.style.display = 'none';
+      }
+      reportResult.classList.add('visible');
+    }
+
+    reportCopyBtn.addEventListener('click', function() {
+      try {
+        if (navigator.clipboard) navigator.clipboard.writeText(reportEventId.textContent);
+        reportCopyBtn.textContent = 'Copied';
+        setTimeout(function() { reportCopyBtn.textContent = 'Copy'; }, 1500);
+      } catch (e) {
+        /* ignore */
+      }
+    });
+
+    reportBtn.addEventListener('click', function() {
+      if (!window.minds) return;
+      // Backend still up (e.g. discovery-pipeline stall): open the full /help modal so the
+      // report can include logs and diagnostics. Backend down: file a one-shot report of the
+      // on-screen error via the main-process Sentry and surface the copyable event id.
+      if (lastErrorData && lastErrorData.canUseBackendReport && window.minds.toggleHelp) {
+        window.minds.toggleHelp('');
+        return;
+      }
+      reportBtn.disabled = true;
+      showReportResult('Sending report…', null);
+      // Per-report opt-in only matters while the checkbox is shown (persistent
+      // include-logs setting off); when hidden, main's persistent setting decides.
+      var includeLogs = reportOptions.classList.contains('visible') && reportIncludeLogs.checked;
+      window.minds.reportError(includeLogs).then(function(res) {
+        if (res && res.ok && res.eventId) {
+          showReportResult('Report sent. Reference ID:', res.eventId);
+        } else {
+          reportBtn.disabled = false;
+          showReportResult('Could not send the report.', null);
+        }
+      }, function() {
+        reportBtn.disabled = false;
+        showReportResult('Could not send the report.', null);
+      });
     });
     document.getElementById('toggle-details-btn').addEventListener('click', function() {
       var el = document.getElementById('error-details');
@@ -212,6 +337,21 @@
         if (message) statusLine.textContent = message;
       });
       window.minds.onErrorDetails(function(data) {
+        lastErrorData = data;
+        // This page is reused (not reloaded) across takeovers, so clear any prior
+        // report outcome and re-enable the button for the new error.
+        reportResult.classList.remove('visible');
+        reportBtn.disabled = false;
+        // Offer the per-report "include logs" opt-in only on the one-shot
+        // backend-down path (when the backend is up, the /help modal carries its
+        // own logs control) and only when the persistent include-logs setting is
+        // off (when on, logs are always attached, so the checkbox is redundant).
+        reportOptions.classList.remove('visible');
+        if (window.minds && window.minds.getLogInclusionSetting && !(data && data.canUseBackendReport)) {
+          window.minds.getLogInclusionSetting().then(function(enabled) {
+            if (!enabled) reportOptions.classList.add('visible');
+          }, function() { /* ignore: leave the checkbox hidden on failure */ });
+        }
         document.body.classList.add('error');
         errorView.style.display = 'flex';
         if (data.message) document.getElementById('error-message').textContent = data.message;

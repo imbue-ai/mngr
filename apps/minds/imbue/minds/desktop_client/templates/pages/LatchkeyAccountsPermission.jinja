@@ -1,0 +1,33 @@
+{#def agent_id, request_id, ws_name, rationale, display_name="Account access", mngr_forward_origin #}
+{#
+  Latchkey accounts permission request fragment. Rendered inside the inbox
+  modal's right pane. The accounts read grant is all-or-nothing with no
+  parameters, so -- like the file-sharing fragment -- it provides a single
+  hidden checked ``name="permissions"`` input so the Approve button enables on
+  first paint. Chrome and form submission JS live in the inbox shell.
+#}
+<div class="permissions-detail">
+  <PermissionsHeader :display_name="display_name" :ws_name="ws_name" :agent_id="agent_id" :rationale="rationale" />
+
+  <PermissionsForm :request_id="request_id">
+    <p class="type-body text-primary mb-3">
+      Approving will let {{ ws_name or agent_id }} and its sibling agents
+      <strong>list the accounts signed in on this device</strong> (their ids and emails),
+      so it can associate a workspace with one of them. It does not grant access to any
+      account's data.
+    </p>
+    {# Hidden checked input named ``permissions`` so the base dialog's
+       updateApproveState treats this fragment as "has a selection": there is
+       no per-permission choice in this flow (the request is all-or-nothing). #}
+    <input type="checkbox" name="permissions" value="accounts" checked hidden>
+  </PermissionsForm>
+
+  <div id="permissions-progress" class="hidden mt-4">
+    <Notice variant="info">
+      <span class="font-semibold">Granting permission...</span>
+    </Notice>
+  </div>
+
+  <PermissionsManualCredentials />
+  <PermissionsError />
+</div>

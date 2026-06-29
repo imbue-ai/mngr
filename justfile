@@ -142,10 +142,18 @@ test-offload-minds-snapshot snapshot_image_id args="":
     fi
     just _generate-dockerignore
     trap "rm -f .dockerignore" EXIT
+    # Forward the Anthropic key (for the suite's live checks) into the offload
+    # sandbox when present. Its value is masked in CI logs by the Vault
+    # use-vault-secrets action even though offload --trace echoes args.
+    EXTRA_ENV_ARGS=()
+    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+        EXTRA_ENV_ARGS+=(--env "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}")
+    fi
     offload -c offload-modal-minds-snapshot.toml run --trace \
         --override-image-id "{{snapshot_image_id}}" \
         --env "GITHUB_HEAD_REF=${GITHUB_HEAD_REF:-}" \
-        --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" {{args}} || [[ $? -eq 2 ]]
+        --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" \
+        ${EXTRA_ENV_ARGS[@]+"${EXTRA_ENV_ARGS[@]}"} {{args}} || [[ $? -eq 2 ]]
 
     # Copy results to the main worktree so new worktrees inherit baselines via COPY mode.
     MAIN_WORKTREE=$(git worktree list --porcelain | head -1 | sed 's/^worktree //')
@@ -239,14 +247,35 @@ minds-test-deployment-only *tests:
   uv run python apps/minds/scripts/test_deployments.py deployment-only {{tests}}
 
 # End-to-end acceptance test that drives the real Electron minds app to create
-# a local Docker workspace from forever-claude-template. Wraps the invocation
-# with `xvfb-run` so it works on headless Linux CI runners. macOS users with
-# a real display can run the underlying pytest directly without xvfb-run.
-# Requires apps/minds/node_modules/ to be installed (`cd apps/minds && pnpm install`).
-# Depends on `minds-css` because the test launches `electron main.js` directly
-# (not via `pnpm start`), so nothing else compiles the gitignored stylesheet.
+# a local Docker workspace from forever-claude-template using the manual
+# `api_key` AI provider, then sends a chat message and asserts the agent replies.
+# Wraps the invocation with `xvfb-run` so it works on headless Linux. macOS users
+# with a real display can run the underlying pytest directly without xvfb-run.
+# Requires apps/minds/node_modules/ (`cd apps/minds && pnpm install`) and a real
+# ANTHROPIC_API_KEY exported (the api_key path calls the official Anthropic API;
+# the test skips without it). Depends on `minds-css` because the test launches
+# `electron main.js` directly (not via `pnpm start`), so nothing else compiles
+# the gitignored stylesheet. The test lives in the snapshot-resume suite (it
+# runs in CI in the snapshot offload stage, reusing that image's warm Electron
+# toolchain) but creates its own fresh workspace, so it runs fine locally too.
 minds-test-electron *args: minds-css
-  xvfb-run -a uv run pytest apps/minds/test_desktop_client_e2e.py::test_create_local_docker_workspace_via_electron -v --no-cov --cov-fail-under=0 {{args}}
+  xvfb-run -a uv run pytest apps/minds/test_snapshot_resume.py::test_create_apikey_workspace_and_chat_via_electron -v --no-cov --cov-fail-under=0 {{args}}
+
+# Drive the FULL Electron workspace lifecycle end-to-end (create local Docker
+# workspace -> send a chat message + await reply -> open a terminal -> navigate
+# home -> destroy via the v1 settings flow), wrapped in `xvfb-run` for headless
+# Linux. Unlike `minds-test-electron` (create-only pytest acceptance test), this
+# is an operator/debug harness: it needs Docker + live AI creds, so activate an
+# env with a logged-in account first, e.g.
+#   eval "$(uv run minds env activate dev-josh-1)"
+# It also needs the FCT external worktree's vendor/mngr synced to this checkout
+# (otherwise the initial chat agent fails to create on settings the vendored mngr
+# doesn't recognize, and the chat step hangs on "Waiting for initial chat
+# agent..."); run `just sync-vendor-mngr .external_worktrees/forever-claude-template`
+# first (the minds-dev-workflow does this on every startup).
+# Screenshots of each step land in /tmp/minds-electron-flow/.
+minds-test-electron-flow *args: minds-css
+  xvfb-run -a uv run --package minds python apps/minds/scripts/electron_full_flow_e2e.py {{args}}
 
 # Compile the minds desktop client's Tailwind v4 stylesheet
 # (static/app.css -> static/app.min.css, minified + tree-shaken) via the
@@ -284,6 +313,9 @@ sync-vendor-mngr fct="":
         echo "Error: $fct/vendor/mngr not found"
         exit 1
     fi
+    # Resolve to an absolute path: the recipe `cd`s into $fct/vendor/mngr and
+    # later back to $fct, so a relative arg would break the second cd.
+    fct="$(cd "$fct" && pwd)"
     if [ -n "$(git -C "$fct" status --porcelain)" ]; then
         echo "Error: $fct has uncommitted changes; resolve them first:"
         git -C "$fct" status --short
@@ -329,15 +361,16 @@ deploy *args:
 # activated env. Sources .env if present, scrubs any ambient
 # ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL (see below), and sets
 # MINDS_WORKSPACE_* env vars so the create-form auto-fills "repository" and
-# "branch" (and the workspace "name" only if you pass an agent_name):
+# "branch":
 #   MINDS_WORKSPACE_GIT_URL = .external_worktrees/forever-claude-template/
 #       (REQUIRED -- recipe fails if missing; create the worktree with
 #       `git -C ~/project/forever-claude-template worktree add` before
 #       running minds-start).
 #   MINDS_WORKSPACE_BRANCH  = the FCT worktree's current branch.
-#   MINDS_WORKSPACE_NAME    = the agent_name arg, set only when you pass a
-#       non-empty one. Default (empty) leaves it unset, so the create form
-#       generates its own `mind-N` name -- matching a shipped binary.
+# The workspace name is never prefilled: the create form generates a `mind-N`
+# name -- matching a shipped binary -- unless you type one into the form's
+# advanced "Name" field. Type a name there if you want a predictable handle for
+# `just propagate-changes <name>` / `just forward-system-interface <name>`.
 # Also sets MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1, the explicit opt-in that
 # tells the desktop client to honor those MINDS_WORKSPACE_* vars. Without it
 # (i.e. a normal `minds run`) the form ignores any stray MINDS_WORKSPACE_* in
@@ -368,11 +401,11 @@ minds-install:
     . apps/minds/scripts/select_node_version.sh || exit 2
     cd apps/minds && pnpm install
 
-# Override agent_name / branch / fct (FCT worktree path) via positional args
-# (just has no name=value form for recipe params -- pass them in order):
-#   just minds-start                     # workspace gets an auto `mind-N` name
-#   just minds-start my-agent my-branch  # pin the workspace name to `my-agent`
-#   just minds-start my-agent "" .external_worktrees/my-fct-worktree   # 3rd arg = fct
+# Override branch / fct (FCT worktree path) via positional args (just has no
+# name=value form for recipe params -- pass them in order):
+#   just minds-start                     # launch against the worktree's branch
+#   just minds-start my-branch           # pin the FCT branch to `my-branch`
+#   just minds-start "" .external_worktrees/my-fct-worktree   # 2nd arg = fct
 # `fct` defaults to .external_worktrees/forever-claude-template; an absolute
 # path is used as-is, a relative one is resolved against the mngr root. This
 # is what gets synced (vendor/mngr/) and exported as MINDS_WORKSPACE_GIT_URL,
@@ -380,7 +413,7 @@ minds-install:
 # Refuses to start if another minds-start is already running in this
 # worktree (PID file under /tmp keyed by worktree path). Use `just
 # minds-stop` to kill the running instance first.
-minds-start agent_name="" branch="" fct="":
+minds-start branch="" fct="":
     #!/bin/bash
     set -ueo pipefail
     if [ -z "${MINDS_ROOT_NAME:-}" ]; then
@@ -461,18 +494,7 @@ minds-start agent_name="" branch="" fct="":
     else
         export MINDS_WORKSPACE_BRANCH="$(git -C "$fct_wt" rev-parse --abbrev-ref HEAD)"
     fi
-    # A non-empty agent_name pins the workspace name via MINDS_WORKSPACE_NAME
-    # (the create form uses it verbatim; a name collision errors at create time
-    # rather than being renamed). The default empty agent_name unsets the var
-    # (clearing any stray value inherited from the shell) so the form falls back
-    # to its generated `mind-N` name -- matching what a shipped binary does.
-    if [ -n "{{agent_name}}" ]; then
-        export MINDS_WORKSPACE_NAME="{{agent_name}}"
-    else
-        unset MINDS_WORKSPACE_NAME
-    fi
     echo "MINDS_WORKSPACE_GIT_URL=$MINDS_WORKSPACE_GIT_URL"
-    echo "MINDS_WORKSPACE_NAME=${MINDS_WORKSPACE_NAME:-(unset; create form will pick mind-N)}"
     echo "MINDS_WORKSPACE_BRANCH=$MINDS_WORKSPACE_BRANCH"
     echo "$$" > "$pid_file"
     trap 'rm -f "$pid_file"' EXIT
@@ -1030,6 +1052,10 @@ changelog-trigger:
     # load the repo's .mngr/settings.toml, whose plugins won't import here.
     export MNGR_ROOT_NAME="mngr-changelog-schedule"
     unset MNGR_HOST_DIR MNGR_PREFIX
+    # Pin the user_id (and thus the Modal environment) to the committed constant
+    # so the on-demand run targets the same deployment changelog_deploy.sh
+    # created, regardless of this machine's random per-profile user_id.
+    export MNGR_USER_ID="$(uv run python scripts/changelog_schedule_utils.py --print-user-id)"
     provider="$(uv run python scripts/changelog_schedule_utils.py --print-provider)"
     disable_args="$(uv run python scripts/changelog_schedule_utils.py --print-disable-plugin-args)"
     uv run mngr schedule run changelog-consolidation --provider "$provider" $disable_args

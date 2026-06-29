@@ -28,6 +28,19 @@ naming-scheme-independent guarantee that no orphaned cron app survives a
 redeploy -- a past app-naming-scheme change had left an orphan firing a
 second nightly run because ``mngr schedule remove`` only stops the app
 matching the *current* name.
+
+The schedule's Modal environment is ``{MNGR_ROOT_NAME}-{user_id}``, where
+``user_id`` is normally a *random* per-profile UUID that mngr generates and
+persists on first use. That made the deployed environment depend on whichever
+machine first deployed it: a redeploy from a fresh checkout rolled a different
+random ``user_id`` and silently forked the schedule into a brand-new
+environment instead of replacing the live one. To make the deploy
+machine-independent we pin ``user_id`` to a committed constant (``USER_ID``)
+and export it as ``MNGR_USER_ID`` from both shell consumers, so every deploy /
+trigger targets the same environment regardless of where it runs. The shell
+consumers read it via ``--print-user-id`` (the deploy and trigger only need it
+*after* their first ``uv run python`` call, so it need not be a duplicated bash
+literal like ``TRIGGER_NAME`` / ``MNGR_ROOT_NAME``).
 """
 
 import argparse
@@ -48,6 +61,14 @@ MNGR_ROOT_NAME: Final[str] = "mngr-changelog-schedule"
 # in-source is fine -- (re)deploys are rare and the file edit is the
 # deliberate trigger.
 PROVIDER: Final[str] = "modal"
+# The pinned mngr ``user_id`` that names the schedule's Modal environment
+# (``{MNGR_ROOT_NAME}-{USER_ID}``). Exported as ``MNGR_USER_ID`` by both shell
+# consumers so the deploy and on-demand trigger always target the same
+# environment regardless of the machine they run on (see the module docstring).
+# This is the value of the originally-deployed production environment; do not
+# change it without migrating the live schedule, or a redeploy will fork into a
+# new, empty environment. It is a namespacing identifier, not a secret.
+USER_ID: Final[str] = "920da0b3db46415d8c4aec37ca23a637"
 # Plugins the schedule trigger needs to function; everything else is
 # disabled to avoid loading repo-specific plugins that would error on
 # import in this isolated mngr config namespace.
@@ -201,6 +222,13 @@ def main() -> None:
         "Used by changelog_deploy.sh and the changelog-trigger justfile recipe.",
     )
     parser.add_argument(
+        "--print-user-id",
+        action="store_true",
+        help="Print the pinned mngr user_id and exit. "
+        "Both shell consumers export it as MNGR_USER_ID so the deploy and on-demand "
+        "trigger target the same Modal environment regardless of the host machine.",
+    )
+    parser.add_argument(
         "--stop-all-apps",
         action="store_true",
         help="Stop every Modal app in the changelog schedule's isolated environment(s). "
@@ -218,13 +246,18 @@ def main() -> None:
     if args.print_provider:
         print(PROVIDER)
         return
+    if args.print_user_id:
+        print(USER_ID)
+        return
     if args.stop_all_apps:
         stopped = stop_all_apps_in_changelog_envs(is_dry_run=args.dry_run)
         verb = "Would stop" if args.dry_run else "Stopped"
         print(f"{verb} {len(stopped)} Modal app(s) in the changelog environment(s).", file=sys.stderr)
         return
     # parser.error() prints usage to stderr and calls sys.exit(2); it does not return.
-    parser.error("no action specified; pass --print-disable-plugin-args, --print-provider, or --stop-all-apps")
+    parser.error(
+        "no action specified; pass --print-disable-plugin-args, --print-provider, --print-user-id, or --stop-all-apps"
+    )
 
 
 if __name__ == "__main__":

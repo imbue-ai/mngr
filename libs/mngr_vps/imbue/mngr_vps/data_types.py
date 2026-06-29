@@ -44,6 +44,10 @@ class RealizePlacementContext(FrozenModel):
     base_image: str = Field(description="Base image to run/build the agent from (container realizer)")
     effective_start_args: tuple[str, ...] = Field(description="Runtime start args (e.g. docker run flags)")
     docker_build_args: tuple[str, ...] = Field(description="Build args; non-empty triggers an on-VPS image build")
+    allow_local_image: bool = Field(
+        default=False,
+        description="When true, an already-present local base_image is run as-is (skip both build and pull)",
+    )
     git_depth: int | None = Field(default=None, description="Shallow-clone depth for the local build context")
     tags: Mapping[str, str] | None = Field(default=None, description="User tags to stamp onto the placement")
     known_hosts: Sequence[str] | None = Field(default=None, description="Extra known_hosts entries for the agent")

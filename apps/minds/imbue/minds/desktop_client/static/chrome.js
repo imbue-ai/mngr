@@ -383,6 +383,8 @@
   if (!isElectron) {
     var newWsBtn = document.getElementById('sidebar-new-workspace');
     if (newWsBtn) newWsBtn.onclick = function () { navigateContent('/create'); closeSidebar(); };
+    var settingsBtn = document.getElementById('sidebar-settings');
+    if (settingsBtn) settingsBtn.onclick = function () { navigateContent('/settings'); closeSidebar(); };
     var accountBtn = document.getElementById('sidebar-account');
     if (accountBtn) {
       accountBtn.onclick = function () {
@@ -395,6 +397,18 @@
   document.getElementById('requests-toggle').onclick = function () {
     if (isElectron) window.minds.toggleInbox();
     else navigateContent('/inbox');
+  };
+
+  // Get-help opens the help modal (report a bug). Pass the currently-displayed
+  // workspace id along so the report can scope workspace context; in Electron the
+  // modal is the shared overlay view, in browser mode it loads into the content frame.
+  document.getElementById('help-toggle').onclick = function () {
+    var aid = currentTitleAgentId || '';
+    if (isElectron) {
+      window.minds.toggleHelp(aid);
+    } else {
+      navigateContent('/help' + (aid ? '?workspace=' + encodeURIComponent(aid) : ''));
+    }
   };
 
   // -- Open a permission request from workspace content (browser mode) -------
@@ -413,10 +427,21 @@
       if (!frame || e.source !== frame.contentWindow) return;
       var data = e.data;
       if (!data || typeof data !== 'object') return;
-      if (data.type !== 'minds:open-request-modal') return;
-      var requestId = data.requestId;
-      if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) return;
-      navigateContent('/inbox?selected=' + encodeURIComponent(requestId));
+      if (data.type === 'minds:open-request-modal') {
+        var requestId = data.requestId;
+        if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) return;
+        navigateContent('/inbox?selected=' + encodeURIComponent(requestId));
+        return;
+      }
+      // Error pages (e.g. the recovery page) ask to open the get-help / report-a-bug
+      // modal. There's no overlay in browser mode, so navigate the content frame to
+      // /help, scoped to the workspace when the page supplied a valid agent id.
+      if (data.type === 'minds:open-help') {
+        var agentId = data.agentId;
+        var scoped = typeof agentId === 'string' && /^agent-[a-f0-9]{1,64}$/i.test(agentId) ? agentId : '';
+        navigateContent('/help' + (scoped ? '?workspace=' + encodeURIComponent(scoped) : ''));
+        return;
+      }
     });
   }
 
