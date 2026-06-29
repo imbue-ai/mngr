@@ -31,10 +31,13 @@ def _record_subprocess_modal_usage() -> None:
 
 @pytest.mark.release
 def test_list_with_no_agents(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # list all agents
         mngr list
-    """)
+
+    Scope: `mngr list` exits 0 in a fresh environment and reports "No agents
+    found" rather than listing any agents.
+    """
     result = e2e.run("mngr list", comment="List agents in a fresh environment")
     expect(result).to_succeed()
     expect(result.stdout).to_contain("No agents found")
@@ -43,10 +46,13 @@ def test_list_with_no_agents(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 def test_list_json_with_no_agents(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # output all objects as one big JSON array when complete  (useful for scripting)
         mngr list --format json
-    """)
+
+    Scope: `mngr list --format json` emits a single parseable JSON object whose
+    `agents` and `errors` arrays are both empty in a fresh environment.
+    """
     result = e2e.run(
         "mngr list --format json",
         comment="output all objects as one big JSON array when complete  (useful for scripting)",
@@ -60,10 +66,12 @@ def test_list_json_with_no_agents(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 def test_list_short_form(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # short form
         mngr ls
-    """)
+
+    Scope: `mngr ls` is accepted as the short alias of `mngr list` and exits 0.
+    """
     expect(e2e.run("mngr ls", comment="short form")).to_succeed()
 
 
@@ -71,10 +79,13 @@ def test_list_short_form(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 def test_list_running_filter(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # show only running agents
         mngr list --running
-    """)
+
+    Scope: `mngr list --running` keeps only agents in the RUNNING state -- a
+    running agent is included while a stopped one is excluded from the listing.
+    """
     # Give the --running filter something to include and something to exclude.
     # Pin a unique sleep value per agent so leaked processes trace back to the
     # specific create call.
@@ -107,10 +118,14 @@ def test_list_running_filter(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_list_stopped_filter(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # show only stopped agents (not running, still exists and can be restarted)
         mngr list --stopped
-    """)
+
+    Scope: `mngr list --stopped` runs the stopped-only filter and, in a fresh
+    environment with no agents, reports "No agents found" rather than merely
+    exiting cleanly.
+    """
     # Intentionally NOT marked @pytest.mark.modal: in an isolated, empty
     # environment `mngr list --stopped` discovers via the provider SDKs (Modal
     # gRPC) and never shells out to the `modal` CLI binary, which is the only
@@ -125,10 +140,15 @@ def test_list_stopped_filter(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_list_archived_filter(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # show only archived agents (stopped, cannot necessarily be restarted, but data can be inspected)
         mngr list --archived
-    """)
+
+    Scope: `mngr list --archived` applies the `has(labels.archived_at)` CEL
+    filter cleanly. In a fresh environment nothing is archived, so it reports
+    "No agents found" and the JSON form returns an empty `agents` array (we do
+    not assert on `errors`, which can carry benign per-provider discovery notes).
+    """
     result = e2e.run("mngr list --archived", comment="show only archived agents")
     expect(result).to_succeed()
     # In a fresh environment nothing has been archived, so the filter must
@@ -149,16 +169,20 @@ def test_list_archived_filter(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_list_active_filter(e2e: E2eSession) -> None:
+    """Tutorial block:
+        # show only active agents (anything not archived/destroyed/crashed/failed)
+        mngr list --active
+
+    Scope: `mngr list --active` runs the active-only filter (excludes anything
+    archived/destroyed/crashed/failed) and, with no agents, reports "No agents
+    found" rather than just exiting 0.
+    """
     # No @pytest.mark.modal: in a fresh environment there are no agents and the
     # Modal environment does not exist yet, so `mngr list` deliberately skips the
     # modal provider (ProviderEmptyError) instead of creating an environment. It
     # therefore never invokes the `modal` CLI -- the only Modal usage the resource
     # guard can observe across the e2e subprocess boundary -- so marking the test
     # @pytest.mark.modal would trip the guard's "marked but never invoked" check.
-    e2e.write_tutorial_block("""
-        # show only active agents (anything not archived/destroyed/crashed/failed)
-        mngr list --active
-    """)
     result = e2e.run("mngr list --active", comment="show only active agents")
     expect(result).to_succeed()
     # With no agents, the active filter should report an empty list rather than
@@ -170,12 +194,18 @@ def test_list_active_filter(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 def test_config_set_list_active_default(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # you can make any of those filters the default for "mngr list" by setting it in your config.
         # for example, to hide agents from dead/destroyed hosts by default:
         mngr config set commands.list.active true
         # to opt out for a single call, override the env var: MNGR__COMMANDS__LIST__ACTIVE=false mngr list
-    """)
+
+    Scope: `mngr config set commands.list.active true` persists the active
+    filter as the project-config default for `mngr list` (readable back as
+    "true" via `mngr config get commands.list.active --scope project`), and the
+    documented `MNGR__COMMANDS__LIST__ACTIVE=false` env-var override is accepted
+    for a single call.
+    """
     expect(
         e2e.run(
             "mngr config set commands.list.active true",
@@ -208,10 +238,13 @@ def test_config_set_list_active_default(e2e: E2eSession) -> None:
 # per-test timeout. The release CI lane already overrides this globally to 90s.
 @pytest.mark.timeout(60)
 def test_list_local_filter(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # show only agents running locally
         mngr list --local
-    """)
+
+    Scope: `mngr list --local` restricts the listing to local-provider agents;
+    with no agents in the fresh environment it reports "No agents found".
+    """
     result = e2e.run("mngr list --local", comment="show only agents running locally")
     expect(result).to_succeed()
     # No agents exist in the fresh environment, and --local restricts the output
@@ -224,10 +257,15 @@ def test_list_local_filter(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_list_remote_filter(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # show only agents running remotely
         mngr list --remote
-    """)
+
+    Scope: `mngr list --remote` discriminates by host provider -- a local agent
+    is excluded from the remote-only listing while still appearing under
+    `--local`, confirming the filter hides only non-remote agents (not
+    everything).
+    """
     # Create a cheap local agent (a `sleep` command, no remote provider) so we
     # can verify that --remote actually discriminates: a local agent must never
     # appear in the remote-only listing.
@@ -262,10 +300,15 @@ def test_list_remote_filter(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_list_provider_filter(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # filter by provider
         mngr list --provider modal
-    """)
+
+    Scope: the happy path of `mngr list --provider <name>`. Filtering by a real
+    provider (modal) runs cleanly; in a fresh environment with no agents (and the
+    Modal backend skipped because its per-user environment does not exist yet) it
+    reports "No agents found".
+    """
     result = e2e.run("mngr list --provider modal", comment="filter by provider")
     expect(result).to_succeed()
     # In a fresh environment there are no agents, and the Modal backend is
@@ -276,10 +319,15 @@ def test_list_provider_filter(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_list_unknown_provider_filter(e2e: E2eSession) -> None:
-    # Shares the `mngr list --provider <name>` tutorial block above, exercising
-    # the unhappy path: an unknown provider name matches no configured providers
-    # or backends, so the listing succeeds with an empty result instead of
-    # raising an error.
+    """Tutorial block:
+        # filter by provider
+        mngr list --provider modal
+
+    Scope: the unhappy path of the same `mngr list --provider <name>` block. An
+    unknown provider name matches no configured providers or backends, so the
+    listing succeeds with an empty result ("No agents found") instead of raising
+    an error.
+    """
     result = e2e.run(
         "mngr list --provider does-not-exist",
         comment="filtering by an unknown provider yields an empty listing",
@@ -290,10 +338,14 @@ def test_list_unknown_provider_filter(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_list_project_filter(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # filter by project
         mngr list --project my-project
-    """)
+
+    Scope: `mngr list --project my-project` parses and applies the project
+    filter; with no agents in the fresh environment the filtered listing is empty
+    ("No agents found"), not an error or a traceback.
+    """
     result = e2e.run("mngr list --project my-project", comment="filter by project")
     expect(result).to_succeed()
     # No agents exist in this fresh environment, so the filtered listing must be
@@ -305,10 +357,14 @@ def test_list_project_filter(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_list_label_filter(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # filter by agent label
         mngr list --label TEAM=backend
-    """)
+
+    Scope: the happy path of `mngr list --label KEY=VALUE`. A well-formed label
+    filter is accepted; with no agents it matches nothing and reports "No agents
+    found".
+    """
     result = e2e.run("mngr list --label TEAM=backend", comment="filter by agent label")
     expect(result).to_succeed()
     # No agents exist, so the label filter matches nothing and lists no agents.
@@ -317,12 +373,14 @@ def test_list_label_filter(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_list_label_filter_invalid_format(e2e: E2eSession) -> None:
-    # Same tutorial block as test_list_label_filter, but exercises the unhappy
-    # path: a --label value without "=" is rejected before any discovery runs.
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # filter by agent label
         mngr list --label TEAM=backend
-    """)
+
+    Scope: the unhappy path of the same `--label` block. A `--label` value
+    without "=" (not KEY=VALUE format) is rejected before any discovery runs --
+    the command fails and stderr mentions the required KEY=VALUE format.
+    """
     result = e2e.run("mngr list --label TEAM", comment="reject malformed --label without KEY=VALUE")
     expect(result).to_fail()
     expect(result.stderr).to_contain("KEY=VALUE")
@@ -330,10 +388,14 @@ def test_list_label_filter_invalid_format(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_list_host_label_filter(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # filter by host label
         mngr list --host-label ENV=staging
-    """)
+
+    Scope: the happy path of `mngr list --host-label KEY=VALUE`. The host-label
+    expression compiles and applies; with no matching hosts in the fresh
+    environment it reports "No agents found" rather than erroring.
+    """
     result = e2e.run("mngr list --host-label ENV=staging", comment="filter by host label")
     expect(result).to_succeed()
     # No hosts carry ENV=staging in a fresh environment, so the filter matches
@@ -344,13 +406,15 @@ def test_list_host_label_filter(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_list_host_label_filter_invalid_format(e2e: E2eSession) -> None:
-    # Unhappy path for the same tutorial block: a --host-label value missing the
-    # "=" separator is rejected up front (before any host discovery) with a
-    # message explaining the required KEY=VALUE format.
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # filter by host label
         mngr list --host-label ENV=staging
-    """)
+
+    Scope: the unhappy path of the same `--host-label` block. A `--host-label`
+    value missing the "=" separator is rejected up front (before any host
+    discovery) -- the command fails and stderr explains the required KEY=VALUE
+    format.
+    """
     result = e2e.run("mngr list --host-label staging", comment="reject host label without KEY=VALUE format")
     expect(result).to_fail()
     expect(result.stderr).to_contain("KEY=VALUE")
@@ -361,11 +425,16 @@ def test_list_host_label_filter_invalid_format(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(600)
 def test_list_fields_and_sort(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # choose which fields to display and sort order
         mngr list --fields "name,state,host.provider,create_time" --sort "create_time desc"
         # see mngr list --help for a complete list of fields you can reference
-    """)
+
+    Scope: `--fields` restricts the rendered columns to exactly those requested
+    (CREATE_TIME shows a real timestamp; default-only columns HOST STATE and
+    PROJECT are excluded) and `--sort "create_time desc"` orders rows
+    newest-first (the agent created last appears before the earlier one).
+    """
     # Create two Modal agents so the listing has real rows to render and sort.
     # Creating a Modal agent also invokes the Modal CLI (environment_create runs
     # during provider initialization), which satisfies the @pytest.mark.modal
@@ -409,10 +478,14 @@ def test_list_fields_and_sort(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_list_limit(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # limit the number of results
         mngr list --limit 10
-    """)
+
+    Scope: `mngr list --limit N` caps the number of listed agents at N. A limit
+    larger than the agent count leaves every agent visible, while a smaller limit
+    truncates the listing to exactly N results.
+    """
     # Create a couple of agents so --limit has results to truncate. Without any
     # agents the flag is a no-op and the command's behavior can't be observed.
     for name in ("limit-first", "limit-second"):
@@ -444,10 +517,15 @@ def test_list_limit(e2e: E2eSession) -> None:
 # under test (wrapping `mngr list` in watch(1)) is provider-agnostic.
 @pytest.mark.release
 def test_list_watch_mode(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # watch mode: refresh the list every 5 seconds
         watch -n5 mngr list
-    """)
+
+    Scope: wrapping `mngr list` in `watch -n5` genuinely runs the wrapped command
+    -- the list output ("No agents found", in this fresh environment) appears
+    verbatim in watch's rendered frame, proving watch executed it rather than
+    merely starting up.
+    """
     # `watch` blocks until SIGINT; wrap with a short `timeout` so the test
     # exits without waiting for a full refresh interval. `timeout` returns 124
     # on expiry (then `|| true` masks it), so a clean exit is expected. The
@@ -470,10 +548,14 @@ def test_list_watch_mode(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_list_format_jsonl(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # output each entry as a JSON object (useful for scripting)
         mngr list --format jsonl
-    """)
+
+    Scope: `mngr list --format jsonl` emits one standalone JSON object per line
+    (the JSONL contract, as opposed to the single big array from `--format
+    json`); every non-empty emitted line parses as a JSON object.
+    """
     result = e2e.run("mngr list --format jsonl", comment="output each entry as a JSON object")
     expect(result).to_succeed()
     # The JSONL contract is "one standalone JSON object per line" (as opposed to
@@ -488,12 +570,16 @@ def test_list_format_jsonl(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 def test_observe_discovery_only(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # continually stream discovery events as JSONL (useful for piping to jq to turn this data into an event stream)
         # will get new events as new hosts are created/destroyed, come online and offline, etc.
         # see the `DiscoveryEvent` type for a complete list of the event types that will be returned in this stream
         mngr observe --discovery-only
-    """)
+
+    Scope: `mngr observe --discovery-only` starts and streams discovery events
+    without error (it runs indefinitely, so it is wrapped in a short `timeout`
+    and the timeout-expiry exit is masked to a clean exit).
+    """
     # `mngr observe` streams indefinitely; wrap with a short `timeout` so the
     # test doesn't hang. `timeout` exits 124 on expiry.
     result = e2e.run(
@@ -507,10 +593,15 @@ def test_observe_discovery_only(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(240)
 def test_list_pipe_stdin(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # you can pass the ids of agents and/or hosts to only list details for specific ids:
         mngr list --format "{id}" | head -n 2 | mngr list --stdin
-    """)
+
+    Scope: piping ids from `mngr list --format "{id}"` into `mngr list --stdin`
+    filters the listing down to exactly those ids -- the created agent's id round
+    trips through the pipe and shows up in the details, and feeding a single id
+    via stdin selects exactly that one agent.
+    """
     # The pipe is only meaningful when there is an id to feed through it, so first
     # create a real (local, in-place) agent. We deliberately do NOT mark this test
     # @pytest.mark.modal: this flow never invokes Modal. `mngr list` discovers

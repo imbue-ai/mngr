@@ -24,9 +24,6 @@ const AGENT_ID_PATTERN = /^agent-[a-f0-9]{1,64}$/i;
 // emits). Accepts only the strict shape so a malicious page can't paint
 // the titlebar with arbitrary CSS values via the preview channel.
 const ACCENT_HEX_PATTERN = /^#[0-9a-f]{6}$/;
-// Either "0 0 0" or "255 255 255" (the only two values
-// ``pick_workspace_foreground`` ever returns).
-const ACCENT_FG_PATTERN = /^(?:0 0 0|255 255 255)$/;
 
 window.addEventListener('message', (event) => {
   // Only honour messages posted by this same top-level page, never by a
@@ -38,6 +35,26 @@ window.addEventListener('message', (event) => {
     const requestId = data.requestId;
     if (typeof requestId !== 'string' || !REQUEST_ID_PATTERN.test(requestId)) return;
     ipcRenderer.send('open-request-modal', requestId);
+    return;
+  }
+  // Error pages (e.g. the workspace-recovery page) ask the shell to open the
+  // get-help / report-a-bug modal. ``agentId`` is optional -- when present it
+  // scopes the report to that workspace; it is validated to the server-issued
+  // shape (or accepted as empty) so a foreign page can't smuggle path/query
+  // characters into the help URL the main process builds.
+  if (data.type === 'minds:open-help') {
+    const agentId = data.agentId;
+    if (agentId !== undefined && agentId !== '' && (typeof agentId !== 'string' || !AGENT_ID_PATTERN.test(agentId))) {
+      return;
+    }
+    ipcRenderer.send('open-help', typeof agentId === 'string' ? agentId : '');
+    return;
+  }
+  // Create-screen sign-in: open the shared modal overlay loaded with the
+  // sign-in page (so it covers the whole window, including the title bar).
+  // No payload -- the main process builds the fixed `/auth/signin-modal` URL.
+  if (data.type === 'minds:open-signin-modal') {
+    ipcRenderer.send('open-signin-modal');
     return;
   }
   // Landing-page Stop button: ask the main process to show a native
@@ -70,24 +87,9 @@ window.addEventListener('message', (event) => {
   if (data.type === 'minds:preview-workspace-accent') {
     const agentId = data.agentId;
     const accent = data.accent;
-    const accentFg = data.accentFg;
     if (typeof agentId !== 'string' || !AGENT_ID_PATTERN.test(agentId)) return;
     if (typeof accent !== 'string' || !ACCENT_HEX_PATTERN.test(accent)) return;
-    if (typeof accentFg !== 'string' || !ACCENT_FG_PATTERN.test(accentFg)) return;
-    ipcRenderer.send('preview-workspace-accent', agentId, accent, accentFg);
-    return;
-  }
-  // Create-form color picker: there's no workspace yet, so we can't
-  // route through the per-agent cache. This path paints the chrome
-  // CSS variables directly for the duration of the create flow; a
-  // subsequent navigation event repaints from whatever the new
-  // displayed/last workspace is.
-  if (data.type === 'minds:preview-freeform-accent') {
-    const accent = data.accent;
-    const accentFg = data.accentFg;
-    if (typeof accent !== 'string' || !ACCENT_HEX_PATTERN.test(accent)) return;
-    if (typeof accentFg !== 'string' || !ACCENT_FG_PATTERN.test(accentFg)) return;
-    ipcRenderer.send('preview-freeform-accent', accent, accentFg);
+    ipcRenderer.send('preview-workspace-accent', agentId, accent);
     return;
   }
 });

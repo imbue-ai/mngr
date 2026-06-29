@@ -26,7 +26,22 @@ vault login -method=oidc   # or whatever your team is set up for
 
 ## Path layout
 
-Each tier has two families of Vault entries:
+Secrets use a **split** layout: each `<service>` is a Vault *directory*, and
+every logical key inside it is its own single-field leaf secret holding a
+`value`. For example, the `litellm` service for the `ci` tier is laid out as:
+
+```
+secrets/minds/ci/litellm/ANTHROPIC_API_KEY   -> { "value": "sk-ant-..." }
+secrets/minds/ci/litellm/DATABASE_URL        -> { "value": "postgres://..." }
+```
+
+Read a single key with `vault kv get -mount=secrets minds/<tier>/<service>/<KEY>`
+(the value is at `.data.data.value`), and list a service's keys with
+`vault kv list -mount=secrets minds/<tier>/<service>`. The deploy code and
+`push_vault_from_file.py` handle this fan-out for you.
+
+Each tier has two families of Vault entries (each a service directory as
+described above):
 
 **Pushed to Modal at deploy time** (the connector + litellm-proxy read
 these from their runtime env via `modal.Secret.from_name(...)`):

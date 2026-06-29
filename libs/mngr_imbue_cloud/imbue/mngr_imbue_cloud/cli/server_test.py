@@ -1,16 +1,21 @@
 import subprocess
 from datetime import datetime
 from datetime import timezone
+from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
+from imbue.mngr_imbue_cloud.cli.server import _box_ssh_host_key_options
 from imbue.mngr_imbue_cloud.cli.server import _format_capacity_table
 from imbue.mngr_imbue_cloud.cli.server import _kill_bake_worker_processes
+from imbue.mngr_imbue_cloud.cli.server import _resolve_vendored_mngr_source
 from imbue.mngr_imbue_cloud.cli.server import build_registered_server
 from imbue.mngr_imbue_cloud.cli.server import compute_server_slice_sizing
 from imbue.mngr_imbue_cloud.cli.server import server
 from imbue.mngr_imbue_cloud.cli.server import slice_advertised_attributes
 from imbue.mngr_imbue_cloud.data_types import BareMetalServer
+from imbue.mngr_imbue_cloud.errors import BareMetalProvisioningError
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerStatus
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_READY
@@ -92,6 +97,22 @@ def test_format_capacity_table_shows_per_server_and_fleet_totals() -> None:
     assert "4/24 slots used, 20 free" in table
 
 
+def test_box_ssh_host_key_options_pins_recorded_key() -> None:
+    """With a recorded box host key, box SSH strictly pins it (no trust-on-first-use)."""
+    with _box_ssh_host_key_options("203.0.113.7", "ssh-ed25519 AAAAtestboxkey") as opts:
+        assert "StrictHostKeyChecking=yes" in opts
+        assert any(o.startswith("UserKnownHostsFile=") for o in opts)
+    # The accept-new TOFU fallback is gone entirely.
+    assert "accept-new" not in " ".join(opts)
+
+
+def test_box_ssh_host_key_options_fails_closed_without_a_key() -> None:
+    """No recorded box host key -> refuse to SSH rather than trust-on-first-use."""
+    with pytest.raises(BareMetalProvisioningError, match="strict host-key"):
+        with _box_ssh_host_key_options("203.0.113.7", "") as _opts:
+            pass
+
+
 def test_server_group_help_lists_commands() -> None:
     result = CliRunner().invoke(server, ["--help"])
     assert result.exit_code == 0
@@ -115,3 +136,30 @@ def test_kill_bake_worker_processes_terminates_a_child() -> None:
         if child.poll() is None:
             child.kill()
             child.wait(timeout=5)
+
+
+def test_from_tag_bake_keeps_the_tags_vendored_mngr() -> None:
+    """A --from-tag bake (no explicit --mngr-source) must NOT vendor the local checkout.
+
+    Regression test: --from-tag means byte-for-byte tag content, including the mngr
+    vendored at the tag. Returning the local repo_root here would silently bake the
+    operator's working-tree mngr over the tag's, producing a same-version content
+    skew (the bug that broke chat-agent creation on a minds-vX slice).
+    """
+    resolved = _resolve_vendored_mngr_source(mngr_source=None, repo_root=Path("/monorepo"), is_from_tag=True)
+    assert resolved is None
+
+
+def test_workspace_dir_bake_vendors_the_local_checkout() -> None:
+    """A --workspace-dir (dev) bake with no explicit --mngr-source vendors repo_root."""
+    resolved = _resolve_vendored_mngr_source(mngr_source=None, repo_root=Path("/monorepo"), is_from_tag=False)
+    assert resolved == Path("/monorepo")
+
+
+def test_explicit_mngr_source_always_wins() -> None:
+    """An explicit --mngr-source overrides the vendored mngr for either bake source."""
+    for is_from_tag in (True, False):
+        resolved = _resolve_vendored_mngr_source(
+            mngr_source="/some/other/mngr", repo_root=Path("/monorepo"), is_from_tag=is_from_tag
+        )
+        assert resolved == Path("/some/other/mngr")

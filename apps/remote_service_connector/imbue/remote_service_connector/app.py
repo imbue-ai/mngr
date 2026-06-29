@@ -43,6 +43,7 @@ from fastapi.responses import HTMLResponse
 from ovh.exceptions import APIError as OvhApiError
 from ovh.exceptions import HTTPError as OvhHttpError
 from ovh.exceptions import ResourceNotFoundError
+from paramiko.hostkeys import HostKeyEntry
 from pydantic import BaseModel
 from pydantic import Field
 from pydantic import field_validator
@@ -439,6 +440,12 @@ class LeaseHostResponse(BaseModel):
     host_id: str = Field(description="Host ID in the mngr provider")
     host_name: str = Field(description="User-chosen friendly name for the leased host")
     attributes: dict[str, Any] = Field(description="Attributes the row was matched against")
+    outer_host_public_key: str = Field(
+        description="The VPS/VM-root sshd host public key (port ssh_port), for strict host-key pinning"
+    )
+    container_host_public_key: str = Field(
+        description="The docker container sshd host public key (port container_ssh_port), for strict host-key pinning"
+    )
 
 
 class ReleaseHostResponse(BaseModel):
@@ -464,6 +471,12 @@ class LeasedHostInfo(BaseModel):
     host_name: str = Field(description="User-chosen friendly name for the leased host")
     attributes: dict[str, Any] = Field(description="Attributes attached to the lease row")
     leased_at: str = Field(description="ISO 8601 timestamp when the host was leased")
+    outer_host_public_key: str | None = Field(
+        default=None, description="The VPS/VM-root sshd host public key, for strict host-key pinning"
+    )
+    container_host_public_key: str | None = Field(
+        default=None, description="The docker container sshd host public key, for strict host-key pinning"
+    )
 
 
 # -- LiteLLM key management models --
@@ -1936,14 +1949,45 @@ def _get_pool_db_connection() -> Any:
     return psycopg2.connect(database_url)
 
 
+def _pin_expected_host_key(client: paramiko.SSHClient, host: str, port: int, expected_host_public_key: str) -> None:
+    """Pin ``expected_host_public_key`` for ``host:port`` and reject any other host key.
+
+    paramiko keys non-default ports under the ``[host]:port`` known-hosts name, so
+    a container/forwarded port must be pinned under that bracketed name to match
+    what ``connect`` looks up. Replaces trust-on-first-use: a mismatched or
+    unknown host key is rejected.
+    """
+    known_hosts_name = host if port == 22 else f"[{host}]:{port}"
+    entry = HostKeyEntry.from_line(f"{known_hosts_name} {expected_host_public_key.strip()}")
+    if entry is None or entry.key is None:
+        # An SSHException (not PoolHostCleanupError) so this is handled uniformly by
+        # every caller: the teardown sweep and reconcile already treat it as an SSH
+        # failure, and the lease path's `except (paramiko.SSHException, OSError)`
+        # maps it to a 502 (SSH key injection failed) rather than a misleading 500.
+        raise paramiko.SSHException(
+            f"could not parse expected host key for {known_hosts_name}: {expected_host_public_key!r}"
+        )
+    client.get_host_keys().add(known_hosts_name, entry.key.get_name(), entry.key)
+    client.set_missing_host_key_policy(paramiko.RejectPolicy())
+
+
 @contextlib.contextmanager
 def _management_ssh_client(
-    host: str, port: int, user: str, management_key_pem: str, timeout_seconds: float
+    host: str,
+    port: int,
+    user: str,
+    management_key_pem: str,
+    timeout_seconds: float,
+    expected_host_public_key: str,
 ) -> Iterator[paramiko.SSHClient]:
-    """Yield an SSHClient connected to ``host`` with the pool management key, closed on exit."""
+    """Yield an SSHClient connected to ``host`` with the pool management key, closed on exit.
+
+    The host is authenticated against ``expected_host_public_key`` (strict pinning,
+    no trust-on-first-use); callers fail closed when no pinned key is available.
+    """
     private_key = paramiko.Ed25519Key.from_private_key(io.StringIO(management_key_pem))
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    _pin_expected_host_key(client, host, port, expected_host_public_key)
     try:
         client.connect(hostname=host, port=port, username=user, pkey=private_key, timeout=timeout_seconds)
         yield client
@@ -1957,9 +2001,12 @@ def _append_authorized_key(
     user: str,
     management_key_pem: str,
     public_key_to_add: str,
+    expected_host_public_key: str,
 ) -> None:
     """SSH into a host using the management key and append a public key to authorized_keys."""
-    with _management_ssh_client(host, port, user, management_key_pem, timeout_seconds=15) as client:
+    with _management_ssh_client(
+        host, port, user, management_key_pem, timeout_seconds=15, expected_host_public_key=expected_host_public_key
+    ) as client:
         key_line = public_key_to_add.strip()
         commands = (
             "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo {} >> ~/.ssh/authorized_keys && ".format(
@@ -2124,10 +2171,12 @@ def build_slice_teardown_commands(lima_instance_name: str, lima_disk_name: str |
 
 
 def _run_ssh_commands_on_box(
-    host: str, port: int, user: str, management_key_pem: str, commands: tuple[str, ...]
+    host: str, port: int, user: str, management_key_pem: str, commands: tuple[str, ...], box_host_public_key: str
 ) -> None:
     """SSH into the box with the pool management key and run each command, raising on failure."""
-    with _management_ssh_client(host, port, user, management_key_pem, timeout_seconds=30) as client:
+    with _management_ssh_client(
+        host, port, user, management_key_pem, timeout_seconds=30, expected_host_public_key=box_host_public_key
+    ) as client:
         for command in commands:
             _stdin, stdout, stderr = client.exec_command(command)
             exit_status = stdout.channel.recv_exit_status()
@@ -2159,7 +2208,7 @@ def clean_up_slice_on_box(
         )
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT public_address, lima_service_user FROM bare_metal_servers WHERE id = %s",
+            "SELECT public_address, lima_service_user, box_host_public_key FROM bare_metal_servers WHERE id = %s",
             (str(bare_metal_server_id),),
         )
         server_row = cur.fetchone()
@@ -2167,10 +2216,18 @@ def clean_up_slice_on_box(
         raise PoolHostCleanupError(
             f"slice pool host {host_db_id}: bare_metal_servers row {bare_metal_server_id} is missing or has no public_address"
         )
-    box_address, lima_service_user = server_row[0], server_row[1] or "root"
+    box_address, lima_service_user, box_host_public_key = server_row[0], server_row[1] or "root", server_row[2]
+    # Fail closed: without the box's pinned host key we cannot reach it without
+    # trust-on-first-use. The row stays ``removing`` and the sweep retries once
+    # the one-time keyscan backfill has populated the column.
+    if not box_host_public_key:
+        raise PoolHostCleanupError(
+            f"slice pool host {host_db_id}: bare_metal_servers row {bare_metal_server_id} has no box_host_public_key "
+            "(run the one-time `mngr imbue_cloud admin` host-key backfill)"
+        )
     management_key_pem = os.environ["POOL_SSH_PRIVATE_KEY"]
     commands = build_slice_teardown_commands(lima_instance_name, lima_disk_name)
-    _run_ssh_commands_on_box(box_address, 22, lima_service_user, management_key_pem, commands)
+    _run_ssh_commands_on_box(box_address, 22, lima_service_user, management_key_pem, commands, box_host_public_key)
 
 
 # Slice lima resources are named ``mngr-slice-<env>-<host-hex>`` (the data disk
@@ -2196,7 +2253,9 @@ def slice_name_env_owner(name: str) -> str | None:
     return match.group("env") if match else None
 
 
-def _list_box_lima_names(host: str, user: str, management_key_pem: str, json_subcommand: str) -> set[str]:
+def _list_box_lima_names(
+    host: str, user: str, management_key_pem: str, json_subcommand: str, box_host_public_key: str
+) -> set[str]:
     """SSH the box and return the ``name`` of every lima instance or disk (per ``json_subcommand``).
 
     ``json_subcommand`` is ``list --json`` (instances) or ``disk list --json`` (disks);
@@ -2205,7 +2264,9 @@ def _list_box_lima_names(host: str, user: str, management_key_pem: str, json_sub
     """
     names: set[str] = set()
     command = f"{_BOX_LIMACTL_PATH_PREFIX} limactl {json_subcommand}"
-    with _management_ssh_client(host, 22, user, management_key_pem, timeout_seconds=30) as client:
+    with _management_ssh_client(
+        host, 22, user, management_key_pem, timeout_seconds=30, expected_host_public_key=box_host_public_key
+    ) as client:
         _stdin, stdout, stderr = client.exec_command(command)
         exit_status = stdout.channel.recv_exit_status()
         output = stdout.read().decode()
@@ -2251,7 +2312,7 @@ def reconcile_slice_boxes(conn: Any, env_name: str) -> int:
         logger.info("Slice reconcile skipped: connector has no MINDS_ENV_NAME to scope to")
         return 0
     with conn.cursor() as cur:
-        cur.execute("SELECT id, public_address, lima_service_user FROM bare_metal_servers")
+        cur.execute("SELECT id, public_address, lima_service_user, box_host_public_key FROM bare_metal_servers")
         servers = cur.fetchall()
     # Read the pool key only once we know there are boxes to inspect: a deployment
     # with no slice infrastructure (no boxes, no POOL_SSH_PRIVATE_KEY) must not fail
@@ -2260,14 +2321,26 @@ def reconcile_slice_boxes(conn: Any, env_name: str) -> int:
         return 0
     management_key_pem = os.environ["POOL_SSH_PRIVATE_KEY"]
     divergence_count = 0
-    for server_id, public_address, lima_service_user in servers:
+    for server_id, public_address, lima_service_user, box_host_public_key in servers:
         if not public_address:
+            continue
+        # Fail closed on a box with no pinned host key: skipping it would look like
+        # a clean audit, so surface it loudly instead. Cleared once the one-time
+        # keyscan backfill populates the column.
+        if not box_host_public_key:
+            logger.error(
+                "Slice reconcile skipped box %s: no box_host_public_key (run the one-time host-key backfill)",
+                public_address,
+            )
+            divergence_count += 1
             continue
         user = lima_service_user or "root"
         # If we cannot list a box's lima resources we did NOT reconcile it; let the
         # failure propagate rather than silently skipping (which would look like a
         # clean audit and could mask vanished/leaked VMs).
-        box_instances = _list_box_lima_names(public_address, user, management_key_pem, "list --json")
+        box_instances = _list_box_lima_names(
+            public_address, user, management_key_pem, "list --json", box_host_public_key
+        )
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT lima_instance_name FROM pool_hosts WHERE backend_kind = %s AND bare_metal_server_id = %s",
@@ -2614,7 +2687,8 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
                         query_params.append(body.region)
                     order_by = "created_at ASC"
                     lease_select_sql = (
-                        "SELECT id, vps_address, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, attributes "
+                        "SELECT id, vps_address, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, attributes, "
+                        "outer_host_public_key, container_host_public_key "
                         "FROM pool_hosts "
                         f"WHERE {' AND '.join(where_clauses)} "
                         f"ORDER BY {order_by} LIMIT 1 FOR UPDATE SKIP LOCKED"
@@ -2629,18 +2703,53 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
                                 "Please ask Josh to provision more, or relax the attribute filter."
                             ),
                         )
-                    host_db_id, vps_address, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, attributes = (
-                        row
-                    )
+                    (
+                        host_db_id,
+                        vps_address,
+                        ssh_port,
+                        ssh_user,
+                        container_ssh_port,
+                        agent_id,
+                        host_id,
+                        attributes,
+                        outer_host_public_key,
+                        container_host_public_key,
+                    ) = row
 
-                    # Inject the user's SSH public key on VPS and container
+                    # Fail closed: a row without both pinned host keys cannot be
+                    # leased without trust-on-first-use. This only happens for rows
+                    # baked before the host-key columns existed; the one-time
+                    # keyscan backfill populates them. Surface it as no-capacity so
+                    # the caller (and the fast/slow path retry) treats it like an
+                    # unavailable host rather than a hard error.
+                    if not outer_host_public_key or not container_host_public_key:
+                        raise HTTPException(
+                            status_code=503,
+                            detail=(
+                                f"Pool host {host_db_id} has no pinned SSH host keys yet; "
+                                "run the one-time `mngr imbue_cloud admin` host-key backfill."
+                            ),
+                        )
+
+                    # Inject the user's SSH public key on VPS and container, pinning
+                    # each sshd's recorded host key (strict, no trust-on-first-use).
                     management_key_pem = os.environ["POOL_SSH_PRIVATE_KEY"]
                     try:
                         _append_authorized_key(
-                            vps_address, ssh_port, ssh_user, management_key_pem, body.ssh_public_key
+                            vps_address,
+                            ssh_port,
+                            ssh_user,
+                            management_key_pem,
+                            body.ssh_public_key,
+                            outer_host_public_key,
                         )
                         _append_authorized_key(
-                            vps_address, container_ssh_port, ssh_user, management_key_pem, body.ssh_public_key
+                            vps_address,
+                            container_ssh_port,
+                            ssh_user,
+                            management_key_pem,
+                            body.ssh_public_key,
+                            container_host_public_key,
                         )
                     except (paramiko.SSHException, OSError) as exc:
                         logger.warning("SSH key injection failed for host %s: %s", host_db_id, exc)
@@ -2669,6 +2778,8 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
             host_id=host_id,
             host_name=body.host_name,
             attributes=attrs_dict,
+            outer_host_public_key=outer_host_public_key,
+            container_host_public_key=container_host_public_key,
         ).model_dump()
 
 
@@ -2791,7 +2902,7 @@ def list_leased_hosts(request: Request) -> list[dict[str, object]]:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT id, vps_address, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, "
-                    "host_name, attributes, leased_at "
+                    "host_name, attributes, leased_at, outer_host_public_key, container_host_public_key "
                     "FROM pool_hosts "
                     "WHERE status = 'leased' AND leased_to_user = %s",
                     (admin.username,),
@@ -2811,6 +2922,8 @@ def list_leased_hosts(request: Request) -> list[dict[str, object]]:
                 host_name=r[7],
                 attributes=r[8] if isinstance(r[8], dict) else {},
                 leased_at=str(r[9]) if r[9] is not None else "",
+                outer_host_public_key=r[10],
+                container_host_public_key=r[11],
             ).model_dump()
             for r in rows
         ]

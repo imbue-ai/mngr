@@ -1,0 +1,531 @@
+/*
+ * Tailwind v4 source entry + design tokens for the minds desktop client chrome.
+ *
+ * This file is the hand-written SOURCE. It is compiled (minified, tree-shaken)
+ * to ``app.min.css`` by ``just minds-css`` (``pnpm run build:css`` -> the
+ * ``@tailwindcss/cli`` standalone compiler). Only ``app.min.css`` is served
+ * (Base.jinja links it) and shipped in the wheel -- there is no runtime JIT,
+ * so a new/changed Tailwind class only takes effect after a rebuild. ``just
+ * minds-start`` runs the compiler in ``--watch`` mode for live dev rebuilds.
+ *
+ * Why explicit sources (``source(none)`` + ``@source`` below): the chrome's
+ * Tailwind classes live in three places -- ``.jinja`` templates, the vanilla
+ * ``static/*.js`` files, AND Python string constants in ``templates.py``
+ * (``BTN_VARIANTS`` / ``INPUT_BASE`` / ``ICONS_*``). Enumerating them keeps the
+ * scan deterministic and off the rest of the monorepo. Classes assembled by
+ * string concatenation in JS are NOT detected -- safelist any such case with
+ * ``@source inline("...")``.
+ */
+@import "tailwindcss" source(none);
+
+@source "../templates/**/*.jinja";
+@source "./*.js";
+@source "../templates.py";
+
+/*
+ * ---------------------------------------------------------------------------
+ * Design tokens -- light / dark theming. Built in two layers so a theme swap
+ * is a single class on <html> with zero component changes:
+ *
+ *   1. VALUE LAYER (--c-*): the raw color for each token, per mode. Light
+ *      values on :root, dark values under .dark. This is the ONLY place a
+ *      value differs between modes, so both tables sit side by side and are
+ *      edited/compared together.
+ *   2. TOKEN LAYER (@theme inline): registers each --c-* as a Tailwind color
+ *      token, generating the utilities (text-primary, ...). ``inline`` makes
+ *      the generated utility resolve THROUGH var(--c-*) at runtime, so adding
+ *      / removing the ``.dark`` class on <html> reskins the whole app live.
+ *
+ * --- Text colors (Stage 1: text) ---
+ * Regular text contrasts the current surface; inverse text contrasts an
+ * inverted surface. Both are pure black / pure white at three alpha steps
+ * (primary 100%, secondary, tertiary) -- no hue. Regular and inverse mirror
+ * each other and swap black<->white between light and dark.
+ * ---------------------------------------------------------------------------
+ */
+/* Light is the default (:root); ``.light`` re-asserts it so a subtree can be
+ * forced light even under a ``.dark`` ancestor (and vice versa) -- useful for
+ * mode-locked islands like the styleguide's side-by-side panels. */
+:root,
+.light {
+  /* Tell the UA to render native controls (form fields, scrollbars, autofill,
+     caret) in the matching scheme; without this they stay light in dark mode. */
+  color-scheme: light;
+  /* regular text (on the default surface) -- black in light mode */
+  --c-text-primary: #000000;
+  --c-text-secondary: rgb(0 0 0 / 0.65);
+  --c-text-tertiary: rgb(0 0 0 / 0.45);
+  /* inverse text (on an inverted surface) -- white in light mode */
+  --c-text-inverse-primary: #ffffff;
+  --c-text-inverse-secondary: rgb(255 255 255 / 0.70);
+  --c-text-inverse-tertiary: rgb(255 255 255 / 0.50);
+  /* borders -- black at four alpha steps in light mode (10 / 17 / 25 / 40%;
+     default nudged up from Figma's 16% for a touch more definition; stronger is
+     the input-hover cue -- a darker edge in place of a fill tint) */
+  --c-border-subtle: rgb(0 0 0 / 0.10);
+  --c-border-default: rgb(0 0 0 / 0.17);
+  --c-border-strong: rgb(0 0 0 / 0.25);
+  --c-border-stronger: rgb(0 0 0 / 0.40);
+  /* surfaces -- solid backgrounds; primary and inverse are exact mirrors */
+  --c-surface-primary: #ffffff;
+  --c-surface-inverse: #000000;
+  --c-surface-overlay: rgb(0 0 0 / 0.20);
+  /* fills -- translucent resting / state tints over a surface (Figma 4/6/10%) */
+  --c-fill-subtle: rgb(0 0 0 / 0.04);
+  --c-fill-hover: rgb(0 0 0 / 0.06);
+  --c-fill-active: rgb(0 0 0 / 0.10);
+}
+.dark {
+  color-scheme: dark;
+  /* regular text -- white in dark mode */
+  --c-text-primary: #ffffff;
+  --c-text-secondary: rgb(255 255 255 / 0.70);
+  --c-text-tertiary: rgb(255 255 255 / 0.50);
+  /* inverse text -- black in dark mode */
+  --c-text-inverse-primary: #000000;
+  --c-text-inverse-secondary: rgb(0 0 0 / 0.65);
+  --c-text-inverse-tertiary: rgb(0 0 0 / 0.45);
+  /* borders -- white at the same alpha steps in dark mode */
+  --c-border-subtle: rgb(255 255 255 / 0.10);
+  --c-border-default: rgb(255 255 255 / 0.17);
+  --c-border-strong: rgb(255 255 255 / 0.25);
+  --c-border-stronger: rgb(255 255 255 / 0.40);
+  /* surfaces -- pure black base in dark; inverse + overlay mirror to white */
+  --c-surface-primary: #000000;
+  --c-surface-inverse: #ffffff;
+  --c-surface-overlay: rgb(255 255 255 / 0.20);
+  /* fills -- white at slightly higher alpha in dark (Figma 6/10/14%) */
+  --c-fill-subtle: rgb(255 255 255 / 0.06);
+  --c-fill-hover: rgb(255 255 255 / 0.10);
+  --c-fill-active: rgb(255 255 255 / 0.14);
+}
+@theme inline {
+  --color-primary: var(--c-text-primary);
+  --color-secondary: var(--c-text-secondary);
+  --color-tertiary: var(--c-text-tertiary);
+  --color-inverse-primary: var(--c-text-inverse-primary);
+  --color-inverse-secondary: var(--c-text-inverse-secondary);
+  --color-inverse-tertiary: var(--c-text-inverse-tertiary);
+  /* borders: utilities border-subtle / -default / -strong / -stronger */
+  --color-subtle: var(--c-border-subtle);
+  --color-default: var(--c-border-default);
+  --color-strong: var(--c-border-strong);
+  --color-stronger: var(--c-border-stronger);
+  /* surfaces: bg-surface-primary / -inverse / -overlay */
+  --color-surface-primary: var(--c-surface-primary);
+  --color-surface-inverse: var(--c-surface-inverse);
+  --color-surface-overlay: var(--c-surface-overlay);
+  /* fills: bg-fill-subtle / -hover / -active */
+  --color-fill-subtle: var(--c-fill-subtle);
+  --color-fill-hover: var(--c-fill-hover);
+  --color-fill-active: var(--c-fill-active);
+  /* status / feedback: text-/bg-/border-{important,success,warning,info}
+     (tints via /opacity) */
+  --color-important: var(--c-important);
+  --color-success: var(--c-success);
+  --color-warning: var(--c-warning);
+  --color-info: var(--c-info);
+  /* accent / interactive: text-accent (links), border-/bg-accent (selection,
+     progress), ring-accent/NN (focus rings); tints via /opacity */
+  --color-accent: var(--c-accent);
+}
+
+/*
+ * Spacing scale -- standard Tailwind (--spacing stays the stock 0.25rem, so
+ * p-1 = 4px, p-4 = 16px). We constrain padding / margin / gap to a fixed
+ * subset of the native steps: 0.5 / 1 / 1.5 / 2 / 3 / 4 / 6 / 8 / 12 / 16
+ * (= 2/4/6/8/12/16/24/32/48/64 px), held by a ratchet. Width / height / inset
+ * stay free for layout. Keeping the stock scale means upstream docs / tooling /
+ * IntelliSense all read correctly. See the styleguide's "Spacing scale".
+ */
+
+/*
+ * Corner-radius scale -- four steps (px: sm 4 / md 6 / lg 8 / xl 16), held by a
+ * ratchet alongside the built-in rounded-full / rounded-none. md is the
+ * default control radius (buttons, inputs, badges, swatches) and matches
+ * Figma's 6px. The one exception is the chrome content frame, which keeps a
+ * structural rounded-[12px] to match Electron's CONTENT_CORNER_RADIUS and the
+ * OS window's outer rounding.
+ */
+@theme {
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 16px;
+}
+
+/*
+ * Elevation -- two box-shadow steps (generate shadow-raised / shadow-overlay),
+ * held by a ratchet. ``raised`` is the subtle hover lift on interactive cards
+ * (the old shadow-sm value). ``overlay`` is the soft floating shadow for
+ * surfaces that sit above the page -- menus, modals, tooltips (Figma's
+ * minds-elevation-1: two 8%-black drop shadows). Mode-independent.
+ */
+@theme {
+  --shadow-raised: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+  --shadow-overlay: 0 1px 1px 0 rgb(0 0 0 / 0.08), 0 3px 12px 0 rgb(0 0 0 / 0.08);
+}
+
+/*
+ * Type ramp (Figma). Six semantic roles, each bundling font-size + weight +
+ * line-height (and transform / tracking for the section eyebrow) into one
+ * utility, so a text element's role is a single class. Sizes reuse Tailwind's
+ * native steps (24/18/14/12 px = text-2xl/lg/sm/xs). COLOR is orthogonal --
+ * compose with text-primary / -secondary / -tertiary (or -inverse-*). A ratchet
+ * keeps content text on these roles instead of raw text-size / font-weight.
+ *
+ *   type-heading-lg  24 / bold       large heading
+ *   type-heading     18 / semibold   regular heading
+ *   type-label       14 / semibold   form + control labels
+ *   type-body        14 / regular    default body text
+ *   type-helper      12 / regular    captions, hints, metadata
+ *   type-section     12 / semibold   ALL-CAPS section eyebrow
+ *
+ * type-badge (10 / bold, 12 line-height) is a specialized component role -- not
+ * a content-text role -- for the notification count pill (Badge.jinja). It is
+ * the one deliberate sub-ramp size: the pill must stay compact, so it sits below
+ * the 12px content floor.
+ */
+@utility type-heading-lg {
+  font-size: var(--text-2xl);
+  line-height: 1.2;
+  font-weight: 700;
+}
+@utility type-heading {
+  font-size: var(--text-lg);
+  line-height: 1.333;
+  font-weight: 600;
+}
+@utility type-label {
+  font-size: var(--text-sm);
+  line-height: 1.4;
+  font-weight: 600;
+}
+@utility type-body {
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  font-weight: 400;
+}
+@utility type-helper {
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  font-weight: 400;
+}
+@utility type-section {
+  font-size: var(--text-xs);
+  line-height: 1.3;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+@utility type-badge {
+  font-size: 10px;
+  line-height: 12px;
+  font-weight: 700;
+}
+
+/*
+ * Default border color. Tailwind v4 defaults un-colored borders / dividers to
+ * ``currentColor``; we instead default them to the themeable ``border-default``
+ * token so every bare ``border`` / ``border-t`` / ... utility is both legible
+ * and theme-aware (light/dark) without each call site naming a color. Explicit
+ * ``border-*`` utilities still win (they live in the higher utilities layer).
+ */
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--c-border-default);
+  }
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * Hand-written CSS that Tailwind doesn't cover (migrated verbatim from the
+ * former tokens.css): per-workspace accent spine, spinner keyframes, the
+ * .titlebar-surface self-theming recipe, shared card / pill / option /
+ * color-picker recipes. These stay UNLAYERED so they keep the same precedence
+ * over Tailwind utilities they had when tokens.css was a separate stylesheet.
+ *
+ * The titlebar takes only --titlebar-bg (the workspace accent, set per-
+ * workspace via inline style by chrome.js); .titlebar-surface derives the
+ * contrasting foreground text tokens from it in pure CSS (lch relative color),
+ * so there is no JS contrast math and no --titlebar-fg. --workspace-accent /
+ * --titlebar-bg feed the .accent-spine / .accent-swatch / .titlebar-* rules
+ * below.
+ * ---------------------------------------------------------------------------
+ */
+
+:root {
+  /* Status / feedback (Figma). One hue per semantic. These light values read on
+     the white surface; .dark lifts each to a brighter value (below), because the
+     deep light hues go muddy / low-contrast on the pure-black surface. Notice /
+     badge tints derive from the active hue via the --c-*-surface tokens. */
+  --c-important: #d90c00;
+  --c-success: #0c8106;
+  --c-warning: #b45300;
+  --c-info: #166fc7;
+  /* Warning surfaces (badge / notice backgrounds) use a yellow caution fill
+     rather than a low-opacity tint of the brown-orange --c-warning, which
+     reads muddy; the warning foreground stays --c-warning. */
+  --c-warning-surface: hsl(49 100% 50% / 0.2);
+  /* Notice / badge surfaces for the other semantics, derived as a faint tint of
+     each hue. On white an 8% tint reads as a clear pale shape; .dark lifts the
+     opacity (below) because the same tint over pure black is invisible. */
+  --c-important-surface: rgb(from var(--c-important) r g b / 0.08);
+  --c-success-surface: rgb(from var(--c-success) r g b / 0.08);
+  --c-info-surface: rgb(from var(--c-info) r g b / 0.08);
+  /* Accent / interactive (links, selected states, focus rings, progress).
+     A WCAG-AA blue; #0069d9 clears 4.5:1 as link text on the white surface.
+     That value reads too dark on the pure-black dark surface, so .dark lifts
+     it to a brighter blue (below). Lighter rings / tints derive via an opacity
+     modifier (e.g. ring-accent/40, bg-accent/15). */
+  --c-accent: #0069d9;
+}
+.dark {
+  /* The light-mode accent reads too dark on the pure-black surface: low-opacity
+     tints (accent/15, /40) nearly vanish and link text loses legibility. Lift
+     the accent to a brighter blue in dark mode so links, focus rings, selection
+     tints, and progress stay clear (clears WCAG AA as link text on black). */
+  --c-accent: #4d9bff;
+  /* Status hues run brighter in dark mode: the deep light values go muddy and
+     low-contrast on the pure-black surface -- both as foreground text and as the
+     derived notice tints -- so each lifts to a brighter value here. */
+  --c-important: #fb1f13;
+  --c-success: #12be09;
+  --c-warning: #ff851a;
+  --c-info: #4396ea;
+  /* Notice / badge surfaces stay a tint of the (now brighter) hue, but lifted
+     from 8% to 22%: an 8% tint over pure black is invisible regardless of hue,
+     so the higher opacity keeps the green / red / blue backing shape legible
+     (warning keeps its bright yellow fill, already visible on both). */
+  --c-important-surface: rgb(from var(--c-important) r g b / 0.22);
+  --c-success-surface: rgb(from var(--c-success) r g b / 0.22);
+  --c-info-surface: rgb(from var(--c-info) r g b / 0.22);
+}
+
+/*
+ * Always reserve space for the scrollbar gutter so that toggling page
+ * height (e.g. expanding the permission dialog's "Adjust" editor) does
+ * not make a classic scrollbar appear/disappear and shift the centered
+ * layout sideways. No-op for macOS-style overlay scrollbars.
+ */
+html {
+  scrollbar-gutter: stable;
+}
+
+.accent-spine::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--workspace-accent, #0b292b);
+}
+
+.accent-swatch {
+  background: var(--workspace-accent, #0b292b);
+}
+
+/*
+ * Titlebar self-theming. The bar is painted with the per-workspace color
+ * (--titlebar-bg, set on the document root by chrome.js). The
+ * ``.titlebar-surface`` class -- toggled onto #minds-titlebar by chrome.js only
+ * while a workspace accent is active -- derives a black-or-white contrast base
+ * from that color entirely in CSS (relative color: lch lightness clamped to
+ * 0/100 via the ``* infinity`` trick) and re-bases the foreground token VALUES
+ * (--c-*) on it. Every titlebar element that uses normal tokens (text-secondary,
+ * hover:bg-fill-hover, ...) then reads correctly on any workspace color -- no JS
+ * luminance, no server calc. Neutral chrome (no accent, hence no class) just
+ * inherits the app's own tokens.
+ *
+ * Requires relative-color syntax (Chromium 119+, which the Electron shell far
+ * exceeds). The fixed-dark close-button hover stays red regardless of accent.
+ */
+.titlebar-surface {
+  --_contrast: lch(from var(--titlebar-bg) calc((49.44 - l) * infinity) 0 0);
+  --c-text-primary: rgb(from var(--_contrast) r g b / 0.95);
+  --c-text-secondary: rgb(from var(--_contrast) r g b / 0.6);
+  --c-text-tertiary: rgb(from var(--_contrast) r g b / 0.42);
+  --c-fill-hover: rgb(from var(--_contrast) r g b / 0.08);
+  --c-fill-active: rgb(from var(--_contrast) r g b / 0.14);
+}
+.titlebar-btn-danger:hover {
+  color: #ffffff;
+  background-color: var(--c-important);
+}
+
+/*
+ * Shared card surface (bg, border, rounded corners). No baseline shadow
+ * -- non-clickable cards read as flat surfaces; the Card.jinja
+ * ``interactive`` prop adds ``hover:shadow-sm`` so clickable cards lift
+ * slightly on hover. The Card.jinja component composes this with
+ * Tailwind utilities for layout (flex/justify) and padding. JS-rendered
+ * surfaces that can't call the Jinja component -- e.g. the providers
+ * list in templates/pages/Landing.jinja -- reference the same class
+ * string so one edit here re-styles every card. Values mirror the
+ * Tailwind utilities they replace: bg-surface-primary, border
+ * border-default, rounded-lg.
+ */
+.minds-card {
+  background: var(--c-surface-primary);
+  border: 1px solid var(--c-border-default);
+  border-radius: var(--radius-lg);
+}
+
+/*
+ * Inline ``<code>`` pill: light-gray rounded chip for service names,
+ * file paths, etc. inline inside prose. The pill style is used by
+ * Sharing.jinja's heading + sharing.js (which rebuilds that heading
+ * via DOM methods after toggling the share state), so factoring the
+ * recipe into one CSS class keeps the two sides from drifting.
+ * Tailwind equivalents:
+ *   bg-fill-subtle rounded-md px-1.5 py-0.5 font-mono text-[0.95em]
+ */
+.code-pill {
+  background: var(--c-fill-subtle);
+  border-radius: var(--radius-md);
+  padding: 0.125rem 0.375rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.95em;
+}
+
+.spinner {
+  border: 2px solid var(--c-border-subtle);
+  border-top-color: var(--c-text-primary);
+  border-radius: 50%;
+  animation: spin 800ms linear infinite;
+}
+/*
+ * Accent-toned spinner: faint accent ring + saturated accent top, used inside
+ * primary-action affordances (the backup-export "downloading..."
+ * indicator). The base ``.spinner`` provides geometry + animation;
+ * ``.spinner-accent`` only overrides the colors (both derived from the one
+ * accent token -- the ring is the accent at low alpha).
+ */
+.spinner-accent {
+  border-color: rgb(from var(--c-accent) r g b / 0.4);
+  border-top-color: var(--c-accent);
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/*
+ * Workspace color picker (workspace settings page + create form).
+ * The swatch's selected state is conveyed via aria-checked="true" so
+ * screen readers see the radio role correctly; the visual ring uses
+ * the same attribute selector so the two stay in lockstep. The 2px
+ * black-25% inset shadow gives every swatch a thin dark rim that's
+ * legible against any background -- including the lightest palette
+ * entry (clarity, #fcefd4) over the page surface.
+ */
+.color-swatch {
+  box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.25);
+}
+.color-swatch[aria-checked="true"] {
+  box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.25);
+  /* Accent selection ring floated off the swatch by a real, transparent gap:
+     outline-offset leaves the gap unpainted so the page background shows
+     through it in every mode -- never a hardcoded white rim (which read as a
+     stray white border in dark mode). */
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+
+/*
+ * Create-form swatches are smaller (w-6 h-6 = 24px) than the
+ * workspace-settings ones (34px); the same 2px rim eats too much of
+ * the visible color area at that size, so override to a 1px rim there.
+ */
+#create-color-picker .color-swatch {
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
+}
+#create-color-picker .color-swatch[aria-checked="true"] {
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+
+/*
+ * Hex-input pill (workspace settings page). Sits inline with the
+ * color swatches and mimics one visually: same height + the same 2px
+ * black-25% inset shadow as a "rim", pill-shaped via rounded-full on
+ * the element. Focus ring matches the swatch selection ring shape so
+ * the picker feels coherent under keyboard navigation.
+ */
+.color-hex-pill {
+  background: var(--c-surface-primary);
+  box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.25);
+}
+.color-hex-pill:focus {
+  outline: none;
+  box-shadow:
+    inset 0 0 0 2px rgba(0, 0, 0, 0.25),
+    0 0 0 2px #fff,
+    0 0 0 4px rgb(from var(--c-accent) r g b / 0.5); /* accent at half alpha: lighter than the solid selected ring */
+}
+/*
+ * When the active color is a custom hex (no palette swatch matches),
+ * the pill carries the same blue selection ring the swatches show via
+ * aria-checked. Toggled by workspace_settings.js in
+ * syncSwatchSelection; declared after :focus so the full-strength
+ * selected ring wins over the focus tint while both apply.
+ */
+.color-hex-pill.is-selected {
+  box-shadow:
+    inset 0 0 0 2px rgba(0, 0, 0, 0.25),
+    0 0 0 2px #fff,
+    0 0 0 4px var(--c-accent); /* matches .color-swatch[aria-checked="true"] */
+}
+
+/*
+ * "Saving" cursor while a settings color POST is in flight. The
+ * workspace_settings.js handler toggles ``is-saving`` on
+ * ``#color-section`` during the save; CSS scopes the progress
+ * cursor to disabled controls inside that scope so the stale-
+ * workspace case (controls disabled at render time, no
+ * ``is-saving``) keeps the default cursor instead of looking
+ * mid-save.
+ */
+#color-section.is-saving .color-swatch:disabled,
+#color-section.is-saving .color-hex-pill:disabled {
+  cursor: progress;
+}
+
+/*
+ * Dev styleguide table-of-contents active link. dev_styleguide.js sets
+ * aria-current="page" on the link whose section is nearest the top of the
+ * viewport (scrollspy). The attribute selector outranks the muted
+ * text-secondary / text-tertiary utility on the link, so the active entry
+ * reads at full-strength primary text without any class juggling.
+ */
+.styleguide-toc-link[aria-current="page"] {
+  color: var(--color-primary);
+}
+
+/*
+ * Dev styleguide light/dark toggle. It's fixed (floats over page content), so
+ * it needs an opaque surface rather than the secondary button's transparent
+ * base. Pin background-color to the surface in every state (overriding the
+ * secondary variant's translucent hover/active fills, which would otherwise
+ * let content show through), and layer the hover/active fill as a
+ * background-image gradient OVER that surface so the control tints while
+ * staying opaque.
+ */
+.styleguide-toggle,
+.styleguide-toggle:hover,
+.styleguide-toggle:active {
+  background-color: var(--c-surface-primary);
+}
+.styleguide-toggle:hover {
+  background-image: linear-gradient(var(--c-fill-hover), var(--c-fill-hover));
+}
+.styleguide-toggle:active {
+  background-image: linear-gradient(var(--c-fill-active), var(--c-fill-active));
+}

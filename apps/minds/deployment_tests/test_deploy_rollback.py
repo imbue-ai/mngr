@@ -18,10 +18,10 @@ reversal steps and ``modal app rollback``s both apps to their captured
 pre-deploy versions.
 
 The subprocess exits with the recover process's exit code (``os.execvp``
-replaces the deploy process with recover). Successful rollback ->
-recover exits 0 -> subprocess returncode 0. The actual assertion is on
-``/version``: after rollback the connector reports v1's ``deploy_id``,
-not v2's.
+replaces the deploy process with recover). On a broken-healthcheck deploy
+the CLI exits NON-ZERO to reflect the deploy failure even though the
+rollback itself succeeded. The substantive assertion is on ``/version``:
+after rollback the connector reports v1's ``deploy_id``, not v2's.
 """
 
 import subprocess
@@ -62,8 +62,8 @@ def test_deploy_auto_rollback_on_broken_healthcheck(ephemeral_env: EphemeralEnvH
     2. Run ``minds env deploy`` against the same env with
        ``MINDS_INJECT_BROKEN_HEALTHCHECK=1`` in the subprocess env.
        ``await_apps_healthy`` fails -> auto-recover fires -> recover
-       rolls Modal apps back -> subprocess exits 0 (recover succeeded
-       at restoring the pre-v2 state).
+       rolls Modal apps back -> subprocess exits non-zero (the deploy
+       failed, even though the rollback itself succeeded).
     3. Poll ``GET <connector>/version`` and assert ``deploy_id`` matches
        v1's id (and the response is 200 -- proving v1 is actually
        serving traffic, not just that the dashboard label moved back).
@@ -94,14 +94,16 @@ def test_deploy_auto_rollback_on_broken_healthcheck(ephemeral_env: EphemeralEnvH
     )
     logger.info("=== v2 deploy stdout ({}) ===\n{}", ephemeral_env.name, completed.stdout)
     logger.info("=== v2 deploy stderr ({}) ===\n{}", ephemeral_env.name, completed.stderr)
-    # The CLI uses ``os.execvp`` to chain into ``minds env recover`` on
-    # MindError, so the returncode is the recover process's exit code.
-    # Successful rollback => recover exited 0 => subprocess exits 0.
-    # A non-zero returncode means recover itself failed (RecoverFailedError)
-    # -- surface the stderr so the operator can diagnose.
-    assert completed.returncode == 0, (
-        f"Broken-v2 deploy + auto-recover for {ephemeral_env.name!r} exited {completed.returncode}. "
-        f"Stderr tail:\n{completed.stderr[-2000:]}"
+    # On a health-check failure the CLI auto-chains into ``minds env recover``
+    # and then exits NON-ZERO to reflect that the deploy failed -- even though
+    # the rollback itself succeeded ("Exiting non-zero to reflect the deploy
+    # failure (the rollback itself succeeded)"). So a broken-healthcheck deploy
+    # MUST exit non-zero; a zero exit would mean the broken health check was not
+    # detected. The rollback success is verified below (the env is restored to
+    # v1) -- if recover had itself failed, those assertions would catch it.
+    assert completed.returncode != 0, (
+        f"Broken-v2 deploy for {ephemeral_env.name!r} unexpectedly exited 0; the injected broken "
+        f"health check should have failed the deploy. Stderr tail:\n{completed.stderr[-2000:]}"
     )
 
     # Post-rollback, /version should report v1's deploy_id again (the

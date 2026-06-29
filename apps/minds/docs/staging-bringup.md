@@ -72,9 +72,9 @@ become Vault entries in step 4.
   Neon org (any name; the staging tier uses `creates_resources=false`
   so minds never creates or names it). Inside the project, create two
   databases: `host_pool` and `litellm_cost`. Capture:
-  - Pooled `DATABASE_URL` for `host_pool` (becomes `neon.DATABASE_URL`)
+  - Pooled `DATABASE_URL` for `host_pool` (becomes `neon/DATABASE_URL`)
   - Pooled `DATABASE_URL` for `litellm_cost` (becomes
-    `litellm.DATABASE_URL`)
+    `litellm/DATABASE_URL`)
   - Direct (non-pooled) DSN for `host_pool` (for the optional manual
     sanity check; `minds env deploy` also runs migrations through
     the pooled URL, but the direct one is handy for `psql`)
@@ -136,7 +136,7 @@ become Vault entries in step 4.
   ```bash
   openssl rand -hex 32
   ```
-  Captured for the `litellm.LITELLM_MASTER_KEY` Vault entry. Treat as
+  Captured for the `litellm/LITELLM_MASTER_KEY` Vault leaf. Treat as
   a secret; this key has admin authority over the LiteLLM proxy.
 
 ---
@@ -218,8 +218,8 @@ Modal-pushed entries (consumed by the deployed apps at runtime):
   Push via the `@<path>` syntax so the key file never leaves your
   laptop:
   ```bash
-  vault kv put -mount=secrets minds/staging/pool-ssh \
-      POOL_SSH_PRIVATE_KEY=@.minds/staging/pool_management_key/id_ed25519
+  vault kv put -mount=secrets minds/staging/pool-ssh/POOL_SSH_PRIVATE_KEY \
+      value=@.minds/staging/pool_management_key/id_ed25519
   ```
   (Or fill the template file with the multi-line value if you'd
   rather route through `push_vault_from_file.py`.)
@@ -250,7 +250,7 @@ never pushed to Modal):
 
 After every push:
 
-- [ ] Spot-check with `vault kv get -mount=secrets minds/staging/<service>`.
+- [ ] Spot-check the keys with `vault kv list -mount=secrets minds/staging/<service>`.
 
 ---
 
@@ -283,7 +283,7 @@ This is the safety-gated command from `environments.md`. What it does:
 1. Snapshots the Neon project's default branch (so recover can roll
    back).
 2. Runs the pool-hosts schema migrations against the `host_pool` DB
-   (via `secrets/minds/staging/neon.DATABASE_URL`).
+   (via `secrets/minds/staging/neon/DATABASE_URL`).
 3. Mints a tier generation id and stores it at
    `secrets/minds/staging/generation` in Vault.
 4. Pushes a Modal Secret per service in `[secrets].services`

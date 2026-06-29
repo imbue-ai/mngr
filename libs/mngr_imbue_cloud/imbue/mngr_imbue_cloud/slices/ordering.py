@@ -7,6 +7,7 @@ The eco line (RISE/SYS/KS) is ordered through a different cart product than VPSe
 client-driven steps are exercised live against a real order.
 """
 
+import base64
 from collections import defaultdict
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -17,9 +18,12 @@ from typing import Final
 from urllib.parse import urlencode
 
 from loguru import logger
+from pydantic import Field
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
+from imbue.mngr.providers.ssh_utils import generate_ed25519_host_keypair
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_imbue_cloud.errors import BareMetalConfigError
 from imbue.mngr_imbue_cloud.errors import BareMetalProvisioningError
@@ -52,6 +56,18 @@ _DELIVERY_TIMEOUT_SECONDS: Final[float] = 4 * 60 * 60.0
 _REINSTALL_POLL_INTERVAL_SECONDS: Final[float] = 30.0
 _REINSTALL_TIMEOUT_SECONDS: Final[float] = 60 * 60.0
 _TERMINAL_TASK_STATUSES: Final[frozenset[str]] = frozenset({"done", "ovhError", "customerError", "cancelled"})
+
+# OVH's dedicated-server reinstall endpoint intermittently fails its OS-compatibility
+# lookup for a perfectly valid template with this message, then succeeds unchanged on a
+# retry seconds later. Observed live 2026-06-25: `POST /dedicated/server/{s}/reinstall`
+# operatingSystem=debian12_64 failed once with this exact text, then the identical call
+# succeeded. We match the message substring and retry rather than aborting `server setup`.
+_REINSTALL_COMPATIBILITY_TRANSIENT_MARKER: Final[str] = "retrieving compatibility details"
+# Total retry budget for kicking off the reinstall when OVH returns the transient
+# compatibility-lookup error above; generous headroom since the only cost of waiting is
+# a slightly slower (already long) box setup, and the alternative is a hard failure.
+_REINSTALL_START_RETRY_TIMEOUT_SECONDS: Final[float] = 300.0
+_REINSTALL_START_RETRY_POLL_INTERVAL_SECONDS: Final[float] = 15.0
 
 
 @pure
@@ -379,27 +395,133 @@ def wait_for_dedicated_server_address(
     return address
 
 
+def build_box_host_key_postinstall_script(host_private_key_pem: str, host_public_key_openssh: str) -> str:
+    """Render the OVH post-install bash that installs our generated ed25519 host key.
+
+    Writes the private key + its ``.pub`` into ``/etc/ssh``, removes OVH's other
+    host key types so only our pinned ed25519 key is ever offered (ed25519-only),
+    and restarts sshd. Delivered inline (base64) in the authenticated reinstall
+    request body, so the private key never travels over a public URL.
+    """
+    return f"""\
+#!/bin/bash
+set -eu
+umask 077
+cat > /etc/ssh/ssh_host_ed25519_key <<'MNGR_BOX_HOSTKEY'
+{host_private_key_pem.strip()}
+MNGR_BOX_HOSTKEY
+chmod 600 /etc/ssh/ssh_host_ed25519_key
+cat > /etc/ssh/ssh_host_ed25519_key.pub <<'MNGR_BOX_HOSTPUB'
+{host_public_key_openssh.strip()}
+MNGR_BOX_HOSTPUB
+chmod 644 /etc/ssh/ssh_host_ed25519_key.pub
+chown root:root /etc/ssh/ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key.pub
+# ed25519-only: drop the other host key types so only our pinned key is offered.
+rm -f /etc/ssh/ssh_host_rsa_key* /etc/ssh/ssh_host_ecdsa_key* /etc/ssh/ssh_host_dsa_key*
+systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || service ssh restart 2>/dev/null || true
+"""
+
+
+class BoxReinstallStart(FrozenModel):
+    """The result of kicking off an OVH box OS reinstall: the install task + the injected host key."""
+
+    task_id: int = Field(description="OVH reinstall task id to poll for completion")
+    box_host_public_key: str = Field(description="The ed25519 host public key we injected; pin it (no scan)")
+
+
+class _ReinstallStartAttempt(FrozenModel):
+    """Single-shot callable for retrying the OVH box reinstall POST.
+
+    ``poll_for_value`` retries while we return ``None`` and stops on a
+    non-``None`` value. We wrap the OVH task object in a one-tuple on success
+    (so even a falsy/empty task counts as "done, stop retrying" and is handled
+    by the caller's existing task-id validation) and return ``None`` only for
+    the specific transient OVH error where the reinstall endpoint fails its
+    OS-compatibility lookup for a valid template and then succeeds unchanged on
+    a later attempt (observed live 2026-06-25). Any other error propagates.
+
+    Lifted to module scope (vs. an inline ``def`` inside ``start_os_reinstall``)
+    so the project ratchet against inline functions is satisfied and the call
+    shape is explicitly testable, mirroring ``_PutServiceInfosAttempt``. ``client``
+    is typed ``Any`` (not ``OvhVpsClient``) so pydantic does not isinstance-reject
+    the duck-typed client the callers and unit tests here pass; only ``call_api``
+    is ever used.
+    """
+
+    client: Any
+    service_name: str
+    os_template: str
+    customizations: dict[str, Any]
+
+    def __call__(self) -> tuple[Any] | None:
+        try:
+            task = self.client.call_api(
+                "POST",
+                f"/dedicated/server/{self.service_name}/reinstall",
+                operatingSystem=self.os_template,
+                customizations=self.customizations,
+            )
+            return (task,)
+        except VpsApiError as e:
+            if _REINSTALL_COMPATIBILITY_TRANSIENT_MARKER in str(e):
+                logger.warning(
+                    "OVH reinstall of {} transiently failed its OS-compatibility lookup; will retry: {}",
+                    self.service_name,
+                    e,
+                )
+                return None
+            raise
+
+
 def start_os_reinstall(
     client: OvhVpsClient,
     *,
     service_name: str,
     ssh_public_key: str,
     os_template: str = DEFAULT_REINSTALL_OS_TEMPLATE,
-) -> int:
-    """Reinstall the box's OS with our SSH key (default RAID1 partitioning) and return the install task id."""
+) -> BoxReinstallStart:
+    """Reinstall the box's OS with our SSH key, injecting a host key we generated.
+
+    Generates an ed25519 host keypair and ships the private half in an inline
+    base64 ``postInstallationScript`` (authenticated request body), so after
+    install the box serves a host key we already know -- pinned downstream with no
+    trust-on-first-use. Returns the install task id and the injected host PUBLIC key.
+
+    The reinstall POST is retried for up to
+    ``_REINSTALL_START_RETRY_TIMEOUT_SECONDS`` on OVH's transient
+    OS-compatibility-lookup failure (see ``_REINSTALL_COMPATIBILITY_TRANSIENT_MARKER``),
+    so a momentary OVH-side flake no longer aborts the whole ``server setup``.
+    The host keypair is generated once and reused across attempts so the pinned
+    host key is stable regardless of how many retries it takes.
+    """
+    host_private_key_pem, host_public_key_openssh = generate_ed25519_host_keypair()
+    postinstall_script = build_box_host_key_postinstall_script(host_private_key_pem, host_public_key_openssh)
+    postinstall_b64 = base64.b64encode(postinstall_script.encode()).decode()
     with log_span("Reinstalling {} with OS {}", service_name, os_template):
-        task = client.call_api(
-            "POST",
-            f"/dedicated/server/{service_name}/reinstall",
-            operatingSystem=os_template,
-            customizations={"sshKey": ssh_public_key},
+        attempt = _ReinstallStartAttempt(
+            client=client,
+            service_name=service_name,
+            os_template=os_template,
+            customizations={"sshKey": ssh_public_key, "postInstallationScript": postinstall_b64},
         )
+        result, _polls, _elapsed = poll_for_value(
+            attempt,
+            timeout=_REINSTALL_START_RETRY_TIMEOUT_SECONDS,
+            poll_interval=_REINSTALL_START_RETRY_POLL_INTERVAL_SECONDS,
+        )
+    if result is None:
+        raise BareMetalProvisioningError(
+            f"OVH reinstall of {service_name} kept failing its OS-compatibility lookup "
+            f"('{_REINSTALL_COMPATIBILITY_TRANSIENT_MARKER}') for "
+            f"{_REINSTALL_START_RETRY_TIMEOUT_SECONDS:.0f}s"
+        )
+    (task,) = result
     task_id = task.get("taskId") if isinstance(task, dict) else None
     if task_id is None and isinstance(task, dict):
         task_id = task.get("id")
     if task_id is None:
         raise BareMetalProvisioningError(f"OVH reinstall of {service_name} returned no task id: {task!r}")
-    return int(task_id)
+    return BoxReinstallStart(task_id=int(task_id), box_host_public_key=host_public_key_openssh)
 
 
 def _poll_reinstall_task_status(client: OvhVpsClient, service_name: str, task_id: int) -> str | None:

@@ -4,6 +4,24 @@ Full, unedited changelog entries for the `mngr_ttyd` project, consolidated night
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-25
+
+Fixed copy-paste in the browser terminal. The plugin now serves its own OSC 52-capable web client to the stock `ttyd` binary via `ttyd -I`, so copying text inside a tmux session running in the browser terminal reaches the system clipboard (the released `ttyd` 1.7.7 client has no OSC 52 handler). `mouse on` is kept, so mouse-wheel scroll and in-app mouse continue to work. The client is vendored gzip-compressed and decompressed onto each agent host during provisioning; if it is missing, `ttyd` cleanly falls back to its built-in client. Rebuild it with `scripts/build_patched_ttyd_client.sh`.
+
+Added `scripts/repro_ttyd_tmux_copy_paste.sh`, a self-contained local reproduction that runs `ttyd` against a tmux session on a dedicated socket and exposes the relevant tmux and `ttyd` client options as environment-variable knobs, used to diagnose the copy-paste / mouse-wheel behavior.
+
+Test branch combining the paired `mngr/fix-copy` changes (mngr-side and forever-claude-template-side) to manually verify the tmux copy/clipboard fixes end-to-end in the minds app.
+
+The `mngr_ttyd` plugin now serves an OSC 52-capable ttyd web client so that a mouse-drag copy inside the browser terminal reaches the system clipboard.
+
+## 2026-06-19
+
+Trimmed the README to user-relevant content and tightened it for concision.
+
+## 2026-06-18
+
+The ttyd web-terminal attach now targets the agent's primary tmux window by name (`tmux.primary_window_name`, default `agent`, read from `MNGR_PRIMARY_WINDOW_NAME`) instead of the literal `:0` index, so attaching to an agent's terminal in the browser works regardless of the user's tmux `base-index` setting.
+
 ## 2026-06-12
 
 Internal: routed the agent state-dir path construction through the shared `get_agent_state_dir_path` helper (now in `imbue.mngr.hosts.common`). No behavior change.

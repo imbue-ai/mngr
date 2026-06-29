@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-19
+
+Trimmed the README to user-relevant content and tightened it for concision.
+
 ## 2026-06-16
 
 Corrected the package version back to 0.1.0 (it had been bumped to 0.1.1, but that version was never actually released).

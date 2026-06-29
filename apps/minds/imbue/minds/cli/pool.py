@@ -15,7 +15,7 @@ Responsibility split:
        subprocess env so the inner ``mngr create ... --template ovh`` has
        credentials;
     3. derives the management public key from the activated tier's
-       ``<vault_path_prefix>/pool-ssh.POOL_SSH_PRIVATE_KEY`` Vault entry
+       ``<vault_path_prefix>/pool-ssh/POOL_SSH_PRIVATE_KEY`` Vault entry
        (the connector runs with the SAME private key as a Modal Secret) and
        passes it to the admin's ``--management-public-key-file`` -- so the
        key injected on the VPS at bake time always matches the connector's
@@ -250,6 +250,18 @@ def build_list_admin_args(*, database_url: str | None) -> list[str]:
     return args
 
 
+def build_backfill_host_keys_admin_args(*, database_url: str | None) -> list[str]:
+    """Compose the ``mngr imbue_cloud admin pool backfill-host-keys`` argv.
+
+    ``--database-url`` forwarded only when explicitly supplied; see
+    :func:`build_create_admin_args`.
+    """
+    args = ["backfill-host-keys"]
+    if database_url is not None:
+        args.extend(["--database-url", database_url])
+    return args
+
+
 def build_destroy_admin_args(
     *, pool_host_id: str, database_url: str | None, force: bool, skip_vps_cancel: bool
 ) -> list[str]:
@@ -358,7 +370,7 @@ def resolve_management_public_key_from_vault(
 
     Looks up the tier for ``env_name``, loads the corresponding deploy
     config to discover ``vault_path_prefix``, then reads
-    ``<prefix>/pool-ssh.POOL_SSH_PRIVATE_KEY`` via the standard
+    ``<prefix>/pool-ssh/POOL_SSH_PRIVATE_KEY`` via the standard
     ``read_vault_kv`` shellout. The returned public key is the openssh
     ``authorized_keys`` line form (no comment), ready to write to the
     file the inner admin CLI's ``--management-public-key-file`` reads.
@@ -386,7 +398,7 @@ def read_pool_private_key_from_vault(
 ) -> str:
     """Read the activated tier's pool management private key PEM from Vault.
 
-    Reads ``<vault_path_prefix>/pool-ssh.POOL_SSH_PRIVATE_KEY`` -- the same entry
+    Reads ``<vault_path_prefix>/pool-ssh/POOL_SSH_PRIVATE_KEY`` -- the same entry
     ``minds env deploy`` pushes into the ``pool-ssh-<tier>`` Modal Secret the
     connector loads, so the key the slice bake authorizes on the VM matches the one
     the connector SSHes with at lease/release time. The OVH backend derives the
@@ -425,7 +437,7 @@ def resolved_management_public_key_path(
        the operator deliberately wants a non-canonical key.
     2. Vault (default): :func:`resolve_management_public_key_from_vault`
        derives the public form from the activated tier's
-       ``<vault_path_prefix>/pool-ssh.POOL_SSH_PRIVATE_KEY`` entry. The
+       ``<vault_path_prefix>/pool-ssh/POOL_SSH_PRIVATE_KEY`` entry. The
        derived key is written to a private temp file that's cleaned up
        when the context exits (so the inner CLI sees ``exists=True`` and
        no stale public-key files litter the operator's machine).
@@ -488,7 +500,7 @@ def resolve_host_pool_dsn(
 
     Precedence: an explicit ``--database-url`` always wins. Otherwise the shared
     tiers (``staging`` / ``production``) keep no local ``secrets.toml``, so their
-    DSN is read from the tier's ``<vault_prefix>/neon.DATABASE_URL`` Vault entry
+    DSN is read from the tier's ``<vault_prefix>/neon/DATABASE_URL`` Vault entry
     -- the same entry the connector and ``minds env deploy`` use. Per-env tiers
     (``dev`` / ``ci``) return None so the admin CLI auto-resolves the DSN from
     the per-env ``secrets.toml`` that ``minds env deploy`` wrote (this path never
@@ -743,7 +755,7 @@ def pool() -> None:
     help=(
         "[ovh_vps only] Override path for the management SSH public key injected on the pool VPS+container. "
         "Default (omitted): derive from the activated tier's Vault entry "
-        "`<vault_path_prefix>/pool-ssh.POOL_SSH_PRIVATE_KEY` -- the same private key the connector "
+        "`<vault_path_prefix>/pool-ssh/POOL_SSH_PRIVATE_KEY` -- the same private key the connector "
         "loads from its `pool-ssh-<tier>` Modal Secret, which guarantees the lease-time SSH-key "
         "injection authenticates. Pass this only when bypassing the tier's canonical keypair."
     ),
@@ -909,6 +921,30 @@ def pool_list(database_url: str | None) -> None:
     env_name = require_activated_env_name()
     args = build_list_admin_args(database_url=resolve_host_pool_dsn(env_name, database_url))
     _raise_on_failure("list", _run_admin_command(args))
+
+
+@pool.command(name="backfill-host-keys")
+@click.option(
+    "--database-url",
+    required=False,
+    default=None,
+    type=str,
+    help=_DATABASE_URL_HELP,
+)
+def pool_backfill_host_keys(database_url: str | None) -> None:
+    """One-time: keyscan + record SSH host public keys for pre-existing pool rows and boxes.
+
+    Forwards to ``mngr imbue_cloud admin pool backfill-host-keys`` -- the single
+    sanctioned trust-on-first-use, used once after deploying the host-key-pinning
+    connector so rows baked before the host-key columns existed become leasable
+    again. Resolves the staging / production host_pool DSN from the tier's
+    ``<vault_prefix>/neon/DATABASE_URL`` Vault entry exactly like ``pool list`` /
+    ``pool destroy``, so the operator never hand-passes ``--database-url``.
+    Idempotent: rows that already have keys are skipped.
+    """
+    env_name = require_activated_env_name()
+    args = build_backfill_host_keys_admin_args(database_url=resolve_host_pool_dsn(env_name, database_url))
+    _raise_on_failure("backfill-host-keys", _run_admin_command(args))
 
 
 @pool.command(name="destroy")

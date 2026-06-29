@@ -40,6 +40,7 @@ from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr_vps.container_setup import download_directory_from_outer
 from imbue.mngr_vps.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps.container_setup import translate_outer_concurrency_errors
+from imbue.mngr_vps.docker_realizer import CONTAINER_HOST_KEY_NAME
 from imbue.mngr_vps.errors import VpsError
 from imbue.mngr_vps.host_state_store import BucketHostStateStore
 from imbue.mngr_vps.host_state_store import HostDirBackend
@@ -52,8 +53,10 @@ from imbue.mngr_vps.instance import VpsProvider
 from imbue.mngr_vps.instance import attempt_cloud_resource_teardown
 from imbue.mngr_vps.interfaces import HostRealizer
 from imbue.mngr_vps.primitives import ISOLATION_TAG_KEY
+from imbue.mngr_vps.primitives import VPS_HOST_KEY_NAME
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import isolation_from_marker
+from imbue.mngr_vps.primitives import read_host_public_key_with_legacy_fallback
 from imbue.mngr_vps.systemd import render_systemd_unit
 
 IDLE_SENTINEL_FILENAME: Final[str] = "stop-instance-requested"
@@ -251,7 +254,7 @@ class OfflineCapableVpsProvider(VpsProvider):
         # connecting -- the instance kept its host keys across the pause (on disk),
         # but the record (the other key source) can't be read until we can SSH in.
         # A no-op for static-IP providers that override it.
-        self._rebind_known_hosts_pre_connect(new_ip)
+        self._rebind_known_hosts_pre_connect(host_id, new_ip)
         with log_span("Waiting for VPS SSH after start"):
             self._wait_for_sshd_on_vps(new_ip, timeout_seconds=self.config.ssh_connect_timeout)
         # Mirror create's host-key wait on resume. Backends whose bootstrap re-runs
@@ -265,9 +268,13 @@ class OfflineCapableVpsProvider(VpsProvider):
         # resume, so it returns on the first poll. This matters most for bare
         # placement, whose agent endpoint *is* port 22.
         with log_span("Waiting for expected VPS host key after start"):
-            self._wait_for_expected_host_key(
-                new_ip, self._get_vps_host_keypair()[1], timeout_seconds=self.config.ssh_connect_timeout
+            expected_vps_host_key = read_host_public_key_with_legacy_fallback(
+                self._key_dir(), host_id, VPS_HOST_KEY_NAME
             )
+            if expected_vps_host_key is not None:
+                self._wait_for_expected_host_key(
+                    new_ip, expected_vps_host_key, timeout_seconds=self.config.ssh_connect_timeout
+                )
         realizer = self._realizer_for_instance(instance)
         with self._make_outer_for_vps_ip(new_ip) as outer:
             host_store = realizer.open_host_store(outer, host_id)
@@ -450,7 +457,7 @@ class OfflineCapableVpsProvider(VpsProvider):
             container_public_key=record.container_ssh_host_public_key,
         )
 
-    def _rebind_known_hosts_pre_connect(self, new_ip: str) -> None:
+    def _rebind_known_hosts_pre_connect(self, host_id: HostId, new_ip: str) -> None:
         """Add ``new_ip`` to known_hosts using mngr's local, authoritative host keys.
 
         Runs on resume *before* any SSH connection (the host record, the other key
@@ -459,13 +466,17 @@ class OfflineCapableVpsProvider(VpsProvider):
         public keys here are exactly what the resumed instance presents (its host
         keys persist on the disk across a pause). Sourcing them locally rather than
         from account-writable instance metadata anchors host-key verification to
-        data mngr controls. Providers whose IP is stable across a pause override
-        this to a no-op.
+        data mngr controls. Per-host keys are read for ``host_id``, falling back to
+        the legacy provider-global key for hosts created before per-host keys
+        existed. Providers whose IP is stable across a pause override this to a
+        no-op.
         """
         self._add_known_hosts_for_ip(
             new_ip,
-            vps_public_key=self._get_vps_host_keypair()[1],
-            container_public_key=self._get_container_host_keypair()[1],
+            vps_public_key=read_host_public_key_with_legacy_fallback(self._key_dir(), host_id, VPS_HOST_KEY_NAME),
+            container_public_key=read_host_public_key_with_legacy_fallback(
+                self._key_dir(), host_id, CONTAINER_HOST_KEY_NAME
+            ),
         )
 
     def _find_instance_for_host(self, host_id: HostId) -> dict[str, Any] | None:

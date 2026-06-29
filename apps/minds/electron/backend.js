@@ -3,6 +3,7 @@ const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const paths = require('./paths');
+const { getBuildMetadata } = require('./build-metadata');
 
 // Swallow EPIPE on the Electron main process's own stdout/stderr. When dev
 // launches go through a pipe (e.g. `just minds-start | head -30`), the
@@ -160,6 +161,9 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       const mindsRootName = paths.getMindsRootName();
       const mngrHostDir = paths.getMngrHostDir();
       const mngrPrefix = paths.getMngrPrefix();
+      // Forwarded to the Python backend so Sentry tags reports with the desktop
+      // app version (release) and the git SHA the build was cut from.
+      const { releaseId, gitSha } = getBuildMetadata();
       // When build.js embedded a client.toml + root_name pair (production
       // / staging / beta packaged builds), pass --config-file explicitly
       // so the backend doesn't have to fall back to MINDS_CLIENT_CONFIG_PATH.
@@ -191,6 +195,8 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MNGR_PREFIX: mngrPrefix,
           MINDS_LATCHKEY_BINARY: paths.getLatchkeyPath(),
           MINDS_LATCHKEY_DIRECTORY: paths.getLatchkeyDirectory(),
+          MINDS_RELEASE_ID: releaseId,
+          MINDS_GIT_SHA: gitSha,
         };
       } else {
         // Packaged mode: use bundled uv with standalone pyproject
@@ -254,6 +260,8 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           // it. Without this, uv falls back to <project>/.venv which is
           // inside the signed .app bundle (read-only on macOS).
           VIRTUAL_ENV: paths.getVenvDir(),
+          MINDS_RELEASE_ID: releaseId,
+          MINDS_GIT_SHA: gitSha,
         };
       }
 

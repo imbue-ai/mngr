@@ -24,11 +24,12 @@ Credentials:
   * OVH AK/AS/CK come from the environment (``OVH_APPLICATION_KEY`` /
     ``OVH_APPLICATION_SECRET`` / ``OVH_CONSUMER_KEY``, optional
     ``OVH_ENDPOINT``). Source them from Vault, e.g.:
-        eval "$(vault kv get -format=json -mount=secrets minds/dev/ovh \\
-            | python3 -c 'import sys,json;[print(f"export {k}={v}") \\
-            for k,v in json.load(sys.stdin)["data"]["data"].items()]')"
+        for k in OVH_APPLICATION_KEY OVH_APPLICATION_SECRET OVH_CONSUMER_KEY; do
+            export "$k=$(vault kv get -format=json -mount=secrets minds/dev/ovh/$k \\
+                | jq -r .data.data.value)"
+        done
   * Databases come from ``--database-url`` (repeatable). Pull each tier's
-    host-pool DSN from Vault (``secrets/minds/<tier>/neon`` -> ``DATABASE_URL``).
+    host-pool DSN from Vault (``secrets/minds/<tier>/neon/DATABASE_URL`` -> ``value``).
 
 Defaults to a dry-run; pass ``--yes`` to actually mutate OVH / the databases.
 

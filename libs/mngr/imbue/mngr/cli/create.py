@@ -1976,6 +1976,14 @@ def _build_create_result_data(result: CreateAgentResult) -> dict[str, Any]:
     outer_ssh_port = result.host.get_outer_ssh_port()
     if outer_ssh_port is not None:
         result_data["outer_ssh_port"] = outer_ssh_port
+    # Baked sshd host public keys (when the provider generates them at bake time),
+    # so pool-bake tooling can persist them for strict host-key pinning instead of
+    # scanning the host later.
+    outer_host_public_key, container_host_public_key = result.host.get_ssh_host_public_keys()
+    if outer_host_public_key is not None:
+        result_data["outer_host_public_key"] = outer_host_public_key
+    if container_host_public_key is not None:
+        result_data["container_host_public_key"] = container_host_public_key
     return result_data
 
 

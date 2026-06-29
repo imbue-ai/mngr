@@ -35,13 +35,17 @@ from imbue.imbue_common.event_envelope import EventSource
 from imbue.imbue_common.event_envelope import EventType
 from imbue.imbue_common.event_envelope import IsoTimestamp
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.desktop_client.latchkey.gateway_client import AccountsRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
+from imbue.minds.desktop_client.latchkey.gateway_client import WorkspaceRequestPayload
+from imbue.minds.desktop_client.request_events import LatchkeyAccountsPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
+from imbue.minds.desktop_client.request_events import LatchkeyWorkspacePermissionRequestEvent
 from imbue.minds.desktop_client.request_events import REQUESTS_EVENT_SOURCE_NAME
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestType
@@ -73,7 +77,10 @@ def streamed_request_to_event(streamed: StreamedPermissionRequest) -> RequestEve
     grant flow); :class:`FileSharingRequestPayload` becomes a
     :class:`LatchkeyFileSharingPermissionRequestEvent` (rendered as a single
     per-path yes/no dialog whose grant path goes through
-    ``POST /permission-requests/approve/<id>``).
+    ``POST /permission-requests/approve/<id>``);
+    :class:`WorkspaceRequestPayload` becomes a
+    :class:`LatchkeyWorkspacePermissionRequestEvent` (the cross-workspace
+    ``minds-workspaces`` verb + all-vs-selected target dialog).
     """
     payload = streamed.payload
     if isinstance(payload, PredefinedRequestPayload):
@@ -102,6 +109,32 @@ def streamed_request_to_event(streamed: StreamedPermissionRequest) -> RequestEve
             permissions_target_path=streamed.target,
             path=payload.path,
             access=str(payload.access),
+            rationale=streamed.rationale,
+        )
+    if isinstance(payload, WorkspaceRequestPayload):
+        return LatchkeyWorkspacePermissionRequestEvent(
+            timestamp=_now_iso(),
+            type=EventType("workspace_permission_request"),
+            event_id=EventId(streamed.request_id),
+            source=EventSource(REQUESTS_EVENT_SOURCE_NAME),
+            agent_id=streamed.agent_id,
+            request_type=str(RequestType.WORKSPACE_PERMISSION),
+            is_user_requested=False,
+            permissions_target_path=streamed.target,
+            permissions=payload.permissions,
+            target_workspace_id=payload.target_workspace_id,
+            rationale=streamed.rationale,
+        )
+    if isinstance(payload, AccountsRequestPayload):
+        return LatchkeyAccountsPermissionRequestEvent(
+            timestamp=_now_iso(),
+            type=EventType("accounts_permission_request"),
+            event_id=EventId(streamed.request_id),
+            source=EventSource(REQUESTS_EVENT_SOURCE_NAME),
+            agent_id=streamed.agent_id,
+            request_type=str(RequestType.ACCOUNTS_PERMISSION),
+            is_user_requested=False,
+            permissions_target_path=streamed.target,
             rationale=streamed.rationale,
         )
     assert_never(payload)
@@ -175,16 +208,29 @@ class PermissionRequestsConsumer(MutableModel):
                 for streamed in self.gateway_client.iter_permission_requests():
                     if self._stop_event.is_set():
                         return
-                    event = streamed_request_to_event(streamed)
-                    # If ``on_request`` raises, the exception propagates
-                    # out through ``_run`` and is reported by
-                    # ``ObservableThread``'s top-level exception handler.
-                    # We intentionally do *not* catch broadly here: a
-                    # buggy callback should be loud rather than
-                    # silently dropped, and the consumer's reconnect
-                    # loop would only re-issue the same delivery on a
-                    # new stream.
-                    self.on_request(event)
+                    try:
+                        event = streamed_request_to_event(streamed)
+                        self.on_request(event)
+                    except Exception as e:
+                        # A single request the consumer cannot process must never
+                        # take down this thread: it is the request inbox's source
+                        # of truth, so an uncaught error here silently stops EVERY
+                        # future permission request -- for any agent or service --
+                        # from reaching the UI until restart (and re-crashes on the
+                        # same record on each reconnect). Log the failure with its
+                        # traceback and skip just this request. The gateway
+                        # validates request bodies up front (see
+                        # permission_requests.mjs), so this broad catch is a
+                        # defense-in-depth backstop for malformed/legacy records,
+                        # not the primary guard.
+                        logger.opt(exception=e).error(
+                            "Skipping a permission request the consumer could not process "
+                            "(request_id={}, agent_id={}): {}",
+                            streamed.request_id,
+                            streamed.agent_id,
+                            e,
+                        )
+                        continue
                     # Reset backoff after a successful delivery.
                     delay = _RECONNECT_MIN_DELAY_SECONDS
             except LatchkeyGatewayClientError as e:

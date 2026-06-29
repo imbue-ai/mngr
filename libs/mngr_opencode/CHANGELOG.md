@@ -6,6 +6,15 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `version` field on the opencode agent type pins the installed opencode CLI; provisioning verifies the installed opencode matches and errors on mismatch.
+- Added: `update_policy` field on the opencode agent type (`AUTO` / `ASK` / `NEVER`, default `NEVER`) governs opencode's startup auto-update via the `autoupdate` key in the per-agent `opencode.json`.
+
+### Changed
+
+- Changed: Opencode agent lifecycle detection now targets the agent's primary tmux window by name (`tmux.primary_window_name`, default `agent`) instead of the literal `:0` index, so it works regardless of the user's tmux `base-index`.
+
 ## [v0.2.17] - 2026-06-18
 
 ### Added

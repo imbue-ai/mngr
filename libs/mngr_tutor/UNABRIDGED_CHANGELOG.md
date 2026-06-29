@@ -4,6 +4,14 @@ Full, unedited changelog entries for the `mngr_tutor` project, consolidated nigh
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-19
+
+Trimmed the README to user-relevant content and tightened it for concision.
+
+## 2026-06-18
+
+Internal refactor: the tutor's tmux-session-has-clients check now builds the agent's tmux session name via the shared `MngrConfig.agent_session_name` helper instead of hand-rolling the `prefix + name` string, keeping it consistent with mngr's centralized session-name construction. No user-visible behavior change.
+
 ## 2026-06-10
 
 Raised the stale coverage floor from 90% to 95% to match the coverage CI already measures (~96%).

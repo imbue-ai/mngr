@@ -1195,6 +1195,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         """Delegate to the provider, which knows whether this host has a distinct outer sshd port."""
         return self.provider_instance.get_outer_ssh_port(self.id)
 
+    def get_ssh_host_public_keys(self) -> tuple[str | None, str | None]:
+        """Delegate to the provider, which knows the host's baked sshd host public keys."""
+        return self.provider_instance.get_ssh_host_public_keys(self.id)
+
     def set_tags(self, tags: Mapping[str, str]) -> None:
         """Set tags via the provider and sync to certified data."""
         self.provider_instance.set_host_tags(self, tags)
@@ -2986,6 +2990,20 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 if agent is None:
                     raise AgentNotFoundOnHostError(agent_id, self.id)
 
+                # Before launching, reap any stale process tree from a prior incarnation
+                # of this agent id -- but only when it isn't already running, so an
+                # idempotent start never tears down a live agent. This clears orphans an
+                # earlier abrupt teardown left behind (e.g. a bootstrap supervisord and
+                # its ttyd reparented to PID 1) so the relaunch can't collide with the
+                # survivors (e.g. EADDRINUSE on a fixed service port).
+                if not self._does_agent_session_exist(agent):
+                    for reap_failure in self.reap_agent_process_tree(agent):
+                        logger.warning(
+                            "Reaping a stale process for agent {} before start surfaced a cleanup issue: {}",
+                            agent.name,
+                            reap_failure,
+                        )
+
                 self._ensure_work_dir_exists(agent)
 
                 command = self._get_agent_command(agent)
@@ -3261,6 +3279,75 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             return []
         return [pid for pid in result.stdout.strip().split("\n") if pid.strip()]
 
+    def _collect_agent_process_pids(self, agent: AgentInterface, failures: list[CleanupFailure]) -> list[str]:
+        """Collect every pid belonging to ``agent``: the pane descendants of its tmux
+        session plus any ``MNGR_AGENT_ID``-tagged orphans that reparented to PID 1 after
+        an abrupt ancestor death. Deduplicated, order-preserving.
+        """
+        session_name = self.mngr_ctx.config.agent_session_name(agent.name)
+        pids = self._collect_session_pids(session_name, failures, agent.name)
+        pids.extend(self._collect_pids_by_agent_id_env(agent.id, failures, agent.name))
+        return list(dict.fromkeys(pids))
+
+    def _terminate_pids(self, pids: Sequence[str], failures: list[CleanupFailure], *, timeout_seconds: float) -> None:
+        """SIGTERM then (after a short grace) SIGKILL every pid, in one batched shell
+        command so a single unresponsive process can't starve the others of SIGKILL.
+        """
+        if not pids:
+            return
+        pid_list = " ".join(pids)
+        # Send SIGTERM to all processes at once, then wait briefly and SIGKILL survivors.
+        # Batching avoids the issue where one non-responsive process (e.g. interactive
+        # bash that ignores SIGTERM) consumes the whole timeout budget in a serial loop.
+        #
+        # stderr is captured (no `2>/dev/null`) so kill failures can be classified: a pid
+        # that died between collection and the kill (ESRCH "No such process") is benign,
+        # while an unkillable process (EPERM) is a real PROCESSES_REMAIN failure.
+        grace_seconds = min(1.0, timeout_seconds)
+        _result, failure = self._run_classified_cleanup_command(
+            f"for p in {pid_list}; do kill -TERM $p; done; "
+            f"sleep {grace_seconds}; "
+            f"for p in {pid_list}; do kill -KILL $p; done",
+            failure_category=CleanupFailureCategory.PROCESSES_REMAIN,
+            benign_stderr_substrings=_KILL_BENIGN_STDERR_SUBSTRINGS,
+            agent_name=None,
+            # Bound by the grace sleep plus a fixed margin so a stuck kill loop can't hang
+            # cleanup; the command itself only sleeps once.
+            timeout_seconds=grace_seconds + _STOP_AGENT_COMMAND_TIMEOUT_SECONDS,
+        )
+        if failure is not None:
+            failures.append(failure)
+
+    def reap_agent_process_tree(self, agent: AgentInterface, *, timeout_seconds: float = 5.0) -> list[CleanupFailure]:
+        """Kill every process belonging to ``agent`` (pane/session descendants plus any
+        ``MNGR_AGENT_ID``-tagged orphans reparented to PID 1) with SIGTERM then SIGKILL.
+
+        Does NOT kill the tmux session itself -- callers that want a full stop do that
+        separately. Returns the cleanup failures so the caller decides whether to raise
+        (a stop) or log and proceed (a (re)start).
+
+        This is the single mechanism that guarantees a long-lived daemon launched under
+        an agent (e.g. the FCT bootstrap's ``supervisord`` and its children, like a ttyd
+        bound to a fixed port) cannot outlive the agent: the env marker is inherited by
+        every descendant and survives reparenting, so it catches orphans that a
+        pane/process-tree walk would miss.
+        """
+        failures: list[CleanupFailure] = []
+        pids = self._collect_agent_process_pids(agent, failures)
+        self._terminate_pids(pids, failures, timeout_seconds=timeout_seconds)
+        return failures
+
+    def _does_agent_session_exist(self, agent: AgentInterface) -> bool:
+        """Return True iff the agent's tmux session already exists (it is likely running)."""
+        session_name = self.mngr_ctx.config.agent_session_name(agent.name)
+        target = TmuxSessionTarget(session_name=session_name).as_shell_arg()
+        result = self.execute_idempotent_command(
+            f"tmux has-session -t {target} 2>/dev/null",
+            timeout_seconds=_STOP_AGENT_COMMAND_TIMEOUT_SECONDS,
+            raise_on_timeout=False,
+        )
+        return result.success
+
     def stop_agents(self, agent_ids: Sequence[AgentId], timeout_seconds: float = 5.0) -> None:
         """Stop agents by killing all processes in their tmux sessions.
 
@@ -3288,42 +3375,15 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                         continue
 
                     current_agents.append(agent)
-                    session_name = self.mngr_ctx.config.agent_session_name(agent.name)
-                    all_pids.extend(self._collect_session_pids(session_name, failures, agent.name))
-                    # Also pick up orphans (e.g. children of an OOM-killed claude) that
-                    # reparented to PID 1 and so are invisible to the pane-descendant walk.
-                    all_pids.extend(self._collect_pids_by_agent_id_env(agent.id, failures, agent.name))
+                    # Pane descendants plus orphans (e.g. children of an OOM-killed claude,
+                    # or a bootstrap daemon reparented to PID 1) matched by MNGR_AGENT_ID.
+                    all_pids.extend(self._collect_agent_process_pids(agent, failures))
 
-                # Deduplicate while preserving order (a pid may appear in both lists).
+                # Deduplicate while preserving order (a pid may appear under >1 agent).
+                # The kill is batched across all agents, so a failure is not attributed
+                # to a single agent.
                 all_pids = list(dict.fromkeys(all_pids))
-
-                if all_pids:
-                    pid_list = " ".join(all_pids)
-
-                    # Send SIGTERM to all processes at once, then wait briefly and SIGKILL survivors.
-                    # This is done in a single shell command to avoid the issue where one non-responsive
-                    # process (e.g., interactive bash which ignores SIGTERM) would consume the entire
-                    # timeout budget in a serial loop, preventing SIGKILL from reaching other processes.
-                    #
-                    # stderr is captured (no `2>/dev/null`) so kill failures can be classified: a pid
-                    # that died between collection and the kill (ESRCH "No such process") is benign,
-                    # while an unkillable process (e.g. EPERM "Operation not permitted") is a real
-                    # PROCESSES_REMAIN failure. The kill is batched across all agents, so a failure here
-                    # is not attributed to a single agent.
-                    grace_seconds = min(1.0, timeout_seconds)
-                    _result, failure = self._run_classified_cleanup_command(
-                        f"for p in {pid_list}; do kill -TERM $p; done; "
-                        f"sleep {grace_seconds}; "
-                        f"for p in {pid_list}; do kill -KILL $p; done",
-                        failure_category=CleanupFailureCategory.PROCESSES_REMAIN,
-                        benign_stderr_substrings=_KILL_BENIGN_STDERR_SUBSTRINGS,
-                        agent_name=None,
-                        # Bound by the grace sleep plus a fixed margin so a stuck kill loop can't hang
-                        # cleanup; the command itself only sleeps once.
-                        timeout_seconds=grace_seconds + _STOP_AGENT_COMMAND_TIMEOUT_SECONDS,
-                    )
-                    if failure is not None:
-                        failures.append(failure)
+                self._terminate_pids(all_pids, failures, timeout_seconds=timeout_seconds)
 
                 # Finally kill the tmux sessions themselves. A session already gone (tmux
                 # "can't find session") is benign; a session that exists but cannot be killed

@@ -29,10 +29,10 @@
   // -- Per-agent accent color ------------------------------------------------
   //
   // Each SSE ``workspaces`` payload carries a per-workspace ``accent``
-  // (#rrggbb) and ``accent_fg`` (RGB triple for the contrasting titlebar
-  // foreground). The chrome caches both per agent id (see
+  // (#rrggbb). The chrome caches it per agent id (see
   // ``rememberWorkspaceAccents`` below) so accent application is a
-  // synchronous lookup. No client-side hash or hex math.
+  // synchronous lookup. The contrasting titlebar foreground is derived
+  // from the accent in pure CSS (``.titlebar-surface`` in app.css), not here.
 
   // -- Navigation adapter ---------------------------------------------------
   function navigateContent(url) {
@@ -117,20 +117,19 @@
 
   // -- Titlebar accent ------------------------------------------------------
   //
-  // The titlebar background and contrasting foreground are driven by three
-  // CSS variables set on the document root:
+  // The titlebar background is driven by two CSS variables set on the
+  // document root, plus the ``.titlebar-surface`` class toggled on
+  // #minds-titlebar:
   //   --workspace-accent  the workspace's #rrggbb accent (also consumed by
   //                       sidebar spines etc.)
   //   --titlebar-bg       the same color, used by the titlebar background
-  //   --titlebar-fg       an RGB triple ("0 0 0" | "255 255 255") for the
-  //                       contrasting foreground; titlebar-* utility classes
-  //                       compose this with per-element alpha for hierarchy
-  // Cleared back to the neutral chrome (pure-white bar via the Chrome.jinja
-  // fallback, dark "0 0 0" foreground via the tokens.css fallback) on any
-  // non-workspace minds screen -- so a sign-out / workspace-delete /
-  // freshly-launched app, and plain navigation to Home / Create / accounts,
-  // all render the neutral white chrome. (Light-mode default; dark-mode
-  // pure black is a deferred follow-up.)
+  // The contrasting foreground is NOT a variable -- the ``.titlebar-surface``
+  // scope derives it from --titlebar-bg in pure CSS and re-bases the
+  // foreground tokens on it (see app.css). Cleared back to the neutral chrome
+  // (surface-primary bar via the Chrome.jinja fallback, app tokens for the
+  // foreground) on any non-workspace minds screen -- so a sign-out /
+  // workspace-delete / freshly-launched app, and plain navigation to Home /
+  // Create / accounts, all render the neutral chrome.
   //
   // ``currentTitleAgentId`` tracks the workspace ACTUALLY DISPLAYED in this
   // window's content view -- it gates ``maybeRedirectToRecovery`` so a stuck
@@ -141,9 +140,9 @@
   // must never write to ``currentTitleAgentId`` or trigger recovery, or a
   // stuck agent in another window will hijack this window's content view.
   var currentTitleAgentId = null;
-  // Per-agent {accent, accent_fg} map populated from each SSE
-  // ``workspaces`` payload. ``applyTitleAccent`` reads from this cache
-  // so accent application is synchronous.
+  // Per-agent {accent} map populated from each SSE ``workspaces`` payload.
+  // ``applyTitleAccent`` reads from this cache so accent application is
+  // synchronous.
   // Workspaces missing from the cache (e.g. an agentId for which no SSE
   // tick has arrived yet) leave the accent unset on this call and get
   // painted by ``renderWorkspaces`` on the next tick.
@@ -163,9 +162,17 @@
       if (!w || !w.id) return;
       accentByAgentId[w.id] = {
         accent: typeof w.accent === 'string' ? w.accent : null,
-        fg: typeof w.accent_fg === 'string' ? w.accent_fg : null,
       };
     });
+  }
+
+  // Toggle the titlebar's self-theming scope. ``.titlebar-surface`` re-bases the
+  // foreground tokens off --titlebar-bg in pure CSS (see app.css); it must be
+  // present only while a workspace accent is set, so neutral chrome falls back
+  // to the app's own tokens (correct in both light and dark).
+  function setTitlebarSurface(on) {
+    var tb = document.getElementById('minds-titlebar');
+    if (tb) tb.classList.toggle('titlebar-surface', !!on);
   }
 
   function applyTitleAccent(agentId) {
@@ -173,7 +180,7 @@
     if (!agentId) {
       document.documentElement.style.removeProperty('--workspace-accent');
       document.documentElement.style.removeProperty('--titlebar-bg');
-      document.documentElement.style.removeProperty('--titlebar-fg');
+      setTitlebarSurface(false);
       return;
     }
     var cached = accentByAgentId[agentId];
@@ -186,9 +193,7 @@
     }
     document.documentElement.style.setProperty('--workspace-accent', cached.accent);
     document.documentElement.style.setProperty('--titlebar-bg', cached.accent);
-    if (cached.fg) {
-      document.documentElement.style.setProperty('--titlebar-fg', cached.fg);
-    }
+    setTitlebarSurface(true);
   }
   // Update the "displayed workspace" tracker and trigger the recovery
   // redirect when warranted. Called from the displayed-workspace sources
@@ -378,6 +383,8 @@
   if (!isElectron) {
     var newWsBtn = document.getElementById('sidebar-new-workspace');
     if (newWsBtn) newWsBtn.onclick = function () { navigateContent('/create'); closeSidebar(); };
+    var settingsBtn = document.getElementById('sidebar-settings');
+    if (settingsBtn) settingsBtn.onclick = function () { navigateContent('/settings'); closeSidebar(); };
     var accountBtn = document.getElementById('sidebar-account');
     if (accountBtn) {
       accountBtn.onclick = function () {
@@ -390,6 +397,18 @@
   document.getElementById('requests-toggle').onclick = function () {
     if (isElectron) window.minds.toggleInbox();
     else navigateContent('/inbox');
+  };
+
+  // Get-help opens the help modal (report a bug). Pass the currently-displayed
+  // workspace id along so the report can scope workspace context; in Electron the
+  // modal is the shared overlay view, in browser mode it loads into the content frame.
+  document.getElementById('help-toggle').onclick = function () {
+    var aid = currentTitleAgentId || '';
+    if (isElectron) {
+      window.minds.toggleHelp(aid);
+    } else {
+      navigateContent('/help' + (aid ? '?workspace=' + encodeURIComponent(aid) : ''));
+    }
   };
 
   // -- Open a permission request from workspace content (browser mode) -------
@@ -408,10 +427,21 @@
       if (!frame || e.source !== frame.contentWindow) return;
       var data = e.data;
       if (!data || typeof data !== 'object') return;
-      if (data.type !== 'minds:open-request-modal') return;
-      var requestId = data.requestId;
-      if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) return;
-      navigateContent('/inbox?selected=' + encodeURIComponent(requestId));
+      if (data.type === 'minds:open-request-modal') {
+        var requestId = data.requestId;
+        if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) return;
+        navigateContent('/inbox?selected=' + encodeURIComponent(requestId));
+        return;
+      }
+      // Error pages (e.g. the recovery page) ask to open the get-help / report-a-bug
+      // modal. There's no overlay in browser mode, so navigate the content frame to
+      // /help, scoped to the workspace when the page supplied a valid agent id.
+      if (data.type === 'minds:open-help') {
+        var agentId = data.agentId;
+        var scoped = typeof agentId === 'string' && /^agent-[a-f0-9]{1,64}$/i.test(agentId) ? agentId : '';
+        navigateContent('/help' + (scoped ? '?workspace=' + encodeURIComponent(scoped) : ''));
+        return;
+      }
     });
   }
 
@@ -437,7 +467,7 @@
     keys.forEach(function (key, keyIdx) {
       if (keyIdx > 0 || keys.length > 1) {
         var header = document.createElement('div');
-        header.className = 'px-2 pt-2 pb-1 text-[10px] text-white/40 uppercase tracking-wider';
+        header.className = 'px-2 pt-2 pb-1 type-section text-tertiary';
         header.textContent = key === 'Private' ? 'Private' : key;
         container.appendChild(header);
       }
@@ -466,33 +496,21 @@
   function updateRequestsBadge(count) {
     var badge = document.getElementById('requests-badge');
     if (!badge) return;
-    if (count > 0) badge.classList.remove('hidden');
-    else badge.classList.add('hidden');
+    if (count > 0) {
+      // The badge is the Badge.jinja count pill; mirror its 99+ cap here.
+      badge.textContent = count > 99 ? '99+' : String(count);
+      badge.hidden = false;
+    } else {
+      // Hide via the native `hidden` attribute, not a `hidden` class: the pill
+      // bakes in `inline-flex`, which beats the `.hidden` utility in the
+      // cascade (so a `hidden` class would leave a stray "0" showing). The
+      // `[hidden]` base rule is `display: none !important`, which wins.
+      badge.hidden = true;
+    }
   }
 
   function handleChromeEvent(data) {
     try {
-      if (data.type === 'freeform_accent_preview') {
-        // Create-form preview: no workspace yet, so there's no agentId
-        // to key the cache by. Paint the CSS variables directly and
-        // drop the SSE replay target so a background ``workspaces``
-        // tick (a liveness flip or rename in any workspace) doesn't
-        // repaint the previous workspace's accent over the preview
-        // while the user is still on the create form. main drops this
-        // override when the window leaves ``/create``: it force-sends an
-        // ``accent-changed`` (the new workspace on submit, or null ->
-        // neutral chrome on abandon) even when the accent value didn't
-        // change -- see ``hasFreeformAccentPreview`` in electron/main.js.
-        if (data.accent) {
-          lastRequestedAccentAgentId = null;
-          document.documentElement.style.setProperty('--workspace-accent', data.accent);
-          document.documentElement.style.setProperty('--titlebar-bg', data.accent);
-          if (data.accent_fg) {
-            document.documentElement.style.setProperty('--titlebar-fg', data.accent_fg);
-          }
-        }
-        return;
-      }
       if (data.type === 'workspace_accent_preview') {
         // Optimistic single-workspace cache update + repaint, emitted by
         // main.js when the settings page in this bundle picks a color.
@@ -517,7 +535,6 @@
         if (data.agent_id && data.accent) {
           accentByAgentId[data.agent_id] = {
             accent: data.accent,
-            fg: typeof data.accent_fg === 'string' ? data.accent_fg : null,
           };
           applyTitleAccent(data.agent_id);
         }

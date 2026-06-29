@@ -4,6 +4,16 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-26
+
+Added scope docstrings to this package's release tests so the TMR (test
+map-reduce) harness can anchor each test's intended scope on its docstring
+rather than on a tutorial block. Docstring-only; no test logic changed.
+
+## 2026-06-19
+
+Trimmed the README to user-relevant content and tightened it for concision.
+
 ## 2026-06-16
 
 Bumped the timeout for `test_schedule_run_local_deployed_trigger` to 30s to reduce flakiness. No user-facing changes.

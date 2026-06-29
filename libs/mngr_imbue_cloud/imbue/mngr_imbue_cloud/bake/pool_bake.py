@@ -107,6 +107,12 @@ class BakedPoolHost(FrozenModel):
     outer_ssh_port: int | None = Field(
         default=None, description="separate outer/management sshd port, if the provider exposes one (slice VM root)"
     )
+    outer_host_public_key: str | None = Field(
+        default=None, description="the VPS/VM-root sshd host public key (baked, deterministic), to pin"
+    )
+    container_host_public_key: str | None = Field(
+        default=None, description="the container sshd host public key (baked, deterministic), to pin"
+    )
 
 
 def _stream_subprocess_line(line: str, is_stdout: bool) -> None:
@@ -264,6 +270,8 @@ def parse_baked_host(stdout: str, *, host_name: str) -> BakedPoolHost:
         ssh_port=int(ssh_port) if ssh_port is not None else None,
         ssh_key_path=parsed.get("ssh_key_path"),
         outer_ssh_port=int(outer_ssh_port) if outer_ssh_port is not None else None,
+        outer_host_public_key=parsed.get("outer_host_public_key"),
+        container_host_public_key=parsed.get("container_host_public_key"),
     )
 
 

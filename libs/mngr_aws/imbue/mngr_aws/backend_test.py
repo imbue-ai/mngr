@@ -224,11 +224,12 @@ def test_rebind_known_hosts_pre_connect_uses_local_keypairs(temp_mngr_ctx: MngrC
     resumed session.
     """
     provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
     new_ip = "203.0.113.50"
-    expected_vps_key = provider._get_vps_host_keypair()[1]
-    expected_container_key = provider._get_container_host_keypair()[1]
+    expected_vps_key = provider._get_vps_host_keypair(host_id)[1]
+    expected_container_key = provider._get_container_host_keypair(host_id)[1]
 
-    provider._rebind_known_hosts_pre_connect(new_ip)
+    provider._rebind_known_hosts_pre_connect(host_id, new_ip)
 
     vps_known_hosts = provider._vps_known_hosts_path().read_text()
     container_known_hosts = provider._container_known_hosts_path().read_text()

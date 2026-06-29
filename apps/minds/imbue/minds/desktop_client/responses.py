@@ -48,6 +48,22 @@ def make_redirect_response(url: str, status_code: int = 307) -> Response:
     return make_response(content="", status_code=status_code, headers={"Location": url})
 
 
+def safe_local_redirect_path(raw: str | None) -> str | None:
+    """Return ``raw`` only if it is a safe same-origin redirect path, else ``None``.
+
+    Guards the ``return_to`` flow (the create page -> sign-in -> back to the
+    picker) against open redirects: a value is accepted only when it is a
+    root-relative path (starts with a single ``/``) with no scheme or host.
+    Protocol-relative URLs (``//evil.com`` and the backslash-form
+    ``/\\evil.com``) and absolute ``https://...`` URLs are all rejected.
+    """
+    if not raw or not raw.startswith("/"):
+        return None
+    if raw.startswith("//") or raw.startswith("/\\"):
+        return None
+    return raw
+
+
 def make_file_response(path: str | Path, media_type: str | None = None, filename: str | None = None) -> Response:
     """Stream a file as an attachment, mirroring ``FileResponse(path=..., filename=...)``."""
     return send_file(str(path), mimetype=media_type, as_attachment=filename is not None, download_name=filename)

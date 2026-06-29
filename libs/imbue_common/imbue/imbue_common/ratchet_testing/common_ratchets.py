@@ -494,7 +494,7 @@ PREVENT_HARDCODED_CLAUDE_DIR = RegexRatchetRule(
         "Use the accessor functions from claude_config.py instead of hardcoding "
         "Path.home() / '.claude' or Path.home() / '.claude.json'. "
         "For the config directory: get_claude_config_dir() / get_user_claude_config_dir(). "
-        "For the user config file: find_user_claude_config(). "
+        "For the user config file: find_user_config_in_isolated_mode(). "
         "This allows paths to be overridden via CLAUDE_CONFIG_DIR "
         "and ORIGINAL_CLAUDE_CONFIG_DIR environment variables."
     ),

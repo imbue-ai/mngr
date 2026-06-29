@@ -6,6 +6,26 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Bare placement (`isolation=NONE`) — an Azure OS shutdown does not halt compute billing, so the bare agent's idle `shutdown.sh` runs the ARM self-deallocate directly (the same call the container idle watcher uses), keeping the self-deallocate role assignment and skipping the host-side sentinel watcher. Bare release tests added.
+- Added: SSH host keys are unique per host — each Azure host gets its own VPS/VM-root and container sshd host keypair at create time.
+- Added: Required Azure Blob **state bucket** (private Storage account + container) as the offline store for Azure hosts (replaces the VM tag mirror). A deallocated VM's full host record (config, IP, host keys) plus per-agent records live in the bucket. `mngr azure prepare` creates the account (default name `mngrst<hash>`, overridable via `state_storage_account_name`) and a `mngr-state` container, and grants the operator's own principal the `Storage Blob Data Contributor` role scoped to that account (Azure splits control plane from data plane, so creating the account does not include data-plane blob access). `mngr azure cleanup` deletes it (refuses non-empty unless `--force`).
+- Added: Offline `host_dir` on Azure, on by default (`is_offline_host_dir_enabled`). A deallocated VM's `host_dir` is now readable without SSH. Capture is operator-driven at `mngr stop` (no VM managed identity needed). Set `is_offline_host_dir_enabled = false` to disable.
+- Added: A running bare Azure host is discoverable with the default provider config — a `mngr-isolation` VM tag stamped at create lets discovery resolve placement from the cloud API without SSH, so operations no longer need `-S providers.<name>.isolation=NONE` at connect time.
+
+### Changed
+
+- Changed: Unauthenticated Azure now raises the shared `ProviderNotAuthorizedError` at construction (still a `ProviderUnavailableError`), with eager credential validation via a management-scope token request — instead of `DefaultAzureCredential` failing lazily on the first real API call.
+- Changed: Azure cleanup refusal when VMs still exist now raises the unified `ManagedResourcesExistError` (previously `AzureProviderError`), matching the message used by the other clouds.
+- Changed: `allowed_ssh_cidrs` is now typed `ScalarStrTuple` (matching AWS), so a higher-precedence config layer that sets it replaces the whole list rather than being flagged as narrowing; the config key and default are unchanged.
+- Changed: Host-side idle-watcher systemd unit renamed from `mngr-azure-idle-watcher` to the shared `mngr-idle-watcher` as the idle-watcher install lifted into the shared `OfflineCapableVpsProvider`.
+
+### Fixed
+
+- Fixed: `mngr start` of a deallocated Azure host now re-mirrors the resumed host record to the Blob state bucket, so offline / `mngr list` reads no longer report a just-resumed Azure VM as STOPPED until the next mirroring write.
+- Fixed: `rename_host` now re-stamps the cheap `mngr-host-name` VM tag (read by offline discovery), so a host renamed and then stopped lists under its new name rather than its old one.
+
 ## [v0.1.1] - 2026-06-18
 
 ### Added

@@ -7,7 +7,7 @@
 
   This component owns only the markup contract the picker JS depends on:
     - class ``color-swatch`` (the rim + selection-ring styles live in
-      tokens.css; ``#create-color-picker .color-swatch`` overrides the rim
+      app.css; ``#create-color-picker .color-swatch`` overrides the rim
       to 1px for the smaller create-form size)
     - ``role="radio"`` + ``aria-checked`` for the selection state
     - ``data-color`` (the #rrggbb the JS reads on click)
@@ -19,12 +19,12 @@
     hex       -- the swatch color as #rrggbb; sets both the visible
                  background and the data-color the JS reads.
     name      -- palette name, surfaced only as the aria-label.
-    selected  -- when true, aria-checked="true" (drives the blue ring).
+    selected  -- when true, aria-checked="true" (drives the accent ring).
     size      -- "md" (34px, settings picker) or "sm" (24px, create form).
     disabled  -- when true, renders the button disabled (stale workspace).
 #}
 {%- set _sizes = {"md": "w-[34px] h-[34px]", "sm": "w-6 h-6"} -%}
-{%- set _cls = "color-swatch " ~ _sizes[size] ~ " rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40 disabled:opacity-40" -%}
+{%- set _cls = "color-swatch " ~ _sizes[size] ~ " rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 disabled:opacity-40" -%}
 <button type="button"
         role="radio"
         class="{{ _cls }}"

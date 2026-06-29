@@ -1,0 +1,22 @@
+{#def name, size="md", extra="" #}
+{#
+  16x16 icon from the shared Figma set (node 857-5091). ``name`` picks
+  from the ``ICONS_16`` catalog global in templates.py. The shell defaults
+  to ``fill="currentColor"`` so each glyph takes the parent's text color
+  (set a ``text-*`` class to recolor). Most glyphs are filled outlines;
+  ``play`` carries its own ``fill="none" stroke="currentColor"`` so it
+  renders as a stroked triangle that matches the set's line weight.
+  Sizes are sm (w-3.5 / 14px), md (w-4 / 16px, the native size, default),
+  or lg (w-5 / 20px).
+
+  Usage:
+    <Icon16 name="home" />
+    <Icon16 name="settings" size="sm" />
+    <Icon16 name="arrow-up-right" extra="text-accent" />
+
+  Brand marks (Google / GitHub, auth.OauthIcon) and the 12x12 window-control
+  glyphs (Icon12) live in their own components.
+#}
+{%- set _size_cls = {"sm": "w-3.5 h-3.5", "md": "w-4 h-4", "lg": "w-5 h-5"}[size] -%}
+<svg class="{{ _size_cls }} {{ extra }}" viewBox="0 0 16 16"
+     fill="currentColor" aria-hidden="true">{{ ICONS_16[name] | safe }}</svg>

@@ -12,8 +12,10 @@
 #           (interactively install system deps; only warns if a *core* dep is missing)
 #   4. Runs: mngr extras -i        (optional: plugins, shell completion,
 #                                   Claude Code plugin, default agent type)
+#   5. Runs: mngr config wizard    (optional: common user-scope config, e.g.
+#                                   Claude config dir isolation)
 #
-# Steps 1-2 run automatically. Steps 3-4 prompt before installing anything.
+# Steps 1-2 run automatically. Steps 3-5 prompt before changing anything.
 # Safe to re-run: skips anything already installed or configured.
 # Source: https://github.com/imbue-ai/mngr
 #
@@ -79,6 +81,13 @@ mngr dependencies --install interactive --scope core || warn "Some dependencies 
 # ── Step 4: Optional extras (plugins, shell completion, Claude Code plugin, default agent type) ──
 
 mngr extras -i || warn "Some extras could not be installed. Run 'mngr extras' to see status."
+
+# ── Step 5: Common user-scope configuration ──────────────────────────────────
+
+# Walks through common config (e.g. whether to isolate the Claude config dir for
+# local agents). Each step is skipped if already configured, so this is safe to
+# re-run. Reads interactive input from /dev/tty, so it works even when stdin is piped.
+mngr config wizard || warn "Configuration wizard did not complete. Run 'mngr config wizard' to finish."
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 

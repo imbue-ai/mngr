@@ -2,6 +2,10 @@
 
 This file contains the full, verbatim per-PR entries for the `mngr_mapreduce` library. For the curated summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-18
+
+Reduced flakiness in `test_run_mngr_raw_returns_finished_process`. Its `_run_mngr_raw` subprocess budget was 10s, which under heavy parallel CI load left no headroom for a cold `mngr` start and intermittently raised `CliError` before the command actually finished. The budget is now 25s, under the test's existing 30s `pytest.mark.timeout` backstop. Test-only change.
+
 ## 2026-06-17
 
 The reducer-prompt send now routes through `require_interactive_agent(...)` before calling `send_message`, since `send_message` is no longer a universal `AgentInterface` method (it moved onto interactive agents). The reducer is a Claude agent (interactive), so behavior is unchanged; the guard just makes the interactive requirement explicit and type-safe.

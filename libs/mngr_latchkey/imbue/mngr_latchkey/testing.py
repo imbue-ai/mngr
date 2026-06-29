@@ -10,9 +10,12 @@ from urllib.parse import urlsplit
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr_latchkey.core import CredentialStatus
+from imbue.mngr_latchkey.core import LATCHKEY_AUTH_OPTION_BROWSER
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
+from imbue.mngr_latchkey.core import LatchkeyServiceInfo
 
 
 class FakeLatchkey(Latchkey):
@@ -31,6 +34,18 @@ class FakeLatchkey(Latchkey):
     _jwt_error: BaseException | None = PrivateAttr(default=None)
     _is_stopped: bool = PrivateAttr(default=False)
 
+    # Auth / services-info doubles. The credential-grant flow now lives in the
+    # real ``Latchkey.auth_browser`` (tested against a fake binary in
+    # core_test.py); the fake only needs non-spawning stand-ins so it never
+    # shells out. ``services_info`` reports a browser-capable MISSING service.
+    _service_info: LatchkeyServiceInfo = PrivateAttr(
+        default=LatchkeyServiceInfo(
+            credential_status=CredentialStatus.MISSING,
+            auth_options=frozenset({LATCHKEY_AUTH_OPTION_BROWSER}),
+            set_credentials_example=None,
+        )
+    )
+
     def configure(
         self,
         *,
@@ -47,6 +62,26 @@ class FakeLatchkey(Latchkey):
         self._password_error = password_error
         self._jwt = jwt
         self._jwt_error = jwt_error
+
+    def services_info(self, service_name: str, *, is_offline: bool = False) -> LatchkeyServiceInfo:
+        del service_name, is_offline
+        return self._service_info
+
+    def auth_prepare(self, service_name: str, client_id: str, client_secret: str) -> tuple[bool, str]:
+        del service_name, client_id, client_secret
+        return (True, "")
+
+    def auth_clear(self, service_name: str) -> tuple[bool, str]:
+        del service_name
+        return (True, "")
+
+    def auth_browser_login(self, service_name: str) -> tuple[bool, str]:
+        del service_name
+        return (True, "")
+
+    def auth_browser(self, service_name: str) -> tuple[bool, str]:
+        del service_name
+        return (True, "")
 
     def initialize(self) -> None:
         # No-op: the real implementation runs ``latchkey --version`` and

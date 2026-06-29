@@ -1689,13 +1689,46 @@ def test_lease_host_returns_available_host(monkeypatch: pytest.MonkeyPatch) -> N
     assert body["agent_id"] == "agent-111"
     assert body["host_name"] == "my-workspace"
     assert body["attributes"] == {"version": "v0.1.0"}
-    # Verify SSH key was injected on both VPS and container
+    # The lease returns both pinned sshd host keys so the client can verify the
+    # host strictly instead of trust-on-first-use.
+    assert body["outer_host_public_key"]
+    assert body["container_host_public_key"]
+    # Verify SSH key was injected on both VPS and container, each pinning the
+    # corresponding recorded host key (the 6th element of the recorded call).
     assert len(backend.append_key_calls) == 2
+    injected_ports = {call[1]: call[5] for call in backend.append_key_calls}
+    assert injected_ports[22] == body["outer_host_public_key"]
+    assert injected_ports[2222] == body["container_host_public_key"]
     # Verify host was marked as leased and the user-supplied host_name was
     # written to the row.
     assert backend.pool_rows[0].status == "leased"
     assert backend.pool_rows[0].leased_to_user == _ADMIN_STUB_USERNAME
     assert backend.pool_rows[0].host_name == "my-workspace"
+
+
+def test_lease_host_fails_closed_when_host_keys_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pool row with no pinned host keys is not leasable (no trust-on-first-use)."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_available_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000001"),
+        version="v0.1.0",
+        outer_host_public_key=None,
+        container_host_public_key=None,
+    )
+    resp = client.post(
+        "/hosts/lease",
+        json={
+            "ssh_public_key": "ssh-ed25519 AAAA testkey",
+            "host_name": "my-workspace",
+            "attributes": {"version": "v0.1.0"},
+        },
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 503
+    assert "host-key backfill" in resp.json()["detail"]
+    # The row must NOT have been leased, and no SSH key injection was attempted.
+    assert backend.pool_rows[0].status == "available"
+    assert backend.append_key_calls == []
 
 
 def test_lease_host_returns_503_when_pool_empty(monkeypatch: pytest.MonkeyPatch) -> None:

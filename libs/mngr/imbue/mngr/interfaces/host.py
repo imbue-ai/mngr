@@ -393,6 +393,16 @@ class OuterHostInterface(HostFileReadInterface, HostFileWriteInterface, ABC):
         """
         return None
 
+    # returns (outer_host_public_key, container_host_public_key)
+    def get_ssh_host_public_keys(self) -> tuple[str | None, str | None]:
+        """The host's outer (VPS/VM-root) and container sshd host public keys, when known.
+
+        Returns ``(None, None)`` by default. A provider that generates the host's
+        sshd host keys at bake time surfaces them here so ``mngr create --format
+        json`` can report them for strict host-key pinning.
+        """
+        return (None, None)
+
     def disconnect(self) -> None:
         """Disconnect from this host, releasing any held connections.
 

@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-19
+
+Removed the now-vestigial `UsagePluginConfig.merge_with` override; the config merge is routed through the overlay pipeline, which reproduces the same assign-by-default semantics. No user-visible behavior change.
+
+Trimmed the README to user-relevant content and tightened it for concision.
+
 ## 2026-06-16
 
 Began generalizing `mngr usage` beyond Claude (groundwork; no user-visible change yet).

@@ -3,8 +3,17 @@ const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
 const paths = require('./paths');
+const { initSentry, captureManualReport, isLogInclusionEnabled } = require('./sentry');
 const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
+const { decideStartupRoute } = require('./startup-routing');
+
+// Initialize Sentry as early as possible so errors thrown during main-process
+// startup (window creation, env setup, backend spawn) are captured. The SDK is
+// always initialized but only sends when the user has enabled error reporting
+// (the report_unexpected_errors setting, read live per event) -- see
+// electron/sentry.js.
+initSentry();
 
 // Only init the auto-updater in packaged builds: in dev, electron.autoUpdater
 // is undefined on macOS, so todesktop's constructor throws.
@@ -182,18 +191,6 @@ function toAbsoluteUrl(url) {
   if (!url) return url;
   if (url.startsWith('/') && backendBaseUrl) return backendBaseUrl + url;
   return url;
-}
-
-// Whether ``url`` is the workspace-creation form (``/create``). Used to decide
-// when a window has *left* the create form so its freeform accent preview can
-// be dropped -- see ``hasFreeformAccentPreview`` in ``onContentNavigate``.
-function isCreateFormUrl(url) {
-  if (!url) return false;
-  try {
-    return new URL(url).pathname === '/create';
-  } catch {
-    return false;
-  }
 }
 
 // Classify a URL as "external" -- i.e. something that should open in the
@@ -604,11 +601,6 @@ function createBundle() {
     // even though they don't count as "displaying" the workspace. NOT persisted:
     // a restored window re-derives it from its saved content URL.
     currentAccentAgentId: null,
-    // The create form paints the titlebar directly (out of band of
-    // ``currentAccentAgentId``) to preview the picked workspace color; this
-    // flags that an override is live so leaving the form repaints the real
-    // accent. See ``preview-freeform-accent`` + ``onContentNavigate``.
-    hasFreeformAccentPreview: false,
     preErrorUrl: null,
     isErrorState: false,
     isLoadingState: true,
@@ -672,20 +664,6 @@ function wireContentViewEvents(bundle, contentView) {
     // on truthiness: the accent tracks the *current* screen, not the last
     // workspace opened in this window.
     updateBundleAccentAgentId(bundle, parseAccentSourceAgentId(url));
-    // Drop the create-form's freeform accent preview once we've navigated off
-    // ``/create`` (by submitting OR abandoning). That preview paints the
-    // titlebar CSS vars directly, out of band of ``currentAccentAgentId``, so
-    // the ``updateBundleAccentAgentId`` above can't clear it on its own: the
-    // abandon case (``/create`` -> a general screen) is null -> null, which its
-    // no-op guard swallows, so no ``accent-changed`` would fire and the preview
-    // would stay stranded on the bar. Force a repaint from the real accent
-    // here (neutral on abandon; the new workspace on submit).
-    if (bundle.hasFreeformAccentPreview && !isCreateFormUrl(url)) {
-      bundle.hasFreeformAccentPreview = false;
-      if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
-        bundle.chromeView.webContents.send('accent-changed', bundle.currentAccentAgentId);
-      }
-    }
     updateOsTitle(bundle);
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
       bundle.chromeView.webContents.send('content-url-changed', url);
@@ -993,6 +971,18 @@ function inboxUrlFor(query) {
   return backendBaseUrl + '/inbox' + (query || '');
 }
 
+function signinModalUrlFor() {
+  if (!backendBaseUrl) return null;
+  return backendBaseUrl + '/auth/signin-modal';
+}
+
+function openSigninModal(bundle) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  const url = signinModalUrlFor();
+  if (!url) return;
+  openModal(bundle, url);
+}
+
 function isInboxModalOpen(bundle) {
   if (!bundle || !bundle.modalVisible) return false;
   if (!bundle.modalUrl) return false;
@@ -1017,6 +1007,42 @@ function toggleInbox(bundle) {
   if (!bundle || bundle.window.isDestroyed()) return;
   if (isInboxModalOpen(bundle)) closeModal(bundle);
   else openInbox(bundle, '');
+}
+
+// -- Get-help modal (per-bundle) --
+//
+// The help modal shares the same modalView overlay as the inbox and sidebar (see
+// openModal): it just loads the backend's /help page. ``agentId`` (the
+// currently-displayed workspace, or falsy on a general screen) is forwarded as a
+// ?workspace= query so the help page can scope its bug report to that workspace.
+
+function helpUrlFor(agentId) {
+  if (!backendBaseUrl) return null;
+  const query = agentId ? '?workspace=' + encodeURIComponent(agentId) : '';
+  return backendBaseUrl + '/help' + query;
+}
+
+function isHelpModalOpen(bundle) {
+  if (!bundle || !bundle.modalVisible || !bundle.modalUrl) return false;
+  // Compare path only; the ?workspace= query may differ between screens.
+  try {
+    return new URL(bundle.modalUrl).pathname === '/help';
+  } catch {
+    return false;
+  }
+}
+
+function openHelp(bundle, agentId) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  const url = helpUrlFor(agentId);
+  if (!url) return;
+  openModal(bundle, url);
+}
+
+function toggleHelp(bundle, agentId) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  if (isHelpModalOpen(bundle)) closeModal(bundle);
+  else openHelp(bundle, agentId);
 }
 
 // Coalesce rapid SSE-triggered chrome-event posts so the inbox shell
@@ -1120,7 +1146,17 @@ function openHomeInNewWindow() {
 
 // -- Error / retry flow --
 
-function showErrorInAllWindows(message, details) {
+// The most recent error takeover's message/details, captured so the shell's
+// "Report a bug" button can file a one-shot Sentry report of the on-screen error
+// when the backend is down (and thus the normal /help flow is unreachable).
+let lastErrorTakeover = null;
+
+// ``canUseBackendReport`` is true only when the Python backend is still up (e.g. the
+// discovery-pipeline-stall takeover): there the shell's report button opens the full
+// /help modal. For a crashed/never-started backend it is false, and the report button
+// falls back to a one-shot main-process Sentry report (see the report-error IPC handler).
+function showErrorInAllWindows(message, details, actionLabel, canUseBackendReport = false) {
+  lastErrorTakeover = { message, details };
   for (const bundle of bundles) {
     if (bundle.window.isDestroyed()) continue;
     bundle.isErrorState = true;
@@ -1140,11 +1176,11 @@ function showErrorInAllWindows(message, details) {
         bundle.chromeView.webContents.loadFile(path.join(__dirname, 'shell.html'));
         bundle.chromeView.webContents.once('did-finish-load', () => {
           if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
-            bundle.chromeView.webContents.send('error-details', { message, details });
+            bundle.chromeView.webContents.send('error-details', { message, details, actionLabel, canUseBackendReport });
           }
         });
       } else {
-        bundle.chromeView.webContents.send('error-details', { message, details });
+        bundle.chromeView.webContents.send('error-details', { message, details, actionLabel, canUseBackendReport });
       }
     }
   }
@@ -1289,6 +1325,17 @@ function readLastLogLines(lineCount) {
 // transparently on first read. The titlebar accent is NOT persisted: a
 // restored window re-derives it from its own saved ``url`` (the content URL
 // it reopens to), so there is nothing per-window to remember.
+//
+// A workspace window's live content URL is on the agent subdomain
+// (``agent-<id>.localhost:<mngr_forward_port>/...``), whose host AND port both
+// change between runs, so it can't be replayed verbatim. ``toPersistedContentUrl``
+// canonicalises such windows to the port-independent ``/goto/<agent>/``
+// auth-bridge path; ``toRestoredContentUrl`` rebuilds the live workspace URL
+// from it on launch. The mind itself persists its panel layout server-side and
+// restores it on a fresh load of its root, so reopening the root is enough to
+// land the user back where they were. Non-workspace screens (Home, Create,
+// ``/workspace/<id>/settings``, ...) live on the minds backend and round-trip
+// as plain backend-relative paths.
 
 function loadSessionState() {
   try {
@@ -1325,6 +1372,38 @@ function toRelativeBackendUrl(url) {
   }
 }
 
+// Canonicalise a window's live content URL into the form persisted in
+// ``window-state.json``. A workspace window's URL is on the agent subdomain
+// (``agent-<id>.localhost:<mngr_forward_port>/...``); stripping that to a bare
+// relative path loses the agent identity (the subdomain host) and would
+// reopen against the minds backend (the landing page) on restore. Persist the
+// port-independent ``/goto/<agent>/`` auth-bridge path instead -- it carries
+// the agent id, is recognised by ``parseWorkspaceId`` (so dead-workspace
+// filtering works), and ``toRestoredContentUrl`` rebuilds the live origin from
+// it. Everything else round-trips as a minds-backend-relative path.
+function toPersistedContentUrl(url) {
+  const agentId = parseWorkspaceId(url);
+  if (agentId) return `/goto/${encodeURIComponent(agentId)}/`;
+  return toRelativeBackendUrl(url);
+}
+
+// Inverse of ``toPersistedContentUrl``: turn a persisted entry's ``url`` back
+// into a loadable absolute URL. Workspace entries (``/goto/<agent>/``) are
+// rebuilt through ``workspaceUrlForAgent`` so the bridge targets the CURRENT
+// run's mngr_forward origin; other entries resolve against the minds backend.
+// Persisted urls are backend-relative, so resolve to absolute BEFORE parsing
+// the workspace id -- ``parseWorkspaceId`` runs ``new URL(url)``, which throws
+// (yielding null) on a bare relative path.
+function toRestoredContentUrl(entry) {
+  const absolute = toAbsoluteUrl(entry.url);
+  const agentId = parseWorkspaceId(absolute);
+  if (agentId) {
+    const workspaceUrl = workspaceUrlForAgent(agentId);
+    if (workspaceUrl) return workspaceUrl;
+  }
+  return absolute;
+}
+
 function saveSessionState() {
   try {
     const windows = [];
@@ -1335,12 +1414,12 @@ function saveSessionState() {
     for (const b of mruWindows) {
       if (b.window.isDestroyed()) continue;
       const url = b.preErrorUrl || b.currentContentUrl;
-      const relative = toRelativeBackendUrl(url);
-      if (!relative) continue;
+      const persisted = toPersistedContentUrl(url);
+      if (!persisted) continue;
       const bounds = b.window.getBounds();
       const display = screen.getDisplayMatching(bounds);
       windows.push({
-        url: relative,
+        url: persisted,
         x: bounds.x,
         y: bounds.y,
         width: bounds.width,
@@ -1378,7 +1457,10 @@ function filterRestorableUrls(state, knownAgentIdsSet) {
   if (!knownAgentIdsSet) return state.slice();
   const results = [];
   for (const entry of state) {
-    const agentId = parseWorkspaceId(entry.url);
+    // Persisted urls are backend-relative; resolve to absolute so
+    // ``parseWorkspaceId`` (``new URL``) can read the workspace id rather than
+    // throwing on the bare path.
+    const agentId = parseWorkspaceId(toAbsoluteUrl(entry.url));
     if (agentId && !knownAgentIdsSet.has(agentId)) {
       continue; // workspace no longer exists, skip silently
     }
@@ -1425,6 +1507,13 @@ function restoreWindowBounds(bundle, entry) {
 // would queue behind the SSE streams -- load-finish latencies could
 // creep from 50ms to 8+ seconds. Running one SSE connection in the main
 // process and broadcasting events via IPC avoids the exhaustion entirely.
+
+// Whether we have already taken over every window with the discovery-pipeline
+// "blocked" error screen. Guards against re-driving the takeover when the
+// backend re-emits the terminal `discovery_health` state (e.g. on an SSE
+// reconnect). Reset by the `retry` handler so a re-block after a restart
+// surfaces again.
+let discoveryBlockedShown = false;
 
 function handleChromeSSEEvent(evt) {
   if (evt.type === 'workspaces' && Array.isArray(evt.workspaces)) {
@@ -1546,6 +1635,26 @@ function handleChromeSSEEvent(evt) {
           scheduleInboxListRefresh(b, evt);
         }
       }
+    }
+  } else if (evt.type === 'discovery_health') {
+    // App-global discovery-pipeline health. Only the terminal `blocked` state is
+    // ever sent (the reconnecting tier heals silently in the background, retrying
+    // forever). `blocked` means the consumer subprocess died -- it is also the
+    // HTTP traffic proxy, so agent forwarding is down / the app is unusable. Take
+    // over every window with the error screen; its Restart button runs the
+    // existing retry path (shut down + restart the backend, respawning the
+    // consumer). Surface the tail of the log as details so "Show details" isn't
+    // an empty box (matches the other takeover sites).
+    if (evt.state === 'blocked' && !discoveryBlockedShown) {
+      discoveryBlockedShown = true;
+      showErrorInAllWindows(
+        "Minds has disconnected from your workspaces and can't automatically reconnect. Restart the app to recover. Your data has not been lost.",
+        readLastLogLines(50),
+        'Restart Minds',
+        // The Python backend is still up in this takeover (only the discovery pipeline
+        // stalled), so the shell's report button can use the full /help modal.
+        true,
+      );
     }
   }
   broadcastChromeEvent(evt);
@@ -1718,17 +1827,19 @@ function ensureChromeSSELoopRunning() {
   }
 }
 
-// POST a restart endpoint (``restart-system-interface`` or ``restart-host``)
-// and resolve once the server has acknowledged the 202 dispatch (or the
-// request errors / times out). The endpoints return 202 immediately and
-// drive recovery asynchronously; the 202 also means the health tracker is
-// already RESTARTING, so callers navigate to the recovery page afterward,
-// which shows restart progress and returns to the workspace once healthy.
+// POST the v1 restart endpoint with a ``scope`` ('services' to restart just the
+// system-services agent, 'host' to restart the whole host) and resolve once the
+// server has acknowledged the 202 dispatch (or the request errors / times out).
+// The route returns 202 immediately (with an ``{operation_id, kind}`` handle we
+// don't need here) and drives recovery asynchronously; the 202 also means the
+// health tracker is already RESTARTING, so callers navigate to the recovery
+// page afterward, which polls health, shows restart progress, and returns to
+// the workspace once healthy.
 //
 // Always resolves (never rejects) so callers can chain navigation
 // regardless of network outcome.
 const RESTART_REQUEST_TIMEOUT_MS = 10000;
-function postRestart(agentId, endpointPath) {
+function postRestart(agentId, scope) {
   return new Promise((resolve) => {
     if (!agentId || !backendBaseUrl) {
       resolve();
@@ -1737,10 +1848,11 @@ function postRestart(agentId, endpointPath) {
     let req;
     try {
       req = net.request({
-        url: `${backendBaseUrl}/api/agents/${encodeURIComponent(agentId)}/${endpointPath}`,
+        url: `${backendBaseUrl}/api/v1/workspaces/${encodeURIComponent(agentId)}/restart`,
         method: 'POST',
         useSessionCookies: true,
       });
+      req.setHeader('Content-Type', 'application/json');
     } catch (e) {
       console.warn('[restart] failed to construct restart request:', e);
       resolve();
@@ -1776,6 +1888,7 @@ function postRestart(agentId, endpointPath) {
       clearTimeout(timer);
       settle();
     });
+    req.write(JSON.stringify({ scope }));
     req.end();
   });
 }
@@ -1797,7 +1910,8 @@ function sleepInterruptible(ms) {
 
 // ---------- Mind shutdown on quit + landing Stop button ----------
 
-// Timeout for the instant, in-memory liveness lookup (GET /api/minds/running).
+// Timeout for the instant, in-memory liveness lookup (GET
+// /api/v1/desktop/running-workspaces).
 const MIND_HTTP_TIMEOUT_MS = 10000;
 // Timeout for the synchronous command endpoints (single/bulk host stop, state
 // container stop). These block until the underlying ``mngr``/docker command
@@ -1805,10 +1919,10 @@ const MIND_HTTP_TIMEOUT_MS = 10000;
 // above it here so the server-side failure surfaces rather than a client abort.
 const MIND_COMMAND_TIMEOUT_MS = 150000;
 
-// GET /api/minds/running -> { ok, running }. ``running`` is an array of
-// {id, name}; ``ok`` is false when the check itself failed (network, parse, no
-// backend) so the caller can distinguish "nothing running" from "couldn't tell"
-// instead of silently treating a failed check as an empty list.
+// GET /api/v1/desktop/running-workspaces -> { ok, running }. ``running`` is an
+// array of {id, name}; ``ok`` is false when the check itself failed (network,
+// parse, no backend) so the caller can distinguish "nothing running" from
+// "couldn't tell" instead of silently treating a failed check as an empty list.
 function getRunningMinds() {
   return new Promise((resolve) => {
     if (!backendBaseUrl) {
@@ -1818,7 +1932,7 @@ function getRunningMinds() {
     }
     let req;
     try {
-      req = net.request({ url: backendBaseUrl + '/api/minds/running', method: 'GET', useSessionCookies: true });
+      req = net.request({ url: backendBaseUrl + '/api/v1/desktop/running-workspaces', method: 'GET', useSessionCookies: true });
     } catch (e) {
       console.warn('[mind-shutdown] failed to construct running-minds request:', e);
       resolve({ ok: false, running: [] });
@@ -1855,9 +1969,11 @@ function getRunningMinds() {
   });
 }
 
-// POST /api/agents/<id>/stop-host (synchronous). Resolves true when the server
+// POST /api/v1/workspaces/<id>/stop (synchronous). Resolves true when the server
 // reports the stop succeeded (<400), false otherwise. Used by the single-row
-// landing Stop relay.
+// landing Stop relay. (The v1 route blocks until the host transition resolves,
+// same as the legacy /api/agents/<id>/stop-host it replaced; cookie auth is
+// accepted via useSessionCookies.)
 function postMindStop(agentId) {
   return new Promise((resolve) => {
     if (!agentId || !backendBaseUrl) {
@@ -1868,7 +1984,7 @@ function postMindStop(agentId) {
     let req;
     try {
       req = net.request({
-        url: `${backendBaseUrl}/api/agents/${encodeURIComponent(agentId)}/stop-host`,
+        url: `${backendBaseUrl}/api/v1/workspaces/${encodeURIComponent(agentId)}/stop`,
         method: 'POST',
         useSessionCookies: true,
       });
@@ -1897,9 +2013,9 @@ function postMindStop(agentId) {
   });
 }
 
-// POST /api/minds/stop-hosts?agent_id=...&agent_id=... (synchronous). Issues ONE
-// ``mngr stop <ids...> --stop-host`` server-side (mngr stops the hosts
-// concurrently). Resolves { ok, stillRunning }: ``stillRunning`` is the subset
+// POST /api/v1/desktop/stop-hosts?agent_id=...&agent_id=... (synchronous).
+// Issues ONE ``mngr stop <ids...> --stop-host`` server-side (mngr stops the
+// hosts concurrently). Resolves { ok, stillRunning }: ``stillRunning`` is the subset
 // of requested minds the server still sees running after the attempt; ``ok`` is
 // false when the request itself failed (so the caller treats it as "couldn't
 // stop" rather than "all stopped").
@@ -1913,7 +2029,7 @@ function postStopMinds(agentIds) {
     const query = agentIds.map((id) => 'agent_id=' + encodeURIComponent(id)).join('&');
     let req;
     try {
-      req = net.request({ url: `${backendBaseUrl}/api/minds/stop-hosts?${query}`, method: 'POST', useSessionCookies: true });
+      req = net.request({ url: `${backendBaseUrl}/api/v1/desktop/stop-hosts?${query}`, method: 'POST', useSessionCookies: true });
     } catch (e) {
       console.warn('[mind-shutdown] failed to construct bulk-stop request:', e);
       resolve({ ok: false, stillRunning: [] });
@@ -1950,9 +2066,9 @@ function postStopMinds(agentIds) {
   });
 }
 
-// POST /api/minds/stop-state-container -- stops this env's mngr docker "state
-// container" (provider bookkeeping) so nothing minds-related is left running
-// after a full shutdown. Best-effort: resolves regardless of outcome, but logs.
+// POST /api/v1/desktop/state-container/stop -- stops this env's mngr docker
+// "state container" (provider bookkeeping) so nothing minds-related is left
+// running after a full shutdown. Best-effort: resolves regardless of outcome, but logs.
 function postStopStateContainer() {
   return new Promise((resolve) => {
     if (!backendBaseUrl) {
@@ -1962,7 +2078,7 @@ function postStopStateContainer() {
     }
     let req;
     try {
-      req = net.request({ url: backendBaseUrl + '/api/minds/stop-state-container', method: 'POST', useSessionCookies: true });
+      req = net.request({ url: backendBaseUrl + '/api/v1/desktop/state-container/stop', method: 'POST', useSessionCookies: true });
     } catch (e) {
       console.warn('[mind-shutdown] failed to construct stop-state-container request:', e);
       resolve();
@@ -2067,19 +2183,26 @@ async function promptMindShutdown() {
   return { proceed: true, stop: true, running };
 }
 
-function fetchInitialChromeState(timeoutMs = 10000) {
-  // Drives one round-trip to /_chrome/events (SSE) to learn both auth status
-  // and the current workspace list. Returns:
-  //   { authenticated: true, workspaces: [...] }  on authenticated success
-  //   { authenticated: false }                     when the backend says auth_required
-  //   null                                          on timeout / network error
+function fetchInitialChromeState(timeoutMs = 25000) {
+  // Drives one round-trip to /_chrome/events (SSE) to learn auth status and the
+  // workspace list, resolving on the first ``workspaces`` snapshot. Returns:
+  //   { authenticated: true, workspaces: [...], hasAccounts, restorableWorkspaceIds }
+  //                                                 on the first workspaces snapshot
+  //   { authenticated: false }                      when the backend says auth_required
+  //   null                                          on timeout (no snapshot) / network error
   //
-  // The timeout must comfortably exceed the connect-time snapshot's slowest
-  // blocking step: the backend computes ``has_accounts`` (a cold ``mngr
-  // imbue_cloud auth list`` subprocess, ~5s on first call) before emitting the
-  // first ``workspaces`` event. A timeout shorter than that returned ``null``,
-  // which the startup path treats as unauthenticated and routes to /welcome --
-  // bouncing an already-signed-in user to the onboarding page.
+  // We resolve on the first snapshot even though discovery may still be mid-sweep
+  // (providers enumerate at different speeds): window restore filters against
+  // ``restorableWorkspaceIds`` -- the live workspaces UNION the persisted last-good
+  // topology -- so a workspace that hasn't been re-discovered yet is still kept,
+  // and a window is never dropped just because the snapshot is partial.
+  //
+  // The timeout only fires when NO snapshot arrives at all. It must comfortably
+  // exceed the connect-time snapshot's slowest blocking step: the backend computes
+  // ``has_accounts`` (a cold ``mngr imbue_cloud auth list`` subprocess, ~5s on
+  // first call) before emitting the first ``workspaces`` event. A timeout shorter
+  // than that returns ``null``, which the startup path treats as unauthenticated
+  // and routes to /welcome -- bouncing an already-signed-in user.
   return new Promise((resolve) => {
     if (!backendBaseUrl) {
       resolve(null);
@@ -2128,7 +2251,14 @@ function fetchInitialChromeState(timeoutMs = 10000) {
             const parsed = JSON.parse(payload);
             if (parsed.type === 'workspaces' && Array.isArray(parsed.workspaces)) {
               clearTimeout(timer);
-              finish({ authenticated: true, workspaces: parsed.workspaces, hasAccounts: !!parsed.has_accounts });
+              finish({
+                authenticated: true,
+                workspaces: parsed.workspaces,
+                hasAccounts: !!parsed.has_accounts,
+                restorableWorkspaceIds: Array.isArray(parsed.restorable_workspace_ids)
+                  ? parsed.restorable_workspace_ids.map(String)
+                  : [],
+              });
               return;
             }
             if (parsed.type === 'auth_required') {
@@ -2519,15 +2649,26 @@ async function startBackendWithRetry() {
         }));
       }
 
-      const knownAgentIdsSet = authenticated
-        ? new Set(workspaceList.map((w) => w.id))
+      // Filter restored windows against the backend's *restorable* workspace ids
+      // -- live workspaces UNION the persisted last-good topology -- rather than
+      // the live list alone. The last-good entries keep a window whose workspace
+      // exists but a slow provider hasn't re-listed yet this session (e.g. local
+      // docker lagging the cloud provider on cold start); absence from an
+      // incomplete live snapshot is not evidence a workspace was destroyed (the
+      // live discovery flow navigates genuinely-destroyed workspaces away later).
+      // When nothing is known yet (empty live AND empty last-good -- first launch,
+      // or a wiped topology), pass ``null`` to keep every saved window rather than
+      // drop them all against an empty set.
+      const restorableWorkspaceIds = (authenticated && chromeState.restorableWorkspaceIds) || [];
+      const knownAgentIdsSet = restorableWorkspaceIds.length > 0
+        ? new Set(restorableWorkspaceIds.map(String))
         : null;
       const restorable = authenticated
         ? filterRestorableUrls(savedState.windows, knownAgentIdsSet)
         : [];
       // (A workspace that no longer exists needs no special accent handling
-      // here: ``filterRestorableUrls`` already drops windows whose saved URL
-      // points at a destroyed workspace, and the accent is re-derived from
+      // here: ``filterRestorableUrls`` drops windows whose saved URL points at a
+      // workspace absent from the known set, and the accent is re-derived from
       // whatever URL each restored window actually reopens to.)
 
       initialBundle.isLoadingState = false;
@@ -2536,23 +2677,32 @@ async function startBackendWithRetry() {
         initialBundle.chromeView.webContents.loadURL(backendBaseUrl + '/_chrome');
       }
 
-      if (!authenticated) {
-        // The one-time code was already consumed above but fetchInitialChromeState
-        // still returned unauthenticated (should not happen, but handle gracefully).
+      // Decide the cold-start landing screen. The precedence (welcome > create
+      // > restore) lives in the pure ``decideStartupRoute`` helper so it can be
+      // unit-tested (startup-routing.test.js). Key subtlety: a "functionally
+      // empty" app -- signed out of every account AND no workspaces -- routes
+      // to /welcome even when stale window-state lingers, so a leftover home
+      // (`/`) window can't silently suppress onboarding for a signed-out user.
+      const startupRoute = decideStartupRoute({
+        authenticated,
+        hasAccounts: !!(chromeState && chromeState.hasAccounts),
+        workspaceCount: workspaceList.length,
+        restorableCount: restorable.length,
+      });
+
+      const loadInitialContent = (relativePath) => {
         if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
-          initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/welcome');
+          initialBundle.contentView.webContents.loadURL(backendBaseUrl + relativePath);
         }
-      } else if (!chromeState.hasAccounts && restorable.length === 0) {
-        // Locally authenticated but user has never signed in with SuperTokens
-        // and has no saved windows -- show the welcome/onboarding page.
-        if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
-          initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/welcome');
-        }
-      } else if (restorable.length === 0) {
-        // Has accounts but nothing to restore -- land on the create page.
-        if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
-          initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/');
-        }
+      };
+
+      if (startupRoute === 'welcome') {
+        // Either unauthenticated (one-time code somehow not consumed -- handled
+        // gracefully) or functionally empty (signed out + no workspaces).
+        loadInitialContent('/welcome');
+      } else if (startupRoute === 'create') {
+        // Has accounts (or workspaces) but nothing to restore -- land on home.
+        loadInitialContent('/');
       } else {
         // Restore saved windows with their positions and sizes. Each window's
         // titlebar accent is re-derived from its restored content URL by
@@ -2560,13 +2710,13 @@ async function startBackendWithRetry() {
         // so no separately-persisted accent is needed.
         const [first, ...rest] = restorable;
         restoreWindowBounds(initialBundle, first);
-        loadUrlIntoBundleContentView(initialBundle, toAbsoluteUrl(first.url));
+        loadUrlIntoBundleContentView(initialBundle, toRestoredContentUrl(first));
         // Open the lesser-MRU windows without stealing focus, so the
         // MRU-zero window (already focused as initialBundle) stays focused
         // after restore completes.
         const restoredBundles = [];
         for (const entry of rest) {
-          const bundle = openNewWindow(toAbsoluteUrl(entry.url), { showInactive: true });
+          const bundle = openNewWindow(toRestoredContentUrl(entry), { showInactive: true });
           restoreWindowBounds(bundle, entry);
           restoredBundles.push(bundle);
         }
@@ -2751,6 +2901,43 @@ ipcMain.on('toggle-inbox', (event) => {
   toggleInbox(getBundleFromEvent(event));
 });
 
+ipcMain.on('toggle-help', (event, agentId) => {
+  toggleHelp(getBundleFromEvent(event), agentId);
+});
+
+// One-shot bug report from the full-app error takeover (shell.html), used when the
+// Python backend is down and its /help flow is unreachable. Reports the on-screen
+// error via the always-initialized main-process Sentry -- with host basics, plus
+// recent log files when the user opted in (the persistent include-logs setting, or
+// the takeover's per-report ``includeLogs`` checkbox) -- since the backend's richer
+// collector is gone. Returns the event id so the shell can show it. ``invoke`` (not
+// ``send``) so the renderer gets the id back.
+ipcMain.handle('report-error', (_event, opts) => {
+  try {
+    const eventId = captureManualReport({
+      message: lastErrorTakeover ? lastErrorTakeover.message : null,
+      details: lastErrorTakeover ? lastErrorTakeover.details : null,
+      includeLogs: Boolean(opts && opts.includeLogs),
+    });
+    return { ok: Boolean(eventId), eventId: eventId || null };
+  } catch (err) {
+    console.error('[report-error] failed to capture manual report:', err && err.message);
+    return { ok: false, eventId: null };
+  }
+});
+
+// Lets the error takeover (shell.html) learn the persistent ``include_error_logs``
+// setting so it only offers its per-report "Include recent logs" checkbox when the
+// setting is off (when on, logs are always attached and the checkbox is redundant).
+ipcMain.handle('get-log-inclusion-setting', () => {
+  try {
+    return isLogInclusionEnabled();
+  } catch (err) {
+    console.error('[get-log-inclusion-setting] failed to read setting:', err && err.message);
+    return false;
+  }
+});
+
 ipcMain.on('open-workspace-in-new-window', (event, agentId) => {
   if (!agentId) return;
   openOrFocusWorkspace(agentId, workspaceUrlForAgent(agentId));
@@ -2781,51 +2968,49 @@ ipcMain.on('open-request-modal', (event, requestId) => {
   if (sender) openInbox(sender, '?selected=' + encodeURIComponent(requestId));
 });
 
+// Open the get-help / report-a-bug modal on behalf of the (otherwise
+// unprivileged) content view -- used by error pages like the workspace-recovery
+// page. Only content-relay-preload.js can emit this channel, and only for an
+// allowlisted `minds:open-help` postMessage. The agent id is re-validated here
+// (never trust the renderer) before being packed into the help URL.
+ipcMain.on('open-help', (event, agentId) => {
+  const scopedAgentId = typeof agentId === 'string' && /^agent-[a-f0-9]{1,64}$/i.test(agentId) ? agentId : '';
+  openHelp(getBundleFromEvent(event), scopedAgentId);
+});
+
+// Open the sign-in modal in the shared overlay on behalf of the (otherwise
+// unprivileged) workspace content view -- the create screen posts an
+// allowlisted `minds:open-signin-modal` when a signed-out user presses
+// "Create" with the Imbue Cloud preset selected. No payload to validate; the
+// URL is a fixed server route.
+ipcMain.on('open-signin-modal', (event) => {
+  const sender = getBundleFromEvent(event);
+  if (sender) openSigninModal(sender);
+});
+
 ipcMain.on('close-modal', (event) => {
   closeModal(getBundleFromEvent(event));
 });
 
 // Settings-page color picker: optimistic chrome-titlebar paint for the
 // bundle the picker is in, so the user sees the new color immediately
-// without waiting for the POST -> mngr label subprocess -> SSE
+// without waiting for the PATCH -> mngr label subprocess -> SSE
 // round-trip. The actual persistence still goes through the
-// /api/workspaces/<id>/color POST endpoint; this just shortcuts the
-// local-window UI feedback. Only content-relay-preload.js can emit
+// PATCH /api/v1/workspaces/<id> endpoint (color field); this just
+// shortcuts the local-window UI feedback. Only content-relay-preload.js can emit
 // this channel, and it validates the agent id + accent shape there;
 // we re-validate here defensively and only forward to the *sending
 // bundle's* chrome view so a stray sender can't paint another
 // window's titlebar.
-ipcMain.on('preview-workspace-accent', (event, agentId, accent, accentFg) => {
+ipcMain.on('preview-workspace-accent', (event, agentId, accent) => {
   if (typeof agentId !== 'string' || !/^agent-[a-f0-9]{1,64}$/i.test(agentId)) return;
   if (typeof accent !== 'string' || !/^#[0-9a-f]{6}$/.test(accent)) return;
-  if (typeof accentFg !== 'string' || !/^(?:0 0 0|255 255 255)$/.test(accentFg)) return;
   const bundle = getBundleFromEvent(event);
   if (!bundle || !bundle.chromeView || bundle.chromeView.webContents.isDestroyed()) return;
   bundle.chromeView.webContents.send('chrome-event', {
     type: 'workspace_accent_preview',
     agent_id: agentId,
     accent,
-    accent_fg: accentFg,
-  });
-});
-
-// Create-form picker freeform preview: no workspace exists yet, so this
-// paints the chrome CSS variables directly. We flag the bundle so that
-// navigating off ``/create`` (submit OR abandon) repaints the bar through
-// the regular accent channel and drops the preview -- see the
-// ``hasFreeformAccentPreview`` handling in ``onContentNavigate``. (Without
-// that, abandoning to a general screen is a null -> null accent transition,
-// which ``updateBundleAccentAgentId`` no-ops, leaving the preview stranded.)
-ipcMain.on('preview-freeform-accent', (event, accent, accentFg) => {
-  if (typeof accent !== 'string' || !/^#[0-9a-f]{6}$/.test(accent)) return;
-  if (typeof accentFg !== 'string' || !/^(?:0 0 0|255 255 255)$/.test(accentFg)) return;
-  const bundle = getBundleFromEvent(event);
-  if (!bundle || !bundle.chromeView || bundle.chromeView.webContents.isDestroyed()) return;
-  bundle.hasFreeformAccentPreview = true;
-  bundle.chromeView.webContents.send('chrome-event', {
-    type: 'freeform_accent_preview',
-    accent,
-    accent_fg: accentFg,
   });
 });
 
@@ -2897,7 +3082,7 @@ ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
       // Close the sidebar first so the user gets immediate visual feedback
       // while the restart dispatch is acknowledged.
       closeModal(bundle);
-      await postRestart(agentId, 'restart-system-interface');
+      await postRestart(agentId, 'services');
       goToRecoveryView();
     },
   });
@@ -2916,7 +3101,7 @@ ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
       });
       if (response !== 1) return;
       closeModal(bundle);
-      await postRestart(agentId, 'restart-host');
+      await postRestart(agentId, 'host');
       goToRecoveryView();
     },
   });
@@ -2935,6 +3120,9 @@ ipcMain.on('retry', async (event) => {
   // backend (if any), put all windows back in loading state, then restart.
   const senderBundle = getBundleFromEvent(event);
   if (senderBundle) focusBundle(senderBundle);
+  // Allow a fresh discovery-pipeline "blocked" takeover to surface again if the
+  // restarted backend ends up stalled too.
+  discoveryBlockedShown = false;
   await shutdown();
   prepareAllWindowsForRetry();
   await startBackendWithRetry();

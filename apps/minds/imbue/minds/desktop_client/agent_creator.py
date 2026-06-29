@@ -233,8 +233,7 @@ class AgentCreationInfo(FrozenModel):
         default="",
         description=(
             "Resolved workspace/host name for this creation (the form's Name field, or a "
-            "repo-derived fallback). Carried so onboarding can address the bootstrap-created "
-            "chat agent (named after the host) without re-deriving it."
+            "repo-derived fallback). Carried alongside status as creation metadata."
         ),
     )
     redirect_url: str | None = Field(default=None, description="URL to redirect to when creation is done")
@@ -525,6 +524,8 @@ def _build_mngr_create_command(
     region: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
     color: str | None = None,
+    original_minds_version: str | None = None,
+    original_branch: str | None = None,
 ) -> list[str]:
     """Build the ``mngr create`` command for a freshly-provisioned workspace.
 
@@ -616,6 +617,25 @@ def _build_mngr_create_command(
         # ``normalize_workspace_color`` call on the create-route side.
         color_label_args = ["--label", f"color={color}"]
 
+    # Stamp the minds version the workspace was created at as an immutable
+    # label. This is the resolved template ref (a ``minds-v*`` tag in prod,
+    # or a branch/``main`` in dev); the workspace's own git history records
+    # any later upgrades. Read back by the ``/api/v1/workspaces/<id>/version``
+    # route -- the one version fact knowable even for an offline workspace.
+    version_label_args: list[str] = []
+    if original_minds_version:
+        version_label_args = ["--label", f"original_minds_version={original_minds_version}"]
+
+    # Stamp the branch/tag the workspace was created from -- the literal value the
+    # user entered in the create form / API ``branch`` field -- as an immutable
+    # label, read back by ``/api/v1/workspaces/<id>`` as the ``branch`` field.
+    # Absent when the field was left blank (the provider's default branch was
+    # used). Distinct from ``original_minds_version`` (the resolved template ref,
+    # which for imbue_cloud can be a semver tag rather than a branch).
+    branch_label_args: list[str] = []
+    if original_branch:
+        branch_label_args = ["--label", f"original_branch={original_branch}"]
+
     mngr_command: list[str] = [
         MNGR_BINARY,
         "create",
@@ -639,6 +659,8 @@ def _build_mngr_create_command(
         "--label",
         "is_primary=true",
         *color_label_args,
+        *version_label_args,
+        *branch_label_args,
     ]
 
     match launch_mode:
@@ -888,6 +910,8 @@ def run_mngr_create(
     anthropic_base_url: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
     color: str | None = None,
+    original_minds_version: str | None = None,
+    original_branch: str | None = None,
     *,
     parent_cg: ConcurrencyGroup | None = None,
 ) -> tuple[AgentId, HostId]:
@@ -924,6 +948,8 @@ def run_mngr_create(
         region=region,
         latchkey_env=latchkey_env,
         color=color,
+        original_minds_version=original_minds_version,
+        original_branch=original_branch,
     )
 
     # Build the subprocess env from the parent's env + any secrets we inject
@@ -1047,6 +1073,8 @@ class _MngrCreateAttemptParams(FrozenModel):
     anthropic_base_url: str | None
     parent_cg: ConcurrencyGroup | None
     color: str | None
+    original_minds_version: str | None
+    original_branch: str | None
 
 
 def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams) -> tuple[AgentId, HostId]:
@@ -1080,6 +1108,8 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         anthropic_api_key=params.anthropic_api_key,
         anthropic_base_url=params.anthropic_base_url,
         color=params.color,
+        original_minds_version=params.original_minds_version,
+        original_branch=params.original_branch,
         parent_cg=params.parent_cg,
     )
 
@@ -1263,6 +1293,7 @@ class AgentCreator(MutableModel):
         on_created: Callable[[AgentId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
+        original_minds_version: str = "",
     ) -> CreationId:
         """Start creating an agent from a git URL or local path in a background thread.
 
@@ -1301,8 +1332,8 @@ class AgentCreator(MutableModel):
         """
         log_queue: queue.Queue[str] = queue.Queue()
         # ``host_name`` falls back to a repo-derived name when blank so the
-        # API path (``/api/create-agent``) doesn't need to compute it itself.
-        # The form path already requires the field. ``HostName(...)`` is
+        # API path (``POST /api/v1/workspaces``) doesn't need to compute it
+        # itself. The form path already requires the field. ``HostName(...)`` is
         # invoked downstream in ``_create_agent_background`` so any invalid
         # input fails inside the background thread with an error_message
         # rather than crashing this synchronous entry point.
@@ -1334,6 +1365,7 @@ class AgentCreator(MutableModel):
                 on_created,
                 backup_request,
                 color,
+                original_minds_version,
             ),
             daemon=True,
             name="agent-creator-{}".format(creation_id),
@@ -1395,6 +1427,7 @@ class AgentCreator(MutableModel):
         on_created: Callable[[AgentId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
+        original_minds_version: str = "",
     ) -> None:
         """Background thread that resolves the repo source and creates an mngr agent.
 
@@ -1621,6 +1654,8 @@ class AgentCreator(MutableModel):
                     anthropic_base_url=effective_anthropic_base_url,
                     parent_cg=self.root_concurrency_group,
                     color=color,
+                    original_minds_version=original_minds_version or None,
+                    original_branch=branch or None,
                 )
 
                 if launch_mode is LaunchMode.IMBUE_CLOUD:
@@ -1693,9 +1728,9 @@ class AgentCreator(MutableModel):
 
                 # Publish the canonical id + DONE atomically so the UI sees
                 # both at once. ``on_created`` runs after publication so any
-                # downstream consumer (e.g. ``_OnCreatedCallbackFactory``,
-                # which kicks off the Cloudflare tunnel + workspace
-                # association) can rely on the canonical id.
+                # downstream consumer (e.g. ``OnCreatedCallback``, which kicks
+                # off the Cloudflare tunnel + workspace association) can rely on
+                # the canonical id.
                 with self._lock:
                     self._canonical_agent_ids[cid_str] = canonical_id
                     self._statuses[cid_str] = AgentCreationStatus.DONE

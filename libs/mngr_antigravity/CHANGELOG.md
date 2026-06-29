@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `update_policy` field on the antigravity agent type (`AUTO` / `ASK` / `NEVER`, default `NEVER`) governing agy's background self-updater via `AGY_CLI_DISABLE_AUTO_UPDATE`. agy has no version-pin capability, so there is no `version` field.
+
+### Changed
+
+- Changed: `settings_overrides` now folds onto the base with a principled merge (matching mngr_claude): a bare key assigns with a recursive narrowing guard, and a top-level `__mngr_merge` map declares per-key `extend` (merge onto the base) or `assign` (replace without the guard). Raw `__extend` / `__assign` suffix keys are rejected — `__mngr_merge` is ignored by vanilla antigravity so the generated `settings.json` stays clean. Previously `settings_overrides` replaced top-level keys wholesale with no guard.
+
 ## [v0.1.8] - 2026-06-18
 
 ### Added

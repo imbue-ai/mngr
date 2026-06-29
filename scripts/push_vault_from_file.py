@@ -18,9 +18,9 @@ The script:
 2. Sources the matching template file the same way to discover the expected
    key set.
 3. Errors out if the filled file is missing any template key.
-4. Pushes every declared key (including empty values, so the Vault entry
-   matches the template schema exactly) to
-   `secrets/minds/<tier>/<service>` via `vault kv put`.
+4. Pushes every declared key (including empty values, so the Vault layout
+   matches the template schema exactly) as its own single-`value` leaf at
+   `secrets/minds/<tier>/<service>/<KEY>` via `vault kv put`.
 
 `VAULT_NAMESPACE` and `VAULT_ADDR` default to the imbue HCP cluster values
 if the operator did not already export them.
@@ -120,23 +120,29 @@ def main() -> int:
         print("error: every value is empty -- nothing meaningful to push", file=sys.stderr)
         return 1
 
-    path = f"minds/{args.tier}/{args.service}"
-    # Pipe values as JSON on stdin instead of `KEY=VALUE` positional args:
-    # the vault CLI interprets a leading `@` in a positional value as a
-    # "read from file" sigil, which mangles emails / suffix lists. Stdin
-    # JSON bypasses that parser entirely.
-    command = ["vault", "kv", "put", "-mount=secrets", path, "-"]
-    payload = json.dumps(filled_values)
-    printable = " ".join(shlex.quote(p) for p in command)
-    print(f"[push] secrets/{path}: {len(non_empty)} non-empty key(s)")
-    print(f"       {printable} < <json on stdin>")
-    if args.dry_run:
-        return 0
+    service_path = f"minds/{args.tier}/{args.service}"
+    print(f"[push] secrets/{service_path}/*: {len(filled_values)} key(s), {len(non_empty)} non-empty")
 
     env = os.environ.copy()
     env.setdefault("VAULT_NAMESPACE", _DEFAULT_VAULT_NAMESPACE)
     env.setdefault("VAULT_ADDR", _DEFAULT_VAULT_ADDR)
-    subprocess.run(command, check=True, env=env, input=payload, text=True)
+
+    # The split layout stores each key as its own single-`value` leaf at
+    # `secrets/minds/<tier>/<service>/<KEY>`. Pipe each value as JSON on stdin
+    # instead of a `value=VALUE` positional arg: the vault CLI interprets a
+    # leading `@` in a positional value as a "read from file" sigil, which
+    # mangles emails / suffix lists. Stdin JSON bypasses that parser entirely.
+    for key, value in filled_values.items():
+        leaf_path = f"{service_path}/{key}"
+        command = ["vault", "kv", "put", "-mount=secrets", leaf_path, "-"]
+        printable = " ".join(shlex.quote(p) for p in command)
+        print(f"       {printable} < <json on stdin>")
+        if args.dry_run:
+            continue
+        subprocess.run(command, check=True, env=env, input=json.dumps({"value": value}), text=True)
+
+    if args.dry_run:
+        return 0
 
     print()
     print(f"Done. Now shred the filled file: shred -u {args.filled_file}")

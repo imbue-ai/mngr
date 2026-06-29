@@ -427,7 +427,7 @@
         },
         {
           "name": "notion-mcp-read-all",
-          "description": "Run any read-only Notion MCP tool (search, fetch, queries, list users/teams/comments) plus the MCP session handshake."
+          "description": "Run any read-only Notion MCP tool (search, fetch, queries, list comments/teams, bot info) plus the MCP session handshake."
         },
         {
           "name": "notion-mcp-write-all",
@@ -1571,6 +1571,196 @@
         {
           "name": "google-directions-compute-route-matrix",
           "description": "Compute a distance and duration matrix between multiple origins and destinations."
+        }
+      ]
+    }
+  ],
+  "ramp": [
+    {
+      "scope": "ramp-api",
+      "display_name": "Ramp",
+      "description": "Any interaction with the Ramp API.",
+      "permissions": [
+        {
+          "name": "ramp-read-all",
+          "description": "Read anything from Ramp: every read capability across all resources (transactions, cards, bills, reimbursements, treasury, vendors, users, accounting, trips, limits, and more). Limited to Ramp's agent-tools capabilities."
+        },
+        {
+          "name": "ramp-write-all",
+          "description": "Create or modify anything in Ramp: every write capability across all resources (activate/lock cards, approve transactions & reimbursements, edit limits, issue funds, manage trips & vendors, pay via x402, and more). Limited to Ramp's agent-tools capabilities."
+        },
+        {
+          "name": "ramp-read-accounting",
+          "description": "Read accounting / analyst queries. Limited to Ramp's agent-tools capabilities. Includes: execute analyst query, get analyst artifact status, get analyst catalog, get analyst metric metadata, get analyst spend facts domain docs, get analyst table domain docs, get tracking categories, get tracking category options."
+        },
+        {
+          "name": "ramp-read-ai-spend",
+          "description": "Read AI token spend. Limited to Ramp's agent-tools capabilities. Includes: get ai token spend aggregates, get ai token spend connections, get ai token spend current spend, get ai token spend filter options."
+        },
+        {
+          "name": "ramp-read-bills",
+          "description": "Read bills. Limited to Ramp's agent-tools capabilities. Includes: get bill amount summary, get bill comments, get bill details, get bill history, get bill invoices, get bill metrics, get bill status, get bills for approval, get draft bill details, get recurring bill, list bills, search bills."
+        },
+        {
+          "name": "ramp-read-cards",
+          "description": "Read cards. Limited to Ramp's agent-tools capabilities. Includes: enroll business in agent cards, get agent card creds, get agent card funds."
+        },
+        {
+          "name": "ramp-read-help-center",
+          "description": "Read Ramp help-center articles. Limited to Ramp's agent-tools capabilities. Includes: search help center snippets."
+        },
+        {
+          "name": "ramp-read-limits",
+          "description": "Read spend limits & allocations. Limited to Ramp's agent-tools capabilities. Includes: get funds, list cards."
+        },
+        {
+          "name": "ramp-read-memos",
+          "description": "Read transaction memos. Limited to Ramp's agent-tools capabilities. Includes: get transaction suggested memos."
+        },
+        {
+          "name": "ramp-read-purchase-orders",
+          "description": "Read purchase orders. Limited to Ramp's agent-tools capabilities. Includes: get purchase order details, search purchase orders."
+        },
+        {
+          "name": "ramp-read-reimbursements",
+          "description": "Read out-of-pocket reimbursements. Limited to Ramp's agent-tools capabilities. Includes: estimate mileage reimbursement, estimate per diem amount, get outstanding reimbursements by currency, get reimbursement receipts, get reimbursements, get reimbursements for approval, get user recent reimbursements, search reimbursements, search user reimbursements."
+        },
+        {
+          "name": "ramp-read-tasks",
+          "description": "Read attention feed / tasks. Limited to Ramp's agent-tools capabilities. Includes: get attention feed."
+        },
+        {
+          "name": "ramp-read-transactions",
+          "description": "Read card transactions. Limited to Ramp's agent-tools capabilities. Includes: answer policy question, get decline explanation, get full transaction metadata, get transaction missing items, get transactions."
+        },
+        {
+          "name": "ramp-read-treasury",
+          "description": "Read treasury / business account balances. Limited to Ramp's agent-tools capabilities. Includes: get account balance history, get investment account balance, get managed portfolio account balance, get ramp business account balance, get treasury balance history, list business accounts, list treasury accounts, list wallet transfers."
+        },
+        {
+          "name": "ramp-read-trips",
+          "description": "Read travel & trips. Limited to Ramp's agent-tools capabilities. Includes: get bookings, get candidate trips for transaction, get flight booking locations, get traveler profile, get user trips, search flights, submit flight booking."
+        },
+        {
+          "name": "ramp-read-unified-requests",
+          "description": "Read unified requests (approvals inbox). Limited to Ramp's agent-tools capabilities. Includes: get requests to review, get unified request details, search unified requests."
+        },
+        {
+          "name": "ramp-read-users",
+          "description": "Read users & org chart. Limited to Ramp's agent-tools capabilities. Includes: get org chart, get simplified user detail, list users, search user."
+        },
+        {
+          "name": "ramp-read-vendors",
+          "description": "Read vendors. Limited to Ramp's agent-tools capabilities. Includes: get vendor agreement, get vendor document bulk status, list vendor agreements, search vendors."
+        },
+        {
+          "name": "ramp-write-approvals",
+          "description": "Create or modify approval decisions. Limited to Ramp's agent-tools capabilities. Includes: approve or reject request."
+        },
+        {
+          "name": "ramp-write-cards",
+          "description": "Create or modify cards. Limited to Ramp's agent-tools capabilities. Includes: activate card, lock or unlock card."
+        },
+        {
+          "name": "ramp-write-comments",
+          "description": "Create or modify comments. Limited to Ramp's agent-tools capabilities. Includes: post comment."
+        },
+        {
+          "name": "ramp-write-funds",
+          "description": "Create or modify agent-card funds. Limited to Ramp's agent-tools capabilities. Includes: issue one off funds."
+        },
+        {
+          "name": "ramp-write-limits",
+          "description": "Create or modify spend limits & allocations. Limited to Ramp's agent-tools capabilities. Includes: limit increase, lock or unlock spend allocation, lock or unlock spend allocation member, update category restrictions, update merchant restrictions, update transaction amount limit."
+        },
+        {
+          "name": "ramp-write-receipts",
+          "description": "Create or modify receipts. Limited to Ramp's agent-tools capabilities. Includes: attach receipt to transaction, mark transaction missing receipt, provide no receipt reason, upload receipt file."
+        },
+        {
+          "name": "ramp-write-reimbursements",
+          "description": "Create or modify out-of-pocket reimbursements. Limited to Ramp's agent-tools capabilities. Includes: approve or reject reimbursement, cancel reimbursement payment, create reimbursement from receipt, duplicate reimbursement, edit reimbursement, resubmit reimbursement, submit reimbursement."
+        },
+        {
+          "name": "ramp-write-transactions",
+          "description": "Create or modify card transactions. Limited to Ramp's agent-tools capabilities. Includes: approve or reject transaction, edit transaction, request transaction repayment."
+        },
+        {
+          "name": "ramp-write-trips",
+          "description": "Create or modify travel & trips. Limited to Ramp's agent-tools capabilities. Includes: create trip, update traveler profile."
+        },
+        {
+          "name": "ramp-write-vendors",
+          "description": "Create or modify vendors. Limited to Ramp's agent-tools capabilities. Includes: attach vendor document, bulk upload vendor documents."
+        },
+        {
+          "name": "ramp-write-x402",
+          "description": "Create or modify x402 protocol payments. Limited to Ramp's agent-tools capabilities. Includes: pay with x402."
+        }
+      ]
+    }
+  ],
+  "todoist": [
+    {
+      "scope": "todoist-api",
+      "display_name": "Todoist",
+      "description": "Any request to the Todoist API.",
+      "permissions": [
+        {
+          "name": "todoist-read-all",
+          "description": "Read anything from Todoist."
+        },
+        {
+          "name": "todoist-write-all",
+          "description": "Create, update, or delete anything in Todoist."
+        },
+        {
+          "name": "todoist-read-projects",
+          "description": "Read projects, including collaborators, search, and archived projects."
+        },
+        {
+          "name": "todoist-write-projects",
+          "description": "Create, update, delete, archive, or unarchive projects."
+        },
+        {
+          "name": "todoist-read-sections",
+          "description": "Read sections, including search."
+        },
+        {
+          "name": "todoist-write-sections",
+          "description": "Create, update, delete, archive, or unarchive sections."
+        },
+        {
+          "name": "todoist-read-tasks",
+          "description": "Read tasks, including filters and completed tasks."
+        },
+        {
+          "name": "todoist-write-tasks",
+          "description": "Create, update, delete, or quick-add tasks (not completion \u2014 see todoist-complete-tasks)."
+        },
+        {
+          "name": "todoist-complete-tasks",
+          "description": "Close, reopen, or move tasks without creating, updating, or deleting them."
+        },
+        {
+          "name": "todoist-read-comments",
+          "description": "Read comments on tasks and projects."
+        },
+        {
+          "name": "todoist-write-comments",
+          "description": "Create, update, or delete comments."
+        },
+        {
+          "name": "todoist-read-labels",
+          "description": "Read personal and shared labels, including search."
+        },
+        {
+          "name": "todoist-write-labels",
+          "description": "Create, update, or delete personal labels and manage shared labels."
+        },
+        {
+          "name": "todoist-sync",
+          "description": "Use the batched Sync endpoint (reads and writes in a single request)."
         }
       ]
     }

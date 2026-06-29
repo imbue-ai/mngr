@@ -1,6 +1,8 @@
 """Unit tests for SystemInterfaceHealthTracker."""
 
 import threading
+from datetime import datetime
+from datetime import timezone
 
 import pytest
 
@@ -8,32 +10,41 @@ from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.system_interface_health import should_enroll_suspect_for_backend_failure
 from imbue.mngr.primitives import AgentId
+from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 
 # Short STUCK threshold so the probe-failure-run tests don't have to sleep 5s.
 _FAST_THRESHOLD: float = 0.05
 
 
 @pytest.mark.parametrize(
-    "status_code,expected",
+    "reason,status_code,expected",
     [
-        # Connection-level failure (no HTTP status) always enrolls.
-        (None, True),
+        # Connection-level failure (no HTTP status) enrolls.
+        (SystemInterfaceBackendFailureReason.CONNECT_ERROR, None, True),
+        (SystemInterfaceBackendFailureReason.SSE_EOF, None, True),
         # Infrastructure 5xx: the backend is unreachable / not serving.
-        (502, True),
-        (503, True),
-        (504, True),
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 502, True),
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 503, True),
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 504, True),
         # Application errors: the backend is alive and responding, so they
         # don't enroll -- the background probe adjudicates a wedged backend.
-        (500, False),
-        (404, False),
-        (401, False),
-        (400, False),
-        # A success that somehow reached the failure path must not enroll.
-        (200, False),
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 500, False),
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 404, False),
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 401, False),
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 400, False),
+        # UNRESOLVED means the forward has no route for the agent at all (a
+        # cold-start warm-up or a genuinely-gone agent); a restart routes through
+        # the forward so it cannot help either way. Never enroll on it -- even
+        # though it carries a None status code that would otherwise enroll.
+        (SystemInterfaceBackendFailureReason.UNRESOLVED, None, False),
     ],
 )
-def test_should_enroll_suspect_for_backend_failure(status_code: int | None, expected: bool) -> None:
-    assert should_enroll_suspect_for_backend_failure(status_code) is expected
+def test_should_enroll_suspect_for_backend_failure(
+    reason: SystemInterfaceBackendFailureReason,
+    status_code: int | None,
+    expected: bool,
+) -> None:
+    assert should_enroll_suspect_for_backend_failure(reason, status_code) is expected
 
 
 def _sleep(seconds: float) -> None:
@@ -97,6 +108,34 @@ def test_sustained_probe_failures_transition_to_stuck() -> None:
 
     assert tracker.get_health(aid) == AgentHealth.STUCK
     assert seen == [(aid, AgentHealth.STUCK)]
+
+
+def test_failure_run_wall_onset_is_recorded_then_cleared() -> None:
+    """The wall-clock outage onset is captured when the probe-failure run begins
+    and cleared when the agent leaves the failing state.
+
+    The recovery redirect compares this onset against discovery snapshot
+    timestamps, so it must track the run: set on the first failure, gone once a
+    restart supersedes it.
+    """
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    aid = AgentId.generate()
+
+    # No probe-failure run yet -> no onset.
+    assert tracker.get_failure_run_started_wall_at(aid) is None
+
+    before = datetime.now(timezone.utc)
+    _drive_to_stuck(tracker, aid)
+    after = datetime.now(timezone.utc)
+
+    onset = tracker.get_failure_run_started_wall_at(aid)
+    assert onset is not None
+    # Captured at the first probe failure, so it falls within the driven window.
+    assert before <= onset <= after
+
+    # A restart supersedes the run, clearing the onset.
+    tracker.mark_restarting(aid)
+    assert tracker.get_failure_run_started_wall_at(aid) is None
 
 
 def test_probe_failure_without_record_is_ignored() -> None:

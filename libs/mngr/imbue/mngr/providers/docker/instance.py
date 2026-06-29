@@ -31,7 +31,9 @@ from imbue.concurrency_group.errors import ProcessTimeoutError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
+from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import DockerBuildTimeoutError
+from imbue.mngr.errors import DockerGvisorEphemeralRootfsError
 from imbue.mngr.errors import DockerRuntimeNotRegisteredError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
@@ -80,6 +82,8 @@ from imbue.mngr.providers.docker.host_store import HostRecord
 from imbue.mngr.providers.docker.volume import DockerVolume
 from imbue.mngr.providers.docker.volume import LABEL_PREFIX
 from imbue.mngr.providers.docker.volume import LABEL_PROVIDER
+from imbue.mngr.providers.docker.volume import STATE_CONTAINER_TYPE_LABEL
+from imbue.mngr.providers.docker.volume import STATE_CONTAINER_TYPE_VALUE
 from imbue.mngr.providers.docker.volume import STATE_VOLUME_MOUNT_PATH
 from imbue.mngr.providers.docker.volume import ensure_state_container
 from imbue.mngr.providers.docker.volume import state_container_name
@@ -152,6 +156,19 @@ SSH_CONNECT_TIMEOUT: Final[float] = 60
 # runtime the daemon has not registered (e.g. `runsc`/gVisor not installed).
 # Stable across Docker versions: "unknown or invalid runtime name: <name>".
 _UNKNOWN_RUNTIME_ERROR_MARKER: Final[str] = "unknown or invalid runtime name"
+
+# gVisor (`runsc`) keeps each container's root filesystem in a per-sandbox overlay that
+# is discarded on every (re)start unless the runtime is registered with this flag, which
+# writes the root layer through to the persistent Docker layer. Without it, mngr's SSH
+# provisioning (written to the rootfs at create time) is silently lost on the first
+# restart, leaving the host running but unreachable. See DockerGvisorEphemeralRootfsError.
+_GVISOR_RUNSC_BINARY_NAME: Final[str] = "runsc"
+_GVISOR_PERSISTENT_OVERLAY_RUNTIME_ARG: Final[str] = "--overlay2=none"
+# The local Docker daemon config file, whose `runtimes` block records each runtime's
+# registration (path + runtimeArgs). This is the only readable source of the effective
+# `--overlay2` setting: `docker info` does not expose runtimeArgs, and `runsc features`
+# reports the compiled default regardless of the registered flag.
+_DOCKER_DAEMON_CONFIG_PATH: Final[Path] = Path("/etc/docker/daemon.json")
 
 
 # Minimum Docker Engine version that supports `--mount ... volume-subpath=...`.
@@ -277,6 +294,50 @@ def create_docker_client() -> docker.DockerClient:
         if context_host is not None:
             return docker.DockerClient(base_url=context_host)
     return docker.from_env()
+
+
+@pure
+def _is_gvisor_runtime_rootfs_ephemeral(
+    runtime_name: str,
+    runtime_spec_by_name: Mapping[str, Mapping[str, object]],
+) -> bool:
+    """Whether the named Docker runtime is gVisor (`runsc`) registered WITHOUT `--overlay2=none`.
+
+    Returns False for a runtime that is not registered here (a truly-missing runtime surfaces
+    via Docker's own "unknown runtime" error at `docker run`) and for a non-gVisor runtime
+    (whose overlay semantics we cannot reason about).
+    """
+    runtime_spec = runtime_spec_by_name.get(runtime_name)
+    if runtime_spec is None:
+        return False
+    if Path(str(runtime_spec.get("path", ""))).name != _GVISOR_RUNSC_BINARY_NAME:
+        return False
+    runtime_args = runtime_spec.get("runtimeArgs")
+    # A gVisor runtime with missing or malformed runtimeArgs cannot carry the persistence
+    # flag, so it is ephemeral.
+    if not isinstance(runtime_args, (list, tuple)):
+        return True
+    return _GVISOR_PERSISTENT_OVERLAY_RUNTIME_ARG not in runtime_args
+
+
+def _read_local_docker_runtime_spec_by_name() -> dict[str, Mapping[str, object]]:
+    """Read the local Docker daemon's runtime registrations from its config file.
+
+    Returns an empty mapping when the config is absent or cannot be read/parsed -- in those
+    cases the runtime cannot be verified from here and host creation proceeds (a genuinely
+    unregistered runtime still surfaces Docker's own error at `docker run`).
+    """
+    if not _DOCKER_DAEMON_CONFIG_PATH.exists():
+        return {}
+    try:
+        raw_config = json.loads(_DOCKER_DAEMON_CONFIG_PATH.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("Could not read Docker daemon config at {}: {}", _DOCKER_DAEMON_CONFIG_PATH, e)
+        return {}
+    runtimes = raw_config.get("runtimes") if isinstance(raw_config, dict) else None
+    if not isinstance(runtimes, dict):
+        return {}
+    return {name: spec for name, spec in runtimes.items() if isinstance(spec, dict)}
 
 
 class DockerProviderInstance(BaseProviderInstance):
@@ -934,6 +995,33 @@ kill -TERM 1
             return DockerRuntimeNotRegisteredError(self.name, runtime)
         return None
 
+    def _verify_gvisor_overlay_persistent_or_raise(self) -> None:
+        """Raise when the configured gVisor runtime would give containers an ephemeral root fs.
+
+        gVisor's default root overlay discards all root-filesystem writes on restart, so a
+        runsc runtime registered without `--overlay2=none` would silently lose mngr's SSH
+        provisioning the first time a host restarts. mngr cannot register the runtime itself
+        (that needs root on the Docker host), so refuse to create such a host with an
+        actionable :class:`DockerGvisorEphemeralRootfsError` instead.
+
+        Only the local daemon's runtime registration is readable here; for a remote daemon the
+        registration cannot be introspected, so a warning is emitted rather than a hard failure.
+        """
+        runtime = self.config.docker_runtime
+        if runtime is None:
+            return
+        if self.config.host:
+            logger.warning(
+                "Cannot verify that remote Docker runtime '{}' persists container root filesystems; "
+                "if it is gVisor (runsc) registered without {}, hosts will become unreachable after a "
+                "restart.",
+                runtime,
+                _GVISOR_PERSISTENT_OVERLAY_RUNTIME_ARG,
+            )
+            return
+        if _is_gvisor_runtime_rootfs_ephemeral(runtime, _read_local_docker_runtime_spec_by_name()):
+            raise DockerGvisorEphemeralRootfsError(self.name, runtime)
+
     # =========================================================================
     # Container Discovery Helpers
     # =========================================================================
@@ -1006,6 +1094,30 @@ kill -TERM 1
         """Check if a container is running."""
         container.reload()
         return container.status == "running"
+
+    def _raise_if_state_container_stopped(self, containers: list[docker.models.containers.Container]) -> None:
+        """Raise ProviderUnavailableError if the singleton state container is present but stopped.
+
+        ``containers`` comes from :meth:`_list_containers` (``all=True``), so the
+        state container (which carries ``LABEL_PROVIDER`` + the type label) is
+        included with a freshly-listed status -- reliable even for a long-lived
+        cached provider instance whose ``_state_volume`` handle predates an
+        external stop. A stopped state container makes every host-record read
+        fail, which ``list_all_host_records`` masks as an empty list; treating it
+        as unavailable keeps discovery from misreporting "zero hosts". An absent
+        state container is left alone (the read-only emptiness guard / lazy
+        create handles that); only the present-but-stopped case raises here.
+        """
+        for container in containers:
+            labels = container.labels or {}
+            if labels.get(STATE_CONTAINER_TYPE_LABEL) != STATE_CONTAINER_TYPE_VALUE:
+                continue
+            if container.status != "running":
+                raise ProviderUnavailableError(
+                    self.name,
+                    "Docker state container is stopped; host records are unreachable",
+                )
+            return
 
     def _create_host_from_container(
         self,
@@ -1116,6 +1228,11 @@ kill -TERM 1
         """
         host_id = HostId.generate()
         logger.info("Creating host {} in {} ...", name, self.name)
+
+        # Refuse up front (before the expensive image build) to create a host whose
+        # configured gVisor runtime would give it an ephemeral root filesystem, which
+        # would lose SSH provisioning on the first restart.
+        self._verify_gvisor_overlay_persistent_or_raise()
 
         # Fail fast if a container with this name already exists, before the
         # expensive image build step.
@@ -1315,6 +1432,11 @@ kill -TERM 1
         If snapshot_id is provided, creates a new container from the snapshot image.
         Otherwise, restarts the stopped container (preserving filesystem state).
         """
+        # A (re)started gVisor container comes up with a fresh root filesystem and
+        # re-runs provisioning, so refuse to start one whose runtime would discard
+        # those writes again on the next restart.
+        self._verify_gvisor_overlay_persistent_or_raise()
+
         host_id = host.id if isinstance(host, HostInterface) else host
 
         container = self._find_container_by_host_id(host_id)
@@ -1644,6 +1766,46 @@ kill -TERM 1
 
         return self._create_host_from_host_record(host_record)
 
+    def get_connection_error_fallback_state(self, host_id: HostId) -> HostState | None:
+        """Report a still-running container as UNAUTHENTICATED rather than CRASHED.
+
+        The docker daemon is ground truth for container lifecycle and is
+        reachable without inner SSH. When agent enumeration fails with a
+        connection error (e.g. the inner sshd died -- "Error reading SSH
+        protocol banner") but the daemon still reports the container as running,
+        the host is up; we just cannot get inside it. Reporting
+        ``HostState.UNAUTHENTICATED`` keeps consumers such as minds' recovery
+        flow from misclassifying a live container as offline and skipping the
+        stop step of a host restart. This deliberately follows the convention
+        ``mngr_imbue_cloud`` established for the identical condition (a running
+        container whose inner SSH is unreachable; see
+        ``map_docker_status_to_host_state``), reached here by a different route:
+        imbue_cloud reads container state out-of-band on its own listing path,
+        whereas docker stays on the generic offline fallback and corrects the
+        state through this hook. Returns ``None`` (default offline derivation)
+        when no running container backs this host, or when the daemon cannot be
+        reached to confirm one -- this hook runs inside the offline fallback,
+        which must degrade gracefully rather than propagate.
+        """
+        try:
+            container = self._find_container_by_host_id(host_id)
+            if container is not None and self._is_container_running(container):
+                return HostState.UNAUTHENTICATED
+        except (
+            docker.errors.DockerException,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            MngrError,
+        ) as e:
+            # The daemon was reachable during enumeration but dropped before this
+            # out-of-band check (e.g. a daemon restart). A transport-level drop
+            # surfaces as a requests ConnectionError/Timeout rather than a
+            # DockerException (see _list_containers), so both are caught here.
+            # Keep the default offline derivation instead of breaking the offline
+            # fallback for this host.
+            logger.warning("Could not read docker container state for host {} during fallback: {}", host_id, e)
+        return None
+
     def get_host(
         self,
         host: HostId | HostName,
@@ -1703,6 +1865,21 @@ kill -TERM 1
         # daemon answered with an error) is a real fault and propagates instead.
         try:
             containers = self._list_containers()
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            raise ProviderUnavailableError(self.name, f"Cannot list Docker hosts: {e}") from e
+
+        # A present-but-stopped state container means host records are
+        # unreachable: every read exec's into a stopped container, and
+        # ``list_all_host_records`` swallows that into an empty list -- which
+        # discovery would publish as "zero hosts", dropping every host (and, for
+        # a long-lived cached provider instance, the read never restarts it).
+        # Surface it as ProviderUnavailableError so an empty list still means
+        # "genuinely zero hosts" and the retain-on-error path keeps last-known
+        # hosts instead. Read-only discovery must not start it; the owning app
+        # restarts it on launch.
+        self._raise_if_state_container_stopped(containers)
+
+        try:
             all_host_records = self._host_store.list_all_host_records()
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
             raise ProviderUnavailableError(self.name, f"Cannot list Docker hosts: {e}") from e

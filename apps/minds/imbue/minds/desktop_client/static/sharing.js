@@ -29,7 +29,7 @@
 
     var link = document.createElement('a');
     link.href = mngrForwardOrigin + '/goto/' + agentId + '/';
-    link.className = 'text-blue-600 hover:underline';
+    link.className = 'text-accent hover:underline';
     link.textContent = wsName;
     h.appendChild(link);
 
@@ -37,7 +37,7 @@
       h.appendChild(document.createTextNode(' ('));
       var acctLink = document.createElement('a');
       acctLink.href = '/accounts';
-      acctLink.className = 'text-blue-600 hover:underline';
+      acctLink.className = 'text-accent hover:underline';
       acctLink.textContent = accountEmail;
       h.appendChild(acctLink);
       h.appendChild(document.createTextNode(')'));
@@ -54,9 +54,9 @@
   function createAclRow(email, variant) {
     var base = 'flex items-center justify-between px-3 py-2 border rounded-md my-1 ';
     var rowCls = {
-      existing: 'bg-white border-zinc-200',
-      added:    'bg-emerald-50 border-emerald-200',
-      removed:  'bg-red-50 border-red-200 line-through',
+      existing: 'bg-surface-primary border-default',
+      added:    'bg-success/12 border-success/30',
+      removed:  'bg-important/12 border-important/30 line-through',
     }[variant];
     var row = document.createElement('div');
     row.className = base + rowCls;
@@ -64,18 +64,18 @@
     var left = document.createElement('span');
     if (variant === 'added' || variant === 'removed') {
       var prefix = document.createElement('span');
-      prefix.className = 'font-semibold mr-1.5 ' + (variant === 'added' ? 'text-emerald-600' : 'text-red-600');
+      prefix.className = 'font-semibold mr-1.5 ' + (variant === 'added' ? 'text-success' : 'text-important');
       prefix.textContent = variant === 'added' ? '+' : '−';
       left.appendChild(prefix);
     }
     var emailEl = document.createElement('span');
-    emailEl.className = 'text-sm ' + (variant === 'removed' ? 'text-zinc-400' : 'text-zinc-800');
+    emailEl.className = 'type-body ' + (variant === 'removed' ? 'text-tertiary' : 'text-primary');
     emailEl.textContent = email;
     left.appendChild(emailEl);
     row.appendChild(left);
 
     var btn = document.createElement('button');
-    btn.className = 'bg-transparent border-none cursor-pointer text-zinc-400 text-lg leading-none px-1 hover:text-zinc-700';
+    btn.className = 'bg-transparent border-none cursor-pointer text-tertiary type-heading px-1 hover:text-primary';
     btn.setAttribute('aria-label', 'Remove');
     btn.setAttribute('data-action',
       variant === 'added' ? 'unmark-added'
@@ -106,7 +106,7 @@
     });
     if (rowCount === 0) {
       var empty = document.createElement('p');
-      empty.className = 'text-sm text-zinc-400';
+      empty.className = 'type-body text-tertiary';
       empty.textContent = 'No one in the access list';
       container.appendChild(empty);
     }
@@ -177,7 +177,7 @@
     if (existing) existing.remove();
     var box = document.createElement('div');
     box.id = 'sharing-error';
-    box.className = 'mt-3 mb-1 px-3 py-2 rounded-md bg-red-50 border border-red-200 text-sm text-red-800';
+    box.className = 'mt-3 mb-1 px-3 py-2 rounded-md bg-important/12 border border-important/30 type-body text-important';
     box.textContent = message;
     var actions = document.getElementById('action-buttons');
     actions.parentNode.insertBefore(box, actions);
@@ -191,15 +191,15 @@
   // ``fetch`` only rejects on network failure -- a 4xx/5xx response is
   // a successful Promise. Wrap it so callers can treat both transport
   // errors and server-side errors uniformly.
-  function postWithErrorCheck(url, body) {
-    return fetch(url, { method: 'POST', body: body }).then(function (r) {
+  function requestWithErrorCheck(url, options) {
+    return fetch(url, options).then(function (r) {
       if (r.ok) return r;
       return r.text().then(function (text) {
         var detail = text;
         try {
-          var parsed = JSON.parse(text);
-          if (parsed && typeof parsed.error === 'string') detail = parsed.error;
-          else if (parsed && typeof parsed.detail === 'string') detail = parsed.detail;
+          // Route both the structural 422 contract and the handler's semantic
+          // {error}/{detail} shapes through the shared normalizer.
+          detail = window.normalizeApiError(JSON.parse(text)).message;
         } catch (_) { /* leave detail as raw text */ }
         var err = new Error(detail || ('HTTP ' + r.status));
         err.httpStatus = r.status;
@@ -211,10 +211,12 @@
   window.submitUpdate = function () {
     clearError();
     setSubmitting(true);
-    var form = new FormData();
-    form.append('emails', JSON.stringify(getFinalEmails()));
-    var url = '/sharing/' + agentId + '/' + serviceName + '/enable';
-    postWithErrorCheck(url, form)
+    var url = '/api/v1/workspaces/' + agentId + '/sharing/' + serviceName;
+    requestWithErrorCheck(url, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ emails: getFinalEmails() }),
+    })
       .then(function () { window.location.href = '/sharing/' + agentId + '/' + serviceName; })
       .catch(function (err) { showError('Could not save sharing changes: ' + err.message); setSubmitting(false); });
   };
@@ -222,7 +224,7 @@
   window.submitDisable = function () {
     clearError();
     setSubmitting(true);
-    postWithErrorCheck('/sharing/' + agentId + '/' + serviceName + '/disable', null)
+    requestWithErrorCheck('/api/v1/workspaces/' + agentId + '/sharing/' + serviceName, { method: 'DELETE' })
       .then(function () { window.location.href = '/sharing/' + agentId + '/' + serviceName; })
       .catch(function (err) { showError('Could not disable sharing: ' + err.message); setSubmitting(false); });
   };
@@ -259,7 +261,7 @@
     var attempts = 0;
     function poll() {
       attempts++;
-      var probeUrl = '/api/sharing-readiness/' + agentId + '/' + serviceName + '?url=' + encodeURIComponent(url);
+      var probeUrl = '/api/v1/workspaces/' + agentId + '/sharing/' + serviceName + '/readiness?url=' + encodeURIComponent(url);
       fetch(probeUrl)
         .then(function (r) { return r.ok ? r.json() : { ready: false }; })
         .catch(function () { return { ready: false }; })
@@ -283,15 +285,13 @@
     return policy.emails.slice();
   }
 
-  fetch('/api/sharing-status/' + agentId + '/' + serviceName)
+  fetch('/api/v1/workspaces/' + agentId + '/sharing/' + serviceName)
     .then(function (r) {
       if (!r.ok) {
         return r.text().then(function (text) {
           var detail = text;
           try {
-            var parsed = JSON.parse(text);
-            if (parsed && typeof parsed.error === 'string') detail = parsed.error;
-            else if (parsed && typeof parsed.detail === 'string') detail = parsed.detail;
+            detail = window.normalizeApiError(JSON.parse(text)).message;
           } catch (_) { /* leave as raw */ }
           throw new Error(detail || ('HTTP ' + r.status));
         });
@@ -333,7 +333,7 @@
     .catch(function (err) {
       var state = document.getElementById('loading-state');
       state.textContent = 'Failed to load sharing status: ' + err.message;
-      state.className = 'text-red-600 py-4';
+      state.className = 'text-important py-4';
       document.getElementById('editor-content').classList.remove('hidden');
       added = proposedEmails.slice();
       renderACL();

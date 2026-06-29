@@ -442,6 +442,7 @@ def test_ensure_mngr_settings_writes_aws_blocks_when_credentials_present(
             "default_instance_type": "t3.large",
             "install_gvisor_runtime": True,
             "docker_runtime": "runsc",
+            "default_start_args": ["--tmpfs", "/run"],
         }
 
 

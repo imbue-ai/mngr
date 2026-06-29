@@ -33,8 +33,8 @@ from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 SERVICES_EVENT_SOURCE_NAME: Final[str] = "services"
 REQUESTS_EVENT_SOURCE_NAME: Final[str] = "requests"
 
-# Every minds workspace runs a constant-named ``main``-type agent that owns
-# the bootstrap service manager (and thus the system interface). This is the
+# Every minds workspace runs a constant-named ``main``-type agent whose
+# bootstrap execs supervisord (and thus owns the system interface). This is the
 # canonical definition of that name; ``agent_creator._DEFAULT_AGENT_NAME``
 # is the ``AgentName``-typed form built from it.
 SYSTEM_SERVICES_AGENT_NAME: Final[str] = "system-services"
@@ -106,6 +106,20 @@ class BackendResolverInterface(MutableModel, ABC):
         """
         return self.list_known_workspace_ids()
 
+    def list_restorable_workspace_ids(self) -> tuple[AgentId, ...]:
+        """Workspace agent IDs known live OR from the persisted last-good topology.
+
+        The window-restore view uses this (not :meth:`list_active_workspace_ids`):
+        a workspace that simply has not been re-discovered yet this session -- e.g.
+        a provider that enumerates slowly on cold start, so the first full snapshot
+        is missing it -- is still recognized as known, so its restored window is
+        not dropped. Absence from a partial live snapshot is not evidence of
+        destruction; the live discovery flow navigates genuinely-destroyed
+        workspaces away after restore, on positive evidence. Default: the live
+        known set (resolvers without a persisted topology have no extra knowledge).
+        """
+        return self.list_known_workspace_ids()
+
     def get_host_state(self, host_id: HostId) -> HostState | None:
         """Return the last-known lifecycle state of a host, or None if unknown.
 
@@ -162,6 +176,15 @@ class BackendResolverInterface(MutableModel, ABC):
         """
         return None
 
+    def get_agent_label(self, agent_id: AgentId, label_key: str) -> str | None:
+        """Return the value of an arbitrary mngr label for an agent, or None.
+
+        Default implementation returns None. Subclasses with access to agent
+        labels should override this. Used by the workspace API to read
+        labels like ``original_minds_version`` off the discovered agent.
+        """
+        return None
+
     def get_workspace_color(self, agent_id: AgentId) -> str | None:
         """Return the workspace color hex for an agent, or None if unset.
 
@@ -201,6 +224,17 @@ class BackendResolverInterface(MutableModel, ABC):
         unverified workspace stale when its provider's last poll errored.
         """
         return {}
+
+    def get_freshness_timestamps(self) -> tuple[datetime | None, datetime | None]:
+        """Return ``(last_event_at, last_full_snapshot_at)`` from discovery.
+
+        Default implementation returns ``(None, None)`` (resolvers without
+        discovery have no freshness to report); ``MngrCliBackendResolver``
+        overrides it. ``None`` for the last full snapshot means discovery has
+        not (recently) confirmed state, so callers that gate on freshness treat
+        it as stale.
+        """
+        return None, None
 
 
 class StaticBackendResolver(BackendResolverInterface):
@@ -761,6 +795,29 @@ class MngrCliBackendResolver(BackendResolverInterface):
                 and host_state_by_host_id.get(str(agent.host_id)) is not HostState.DESTROYED
             )
 
+    def list_restorable_workspace_ids(self) -> tuple[AgentId, ...]:
+        """Union of live primary-workspace agents and last-good workspace agents.
+
+        The live set is the ``workspace`` + ``is_primary`` agents in the current
+        snapshot (host state aside -- a restore view declines to drop on absence,
+        not on DESTROYED). The last-good set is the persisted topology's
+        system-services agents (the minds' primary agents, which carry those
+        labels live). Unioning them means a workspace that exists but hasn't been
+        re-discovered this session yet -- a slow provider on cold start -- stays
+        recognized, so its window isn't dropped before discovery catches up.
+        """
+        with self._lock:
+            ids: set[AgentId] = {
+                agent.agent_id
+                for agent in self._agents_result.discovered_agents
+                if "workspace" in agent.labels and "is_primary" in agent.labels
+            }
+            for records in self._last_good_agents_by_host.values():
+                for record in records:
+                    if str(record.agent_name) == SYSTEM_SERVICES_AGENT_NAME:
+                        ids.add(record.agent_id)
+            return tuple(ids)
+
     def get_host_state(self, host_id: HostId) -> HostState | None:
         """Return the host's lifecycle state, preferring a fresh optimistic override.
 
@@ -804,6 +861,14 @@ class MngrCliBackendResolver(BackendResolverInterface):
             for agent in self._agents_result.discovered_agents:
                 if agent.agent_id == agent_id:
                     return agent.labels.get("workspace")
+            return None
+
+    def get_agent_label(self, agent_id: AgentId, label_key: str) -> str | None:
+        """Return the value of an arbitrary mngr label for an agent, or None."""
+        with self._lock:
+            for agent in self._agents_result.discovered_agents:
+                if agent.agent_id == agent_id:
+                    return agent.labels.get(label_key)
             return None
 
     def get_workspace_color(self, agent_id: AgentId) -> str | None:

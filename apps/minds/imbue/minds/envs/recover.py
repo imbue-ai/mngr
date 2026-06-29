@@ -114,7 +114,7 @@ class RecoverTarget(FrozenModel):
             "Neon project id the snapshot branch was created in. For dev (creates_resources=true) "
             "it's the just-provisioned per-env project; for shared tiers (creates_resources=false) "
             "it's the operator-managed project id from "
-            "``secrets/minds/<tier>/neon-admin.NEON_PROJECT_ID``."
+            "``secrets/minds/<tier>/neon-admin/NEON_PROJECT_ID``."
         ),
     )
     neon_branch_id: str | None = Field(

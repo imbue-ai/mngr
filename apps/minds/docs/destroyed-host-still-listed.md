@@ -38,11 +38,12 @@ The steady-state discovery snapshot the front end runs on
 stream *does* carry host state via `DiscoveredHost.host_state` (and it's in
 `mngr list --format json`), but minds drops it from the snapshot.
 
-Host state **is** already reachable on the front end on demand — the
-recovery/host-health page queries it (`app._run_host_health_probe` →
-`_build_mngr_host_state_argv` → `mngr list`). So nothing needed for a future
-"restore from backup" view is lost by hiding destroyed hosts from the active
-list; mngr still persists the destroyed host for its window.
+Host state **is** already reachable on the front end — the recovery/host-health
+page reads it from the resolver (`app._run_host_health_probe` →
+`backend_resolver.get_host_state`, sourced from the same passive discovery
+snapshot). So nothing needed for a future "restore from backup" view is lost by
+hiding destroyed hosts from the active list; mngr still persists the destroyed
+host for its window.
 
 ## Implemented fix
 
@@ -53,8 +54,10 @@ terminal `DESTROYED` state is treated as gone:
    map). `EnvelopeStreamConsumer` populates it from the full discovery
    snapshot's `hosts`, and keeps it fresh via the delta events
    (`HostDiscoveryEvent`, and `HostDestroyedEvent` which marks the host
-   `DESTROYED` immediately). `parse_agents_from_json` fills it from the
-   `host.state` field of `mngr list --format json` for the on-demand path.
+   `DESTROYED` immediately). `parse_agents_from_json` also fills it from the
+   `host.state` field of `mngr list --format json` when parsing a list payload
+   (now used only in tests; the recovery host-health page reads host state from
+   the resolver rather than re-listing).
 2. The resolver exposes `get_host_state(host_id)` and a derived
    `list_active_workspace_ids()` that drops agents whose host is `DESTROYED`.
    `list_known_workspace_ids()` is left as the full set so a future

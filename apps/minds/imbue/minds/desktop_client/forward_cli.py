@@ -14,8 +14,9 @@ spawning code; this file replaces them with a thin consumer that:
   service map and fan out to request callbacks; ``forward`` lines
   feed the ``system_interface_backend_failure`` health tracker and the
   ``listening`` port handshake;
-- watches the subprocess for premature exit and surfaces stderr + exit code
-  via ``NotificationDispatcher``.
+- watches the subprocess for premature exit and reports it (the consumer is
+  dead, so the discovery pipeline is down) to the discovery-health watchdog
+  via registered ``on_unexpected_exit`` callbacks.
 
 Provider-set changes are picked up by bouncing the detached ``mngr latchkey
 forward`` supervisor (the single discovery observer); the tailer here then sees
@@ -48,9 +49,6 @@ from imbue.minds.desktop_client.backend_resolver import REQUESTS_EVENT_SOURCE_NA
 from imbue.minds.desktop_client.backend_resolver import SERVICES_EVENT_SOURCE_NAME
 from imbue.minds.desktop_client.backend_resolver import ServiceDeregisteredRecord
 from imbue.minds.desktop_client.backend_resolver import parse_service_log_record
-from imbue.minds.desktop_client.notification import NotificationDispatcher
-from imbue.minds.desktop_client.notification import NotificationRequest
-from imbue.minds.desktop_client.notification import NotificationUrgency
 from imbue.minds.errors import EnvelopeStreamConsumerError
 from imbue.minds.utils.secret_redaction import redact_secret_flag_values
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
@@ -74,6 +72,29 @@ _PREAUTH_TOKEN_LENGTH: Final[int] = 64
 OnAgentDiscoveredCallback = Callable[[AgentId, RemoteSSHInfo | None, str], None]
 OnAgentDestroyedCallback = Callable[[AgentId], None]
 OnSystemInterfaceBackendFailureCallback = Callable[[AgentId, SystemInterfaceBackendFailureReason, int | None], None]
+OnUnexpectedExitCallback = Callable[[int], None]
+
+
+def _full_snapshot_observed_at(event: FullDiscoverySnapshotEvent) -> datetime:
+    """Producer-side poll time of a full snapshot, for freshness comparisons.
+
+    The envelope ``timestamp`` is stamped when the discovery producer finished the
+    poll, so the host states the snapshot carries were observed at that instant.
+    Minds gates the recovery redirect on whether a snapshot postdates an outage's
+    onset, so it must compare against *when discovery observed the world*, not when
+    minds happened to receive the line -- using the producer time removes the
+    receive-tail-latency slop between the two. The producer and this consumer run
+    on the same machine, so the timestamps share a clock. Falls back to the receive
+    time if the envelope timestamp is unparseable (which only loosens the gate back
+    to the prior receive-time behavior).
+    """
+    try:
+        return datetime.fromisoformat(event.timestamp)
+    except ValueError:
+        logger.warning(
+            "Full discovery snapshot carried an unparseable timestamp {!r}; using receive time", event.timestamp
+        )
+        return datetime.now(timezone.utc)
 
 
 class ForwardSubprocessConfig(FrozenModel):
@@ -107,10 +128,6 @@ class EnvelopeStreamConsumer(MutableModel):
     """
 
     resolver: MngrCliBackendResolver = Field(frozen=True, description="Resolver to feed observe + event lines into")
-    notification_dispatcher: NotificationDispatcher | None = Field(
-        default=None,
-        description="Dispatcher used to surface plugin-exit failures to the user",
-    )
 
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _agent_host_map: dict[str, str] = PrivateAttr(default_factory=dict)
@@ -123,8 +140,9 @@ class EnvelopeStreamConsumer(MutableModel):
     _on_system_interface_backend_failure_callbacks: list[OnSystemInterfaceBackendFailureCallback] = PrivateAttr(
         default_factory=list
     )
+    _on_unexpected_exit_callbacks: list[OnUnexpectedExitCallback] = PrivateAttr(default_factory=list)
     _process: subprocess.Popen[bytes] | None = PrivateAttr(default=None)
-    _has_notified_exit: bool = PrivateAttr(default=False)
+    _has_reported_exit: bool = PrivateAttr(default=False)
     _intentional_shutdown: bool = PrivateAttr(default=False)
     # Set once the plugin emits its `listening` envelope; `_listening_port`
     # then holds the port the plugin actually bound. `wait_for_listening`
@@ -164,6 +182,17 @@ class EnvelopeStreamConsumer(MutableModel):
         with self._lock:
             self._on_system_interface_backend_failure_callbacks.append(callback)
 
+    def add_on_unexpected_exit_callback(self, callback: OnUnexpectedExitCallback) -> None:
+        """Register a callback fired once when the plugin subprocess exits unexpectedly.
+
+        The callback receives the subprocess exit code. It fires only for an
+        exit minds did not ask for (i.e. not after :meth:`terminate`), and at
+        most once per consumer. The discovery-health watchdog registers here so
+        a dead consumer transitions the app-global state straight to BLOCKED.
+        """
+        with self._lock:
+            self._on_unexpected_exit_callbacks.append(callback)
+
     # -- Subprocess lifecycle ---------------------------------------------
 
     def attach(self, process: subprocess.Popen[bytes]) -> None:
@@ -200,7 +229,7 @@ class EnvelopeStreamConsumer(MutableModel):
             is_checked=False,
         )
         concurrency_group.start_new_thread(
-            target=self._wait_and_notify_on_exit,
+            target=self._wait_and_report_exit,
             name="mngr-forward-lifecycle-watcher",
             daemon=True,
             is_checked=False,
@@ -227,9 +256,8 @@ class EnvelopeStreamConsumer(MutableModel):
         """Stop the plugin subprocess (SIGTERM, then SIGKILL on timeout).
 
         Sets ``_intentional_shutdown`` *before* signalling the subprocess
-        so the lifecycle watcher (``_wait_and_notify_on_exit``) does not
-        surface the resulting non-zero exit code as a CRITICAL "Forwarding
-        subprocess died" notification.
+        so the lifecycle watcher (``_wait_and_report_exit``) does not report
+        the resulting exit to the watchdog as a dead pipeline.
         """
         process = self._process
         if process is None:
@@ -264,34 +292,30 @@ class EnvelopeStreamConsumer(MutableModel):
             if stripped:
                 logger.debug("mngr forward stderr: {}", stripped)
 
-    def _wait_and_notify_on_exit(self) -> None:
+    def _wait_and_report_exit(self) -> None:
         process = self._process
         if process is None:
             return
         exit_code = process.wait()
-        # If minds asked the subprocess to stop (lifespan shutdown), the
-        # non-zero exit code is the expected SIGTERM/SIGKILL signal, not a
-        # crash. Surfacing it as a CRITICAL notification on every clean
-        # shutdown trains the user to ignore the notification entirely,
-        # which defeats its purpose for the crash-on-its-own case.
+        # If minds asked the subprocess to stop (lifespan shutdown), the exit is
+        # expected -- not a dead pipeline.
         if self._intentional_shutdown:
             logger.debug("mngr forward exited with code {} after intentional shutdown", exit_code)
             return
-        if exit_code != 0 and not self._has_notified_exit:
-            self._has_notified_exit = True
-            logger.error("mngr forward exited with code {}", exit_code)
-            if self.notification_dispatcher is not None:
-                self.notification_dispatcher.dispatch(
-                    NotificationRequest(
-                        title="Forwarding subprocess died",
-                        message=(
-                            f"`mngr forward` exited with code {exit_code}. The minds desktop client "
-                            "is no longer forwarding agent traffic; restart minds to recover."
-                        ),
-                        urgency=NotificationUrgency.CRITICAL,
-                    ),
-                    agent_display_name="Minds",
-                )
+        # Any unasked-for exit means the consumer (and thus the discovery
+        # pipeline + traffic proxy) is down. Report it once to the watchdog,
+        # which owns the user-facing surfacing (the app-global BLOCKED screen).
+        if self._has_reported_exit:
+            return
+        self._has_reported_exit = True
+        logger.error("mngr forward exited unexpectedly with code {}", exit_code)
+        with self._lock:
+            callbacks = list(self._on_unexpected_exit_callbacks)
+        for callback in callbacks:
+            try:
+                callback(exit_code)
+            except (OSError, RuntimeError, ValueError) as e:
+                logger.warning("on_unexpected_exit callback failed: {}", e)
 
     # -- Envelope parsing + dispatch --------------------------------------
 
@@ -431,7 +455,7 @@ class EnvelopeStreamConsumer(MutableModel):
         self.resolver.update_providers(
             providers=event.providers,
             error_by_provider_name=event.error_by_provider_name,
-            last_full_snapshot_at=datetime.now(timezone.utc),
+            last_full_snapshot_at=_full_snapshot_observed_at(event),
         )
         if partition.retained:
             logger.debug(
@@ -658,7 +682,6 @@ class EnvelopeStreamConsumer(MutableModel):
 def start_mngr_forward(
     config: ForwardSubprocessConfig,
     resolver: MngrCliBackendResolver,
-    notification_dispatcher: NotificationDispatcher | None = None,
 ) -> tuple[EnvelopeStreamConsumer, str]:
     """Spawn the ``mngr forward`` subprocess and attach an envelope consumer.
 
@@ -712,10 +735,7 @@ def start_mngr_forward(
         env=env,
         cwd=str(Path.home()),
     )
-    consumer = EnvelopeStreamConsumer(
-        resolver=resolver,
-        notification_dispatcher=notification_dispatcher,
-    )
+    consumer = EnvelopeStreamConsumer(resolver=resolver)
     consumer.attach(process)
     return consumer, preauth_cookie
 

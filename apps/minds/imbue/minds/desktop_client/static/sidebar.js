@@ -1,8 +1,8 @@
 // Electron sidebar page: loaded into the shared modal WebContentsView when
 // the user opens the sidebar. Renders the floating menu (workspace list +
-// "New workspace" + "Manage account(s)"). Clicks + context menus go through
-// window.minds IPC. In browser mode the chrome.js embedded sidebar handles
-// the same job inline instead.
+// "New workspace" + "Settings" + "Manage account(s)"). Clicks + context menus
+// go through window.minds IPC. In browser mode the chrome.js embedded sidebar
+// handles the same job inline instead.
 (function () {
   var isElectron = !!window.minds;
   var currentWorkspaceId = null;
@@ -57,7 +57,7 @@
     keys.forEach(function (key, keyIdx) {
       if (keyIdx > 0 || keys.length > 1) {
         var header = document.createElement('div');
-        header.className = 'px-2 pt-2 pb-1 text-[10px] text-white/40 uppercase tracking-wider';
+        header.className = 'px-2 pt-2 pb-1 type-section text-tertiary';
         header.textContent = key === 'Private' ? 'Private' : key;
         container.appendChild(header);
       }
@@ -88,6 +88,10 @@
   document.addEventListener('click', function (e) {
     if (e.target.closest('#sidebar-new-workspace')) {
       navigate('/create');
+      return;
+    }
+    if (e.target.closest('#sidebar-settings')) {
+      navigate('/settings');
       return;
     }
     if (e.target.closest('#sidebar-account')) {

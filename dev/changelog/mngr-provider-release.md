@@ -1,1 +1,0 @@
-Vendored `specs/provider-release-tests.md` (the common provider release-test suite proposal, originally authored in PR #2142) into the tree so the new provider release harness ships alongside the design doc its docstrings cite as the source of truth for the trip definitions and the still-owed future trips.
