@@ -272,6 +272,10 @@ def discovered_agent_from_agent_details(agent_details: AgentDetails) -> Discover
         agent_id=agent_details.id,
         agent_name=agent_details.name,
         provider_name=agent_details.host.provider_name,
+        # The listing already computed the live lifecycle state for this agent;
+        # carry it through so discovery-stream consumers see it instead of
+        # having to re-list. (Static fields go in certified_data below.)
+        state=agent_details.state,
         certified_data={
             "type": agent_details.type,
             "work_dir": str(agent_details.work_dir),

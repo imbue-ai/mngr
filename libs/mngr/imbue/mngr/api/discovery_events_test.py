@@ -54,6 +54,7 @@ from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import DiscoverySchemaChangedError
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
@@ -209,6 +210,39 @@ def test_discovered_agent_from_agent_details_preserves_plugin_fields() -> None:
     )
     discovered = discovered_agent_from_agent_details(details)
     assert discovered.certified_data["plugin"] == {"demo_plugin": {"flag": True}}
+
+
+def test_discovered_agent_from_agent_details_carries_lifecycle_state() -> None:
+    """The live lifecycle state computed during a listing must survive into the
+    DiscoveredAgent, so discovery-stream consumers can tell a stopped agent's
+    process from a running one without re-listing."""
+    details = make_test_agent_details(state=AgentLifecycleState.DONE)
+    discovered = discovered_agent_from_agent_details(details)
+    assert discovered.state == AgentLifecycleState.DONE
+
+
+def test_discovered_agent_lifecycle_state_survives_event_json_roundtrip() -> None:
+    """The lifecycle state must survive the JSONL wire format of the discovery
+    stream (model_dump -> parse), since that is how it reaches consumers."""
+    details = make_test_agent_details(state=AgentLifecycleState.DONE)
+    discovered = discovered_agent_from_agent_details(details)
+    event = make_agent_discovery_event(discovered)
+    line = json.dumps(event.model_dump(mode="json"))
+    parsed = parse_discovery_event_line(line)
+    assert isinstance(parsed, AgentDiscoveryEvent)
+    assert parsed.agent.state == AgentLifecycleState.DONE
+
+
+def test_discovered_agent_state_defaults_to_none_when_not_provided() -> None:
+    """A DiscoveredAgent built from data.json alone (offline discovery) has no
+    live state; the field defaults to None rather than implying running."""
+    agent = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("offline-agent"),
+        provider_name=ProviderInstanceName("local"),
+    )
+    assert agent.state is None
 
 
 def test_discovered_host_from_agent_details_preserves_key_fields() -> None:

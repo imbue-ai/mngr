@@ -585,6 +585,17 @@ class DiscoveredAgent(FrozenModel):
     agent_name: AgentName
     provider_name: ProviderInstanceName
     certified_data: Mapping[str, Any] = Field(default_factory=dict)
+    # Live lifecycle state, when this agent was discovered from an online host
+    # that probed it (a full listing computes get_lifecycle_state for every
+    # agent). Unlike the rest of this model -- static data.json that needs no
+    # host connection -- this requires touching the host, so it is None when the
+    # agent was discovered offline / from data.json alone. Carried through so
+    # discovery-stream consumers (e.g. minds' system interface) can show whether
+    # the agent process is actually running without re-listing.
+    state: AgentLifecycleState | None = Field(
+        default=None,
+        description="The agent's lifecycle state if known from a live listing, else None.",
+    )
 
     @property
     def agent_type(self) -> "AgentTypeName | None":
