@@ -277,20 +277,12 @@ def render_landing_page(
 # ``_operator_workspace_default`` for the gating rationale.
 # Public alias: the default forever-claude-template repo URL. The pre-baked Lima
 # image gate (lima_image_prefetch) keys on this to recognize the default workspace.
-# === LOCAL LIMA FAST-PATH TEST OVERRIDE (uncommitted; revert with `git checkout`) ===
-# Points the default workspace at the local FCT worktree whose vendor/mngr is
-# synced to this branch's mngr, and keys the pre-baked image to a local ref, so
-# the prebaked-image gate fires for a non-dev-loop default-workspace create and
-# the in-VM agent's vendored mngr matches the dev binary. Restore the two lines
-# below (github URL + "minds-v0.3.4") to test the shipped default workspace.
-DEFAULT_FOREVER_CLAUDE_GIT_URL: Final[str] = (
-    "/home/user/.mngr/worktrees/lima-optimization-test-6ae124ad1e294746a602140ed6770dff/.external_worktrees/forever-claude-template"
-)
+DEFAULT_FOREVER_CLAUDE_GIT_URL: Final[str] = "https://github.com/imbue-ai/forever-claude-template.git"
 _FALLBACK_GIT_URL: Final[str] = DEFAULT_FOREVER_CLAUDE_GIT_URL
 # Pin to an annotated FCT tag so a shipped binary clones the exact FCT
 # snapshot it was verified against. Bump to a newer tag only after
 # re-verifying launch-to-msg CI against (this binary, the new tag).
-FALLBACK_BRANCH: Final[str] = "lima-fast-test"
+FALLBACK_BRANCH: Final[str] = "minds-v0.3.4"
 
 # Env var (set by ``just minds-start`` and the e2e workspace runner) that opts a
 # launch into the operator's local-worktree create-form defaults. Gating on an
