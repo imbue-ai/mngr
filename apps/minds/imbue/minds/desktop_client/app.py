@@ -2915,7 +2915,11 @@ def _handle_recovery_page(
         initial_error=initial_error,
         ssh_command=_ssh_command_for_agent(backend_resolver, aid),
     )
-    return make_html_response(content=html_body)
+    # Expose the rendered status so the page's background convergence poll can
+    # tell "still restarting" (keep waiting, no reload) from a state change
+    # (reload to render the new state) without a focus-stealing full reload on
+    # every tick. See the recovery script's ``scheduleRefresh``.
+    return make_html_response(content=html_body, headers={"X-Recovery-Status": render_status})
 
 
 def _run_mngr(

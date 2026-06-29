@@ -2755,6 +2755,9 @@ def test_recovery_page_initial_status_reflects_tracker_restarting(tmp_path: Path
 
     assert response.status_code == 200
     assert 'data-initial-status="restarting"' in response.text
+    # The page's background convergence poll keys off this header to tell "still
+    # restarting" (keep waiting, no focus-stealing reload) from a state change.
+    assert response.headers["X-Recovery-Status"] == "restarting"
 
 
 def test_recovery_page_redirects_to_return_to_when_agent_already_healthy(tmp_path: Path) -> None:

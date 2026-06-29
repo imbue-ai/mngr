@@ -956,12 +956,12 @@ _RECOVERY_SCRIPT: Final[str] = """\
 
         var latestHealth = null;
 
-        // A timed reload restarts the spinner's CSS animation from 0deg, so the
-        // interval must be a whole multiple of the spinner's 1s rotation period
-        // (see LOADING_PAGE_CSS' ``spin`` keyframe) -- otherwise the spinner
-        // visibly jumps back mid-rotation on every refresh. 1000ms also matches
-        // the mngr_forward proxy loader's 1s meta refresh, keeping the two
-        // loading pages a user may see during recovery in lockstep.
+        // The background convergence/healthy polls below run on this cadence.
+        // 1000ms matches the mngr_forward proxy loader's poll interval, keeping
+        // the two loading pages a user may see during recovery in lockstep, and
+        // is a whole multiple of the spinner's 1s rotation period (see
+        // LOADING_PAGE_CSS' ``spin`` keyframe) so the one eventual state-change
+        // reload lands at the animation's cycle boundary rather than mid-spin.
         var REFRESH_INTERVAL_MS = 1000;
 
         function show(el, visible) {
@@ -1023,15 +1023,40 @@ _RECOVERY_SCRIPT: Final[str] = """\
           if (returnTo) u += '?return_to=' + encodeURIComponent(returnTo);
           return u;
         }
+        // Convergence poll while a restart is in flight (the RESTARTING state).
+        // A full-page reload here would steal OS focus from any Electron view
+        // layered over this one -- e.g. the bug-report modal opened from
+        // "Report a problem" -- on every tick, making its inputs impossible to
+        // type into (Electron has no per-WebContentsView focus-on-navigation
+        // control; see https://github.com/electron/electron/issues/42578). So
+        // poll in the background instead: a HEALTHY tracker 302s back to the
+        // workspace (an opaque redirect, which we follow), and any non-restarting
+        // status (e.g. restart_failed) means we reload to render that state.
+        // While the status stays 'restarting' we leave the page -- and any
+        // focused overlay -- untouched and just poll again.
         function scheduleRefresh() {
-          setTimeout(function () { window.location.assign(pollUrl()); }, REFRESH_INTERVAL_MS);
+          setTimeout(function () {
+            fetch(pollUrl(), { credentials: 'same-origin', redirect: 'manual', cache: 'no-store' }).then(function (resp) {
+              if (resp.type === 'opaqueredirect' || (resp.status >= 300 && resp.status < 400)) {
+                window.location.assign(pollUrl());
+                return;
+              }
+              if ((resp.headers.get('X-Recovery-Status') || '') === 'restarting') {
+                scheduleRefresh();
+                return;
+              }
+              window.location.assign(pollUrl());
+            }, function () {
+              scheduleRefresh();
+            });
+          }, REFRESH_INTERVAL_MS);
         }
-        // Background convergence poll for the restart_failed state. Unlike
-        // scheduleRefresh (which reloads the whole page), this fetches pollUrl
-        // with manual redirect handling: while the workspace is still down the
-        // server returns the recovery HTML (200), which we discard so the
-        // displayed failure reason + diagnostics stay put and the heavy
-        // host-health probe is not re-run. Once the background probe loop flips
+        // Background convergence poll for the restart_failed state. Like
+        // scheduleRefresh it polls in the background rather than reloading, but
+        // it only ever navigates on a healthy redirect: while the workspace is
+        // still down the server returns the recovery HTML (200), which we
+        // discard so the displayed failure reason + diagnostics stay put and the
+        // heavy host-health probe is not re-run. Once the background probe loop flips
         // the tracker to HEALTHY the server starts 302ing to return_to, which
         // surfaces as an opaque-redirect response; we then follow it to send
         // the user back to the now-recovered workspace.

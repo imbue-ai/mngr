@@ -5,9 +5,9 @@ loader and any downstream consumer's loading/recovery page render the *same*
 HTML in their loading state -- rather than two hand-matched markups that drift
 apart.
 
-The proxy serves it as a static auto-refreshing page; a consumer can reuse it
-and layer its own controls and script on top via the ``card_extra`` /
-``style_extra`` / ``body_extra`` hooks.
+The proxy serves it with a small background poll that re-attempts the workspace
+until it answers; a consumer can reuse it and layer its own controls and script
+on top via the ``card_extra`` / ``style_extra`` / ``body_extra`` hooks.
 """
 
 from typing import Final
