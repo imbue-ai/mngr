@@ -73,7 +73,7 @@ def render_loading_page(
 ) -> str:
     """Render the canonical "Loading workspace" page.
 
-    ``head_extra``   -- extra markup inside ``<head>`` (e.g. a meta refresh).
+    ``head_extra``   -- extra markup inside ``<head>`` (e.g. a ``<meta>`` or ``<link>`` tag).
     ``style_extra``  -- extra CSS appended to ``LOADING_PAGE_CSS``.
     ``card_attrs``   -- extra attributes on the ``.card`` element (e.g. ``data-*``).
     ``card_extra``   -- extra markup appended inside the ``.card`` (e.g. buttons).
