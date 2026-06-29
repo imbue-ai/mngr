@@ -412,33 +412,6 @@ def _is_workspace_provider_errored(info: AgentDisplayInfo | None, errored_provid
     return info is not None and info.provider_name is not None and info.provider_name in errored_provider_names
 
 
-# Label values mngr never validates, so a present marker label might carry
-# any string; treat these (case-insensitive) as "not set" so an explicit
-# ``auto_created=false`` doesn't blink. Anything else present counts as set.
-_FALSEY_LABEL_VALUES: Final[frozenset[str]] = frozenset({"", "false", "0", "no", "off"})
-
-# The labels that currently mark a workspace as "highlighted" -- i.e. worth
-# drawing the user's eye to with the blinking-tab affordance. This is the single
-# place that defines what counts as highlighted: add a label here to highlight
-# workspaces for a new reason, or empty the tuple to turn the highlight off
-# entirely if blinking is later judged unhelpful. Today the only reason is a
-# workspace the Caretaker scheduler auto-created (``auto_created`` / ``caretaker``).
-_HIGHLIGHT_LABEL_NAMES: Final[tuple[str, ...]] = ("auto_created", "caretaker")
-
-
-def _is_highlighted_workspace(labels: Mapping[str, str]) -> bool:
-    """True when the agent carries any truthy :data:`_HIGHLIGHT_LABEL_NAMES` label.
-
-    Drives the blinking-tab affordance: a highlighted workspace blinks until the
-    user first opens it. A label counts as set when present with any value
-    outside :data:`_FALSEY_LABEL_VALUES`.
-    """
-    return any(
-        name in labels and labels[name].strip().lower() not in _FALSEY_LABEL_VALUES
-        for name in _HIGHLIGHT_LABEL_NAMES
-    )
-
-
 def _resolved_workspace_color(backend_resolver: BackendResolverInterface, agent_id: AgentId) -> str:
     """The workspace's stored color hex, or the default for label-less workspaces.
 
@@ -2614,11 +2587,6 @@ def _build_workspace_list(
         # unverified rather than confirmed healthy.
         if _is_workspace_provider_errored(info, errored_provider_names):
             entry["is_stale"] = "true"
-        # Blink the tab for highlighted workspaces (see _is_highlighted_workspace
-        # / _HIGHLIGHT_LABEL_NAMES for what counts) until the client marks them
-        # seen; non-highlighted workspaces and the day-1 chat tab never blink.
-        if _is_highlighted_workspace(backend_resolver.get_agent_labels(aid)):
-            entry["is_highlighted"] = "true"
         liveness = liveness_by_agent_id.get(str(aid))
         if liveness is not None:
             entry["supports_shutdown"] = "true"
