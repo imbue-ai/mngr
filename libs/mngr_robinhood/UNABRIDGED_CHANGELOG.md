@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-26
+
+Added scope docstrings to this package's release tests so the TMR (test
+map-reduce) harness can anchor each test's intended scope on its docstring
+rather than on a tutorial block. Docstring-only; no test logic changed.
+
 ## 2026-06-19
 
 Trimmed the README to user-relevant content (removed the live SDK test docs and condensed the SDK divergence detail) and tightened it for concision.

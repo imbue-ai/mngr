@@ -216,7 +216,6 @@ CATALOG: Final[Catalog] = _build_catalog()
 def render_landing_page(
     accessible_agent_ids: Sequence[AgentId],
     mngr_forward_origin: str = "",
-    telegram_status_by_agent_id: dict[str, bool] | None = None,
     is_discovering: bool = False,
     agent_names: dict[str, str] | None = None,
     destroying_status_by_agent_id: dict[str, str] | None = None,
@@ -231,9 +230,6 @@ def render_landing_page(
     (e.g. ``"http://localhost:8421"``). Workspace links target
     ``{mngr_forward_origin}/goto/<agent>/`` because Phase 2 deletes minds'
     in-process subdomain forwarder; the plugin owns ``/goto/`` now.
-
-    telegram_status_by_agent_id maps agent ID strings to whether they have
-    active Telegram bot credentials. When None, no telegram buttons are shown.
 
     agent_names maps agent ID strings to human-readable workspace names.
 
@@ -267,8 +263,6 @@ def render_landing_page(
         agent_ids=accessible_agent_ids,
         agent_accents=effective_accents,
         mngr_forward_origin=mngr_forward_origin,
-        telegram_enabled=telegram_status_by_agent_id is not None,
-        telegram_status_by_agent_id=telegram_status_by_agent_id or {},
         is_discovering=is_discovering,
         agent_names=agent_names or {},
         destroying_status_by_agent_id=destroying_status_by_agent_id or {},
@@ -302,7 +296,7 @@ _WORKSPACE_DEFAULTS_OPT_IN_ENV_VAR: Final[str] = "MINDS_USE_LOCAL_WORKSPACE_DEFA
 def _operator_workspace_default(env_var: str, fallback: str) -> str:
     """Return ``env_var`` only when the operator explicitly opted in; else ``fallback``.
 
-    The MINDS_WORKSPACE_GIT_URL / _NAME / _BRANCH env vars wire the create-form
+    The MINDS_WORKSPACE_GIT_URL / _BRANCH env vars wire the create-form
     defaults to the operator's local FCT worktree. They are honored only when
     ``MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1`` is set in the same environment
     (``just minds-start`` and the e2e runner set it). An end-user ``minds run``
@@ -357,31 +351,24 @@ def make_unique_host_name(base: str, existing_host_names: Collection[str], *, al
 def resolve_create_host_name(submitted_host_name: str, existing_host_names: Collection[str] = ()) -> HostName:
     """Resolve the host name for a new workspace.
 
-    The create form no longer asks for a name; it is chosen automatically.
-    Resolution order:
+    The name defaults to an automatic ``mind-N`` unless the operator types one
+    into the create form's advanced "Name" field. Resolution order:
 
     1. the user-submitted name, if any, used verbatim (validated as a
        ``HostName``);
-    2. the operator override ``MINDS_WORKSPACE_NAME``, honored only under the
-       explicit opt-in (see ``_operator_workspace_default``) -- this is how the
-       e2e runner / ``just minds-start <name>`` pin a known name, also used
-       verbatim;
-    3. the next free ``mind-N`` name (smallest positive ``N`` whose ``mind-N``
+    2. the next free ``mind-N`` name (smallest positive ``N`` whose ``mind-N``
        is not already in ``existing_host_names``).
 
-    The two named paths (1, 2) are used verbatim and never uniquified -- an
-    explicit collision is the API's 409 to reject, not ours to silently rename
-    (a duplicate name fails the ``mngr create`` pre-flight). Only the generated
+    The submitted name is used verbatim and never uniquified -- an explicit
+    collision is the API's 409 to reject, not ours to silently rename (a
+    duplicate name fails the ``mngr create`` pre-flight). Only the generated
     ``mind-N`` fallback consults ``existing_host_names`` to pick a free name.
 
-    Raises ``InvalidName`` if a non-empty submitted or operator name is not
-    a valid host name; the generated fallback is always valid.
+    Raises ``InvalidName`` if a non-empty submitted name is not a valid host
+    name; the generated fallback is always valid.
     """
     if submitted_host_name:
         return HostName(submitted_host_name)
-    operator_name = _operator_workspace_default("MINDS_WORKSPACE_NAME", "")
-    if operator_name:
-        return HostName(operator_name)
     return make_unique_host_name(_DEFAULT_HOST_NAME_BASE, existing_host_names, always_number=True)
 
 
@@ -1146,21 +1133,26 @@ _RECOVERY_SCRIPT: Final[str] = """\
           show(debugDetailsEl, false);
         }
 
-        function postRestart(path) {
+        function postRestart(body) {
           renderLoading();
-          // The endpoint returns 202 once the tracker is RESTARTING; any other
-          // status means the dispatch did not start, so surface an error
-          // instead of refreshing into a re-probe loop.
-          fetch('/api/agents/' + encodeURIComponent(agentId) + path, {
+          // The endpoint returns a 202 operation handle once the tracker is
+          // RESTARTING; any other status means the dispatch did not start, so
+          // surface an error instead of refreshing into a re-probe loop. The
+          // page keeps its own health-poll loop (scheduleRefresh re-reads the
+          // tracker via the recovery page), so the operation handle is unused
+          // here -- a clean 202 is enough to start polling.
+          fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/restart', {
             method: 'POST',
             credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
           }).then(function (resp) {
             if (resp.ok) { scheduleRefresh(); } else { renderDispatchError(); }
           }, renderDispatchError);
         }
 
         function fetchHealth() {
-          return fetch('/api/agents/' + encodeURIComponent(agentId) + '/host-health', {
+          return fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/health', {
             credentials: 'same-origin',
           }).then(function (resp) { return resp.json(); });
         }
@@ -1184,22 +1176,37 @@ _RECOVERY_SCRIPT: Final[str] = """\
             scheduleHealthyPoll();
             return;
           }
+          // The in-container probe shows the interface is actually answering
+          // (HTTP 200), so there is nothing to restart -- on EVERY entry path
+          // (live auto-dispatch and restart_failed alike). Reload the recovery
+          // route; once the background tracker also confirms HEALTHY it 302s the
+          // user back to the workspace. If the tracker is still catching up the
+          // route re-renders here, we re-probe, see HEALTHY again, and converge
+          // -- never dispatching a restart against a working backend.
+          if (tier === 'healthy') {
+            renderLoading();
+            scheduleRefresh();
+            return;
+          }
           if (!autoDispatch) {
             // restart_failed entry: render unresponsive so the failure reason and
             // the diagnostics list both stay visible.
             renderUnresponsive();
             return;
           }
+          // ``auto_dispatched=1`` marks these as recovery-page auto-restarts (not
+          // a manual sidebar restart), so the endpoint can skip the bounce if the
+          // workspace self-recovered while the slow host-health probe was in flight.
           if (tier === 'host_offline') {
             // Container fully stopped: nothing live to interrupt, dispatch
             // unattended. Tell the endpoint the host is already stopped so it
             // skips the redundant stop step and cold-boots straight away.
-            postRestart('/restart-host?host_already_stopped=1');
+            postRestart({ scope: 'host', host_already_stopped: true, auto_dispatched: true });
             return;
           }
           if (tier === 'interface_unresponsive') {
             // Container running, exec works: restart the system-services agent in place.
-            postRestart('/restart-system-interface');
+            postRestart({ scope: 'services', auto_dispatched: true });
             return;
           }
           // 'host_unresponsive' or anything else: require explicit user consent for a host restart.
@@ -1221,7 +1228,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
         }
 
         hostBtn.addEventListener('click', function () {
-          postRestart('/restart-host');
+          postRestart({ scope: 'host' });
         });
         if (retryBtn) {
           retryBtn.addEventListener('click', function () {
@@ -1371,11 +1378,11 @@ def render_destroying_page(
 ) -> str:
     """Render the detail page for an in-flight or recently-completed destroy.
 
-    The page polls ``/api/destroying/<agent_id>/{status,log}`` to keep its
-    log tail and status badge up to date; once status flips to ``done`` it
-    redirects to ``/``. ``status`` is the initial server-side computed
-    value (``running``/``failed``/``done``) so the page renders correctly
-    even before the first poll completes.
+    The page polls ``/api/v1/workspaces/operations/destroy/<agent_id>`` for status
+    and streams its log over SSE from ``.../operations/destroy/<agent_id>/logs``;
+    once status flips to ``done`` it redirects to ``/``. ``status`` is the initial
+    server-side computed value (``running``/``failed``/``done``) so the page
+    renders correctly even before the first poll completes.
     """
     return CATALOG.render(
         "pages.Destroying",
@@ -1500,18 +1507,11 @@ def render_workspace_settings(
     current_account: object | None,
     accounts: Sequence[object],
     servers: Sequence[str],
-    telegram_state: str | None = None,
     is_leased_imbue_cloud: bool = False,
     current_color: str = DEFAULT_WORKSPACE_COLOR,
     is_stale: bool = False,
 ) -> str:
     """Render the workspace settings page.
-
-    telegram_state controls whether the Telegram section is shown:
-
-    - ``None`` -- no Telegram orchestrator configured; section is hidden.
-    - ``"active"`` -- Telegram is already set up for this workspace.
-    - ``"pending"`` -- setup button is shown.
 
     ``is_leased_imbue_cloud`` is True for workspaces on a host leased from
     Imbue Cloud; the account section then shows the bound account with a
@@ -1536,7 +1536,6 @@ def render_workspace_settings(
         current_account=current_account,
         accounts=accounts,
         servers=servers,
-        telegram_state=telegram_state,
         is_leased_imbue_cloud=is_leased_imbue_cloud,
         current_color=current_color,
         is_stale=is_stale,

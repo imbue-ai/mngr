@@ -480,6 +480,7 @@ def _build_slice_create_args(
     ssh_user: str,
     port_range_start: int,
     port_range_end: int,
+    fct_cache_tag: str | None,
 ) -> list[str]:
     """Render the ``-S`` provider-config overrides that point one slice bake at this box.
 
@@ -524,6 +525,10 @@ def _build_slice_create_args(
     # absent, so the provider falls back to legacy un-stamped names.
     if env_name is not None:
         overrides["slice_env_name"] = env_name
+    # Production (--from-tag) bakes enable the per-box FCT image cache: the first
+    # slice builds + seeds the box tar, the rest docker-load it. Omitted for dev bakes.
+    if fct_cache_tag is not None:
+        overrides["fct_cache_tag"] = fct_cache_tag
     args: list[str] = []
     for key, value in overrides.items():
         args.extend(["-S", f"{prefix}.{key}={value}"])
@@ -620,6 +625,7 @@ def _bake_one_slice(
     port_range_start: int,
     port_range_end: int,
     is_deferred_install_wait_skipped: bool,
+    fct_cache_tag: str | None,
 ) -> dict[str, Any]:
     """Bake one slice (laptop-driven ``mngr create`` against the slice provider) + insert its pool row.
 
@@ -653,6 +659,7 @@ def _bake_one_slice(
                 ssh_user=ssh_user,
                 port_range_start=port_range_start,
                 port_range_end=port_range_end,
+                fct_cache_tag=fct_cache_tag,
             ),
             mngr_create_timeout_seconds=_SLICE_MNGR_CREATE_TIMEOUT_SECONDS,
         )
@@ -767,6 +774,7 @@ def _bake_into_outcomes(
     port_range_start: int,
     port_range_end: int,
     is_deferred_install_wait_skipped: bool,
+    fct_cache_tag: str | None,
     semaphore: "threading.Semaphore",
     total: int,
     outcomes: list[dict[str, Any]],
@@ -792,6 +800,7 @@ def _bake_into_outcomes(
             port_range_start=port_range_start,
             port_range_end=port_range_end,
             is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
+            fct_cache_tag=fct_cache_tag,
         )
     with outcomes_lock:
         outcomes.append(outcome)
@@ -1130,6 +1139,12 @@ def allocate_slices(
             sync_mngr_into_template(mngr_source_to_vendor, workspace_dir)
 
         pool_public_key = _derive_public_key(private_key_path)
+        # Enable the per-box FCT image cache only for production (--from-tag) bakes, whose
+        # content is an immutable tag: the first slice builds + seeds a box-local tar
+        # (tagged fct:<tag>), the rest docker-load it. Dev (--workspace-dir) bakes have
+        # mutable content under a branch label, so they always build (fct_cache_tag=None).
+        repo_branch_or_tag = lease_attributes.get("repo_branch_or_tag")
+        fct_cache_tag = f"fct:{repo_branch_or_tag}" if (is_from_tag and repo_branch_or_tag) else None
         # Spawn one thread per slice but cap how many bake at once with a semaphore
         # (``max_concurrency``): each thread blocks on it before its ``mngr create``,
         # so the box is never contended by more than K simultaneous carves+builds
@@ -1155,6 +1170,7 @@ def allocate_slices(
                     port_range_start=DEFAULT_SLICE_PORT_RANGE_START,
                     port_range_end=DEFAULT_SLICE_PORT_RANGE_END,
                     is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
+                    fct_cache_tag=fct_cache_tag,
                     semaphore=bake_semaphore,
                     total=count,
                     outcomes=outcomes,
