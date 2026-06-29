@@ -1,0 +1,3 @@
+Fixed the per-box FCT image seed: the cloud-side Playwright/Chromium bake now invokes `uv run python -m playwright install` instead of the `playwright` console script.
+
+The FCT image builds its uv venv at `/mngr/code` and then relocates the workspace to `/docker_build_code`. A uv venv is path-bound -- its console-script shebangs hardcode the original `/mngr/code/.venv/bin/python` -- so running the `playwright` script from the relocated path failed the seed with `Failed to spawn: playwright`, which left every production (`--from-tag`) slice bake unable to produce the box tar. Invoking via `python -m` goes through the venv's relocatable interpreter symlink and succeeds.

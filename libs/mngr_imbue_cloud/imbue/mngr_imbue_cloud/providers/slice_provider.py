@@ -486,6 +486,16 @@ class SliceVpsDockerProvider(VpsProvider):
         The RUN first guards that the FCT build-code dir exists, so a future FCT image
         that relocates it fails fast with a clear message instead of a confusing
         ``cd``-not-found build failure buried in retries.
+
+        Playwright is invoked as ``python -m playwright`` (not the ``playwright``
+        console script) on purpose: the FCT Dockerfile builds the uv venv at
+        ``/mngr/code`` and then ``mv``\\s the workspace to ``/docker_build_code``. A uv
+        venv is path-bound -- its console-script shebangs hardcode
+        ``/mngr/code/.venv/bin/python``, which does not exist here, so ``uv run
+        playwright`` would fail with ``Failed to spawn: playwright``. ``python -m``
+        goes through the venv's interpreter symlink (location-independent), so it works
+        from the relocated path. (FCT's own deferred-install runs the console script,
+        but only at runtime after fct-seed restores the workspace to ``/mngr/code``.)
         """
         guard = (
             f"test -d {_FCT_BUILD_CODE_DIR} || "
@@ -495,7 +505,7 @@ class SliceVpsDockerProvider(VpsProvider):
         dockerfile = (
             f"FROM {base_image}\n"
             f"RUN {guard} "
-            f"&& cd {_FCT_BUILD_CODE_DIR} && uv run playwright install --with-deps chromium "
+            f"&& cd {_FCT_BUILD_CODE_DIR} && uv run python -m playwright install --with-deps chromium "
             f"&& mkdir -p {_DEFERRED_INSTALL_MARKER_DIR} && touch {_DEFERRED_INSTALL_MARKER}\n"
         )
         encoded_dockerfile = base64.b64encode(dockerfile.encode()).decode()

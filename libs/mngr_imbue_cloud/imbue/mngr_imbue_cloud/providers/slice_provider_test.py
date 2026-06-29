@@ -146,7 +146,10 @@ def test_build_playwright_derived_image_renders_marker_and_build_command() -> No
     encoded = stage_command.split("echo ")[1].split(" | base64 -d")[0].strip().strip("'")
     dockerfile = base64.b64decode(encoded).decode()
     assert dockerfile.startswith("FROM mngr-build-xyz")
-    assert "playwright install --with-deps chromium" in dockerfile
+    # Must invoke playwright via ``python -m`` (not the ``playwright`` console script): the FCT
+    # venv is built at /mngr/code and ``mv``\\d to /docker_build_code, so the script's hardcoded
+    # shebang is broken here -- only the interpreter (reached via ``python -m``) is relocatable.
+    assert "uv run python -m playwright install --with-deps chromium" in dockerfile
     assert _DEFERRED_INSTALL_MARKER in dockerfile
     # Guards the FCT build-code path so a relocated layout fails fast with a clear message.
     assert f"test -d {_FCT_BUILD_CODE_DIR}" in dockerfile
