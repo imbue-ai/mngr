@@ -14,17 +14,18 @@ Plain-Python (click-driven) entrypoint -- NOT a pytest wrapper. Owns:
   (``-m minds_deployment`` first, then ``-m minds_services``).
 * Per-run ledger at ``.minds/ci-test-deploys.jsonl``: append-on-create,
   walked for end-of-run teardown, paired cleanup mode for prior runs.
-* Name + age sweep: enumerates ``ci-*`` envs and ``ci-*`` FCT
-  branches, destroys anything older than 4 hours.
+* Name + age sweep: enumerates ``ci-*`` Modal envs and destroys
+  anything older than 4 hours.
 
-Wired up to satisfy the spec's command surface; the heavyweight steps
-(``minds env deploy`` shellout, SuperTokens admin teardown, the OVH /
-Cloudflare / Neon enumeration arm of the sweep) are real where simple
-and explicitly-stubbed where iteration with the user is needed -- the
-stubs log a clear "not implemented yet" warning rather than silently
-no-op-ing.
+Wired up to satisfy the spec's command surface. The env lifecycle --
+the ``minds env deploy`` / ``destroy`` shellouts, the per-run secret
+handoff, the fixed CI test-user creation, and the name+age sweep -- is
+implemented. The FCT branch push/delete steps remain explicitly stubbed
+for Phase 2 and log a clear "not implemented yet" warning rather than
+silently no-op-ing.
 """
 
+import json
 import os
 import re
 import subprocess
@@ -42,16 +43,26 @@ from uuid import uuid4
 import click
 import httpx
 from loguru import logger
+from pydantic import AnyUrl
 from pydantic import Field
 from pydantic import SecretStr
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.minds.cli._activated_env import MODAL_PROFILE_ENV_VAR
+from imbue.minds.cli._activated_env import modal_profile_for_tier_or_none
+from imbue.minds.cli._activated_env import tier_for_env_name
 from imbue.minds.config.loader import load_client_config
 from imbue.minds.deployment_tests.data_types import DeploymentEnvsConfig
 from imbue.minds.deployment_tests.data_types import FctTemplateRef
 from imbue.minds.deployment_tests.data_types import SharedEnvUrls
+from imbue.minds.deployment_tests.helpers import build_minds_env_subprocess_env
+from imbue.minds.deployment_tests.helpers import create_verified_user_via_admin_api
+from imbue.minds.deployment_tests.helpers import delete_shared_env_secrets
+from imbue.minds.deployment_tests.helpers import publish_shared_env_secrets
+from imbue.minds.deployment_tests.helpers import read_ci_test_user_credentials
+from imbue.minds.deployment_tests.helpers import read_shared_env_secrets
 from imbue.minds.deployment_tests.primitives import DEPLOYMENT_ENVS_JSON_ENV_VAR
 from imbue.minds.deployment_tests.primitives import MAILTM_ADDRESS_ENV_VAR
 from imbue.minds.deployment_tests.primitives import MAILTM_JWT_ENV_VAR
@@ -59,6 +70,10 @@ from imbue.minds.deployment_tests.primitives import RunId
 from imbue.minds.deployment_tests.primitives import SHARED_ENV_SECRET_ENV_VAR_PREFIX
 from imbue.minds.deployment_tests.primitives import SharedEnvRole
 from imbue.minds.envs.local_store import read_secrets_file
+from imbue.minds.envs.local_store import write_secrets_file
+from imbue.minds.envs.paths import client_config_file
+from imbue.minds.envs.paths import env_root_dir
+from imbue.minds.envs.paths import secrets_file
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.errors import MindError
 from imbue.minds.utils.output import write_stdout_line
@@ -82,6 +97,17 @@ _MAILTM_API_BASE: Final[str] = "https://api.mail.tm"
 # env; expansion is a matter of editing this tuple (and registering more
 # roles in tests that need them via ``shared_env('<role>')``).
 _DEFAULT_SHARED_ENV_ROLES: Final[tuple[SharedEnvRole, ...]] = (SharedEnvRole("default"),)
+
+_MINDS_DEPLOY_TIMEOUT_SECONDS: Final[int] = 15 * 60
+_MINDS_DESTROY_TIMEOUT_SECONDS: Final[int] = 10 * 60
+# Global pytest-session deadline for the deployment/services suites. They each
+# stand up real cloud envs and legitimately run for many minutes (the three
+# minds_deployment tests together are ~10-12 min), far beyond the default.
+_PYTEST_MAX_DURATION_SECONDS: Final[int] = 60 * 60
+_MODAL_ENV_LIST_TIMEOUT_SECONDS: Final[int] = 60
+# Used only to resolve the ci tier's Modal workspace when listing envs for the
+# sweep; never materialized as a real env.
+_CI_TIER_PROBE_ENV_NAME: Final[str] = "ci-probe"
 
 
 # ---------------------------------------------------------------------------
@@ -199,17 +225,20 @@ class FctWorktreeMissingError(MindError):
 
 
 def _validate_fct_worktree() -> None:
-    """Ensure the FCT worktree exists; print actionable setup instructions if not."""
+    """Warn (do not fail) if the FCT worktree is missing.
+
+    No Phase 1 test creates an FCT workspace -- the deleted workspace/signup
+    services tests were the only consumers -- so a missing worktree is not
+    fatal today (and CI runners don't have one). Phase 2 re-adds the
+    workspace-creating tests and will restore the hard requirement here.
+    """
     if not _FCT_WORKTREE_PATH.is_dir() or not (_FCT_WORKTREE_PATH / ".git").exists():
-        raise FctWorktreeMissingError(
-            "FCT worktree missing at "
-            f"{_FCT_WORKTREE_PATH}\n\n"
-            "Per the CLAUDE.md convention, external repos live under "
-            "``.external_worktrees/<repo>/``. Create it once from your FCT clone "
-            "(typically ~/project/forever-claude-template):\n\n"
-            f"  git worktree add -B <fct-branch> {_FCT_WORKTREE_PATH} <fct-branch>\n\n"
-            "Use whichever FCT branch you want the tests to exercise. Re-run the orchestrator "
-            "once the worktree is in place."
+        logger.warning(
+            "FCT worktree missing at {} -- continuing (no Phase 1 test needs it). To enable the "
+            "future workspace/signup tests, create it with `git worktree add -B <branch> {} <branch>` "
+            "from an FCT clone.",
+            _FCT_WORKTREE_PATH,
+            _FCT_WORKTREE_PATH,
         )
 
 
@@ -351,34 +380,126 @@ def _mint_shared_env_name(*, run_id: RunId, role: SharedEnvRole) -> DevEnvName:
     return DevEnvName(f"ci-{run_id}-{short}-{role}")
 
 
-def _deploy_shared_env(*, name: DevEnvName, run_id: RunId, role: SharedEnvRole) -> SharedEnvUrls:
-    """Run ``uv run minds env activate --create <name> && minds env deploy``; return URLs.
+def _deploy_shared_env(*, name: DevEnvName, role: SharedEnvRole) -> SharedEnvUrls:
+    """Deploy a fresh ci env, create the fixed CI test user, publish per-env secrets; return URLs.
 
-    Stub: real implementation needs to drive the activate + deploy CLI
-    and parse the resulting ``client.toml`` to recover the connector +
-    litellm URLs. The connector tests are all skipped today so this
-    stub raises if invoked.
+    Shells out to ``minds env deploy`` with the activation env vars set
+    (so it targets ``name`` without a prior ``eval activate``), parses
+    the resulting ``client.toml`` for the connector + litellm URLs, reads
+    the per-env secrets the deploy wrote (the freshly-minted SuperTokens
+    app + Neon DSNs), creates the fixed CI test user against the new
+    SuperTokens app, and publishes those per-env secrets to the env-keyed
+    Vault path so the test runner + destroy/sweep jobs can read them back.
     """
-    logger.warning(
-        "Shared env deploy for {!r} (role={!r}, run={!r}) is stubbed out -- iterate next. "
-        "See specs/minds-deployment-tests.md.",
-        name,
-        role,
-        run_id,
+    env_root_dir(name).mkdir(parents=True, exist_ok=True)
+    sub_env = build_minds_env_subprocess_env(name)
+    logger.info("Deploying shared env {!r} (role={!r})", name, role)
+    completed = subprocess.run(
+        ["uv", "run", "minds", "env", "deploy"],
+        env=sub_env,
+        cwd=str(_REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=_MINDS_DEPLOY_TIMEOUT_SECONDS,
+        check=False,
     )
-    raise MindError(
-        f"Shared env deploy for {name!r} is not yet implemented. The orchestrator scaffolding is "
-        "in place; the next iteration step is the `minds env deploy` shellout + client.toml parse."
+    if completed.returncode != 0:
+        raise MindError(
+            f"`minds env deploy` for {name!r} exited {completed.returncode}.\n"
+            f"--- stdout ---\n{completed.stdout}\n--- stderr ---\n{completed.stderr}"
+        )
+    client_toml = client_config_file(name)
+    if not client_toml.is_file():
+        raise MindError(
+            f"`minds env deploy` for {name!r} completed but did not write {client_toml}. "
+            "This usually means the modal-side deploy succeeded but the local-state write step failed."
+        )
+    client_config = load_client_config(client_toml)
+    urls = SharedEnvUrls(
+        role=role,
+        env_name=name,
+        connector_url=client_config.connector_url,
+        litellm_proxy_url=client_config.litellm_proxy_url,
     )
+    secrets_model = read_secrets_file(name)
+    secrets = {key: value.get_secret_value() for key, value in secrets_model.secrets.items()}
+    _create_ci_test_user(secrets=secrets, connector_url=str(client_config.connector_url), name=name)
+    publish_shared_env_secrets(env_name=name, role=role, secrets=secrets)
+    logger.info("Shared env {!r} deployed; connector={}", name, urls.connector_url)
+    return urls
+
+
+def _create_ci_test_user(*, secrets: dict[str, str], connector_url: str, name: DevEnvName) -> None:
+    """Create the fixed verified CI test user against a freshly-deployed env's SuperTokens app."""
+    missing = [key for key in ("SUPERTOKENS_CONNECTION_URI", "SUPERTOKENS_API_KEY") if not secrets.get(key)]
+    if missing:
+        raise MindError(f"Deployed env {name!r} secrets.toml is missing {missing}; cannot create the CI test user.")
+    email, password = read_ci_test_user_credentials()
+    create_verified_user_via_admin_api(
+        connection_uri=SecretStr(secrets["SUPERTOKENS_CONNECTION_URI"]),
+        api_key=SecretStr(secrets["SUPERTOKENS_API_KEY"]),
+        connector_url=AnyUrl(connector_url),
+        email=email,
+        password=password,
+    )
+    logger.info("Created CI test user {!r} on env {!r}", str(email), name)
 
 
 def _destroy_env(name: DevEnvName, *, run_id: RunId) -> None:
-    """Run ``uv run minds env destroy`` for the named env. Idempotent against missing state."""
-    logger.warning(
-        "Env destroy for {!r} is stubbed out -- iterate next. The name+age sweep is the safety net.",
-        name,
+    """Run ``uv run minds env destroy`` for the named env + delete its per-env Vault secrets.
+
+    Works cross-machine (CI's deploy and destroy run on separate runners, and
+    the leaked-env sweep runs on a third). ``minds env destroy`` re-derives most
+    cloud resources from Vault + the env name, but its pool-slice teardown step
+    auto-resolves the host_pool DSN from the per-env ``secrets.toml``; so we
+    first reconstruct that file from the env-keyed Vault secrets the deploy
+    published. Idempotent against an already-destroyed env.
+    """
+    env_root_dir(name).mkdir(parents=True, exist_ok=True)
+    _reconstruct_env_secrets_file(name)
+    sub_env = build_minds_env_subprocess_env(name)
+    logger.info("Destroying env {!r}", name)
+    completed = subprocess.run(
+        ["uv", "run", "minds", "env", "destroy"],
+        env=sub_env,
+        cwd=str(_REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=_MINDS_DESTROY_TIMEOUT_SECONDS,
+        check=False,
     )
+    if completed.returncode != 0:
+        raise MindError(
+            f"`minds env destroy` for {name!r} exited {completed.returncode}.\n"
+            f"--- stdout ---\n{completed.stdout}\n--- stderr ---\n{completed.stderr}"
+        )
+    for role in _DEFAULT_SHARED_ENV_ROLES:
+        try:
+            delete_shared_env_secrets(env_name=name, role=role)
+        except (MindError, httpx.HTTPError) as exc:
+            logger.warning("Failed to delete per-env Vault secrets for env {!r} role {!r}: {}", name, role, exc)
     _mark_status(NonEmptyStr(str(name)), kind=LedgerKind.ENV, run_id=run_id, status=LedgerStatus.DESTROYED)
+
+
+def _reconstruct_env_secrets_file(name: DevEnvName) -> None:
+    """Rebuild ``~/.minds-<name>/secrets.toml`` from the env-keyed Vault secrets.
+
+    A no-op when the local file already exists (same-machine destroy) or when no
+    per-env secrets are in Vault (already cleaned up / not a ci env we deployed).
+    """
+    if secrets_file(name).is_file():
+        return
+    for role in _DEFAULT_SHARED_ENV_ROLES:
+        try:
+            secrets = read_shared_env_secrets(env_name=name, role=role)
+        except (MindError, httpx.HTTPError) as exc:
+            logger.warning(
+                "Could not reconstruct secrets.toml for env {!r} from Vault (role {!r}): {}", name, role, exc
+            )
+            continue
+        if secrets:
+            write_secrets_file({key: SecretStr(value) for key, value in secrets.items()}, name=name)
+            return
 
 
 # ---------------------------------------------------------------------------
@@ -389,20 +510,74 @@ def _destroy_env(name: DevEnvName, *, run_id: RunId) -> None:
 _CI_ENV_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(r"^ci-(\d{8}t\d{6}z)")
 
 
-def _sweep_stale_envs(max_age_hours: int = _DEFAULT_MAX_RESOURCE_AGE_HOURS) -> None:
-    """Enumerate ``ci-*`` envs; destroy anything older than ``max_age_hours``.
+def _parse_ci_env_timestamp(stamp: str) -> datetime:
+    """Parse the ``YYYYMMDDtHHMMSSz`` timestamp embedded in a ``ci-*`` env name."""
+    return datetime.strptime(stamp, "%Y%m%dt%H%M%Sz").replace(tzinfo=timezone.utc)
 
-    Stub: real implementation needs to shell out to ``uv run minds env
-    list`` (parses its output), parse the embedded timestamp from each
-    ``ci-<YYYYMMDDtHHMMSSz>...`` name, and call destroy on stale
-    ones. Tracked separately; the name pattern is fixed here.
+
+def _list_stale_ci_env_names(*, cutoff: datetime) -> list[DevEnvName]:
+    """Enumerate Modal environments named ``ci-<timestamp>...`` older than ``cutoff``.
+
+    Lists Modal envs (the cross-runner source of truth -- a leaked env from a
+    prior CI run is not on this runner's local disk) and filters to ``ci-*``
+    names whose embedded timestamp predates the cutoff.
+    """
+    sub_env = dict(os.environ)
+    profile = modal_profile_for_tier_or_none(tier_for_env_name(_CI_TIER_PROBE_ENV_NAME))
+    if profile is not None:
+        sub_env[MODAL_PROFILE_ENV_VAR] = profile
+    result = subprocess.run(
+        ["uv", "run", "modal", "environment", "list", "--json"],
+        env=sub_env,
+        cwd=str(_REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=_MODAL_ENV_LIST_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise MindError(f"`modal environment list --json` exited {result.returncode}: {result.stderr.strip()!r}")
+    try:
+        entries = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise MindError(f"`modal environment list --json` returned non-JSON: {result.stdout[:200]!r}") from exc
+    stale: list[DevEnvName] = []
+    for entry in entries:
+        raw_name = entry.get("Name") or entry.get("name")
+        if not raw_name:
+            continue
+        match = _CI_ENV_NAME_PATTERN.match(raw_name)
+        if match is None:
+            continue
+        if _parse_ci_env_timestamp(match.group(1)) < cutoff:
+            stale.append(DevEnvName(raw_name))
+    return stale
+
+
+def _sweep_stale_envs(max_age_hours: int = _DEFAULT_MAX_RESOURCE_AGE_HOURS) -> None:
+    """Enumerate ``ci-*`` Modal envs; destroy anything older than ``max_age_hours``.
+
+    The backstop for CI envs that leaked because a per-run destroy never ran
+    (job hard-crash / cancellation). Destroys by name (re-deriving cloud
+    resources from Vault) so it works even though the leaked env has no local
+    state on this runner.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
-    logger.info(
-        "Name+age sweep is stubbed -- would destroy any ci-* env older than {} ({}h).",
-        cutoff.isoformat(),
-        max_age_hours,
-    )
+    stale = _list_stale_ci_env_names(cutoff=cutoff)
+    if not stale:
+        logger.info("Name+age sweep: no ci-* envs older than {} ({}h).", cutoff.isoformat(), max_age_hours)
+        return
+    logger.info("Name+age sweep: destroying {} stale ci-* env(s) older than {}h.", len(stale), max_age_hours)
+    for name in stale:
+        match = _CI_ENV_NAME_PATTERN.match(str(name))
+        # The per-env Vault secrets are keyed by env name, so _destroy_env can
+        # reconstruct secrets.toml + delete them for any leaked env here. The
+        # run_id (parsed from the env-name timestamp) is only for the ledger row.
+        run_id = RunId(match.group(1)) if match is not None else _mint_run_id()
+        try:
+            _destroy_env(name, run_id=run_id)
+        except (MindError, httpx.HTTPError) as exc:
+            logger.error("Sweep failed to destroy {!r}: {}", name, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -438,6 +613,12 @@ def _build_pytest_env(
     """
     env = dict(os.environ)
     env[DEPLOYMENT_ENVS_JSON_ENV_VAR] = str(deployment_envs_json_path)
+    # The deployment/services tests each deploy real cloud envs and run for
+    # minutes; raise the pytest global-duration deadline well above the default
+    # so the suite isn't failed for simply being slow (an operator override of
+    # the env var still wins). The per-test `@pytest.mark.timeout` decorators
+    # remain the real per-test guards.
+    env.setdefault("PYTEST_MAX_DURATION_SECONDS", str(_PYTEST_MAX_DURATION_SECONDS))
     if mailtm_address and mailtm_jwt:
         env[MAILTM_ADDRESS_ENV_VAR] = mailtm_address
         env[MAILTM_JWT_ENV_VAR] = mailtm_jwt.get_secret_value()
@@ -518,7 +699,7 @@ def run(keep_on_failure: bool) -> None:
                     status=LedgerStatus.ACTIVE,
                 )
             )
-            shared_env_urls[role] = _deploy_shared_env(name=env_name, run_id=run_id, role=role)
+            shared_env_urls[role] = _deploy_shared_env(name=env_name, role=role)
     except MindError as exc:
         deploy_failure = exc
         logger.error("Shared env deploy failed: {}", exc)
@@ -561,6 +742,24 @@ def run(keep_on_failure: bool) -> None:
         exit_code = 1
     logger.info("Orchestrator run {} done -- exit code {}", run_id, exit_code)
     sys.exit(exit_code)
+
+
+@cli.command()
+@click.option(
+    "--max-age-hours",
+    type=int,
+    default=_DEFAULT_MAX_RESOURCE_AGE_HOURS,
+    help="Destroy ci-* envs whose embedded timestamp is older than this many hours.",
+)
+def sweep(max_age_hours: int) -> None:
+    """Enumerate ci-* Modal envs and destroy any older than the age threshold.
+
+    The cross-run leaked-resource backstop (a per-run destroy that never
+    fired because its job hard-crashed / was cancelled). Run on its own CI
+    runner, so it relies on the Modal-side enumeration rather than local
+    state.
+    """
+    _sweep_stale_envs(max_age_hours=max_age_hours)
 
 
 @cli.command()
@@ -660,7 +859,7 @@ def up(role: str) -> None:
             status=LedgerStatus.ACTIVE,
         )
     )
-    urls = _deploy_shared_env(name=env_name, run_id=run_id, role=role_key)
+    urls = _deploy_shared_env(name=env_name, role=role_key)
     state_path = _ITERATE_STATE_DIR / f"iterate-{role}.json"
     _write_deployment_envs_json(
         shared_envs={role_key: urls},

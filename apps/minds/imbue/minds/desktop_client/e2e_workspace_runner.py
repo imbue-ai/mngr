@@ -7,7 +7,8 @@ renders through the desktop client's subdomain proxy.
 
 Two callers consume this module:
 
-- ``apps/minds/test_desktop_client_e2e.py`` -- the pytest test wraps
+- ``apps/minds/test_snapshot_resume.py`` -- the pytest test
+  (``test_create_apikey_workspace_and_chat_via_electron``) wraps
   :func:`create_workspace_via_electron` and always cleans up the resulting
   mngr agent in its ``finally``.
 - ``scripts/snapshot_minds_e2e_state.py`` -- the Modal-snapshot script
@@ -357,7 +358,7 @@ def ensure_minds_env_defaults(setenv: Callable[[str, str], None]) -> None:
     repo style guide forbids mutating ``os.environ`` of the current
     process, so this library never picks the strategy on the caller's
     behalf. The pytest wrapper in
-    ``apps/minds/test_desktop_client_e2e.py`` passes
+    ``apps/minds/test_snapshot_resume.py`` passes
     ``monkeypatch.setenv`` so the env vars get reverted between tests;
     the snapshot script (which runs in a throwaway sandbox) passes a
     setter that writes to ``os.environ`` directly. Both options share
@@ -770,6 +771,7 @@ def _drive_create_flow(
     launch_mode: str = "DOCKER",
     account_label: str | None = None,
     region: str | None = None,
+    anthropic_api_key: str | None = None,
 ) -> None:
     """Drive the create form to a ready workspace on an attached page.
 
@@ -781,7 +783,15 @@ def _drive_create_flow(
     (by visible option text) before submitting. ``region`` selects the machine
     region for region-aware modes (aws/vultr/imbue_cloud); it is required by the
     form for those modes and ignored (the row is hidden) for others.
+
+    ``anthropic_api_key`` selects the manual ``API_KEY`` AI-provider option and
+    types the supplied key into the revealed ``#anthropic_api_key`` field (the
+    agent then talks to the official Anthropic API directly, no LiteLLM proxy).
+    Mutually exclusive with ``account_label`` (the manual key needs no account).
     """
+    assert anthropic_api_key is None or account_label is None, (
+        "anthropic_api_key (API_KEY mode) and account_label are mutually exclusive"
+    )
     backend_origin = _backend_origin_from_page(page)
     logger.info("Backend origin: {}", backend_origin)
 
@@ -823,6 +833,20 @@ def _drive_create_flow(
     if region is not None:
         page.wait_for_selector("#region:visible", timeout=5_000)
         page.select_option("#region", region)
+
+    # Manual-key path: switch the AI provider to API_KEY (which un-hides the
+    # key field via the form's change handler) and type the key. Done after the
+    # launch_mode/account handling so an earlier change event can't re-hide the
+    # key row from under us.
+    if anthropic_api_key is not None:
+        page.select_option("#ai_provider", "API_KEY")
+        page.wait_for_selector("#anthropic_api_key:visible", timeout=5_000)
+        page.fill("#anthropic_api_key", anthropic_api_key)
+        resolved_ai_provider = page.input_value("#ai_provider")
+        if resolved_ai_provider != "API_KEY":
+            raise WorkspaceCreationFailedError(
+                f"Create form did not settle on API_KEY AI provider (got {resolved_ai_provider!r})"
+            )
 
     logger.info("Submitting create form")
     page.click("#create-submit")
@@ -872,12 +896,20 @@ def _attempt_create_workspace_via_electron(
     launch_mode: str = "DOCKER",
     account_label: str | None = None,
     region: str | None = None,
+    anthropic_api_key: str | None = None,
+    on_workspace_ready: Callable[[Page], None] | None = None,
 ) -> None:
     """One Electron launch + CDP attach + create-flow drive.
 
     Raises :class:`_ElectronConnectError` if the launch/CDP-attach phase fails
     (a wedged Electron the caller should recover by relaunching). Errors from the
     create flow itself propagate unchanged so real test failures are not retried.
+
+    ``on_workspace_ready``, if given, is called with the attached content page
+    once the workspace's ``system_interface`` has rendered, while the browser is
+    still connected (e.g. to send a chat message). Its exceptions propagate
+    unchanged -- they are real failures, not launch flakes, so they are not
+    retried.
     """
     with _launched_electron(fct_path, debug_port, host_config_dir):
         with sync_playwright() as playwright:
@@ -907,7 +939,10 @@ def _attempt_create_workspace_via_electron(
                     launch_mode=launch_mode,
                     account_label=account_label,
                     region=region,
+                    anthropic_api_key=anthropic_api_key,
                 )
+                if on_workspace_ready is not None:
+                    on_workspace_ready(page)
             finally:
                 browser.close()
 
@@ -920,6 +955,8 @@ def create_workspace_via_electron(
     launch_mode: str = "DOCKER",
     account_label: str | None = None,
     region: str | None = None,
+    anthropic_api_key: str | None = None,
+    on_workspace_ready: Callable[[Page], None] | None = None,
 ) -> None:
     """Drive Electron to create a workspace from ``fct_path``.
 
@@ -928,6 +965,12 @@ def create_workspace_via_electron(
     (by visible option text) before submitting. ``region`` selects the machine
     region for region-aware modes (aws/vultr/imbue_cloud); it is required by the
     form for those modes and ignored (the row is hidden) for others.
+
+    ``anthropic_api_key`` selects the manual ``API_KEY`` AI provider and types
+    the key into the create form (mutually exclusive with ``account_label``).
+    ``on_workspace_ready`` is called with the attached content page once the
+    workspace has rendered, before teardown -- e.g. to send a chat message and
+    await the reply on the same Electron session.
 
     Returns once the workspace's ``system_interface`` dockview UI has
     rendered through the desktop client proxy. Does NOT clean up the
@@ -963,6 +1006,8 @@ def create_workspace_via_electron(
                 launch_mode=launch_mode,
                 account_label=account_label,
                 region=region,
+                anthropic_api_key=anthropic_api_key,
+                on_workspace_ready=on_workspace_ready,
             )
             return
         except _ElectronConnectError as exc:

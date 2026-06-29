@@ -247,14 +247,19 @@ minds-test-deployment-only *tests:
   uv run python apps/minds/scripts/test_deployments.py deployment-only {{tests}}
 
 # End-to-end acceptance test that drives the real Electron minds app to create
-# a local Docker workspace from forever-claude-template. Wraps the invocation
-# with `xvfb-run` so it works on headless Linux CI runners. macOS users with
-# a real display can run the underlying pytest directly without xvfb-run.
-# Requires apps/minds/node_modules/ to be installed (`cd apps/minds && pnpm install`).
-# Depends on `minds-css` because the test launches `electron main.js` directly
-# (not via `pnpm start`), so nothing else compiles the gitignored stylesheet.
+# a local Docker workspace from forever-claude-template using the manual
+# `api_key` AI provider, then sends a chat message and asserts the agent replies.
+# Wraps the invocation with `xvfb-run` so it works on headless Linux. macOS users
+# with a real display can run the underlying pytest directly without xvfb-run.
+# Requires apps/minds/node_modules/ (`cd apps/minds && pnpm install`) and a real
+# ANTHROPIC_API_KEY exported (the api_key path calls the official Anthropic API;
+# the test skips without it). Depends on `minds-css` because the test launches
+# `electron main.js` directly (not via `pnpm start`), so nothing else compiles
+# the gitignored stylesheet. The test lives in the snapshot-resume suite (it
+# runs in CI in the snapshot offload stage, reusing that image's warm Electron
+# toolchain) but creates its own fresh workspace, so it runs fine locally too.
 minds-test-electron *args: minds-css
-  xvfb-run -a uv run pytest apps/minds/test_desktop_client_e2e.py::test_create_local_docker_workspace_via_electron -v --no-cov --cov-fail-under=0 {{args}}
+  xvfb-run -a uv run pytest apps/minds/test_snapshot_resume.py::test_create_apikey_workspace_and_chat_via_electron -v --no-cov --cov-fail-under=0 {{args}}
 
 # Drive the FULL Electron workspace lifecycle end-to-end (create local Docker
 # workspace -> send a chat message + await reply -> open a terminal -> navigate
