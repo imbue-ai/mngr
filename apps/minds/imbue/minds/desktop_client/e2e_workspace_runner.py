@@ -7,7 +7,8 @@ renders through the desktop client's subdomain proxy.
 
 Two callers consume this module:
 
-- ``apps/minds/test_desktop_client_e2e.py`` -- the pytest test wraps
+- ``apps/minds/test_snapshot_resume.py`` -- the pytest test
+  (``test_create_apikey_workspace_and_chat_via_electron``) wraps
   :func:`create_workspace_via_electron` and always cleans up the resulting
   mngr agent in its ``finally``.
 - ``scripts/snapshot_minds_e2e_state.py`` -- the Modal-snapshot script
@@ -357,7 +358,7 @@ def ensure_minds_env_defaults(setenv: Callable[[str, str], None]) -> None:
     repo style guide forbids mutating ``os.environ`` of the current
     process, so this library never picks the strategy on the caller's
     behalf. The pytest wrapper in
-    ``apps/minds/test_desktop_client_e2e.py`` passes
+    ``apps/minds/test_snapshot_resume.py`` passes
     ``monkeypatch.setenv`` so the env vars get reverted between tests;
     the snapshot script (which runs in a throwaway sandbox) passes a
     setter that writes to ``os.environ`` directly. Both options share
