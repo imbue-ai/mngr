@@ -170,16 +170,14 @@ jobs:
     # native binary. Linux runners produce ELF binaries that the shipped
     # .app can't exec on Mac.
     runs-on: [self-hosted, macOS, minds-runner]
-    # 60 min covers cold-cache install + full pnpm dist that waits on
-    # ToDesktop's per-target cloud build (sign + notarize x64 + arm64).
-    # 25 min was too tight (cache-miss installs grazed the deadline).
-    # 40 min was also too tight (run 26935971928 stalled at "Notarizing
-    # Minds for arm64 (this may take up to 30 minutes) 35%" -- Apple's
-    # notarization service is the long pole and the worst case really is
-    # ~30 min per arch). 60 min absorbs that worst-case for both archs
-    # without leaving the post-failure cancel step needlessly tearing
-    # down builds that just needed a few more minutes.
-    timeout-minutes: 60
+    # 85 min = the 70-min `pnpm dist` step budget (below) + ~15 min for
+    # the post-failure cancel step to tear an orphaned ToDesktop build
+    # down. A fresh dual-arch cloud build (serial sign + notarize x64 +
+    # arm64, then a ~15-min final packaging phase) runs ~43 min even with
+    # a fast source download, and ~60+ min when ToDesktop's source
+    # download stalls; Apple notarization ("up to 30 min per arch") is the
+    # long pole.
+    timeout-minutes: 85
     env:
       TODESKTOP_ACCESS_TOKEN: ${{ secrets.TODESKTOP_ACCESS_TOKEN }}
       TODESKTOP_EMAIL:        ${{ secrets.TODESKTOP_EMAIL }}
@@ -304,13 +302,17 @@ jobs:
       - name: pnpm dist (build + upload to ToDesktop)
         id: dist
         if: steps.existing.outputs.url == ''
-        # 45 min covers a healthy cold build (~15-25 min observed) plus
-        # tail latency on Apple's notarization service. When ToDesktop's
-        # signing wedges (silent stall mid-notarize, e.g. run
-        # 27310529771), failing here at 45 surfaces the wedge instead of
-        # consuming the job-level 60-min budget and starving the cancel
-        # step of time to tear the build down.
-        timeout-minutes: 45
+        # 70 min covers a fresh dual-arch cloud build end to end: even
+        # with a fast source download `pnpm dist` runs ~43 min (serial
+        # sign + notarize x64 + arm64, then a ~15-min final packaging
+        # phase), and ~60+ min when ToDesktop's "Downloading application
+        # source" phase stalls ~16 min (runs 28312671748 / 28389420591
+        # timed out at the old 45-min budget while still notarizing).
+        # Notarization ("up to 30 min per arch") is the long pole. Kept
+        # below the job's 85-min budget so a genuine signing wedge still
+        # fails here, leaving the cancel step time to tear the orphaned
+        # build down.
+        timeout-minutes: 70
         working-directory: apps/minds
         # build.js::bundleLatchkey smoke-tests the bundled CLI via
         # `latchkey --version`. Latchkey tries to read/init an encryption
