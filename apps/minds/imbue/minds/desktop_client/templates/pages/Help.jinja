@@ -220,9 +220,12 @@
 
         <div class="flex flex-col gap-2 mb-4">
           {% if workspace_agent_id %}
-          {# In a loaded workspace, agent help is available and is the default choice. #}
+          {# In a loaded workspace, agent help is available and is the default choice -- except
+             when a description was pre-filled, which only happens when an in-workspace /assist
+             agent escalated its diagnosis: that flow must land on the report form for a human to
+             review and submit, so report (below) is the default in that case. #}
           <label class="flex items-start gap-3 cursor-pointer">
-            <input type="radio" name="help-mode" value="agent" class="mt-1 shrink-0" checked>
+            <input type="radio" name="help-mode" value="agent" class="mt-1 shrink-0" {% if not description %}checked{% endif %}>
             <span>
               <span class="type-body text-primary font-semibold">Have an agent help fix the problem</span>
               <span class="block type-helper text-tertiary">Opens a new chat in this workspace that diagnoses the issue and fixes what it can.</span>
@@ -239,7 +242,7 @@
           </label>
           {% endif %}
           <label class="flex items-start gap-3 cursor-pointer">
-            <input type="radio" name="help-mode" value="report" class="mt-1 shrink-0" {% if not workspace_agent_id %}checked{% endif %}>
+            <input type="radio" name="help-mode" value="report" class="mt-1 shrink-0" {% if not workspace_agent_id or description %}checked{% endif %}>
             <span>
               <span class="type-body text-primary font-semibold">Report a bug to Imbue</span>
               <span class="block type-helper text-tertiary">Send us a description and diagnostics so we can investigate.</span>

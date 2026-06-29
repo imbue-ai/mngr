@@ -1646,6 +1646,19 @@ def test_help_page_prefills_description_from_query(tmp_path: Path) -> None:
     assert "the database migration failed" in response.text
 
 
+def test_help_page_with_prefilled_description_defaults_to_report_mode(tmp_path: Path) -> None:
+    """An agent escalation opens the modal with both a workspace and a description; it must land on
+    the report form (so a human reviews and submits) rather than agent-help mode (which would spawn
+    another /assist chat)."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get(f"/help?workspace={AgentId()}&description=it+broke")
+    assert response.status_code == 200
+    agent_radio = response.text.split('value="agent"')[1].split(">")[0]
+    report_radio = response.text.split('value="report"')[1].split(">")[0]
+    assert "checked" not in agent_radio
+    assert "checked" in report_radio
+
+
 def test_help_page_hides_include_logs_checkbox_when_setting_on(tmp_path: Path) -> None:
     """With the persistent include-logs setting on, logs are always attached and the checkbox is hidden."""
     MindsConfig(data_dir=tmp_path).set_include_error_logs(True)
