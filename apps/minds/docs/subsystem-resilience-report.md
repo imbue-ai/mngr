@@ -25,46 +25,83 @@ production behavior was changed in producing it.
 
 ---
 
-## 1. The governing principle
+## 1. Governing principles
 
-The two recovery mechanisms that caused their own problems in production are the
-Rosetta stone for everything else:
+Three principles should guide every one of these mechanisms:
 
-| Incident | What actually went wrong | The rule it broke |
+1. **Do as little as possible.** Prefer the smallest mechanism that covers the
+   failure. No watchdog where a passive signal works; no state machine where a
+   reconnect loop works; no host-wide restart where a local respawn works; no code
+   at all where dead code can simply be deleted. Less mechanism is less to misfire,
+   less to maintain, and less to mislead a future reader.
+2. **Prefer manual actions.** When a recovery is heavy, risky, or mode-dependent,
+   default to *surfacing the problem and offering the user a button* rather than
+   acting automatically on their behalf. Automatic recovery is reserved for actions
+   that are cheap, safe, local, and idempotent (reconnect a dropped stream, respawn
+   a crashed child). Anything that re-provisions hosts, bounces containers, or takes
+   over the whole app should be something the user triggers when they actually care
+   -- not a background reflex that can storm.
+3. **Be as transparent as possible.** The failure and the available action are
+   always visible. Never let an automatic retry mask a failure the user would want
+   to know about; never resolve a heavy action silently; always show what the
+   mechanism observed (the recovery page's literal probe-command output is the gold
+   standard). Transparency is what makes "do less" and "prefer manual" safe: doing
+   less is only acceptable if the user can see what is happening and act on it.
+
+These three are mutually reinforcing, and together they explain *both* failure
+modes this audit found -- the over-reactions and the under-reactions -- as the same
+mistake:
+
+| Failure mode | Example | Principle violated |
 |---|---|---|
-| Surgical restarts firing too often (pre-`UNRESOLVED`-filter) | detection counted routing-not-yet-caught-up as a wedged backend | **detection width** exceeded the real failure |
-| Discovery watchdog moving the whole app to an error screen | a producer stall (narrow, mode-dependent) triggered the widest possible recovery | **recovery scope** exceeded the real blast radius |
+| Over-reaction | discovery watchdog -> whole-app error screen for a producer stall | Do as little; Prefer manual |
+| Over-reaction | surgical restarts auto-firing on `UNRESOLVED` (pre-filter) | Do as little (detection too broad) |
+| Over-reaction | watchdog auto-`restart()` re-provisions every host for a stalled producer | Prefer manual; Do as little |
+| Under-reaction | backend code-0/signal exit ignored; renderer crash undetected | Be transparent |
+| Under-reaction | permission nudge silently lost; backup failure only a transient toast | Be transparent |
 
-Both are the same meta-bug seen from two sides. The unifying principle:
+The over-reactions did too much, automatically and heavily; the under-reactions did
+too little, visibly. **The correct middle is the same every time: do little
+automatically, make the situation transparent, and offer a manual action for
+anything heavier.**
 
-> **A recovery's scope and aggressiveness must never exceed the failure's actual,
-> mode-dependent blast radius -- and "blast radius" depends on what the user is
-> currently doing, not on which process happens to have failed.**
+### Operationalizing them: scope must match blast radius
 
-A producer stall has, for the median single-workspace user already loaded into a
-workspace, a blast radius of approximately zero (the proxy still routes from
-cached topology). Recovering it with an app-wide error screen, or with a
-host-wide re-provision, is the over-reaction. The fix in both historical cases
-was to *narrow* -- narrow detection, narrow scope -- not to add machinery.
+The concrete test for "how little is little enough" is blast radius:
 
-### Three recovery tiers, and the rule that nothing jumps a tier
+> A recovery's scope and aggressiveness must never exceed the failure's actual,
+> *mode-dependent* blast radius -- and blast radius depends on what the user is
+> currently doing, not on which process failed.
 
-- **Tier 0 -- silent self-heal, owned locally.** Cheap idempotent reconnect/respawn
-  loops, owned by the process that owns the failing thing. The proxy's 503
-  auto-refresh, SSH-tunnel reconnect, per-agent `mngr event` respawn, the
-  permission-stream reconnect. This is the correct default for almost everything.
-- **Tier 1 -- scoped passive signal.** A non-blocking indicator at the scope of the
-  affected thing that never blocks unaffected activity: stale liveness dots, the
-  per-workspace recovery page, a (missing today) "permissions reconnecting" chip.
+A producer stall has, for the median single-workspace user already loaded in, a
+blast radius of ~zero (the proxy still routes from cached topology). An app-wide
+error screen or a host-wide re-provision for that is the over-reaction; the fix in
+both historical incidents was to *narrow*, not to add machinery.
+
+### Three tiers, and the rule that nothing jumps a tier
+
+The tiers are how "prefer manual + be transparent" become concrete. Each mechanism
+picks the lowest tier that covers its blast radius:
+
+- **Tier 0 -- silent local self-heal.** The sanctioned automatic exception to
+  "prefer manual": cheap, safe, local, idempotent reconnect/respawn owned by the
+  process that owns the failing thing (proxy 503 auto-refresh, SSH-tunnel reconnect,
+  per-agent `mngr event` respawn, the permission-stream reconnect). Still bounded by
+  transparency: if it is *persistently* failing, surface it.
+- **Tier 1 -- scoped, transparent signal + manual action.** A non-blocking indicator
+  at the scope of the affected thing, plus a button: the per-workspace recovery page
+  (detect -> show diagnostics -> offer surgical/host restart), stale liveness dots, a
+  (missing today) "permissions reconnecting" chip. This is the home of "prefer
+  manual" -- the heavy recovery is a user choice, not a reflex.
 - **Tier 2 -- whole-app takeover.** Reserved, with a short explicit allowlist, for
-  genuinely whole-app-fatal conditions: backend dead, proxy/consumer dead. This is
-  where *more* vigilance is warranted, and it is exactly where the real
-  silent-failure holes are (backend code-0/signal exit, renderer crash).
+  genuinely whole-app-fatal conditions (backend dead, proxy/consumer dead). This is
+  where *more* vigilance is warranted -- and it is exactly where the real
+  transparency holes are (backend code-0/signal exit, renderer crash).
 
-The recurring design move this report recommends is **demote and localize**, not
-centralize: push liveness ownership down to the process that owns the child, demote
-mode-dependent failures to passive signals, and reserve the app-wide hammer for
-app-wide death.
+The recurring design move is **demote and localize**, not centralize: push liveness
+to the process that owns the child (do little, locally), demote mode-dependent
+failures to transparent passive signals (be transparent), and reserve the app-wide
+hammer for app-wide death (prefer manual everywhere below that).
 
 ---
 
@@ -459,6 +496,25 @@ Ordered roughly by clarity-of-win. Effort is a rough estimate.
 | 14 | Latchkey perms | `LatchkeyAutoRegister` lock guards a non-existent reader | over-guard | judgment | S | Simplify if touched; low stakes. |
 | 15 | Workspace recovery | `_run_mngr_capturing` distinguishing behavior unused | premature abstraction | verified | S | Inline if touched; low priority. |
 
+### By principle
+
+- **Do as little as possible** -- #1, #2, #5, #8, #10, #12, #13, #15 (delete dead
+  code / collapse over-built mechanism / narrow scope), plus #6/#10 (a local
+  respawn instead of a host-wide restart).
+- **Prefer manual actions** -- #6/#10 (demote the auto-`restart()` hammer to a true
+  last resort; let the cheap local respawn be the only automatic part) and the
+  general stance that any *new* heavy recovery should be a surfaced button, not a
+  reflex.
+- **Be as transparent as possible** -- #3 (re-sign-in prompt), #4 (surface an
+  undeliverable nudge / a down permission stream), #2 (a real backup-status signal),
+  and all of section 4 below.
+
+A note on overlap: #6 serves all three at once -- a self-respawning observe child is
+*less* mechanism (do little), removes the need for the automatic host-wide restart
+(prefer manual), and the watchdog's remaining job (surface a persistent stall)
+becomes purely transparent. That triple alignment is why it is the highest-leverage
+structural change.
+
 ---
 
 ## 4. The silent-failure surfaces (user-impact order)
@@ -476,34 +532,42 @@ user with no signal -- the inverse of the over-reactions. Roughly ordered by imp
 7. **Persistent producer stall while consumer is alive** (2.2) -- passive counter only
    (acceptable for single-workspace users; matters at home/switch/create).
 
-Note the pattern: the over-reactions (the two historical incidents) and the
-under-reactions (this list) are the *same* failure of proportionality. The fix for
-both is the tier discipline in section 1 -- match the signal's scope and weight to
-the failure's mode-dependent blast radius. Several of these (2, 3, 5) are also
-*demand-driven*: invisible until the user does a specific thing, which argues for a
-lazy Tier-1 indicator surfaced at the point of impact rather than an always-on
-watchdog.
+Every item on this list is a **"be transparent"** failure: the system did too
+little, visibly. None of them needs a heavier *automatic* recovery -- the agent
+self-polls, the user can re-sign-in, the workspace can be restarted by hand. What
+they need is to be *seen*. Several (2, 3, 5) are also *demand-driven*: invisible
+until the user does a specific thing, which argues for a lazy Tier-1 indicator
+surfaced at the point of impact rather than an always-on watchdog -- "do as little
+as possible" applied to detection itself.
 
 ---
 
 ## 5. Recommended consolidation, in order
 
 1. **Land the clean wins (table #1-#5).** All verified, all small, all pure
-   reductions: dead code out, one missing handler in. These alone meaningfully
-   shrink the "very specific code that could be brittle" surface.
+   reductions: dead code out, one missing handler in. *Do as little* (delete #1, #2,
+   #5) and *be transparent* (#3 re-sign-in prompt, #4 surfaced nudge/stream). These
+   alone meaningfully shrink the "very specific code that could be brittle" surface.
 2. **Push producer liveness into the forward (table #6/#10).** The single highest-
-   leverage structural change: it removes the cross-ring babysitting, demotes the
-   host-wide `restart` hammer, and lets the minds discovery watchdog's producer half
-   shrink. Verify the two preconditions in 2.2 first.
+   leverage structural change, and the one that serves all three principles at once:
+   a cheap *local* self-respawn (do as little), which demotes the host-wide
+   `restart()` hammer to a true last resort (prefer manual), leaving the watchdog's
+   only remaining job to *surface* a persistent stall (be transparent). Verify the
+   two preconditions in 2.2 first.
 3. **Finish in-flight migrations (table #7, #9).** Don't maintain two parallel
-   status surfaces or a hollow shim indefinitely -- each is a standing dual-write
-   tax. Pick the new surface and retire the old.
+   status surfaces or a hollow shim indefinitely -- each is a standing dual-write tax
+   (*do as little*). Pick the new surface and retire the old.
 4. **Consolidate the redirect emit-sites (table #8)** once the SSE delivery
-   guarantee is confirmed.
-5. **Adopt the tier discipline as a review rule.** For any new background process or
-   recovery mechanism, state its blast radius per user-mode and pick the lowest tier
-   that covers it. Tier-2 (whole-app takeover) requires an explicit entry on a short
-   allowlist. This is the durable fix that prevents the next over-reaction.
+   guarantee is confirmed (*do as little*: one reconcile pass for one decision).
+5. **Adopt the three principles + tier discipline as a review rule.** For any new
+   background process or recovery mechanism, ask in order: *can we do less?* (is a
+   passive signal or a local respawn enough); *should this be manual?* (anything
+   heavy/risky/mode-dependent becomes a surfaced button, not a reflex); *is it
+   transparent?* (the failure and the action are visible, and no automatic retry
+   masks something the user would want to know). Then state its blast radius per
+   user-mode and pick the lowest tier that covers it -- Tier-2 (whole-app takeover)
+   requires an explicit entry on a short allowlist. This is the durable fix that
+   prevents both the next over-reaction and the next silent failure.
 
 ---
 
