@@ -3,6 +3,9 @@ import shlex
 from imbue.minds.desktop_client.assist_chat import ASSIST_CHAT_LABEL
 from imbue.minds.desktop_client.assist_chat import build_assist_chat_mngr_args
 from imbue.minds.desktop_client.assist_chat import generate_assist_chat_name
+from imbue.minds.desktop_client.assist_chat import spawn_assist_chat
+from imbue.minds.utils.mngr_caller import MngrCallResult
+from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 
 
@@ -63,3 +66,39 @@ def test_generate_assist_chat_name_is_prefixed_and_unique() -> None:
     second = generate_assist_chat_name()
     assert first.startswith("assist-")
     assert first != second
+
+
+def test_spawn_assist_chat_succeeds_and_passes_the_built_args() -> None:
+    # A zero exit maps to True, and the caller is handed exactly the argv that
+    # build_assist_chat_mngr_args assembles for the same inputs.
+    caller = RecordingMngrCaller()
+    agent_id = AgentId.generate()
+    succeeded = spawn_assist_chat(
+        mngr_caller=caller,
+        workspace_agent_id=agent_id,
+        workspace_name="my-workspace",
+        description="it broke",
+        chat_name="assist-abc123",
+    )
+    assert succeeded is True
+    assert caller.calls == [
+        build_assist_chat_mngr_args(
+            workspace_agent_id=agent_id,
+            workspace_name="my-workspace",
+            description="it broke",
+            chat_name="assist-abc123",
+        )
+    ]
+
+
+def test_spawn_assist_chat_returns_false_on_nonzero_exit() -> None:
+    # A non-zero ``mngr create`` exit surfaces as False so the /help/assist route returns 502.
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stderr="boom"))
+    succeeded = spawn_assist_chat(
+        mngr_caller=caller,
+        workspace_agent_id=AgentId.generate(),
+        workspace_name="ws",
+        description="it broke",
+        chat_name="assist-x",
+    )
+    assert succeeded is False
