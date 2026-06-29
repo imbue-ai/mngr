@@ -564,7 +564,7 @@ def test_creating_page_shows_status(tmp_path: Path) -> None:
 
     response = client.get("/creating/{}".format(agent_id))
     assert response.status_code == 200
-    assert "Creating your project" in response.text
+    assert "Creating your workspace" in response.text
     assert "Setting up your workspace" in response.text
     # The onboarding question UI was removed, so none of its markers render.
     assert "data-question" not in response.text

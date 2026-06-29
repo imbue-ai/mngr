@@ -577,7 +577,7 @@
         {% for acct in accounts %}
           <option value="{{ acct.user_id }}"{% if acct.user_id == default_account_id %} selected{% endif %}>{{ acct.email }}</option>
         {% endfor %}
-        <option value=""{% if not default_account_id %} selected{% endif %}>No account (private project)</option>
+        <option value=""{% if not default_account_id %} selected{% endif %}>No account (private workspace)</option>
       </select>
       <span id="advanced-toggle-wrap">
         <Button variant="ghost" id="toggle-advanced"
