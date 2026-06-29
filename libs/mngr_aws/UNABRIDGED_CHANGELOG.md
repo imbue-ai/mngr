@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in t
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-28
+
+Stops the AWS provider from hanging discovery when AWS is slow or unreachable.
+
+- Every AWS service client (EC2 / STS / S3) is now built with an explicit `botocore.Config`: a 5s connect timeout, a 15s read timeout, and two retries (`standard` mode). Previously these used boto3's defaults (60s connect / 60s read), so a slow or blackholed AWS endpoint could hang for minutes -- and, because discovery has no per-provider timeout, one stuck AWS call could freeze a whole discovery snapshot.
+
+- The EC2 instance-metadata service (IMDS, `169.254.169.254`) is no longer used as a credential source by default. A new `use_ec2_instance_metadata` provider-config field (default `false`) controls it: when off, the IMDS credential provider is removed from boto3's resolution chain, so a host that is not an EC2 instance fails fast ("AWS credentials not configured") instead of blocking on the OS TCP connect timeout against a frequently routed-but-blackholed link-local address. Set `use_ec2_instance_metadata = true` in the provider config when running mngr on an EC2 instance that should authenticate via its attached IAM instance role.
+
 ## 2026-06-26
 
 Added scope docstrings to this package's release tests so the TMR (test

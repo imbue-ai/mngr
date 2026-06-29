@@ -1,1 +1,0 @@
-Added a design/blueprint document at `blueprint/minds-workspace-api/plan-minds-workspace-api.md` capturing the plan for the versioned Minds workspace API (cross-workspace, backup, version, and SSH capabilities reachable by agents through the latchkey gateway).
