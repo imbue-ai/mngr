@@ -472,17 +472,18 @@ html {
 }
 
 /*
- * New-tab pulse: a workspace the Caretaker scheduler auto-created
- * (``is_new`` from the server) blinks its accent dot until the user opens
- * it once. ``.sidebar-new`` is added to the row by buildRow (sidebar_workspace_row.js)
- * only while the id is not yet in the client's "seen" set (seen_workspaces.js).
+ * Highlight pulse: a highlighted workspace (``is_highlighted`` from the server --
+ * see _HIGHLIGHT_LABEL_NAMES in app.py for what counts) blinks its accent dot
+ * until the user opens it once. ``.sidebar-highlight`` is added to the row by
+ * buildRow (sidebar_workspace_row.js) only while the id is not yet in the
+ * client's "seen" set (seen_workspaces.js).
  * The pulse breathes an accent-colored halo around the dot (sized via
  * box-shadow so it never reflows the row) plus a gentle opacity swell -- a
- * tasteful "look here, this is new" without the harshness of a hard blink.
+ * tasteful "look here" without the harshness of a hard blink.
  * The halo color is the same ``--workspace-accent`` the dot is painted with
  * (set inline per row by buildRow), falling back to the default accent.
  */
-.sidebar-new .sidebar-dot {
+.sidebar-highlight .sidebar-dot {
   animation: pulse-accent 1.4s ease-in-out infinite;
 }
 @keyframes pulse-accent {
