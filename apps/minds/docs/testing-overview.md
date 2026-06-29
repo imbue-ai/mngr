@@ -109,8 +109,8 @@ This is the `build-minds-snapshot` -> `test-minds-snapshot` job pair. Its whole
 point is that **expensive workspace-in-Docker creation happens once per run**,
 then cheap test sandboxes fan out from the baked image.
 
-- **Build** -- `scripts/snapshot_minds_e2e_state.py` builds a Modal image
-  mirroring the `test-docker-electron` runner, creates a sandbox with
+- **Build** -- `scripts/snapshot_minds_e2e_state.py` builds a Modal image with a
+  warm Electron/Playwright/Xvfb + Docker-in-Docker toolchain, creates a sandbox with
   `experimental_options={"vm_runtime": True}` (true-VM runtime, so
   `/var/lib/docker` survives `snapshot_filesystem()`), starts `dockerd`, calls
   `e2e_workspace_runner.create_workspace_via_electron` directly (no pytest, **no**
