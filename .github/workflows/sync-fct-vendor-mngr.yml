@@ -1,0 +1,97 @@
+name: sync FCT vendor/mngr
+
+# Keeps forever-claude-template's `vendor/mngr` tracking mngr `main`. The minds
+# binary is built from mngr main, but the in-VM agent imports FCT's committed
+# `vendor/mngr`; left alone that snapshot only moves at release time and drifts
+# hundreds of commits behind, so the launch-to-msg health check (which creates
+# the agent from FCT main) risks a vendor-skew wedge. This re-archives mngr main
+# into FCT `vendor/mngr` daily and pushes the refresh straight to FCT main.
+#
+# Runs an hour before each `minds-launch-to-msg.yml` cron (16:00 / 04:00 UTC) so
+# that health check sees a fresh, coherent (binary, vendor) pair. No-ops when
+# mngr main has not moved since the last sync.
+#
+# The push to FCT uses FCT_VENDOR_SYNC_TOKEN (a fine-grained PAT scoped to
+# forever-claude-template, Contents: read+write) rather than the workflow's own
+# GITHUB_TOKEN, which is scoped to mngr only; a PAT push also lets FCT's own CI
+# fire on the resulting commit as a post-push signal.
+
+on:
+  schedule:
+    - cron: '0 15 * * *'  # 1h before the 16:00 UTC launch-to-msg cron
+    - cron: '0 3 * * *'   # 1h before the 04:00 UTC launch-to-msg cron
+  workflow_dispatch:
+
+concurrency:
+  group: sync-fct-vendor-mngr
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: check FCT token
+        env:
+          FCT_VENDOR_SYNC_TOKEN: ${{ secrets.FCT_VENDOR_SYNC_TOKEN }}
+        run: |
+          if [[ -z "${FCT_VENDOR_SYNC_TOKEN:-}" ]]; then
+            echo "::error::FCT_VENDOR_SYNC_TOKEN secret is not set. Add a fine-grained PAT"
+            echo "scoped to imbue-ai/forever-claude-template (Contents: read+write) at"
+            echo "Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+      - name: checkout mngr @ main
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 1
+      - name: checkout forever-claude-template @ main
+        uses: actions/checkout@v6
+        with:
+          repository: imbue-ai/forever-claude-template
+          ref: main
+          token: ${{ secrets.FCT_VENDOR_SYNC_TOKEN }}
+          path: fct
+          fetch-depth: 1
+      - name: re-archive mngr main into FCT vendor/mngr
+        run: |
+          set -euo pipefail
+          MNGR_SHA=$(git rev-parse HEAD)
+          MNGR_SHORT=$(git rev-parse --short HEAD)
+          # Replace vendor/mngr wholesale with mngr HEAD's tree, mirroring
+          # `just sync-vendor-mngr`. FCT's `**/.minds/` gitignore strips those
+          # paths on `git add`, which is the one expected, tracked delta from a
+          # full `git ls-tree` of the mngr SHA.
+          tarball=$(mktemp)
+          git archive --format=tar HEAD > "$tarball"
+          rm -rf fct/vendor/mngr/* fct/vendor/mngr/.[!.]*
+          tar -xf "$tarball" -C fct/vendor/mngr
+          rm -f "$tarball"
+          {
+            echo "MNGR_SHA=$MNGR_SHA"
+            echo "MNGR_SHORT=$MNGR_SHORT"
+          } >> "$GITHUB_ENV"
+      - name: commit + push to FCT main if changed
+        working-directory: fct
+        run: |
+          set -euo pipefail
+          git add -A vendor/mngr/
+          if git diff --cached --quiet -- vendor/mngr/; then
+            echo "vendor/mngr already in sync with mngr ${MNGR_SHORT}; nothing to push"
+            echo "- FCT vendor/mngr already at mngr \`${MNGR_SHORT}\`; no-op" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git -c user.name='minds-vendor-sync' \
+              -c user.email='minds-vendor-sync@users.noreply.github.com' \
+              commit -m "Sync vendor/mngr to mngr main (${MNGR_SHORT})" \
+                     -m "Tracks ${MNGR_SHA} in mngr."
+          git push origin HEAD:main
+          {
+            echo "## Synced FCT vendor/mngr"
+            echo ""
+            echo "- mngr main: \`${MNGR_SHA}\`"
+            echo "- pushed to forever-claude-template \`main\`"
+          } >> "$GITHUB_STEP_SUMMARY"
