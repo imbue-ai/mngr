@@ -16,6 +16,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Changed
 
+- Changed: EC2 instance-metadata service (IMDS, `169.254.169.254`) is no longer used as a credential source by default. A new `use_ec2_instance_metadata` provider-config field (default `false`) controls it — when off, the IMDS credential provider is removed from boto3's resolution chain, so a host that is not an EC2 instance fails fast ("AWS credentials not configured") instead of blocking on the OS TCP connect timeout against a frequently routed-but-blackholed link-local address. Set it to `true` when running mngr on an EC2 instance that should authenticate via its attached IAM instance role.
 - Changed: Unauthenticated AWS now raises the shared `ProviderNotAuthorizedError` (still a `ProviderUnavailableError`). In `mngr list` this surfaces as one consistent error line and a non-zero exit, instead of a one-off message.
 - Changed: Collapsed the AWS AMI config knobs — `default_ami_by_region` removed; `default_ami_id` now defaults to `None` and uses the pinned per-region default (`DEFAULT_AMI_BY_REGION`, Debian 12 amd64) when unset. Resolution behavior is unchanged.
 - Changed: AWS missing-credential help text now points at `aws configure` and the rest of the boto3 credential chain instead of generic "start Docker" guidance.
@@ -24,6 +25,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Fixed
 
+- Fixed: AWS provider no longer hangs discovery when AWS is slow or unreachable. Every AWS service client (EC2/STS/S3) is now built with an explicit `botocore.Config` — 5s connect timeout, 15s read timeout, two retries (`standard` mode) — replacing boto3's 60s/60s defaults. A slow or blackholed AWS endpoint can no longer freeze a whole discovery snapshot.
 - Fixed: `mngr destroy` of a stopped AWS host no longer leaks its EC2 instance. The offline destroy path resolves the stopped instance by its `mngr-host-id` tag and terminates it via `TerminateInstances`, removing the state-bucket records — failing loudly if termination could not complete.
 - Fixed: `mngr rename` now re-stamps the EC2 `Name` identity tag (read by offline discovery), so a renamed-then-stopped host lists under its new name.
 - Fixed: A partial S3 `DeleteObjects` failure (HTTP 200 with per-key failures in the response `Errors` array) now raises instead of being silently dropped, so a failed state/`host_dir` removal can't leave orphaned objects behind.

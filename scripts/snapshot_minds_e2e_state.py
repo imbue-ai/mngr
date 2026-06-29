@@ -30,9 +30,9 @@ preview opt-in is required.
 This is a one-off demonstration script for the test-efficiency groundwork.
 The flow is:
 
-1. Build a Modal image that mirrors what the ``test-docker-electron`` CI
-   runner sets up: Python + uv + Docker-in-Docker + Node + pnpm + xvfb +
-   Playwright, plus the local mngr repo source.
+1. Build a Modal image with the full Electron e2e toolchain: Python + uv +
+   Docker-in-Docker + Node + pnpm + xvfb + Playwright, plus the local mngr
+   repo source.
 2. Create a Modal sandbox with ``experimental_options={"vm_runtime": True}``
    -- Modal's true-VM runtime. We need this specifically because
    Docker-in-sandbox state (everything in ``/var/lib/docker``, including
@@ -90,8 +90,7 @@ _RUNC_VERSION: Final[str] = "v1.3.0"
 # apps/minds pins an EXACT Node + pnpm version (engines in package.json with
 # engine-strict=true in its .npmrc), so the image must install those exact
 # versions or `pnpm install --frozen-lockfile` aborts with an engine error.
-# Keep these in sync with apps/minds/.nvmrc, apps/minds/package.json engines,
-# and the test-docker-electron job in .github/workflows/ci.yml.
+# Keep these in sync with apps/minds/.nvmrc and apps/minds/package.json engines.
 _NODE_VERSION: Final[str] = "24.15.0"
 _PNPM_VERSION: Final[str] = "10.33.4"
 _CLAUDE_CODE_VERSION: Final[str] = "2.1.141"
@@ -143,7 +142,8 @@ _IN_SANDBOX_RUNNER_PROGRAM: Final[str] = textwrap.dedent(
     # `docker run --runtime runsc` fails with "unknown or invalid runtime
     # name: runsc". Force runc here -- the Modal VM is already the isolation
     # boundary for this throwaway snapshot. Mirrors the same override the
-    # pytest path applies in apps/minds/test_desktop_client_e2e.py.
+    # pytest path applies in
+    # apps/minds/test_snapshot_resume.py::test_create_apikey_workspace_and_chat_via_electron.
     _write_to_os_environ("MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME", "runc")
     with tempfile.TemporaryDirectory(prefix="snapshot-fct-") as scratch:
         fct_path = resolve_fct_path(Path(scratch))
@@ -269,8 +269,8 @@ def _build_snapshot_image(staged_repo: Path) -> modal.Image:
     return (
         modal.Image.debian_slim(python_version="3.12")
         # System deps -- superset of the base mngr Dockerfile, plus the extras
-        # the test-docker-electron CI job installs: xvfb (display server for
-        # Electron) and the iptables/iproute2 needed by Docker-in-Docker.
+        # the Electron e2e test needs: xvfb (display server for Electron) and
+        # the iptables/iproute2 needed by Docker-in-Docker.
         #
         # The lib* entries are Electron's runtime GUI dependency set on
         # Debian. GitHub-hosted ubuntu-latest runners have these
@@ -388,7 +388,7 @@ def _build_snapshot_image(staged_repo: Path) -> modal.Image:
         # app.min.css 404s in the renderer -- and since the onboarding driver
         # detects a screen advancing via `wait_for_selector(state="hidden")` and
         # the `.hidden` rule lives in that stylesheet, a missing stylesheet makes
-        # every onboarding screen look stuck. Mirrors the test-docker-electron job.
+        # every onboarding screen look stuck. Mirrors the Electron e2e test setup.
         #
         # The /app -> /code/mngr symlink (independent) works around offload
         # v0.9.7's create_from_image hardcoding workdir="/app": our project is at

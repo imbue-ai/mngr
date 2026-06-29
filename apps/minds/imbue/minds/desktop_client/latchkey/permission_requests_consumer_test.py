@@ -13,10 +13,12 @@ from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayCl
 from imbue.minds.desktop_client.latchkey.gateway_client import PermissionEffect
 from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
+from imbue.minds.desktop_client.latchkey.gateway_client import WorkspaceRequestPayload
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import streamed_request_to_event
 from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
+from imbue.minds.desktop_client.request_events import LatchkeyWorkspacePermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestType
 
@@ -60,6 +62,24 @@ def _make_streamed_file_sharing(
     )
 
 
+def _make_streamed_workspace(
+    request_id: str = "wsp789",
+    agent_id: str = "agent-5",
+    permissions: tuple[str, ...] = ("minds-workspaces-destroy",),
+    target_workspace_id: str | None = "agent-" + "1" * 32,
+    rationale: str = "needs to manage a sibling",
+) -> StreamedPermissionRequest:
+    return StreamedPermissionRequest(
+        request_id=request_id,
+        agent_id=agent_id,
+        rationale=rationale,
+        request_type="workspace",
+        payload=WorkspaceRequestPayload(permissions=permissions, target_workspace_id=target_workspace_id),
+        target="/tmp/permissions.json",
+        effect=PermissionEffect(rules=({"minds-workspaces": permissions},)),
+    )
+
+
 def test_streamed_request_to_event_maps_predefined_fields() -> None:
     """Predefined-type streamed records translate to LatchkeyPredefinedPermissionRequestEvent."""
     event = streamed_request_to_event(_make_streamed_predefined())
@@ -86,6 +106,30 @@ def test_streamed_request_to_event_maps_file_sharing_fields() -> None:
     assert event.rationale == "needs data"
     assert event.request_type == str(RequestType.FILE_SHARING_PERMISSION)
     assert event.permissions_target_path == "/tmp/permissions.json"
+
+
+def test_streamed_request_to_event_maps_workspace_fields() -> None:
+    """Workspace-type streamed records translate to LatchkeyWorkspacePermissionRequestEvent."""
+    target = "agent-" + "2" * 32
+    event = streamed_request_to_event(_make_streamed_workspace(target_workspace_id=target))
+    assert isinstance(event, LatchkeyWorkspacePermissionRequestEvent)
+    assert str(event.event_id) == "wsp789"
+    assert event.agent_id == "agent-5"
+    assert event.permissions == ("minds-workspaces-destroy",)
+    assert event.target_workspace_id == target
+    assert event.rationale == "needs to manage a sibling"
+    assert event.request_type == str(RequestType.WORKSPACE_PERMISSION)
+    assert event.permissions_target_path == "/tmp/permissions.json"
+
+
+def test_streamed_request_to_event_maps_workspace_without_target() -> None:
+    """A workspace request with no target normalizes to ``target_workspace_id=None``."""
+    event = streamed_request_to_event(
+        _make_streamed_workspace(permissions=("minds-workspaces-read",), target_workspace_id=None)
+    )
+    assert isinstance(event, LatchkeyWorkspacePermissionRequestEvent)
+    assert event.target_workspace_id is None
+    assert event.permissions == ("minds-workspaces-read",)
 
 
 def _wait_until(predicate, timeout: float = _POLL_TIMEOUT_SECONDS) -> bool:

@@ -9,6 +9,7 @@ from moto import mock_aws
 from imbue.mngr.config.data_types import ScalarTuple
 from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.primitives import ProviderBackendName
+from imbue.mngr_aws.boto_config import IMDS_CREDENTIAL_PROVIDER_NAME
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.config import DEFAULT_AMI_BY_REGION
@@ -68,6 +69,36 @@ def test_get_session_returns_session_with_region(monkeypatch: pytest.MonkeyPatch
     assert session.region_name == "us-west-2"
     creds = session.get_credentials()
     assert creds is not None
+
+
+def _credential_provider_names(session: boto3.Session) -> list[str]:
+    """The names of the credential providers in a boto3 session's resolution chain."""
+    return [provider.METHOD for provider in session._session.get_component("credential_provider").providers]
+
+
+def test_use_ec2_instance_metadata_defaults_to_false() -> None:
+    assert AwsProviderConfig().use_ec2_instance_metadata is False
+
+
+def test_get_session_excludes_imds_credential_provider_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    # By default the EC2 instance-metadata (IMDS) credential provider is dropped
+    # from the chain, so a non-EC2 host never probes the (often blackholed)
+    # 169.254.169.254 endpoint and fails fast instead of hanging.
+    clear_aws_env(monkeypatch)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIATEST")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+    session = AwsProviderConfig().get_session()
+    assert IMDS_CREDENTIAL_PROVIDER_NAME not in _credential_provider_names(session)
+
+
+def test_get_session_keeps_imds_credential_provider_when_opted_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Opting in (e.g. running mngr on an EC2 instance with an attached role) keeps
+    # the IMDS provider in the chain.
+    clear_aws_env(monkeypatch)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIATEST")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+    session = AwsProviderConfig(use_ec2_instance_metadata=True).get_session()
+    assert IMDS_CREDENTIAL_PROVIDER_NAME in _credential_provider_names(session)
 
 
 def test_resolve_state_bucket_name_uses_explicit_override() -> None:

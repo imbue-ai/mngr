@@ -22,6 +22,7 @@
 #}
 {% set _default_restic_env = "# see docs linked above for available options\n# for example:\nRESTIC_REPOSITORY=s3:s3.amazonaws.com/<bucket_name>\nAWS_ACCESS_KEY_ID=\nAWS_SECRET_ACCESS_KEY=\n" %}
 {% set _scripts %}
+<script src="/_static/api_errors.js"></script>
 <script>
   (function() {
     // The remote (Imbue Cloud) preset needs an Imbue account. When a signed-out
@@ -64,8 +65,18 @@
     var regionSelect = document.getElementById('region');
     var presetCards = document.querySelectorAll('[data-preset]');
     var accountError = document.getElementById('account-error');
+    // Inputs read when building the create request body (some -- master password,
+    // save-password -- only exist when no shared backup password is saved yet).
+    var gitUrlInput = document.getElementById('git_url');
+    var branchInput = document.getElementById('branch');
     var hostNameInput = document.getElementById('host_name');
     var hostNameError = document.getElementById('host-name-error');
+    var colorInput = document.getElementById('create-color-input');
+    var backupApiKeyEnvInput = document.getElementById('backup_api_key_env');
+    var backupSavePasswordInput = document.getElementById('backup_save_password');
+    var createError = document.getElementById('create-error');
+    // The field highlighted by the last create error, cleared before the next try.
+    var lastErrorField = null;
     var REGION_OPTIONS = {{ region_options_by_launch_mode | tojson }};
     var REGION_SELECTED = {{ region_selected_by_launch_mode | tojson }};
 
@@ -194,7 +205,7 @@
         account_id: accountSelect.value,
         region: regionSelect.disabled ? '' : regionSelect.value
       });
-      return '/api/host-name-available?' + params.toString();
+      return '/api/v1/desktop/host-name-available?' + params.toString();
     }
 
     function validateHostName() {
@@ -280,14 +291,97 @@
     toggleAdvanced.addEventListener('click', function () { showAdvanced(true); });
     backToSimple.addEventListener('click', function () { showAdvanced(false); });
 
+    function fieldValue(el) {
+      // Skip disabled / absent inputs (e.g. the region select while hidden) so
+      // their stale values are not sent.
+      if (!el || el.disabled) return '';
+      return el.value;
+    }
+
+    function clearCreateError() {
+      if (createError) createError.classList.add('hidden');
+      if (lastErrorField) {
+        lastErrorField.classList.remove('!ring-1', 'ring-important');
+        lastErrorField = null;
+      }
+    }
+
+    function showCreateError(message, field) {
+      if (createError) {
+        createError.textContent = message || 'Could not create the workspace.';
+        createError.classList.remove('hidden');
+      }
+      // When the API names the offending field, reveal the advanced view it
+      // lives in, ring it, and bring it into focus so the message has context.
+      if (field) {
+        var fieldEl = document.getElementById(field);
+        if (fieldEl) {
+          showAdvanced(true);
+          fieldEl.classList.add('!ring-1', 'ring-important');
+          fieldEl.focus();
+          fieldEl.scrollIntoView({ block: 'center' });
+          lastErrorField = fieldEl;
+        }
+      }
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Create';
+    }
+
+    function submitCreate() {
+      clearCreateError();
+      // The advanced selects are always the source of truth on submit (the
+      // preset cards just pre-fill them); send the full create field surface.
+      var body = {
+        git_url: fieldValue(gitUrlInput).trim(),
+        host_name: fieldValue(hostNameInput).trim(),
+        branch: fieldValue(branchInput).trim(),
+        color: fieldValue(colorInput),
+        launch_mode: launchSelect.value,
+        ai_provider: aiProviderSelect.value,
+        account_id: accountSelect.value,
+        anthropic_api_key: fieldValue(apiKeyInput).trim(),
+        backup_provider: backupSelect.value,
+        backup_encryption_method: backupEncryptionSelect.value,
+        backup_api_key_env: fieldValue(backupApiKeyEnvInput),
+        backup_master_password: fieldValue(backupMasterPasswordInput),
+        backup_save_password: backupSavePasswordInput ? backupSavePasswordInput.checked : false,
+        region: fieldValue(regionSelect)
+      };
+      fetch('/api/v1/workspaces', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      }).then(function (r) {
+        return r.json().then(function (data) { return { status: r.status, data: data || {} }; });
+      }).then(function (res) {
+        if (res.status === 202 && res.data.operation_id) {
+          window.location = '/creating/' + res.data.operation_id;
+          return;
+        }
+        // Normalize both the structural 422 contract and the handler's semantic
+        // {error, field, redirect_url} into one shape. The no-account imbue_cloud
+        // backstop carries a sign-up redirect target; a field error rings the
+        // matching input (the 422 field names line up with the form input ids).
+        var err = normalizeApiError(res.data);
+        if (err.redirect_url) {
+          window.location = err.redirect_url;
+          return;
+        }
+        showCreateError(err.message, err.field);
+      }).catch(function () {
+        showCreateError('Could not reach the server. Please try again.');
+      });
+    }
+
     form.addEventListener('submit', function (e) {
+      // Always handle submission via fetch (never a native POST navigation).
+      e.preventDefault();
       // Imbue Cloud needs an account. If none is selected, don't submit:
       //  - signed out -> open the sign-in modal (overlay layer).
       //  - signed in  -> surface the account-picker error, but only now (on a
       //    Create attempt) -- not proactively as the user clicks between
       //    presets, which is too distracting.
       if (imbueCloudNeedsAccount()) {
-        e.preventDefault();
         if (HAS_ANY_ACCOUNT) showAccountError();
         else openSigninModal();
         return;
@@ -316,13 +410,14 @@
       var nameStillTaken =
         hostNameState === HOST_NAME_TAKEN && hostNameTakenKey === hostNameAvailabilityUrl(trimmedName);
       if (hostNameState === HOST_NAME_INVALID || nameStillTaken) {
-        e.preventDefault();
+        // (default already prevented above) -- just surface the inline error.
         showAdvanced(true);
         hostNameInput.focus();
         return;
       }
       submitBtn.disabled = true;
       submitBtn.textContent = 'Creating...';
+      submitCreate();
     });
 
     function onAccountChange() {
@@ -427,8 +522,11 @@
 </script>
 {% endset %}
 <PageNarrowContainer title="Create a mind" padding="form" max_width="max-w-[720px]" scripts={{ _scripts }}>
-  <form id="create-form" action="/create" method="post">
-    {# Auto-chosen color carried through the POST; no visible picker. #}
+  {# Submission is a JS fetch to POST /api/v1/workspaces (the same create front
+     door agents use); see the submit handler in the scripts block. The form
+     element keeps the field layout + native required-field validation. #}
+  <form id="create-form">
+    {# Auto-chosen color carried in the create request; no visible picker. #}
     <input type="hidden" name="color" id="create-color-input" value="{{ color }}">
 
     <div class="text-center mb-12">
@@ -439,6 +537,10 @@
     {% if error_message %}
       <Notice variant="error">{{ error_message }}</Notice>
     {% endif %}
+
+    {# Filled in + revealed by the submit handler from the create API's
+       structured 400 ({error, field}); hidden on a fresh form. #}
+    <p id="create-error" role="alert" class="hidden mb-6 type-helper text-important text-center"></p>
 
     {# ---- Simple view: two compute presets ---- #}
     <div id="simple-view" role="radiogroup" aria-label="Where to run your mind">
