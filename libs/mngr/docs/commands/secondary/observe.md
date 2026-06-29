@@ -68,6 +68,7 @@ mngr observe [OPTIONS]
 | `--events-dir` | path | Base directory for the full observer's event output files and lock. Defaults to MNGR_HOST_DIR (~/.mngr). Has no effect with --discovery-only (the discovery log always lives under the default host dir). | None |
 | `--discovery-only` | boolean | Stream only discovery events as JSONL (hosts and agents discovered/destroyed). Outputs a full snapshot, then tails the event file for updates. Periodically re-polls to catch any missed changes. Does not start activity streams or emit agent state events. | `False` |
 | `--daemonize`, `--no-daemonize` | boolean | When not daemonized (default), exit if the parent process dies. Use --daemonize to keep running independently. | `False` |
+| `--exit-alongside-pid` | integer | SIGTERM this process when the given PID exits. Use to tie this observer's lifetime to a process other than its own parent (e.g. an embedder that spawned it indirectly through a longer-lived supervisor). | None |
 
 ## See Also
 

@@ -259,6 +259,7 @@ mngr latchkey forward [OPTIONS]
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--mngr-binary` | text | Path to the mngr binary used to spawn the underlying ``mngr observe`` subprocess. | `mngr` |
+| `--observe-exit-alongside-pid` | integer | If set, the ``mngr observe`` discovery child is launched with ``--exit-alongside-pid PID`` so it terminates when that PID exits. This forward (and its shared gateway and reverse tunnels) is NOT tied to the PID -- only its discovery producer. The minds desktop client passes its own PID so the producer dies with the app while the gateway survives a restart. | None |
 | `--latchkey-binary` | text | Path to the upstream ``latchkey`` CLI. Falls back to $MNGR_LATCHKEY_BINARY, then ``[plugins.latchkey].latchkey_binary`` in settings.toml, then 'latchkey' on PATH. | None |
 | `--latchkey-directory` | path | Root directory for ``LATCHKEY_DIRECTORY`` and the plugin's ``mngr_latchkey/`` metadata subtree. Falls back to $MNGR_LATCHKEY_DIRECTORY, then ``[plugins.latchkey].directory`` in settings.toml, then '~/.mngr/latchkey'. | None |
 
