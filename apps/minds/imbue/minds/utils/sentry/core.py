@@ -117,22 +117,6 @@ _SENTRY_DSN_BY_ENVIRONMENT: Mapping["SentryDeployEnvironment", str] = {
 }
 
 
-# Sentry (backend *and* frontend) is off by default and only turned on when this
-# env var is truthy. The Electron launcher / operator opts in explicitly; until
-# then nothing is sent to Sentry from either the Python backend or the web UI.
-MINDS_SENTRY_ENABLED_ENV_VAR = "MINDS_SENTRY_ENABLED"
-_SENTRY_ENABLED_TRUTHY_VALUES = ("1", "true", "yes")
-
-
-def is_sentry_enabled() -> bool:
-    """Whether error reporting is opted in via ``MINDS_SENTRY_ENABLED``.
-
-    Shared by the Python backend (``minds run``) and the web-UI frontend config
-    so both honor the same single opt-in switch.
-    """
-    return os.environ.get(MINDS_SENTRY_ENABLED_ENV_VAR, "").strip().lower() in _SENTRY_ENABLED_TRUTHY_VALUES
-
-
 def resolve_sentry_environment() -> "SentryDeployEnvironment":
     """Select the Sentry environment from the activated minds env in the process env.
 
@@ -488,6 +472,65 @@ def get_traceback_with_vars(exception: BaseException | None = None) -> str:
 BaseBeforeSendType = Callable[[Event, Hint], Event | None]
 
 
+# Tag set on events the user submits explicitly via the "report a bug" flow. Such events are always
+# sent (an explicit user action), so the automatic-error gate below lets them through even when
+# automatic error reporting is turned off.
+MANUALLY_SUBMITTED_TAG = "manually_submitted"
+
+
+class _AutomaticReportingGate(MutableModel):
+    """before_send hook (a callable object, mirroring ``_SentryEventRateLimiter``) that drops automatic
+    events while error reporting is disabled.
+
+    ``is_error_reporting_enabled`` is read live on every event, so toggling the user setting takes
+    effect without restarting. Events tagged ``MANUALLY_SUBMITTED_TAG`` always pass: a manual bug
+    report is an explicit user action.
+    """
+
+    is_error_reporting_enabled: Callable[[], bool]
+
+    def before_send(self, event: Event, hint: Hint) -> Event | None:
+        tags = event.get("tags") or {}
+        if isinstance(tags, dict) and tags.get(MANUALLY_SUBMITTED_TAG) == "true":
+            return event
+        if self.is_error_reporting_enabled():
+            return event
+        return None
+
+
+def _make_automatic_reporting_gate(is_error_reporting_enabled: Callable[[], bool]) -> BaseBeforeSendType:
+    """Build the automatic-reporting before_send gate bound to a live ``is_error_reporting_enabled``."""
+    return _AutomaticReportingGate(is_error_reporting_enabled=is_error_reporting_enabled).before_send
+
+
+def _drop_interrupt_events(event: Event, hint: Hint) -> Event | None:
+    """before_send hook that drops interrupt / clean-shutdown exceptions, which are not real faults.
+
+    ``KeyboardInterrupt`` (Ctrl-C / SIGINT) is always dropped: it is not itself an error. A
+    ``SystemExit`` is dropped only for a clean exit code (``None`` or ``0``); a non-zero code is a
+    genuine fatal-exit signal and is kept.
+
+    The ``SentryEventHandler`` already filters these out of the *logging* path, but the SDK's default
+    excepthook / threading integrations capture every top-level ``BaseException`` and call
+    ``capture_event`` directly, bypassing that handler. ``before_send`` is the one place every event
+    passes through regardless of which integration produced it, so the filter belongs here. Any *other*
+    exception raised during shutdown has a different type and is left untouched, so genuine errors are
+    still reported.
+    """
+    if "exc_info" not in hint:
+        return event
+    exc_type, exc_value, _ = hint["exc_info"]
+    if exc_type is None:
+        return event
+    if issubclass(exc_type, KeyboardInterrupt):
+        return None
+    if issubclass(exc_type, SystemExit):
+        code = exc_value.code if isinstance(exc_value, SystemExit) else None
+        if code is None or code == 0:
+            return None
+    return event
+
+
 # NOTE: if the actual event (without attachments) being too large is a problem, then it will be handled
 #       in our custom logic in ImbueSentryHttpTransport above.
 def _before_send_wrapper(
@@ -532,20 +575,29 @@ def setup_sentry(
     release_id: str,
     git_commit_sha: str,
     log_folder: Path,
-    is_s3_upload_enabled: bool = False,
+    is_error_reporting_enabled: Callable[[], bool],
+    is_log_inclusion_enabled: Callable[[], bool],
 ) -> None:
     """Sets up the main Sentry instance for this process.
 
     This should be done *after* setting up normal loguru loggers, to ensure that sentry handling happens after normal logging.
     In case the sentry stuff hangs or something odd, we want to make sure to at least get regular log output.
 
-    The ``environment`` selects the Sentry DSN (``production`` and ``staging`` each
-    report to their own project; everything else to the shared dev project) and,
-    for ``production``/``staging``, *which* S3 bucket attachments would go to.
+    Sentry always initializes; what it actually *sends* is gated live by user setting:
 
-    S3 attachment uploads are additionally gated by ``is_s3_upload_enabled`` (off by
-    default): they only happen when it is true *and* the environment is
-    ``production`` or ``staging``. ``development`` never uploads to S3.
+    * ``is_error_reporting_enabled`` is read on every event (in a before_send hook). While it returns
+      False, automatic events are dropped before they leave the process. Manually-submitted bug
+      reports (tagged ``MANUALLY_SUBMITTED_TAG``) bypass this gate.
+    * ``is_log_inclusion_enabled`` is read whenever attachments are collected; while it returns False,
+      log/traceback attachments are skipped. This only matters in production/staging, where the S3
+      bucket exists -- ``development`` never uploads attachments regardless.
+
+    Both callables are read live, so toggling the corresponding user setting takes effect without an
+    app restart.
+
+    The ``environment`` selects the Sentry DSN (``production`` and ``staging`` each report to their
+    own project; everything else to the shared dev project) and, for ``production``/``staging``,
+    *which* S3 bucket attachments would go to.
     """
     if "SENTRY_DSN" in os.environ:
         # We pass ``dsn=`` explicitly below, so sentry_sdk ignores any SENTRY_DSN
@@ -556,11 +608,18 @@ def setup_sentry(
     sentry_dsn = _SENTRY_DSN_BY_ENVIRONMENT[environment]
 
     # NOTE: the rate limiter object's lifetime is maintained by being captured in the
-    #       closure of the before_send function
+    #       closure of the before_send function.
+    # Interrupt / clean-shutdown exceptions are dropped first (they are never real faults), then the
+    # automatic-reporting gate drops events the user has opted out of, both before they consume a
+    # rate-limiter slot.
     rate_limiter = _SentryEventRateLimiter()
     before_send = functools.partial(
         _before_send_wrapper,
-        before_send_list=[rate_limiter.before_send],
+        before_send_list=[
+            _drop_interrupt_events,
+            _make_automatic_reporting_gate(is_error_reporting_enabled),
+            rate_limiter.before_send,
+        ],
     )
 
     sentry_sdk.init(
@@ -602,14 +661,16 @@ def setup_sentry(
     # because the uploaded log files + traceback-with-locals can carry
     # potentially-sensitive data. When enabled, the bucket follows the environment;
     # development never uploads regardless of the flag.
-    if not is_s3_upload_enabled:
-        logger.info("Sentry S3 attachment uploads disabled (not enabled via MINDS_SENTRY_S3_UPLOADS)")
-    elif environment is SentryDeployEnvironment.PRODUCTION:
+    # The S3 attachment uploader is initialized whenever the environment has a bucket
+    # (production/staging). Whether logs/tracebacks are actually collected and uploaded is decided
+    # live per-event by ``is_log_inclusion_enabled`` (in ``add_extra_info_hook``); development has no
+    # bucket and never uploads.
+    if environment is SentryDeployEnvironment.PRODUCTION:
         setup_s3_uploads(is_production=True)
-        logger.info("Sentry S3 attachment uploads enabled (production bucket)")
+        logger.info("Sentry S3 attachment uploader ready (production bucket)")
     elif environment is SentryDeployEnvironment.STAGING:
         setup_s3_uploads(is_production=False)
-        logger.info("Sentry S3 attachment uploads enabled (staging bucket)")
+        logger.info("Sentry S3 attachment uploader ready (staging bucket)")
     else:
         logger.info("Sentry S3 attachment uploads disabled (environment={} has no bucket)", environment.value)
 
@@ -620,7 +681,7 @@ def setup_sentry(
     min_sentry_level: int = SentryLoguruLoggingLevels.LOW_PRIORITY.value
     handler = SentryEventHandler(
         level=min_sentry_level,
-        add_extra_info_hook=add_extra_info_hook,
+        add_extra_info_hook=partial(add_extra_info_hook, is_log_inclusion_enabled=is_log_inclusion_enabled),
     )
     register_sentry_event_handler(handler)
     logger.add(
@@ -834,33 +895,98 @@ class ErrorAttachmentsS3Uploader(MutableModel):
 _ATTACHMENTS_UPLOADER = ErrorAttachmentsS3Uploader()
 
 
-def add_extra_info_hook(event: Event, hint: Hint) -> tuple[Event, Hint, tuple[_UploadCallback, ...]]:
+def add_extra_info_hook(
+    event: Event, hint: Hint, is_log_inclusion_enabled: Callable[[], bool]
+) -> tuple[Event, Hint, tuple[_UploadCallback, ...]]:
     """The add_extra_info_hook gets called in the SentryEventHandler. This seems a little too early in the process for
     sending things to s3.
 
     Sentry may still decide to discard the issue and in that scenario, executing all the uploads now would just
     blackhole them.
+
+    Log/traceback attachment collection is gated by ``is_log_inclusion_enabled`` (read live): while it
+    returns False, no log or traceback uploads are prepared, so the event carries no attachments. The
+    lightweight ``platform`` extra is always added regardless.
     """
-    exception = sys.exception()
-    if exception is None:
-        try:
-            raise Exception("this is an exception to get the current traceback")
-        except Exception as e:
-            exception = e
-
-    s3_uri_groups, callbacks = _ATTACHMENTS_UPLOADER.collect_external_attachments(
-        exception=exception, logs_folder=_get_log_folder_from_scope()
-    )
-
     extra = cast(dict[str, Any], event["extra"])
-    if s3_uri_groups:
-        for group_name, s3_uris in s3_uri_groups.items():
-            # NOTE: EXTRAS_UPLOADED_FILES_KEY is not safe to write to, as it may get stomped by other code paths
-            extra_name = f"{EXTRAS_UPLOADED_FILES_KEY}_{group_name}"
-            # NOTE: It is possible that there are pre-existing contents of this list that
-            #       will bump the list size over the MAX_SENTRY_LIST_SIZE. Ignoring this edge
-            #       as no one is expected to actually write to these at the moment of committing this.
-            extra[extra_name] = extra.get(extra_name, []) + list(s3_uris)
+
+    if is_log_inclusion_enabled():
+        exception = sys.exception()
+        if exception is None:
+            try:
+                raise Exception("this is an exception to get the current traceback")
+            except Exception as e:
+                exception = e
+
+        s3_uri_groups, callbacks = _ATTACHMENTS_UPLOADER.collect_external_attachments(
+            exception=exception, logs_folder=_get_log_folder_from_scope()
+        )
+
+        if s3_uri_groups:
+            for group_name, s3_uris in s3_uri_groups.items():
+                # NOTE: EXTRAS_UPLOADED_FILES_KEY is not safe to write to, as it may get stomped by other code paths
+                extra_name = f"{EXTRAS_UPLOADED_FILES_KEY}_{group_name}"
+                # NOTE: It is possible that there are pre-existing contents of this list that
+                #       will bump the list size over the MAX_SENTRY_LIST_SIZE. Ignoring this edge
+                #       as no one is expected to actually write to these at the moment of committing this.
+                extra[extra_name] = extra.get(extra_name, []) + list(s3_uris)
+    else:
+        callbacks = ()
 
     extra["platform"] = _get_platform_info()
     return event, hint, tuple(callbacks)
+
+
+def submit_manual_bug_report(
+    *,
+    title: str,
+    report: Mapping[str, Any],
+    include_logs: bool,
+    logs_folder: Path | None,
+) -> str | None:
+    """Synthesize and send a user-submitted bug report as a Sentry event.
+
+    Unlike automatic error reporting, this is an explicit user action: the event is tagged
+    ``MANUALLY_SUBMITTED_TAG`` so the automatic-reporting gate always lets it through, even when
+    automatic error reporting is turned off. It is not tied to an exception -- ``title`` becomes the
+    event message and ``report`` is attached as structured context.
+
+    When ``include_logs`` is set and a ``logs_folder`` is given, recent log files are uploaded via the
+    same S3-attachment mechanism as automatic errors (a no-op in environments without an S3 bucket).
+    No traceback is collected (a manual report has no meaningful one).
+
+    Returns the Sentry event id (a 32-char hex string the user can quote when following up), or None
+    if Sentry is not active or the event was dropped before sending.
+    """
+    client = sentry_sdk.get_client()
+    if not client.is_active():
+        logger.info("Sentry is not active; manual bug report was not sent")
+        return None
+
+    # Build ``extra`` as a local dict (also referenced by the event) so log-attachment URLs can be
+    # added without re-subscripting the loosely-typed Event TypedDict.
+    extra: dict[str, Any] = {"bug_report": dict(report)}
+    event: Event = {
+        "message": title,
+        "level": "info",
+        "tags": {MANUALLY_SUBMITTED_TAG: "true"},
+        "extra": extra,
+    }
+
+    if include_logs and logs_folder is not None:
+        # exception=None -> only log files are prepared (no synthesized traceback).
+        s3_uri_groups, callbacks = _ATTACHMENTS_UPLOADER.collect_external_attachments(
+            exception=None, logs_folder=logs_folder
+        )
+        for group_name, s3_uris in s3_uri_groups.items():
+            extra[f"{EXTRAS_UPLOADED_FILES_KEY}_{group_name}"] = list(s3_uris)
+        handler = get_sentry_event_handler()
+        if handler is not None:
+            handler.schedule_callbacks(callbacks)
+        else:
+            # No loguru handler (e.g. Sentry initialized without the event handler): run the uploads
+            # inline so the referenced S3 URLs resolve.
+            for callback in callbacks:
+                callback()
+
+    return sentry_sdk.capture_event(event)

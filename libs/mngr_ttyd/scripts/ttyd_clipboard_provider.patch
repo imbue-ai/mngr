@@ -1,0 +1,56 @@
+diff --git a/html/src/components/terminal/xterm/index.ts b/html/src/components/terminal/xterm/index.ts
+index b332154..57e00f9 100644
+--- a/html/src/components/terminal/xterm/index.ts
++++ b/html/src/components/terminal/xterm/index.ts
+@@ -2,7 +2,7 @@ import { bind } from 'decko';
+ import type { IDisposable, ITerminalOptions } from '@xterm/xterm';
+ import { Terminal } from '@xterm/xterm';
+ import { CanvasAddon } from '@xterm/addon-canvas';
+-import { ClipboardAddon } from '@xterm/addon-clipboard';
++import { ClipboardAddon, IClipboardProvider, ClipboardSelectionType } from '@xterm/addon-clipboard';
+ import { WebglAddon } from '@xterm/addon-webgl';
+ import { FitAddon } from '@xterm/addon-fit';
+ import { WebLinksAddon } from '@xterm/addon-web-links';
+@@ -67,6 +67,26 @@ export interface XtermOptions {
+     termOptions: ITerminalOptions;
+ }
+ 
++// tmux emits OSC 52 clipboard writes with an EMPTY selection field (`\e]52;;<base64>`),
++// but the stock BrowserClipboardProvider only honors the explicit `c` (SYSTEM)
++// target, so it silently drops every tmux copy. Treat an empty selection the same
++// as the system clipboard so plain mouse-drag copies inside tmux reach the OS clipboard.
++class TmuxAwareClipboardProvider implements IClipboardProvider {
++    private isSystemSelection(selection: ClipboardSelectionType): boolean {
++        return (selection as string) === '' || selection === ClipboardSelectionType.SYSTEM;
++    }
++
++    public async readText(selection: ClipboardSelectionType): Promise<string> {
++        if (!this.isSystemSelection(selection)) return '';
++        return navigator.clipboard.readText();
++    }
++
++    public async writeText(selection: ClipboardSelectionType, data: string): Promise<void> {
++        if (!this.isSystemSelection(selection)) return;
++        return navigator.clipboard.writeText(data);
++    }
++}
++
+ function toDisposable(f: () => void): IDisposable {
+     return { dispose: f };
+ }
+@@ -86,7 +106,14 @@ export class Xterm {
+     private terminal: Terminal;
+     private fitAddon = new FitAddon();
+     private overlayAddon = new OverlayAddon();
+-    private clipboardAddon = new ClipboardAddon();
++    // NOTE: addon-clipboard@0.1.0's runtime constructor is (base64?, provider?),
++    // even though its bundled .d.ts wrongly declares (provider?). Pass the custom
++    // provider as the SECOND argument (the first defaults to the built-in Base64)
++    // and cast to satisfy the stale typings.
++    private clipboardAddon = new (ClipboardAddon as unknown as new (
++        base64: undefined,
++        provider: IClipboardProvider
++    ) => ClipboardAddon)(undefined, new TmuxAwareClipboardProvider());
+     private webLinksAddon = new WebLinksAddon();
+     private webglAddon?: WebglAddon;
+     private canvasAddon?: CanvasAddon;

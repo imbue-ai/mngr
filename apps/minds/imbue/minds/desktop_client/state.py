@@ -34,14 +34,15 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
-from imbue.minds.desktop_client.onboarding import OnboardingApplier
 from imbue.minds.desktop_client.region_preference import GeoLocationCache
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
+from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRegistryInterface
 from imbue.minds.primitives import OutputFormat
-from imbue.minds.telegram.setup import TelegramSetupOrchestrator
+from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
 _STATE_KEY: Final[str] = "minds_desktop_client_state"
@@ -65,14 +66,8 @@ class DesktopClientState(MutableModel):
     agent_creator: AgentCreator | None = Field(
         default=None, frozen=True, description="In-flight agent creation manager"
     )
-    onboarding_applier: OnboardingApplier | None = Field(
-        default=None, frozen=True, description="Applies onboarding answers on a background thread"
-    )
     imbue_cloud_cli: ImbueCloudCli | None = Field(
         default=None, frozen=True, description="imbue_cloud plugin CLI wrapper"
-    )
-    telegram_orchestrator: TelegramSetupOrchestrator | None = Field(
-        default=None, frozen=True, description="Telegram bot setup orchestrator"
     )
     notification_dispatcher: NotificationDispatcher | None = Field(
         default=None, frozen=True, description="OS notification dispatcher"
@@ -131,6 +126,17 @@ class DesktopClientState(MutableModel):
     )
     shutdown_event: threading.Event = Field(
         default_factory=threading.Event, description="Cross-thread flag SSE handlers poll to exit on shutdown"
+    )
+    workspace_operation_registry: WorkspaceOperationRegistryInterface = Field(
+        default_factory=InMemoryWorkspaceOperationRegistry,
+        description="In-memory registry tracking in-process workspace operations (restart) + their logs",
+    )
+    ssh_tunnel_manager: SSHTunnelManager = Field(
+        default_factory=SSHTunnelManager,
+        description=(
+            "Reverse-SSH-tunnel manager owning hub-brokered tunnels into calling workspaces "
+            "(local cross-workspace SSH access). Idle until first use; torn down on shutdown."
+        ),
     )
 
 

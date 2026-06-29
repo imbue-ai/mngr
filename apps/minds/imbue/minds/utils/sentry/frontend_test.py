@@ -1,8 +1,8 @@
 import pytest
 
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
-from imbue.minds.utils.sentry.core import MINDS_SENTRY_ENABLED_ENV_VAR
 from imbue.minds.utils.sentry.frontend import FrontendSentryConfig
+from imbue.minds.utils.sentry.frontend import frontend_sentry_browser_payload
 from imbue.minds.utils.sentry.frontend import resolve_frontend_sentry_config
 
 
@@ -44,18 +44,19 @@ def test_to_browser_payload_carries_dsn_environment_release_and_git_sha() -> Non
     }
 
 
-def test_resolve_is_disabled_when_opt_in_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(MINDS_SENTRY_ENABLED_ENV_VAR, raising=False)
-    config = resolve_frontend_sentry_config()
-    assert config.is_enabled is False
+def test_resolve_is_disabled_when_user_setting_off() -> None:
+    assert resolve_frontend_sentry_config(is_error_reporting_enabled=False).is_enabled is False
 
 
-def test_resolve_tracks_opt_in_and_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(MINDS_SENTRY_ENABLED_ENV_VAR, "1")
-    monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "minds-staging")
-    config = resolve_frontend_sentry_config()
-    assert config.is_enabled is True
-    assert config.environment == "staging"
+def test_resolve_is_enabled_when_user_setting_on() -> None:
+    assert resolve_frontend_sentry_config(is_error_reporting_enabled=True).is_enabled is True
+
+
+def test_browser_payload_follows_user_setting() -> None:
+    # The user's report_unexpected_errors setting alone decides whether the page emits a Sentry
+    # bootstrap (the env DSNs are real, so the payload is present iff reporting is enabled).
+    assert frontend_sentry_browser_payload(is_error_reporting_enabled=False) is None
+    assert frontend_sentry_browser_payload(is_error_reporting_enabled=True) is not None
 
 
 @pytest.mark.parametrize(
@@ -70,4 +71,4 @@ def test_resolve_environment_follows_activated_root_name(
     monkeypatch: pytest.MonkeyPatch, root_name: str, expected_environment: str
 ) -> None:
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, root_name)
-    assert resolve_frontend_sentry_config().environment == expected_environment
+    assert resolve_frontend_sentry_config(is_error_reporting_enabled=True).environment == expected_environment

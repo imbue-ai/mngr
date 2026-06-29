@@ -73,7 +73,7 @@ If you want to run against prod / staging instead of a personal dev env, use `ev
 1. Verifies a minds env is activated in the shell (refuses with a helpful error if not).
 2. Verifies the FCT worktree exists at `.external_worktrees/forever-claude-template/` and bails with a helpful error if not.
 3. Rsyncs the live mngr working tree into the FCT worktree's `vendor/mngr/` using the same exclusions as the pool-bake's `--mngr-source` path (`.git`, `__pycache__`, `.venv`, `node_modules`, etc.). Uncommitted changes are included; nothing is committed in the FCT worktree.
-4. Launches Electron with the right `MINDS_WORKSPACE_*` env vars so the create-form auto-fills "repository", "name", and "branch".
+4. Launches Electron with the right `MINDS_WORKSPACE_*` env vars so the create-form auto-fills "repository" and "branch". The workspace name is not prefilled -- the form generates a `mind-N` name unless you type one into its advanced "Name" field.
 
 ## Iterating on a running agent
 
@@ -111,8 +111,8 @@ The port is randomly assigned by Docker per agent. The container name is `<MNGR_
 
 ```bash
 eval "$(uv run minds env activate dev-<your-user>)"   # so we know MNGR_PREFIX
-docker ps --format '{{.Names}} {{.Ports}}' | grep "${MNGR_PREFIX}mindtest"
-# e.g.  minds-dev-<your-user>-mindtest-host 0.0.0.0:32772->22/tcp
+docker ps --format '{{.Names}} {{.Ports}}' | grep "${MNGR_PREFIX}mind-"
+# e.g.  minds-dev-<your-user>-mind-1-host 0.0.0.0:32772->22/tcp
 ```
 
 The SSH key for a minds Docker agent lives under the activated env's `MNGR_HOST_DIR`:
@@ -159,7 +159,6 @@ Slice bakes (`minds pool create`, `just bake-slice-{dev,prod}`) read secrets fro
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `MINDS_WORKSPACE_GIT_URL` | Template repo path/URL for the create-form | `<repo>/.external_worktrees/forever-claude-template/` if it exists, else `~/project/forever-claude-template` |
-| `MINDS_WORKSPACE_NAME` | Default agent name in the create-form | `mindtest` (override with `agent_name=...`) |
 | `MINDS_WORKSPACE_BRANCH` | Default git branch for the template | The FCT path's current branch (matches your mngr branch when you set up the worktree on a parallel-named branch) |
 
 The desktop client reads these in `apps/minds/imbue/minds/desktop_client/templates.py`.
@@ -238,7 +237,6 @@ TEMPLATE_BRANCH=$(cd .external_worktrees/forever-claude-template && git branch -
   source .env
   set +a
   export MINDS_WORKSPACE_GIT_URL="$(pwd)/.external_worktrees/forever-claude-template"
-  export MINDS_WORKSPACE_NAME="mindtest"
   export MINDS_WORKSPACE_BRANCH="$TEMPLATE_BRANCH"
   cd apps/minds && pnpm start
 )

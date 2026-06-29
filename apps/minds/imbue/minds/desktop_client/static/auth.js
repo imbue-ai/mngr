@@ -1,6 +1,53 @@
 // Sign-up / sign-in tab handling + OAuth polling. Tab switches via
 // data-show-tab, OAuth via data-oauth. Keeps markup JS-free.
 (function () {
+  // Where to land after a successful sign-in. When the page carries a
+  // ``return_to`` query param (e.g. the create page sent a signed-out user
+  // here to enable the remote preset), forward it to /post-login so the
+  // server returns them there; /post-login re-validates it as a safe path.
+  function postLoginUrl() {
+    var returnTo = new URLSearchParams(window.location.search).get('return_to');
+    return returnTo ? '/post-login?return_to=' + encodeURIComponent(returnTo) : '/post-login';
+  }
+
+  // How to perform a post-auth navigation. The standalone auth page just
+  // navigates this page (window.location). When this form is hosted in the
+  // create screen's sign-in modal -- its own WebContentsView in the desktop
+  // client's overlay layer -- the host page sets ``window.MINDS_AUTH_NAV`` to
+  // route the navigation to the content view *behind* the modal and dismiss the
+  // overlay; reloading this page would only reload the overlay.
+  function authNavigate(url) {
+    if (typeof window.MINDS_AUTH_NAV === 'function') window.MINDS_AUTH_NAV(url);
+    else window.location.href = url;
+  }
+
+  // What to do after a successful sign-in / OAuth. The sign-in modal sets
+  // ``window.MINDS_AUTH_RETURN_TO`` to the create screen so the user lands back
+  // there signed in (and clicks "Create" again); the standalone auth page has
+  // no such hint and goes through /post-login (which may carry its own
+  // ?return_to=).
+  function onAuthSuccess() {
+    authNavigate(window.MINDS_AUTH_RETURN_TO || postLoginUrl());
+  }
+
+  // Where to return after an email-verification round-trip (sign-up, or
+  // sign-in of an unverified account). The standalone auth page honors its
+  // ``?return_to=`` query param; the sign-in modal sets
+  // ``window.MINDS_AUTH_RETURN_TO`` (e.g. /create) so the user lands back in
+  // the create flow rather than on the accounts page. The path is carried
+  // through /auth/check-email -> /post-login, which re-validates it as a safe
+  // path.
+  function verificationReturnTo() {
+    var q = new URLSearchParams(window.location.search).get('return_to');
+    if (q) return q;
+    return window.MINDS_AUTH_RETURN_TO || null;
+  }
+
+  function goToCheckEmail() {
+    var rt = verificationReturnTo();
+    authNavigate('/auth/check-email' + (rt ? '?return_to=' + encodeURIComponent(rt) : ''));
+  }
+
   function showTab(tab) {
     document.getElementById('signup-tab').classList.toggle('hidden', tab !== 'signup');
     document.getElementById('signin-tab').classList.toggle('hidden', tab !== 'signin');
@@ -29,7 +76,7 @@
       });
       var data = await res.json();
       if (data.status === 'OK') {
-        window.location.href = '/auth/check-email';
+        goToCheckEmail();
       } else if (data.status === 'EMAIL_ALREADY_EXISTS' || data.status === 'FIELD_ERROR') {
         showError('signup', data.message);
       } else {
@@ -60,8 +107,8 @@
       });
       var data = await res.json();
       if (data.status === 'OK') {
-        if (data.needsEmailVerification) window.location.href = '/auth/check-email';
-        else window.location.href = '/post-login';
+        if (data.needsEmailVerification) goToCheckEmail();
+        else onAuthSuccess();
       } else if (data.status === 'WRONG_CREDENTIALS') {
         showError('signin', data.message);
       } else {
@@ -135,7 +182,7 @@
         if (s.state === 'done') {
           clearInterval(oauthPollInterval);
           oauthPollInterval = null;
-          window.location.href = '/post-login';
+          onAuthSuccess();
           return;
         }
         if (s.state === 'error') {

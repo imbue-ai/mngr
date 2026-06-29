@@ -22,6 +22,15 @@ _BUILD_TIMEOUT = 480.0
 @pytest.mark.rsync
 @pytest.mark.timeout(600)
 def test_create_docker_start_args(e2e: E2eSession) -> None:
+    """Tutorial block:
+        # pass Docker-specific start args (eg, GPU access) "start args" are the args to "docker run", see "docker run --help" for all of them
+        mngr create my-task --provider docker -s "--gpus all"
+
+    Scope: `-s` forwards Docker start args through to `docker run`. The canonical
+    `--gpus all` example needs the nvidia-container-runtime, which the offload
+    sandbox lacks, so the test substitutes the portable `--hostname=...` arg and
+    reads it back via `mngr exec my-task hostname` to prove the arg took effect.
+    """
     # `--gpus all` is the canonical tutorial example, but the test itself
     # exercises start-args forwarding with a flag that does not require a
     # GPU to be present in the sandbox. Modal offload sandboxes do not ship
@@ -32,10 +41,6 @@ def test_create_docker_start_args(e2e: E2eSession) -> None:
     # through to `docker run`), with the added benefit that the post-create
     # `mngr exec my-task hostname` call below can read back the value and
     # confirm the arg actually took effect.
-    e2e.write_tutorial_block("""
-        # pass Docker-specific start args (eg, GPU access) "start args" are the args to "docker run", see "docker run --help" for all of them
-        mngr create my-task --provider docker -s "--gpus all"
-    """)
     result = e2e.run(
         "mngr create my-task --provider docker --type command"
         ' -s "--hostname=mngr-start-arg-test" --no-connect --no-ensure-clean -- sleep 100605',
@@ -58,10 +63,15 @@ def test_create_docker_start_args(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(300)
 def test_create_docker_default_image(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # run an agent in a local Docker container. Will default to mngr's default image if you don't specify one.
         mngr create my-task --provider docker
-    """)
+
+    Scope: `mngr create --provider docker` with no image runs the agent in a
+    local Docker container using mngr's default image (debian:bookworm-slim). The
+    agent actually lands on the docker provider and the container's
+    /etc/os-release reports bookworm.
+    """
     # The tutorial relies on a configured default agent type ([commands.create]
     # type in user settings); the isolated e2e profile has none, so make the
     # type explicit with `--type command` and give it a long sleep as the agent
@@ -100,11 +110,16 @@ def test_create_docker_default_image(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(600)
 def test_create_docker_custom_dockerfile(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # use a custom Dockerfile for the container image. One strange thing is that you probably want to pass "-b ." because
         # that's just how docker works (it takes the context dir as the last arg)
         mngr create my-task --provider docker -b file=./Dockerfile.dev -b .
-    """)
+
+    Scope: `-b file=./Dockerfile.dev -b .` builds the container image from the
+    given custom Dockerfile, with the trailing `.` as the build context dir. A
+    marker file baked only into that Dockerfile is readable inside the container,
+    proving the custom image was used rather than mngr's default.
+    """
     # The custom base image must provide the packages mngr installs on every
     # host (openssh-server, tmux, python3, rsync). `alpine` lacks apt-get, so
     # the runtime package install would fail; `debian:bookworm-slim` provides
@@ -151,12 +166,16 @@ def test_create_docker_custom_dockerfile(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(300)
 def test_create_docker_volume_start_arg(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # include additional volumes for data persistence and sharing
         mngr create my-task --provider docker -s "-v /host/data:/container/data"
         # note that all docker hosts have a default volume mounted, which is used so that the host and agent information can be
         # available even when a given "host" (container) is stopped
-    """)
+
+    Scope: `-s "-v src:dst"` forwards an extra bind-mount volume through to
+    `docker run`. A sentinel file written on the host side of the mount is
+    readable from inside the container at the mount target.
+    """
     expect(e2e.run("mkdir -p /tmp/mngr-test-data", comment="ensure host volume source exists")).to_succeed()
     # Drop a sentinel file on the host side of the volume so we can confirm the
     # bind mount actually exposes the host directory inside the container.
@@ -193,10 +212,14 @@ def test_create_docker_volume_start_arg(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(300)
 def test_create_docker_cpus_start_arg(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # set resource limits via start args
         mngr create my-task --provider docker -s --cpus=2
-    """)
+
+    Scope: `-s --cpus=2` forwards a resource limit through to `docker run`. The
+    limit is actually applied inside the container: its cgroup CPU quota reflects
+    2 CPUs (cpu.max / cpu.cfs_quota_us contains 200000).
+    """
     # The tutorial block omits an agent type because it assumes the user has
     # configured a default (via `mngr extras config`). The e2e environment has
     # no default, so we pass `--type command -- sleep ...` as a stand-in, the
@@ -230,10 +253,13 @@ def test_create_docker_cpus_start_arg(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(300)
 def test_list_provider_docker(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # list Docker agents
         mngr list --provider docker
-    """)
+
+    Scope: `mngr list --provider docker` lists agents running on the docker
+    provider; a just-created docker agent appears in the output.
+    """
     # Create a Docker agent first so the listing has something real to show. This also
     # makes the test exercise the docker provider end to end: `mngr list` alone reads the
     # state volume via the docker SDK in a subprocess, which the @pytest.mark.docker CLI
@@ -258,11 +284,17 @@ def test_list_provider_docker(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(600)
 def test_create_docker_start_args_overview(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # some providers (like docker), take "start" args as well as build args:
         mngr create my-task --provider docker -s "--gpus all"
         # these args are passed to "docker run", whereas the build args are passed to "docker build".
-    """)
+
+    Scope: the provider-overview framing of `-s` start-args forwarding (start
+    args go to `docker run`, build args to `docker build`). As in
+    test_create_docker_start_args, the GPU example is swapped for a portable
+    `--hostname=...` arg, read back via `mngr exec my-task hostname` to prove the
+    arg was forwarded.
+    """
     # Same substitution as test_create_docker_start_args: `--gpus all` requires
     # a real GPU runtime which the offload sandbox lacks, so use a portable
     # hostname-style arg that still proves -s is forwarded to `docker run`.
@@ -293,10 +325,14 @@ def test_create_docker_start_args_overview(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(600)
 def test_destroy_all_docker_agents(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
+    """Tutorial block:
         # destroy all docker agents (be careful!)  Useful for cleaning up while prototyping
         mngr list --include 'host.provider == "docker"' --ids | mngr destroy -f -
-    """)
+
+    Scope: piping the ids from `mngr list --include 'host.provider == "docker"'
+    --ids` into `mngr destroy -f -` destroys every docker agent. A docker agent
+    present in the listing beforehand is gone from it afterward.
+    """
     # Create a real Docker agent so the filter+stdin destroy actually has
     # something to remove. Without this, the command would run against an empty
     # agent list and prove nothing about whether destroy works.

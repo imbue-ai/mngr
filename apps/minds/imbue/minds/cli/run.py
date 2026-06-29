@@ -58,9 +58,11 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.laptop_agent_types_seed import seed_laptop_agent_types_for_minds
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
+from imbue.minds.desktop_client.latchkey.handlers.accounts import AccountsPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.handlers.file_sharing import FileSharingGrantHandler
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
+from imbue.minds.desktop_client.latchkey.handlers.workspace import WorkspacePermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
 from imbue.minds.desktop_client.latchkey_auto_register import LatchkeyAutoRegister
 from imbue.minds.desktop_client.minds_config import MindsConfig
@@ -76,12 +78,12 @@ from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.system_interface_health import should_enroll_suspect_for_backend_failure
+from imbue.minds.envs.docker_cleanup import DockerCleanupError
+from imbue.minds.envs.docker_cleanup import start_active_env_state_container
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
-from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.output import emit_event
-from imbue.minds.utils.sentry.core import is_sentry_enabled
 from imbue.minds.utils.sentry.core import resolve_sentry_environment
 from imbue.minds.utils.sentry.core import setup_sentry
 from imbue.mngr.primitives import AgentId
@@ -181,36 +183,27 @@ def run(
     # Initialize Sentry for the minds backend process. ``setup_logging`` already ran
     # in the CLI group callback, so the loguru sinks Sentry layers on top of exist.
     #
-    # Sentry is off by default and only initialized when MINDS_SENTRY_ENABLED is
-    # set: until we're ready to rely on it, the backend sends nothing to Sentry
-    # unless explicitly opted in.
+    # Sentry always initializes, but what it actually sends is gated live by per-machine user
+    # settings (stored in MindsConfig, surfaced via the first-launch consent screen and account
+    # settings): ``report_unexpected_errors`` gates automatic error sends, and ``include_error_logs``
+    # gates log/traceback attachments. Both are read live, so toggling a setting takes effect without
+    # restarting. Manual bug reports are always sent regardless of ``report_unexpected_errors``.
     #
-    # When enabled, the activated minds env (from `minds env activate`) selects the
-    # Sentry DSN and, for production/staging, which S3 attachment bucket: production
-    # and staging each get their own, while every other env (dev-*, ci-*, or no
-    # activated env) reports to the dev project. We treat "not activated" as dev so
-    # an un-activated `minds run` never accidentally reports to the production
-    # project. S3 attachment uploads are additionally opt-in via
-    # MINDS_SENTRY_S3_UPLOADS (default off, even in production/staging) since they
-    # can carry potentially-sensitive data; development never uploads regardless.
-    # The release id (desktop app version) and git sha come from the Electron
-    # launcher via env vars, falling back to the in-repo package.json / "unknown"
-    # for bare source runs (see imbue.minds.build_info).
-    if is_sentry_enabled():
-        is_sentry_s3_upload_enabled = os.environ.get("MINDS_SENTRY_S3_UPLOADS", "").strip().lower() in (
-            "1",
-            "true",
-            "yes",
-        )
-        setup_sentry(
-            environment=resolve_sentry_environment(),
-            release_id=resolve_release_id(),
-            git_commit_sha=resolve_git_sha(),
-            log_folder=paths.log_dir,
-            is_s3_upload_enabled=is_sentry_s3_upload_enabled,
-        )
-    else:
-        logger.info("Sentry is disabled (set MINDS_SENTRY_ENABLED=1 to enable error reporting).")
+    # The activated minds env (from `minds env activate`) selects the Sentry DSN and, for
+    # production/staging, which S3 attachment bucket: production and staging each get their own, while
+    # every other env (dev-*, ci-*, or no activated env) reports to the dev project. We treat "not
+    # activated" as dev so an un-activated `minds run` never accidentally reports to the production
+    # project; development never uploads attachments regardless. The release id (desktop app version)
+    # and git sha come from the Electron launcher via env vars, falling back to the in-repo
+    # package.json / "unknown" for bare source runs (see imbue.minds.build_info).
+    setup_sentry(
+        environment=resolve_sentry_environment(),
+        release_id=resolve_release_id(),
+        git_commit_sha=resolve_git_sha(),
+        log_folder=paths.log_dir,
+        is_error_reporting_enabled=minds_config.get_report_unexpected_errors,
+        is_log_inclusion_enabled=minds_config.get_include_error_logs,
+    )
     client_config_path = config_file
     client_env_config = load_client_config(client_config_path)
     connector_url_str = str(client_env_config.connector_url).rstrip("/")
@@ -249,6 +242,27 @@ def run(
 
     root_concurrency_group = ConcurrencyGroup(name="minds-run")
     root_concurrency_group.__enter__()
+
+    # Resolved up front: needed both to restart the docker state container just
+    # below and by the ``mngr forward`` consumer further down.
+    mngr_host_dir_str = os.environ.get("MNGR_HOST_DIR")
+    mngr_host_dir = Path(mngr_host_dir_str).expanduser() if mngr_host_dir_str else (Path.home() / ".mngr")
+
+    # Restart this env's mngr docker *state* container before the discovery
+    # producer spawns. The quit flow stops it (``stop_active_env_state_container``)
+    # so no stray container is left running; but if it's still stopped when
+    # discovery polls, the docker provider can't read host records and reports
+    # zero hosts -- which blanks the restored windows and the landing page on the
+    # first snapshot. Bring it back up first. Best-effort: a no-op without docker,
+    # and a start failure must not block startup (discovery then degrades to
+    # ProviderUnavailable + retain-last-known rather than a misleading empty).
+    try:
+        start_active_env_state_container(
+            mngr_host_dir=mngr_host_dir,
+            parent_concurrency_group=root_concurrency_group,
+        )
+    except DockerCleanupError as exc:
+        logger.warning("Could not start the Docker state container at launch: {}", exc)
 
     # Spawn (or adopt) a detached ``mngr latchkey forward`` supervisor.
     # The supervisor owns the shared latchkey gateway + per-agent reverse
@@ -324,11 +338,20 @@ def run(
         gateway_client=gateway_client,
         mngr_message_sender=mngr_message_sender,
     )
+    workspace_permission_handler = WorkspacePermissionGrantHandler(
+        data_dir=data_directory,
+        gateway_client=gateway_client,
+        mngr_message_sender=mngr_message_sender,
+    )
+    accounts_permission_handler = AccountsPermissionGrantHandler(
+        data_dir=data_directory,
+        gateway_client=gateway_client,
+        mngr_message_sender=mngr_message_sender,
+    )
     imbue_cloud_cli = ImbueCloudCli(
         parent_concurrency_group=root_concurrency_group,
         connector_url=client_env_config.connector_url,
     )
-    telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
     session_store = MultiAccountSessionStore(data_dir=data_directory, cli=imbue_cloud_cli)
     response_events = load_response_events(data_directory)
     request_inbox = RequestInbox()
@@ -341,8 +364,6 @@ def run(
     # Minds API: agents reach it through the latchkey gateway's bundled
     # ``minds-api-proxy`` extension instead, so no ``--reverse`` specs
     # are needed here.
-    mngr_host_dir_str = os.environ.get("MNGR_HOST_DIR")
-    mngr_host_dir = Path(mngr_host_dir_str).expanduser() if mngr_host_dir_str else (Path.home() / ".mngr")
     # `mngr forward` and every other laptop-side mngr invocation (including the
     # bundled mngr CLI when run from a Terminal under this MNGR_HOST_DIR) starts
     # with cwd=$HOME, so the FCT workspace's `[agent_types.main]` block in
@@ -377,12 +398,13 @@ def run(
     # consumer's failure callback (registered before consumer.start() below;
     # otherwise early failures would dispatch against an empty list).
     system_interface_health_tracker = SystemInterfaceHealthTracker()
+
     # The plugin reports every non-2xx response; minds decides which ones count.
     # Only connection-level failures and infrastructure 5xx enroll a suspect --
-    # application errors are left for the background probe to adjudicate.
+    # application errors (and UNRESOLVED, a routeless warm-up) are left alone.
     consumer.add_on_system_interface_backend_failure_callback(
-        lambda agent_id, _reason, status_code: system_interface_health_tracker.record_failure(agent_id)
-        if should_enroll_suspect_for_backend_failure(status_code)
+        lambda agent_id, reason, status_code: system_interface_health_tracker.record_failure(agent_id)
+        if should_enroll_suspect_for_backend_failure(reason, status_code)
         else None
     )
 
@@ -456,7 +478,6 @@ def run(
         http_client=None,
         agent_creator=agent_creator,
         imbue_cloud_cli=imbue_cloud_cli,
-        telegram_orchestrator=telegram_orchestrator,
         notification_dispatcher=notification_dispatcher,
         paths=paths,
         envelope_stream_consumer=consumer,
@@ -464,7 +485,12 @@ def run(
         minds_config=minds_config,
         client_env_config=client_env_config,
         request_inbox=request_inbox,
-        request_event_handlers=(latchkey_permission_handler, file_sharing_handler),
+        request_event_handlers=(
+            latchkey_permission_handler,
+            file_sharing_handler,
+            workspace_permission_handler,
+            accounts_permission_handler,
+        ),
         server_port=port,
         mngr_forward_port=mngr_forward_port,
         mngr_forward_preauth_cookie=preauth_cookie,

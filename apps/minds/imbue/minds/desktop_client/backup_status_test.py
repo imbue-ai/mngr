@@ -19,6 +19,7 @@ from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.backup_status import BackupStatusState
 from imbue.minds.desktop_client.backup_status import compute_backup_status_for_workspace
 from imbue.minds.desktop_client.backup_status import compute_backup_status_for_workspaces
+from imbue.minds.desktop_client.backup_status import is_workspace_backing_up
 from imbue.minds.desktop_client.restic_cli import _get_restic_binary
 from imbue.mngr.primitives import AgentId
 
@@ -37,6 +38,10 @@ def _now() -> datetime:
 def test_no_canonical_env_is_not_configured(tmp_path: Path) -> None:
     status = compute_backup_status_for_workspace(_paths(tmp_path), AgentId.generate(), now=_now())
     assert status.state is BackupStatusState.NOT_CONFIGURED
+
+
+def test_is_workspace_backing_up_is_false_without_canonical_env(tmp_path: Path) -> None:
+    assert is_workspace_backing_up(_paths(tmp_path), AgentId.generate(), now=_now()) is False
 
 
 def test_malformed_env_without_repository_is_unknown(tmp_path: Path) -> None:
@@ -88,6 +93,9 @@ def test_status_never_then_backed_up_against_local_repo(tmp_path: Path) -> None:
     before = compute_backup_status_for_workspace(paths, agent_id, now=_now())
     assert before.state is BackupStatusState.NEVER
     assert before.last_success_at is None
+
+    # A configured repo with no backup running -> not backing up.
+    assert is_workspace_backing_up(paths, agent_id, now=_now()) is False
 
     # After a successful backup -> BACKED_UP with a timestamp.
     source = tmp_path / "data.txt"

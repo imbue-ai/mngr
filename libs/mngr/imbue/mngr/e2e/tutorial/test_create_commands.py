@@ -16,14 +16,19 @@ from imbue.skitwright.expect import expect
 # followed by `mngr exec` and `mngr list` routinely exceeds 10s.
 @pytest.mark.timeout(120)
 def test_create_command_agent_runs_post_dash_command_in_agent(e2e: E2eSession) -> None:
+    """Tutorial block:
+        # to run an arbitrary shell command, use the built-in `command` agent type
+        # and put the command (and its args) after `--`:
+        mngr create my-task --type command -- python my_script.py
+        # remember that the arguments to the "agent" (or command) come after the `--` separator
+
+    Scope: `--type command` with a post-`--` command runs that exact shell
+    command as the agent body. The command is live inside the agent (visible via
+    `mngr exec ... ps`) and the agent's `command` field in `mngr list --format
+    json` equals the verbatim post-`--` string.
+    """
     # Use a locally-bound name since we assert on the exact command string below.
     expected_command = "sleep 123456789"
-    e2e.write_tutorial_block("""
-    # to run an arbitrary shell command, use the built-in `command` agent type
-    # and put the command (and its args) after `--`:
-    mngr create my-task --type command -- python my_script.py
-    # remember that the arguments to the "agent" (or command) come after the `--` separator
-    """)
     expect(
         e2e.run(
             f"mngr create my-task --type command --no-ensure-clean -- {expected_command}",
@@ -57,12 +62,18 @@ def test_create_command_agent_runs_post_dash_command_in_agent(e2e: E2eSession) -
 @pytest.mark.rsync
 @pytest.mark.timeout(120)
 def test_create_with_idle_mode_and_timeout(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # this enables some pretty interesting use cases, like running servers or other programs (besides AI agents)
-    # this makes debugging easy--you can snapshot when a task is complete, then later connect to that exact machine state:
-    mngr create my-task --type command --idle-mode run --idle-timeout 60 -- python my_long_running_script.py extra-args
-    # see "RUNNING NON-AGENT PROCESSES" below for more details
-    """)
+    """Tutorial block:
+        # this enables some pretty interesting use cases, like running servers or other programs (besides AI agents)
+        # this makes debugging easy--you can snapshot when a task is complete, then later connect to that exact machine state:
+        mngr create my-task --type command --idle-mode run --idle-timeout 60 -- python my_long_running_script.py extra-args
+        # see "RUNNING NON-AGENT PROCESSES" below for more details
+
+    Scope: `--idle-mode run` and `--idle-timeout 60` on a command agent take
+    effect on the created host (requires a remote provider; here Modal). `mngr
+    list --format json` reflects the concrete settings: idle_mode RUN,
+    idle_timeout_seconds 60, type command, the verbatim post-`--` command, and
+    the modal provider.
+    """
     # Idle timeout requires a remote provider (local provider rejects it).
     # Use Modal to exercise the real idle timeout path. The `--idle-*` and
     # `--no-connect` options must precede `--`, otherwise they are consumed
@@ -117,11 +128,16 @@ def test_create_with_idle_mode_and_timeout(e2e: E2eSession) -> None:
 # system_interface's observe lifecycle, not here.
 @pytest.mark.flaky
 def test_create_with_extra_tmux_windows(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # alternatively, you can simply add extra tmux windows that run alongside your agent:
-    mngr create my-task -w server="npm run dev" -w logs="tail -f app.log"
-    # that command automatically starts two tmux windows named "server" and "logs" that run those commands (in addition to the main window that runs the agent)
-    """)
+    """Tutorial block:
+        # alternatively, you can simply add extra tmux windows that run alongside your agent:
+        mngr create my-task -w server="npm run dev" -w logs="tail -f app.log"
+        # that command automatically starts two tmux windows named "server" and "logs" that run those commands (in addition to the main window that runs the agent)
+
+    Scope: each `-w NAME="cmd"` adds a tmux window named NAME that runs `cmd`
+    alongside the agent's own main window. After create, the session has windows
+    named "server" and "logs" plus a main agent window (so more than two
+    windows), and both window commands are live processes on the host.
+    """
     # Use the tutorial's exact window names ("server" and "logs"). The agent
     # bodies are `sleep` stand-ins for `npm run dev` / `tail -f app.log` so the
     # commands don't depend on tools that aren't present in the test sandbox.
@@ -174,12 +190,16 @@ def test_create_with_extra_tmux_windows(e2e: E2eSession) -> None:
 # followed by `mngr list` routinely exceeds 10s.
 @pytest.mark.timeout(120)
 def test_create_with_no_ensure_clean(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # by default, mngr aborts the create command if the working tree has uncommitted changes. You can avoid this by doing:
-    mngr create my-task --no-ensure-clean
-    # this is particularly useful when, for example, you are in the middle of a merge conflict and you just want the agent to finish it off
-    # it should probably be avoided in general, because it makes it more difficult to merge work later.
-    """)
+    """Tutorial block:
+        # by default, mngr aborts the create command if the working tree has uncommitted changes. You can avoid this by doing:
+        mngr create my-task --no-ensure-clean
+        # this is particularly useful when, for example, you are in the middle of a merge conflict and you just want the agent to finish it off
+        # it should probably be avoided in general, because it makes it more difficult to merge work later.
+
+    Scope: the happy path of the block. With a dirty working tree (an added but
+    uncommitted file), `--no-ensure-clean` lets `mngr create` succeed anyway and
+    the agent appears in `mngr list --format json`.
+    """
     # Make the working tree dirty so --no-ensure-clean is actually needed
     e2e.run("touch untracked-file.txt && git add untracked-file.txt", comment="Dirty the working tree")
 
@@ -206,12 +226,18 @@ def test_create_with_no_ensure_clean(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.timeout(120)
 def test_create_aborts_on_dirty_tree_by_default(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # by default, mngr aborts the create command if the working tree has uncommitted changes. You can avoid this by doing:
-    mngr create my-task --no-ensure-clean
-    # this is particularly useful when, for example, you are in the middle of a merge conflict and you just want the agent to finish it off
-    # it should probably be avoided in general, because it makes it more difficult to merge work later.
-    """)
+    """Tutorial block:
+        # by default, mngr aborts the create command if the working tree has uncommitted changes. You can avoid this by doing:
+        mngr create my-task --no-ensure-clean
+        # this is particularly useful when, for example, you are in the middle of a merge conflict and you just want the agent to finish it off
+        # it should probably be avoided in general, because it makes it more difficult to merge work later.
+
+    Scope: the default behavior the block describes (counterpart to
+    test_create_with_no_ensure_clean). Without `--no-ensure-clean`, a dirty
+    working tree makes `mngr create` abort with a non-zero exit before any
+    host/tmux/rsync work; stderr explains the cause ("uncommitted changes") and
+    points at the `--no-ensure-clean` escape hatch, and no agent is created.
+    """
     # Dirty the working tree so the default ensure-clean check has something to trip on.
     e2e.run("touch untracked-file.txt && git add untracked-file.txt", comment="Dirty the working tree")
 
@@ -242,10 +268,15 @@ def test_create_aborts_on_dirty_tree_by_default(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_create_with_connect_command(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # you can use a custom connect command instead of the default (eg, useful for, say, connecting in a new iterm window instead of the current one)
-    mngr create my-task --connect-command "my_script.sh"
-    """)
+    """Tutorial block:
+        # you can use a custom connect command instead of the default (eg, useful for, say, connecting in a new iterm window instead of the current one)
+        mngr create my-task --connect-command "my_script.sh"
+
+    Scope: `--connect-command` replaces the default connect step with the given
+    command, which mngr actually runs with the agent's environment populated.
+    The custom command (an `echo` of $MNGR_AGENT_NAME) runs and sees the agent
+    name, and the agent is created and listed.
+    """
     # Create with a custom connect command that echoes env vars set by mngr.
     # Single quotes around the connect command prevent the outer shell from
     # expanding $MNGR_AGENT_NAME; it is expanded by the inner shell that mngr
@@ -283,10 +314,15 @@ def test_create_with_connect_command(e2e: E2eSession) -> None:
 # too tight; give it the same headroom as test_create_with_idle_mode_and_timeout.
 @pytest.mark.timeout(120)
 def test_create_with_message(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # you can send a message when starting the agent (great for scripting):
-    mngr create my-task --no-connect --message "Do the thing"
-    """)
+    """Tutorial block:
+        # you can send a message when starting the agent (great for scripting):
+        mngr create my-task --no-connect --message "Do the thing"
+
+    Scope: `--message` sends an initial message to the agent at launch. The
+    create reports "Sending initial message", the agent is created and listed,
+    and the message text is actually delivered into the agent's tmux pane (not
+    merely logged).
+    """
     create_result = e2e.run(
         'mngr create my-task --type command --no-ensure-clean --no-connect --message "Do the thing" -- sleep 100081',
         comment="you can send a message when starting the agent (great for scripting)",

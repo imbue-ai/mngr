@@ -155,12 +155,22 @@ def test_spawn_detached_latchkey_ensure_browser_raises_when_binary_missing(tmp_p
 
 
 def _make_argv_reporter_mngr_binary(tmp_path: Path) -> Path:
-    """Build a fake ``mngr`` that records its argv to ``$FAKE_MNGR_REPORT`` and exits."""
+    """Build a fake ``mngr`` that records its argv to ``$FAKE_MNGR_REPORT`` and exits.
+
+    Writes the report atomically (temp file + ``os.replace``) so a reader that
+    polls only for the file's *existence* can never observe it truncated-but-empty
+    between ``open(..., "w")`` and ``write`` -- the race that made
+    :func:`test_spawn_detached_mngr_latchkey_forward_points_at_structured_log_file`
+    intermittently raise ``JSONDecodeError`` under parallel load.
+    """
     script = tmp_path / "mngr"
     script.write_text(
         "#!/usr/bin/env python3\n"
         "import json, os, sys\n"
-        "open(os.environ['FAKE_MNGR_REPORT'], 'w').write(json.dumps(sys.argv[1:]))\n"
+        "path = os.environ['FAKE_MNGR_REPORT']\n"
+        "tmp = path + '.tmp'\n"
+        "open(tmp, 'w').write(json.dumps(sys.argv[1:]))\n"
+        "os.replace(tmp, path)\n"
     )
     script.chmod(0o755)
     return script

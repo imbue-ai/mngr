@@ -12,6 +12,7 @@ import json
 import secrets
 import threading
 import time
+from typing import Final
 from urllib.parse import urlencode
 
 from flask import Blueprint
@@ -32,6 +33,7 @@ from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.responses import make_html_response
 from imbue.minds.desktop_client.responses import make_redirect_response
 from imbue.minds.desktop_client.responses import make_response
+from imbue.minds.desktop_client.responses import safe_local_redirect_path
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.session_store import UserInfo
 from imbue.minds.desktop_client.state import get_state
@@ -39,6 +41,7 @@ from imbue.minds.desktop_client.templates_auth import render_auth_page
 from imbue.minds.desktop_client.templates_auth import render_check_email_page
 from imbue.minds.desktop_client.templates_auth import render_forgot_password_page
 from imbue.minds.desktop_client.templates_auth import render_settings_page
+from imbue.minds.desktop_client.templates_auth import render_signin_modal_page
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.utils.output import emit_event
 from imbue.mngr_latchkey.core import LatchkeyError
@@ -272,6 +275,15 @@ def _auth_error_response(exc: AuthBackendError | ImbueCloudCliError) -> Response
     )
 
 
+# Default banner shown when the create page sends a signed-out user here to
+# enable the remote (Imbue Cloud) compute preset. Used when no explicit
+# ``?message=`` is supplied alongside a ``return_to``.
+_REMOTE_SIGNIN_EXPLAINER: Final[str] = (
+    "Sign in or create an Imbue account to run your mind on Imbue Cloud. "
+    "You can also go back and run it directly on your computer."
+)
+
+
 def _handle_auth_page() -> Response:
     """Render the sign-up or sign-in page.
 
@@ -282,12 +294,23 @@ def _handle_auth_page() -> Response:
     An optional ``?message=`` query parameter is rendered as a banner on
     the page (e.g. the Electron shell appends one explaining why the user
     was redirected here to sign in).
+
+    An optional ``?return_to=`` query parameter (a same-origin path, e.g.
+    ``/create``) adds a back link to the page and is forwarded to
+    ``/post-login`` so a successful sign-in returns there. When it is
+    present without an explicit message, a default explainer banner about
+    the remote compute path is shown.
     """
     default_to_signup = request.path.rstrip("/").endswith("/signup")
+    return_to = safe_local_redirect_path(request.args.get("return_to"))
+    message = request.args.get("message")
+    if message is None and return_to is not None:
+        message = _REMOTE_SIGNIN_EXPLAINER
     return make_html_response(
         render_auth_page(
             default_to_signup=default_to_signup,
-            message=request.args.get("message"),
+            message=message,
+            return_to=return_to,
         )
     )
 
@@ -445,6 +468,16 @@ def _handle_resend_verification_api() -> Response:
     if not ok:
         return _json_response({"status": "ERROR", "message": "Failed to send verification email"}, 502)
     return _json_response({"status": "OK"})
+
+
+def _handle_signin_modal_page() -> Response:
+    """Render the sign-in modal page (``GET /auth/signin-modal``).
+
+    Served into the desktop client's shared modal WebContentsView (the overlay
+    layer that also hosts the inbox) so the create screen's sign-in prompt
+    covers the whole window, including the title bar.
+    """
+    return make_html_response(render_signin_modal_page())
 
 
 def _handle_check_email_page() -> Response:
@@ -723,6 +756,7 @@ def create_supertokens_blueprint() -> Blueprint:
     blueprint.add_url_rule("/api/status", view_func=_handle_status_api, methods=["GET"])
     blueprint.add_url_rule("/api/email-verified", view_func=_handle_email_verified_api, methods=["GET"])
     blueprint.add_url_rule("/api/resend-verification", view_func=_handle_resend_verification_api, methods=["POST"])
+    blueprint.add_url_rule("/signin-modal", view_func=_handle_signin_modal_page, methods=["GET"])
     blueprint.add_url_rule("/check-email", view_func=_handle_check_email_page, methods=["GET"])
     blueprint.add_url_rule("/oauth/<provider_id>", view_func=_handle_oauth_redirect, methods=["GET"])
     blueprint.add_url_rule("/oauth/status/<flow_id>", view_func=_handle_oauth_status, methods=["GET"])

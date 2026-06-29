@@ -109,6 +109,12 @@ def test_stream_json_emits_partials_before_final_assistant(
     streaming_work_dir: Path,
     streaming_env: dict[str, str],
 ) -> None:
+    """Scope: with ``--output-format stream-json --include-partial-messages``, robinhood
+    emits incremental ``stream_event`` partials carrying ``text_delta`` chunks, and at least
+    one such partial appears before the authoritative final ``assistant`` message. Fails if no
+    partials are streamed (a non-streaming no-op would emit only the final assistant message),
+    if the assistant message never arrives, or if partials are ordered after it.
+    """
     stdout = _run_robinhood(
         ["--output-format", "stream-json", "--include-partial-messages", _LONG_PROMPT],
         cwd=streaming_work_dir,
@@ -136,6 +142,11 @@ def test_stream_plain_text_streams_once_without_duplication(
     streaming_work_dir: Path,
     streaming_env: dict[str, str],
 ) -> None:
+    """Scope: with ``--stream-plain-text``, robinhood writes the response text to stdout
+    incrementally and exactly once. Fails if nothing is streamed, if the response body is
+    missing, or if the suppression-of-final-dump path breaks and the body is emitted twice
+    (detected by the two output halves being identical).
+    """
     stdout = _run_robinhood(
         ["--stream-plain-text", _LONG_PROMPT],
         cwd=streaming_work_dir,
