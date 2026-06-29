@@ -1,0 +1,1 @@
+Added a `--exit-alongside-pid PID` option to `mngr observe`. When set, the observer SIGTERMs itself once that PID exits, so its lifetime can be tied to a process other than its own parent (e.g. an embedder that spawned it indirectly through a longer-lived supervisor). This complements the existing parent-death watcher rather than replacing it.

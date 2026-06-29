@@ -201,3 +201,33 @@ def test_spawn_detached_mngr_latchkey_forward_points_at_structured_log_file(
     # ``--quiet`` suppresses the detached child's console handler so the raw
     # stdout/stderr capture file does not accumulate in steady state.
     assert "--quiet" in argv
+    # No leash flag unless one is requested.
+    assert "--observe-exit-alongside-pid" not in argv
+
+
+def test_spawn_detached_mngr_latchkey_forward_forwards_observe_exit_alongside_pid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``observe_exit_alongside_pid`` is passed through as ``--observe-exit-alongside-pid``.
+
+    The forward then hands it to its ``mngr observe`` child so the discovery
+    producer dies with the embedder, even though the forward itself stays up.
+    """
+    fake_binary = _make_argv_reporter_mngr_binary(tmp_path)
+    report_path = tmp_path / "report.json"
+    monkeypatch.setenv("FAKE_MNGR_REPORT", str(report_path))
+    latchkey_directory = tmp_path / "latchkey"
+    plugin_dir = plugin_data_dir(latchkey_directory)
+
+    pid = spawn_detached_mngr_latchkey_forward(
+        mngr_binary=str(fake_binary),
+        latchkey_binary="latchkey",
+        latchkey_directory=latchkey_directory,
+        log_path=forward_log_path(plugin_dir),
+        observe_exit_alongside_pid=4242,
+    )
+    assert pid > 0
+    assert _wait_for_file(report_path)
+    argv = json.loads(report_path.read_text())
+    assert "--observe-exit-alongside-pid" in argv
+    assert argv[argv.index("--observe-exit-alongside-pid") + 1] == "4242"

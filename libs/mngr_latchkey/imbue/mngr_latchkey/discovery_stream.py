@@ -118,6 +118,16 @@ class DiscoveryStreamConsumer(MutableModel):
         frozen=True,
         description="Path to the mngr binary used to spawn the observe subprocess.",
     )
+    exit_alongside_pid: int | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "When set, the spawned ``mngr observe`` is passed ``--exit-alongside-pid PID`` so it "
+            "self-terminates when that PID exits. Lets an embedder tie the discovery producer's "
+            "lifetime to itself even though the producer's parent (the ``mngr latchkey forward`` "
+            "supervisor) is meant to outlive the embedder."
+        ),
+    )
 
     _on_agent_discovered_callbacks: list[OnAgentDiscoveredCallback] = PrivateAttr(default_factory=list)
     _on_agent_destroyed_callbacks: list[OnAgentDestroyedCallback] = PrivateAttr(default_factory=list)
@@ -142,7 +152,10 @@ class DiscoveryStreamConsumer(MutableModel):
 
     def _observe_command(self) -> list[str]:
         """Build the ``mngr observe`` argv."""
-        return [self.mngr_binary, "observe", "--discovery-only", "--quiet"]
+        command = [self.mngr_binary, "observe", "--discovery-only", "--quiet"]
+        if self.exit_alongside_pid is not None:
+            command += ["--exit-alongside-pid", str(self.exit_alongside_pid)]
+        return command
 
     def start(self) -> None:
         """Spawn the ``mngr observe`` subprocess and begin dispatching events."""

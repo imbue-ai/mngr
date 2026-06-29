@@ -1,4 +1,6 @@
 import os
+import signal
+import subprocess
 import threading
 from uuid import uuid4
 
@@ -9,6 +11,7 @@ from imbue.mngr.utils.parent_process import _PARENT_POLL_INTERVAL_SECONDS
 from imbue.mngr.utils.parent_process import _read_grandparent_pid
 from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
 from imbue.mngr.utils.parent_process import start_parent_death_watcher
+from imbue.mngr.utils.parent_process import start_pid_death_watcher
 
 
 def test_start_parent_death_watcher_starts_thread_in_concurrency_group() -> None:
@@ -34,6 +37,46 @@ def test_parent_death_watcher_does_not_fire_when_parent_alive() -> None:
         deadline = threading.Event()
         deadline.wait(timeout=_PARENT_POLL_INTERVAL_SECONDS + 1.0)
         assert watcher_thread.is_alive(), "Watcher thread exited unexpectedly during poll cycle"
+
+
+def test_start_pid_death_watcher_starts_thread_in_concurrency_group() -> None:
+    """Verify the watcher thread is started and is alive while the watched PID lives."""
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        # Watch our own PID: it stays alive for the duration of the test, so the
+        # watcher must keep running rather than fire.
+        start_pid_death_watcher(os.getpid(), cg)
+        threads = [t for t in cg._threads if t.thread.name == "pid-death-watcher"]
+        assert len(threads) == 1
+        watcher_thread = threads[0].thread
+        assert watcher_thread.is_alive()
+        deadline = threading.Event()
+        deadline.wait(timeout=_PARENT_POLL_INTERVAL_SECONDS + 1.0)
+        assert watcher_thread.is_alive(), "Watcher thread exited unexpectedly while watched PID alive"
+
+
+def test_pid_death_watcher_fires_when_watched_pid_dies() -> None:
+    """The watcher SIGTERMs the current process once the watched PID disappears.
+
+    A handler captures the SIGTERM (instead of letting it terminate the test
+    runner) so we can assert the watcher fired. The watched PID is a short-lived
+    child that we reap before starting the watcher, so the very first poll sees
+    it gone.
+    """
+    child = subprocess.Popen(["sleep", "0"])
+    child.wait()
+    dead_pid = child.pid
+
+    fired = threading.Event()
+    original_handler = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, lambda *_: fired.set())
+    try:
+        with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+            start_pid_death_watcher(dead_pid, cg)
+            assert fired.wait(timeout=_PARENT_POLL_INTERVAL_SECONDS + 3.0), (
+                "Watcher did not SIGTERM the process after the watched PID died"
+            )
+    finally:
+        signal.signal(signal.SIGTERM, original_handler)
 
 
 def test_read_grandparent_pid_returns_alive_grandparent() -> None:

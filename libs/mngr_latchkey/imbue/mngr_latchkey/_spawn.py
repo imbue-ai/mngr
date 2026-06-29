@@ -87,6 +87,7 @@ def spawn_detached_mngr_latchkey_forward(
     log_path: Path,
     extra_env: Mapping[str, str] | None = None,
     cwd: Path | None = None,
+    observe_exit_alongside_pid: int | None = None,
 ) -> int:
     """Start a detached ``mngr latchkey forward`` and return its PID.
 
@@ -112,6 +113,11 @@ def spawn_detached_mngr_latchkey_forward(
     extension's ``process.env``. Used by the minds desktop client to
     publish the current ``LATCHKEY_EXTENSION_MINDS_API_URL`` to the
     bundled ``minds-api-proxy`` extension on every supervisor restart.
+
+    ``observe_exit_alongside_pid``, when set, is forwarded as
+    ``--observe-exit-alongside-pid`` so the supervisor's ``mngr observe``
+    discovery child dies when that PID exits. Only the producer is tied to the
+    PID; this detached forward (and its gateway and reverse tunnels) is not.
 
     The returned ``Popen`` object is intentionally allowed to go out of
     scope. Python's ``subprocess`` module parks finished children on an
@@ -139,26 +145,30 @@ def spawn_detached_mngr_latchkey_forward(
     if extra_env is not None:
         env.update(extra_env)
 
+    command = [
+        mngr_binary,
+        "latchkey",
+        "forward",
+        "--latchkey-directory",
+        str(latchkey_directory),
+        "--latchkey-binary",
+        latchkey_binary,
+        "--mngr-binary",
+        mngr_binary,
+        "--log-file",
+        str(events_log_path),
+        # Suppress the detached child's loguru console handler so its
+        # raw stdout/stderr capture file stays empty in steady state;
+        # all logging still lands in the structured ``--log-file``.
+        "--quiet",
+    ]
+    if observe_exit_alongside_pid is not None:
+        command += ["--observe-exit-alongside-pid", str(observe_exit_alongside_pid)]
+
     log_file = log_path.open("ab")
     try:
         process = subprocess.Popen(
-            [
-                mngr_binary,
-                "latchkey",
-                "forward",
-                "--latchkey-directory",
-                str(latchkey_directory),
-                "--latchkey-binary",
-                latchkey_binary,
-                "--mngr-binary",
-                mngr_binary,
-                "--log-file",
-                str(events_log_path),
-                # Suppress the detached child's loguru console handler so its
-                # raw stdout/stderr capture file stays empty in steady state;
-                # all logging still lands in the structured ``--log-file``.
-                "--quiet",
-            ],
+            command,
             stdin=subprocess.DEVNULL,
             stdout=log_file,
             stderr=log_file,

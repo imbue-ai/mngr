@@ -117,6 +117,7 @@ class _ForwardCliOptions(_LatchkeyCommonCliOptions):
     """Backing options object for ``mngr latchkey forward``."""
 
     mngr_binary: str = "mngr"
+    observe_exit_alongside_pid: int | None = None
 
 
 def _add_common_latchkey_options(command: click.Command) -> click.Command:
@@ -472,6 +473,20 @@ add_pager_help_option(_register_agent_command)
     show_default=True,
     help="Path to the mngr binary used to spawn the underlying ``mngr observe`` subprocess.",
 )
+@click.option(
+    "--observe-exit-alongside-pid",
+    "observe_exit_alongside_pid",
+    type=int,
+    default=None,
+    help=(
+        "If set, the ``mngr observe`` discovery child is launched with "
+        "``--exit-alongside-pid PID`` so it terminates when that PID exits. "
+        "This forward (and its shared gateway and reverse tunnels) is NOT tied "
+        "to the PID -- only its discovery producer. The minds desktop client "
+        "passes its own PID so the producer dies with the app while the gateway "
+        "survives a restart."
+    ),
+)
 @add_common_options
 @click.pass_context
 def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
@@ -484,14 +499,17 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
         is_format_template_supported=False,
     )
 
-    # No parent-death watcher: ``LatchkeyForwardSupervisor`` spawns us
-    # detached via ``start_new_session=True`` so we survive embedder
-    # restarts (the whole point of the supervisor pattern). Polling
-    # ``getppid()`` and SIGTERM'ing ourselves on reparent-to-init would
-    # actively defeat that. SIGINT/SIGTERM trigger shutdown; SIGHUP instead
-    # bounces only the ``mngr observe`` child (see the signal handlers below)
-    # so an embedder can refresh our provider set mid-session without
-    # dropping the gateway or any reverse tunnels.
+    # No parent-death watcher on *this* process: ``LatchkeyForwardSupervisor``
+    # spawns us detached via ``start_new_session=True`` so we survive embedder
+    # restarts (the whole point of the supervisor pattern) -- polling
+    # ``getppid()`` and SIGTERM'ing ourselves on reparent-to-init would actively
+    # defeat that. The discovery *producer* is different: when
+    # ``--observe-exit-alongside-pid`` is set we pass it through to the
+    # ``mngr observe`` child (below) so the producer dies with the embedder even
+    # though we (and the gateway/reverse tunnels) keep running. SIGINT/SIGTERM
+    # trigger shutdown; SIGHUP instead bounces only the ``mngr observe`` child
+    # (see the signal handlers below) so an embedder can refresh our provider
+    # set mid-session without dropping the gateway or any reverse tunnels.
     latchkey = _build_initialized_latchkey(mngr_ctx, opts.latchkey_directory, opts.latchkey_binary)
 
     # Refuse to start if another forward is already alive for this
@@ -552,6 +570,7 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
     consumer = DiscoveryStreamConsumer(
         concurrency_group=mngr_ctx.concurrency_group,
         mngr_binary=opts.mngr_binary,
+        exit_alongside_pid=opts.observe_exit_alongside_pid,
     )
     consumer.add_on_agent_discovered_callback(discovery_handler)
     consumer.add_on_agent_destroyed_callback(destruction_handler)

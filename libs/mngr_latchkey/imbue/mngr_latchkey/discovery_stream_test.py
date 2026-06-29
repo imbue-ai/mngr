@@ -455,3 +455,16 @@ def test_stderr_line_is_dropped(tmp_path: Path) -> None:
         consumer._on_observe_output(_agent_discovery_line(agent), is_stdout=False)
     assert handlers.discovered_calls == ()
     assert handlers.destroyed_calls == ()
+
+
+def test_observe_command_includes_exit_alongside_pid_only_when_set() -> None:
+    """``exit_alongside_pid`` is appended to the observe argv so the producer dies with the embedder."""
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        without_pid = DiscoveryStreamConsumer(concurrency_group=cg, mngr_binary="mngr")
+        assert "--exit-alongside-pid" not in without_pid._observe_command()
+
+        with_pid = DiscoveryStreamConsumer(concurrency_group=cg, mngr_binary="mngr", exit_alongside_pid=4242)
+        command = with_pid._observe_command()
+        assert command[:4] == ["mngr", "observe", "--discovery-only", "--quiet"]
+        assert "--exit-alongside-pid" in command
+        assert command[command.index("--exit-alongside-pid") + 1] == "4242"

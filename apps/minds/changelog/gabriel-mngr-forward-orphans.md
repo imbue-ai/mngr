@@ -1,0 +1,5 @@
+Fixed the root cause of duplicate background discovery producers, which made the app keep showing errors for providers you had disabled and contributed to a running mind intermittently disappearing (redirecting to the "create a mind" page with "0 minds").
+
+minds now leashes the discovery producer (`mngr observe`) to its own backend process: the detached `mngr latchkey forward` supervisor is launched with `--observe-exit-alongside-pid <backend pid>`, so the producer terminates when the app quits -- or when Electron crashes and the grandparent-death watcher SIGTERMs the backend. A prior instance's producer therefore can no longer outlive the app and pollute the shared discovery-events file with stale, frozen-at-startup provider config. The shared `latchkey gateway` and reverse tunnels still survive a restart (so agents stay reachable, and permission requests can still be deposited while the app is closed); only the producer is tied to the app's lifetime.
+
+This supersedes the previous startup-time reaping that scanned for and killed leftover `mngr latchkey forward` processes -- the orphan is now prevented at its source rather than cleaned up on the next launch.

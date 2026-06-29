@@ -296,6 +296,16 @@ def run(
             MINDS_API_PROXY_URL_ENV_VAR: f"http://127.0.0.1:{port}",
             MINDS_API_PROXY_KEY_ENV_VAR: minds_api_key,
         },
+        # Leash the supervisor's `mngr observe` discovery producer to *this*
+        # backend process: it is launched with `--exit-alongside-pid <our pid>`
+        # so it dies when we exit (clean quit, or an Electron crash that the
+        # grandparent watcher turns into a SIGTERM). This is what keeps a prior
+        # instance's producer from outliving the app and racing the shared
+        # discovery-events file -- the failure mode the old startup-time
+        # forward-reaping was working around. Only the producer is tied to our
+        # PID; the detached supervisor and its gateway/reverse tunnels survive a
+        # restart (and are replaced wholesale on the next launch's restart()).
+        observe_exit_alongside_pid=os.getpid(),
     )
 
     # Background thread: supervisor restart must complete before the

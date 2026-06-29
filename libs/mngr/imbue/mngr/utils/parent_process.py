@@ -55,6 +55,59 @@ def start_parent_death_watcher(concurrency_group: ConcurrencyGroup) -> None:
     )
 
 
+def _poll_pid_until_dead(
+    pid: int,
+    stop_event: threading.Event,
+    concurrency_group: ConcurrencyGroup,
+) -> None:
+    """Poll an explicit PID and SIGTERM ourselves when it stops existing."""
+    while not stop_event.is_set():
+        stop_event.wait(timeout=_PARENT_POLL_INTERVAL_SECONDS)
+        if stop_event.is_set():
+            break
+        if concurrency_group.state != ConcurrencyGroupState.ACTIVE:
+            break
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            logger.info(
+                "Watched process (PID {}) no longer exists, sending SIGTERM",
+                pid,
+            )
+            os.kill(os.getpid(), signal.SIGTERM)
+            break
+        except PermissionError:
+            # PID belongs to a process we can't signal (e.g. reused by another
+            # user). Treat as still alive; bailing on PermissionError would
+            # cause spurious early shutdowns on PID reuse boundaries.
+            continue
+
+
+def start_pid_death_watcher(pid: int, concurrency_group: ConcurrencyGroup) -> None:
+    """Start a daemon thread that exits the process when the given PID dies.
+
+    Polls ``os.kill(pid, 0)`` every ~3 seconds and SIGTERMs the current process
+    the first time ``pid`` disappears. Unlike :func:`start_parent_death_watcher`
+    (which watches ``getppid()``), this watches an arbitrary, explicitly-supplied
+    PID -- use it when the process whose lifetime you want to track is not the
+    immediate parent (e.g. a detached grandchild that must die with the original
+    embedder, even though its own parent outlives the embedder). ``os.kill(pid,
+    0)`` is cross-platform, so unlike :func:`start_grandparent_death_watcher` it
+    does not depend on ``/proc``.
+    """
+    logger.debug("PID death watcher started (watching PID={})", pid)
+
+    stop_event = threading.Event()
+
+    concurrency_group.start_new_thread(
+        target=_poll_pid_until_dead,
+        args=(pid, stop_event, concurrency_group),
+        daemon=True,
+        name="pid-death-watcher",
+        is_checked=False,
+    )
+
+
 def _read_grandparent_pid() -> int | None:
     """Return the grandparent process's PID by reading ``/proc/<ppid>/status``.
 
@@ -74,34 +127,6 @@ def _read_grandparent_pid() -> int | None:
     except OSError:
         return None
     return None
-
-
-def _poll_grandparent_until_dead(
-    grandparent_pid: int,
-    stop_event: threading.Event,
-    concurrency_group: ConcurrencyGroup,
-) -> None:
-    """Poll the grandparent's PID and SIGTERM ourselves when it stops existing."""
-    while not stop_event.is_set():
-        stop_event.wait(timeout=_PARENT_POLL_INTERVAL_SECONDS)
-        if stop_event.is_set():
-            break
-        if concurrency_group.state != ConcurrencyGroupState.ACTIVE:
-            break
-        try:
-            os.kill(grandparent_pid, 0)
-        except ProcessLookupError:
-            logger.info(
-                "Grandparent process (PID {}) no longer exists, sending SIGTERM",
-                grandparent_pid,
-            )
-            os.kill(os.getpid(), signal.SIGTERM)
-            break
-        except PermissionError:
-            # PID belongs to a process we can't signal (e.g. reused by another
-            # user). Treat as still alive; bailing on PermissionError would
-            # cause spurious early shutdowns on PID reuse boundaries.
-            continue
 
 
 def start_grandparent_death_watcher(concurrency_group: ConcurrencyGroup) -> None:
@@ -128,7 +153,7 @@ def start_grandparent_death_watcher(concurrency_group: ConcurrencyGroup) -> None
     stop_event = threading.Event()
 
     concurrency_group.start_new_thread(
-        target=_poll_grandparent_until_dead,
+        target=_poll_pid_until_dead,
         args=(grandparent_pid, stop_event, concurrency_group),
         daemon=True,
         name="grandparent-death-watcher",

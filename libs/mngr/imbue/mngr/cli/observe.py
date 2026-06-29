@@ -15,6 +15,7 @@ from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.utils.parent_process import start_parent_death_watcher
+from imbue.mngr.utils.parent_process import start_pid_death_watcher
 
 
 class ObserveCliOptions(CommonCliOptions):
@@ -23,6 +24,7 @@ class ObserveCliOptions(CommonCliOptions):
     events_dir: Path | None = None
     discovery_only: bool = False
     daemonize: bool = False
+    exit_alongside_pid: int | None = None
 
 
 @click.command(name="observe")
@@ -49,6 +51,14 @@ class ObserveCliOptions(CommonCliOptions):
     help="When not daemonized (default), exit if the parent process dies. "
     "Use --daemonize to keep running independently.",
 )
+@click.option(
+    "--exit-alongside-pid",
+    type=int,
+    default=None,
+    help="SIGTERM this process when the given PID exits. Use to tie this "
+    "observer's lifetime to a process other than its own parent (e.g. an "
+    "embedder that spawned it indirectly through a longer-lived supervisor).",
+)
 @add_common_options
 @click.pass_context
 def observe(ctx: click.Context, **kwargs: Any) -> None:
@@ -62,6 +72,13 @@ def observe(ctx: click.Context, **kwargs: Any) -> None:
     # Start parent death watcher unless running as a daemon
     if not opts.daemonize:
         start_parent_death_watcher(mngr_ctx.concurrency_group)
+
+    # Optionally also tie our lifetime to an explicit PID. The minds desktop
+    # client uses this so its discovery producer dies with the app even though
+    # the producer's own parent (the detached ``mngr latchkey forward``
+    # supervisor) is meant to outlive the app.
+    if opts.exit_alongside_pid is not None:
+        start_pid_death_watcher(opts.exit_alongside_pid, mngr_ctx.concurrency_group)
 
     # The discovery log always lives under the default host dir, so --events-dir
     # (which only relocates the full observer's agent-state events and lock) has no
