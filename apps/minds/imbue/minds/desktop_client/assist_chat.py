@@ -81,7 +81,11 @@ def build_assist_chat_mngr_args(
 
 
 def _run_assist_spawn(mngr_caller: MngrCaller, args: list[str], workspace_agent_id: AgentId) -> None:
-    """Run the spawn command and log a non-zero exit. Never raises (background thread)."""
+    """Run the spawn command and log a non-zero exit.
+
+    Does not swallow exceptions from ``mngr_caller.call``; in the production background-thread
+    path ``spawn_assist_chat`` dispatches this with an ``on_failure`` hook that logs any raise.
+    """
     result = mngr_caller.call(args, timeout=_ASSIST_SPAWN_TIMEOUT_SECONDS)
     if result.returncode != 0:
         logger.error(
