@@ -1,18 +1,21 @@
 // Client-side "seen workspaces" tracker, shared by chrome.js (browser-mode
 // inline sidebar) and sidebar.js (the Electron modal sidebar) so the
-// blinking-new-tab affordance behaves identically in both. Loaded before
-// each of them (see Chrome.jinja / Sidebar.jinja).
+// highlight (blinking-tab) affordance behaves identically in both. Loaded
+// before each of them (see Chrome.jinja / Sidebar.jinja).
 //
-// The server marks a workspace ``is_new`` when the agent carries the
-// Caretaker scheduler's ``auto_created`` / ``caretaker`` label (see
-// _build_workspace_list in app.py). A row only actually blinks while it is
-// ``is_new`` AND not yet in this client's seen set -- so a tab pulses until
-// the user opens it once, then stops forever (per client/device).
+// The server marks a workspace ``is_highlighted`` when it is worth drawing the
+// user's eye to -- what counts is defined in one place server-side
+// (``_HIGHLIGHT_LABEL_NAMES`` / ``_is_highlighted_workspace`` in app.py; today
+// that's a workspace the Caretaker scheduler auto-created, but the set of
+// highlight reasons can be extended -- or the highlight dropped -- there without
+// touching this file). A row only actually blinks while it is ``is_highlighted``
+// AND not yet in this client's seen set -- so a tab pulses until the user opens
+// it once, then stops (per client/device).
 //
 // Seeding rule: on a brand-new client (no stored set) we seed the set with
 // every workspace id currently known, so pre-existing tabs -- including the
-// day-1 chat tab that predates this feature -- never blink. Only genuinely
-// new workspaces that arrive *after* seeding can pulse.
+// day-1 chat tab that predates this feature -- never blink. Only workspaces that
+// become highlighted *after* seeding can pulse.
 //
 // Persistence: a versioned localStorage key. localStorage can be unavailable
 // (private mode, a sandboxed context); we degrade to an in-memory set so the

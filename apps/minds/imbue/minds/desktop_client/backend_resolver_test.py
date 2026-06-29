@@ -388,9 +388,9 @@ def test_get_workspace_color_returns_none_for_unknown_agent() -> None:
 
 # -- get_agent_labels tests -------------------------------------------
 #
-# get_agent_labels is the label-read behind the blinking-new-tab affordance:
-# _build_workspace_list reads it to spot the Caretaker scheduler's
-# ``auto_created`` / ``caretaker`` markers.
+# get_agent_labels is the label-read behind the blinking-tab affordance:
+# _build_workspace_list reads it to spot the highlight markers (see
+# ``_HIGHLIGHT_LABEL_NAMES`` in app.py; currently ``auto_created`` / ``caretaker``).
 
 
 def test_get_agent_labels_returns_full_label_mapping() -> None:

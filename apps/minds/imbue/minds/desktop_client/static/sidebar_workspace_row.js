@@ -19,13 +19,13 @@
 //   var btn = window.mindsSidebarRow.buildIconButton(title, pathSvg,
 //                                                    dataAttr, agentId, sizeClass);
 //
-// ``workspace`` is { id, name, accent?, is_stale?, is_new? }. ``withOpenNew``
+// ``workspace`` is { id, name, accent?, is_stale?, is_highlighted? }. ``withOpenNew``
 // adds the "open in new window" arrow (Electron only -- browser mode has no
 // multi-window concept and passes false). Both action icons are always
 // visible. ``isCurrent`` marks the row selected (highlighted background).
-// ``isSeen`` suppresses the new-tab pulse for a workspace the user has
+// ``isSeen`` suppresses the highlight pulse for a workspace the user has
 // already opened on this client (see seen_workspaces.js): a row only pulses
-// while ``is_new`` AND not ``isSeen``. Event wiring (click / context-menu) is
+// while ``is_highlighted`` AND not ``isSeen``. Event wiring (click / context-menu) is
 // the caller's job -- this builds DOM only.
 (function () {
   function buildIconButton(title, pathSvg, dataAttr, agentId, sizeClass) {
@@ -78,11 +78,12 @@
       + (isCurrent ? ' is-current bg-fill-active' : ' hover:bg-fill-hover');
     row.setAttribute('data-agent-id', workspace.id);
 
-    // New tab the Caretaker scheduler auto-created: pulse the accent dot
-    // until the user opens it (``is_new`` from the server, not yet seen by
-    // this client). ``.sidebar-new`` drives the keyframe animation in app.css.
-    if (workspace.is_new && !isSeen) {
-      row.classList.add('sidebar-new');
+    // Highlighted workspace (see _HIGHLIGHT_LABEL_NAMES in app.py for what
+    // counts): pulse the accent dot until the user opens it (``is_highlighted``
+    // from the server, not yet seen by this client). ``.sidebar-highlight``
+    // drives the keyframe animation in app.css.
+    if (workspace.is_highlighted && !isSeen) {
+      row.classList.add('sidebar-highlight');
     }
 
     var dot = document.createElement('span');

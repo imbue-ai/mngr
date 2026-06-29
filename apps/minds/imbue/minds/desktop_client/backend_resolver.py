@@ -180,8 +180,8 @@ class BackendResolverInterface(MutableModel, ABC):
 
         Mirrors :meth:`get_workspace_color`'s iteration over discovered
         agents but exposes every label rather than one. Callers use it to
-        read the ``auto_created`` / ``caretaker`` markers that drive the
-        blinking-new-tab affordance.
+        read the highlight markers that drive the blinking-tab affordance
+        (see ``_HIGHLIGHT_LABEL_NAMES`` in app.py).
 
         Default implementation returns an empty mapping. Subclasses with
         access to agent labels should override this.

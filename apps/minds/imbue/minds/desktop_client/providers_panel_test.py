@@ -410,12 +410,14 @@ def test_build_workspace_list_does_not_mark_stale_for_unrelated_provider_error()
     assert "is_stale" not in workspaces[0]
 
 
-# -- _build_workspace_list new-tab (blink) marking --
+# -- _build_workspace_list highlight (blink) marking --
 #
-# The Caretaker scheduler creates its agent with ``auto_created=true`` +
-# ``caretaker=true``; the desktop client blinks any such tab until the user
-# opens it (the seen-tracking lives client-side in JS). _build_workspace_list
-# emits ``is_new`` iff the agent carries a truthy auto-created marker.
+# A highlighted workspace blinks in the sidebar until the user opens it (the
+# seen-tracking lives client-side in JS). What counts as highlighted is defined
+# in one place (``_HIGHLIGHT_LABEL_NAMES`` in app.py; today a workspace the
+# Caretaker scheduler auto-created, ``auto_created`` / ``caretaker``).
+# _build_workspace_list emits ``is_highlighted`` iff the agent carries a truthy
+# highlight marker.
 
 
 def _build_one_workspace_with_labels(extra_labels: dict[str, str]) -> dict[str, str]:
@@ -428,10 +430,10 @@ def _build_one_workspace_with_labels(extra_labels: dict[str, str]) -> dict[str, 
     return workspaces[0]
 
 
-def test_build_workspace_list_does_not_mark_new_for_ordinary_workspace() -> None:
-    """A hand-made workspace (no auto-created marker) never blinks."""
+def test_build_workspace_list_does_not_highlight_ordinary_workspace() -> None:
+    """A workspace with no highlight marker never blinks."""
     entry = _build_one_workspace_with_labels({})
-    assert "is_new" not in entry
+    assert "is_highlighted" not in entry
 
 
 @pytest.mark.parametrize(
@@ -444,10 +446,10 @@ def test_build_workspace_list_does_not_mark_new_for_ordinary_workspace() -> None
         {"auto_created": "1"},
     ],
 )
-def test_build_workspace_list_marks_new_for_auto_created_agent(marker_labels: dict[str, str]) -> None:
-    """An agent carrying a truthy ``auto_created`` / ``caretaker`` label blinks."""
+def test_build_workspace_list_highlights_agent_with_highlight_label(marker_labels: dict[str, str]) -> None:
+    """An agent carrying a truthy highlight label (``auto_created`` / ``caretaker``) blinks."""
     entry = _build_one_workspace_with_labels(marker_labels)
-    assert entry["is_new"] == "true"
+    assert entry["is_highlighted"] == "true"
 
 
 @pytest.mark.parametrize(
@@ -459,10 +461,10 @@ def test_build_workspace_list_marks_new_for_auto_created_agent(marker_labels: di
         {"caretaker": "no"},
     ],
 )
-def test_build_workspace_list_does_not_mark_new_for_falsey_marker(marker_labels: dict[str, str]) -> None:
-    """An explicitly falsey marker (e.g. ``auto_created=false``) must not blink."""
+def test_build_workspace_list_does_not_highlight_falsey_marker(marker_labels: dict[str, str]) -> None:
+    """An explicitly falsey highlight marker (e.g. ``auto_created=false``) must not blink."""
     entry = _build_one_workspace_with_labels(marker_labels)
-    assert "is_new" not in entry
+    assert "is_highlighted" not in entry
 
 
 # -- _build_workspace_list color emission --
