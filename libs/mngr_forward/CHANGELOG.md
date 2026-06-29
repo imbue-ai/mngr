@@ -12,6 +12,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Fixed
 
+- Fixed: Forward respawns a dead per-agent events stream instead of skipping it forever. After an agent's host restarted, the `mngr event --follow` child exited and `_start_events_stream`'s guard skipped the dead entry, so the service map stayed empty and the proxy returned 503 indefinitely even though discovery (including fresh SSH info) had fully recovered. The guard now treats a dead entry as absent: it drops the exited child, logs the respawn, and starts a fresh stream; respawns ride the periodic discovery snapshot, and already-known services are preserved across the respawn.
 - Fixed: The websocket forward path now emits a `system_interface_backend_failure` envelope when the backend connection fails (unresolved target, SSH-tunnel setup failure, refused host-loopback dial, or a connect-time backend-websocket failure), matching the HTTP/SSE paths. Previously a consumer like minds could go blind to a dead system interface whose only live channel was a websocket — the user was stranded on a frozen workspace because the recovery redirect never fired.
 
 ## [v0.1.6] - 2026-06-18

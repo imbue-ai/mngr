@@ -11,10 +11,13 @@ from pathlib import Path
 import httpx
 import pytest
 
+from imbue.minds.desktop_client.latchkey.gateway_client import AccountsRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequestPayload
+from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
+from imbue.minds.desktop_client.latchkey.gateway_client import WorkspaceRequestPayload
 
 
 def _build_client(handler: Callable[[httpx.Request], httpx.Response]) -> LatchkeyGatewayClient:
@@ -123,6 +126,18 @@ def test_iter_permission_requests_parses_jsonl_stream() -> None:
             "target": "/tmp/permissions.json",
             "effect": {"rules": [{"latchkey-self": ["minds-file-server-cafef00d"]}]},
         },
+        {
+            "request_id": "ghi",
+            "agent_id": "a3",
+            "rationale": "manage sibling",
+            "request_type": "workspace",
+            "payload": {
+                "permissions": ["minds-workspaces-destroy"],
+                "target_workspace_id": "agent-" + "1" * 32,
+            },
+            "target": "/tmp/permissions.json",
+            "effect": {"rules": [{"minds-workspaces": ["minds-workspaces-destroy"]}]},
+        },
     ]
     body = "".join(json.dumps(item) + "\n" for item in requests_payload).encode("utf-8")
 
@@ -134,7 +149,7 @@ def test_iter_permission_requests_parses_jsonl_stream() -> None:
 
     client = _build_client(_handler)
     items = list(client.iter_permission_requests())
-    assert [item.request_id for item in items] == ["abc", "def"]
+    assert [item.request_id for item in items] == ["abc", "def", "ghi"]
     assert items[0].request_type == "predefined"
     predefined_payload = items[0].payload
     assert isinstance(predefined_payload, PredefinedRequestPayload)
@@ -145,6 +160,33 @@ def test_iter_permission_requests_parses_jsonl_stream() -> None:
     assert isinstance(file_sharing_payload, FileSharingRequestPayload)
     assert file_sharing_payload.path == "/home/user/file.txt"
     assert str(file_sharing_payload.access) == "READ"
+    assert items[2].request_type == "workspace"
+    workspace_payload = items[2].payload
+    assert isinstance(workspace_payload, WorkspaceRequestPayload)
+    assert workspace_payload.permissions == ("minds-workspaces-destroy",)
+    assert workspace_payload.target_workspace_id == "agent-" + "1" * 32
+
+
+def test_streamed_request_payload_selected_by_request_type() -> None:
+    """The payload variant is chosen from ``request_type``, not pydantic shape.
+
+    The ``accounts`` and ``workspace`` payloads are both satisfiable by an empty
+    object, so without ``request_type`` discrimination an accounts request would
+    mis-parse as a workspace one. This pins the deterministic selection.
+    """
+    base = {"request_id": "r", "agent_id": "a", "rationale": "why", "target": "/tmp/p.json", "effect": {}}
+
+    accounts = StreamedPermissionRequest.model_validate({**base, "request_type": "accounts", "payload": {}})
+    assert isinstance(accounts.payload, AccountsRequestPayload)
+
+    workspace_empty = StreamedPermissionRequest.model_validate({**base, "request_type": "workspace", "payload": {}})
+    assert isinstance(workspace_empty.payload, WorkspaceRequestPayload)
+
+    workspace_verbs = StreamedPermissionRequest.model_validate(
+        {**base, "request_type": "workspace", "payload": {"permissions": ["minds-workspaces-read"]}}
+    )
+    assert isinstance(workspace_verbs.payload, WorkspaceRequestPayload)
+    assert workspace_verbs.payload.permissions == ("minds-workspaces-read",)
 
 
 def test_iter_permission_requests_skips_malformed_lines() -> None:
@@ -201,8 +243,8 @@ def test_approve_permission_request_sends_no_body_without_override() -> None:
     assert captured["content"] == b""
 
 
-def test_approve_permission_request_sends_override_path_body() -> None:
-    """An override path is sent as a ``{"path": ...}`` JSON body so the gateway recomputes the effect."""
+def test_approve_permission_request_sends_override_body() -> None:
+    """An override body is sent verbatim as JSON so the gateway recomputes the effect."""
     captured: dict[str, object] = {}
 
     def _handler(request: httpx.Request) -> httpx.Response:
@@ -211,11 +253,23 @@ def test_approve_permission_request_sends_override_path_body() -> None:
         return httpx.Response(200, json={"request_id": "evt-abc"})
 
     client = _build_client(_handler)
-    client.approve_permission_request("evt-abc", override_path="/Users/glenn/Documents/Shared")
+    # File-sharing override.
+    client.approve_permission_request("evt-abc", override_body={"path": "/Users/glenn/Documents/Shared"})
     sent_body = captured["content"]
     assert isinstance(sent_body, bytes)
     assert json.loads(sent_body) == {"path": "/Users/glenn/Documents/Shared"}
     assert captured["content_type"] == "application/json"
+    # Workspace override (verbs + target).
+    client.approve_permission_request(
+        "evt-abc",
+        override_body={"permissions": ["minds-workspaces-destroy"], "target_workspace_id": "agent-" + "1" * 32},
+    )
+    ws_body = captured["content"]
+    assert isinstance(ws_body, bytes)
+    assert json.loads(ws_body) == {
+        "permissions": ["minds-workspaces-destroy"],
+        "target_workspace_id": "agent-" + "1" * 32,
+    }
 
 
 def test_approve_permission_request_raises_on_4xx() -> None:

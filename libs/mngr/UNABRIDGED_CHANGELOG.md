@@ -4,6 +4,49 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-28
+
+Gives the `mngr list` nested-fields CLI test (`test_list_command_with_nested_fields`) the same `@pytest.mark.timeout(30)` its sibling real-tmux `list` tests already carry, so it no longer flakily exceeds the 10s default timeout while creating a real tmux agent under CI load.
+
+Fixes a duplicate `_FakeContainer` test helper class in the docker provider tests (`providers/docker/instance_test.py`): two module-level classes shared the name, so the second silently shadowed the first at import time (the earlier state-container tests would have constructed the wrong, single-argument class) and a static type check reported the call sites against a union of both. The status-only variant used by the connection-error-fallback tests is renamed `_FakeStatusContainer`, leaving the labels+status `_FakeContainer` as the sole holder of that name. Test-only change.
+
+Refuses to create or start a Docker host whose configured gVisor (`runsc`) runtime would give it an ephemeral root filesystem. gVisor's default root overlay (`--overlay2=root:self`) keeps each container's root filesystem in a per-sandbox overlay that is discarded whenever the container stops, so a `runsc` runtime registered without `--overlay2=none` silently loses mngr's SSH provisioning (the injected host key, `authorized_keys`, and the self-healing-entrypoint marker) the first time the container restarts -- leaving the host running but unreachable (the container's published SSH port accepts TCP but sshd never starts, so discovery reports the host `UNAUTHENTICATED`). The Docker provider now checks the local daemon's runtime registration (`/etc/docker/daemon.json`) when a gVisor runtime is configured and, if `--overlay2=none` is missing, raises an actionable `DockerGvisorEphemeralRootfsError` at create/start that offers both fixes: switch the provider to the standard runtime (`docker_runtime = "runc"`), or re-register the runtime persistently (`sudo runsc install -- --overlay2=none` then restart Docker). A remote daemon's registration cannot be introspected, so that case logs a warning instead of failing. This matches the `--overlay2=none` registration `mngr_vps` already performs for the same reason. The error's remediation text also warns that, with `--overlay2=none`, a container running supervisord (or anything that installs a unix socket under `/run` via a hard link) must additionally mount `/run` as a tmpfs (`default_start_args=["--tmpfs", "/run"]`), because `--overlay2=none` puts `/run` on gVisor's gofer filesystem where `os.link()` of a socket returns `EOPNOTSUPP`.
+
+Adds per-provider visibility to parallel discovery (`api/discover.py`). Discovery polls every provider in parallel and then waits for all of them, so a single provider whose call hangs silently freezes the whole snapshot (and downstream, the minds discovery-health watchdog mistakes the resulting gap for a dead producer). Now each provider's discovery is wrapped in a timing span, an unusually-slow provider is logged at WARNING with its duration, and -- while the snapshot is still waiting -- the still-pending provider(s) are named in a WARNING every 15s, so a hung provider is identifiable by name from the logs instead of only inferable from its silence. Behavior is otherwise unchanged: discovery still waits for all providers (bounding a hung provider's call is a separate change).
+
+## 2026-06-27
+
+Fix custom `parent_type` agent types losing their inherited settings after a multi-layer config load.
+
+A custom agent type that declares only `parent_type` (e.g. `[agent_types.worker]` with `parent_type = "claude"`) is supposed to inherit all of its parent type's non-default settings (`use_env_config_dir`, `auto_dismiss_dialogs`, `cli_args`, etc.). This worked when the config was resolved straight after a single merge, but once the real config load applied a second settings layer, every inherited value was silently reset to the child config class's defaults -- so a `worker` built on `claude` came out with permissions, env-config-dir, and dialog-dismissal handling all turned off.
+
+The cause was in the overlay merge pipeline (`config/overlay_merge.py`): each whole-config merge reparses the merged result with `model_validate`, which marks every present field as explicitly set. A registry entry carried through unchanged from the base layer therefore lost its sparse `model_fields_set`, so when `parent_type` inheritance later folded the child onto the parent (using `exclude_unset` semantics), the child's defaulted fields looked explicitly set and clobbered the parent's values.
+
+The merge now restores each merged model's `model_fields_set` (recursively, including nested sub-models and registry entries) to the union of the base's and the override's actually-set fields, rather than "all fields". Inheritance through any number of config layers is now correct: a `parent_type` child inherits the parent's non-default settings, while a field the child does set still wins.
+
+Fixed the docker provider reporting a running container as `CRASHED` when its inner sshd had died (e.g. "Error reading SSH protocol banner"). Previously, when agent enumeration failed to SSH into such a host, `mngr list` / `mngr forward` fell back to the offline view and derived `host.state = CRASHED` (a shutdown-capable provider with no recorded clean stop is treated as crashed) -- even though the docker daemon, the ground truth for container lifecycle, still reported the container as running. The docker provider now consults the daemon in that fallback and reports `UNAUTHENTICATED` (the host is up; we just can't get inside it), mirroring how the imbue_cloud provider reads container state out-of-band. This matches the actual host condition and stops downstream consumers from treating a live-but-unreachable container as fully offline. If the daemon itself cannot be reached for this out-of-band check, the provider keeps the default offline-state derivation instead of failing, so the offline fallback still degrades gracefully.
+
+Added a `get_connection_error_fallback_state` provider hook (default: no override) that `get_host_and_agent_details` consults when a non-authentication connection failure forces the offline fallback. Only the docker provider overrides it; the generic offline-state derivation and every other provider's behavior are unchanged.
+
+The Docker provider's discovery now treats a present-but-stopped state container as a provider error (`ProviderUnavailableError`) rather than silently reporting zero hosts. The state container holds every docker host's records; when it is stopped, reads fail and previously collapsed to an empty host list, which discovery published as "no hosts" -- dropping every host. Now an empty list always means "genuinely zero hosts," and the existing retain-on-error path keeps last-known hosts while the container is unavailable.
+
+## 2026-06-26
+
+Changed: Bumped the offload version baked into `libs/mngr/imbue/mngr/resources/Dockerfile` from `0.9.9` to `0.9.10` to track the CI pin.
+
+TMR test scope is being re-anchored from the tutorial block to each test
+function's docstring, so that TMR can run against all release tests rather than
+only the e2e tutorial tests.
+
+As part of this, the e2e test fixture now captures each test's docstring (the
+verbatim tutorial block plus its crystallized scope) and the rendered test
+detail pages show it under a "Docstring" heading.
+
+All e2e tutorial tests have been migrated to the new format: each test's tutorial
+block now lives in its docstring (under a `Tutorial block:` section) followed by a
+`Scope:` section describing what the test verifies. The `e2e.write_tutorial_block`
+helper has been removed now that no test uses it.
+
 ## 2026-06-25
 
 Bumped the offload version baked into `libs/mngr/imbue/mngr/resources/Dockerfile` from `0.9.7` to `0.9.9` to track the CI pin.

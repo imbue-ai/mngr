@@ -259,6 +259,23 @@ def test_dispatch_tier_interface_unresponsive_when_system_interface_not_running(
     assert response.dispatch_tier == DispatchTier.INTERFACE_UNRESPONSIVE
 
 
+def test_dispatch_tier_healthy_when_interface_answers_http_200() -> None:
+    """Container up, exec works, and GET / answers 200: nothing to recover.
+
+    The live in-container HTTP 200 is direct proof the interface is responding, so
+    the classifier must report HEALTHY (the recovery page returns the user to the
+    workspace) rather than the by-elimination INTERFACE_UNRESPONSIVE -- this is
+    the fix for a healthy workspace being misclassified (and needlessly
+    restarted) just because container+exec were up.
+    """
+    response = _response(
+        host_state="RUNNING",
+        in_container_stdout=_probe_stdout({"inner_port": 8000, "curl_status": "200"}),
+    )
+    assert _answer(response, "GET /") == ProbeAnswer.YES
+    assert response.dispatch_tier == DispatchTier.HEALTHY
+
+
 def test_dispatch_tier_host_offline_when_container_is_offline() -> None:
     response = _response(host_state="STOPPED")
     assert response.dispatch_tier == DispatchTier.HOST_OFFLINE

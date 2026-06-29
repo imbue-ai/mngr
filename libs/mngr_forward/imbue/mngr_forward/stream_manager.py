@@ -480,9 +480,30 @@ class ForwardStreamManager(MutableModel):
             return
         aid_str = str(agent_id)
         with self._lock:
-            if aid_str in self._events_processes:
+            existing = self._events_processes.get(aid_str)
+            if existing is not None and existing.poll() is None:
+                # A live events stream is already running for this agent.
                 return
-            self._events_services[aid_str] = {}
+            if existing is not None:
+                # The previous stream exited -- most often because the agent's
+                # host restarted (e.g. after a reboot) and broke the long-lived
+                # ``mngr event ... --follow`` connection, which then exits
+                # non-zero. Nothing respawns it on its own, so the resolver's
+                # per-agent service map would stay empty forever and
+                # ``resolve`` would keep returning None (a permanent 503).
+                # Drop the dead entry and respawn below; the periodic discovery
+                # snapshot drives this retry, rate-limiting respawns to the
+                # snapshot cadence.
+                logger.info(
+                    "Per-agent events stream for {} exited (returncode={}); respawning",
+                    agent_id,
+                    existing.returncode,
+                )
+                self._events_processes.pop(aid_str, None)
+            # Preserve any already-known services across a respawn (the new
+            # stream re-emits current registrations on connect); only seed an
+            # empty map on the first spawn.
+            self._events_services.setdefault(aid_str, {})
         sources: Sequence[str] = self._filtered_event_sources
         try:
             process = self._cg.run_process_in_background(

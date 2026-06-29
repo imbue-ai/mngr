@@ -56,7 +56,15 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    rc.check_broad_exception_catch(_DIR, snapshot(0))
+    # Count is 1 for the SIGHUP bounce watcher in ``cli.py``
+    # (``_run_sighup_bounce_watcher``). It is a long-lived daemon thread that
+    # must survive *any* single bounce's failure: an uncaught exception there
+    # kills the thread and silently turns every later provider refresh into a
+    # no-op for the supervisor's whole life. ``bounce_observe`` already catches
+    # the specific concurrency-group teardown/respawn errors it expects; the
+    # broad catch here is the deliberate last-resort safety net for a daemon
+    # loop, exactly the case where crashing is worse than continuing.
+    rc.check_broad_exception_catch(_DIR, snapshot(1))
 
 
 def test_prevent_base_exception_catch() -> None:

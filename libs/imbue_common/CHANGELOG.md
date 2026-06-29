@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: `find_bash_scripts_without_strict_mode` (the helper behind the repo-wide bash strict-mode ratchet) now skips `*.sh` files under `.minds/template/`. Those are declarative secret-schema templates sourced by the deploy tooling, not runnable scripts, so `set -euo pipefail` is meaningless for them.
+
 ## [v0.1.20] - 2026-06-13
 
 ### Changed

@@ -19,6 +19,8 @@ both recognize.
 """
 
 import os
+import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -56,17 +58,13 @@ register_marker(
     "`just test-quick`."
 )
 register_marker(
-    "minds_electron: tests that drive the Electron minds desktop app end-to-end via Playwright "
-    "over CDP. Need Node, pnpm, Electron's native deps, and a display server (`xvfb-run` on "
-    "Linux). Split out into its own CI job (`test-docker-electron`) so the heavyweight "
-    "Electron + docker spin-up does not serialize behind every other docker-marked test."
-)
-register_marker(
-    "minds_snapshot_resume: tests that assume the sandbox was booted from a Modal snapshot "
-    "produced by `scripts/snapshot_minds_e2e_state.py` (a stopped FCT workspace Docker "
-    "container already on disk). Run only via `just test-offload-minds-snapshot <image-id>` -- "
-    "explicitly excluded from every other offload run because they would fail anywhere without "
-    "the snapshot's pre-baked state."
+    "minds_snapshot_resume: tests that run in a sandbox booted from a Modal snapshot produced by "
+    "`scripts/snapshot_minds_e2e_state.py` (a stopped FCT workspace Docker container already on "
+    "disk, plus a warm Electron/Playwright/Xvfb/Docker toolchain). Includes both the resume "
+    "sanity checks (against the baked workspace) and the Electron-driven create+chat test (which "
+    "drives the warm toolchain to create a fresh workspace). Run only via "
+    "`just test-offload-minds-snapshot <image-id>` -- explicitly excluded from every other "
+    "offload run because they need the snapshot's pre-baked state."
 )
 register_conftest_hooks(globals())
 register_plugin_test_fixtures(globals())
@@ -92,3 +90,61 @@ def mngr_test_prefix() -> str:
     spawn AND clean_env()-based subprocess calls uniformly.
     """
     return f"{generate_test_environment_name()}-"
+
+
+class _XvfbStartupError(RuntimeError):
+    """Raised when the Xvfb display server fails to start for an Electron test."""
+
+
+@pytest.fixture(scope="session")
+def xvfb_display() -> Iterator[str]:
+    """Provide an X display for Electron tests, starting Xvfb if none is set.
+
+    Two contexts:
+    - Local runs go through ``xvfb-run -a`` (the ``just minds-test-electron``
+      recipe), which already sets ``DISPLAY``; this fixture then just yields it.
+    - The snapshot offload stage runs ``uv run pytest`` directly (no
+      ``xvfb-run`` wrapper) in a sandbox booted from the snapshot image, which
+      has the ``Xvfb`` binary baked in but no running display server. There this
+      fixture starts ``Xvfb`` and points ``DISPLAY`` at it so the Electron
+      renderer has somewhere to draw.
+
+    Uses Xvfb's ``-displayfd`` so there is no poll/sleep: Xvfb picks a free
+    display itself and writes its number to the pipe once the server is ready
+    (and EOFs if it dies first), so a single blocking read both waits for
+    readiness and learns the display number.
+    """
+    existing = os.environ.get("DISPLAY")
+    if existing:
+        yield existing
+        return
+
+    read_fd, write_fd = os.pipe()
+    try:
+        process = subprocess.Popen(
+            ["Xvfb", "-displayfd", str(write_fd), "-screen", "0", "1280x1024x24", "-nolisten", "tcp"],
+            pass_fds=(write_fd,),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    finally:
+        # Close the parent's copy so the read end EOFs if Xvfb dies before writing.
+        os.close(write_fd)
+
+    with os.fdopen(read_fd, "r") as ready_reader:
+        display_number = ready_reader.readline().strip()
+    if not display_number:
+        process.terminate()
+        raise _XvfbStartupError("Xvfb exited before reporting a display number; cannot run the Electron test")
+
+    display = f":{display_number}"
+    os.environ["DISPLAY"] = display
+    try:
+        yield display
+    finally:
+        os.environ.pop("DISPLAY", None)
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
