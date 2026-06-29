@@ -67,6 +67,17 @@ export MNGR_ROOT_NAME="mngr-changelog-schedule"
 unset MNGR_HOST_DIR
 unset MNGR_PREFIX
 
+# Pin the mngr user_id (and thus the Modal environment name,
+# {MNGR_ROOT_NAME}-{user_id}) to the committed constant so this redeploy targets
+# the live production environment no matter which machine runs it. Without this,
+# mngr falls back to a *random* per-profile user_id, so a redeploy from a fresh
+# checkout would silently fork the schedule into a new, empty environment. Read
+# from the shared source of truth so it can't drift from the trigger recipe.
+# (If a stale changelog profile on this machine already holds a *different*
+# user_id, mngr fails loudly on the mismatch; delete ~/.mngr-changelog-schedule
+# to let it regenerate against the pinned value.)
+export MNGR_USER_ID=$(uv run python "${REPO_ROOT}/scripts/changelog_schedule_utils.py" --print-user-id)
+
 # Pull the agent's credentials from Vault and export them so the --pass-env
 # flags below bake them into the schedule. Requires a valid `vault login
 # -method=oidc`. VAULT_ADDR / VAULT_NAMESPACE default to the imbue HCP cluster

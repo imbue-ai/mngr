@@ -14,7 +14,7 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.backup_export import BackupExportError
-from imbue.minds.desktop_client.backup_export import export_latest_snapshot_zip
+from imbue.minds.desktop_client.backup_export import export_snapshot_zip
 from imbue.minds.desktop_client.backup_export import export_zip_path_for_host
 from imbue.minds.desktop_client.backup_provisioning import build_canonical_env_content
 from imbue.minds.desktop_client.testing import restic_backup_a_file
@@ -38,7 +38,7 @@ def test_export_zip_path_for_host_is_keyed_and_in_tmp() -> None:
 def test_export_raises_without_canonical_env(tmp_path: Path) -> None:
     paths = WorkspacePaths(data_dir=tmp_path)
     with pytest.raises(BackupExportError):
-        export_latest_snapshot_zip(paths=paths, agent_id=_fresh_agent_id(), host_id="host-" + uuid4().hex)
+        export_snapshot_zip(paths=paths, agent_id=_fresh_agent_id(), host_id="host-" + uuid4().hex)
 
 
 def test_export_raises_when_repository_missing(tmp_path: Path) -> None:
@@ -47,14 +47,14 @@ def test_export_raises_when_repository_missing(tmp_path: Path) -> None:
     # Canonical env present but with no RESTIC_REPOSITORY line.
     write_canonical_env(paths, agent_id, "RESTIC_PASSWORD=secret\n")
     with pytest.raises(BackupExportError):
-        export_latest_snapshot_zip(paths=paths, agent_id=agent_id, host_id="host-" + uuid4().hex)
+        export_snapshot_zip(paths=paths, agent_id=agent_id, host_id="host-" + uuid4().hex)
 
 
 # --- local restic integration ---
 
 
 @pytest.mark.timeout(60)
-def test_export_latest_snapshot_zip_produces_zip(tmp_path: Path) -> None:
+def test_export_snapshot_zip_produces_zip(tmp_path: Path) -> None:
     paths = WorkspacePaths(data_dir=tmp_path / "minds-data")
     agent_id = _fresh_agent_id()
     host_id = "host-" + uuid4().hex
@@ -70,7 +70,7 @@ def test_export_latest_snapshot_zip_produces_zip(tmp_path: Path) -> None:
         paths, agent_id, build_canonical_env_content(repository=repo, backend_env={}, workspace_password=password)
     )
 
-    target = export_latest_snapshot_zip(paths=paths, agent_id=agent_id, host_id=host_id)
+    target = export_snapshot_zip(paths=paths, agent_id=agent_id, host_id=host_id)
     try:
         assert target == export_zip_path_for_host(host_id)
         assert zipfile.is_zipfile(target)

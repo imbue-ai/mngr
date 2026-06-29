@@ -4,6 +4,70 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-28
+
+Added a third permission-request type, `workspace`, to the `permission-requests` gateway extension (alongside `predefined` and `file-sharing`), for the cross-workspace `minds-workspaces` API.
+
+- The extension validates the requested verbs against the `minds-workspaces` verb set (read / create / destroy / lifecycle / backups-export / ssh) and the optional `target_workspace_id` as an agent id, and computes a self-contained `effect` (the scope schema + per-verb permission schemas + the grant rule), applied via the standard `POST /permission-requests/approve` path exactly like file-sharing.
+
+- The target-scoped verbs (destroy / lifecycle / backups-export / ssh) mint a uniquely-named per-target schema (`minds-workspaces-<verb>-<target_id>`) for a "selected" grant, or a broad schema for an "all workspaces" grant. Successive grants accumulate targets through the gateway's ordinary schema-by-name merge -- no `anyOf` and no special merge logic.
+
+- The approve override body is extended so a `workspace` request can recompute its effect at approval time from the user's dialog choices (`{permissions, target_workspace_id}`), mirroring file-sharing's `{path}` override.
+
+- The `minds-workspaces` scope is no longer part of the agent baseline and is not in the service catalog: it has its own dedicated request type, and its scope + verb schemas arrive self-described in the grant effect. The startup schema-backfill migration for it has been removed, and the now-empty `_MANUAL_SERVICE_ENTRIES` hook in the `services.json` generation script has been dropped.
+
+- The `minds-workspaces` verb catalog now lives in a single shared data file, `extensions/workspace_permissions.json`, read by both the gateway extension (for request-path schema construction) and the Python `workspace_permissions` module (for dialog-facing verb metadata), so the two sides cannot drift.
+
+Added the `minds-workspaces` detent scope and its named permissions (`minds-workspaces-read`, `-create`, `-destroy`, `-lifecycle`, `-backups-export`, `-ssh`) to the per-agent latchkey permissions baseline. This gates the minds desktop client's new cross-workspace management API (`/minds-api-proxy/api/v1/workspaces/...`): the scope is materialized in every per-host permissions file but not pre-granted, so an agent goes through the standard permission-request dialog before its first cross-workspace call and the user picks which verbs to allow.
+
+- `ensure_minds_workspaces_schema_in_existing_host_files` backfills the scope + permission schemas into permissions files created before the scope shipped (run at `minds run` startup, before the gateway restarts).
+
+- `store.list_host_permissions_paths` enumerates the per-host permissions files (used by the migration).
+
+- The `services.json` generator now preserves manually-curated, non-detent scope entries (like `minds-workspaces`) across regenerations.
+
+- The `minds-workspaces-ssh` permission now pins its HTTP method to `POST`, matching the other write verbs (`-create`/`-destroy`/`-lifecycle`/`-backups-export`) and the scope's one-verb-per-permission convention.
+
+Grants every agent read access to the Minds API schema document by default. The agent permissions baseline now allows `GET /minds-api-proxy/api/schema` (a permission on the existing domain-only `latchkey-self` scope, alongside the existing self-permission reads), so a freshly-created workspace can fetch the OpenAPI description of the gateway-reachable Minds API without any user grant. The schema document is non-agent-scoped (identical for all callers) and read-only.
+
+Fixes a bug where a granted `minds-workspaces` permission (the cross-workspace management API -- list/read/create/destroy/ssh/etc. on other workspaces) was silently rejected with `403` despite being present in the agent's permissions file. The agent baseline's `latchkey-self` scope is *domain-only* -- it matches every gateway-self request on host alone -- and detent evaluates rules in order, treating the first rule whose scope matches as authoritative (it rejects outright if that rule's own permissions do not cover the request, without consulting later rules). Because the workspace grant was appended *after* the `latchkey-self` rule, the catch-all matched first and vetoed the request. The grant rules are now kept ordered with `latchkey-self` last -- both when a grant is approved (the gateway's `permission_requests.mjs` merge) and when an agent is (re)registered (`register_agent_for_host`, which on app restart also repairs a host file written by an older build) -- so a narrower same-domain scope is evaluated first and its grants take effect. Schema and file-sharing access (granted under `latchkey-self` itself) is unaffected.
+
+Adds an `accounts` permission-request type to the gateway's bundled `permission-requests` extension, backing the new must-ask `GET /api/v1/accounts` route on the minds side. Like the existing `file-sharing` type, approving an `accounts` request mints a single fixed permission (`minds-accounts-read`, matching `GET /minds-api-proxy/api/v1/accounts`) under the pre-existing `latchkey-self` scope rather than minting a new detent scope, so it requires no baseline change and is deny-by-default until explicitly granted. The request is all-or-nothing with an empty payload (no verbs, no target).
+
+Adds the `minds-workspaces` detent permission scope used by the minds cross-workspace management API, with one named permission per verb (`minds-workspaces-read`, `-create`, `-destroy`, `-lifecycle`, `-backups-export`, `-ssh`, `-update`, `-recover`, `-sharing`).
+
+- Verbs split on a target axis: `read`/`create` are all-or-nothing, while `destroy`/`lifecycle`/`backups-export`/`ssh`/`update`/`recover`/`sharing` are target-scoped. A "selected" grant mints a uniquely-named per-target permission schema (`minds-workspaces-<verb>-<target_id>`) that pins a single workspace; an "all workspaces" grant uses the broad verb schema. Successive selected grants accumulate targets through the gateway's ordinary schema-by-name merge.
+
+- A verb's `method` in the shared catalog may now be a single HTTP method or an array of methods; multi-method verbs (e.g. `recover` matches `GET`/`POST`, `sharing` matches `GET`/`PUT`/`DELETE`) produce a permission schema whose `method` is a JSON-Schema `enum`.
+
+- The grant is applied like file-sharing: the agent's `type=workspace` permission request carries a precomputed effect (scope schema + verb schemas + rule, built in `permission_requests.mjs`'s `computeWorkspaceEffect`), spliced into the requesting agent's per-host permissions file on approval. The Python side keeps only the dialog-facing verb metadata.
+
+## 2026-06-27
+
+Fixed: a SIGHUP provider refresh (sent whenever a workspace toggles a discovery provider, e.g. disabling OVH) could permanently wedge the `mngr latchkey forward` supervisor's discovery pipeline. The supervisor's `mngr observe` child was tracked as a *checked* concurrency-group strand, so terminating it during a bounce (SIGTERM, a non-zero exit) was re-checked as a failure and raised a `ConcurrencyExceptionGroup`. That group escaped the bounce watcher's narrow `(OSError, RuntimeError)` guard and killed the watcher thread, turning every later SIGHUP bounce into a silent no-op for the rest of that supervisor's life.
+
+The observe stream is now spawned with `is_checked_by_group=False` (it is stopped deliberately on every bounce and on shutdown, so its SIGTERM exit is expected, not a failure), and the SIGHUP bounce watcher now survives any single bounce's error -- it logs and keeps watching instead of dying -- so a later provider toggle can still take effect. `bounce_observe`'s own teardown/respawn guards were likewise widened to cover the concurrency-group failure types they can encounter, and the shutdown `stop()` teardown now tolerates the same `terminate()` failure modes (notably a `TimeoutExpired` force-kill overrun) so a slow-to-die observe child can no longer abort the rest of the forward's clean shutdown.
+
+Stopped duplicate background discovery producers from accumulating, which made the Minds app keep showing errors for providers you had disabled and contributed to a running mind intermittently disappearing (redirecting to the "create a mind" page with "0 minds").
+
+`LatchkeyForwardSupervisor.ensure_running()` previously only reconciled the `mngr latchkey forward` recorded in `latchkey_forward.json`. When that record was missing or stale, it spawned a fresh supervisor without noticing that *other* `mngr latchkey forward` processes (left by a prior or concurrent app instance) were still running against the same latchkey directory. Each of those orphans runs its own `mngr observe --discovery-only` child, so several producers ended up writing the one shared discovery-events file with divergent, frozen-at-startup provider configs: orphans kept polling (and erroring on) providers you had since disabled, and their conflicting snapshots made the consumer flap agents in and out.
+
+`ensure_running()` now enforces one forward per latchkey directory: it reaps every `mngr latchkey forward` bound to the same `--latchkey-directory` (along with that forward's child subprocesses -- its `mngr observe` producer, the `latchkey gateway`, and reverse `ssh` tunnels) except the one that matches the live on-disk record. An unrecorded orphan is always replaced rather than adopted, since it may be running stale code or config. The scan is scoped by resolved `--latchkey-directory` equality, so a supervisor for one profile never signals a sibling profile's forward (e.g. `.minds` vs `.minds-staging`).
+
+Scope: this removes the duplicate/stale-producer source of the problem -- it fully addresses disabled providers continuing to error, and removes the cross-producer snapshot divergence. It does not, on its own, fully fix a mind disappearing: a single discovery producer can still momentarily report a provider as healthy while omitting one of its agents (e.g. the Docker provider intermittently returning no containers without raising), and the consumer currently drops an agent the first time that happens. Hardening that consumer-side retention (and the Docker provider's empty/error behavior) is separate follow-up work.
+
+## 2026-06-26
+
+Bump the pinned latchkey CLI version installed on remote VPS environments (the secondary gateway) to 2.19.1.
+
+`Latchkey.auth_browser` now owns the full Minds Google OAuth flow, so all of the auth logic lives in one place. It attempts the browser sign-in optimistically and, only when latchkey reports that the service has no registered client yet, prefers the Minds-provided OAuth client: for a Minds-OAuth Google service it registers that client (`auth prepare`) and retries against the Minds consent screen before falling back to the user self-setup flow (`auth browser-prepare`). This removes the previous up-front `auth list` probe, which was expensive because it queried every service.
+
+The registered Minds client is cleared (`auth clear`) only when we just registered it and its sign-in then failed; a client that was already registered (for example a user's own) is never cleared.
+
+Add the supporting `Latchkey` primitives used by that flow: `auth_prepare` (register an OAuth client id/secret for a service), `auth_browser_login` (a bare `auth browser` sign-in with no self-setup fallback), and `auth_clear` (`latchkey auth clear -y <service>`). Add an explicit set of Minds-OAuth Google services (`MINDS_GOOGLE_OAUTH_SERVICES`) used to gate the flow -- `google-directions` is deliberately excluded because it authenticates with an API key, not OAuth, so it must not go through the Minds OAuth client -- plus the Minds Google OAuth client id/secret as hardcoded constants (an installed/desktop-app OAuth client, where the "secret" is not truly confidential since it ships inside the distributed client).
+
+Raise the minimum supported latchkey CLI version (`LATCHKEY_MIN_VERSION`) to 2.19.1, kept in lockstep with the version installed/bundled. The package now refuses to operate against gateways older than 2.19.1 (2.18.0 introduced the `auth prepare` subcommand the flow depends on).
+
 ## 2026-06-25
 
 Fixed repeated macOS system keychain access dialogs (mentioning Latchkey) that appeared during normal Minds use. The detached `latchkey ensure-browser` subprocess was spawned without `LATCHKEY_ENCRYPTION_KEY`, so Latchkey's startup key-resolution fell through to the system keychain on every spawn. The per-directory encryption key is now injected into that subprocess's environment, matching the other Latchkey invocations.

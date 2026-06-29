@@ -18,6 +18,7 @@ of sandbox.
 """
 
 import json
+import os
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
@@ -25,10 +26,22 @@ from typing import Any
 from typing import Final
 
 import pytest
+import tomlkit
+from loguru import logger
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.desktop_client.e2e_workspace_runner import _REPO_ROOT
+from imbue.minds.desktop_client.e2e_workspace_runner import _send_message_and_await_reply
+from imbue.minds.desktop_client.e2e_workspace_runner import configure_logging
+from imbue.minds.desktop_client.e2e_workspace_runner import create_workspace_via_electron
+from imbue.minds.desktop_client.e2e_workspace_runner import destroy_agent_best_effort
+from imbue.minds.desktop_client.e2e_workspace_runner import ensure_minds_env_defaults
+from imbue.minds.desktop_client.e2e_workspace_runner import find_free_port
+from imbue.minds.desktop_client.e2e_workspace_runner import materialize_isolated_fct
+from imbue.minds.desktop_client.e2e_workspace_runner import resolve_fct_path
 from imbue.minds.desktop_client.recovery_probe import PROBE_SENTINEL
 from imbue.minds.desktop_client.recovery_probe import build_probe_shell_command
+from imbue.mngr.utils.testing import get_short_random_string
 
 _START_DOCKERD_SCRIPT: Final[Path] = Path("/code/mngr/libs/mngr/imbue/mngr/resources/start-dockerd.sh")
 _DOCKERD_STARTUP_TIMEOUT_SECONDS: Final[int] = 180
@@ -415,3 +428,132 @@ def test_minds_recovery_restores_dead_system_interface() -> None:
     assert recovered_probe.get("curl_status") in _SERVED_HTTP_STATUS_CODES, (
         f"minds recovery probe still reports system_interface unhealthy after restart; probe={recovered_probe!r}"
     )
+
+
+# -- Electron-driven create + chat (a second workspace) -----------------------
+#
+# The snapshot image bakes a warm Electron/Playwright/Xvfb/Docker toolchain (the
+# snapshot *build* drives that same toolchain to create the first workspace).
+# This test reuses that warm toolchain to drive the real Electron app and create
+# a SECOND workspace -- this time via the manual ``api_key`` AI-provider option
+# -- then sends a chat message to its ``system_interface`` and asserts the agent
+# replies. It runs in the same offload snapshot stage (carries
+# minds_snapshot_resume), so all the "drive Electron" coverage lives in one place
+# instead of a separate cold-install CI job. It does NOT use the baked first
+# workspace (it creates its own), so it is independent of the
+# ``running_workspace`` fixture.
+
+
+def _opt_into_pytest_config_guard(settings_path: Path) -> None:
+    """Set ``is_allowed_in_pytest = true`` in a throwaway ``settings.toml``.
+
+    mngr's config guard refuses to run under ``PYTEST_CURRENT_TEST`` unless every
+    config file it loads opts in. This writes the file in place with no restore,
+    so ``settings_path`` must live under a throwaway tree (``tmp_path`` or an FCT
+    clone) -- never a real checkout.
+    """
+    doc = tomlkit.parse(settings_path.read_text()) if settings_path.exists() else tomlkit.document()
+    doc["is_allowed_in_pytest"] = True
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(tomlkit.dumps(doc))
+
+
+def _isolated_host_config_root(scratch_dir: Path) -> Path:
+    """Build a throwaway git repo holding an opted-in copy of the repo's mngr config.
+
+    The Electron app runs from the returned directory (passed as
+    ``create_workspace_via_electron``'s ``host_config_dir``), so the host-side
+    ``mngr`` it spawns resolves its project config here instead of the real repo
+    ``.mngr/``. We copy the repo's ``settings.toml`` verbatim and add the pytest
+    opt-in, deliberately omitting any ``settings.local.toml``. ``git init`` makes
+    this the worktree root mngr's project-config walk stops at.
+    """
+    root = scratch_dir / "mngr_host_config"
+    root.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", str(root)], check=True, capture_output=True, text=True, timeout=30)
+    settings_path = root / ".mngr" / "settings.toml"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text((_REPO_ROOT / ".mngr" / "settings.toml").read_text())
+    _opt_into_pytest_config_guard(settings_path)
+    return root
+
+
+def _prepare_electron_workspace_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+    """Set the minds env + provider overrides and materialize the throwaway FCT + host config.
+
+    Returns ``(fct_path, host_config_root)`` for ``create_workspace_via_electron``.
+    """
+    configure_logging()
+    # Route env-var defaults through monkeypatch so injected MINDS_ROOT_NAME /
+    # MINDS_CLIENT_CONFIG_PATH revert between tests; defaults to the committed
+    # minds-staging tier.
+    ensure_minds_env_defaults(setenv=monkeypatch.setenv)
+    # No Modal creds here, so silence the Electron-spawned mngr's Modal discovery.
+    monkeypatch.setenv("MNGR__PROVIDERS__MODAL__IS_ENABLED", "false")
+    # FCT pins docker_runtime = "runsc" (gVisor), absent in CI / the sandbox;
+    # override to the default runtime (FCT names this exact escape-hatch env var).
+    monkeypatch.setenv("MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME", "runc")
+    # The Electron-spawned mngr loads two project-config trees under
+    # PYTEST_CURRENT_TEST (host-side + the FCT checkout); both must opt into the
+    # pytest config guard, and neither opt-in lives in committed state, so point
+    # at throwaway opted-in copies.
+    fct_path = materialize_isolated_fct(resolve_fct_path(tmp_path), tmp_path)
+    _opt_into_pytest_config_guard(fct_path / ".mngr" / "settings.toml")
+    host_config_root = _isolated_host_config_root(tmp_path)
+    return fct_path, host_config_root
+
+
+@pytest.mark.minds_snapshot_resume
+@pytest.mark.docker
+@pytest.mark.rsync
+@pytest.mark.timeout(900)
+def test_create_apikey_workspace_and_chat_via_electron(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    xvfb_display: str,
+) -> None:
+    """Drive Electron to create a manual-API-key Docker workspace, then chat with it.
+
+    The product-level round-trip: pick the ``api_key`` AI provider, type a raw
+    Anthropic key, create a local Docker workspace from FCT, and assert the agent
+    in the workspace's ``system_interface`` answers a chat message (echoes a
+    unique token) -- end-to-end through the real Electron app and the desktop
+    client proxy.
+
+    Runs in the snapshot offload sandbox, reusing the warm Electron toolchain
+    baked into the image (the ``xvfb_display`` fixture supplies the display the
+    sandbox lacks). Needs a real Anthropic key: the ``API_KEY`` path talks to the
+    official Anthropic API directly (no LiteLLM proxy), so the agent only replies
+    if the key works. The key is read from ``ANTHROPIC_API_KEY`` (forwarded into
+    this stage from Vault) and typed into the create form -- the Electron child
+    env scrubs that var, so the key reaches the agent only via the form,
+    exercising the real manual-key UX. Skips if the key is absent.
+    """
+    anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not anthropic_api_key:
+        pytest.skip("ANTHROPIC_API_KEY is required for the manual-key workspace chat round-trip")
+
+    fct_path, host_config_root = _prepare_electron_workspace_inputs(tmp_path, monkeypatch)
+
+    workspace_name = f"forever-{get_short_random_string()}"
+    token = get_short_random_string()
+    debug_port = find_free_port()
+    logger.info(
+        "Workspace name: {}; chat token: {}; CDP debug port: {}; DISPLAY={}",
+        workspace_name,
+        token,
+        debug_port,
+        xvfb_display,
+    )
+
+    try:
+        create_workspace_via_electron(
+            fct_path,
+            workspace_name,
+            debug_port,
+            host_config_dir=host_config_root,
+            anthropic_api_key=anthropic_api_key,
+            on_workspace_ready=lambda page: _send_message_and_await_reply(page, token),
+        )
+    finally:
+        destroy_agent_best_effort(workspace_name, config_project_dir=host_config_root / ".mngr")

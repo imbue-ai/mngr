@@ -40,6 +40,7 @@ from imbue.mngr_vps.container_setup import delete_btrfs_subvolume_on_outer
 from imbue.mngr_vps.container_setup import docker_inspect_running
 from imbue.mngr_vps.container_setup import exec_in_container
 from imbue.mngr_vps.container_setup import host_volume_name_for
+from imbue.mngr_vps.container_setup import image_exists
 from imbue.mngr_vps.container_setup import is_running_container_state
 from imbue.mngr_vps.container_setup import prepare_btrfs_on_outer
 from imbue.mngr_vps.container_setup import provision_snapshot_helper_on_outer
@@ -317,7 +318,11 @@ class DockerRealizer(SnapshotCapableRealizer):
         )
 
         image = ctx.base_image
-        if ctx.docker_build_args:
+        if ctx.allow_local_image and image_exists(outer, image):
+            # The caller pre-loaded the image into the daemon (e.g. the imbue_cloud
+            # slice load path); run it as-is rather than building or pulling.
+            logger.log(LogLevel.BUILD.value, "Using image {} already present on VPS", image, source="vps")
+        elif ctx.docker_build_args:
             image = self._build_image_on_vps(outer, host_id, image, ctx.docker_build_args, ctx.git_depth)
         else:
             logger.log(LogLevel.BUILD.value, "Pulling Docker image {} on VPS...", image, source="vps")

@@ -1,6 +1,10 @@
+import concurrent.futures
+import time
+from collections.abc import Mapping
 from collections.abc import Sequence
 from concurrent.futures import Future
 from threading import Lock
+from typing import Final
 
 from loguru import logger
 
@@ -22,6 +26,14 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.utils.thread_cleanup import mngr_executor
+
+# A full discovery snapshot waits for every provider in parallel, so a single
+# provider whose call blocks freezes the whole snapshot. These thresholds make
+# that diagnosable: warn (by default, at WARNING) when one provider's discovery
+# is unusually slow, and -- while still pending -- name the provider(s) we are
+# blocked on so a hang is visible by name instead of only inferable from silence.
+_SLOW_PROVIDER_DISCOVERY_WARN_SECONDS: Final[float] = 10.0
+_PENDING_PROVIDER_WARN_INTERVAL_SECONDS: Final[float] = 15.0
 
 
 def warn_on_duplicate_host_names(
@@ -73,17 +85,49 @@ def _discover_provider_hosts_and_agents(
     messages -- minds surfaces this in its providers panel so the user can
     see which provider failed and Disable it themselves.
     """
-    try:
-        provider_results = provider.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
-    except ProviderUnavailableError:
-        # Re-raise as-is so the broad except below doesn't wrap it.
-        raise
-    except Exception as exc:
-        raise ProviderDiscoveryError(provider.name, exc) from exc
+    # Time + span each provider's discovery so per-provider latency is visible
+    # (the span logs the duration at trace; the slow-warning below surfaces an
+    # unusually-slow provider at WARNING by default).
+    started_at = time.monotonic()
+    with log_span("Discovering hosts and agents from provider {}", provider.name):
+        try:
+            provider_results = provider.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
+        except ProviderUnavailableError:
+            # Re-raise as-is so the broad except below doesn't wrap it.
+            raise
+        except Exception as exc:
+            raise ProviderDiscoveryError(provider.name, exc) from exc
+    elapsed_seconds = time.monotonic() - started_at
+    if elapsed_seconds > _SLOW_PROVIDER_DISCOVERY_WARN_SECONDS:
+        logger.warning("Provider {} discovery was slow: took {:.1f}s", provider.name, elapsed_seconds)
 
     # Merge results into the main dict under lock
     with results_lock:
         agents_by_host.update(provider_results)
+
+
+def _wait_for_provider_discovery(provider_name_by_future: Mapping["Future[None]", str]) -> None:
+    """Wait for all provider-discovery futures, naming any that are still pending.
+
+    A snapshot waits for every provider, so one provider whose call blocks freezes
+    the whole snapshot. To make that diagnosable, this logs a warning naming the
+    still-pending provider(s) every ``_PENDING_PROVIDER_WARN_INTERVAL_SECONDS``
+    until they all finish. It does not abort -- bounding a hung provider's call is
+    a separate concern; this only restores visibility into *which* provider is the
+    one we are blocked on.
+    """
+    pending = set(provider_name_by_future)
+    started_at = time.monotonic()
+    while pending:
+        _done, pending = concurrent.futures.wait(pending, timeout=_PENDING_PROVIDER_WARN_INTERVAL_SECONDS)
+        if pending:
+            pending_provider_names = sorted(provider_name_by_future[future] for future in pending)
+            logger.warning(
+                "Discovery still waiting on {} provider(s) after {:.0f}s: {}",
+                len(pending),
+                time.monotonic() - started_at,
+                ", ".join(pending_provider_names),
+            )
 
 
 def _run_discovery(
@@ -104,25 +148,28 @@ def _run_discovery(
         for provider in providers:
             provider.reset_caches()
 
-    # Process all providers in parallel using mngr_executor
-    futures: list[Future[None]] = []
+    # Process all providers in parallel using mngr_executor. Track which provider
+    # each future belongs to so a provider that hangs -- which freezes the whole
+    # snapshot, since we wait for all of them -- can be named in the logs while it
+    # is still pending, rather than only inferred later from its silence.
+    provider_name_by_future: dict[Future[None], str] = {}
     with mngr_executor(
         parent_cg=mngr_ctx.concurrency_group, name="discover_hosts_and_agents", max_workers=32
     ) as executor:
         for provider in providers:
-            futures.append(
-                executor.submit(
-                    _discover_provider_hosts_and_agents,
-                    provider,
-                    agents_by_host,
-                    include_destroyed,
-                    results_lock,
-                    mngr_ctx.concurrency_group,
-                )
+            future = executor.submit(
+                _discover_provider_hosts_and_agents,
+                provider,
+                agents_by_host,
+                include_destroyed,
+                results_lock,
+                mngr_ctx.concurrency_group,
             )
+            provider_name_by_future[future] = provider.name
+        _wait_for_provider_discovery(provider_name_by_future)
 
-    # Re-raise any thread exceptions
-    for future in futures:
+    # Re-raise any thread exceptions (the wait above only logs; results are read here).
+    for future in provider_name_by_future:
         future.result()
 
     # Warn if any host names are duplicated within the same provider
