@@ -6,7 +6,7 @@ Added a per-run minds CI environment to the snapshot test pipeline so live tests
 
 - New `minds_services` integration test: log in to the per-run env as the fixed CI user, mint a LiteLLM key, and make a live LLM call. Runs on every push.
 
-- Test tiers: `minds_services` runs in the integration tier (every push); `minds_deployment` (deploy / rollback / round-trip) runs in a manual release tier (`workflow_dispatch`), all three passing. See `apps/minds/deployment_tests/README.md` for the capability-mark + tier matrix and local-invocation recipes.
+- Test tiers: both `minds_services` and `minds_deployment` (deploy / rollback / round-trip) need a remote `ci-*` env, so both run only in the manual release tier (`workflow_dispatch` with `run_minds_release_tests=true`); normal pushes run only `minds_snapshot_resume` (which needs just the built snapshot image, not a ci env). See `apps/minds/deployment_tests/README.md` for the capability-mark + tier matrix and local-invocation recipes.
 
 - Fixed a `minds env recover` bug surfaced by the rollback test: after an auto-rollback, the rolled-back app's broken containers were never terminated because the Modal app-id lookup matched the app name against `Name`/`name`/`App` but `modal app list --json` reports it under `Description`. The lookup silently found nothing, so the failed version's containers kept serving (and `/version` kept reporting the failed deploy_id) until they idled out. `_find_modal_app_id` now also checks `Description`; the parsing is extracted into a pure `_select_deployed_app_id` with regression unit tests against the real JSON shape.
 

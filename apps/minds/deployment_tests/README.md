@@ -15,10 +15,10 @@ These map onto two **tiers**:
 
 | Tier | When it runs | What runs |
 |---|---|---|
-| Integration | every push / PR (non-fork), in the `test-minds-snapshot` CI job | `minds_services` (on the runner, against the per-run env from `build-minds-ci-env`) + `minds_snapshot_resume` (offload) |
-| Release | manual only, in the `test-minds-release` CI job | `minds_deployment` (each test mints + destroys its own env) |
+| Integration | every push / PR (non-fork), in the `test-minds-snapshot` CI job | `minds_snapshot_resume` (offload; needs only the built snapshot image, not a ci env) |
+| Release | manual only (`workflow_dispatch` + `run_minds_release_tests`) | `minds_services` (in `test-minds-snapshot`, against the per-run env from `build-minds-ci-env`) + `minds_deployment` (in `test-minds-release`; each test mints + destroys its own env) |
 
-The release tier is `workflow_dispatch`-gated because each `minds_deployment` test deploys a full env (minutes + real spend). Trigger it from the Actions UI or:
+Both `minds_services` and `minds_deployment` need a remote `ci-*` env (a real Modal env + Neon project + SuperTokens app), so neither runs on a normal push: standing one up per push has real infra cost. They are gated behind a single `workflow_dispatch` opt-in. The only thing that runs on every push is `minds_snapshot_resume`, which needs just the built snapshot image. Trigger the full remote-env suite from the Actions UI or:
 
 ```bash
 gh workflow run ci.yml -f run_minds_release_tests=true --ref <branch>
@@ -57,6 +57,6 @@ The `shared_env` / `ci_test_user` fixtures resolve their secrets from injected e
 
 ## Status
 
-- `test_logged_in_smoke` (`minds_services`) and `test_ci_env_litellm` (`minds_services`: login → mint LiteLLM key → live LLM call) run in the integration tier and pass in CI.
+- `test_logged_in_smoke` (`minds_services`) and `test_ci_env_litellm` (`minds_services`: login → mint LiteLLM key → live LLM call) run in the release tier (opt-in) and pass in CI.
 - `test_deploy_new_version`, `test_deploy_rollback`, and `test_deploy_round_trip` (`minds_deployment`) run in the release tier and pass. (`test_deploy_rollback` originally surfaced a real `minds env recover` gap -- rolled-back apps' broken containers weren't terminated because the Modal app-id lookup missed the `Description` field -- which this work fixed.)
 - `test_litellm_via_workspace` and `test_signup_tunnel` are wired into the flow but **`@pytest.mark.skip`ped**: their bodies are still stubs and need debugging/implementation (real FCT Docker workspace creation, Cloudflare tunnels, the mail.tm signup flow) before they will pass. Each carries an explicit skip note.

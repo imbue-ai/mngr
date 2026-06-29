@@ -5,13 +5,17 @@ on:
     branches: [main]
   pull_request:
     branches: ['**']
-  # Manual trigger for the minds release tier: the heavy `minds_deployment`
-  # tests (each mints + destroys its own ephemeral ci env). Off by default; the
-  # `test-minds-release` job runs only when dispatched with this input set.
+  # Manual trigger for every minds test path that needs a remote ci env. Off by
+  # default so normal pushes/PRs never stand up a per-run `ci-*` env (real Modal
+  # env + Neon project + SuperTokens app) -- only an explicit dispatch does. When
+  # set it enables BOTH the per-run shared env (build-minds-ci-env + the
+  # `minds_services` step in test-minds-snapshot) and the heavy release-tier
+  # `minds_deployment` tests (test-minds-release, each minting + destroying its
+  # own ephemeral env).
   workflow_dispatch:
     inputs:
       run_minds_release_tests:
-        description: "Run the minds release-tier tests (minds_deployment: deploy/rollback/round-trip)"
+        description: "Run all remote-ci-env minds tests (minds_services + minds_deployment: deploy/rollback/round-trip)"
         type: boolean
         default: false
 
@@ -576,10 +580,15 @@ jobs:
   # parallel with build-minds-snapshot; test-minds-snapshot needs both.
   build-minds-ci-env:
     runs-on: ubuntu-latest
+    # Opt-in only: standing up a per-run ci env (Modal env + Neon + SuperTokens)
+    # on every push has real infra cost, so this runs ONLY on an explicit
+    # `workflow_dispatch` with `run_minds_release_tests=true`. Normal pushes/PRs
+    # skip it (and the `minds_services` step in test-minds-snapshot is gated the
+    # same way), so they never create a ci env.
     if: >-
-      vars.DISABLE_MINDS_SNAPSHOT_CI != 'true' &&
-      (github.event_name != 'pull_request' ||
-       github.event.pull_request.head.repo.full_name == github.repository)
+      github.event_name == 'workflow_dispatch' &&
+      inputs.run_minds_release_tests &&
+      vars.DISABLE_MINDS_SNAPSHOT_CI != 'true'
     environment: minds-ci-env
     permissions:
       contents: read
@@ -652,10 +661,13 @@ jobs:
   # builds; enumerates Modal ci-* envs and destroys any older than 1 hour.
   cleanup-minds-ci-envs:
     runs-on: ubuntu-latest
+    # Backstop sweep of leaked ci-* envs. Only meaningful when we actually create
+    # envs, so gate it to the same opt-in as build-minds-ci-env -- normal pushes
+    # create nothing to sweep.
     if: >-
-      vars.DISABLE_MINDS_SNAPSHOT_CI != 'true' &&
-      (github.event_name != 'pull_request' ||
-       github.event.pull_request.head.repo.full_name == github.repository)
+      github.event_name == 'workflow_dispatch' &&
+      inputs.run_minds_release_tests &&
+      vars.DISABLE_MINDS_SNAPSHOT_CI != 'true'
     environment: minds-ci-env
     permissions:
       contents: read
@@ -706,10 +718,19 @@ jobs:
   test-minds-snapshot:
     runs-on: ubuntu-latest
     needs: [build-minds-snapshot, build-minds-ci-env]
-    # Mirror the build job's fork-PR skip (the test job also authenticates to
-    # Vault, so it cannot run on fork PRs either).
+    # Runs on every push/PR for the snapshot-resume tests (which need only the
+    # built image, not a ci env). `build-minds-ci-env` is opt-in, so it is
+    # normally skipped -- hence `!cancelled()` (which drops the implicit
+    # "a skipped dependency skips me" rule) plus an explicit
+    # `build-minds-snapshot` success gate, so a skipped ci-env build does not
+    # skip this whole job. The `minds_services` steps below are themselves gated
+    # on the same opt-in and only run when the ci env was actually built.
+    # Mirror the build job's fork-PR skip (the job authenticates to Vault, so it
+    # cannot run on fork PRs either).
     if: >-
+      !cancelled() &&
       vars.DISABLE_MINDS_SNAPSHOT_CI != 'true' &&
+      needs.build-minds-snapshot.result == 'success' &&
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository)
     # The GitHub Environment whose claim the minds_ci_test_gh Vault role is
@@ -785,9 +806,13 @@ jobs:
       # The minds_services tests run directly on the runner (not in the offload
       # sandbox): they only need network access to the per-run env's connector +
       # litellm and a Vault token to read the per-run secrets + CI test-user
-      # credentials. Runs even if the offload step failed so both tiers report.
+      # credentials. Opt-in only: these steps run ONLY when the ci env was built
+      # (the same `workflow_dispatch` + `run_minds_release_tests` gate as
+      # build-minds-ci-env); on a normal push they are skipped and this job runs
+      # just the snapshot-resume tests above. `!cancelled()` lets them run even
+      # if the offload step failed, so both report.
       - name: Install Vault CLI
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.run_minds_release_tests }}
         run: |
           set -euo pipefail
           VAULT_VERSION=1.18.3
@@ -795,7 +820,7 @@ jobs:
           unzip -o /tmp/vault.zip -d /tmp/vault-bin
           sudo mv /tmp/vault-bin/vault /usr/local/bin/vault
       - name: Authenticate to Vault via GitHub OIDC
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.run_minds_release_tests }}
         run: |
           set -euo pipefail
           OIDC=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=imbue-vault" | jq -r '.value')
@@ -803,14 +828,14 @@ jobs:
           echo "::add-mask::$VAULT_TOKEN"
           printf '%s' "$VAULT_TOKEN" > "$HOME/.vault-token"
       - name: Download deployment env config
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.run_minds_release_tests }}
         uses: actions/download-artifact@v7
         with:
           name: minds-ci-env-config
           path: .minds
       - name: Run minds_services tests against the per-run ci env
         id: services_tests
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.run_minds_release_tests }}
         run: |
           MINDS_DEPLOYMENT_TEST_ENVS_JSON="$PWD/.minds/iterate-default.json" \
             uv run pytest -m minds_services apps/minds/deployment_tests/ --no-cov -p no:xdist -v
@@ -849,11 +874,14 @@ jobs:
   destroy-minds-ci-env:
     runs-on: ubuntu-latest
     needs: [build-minds-ci-env, test-minds-snapshot]
+    # Teardown for the opt-in per-run env: `always()` so it tears down even on
+    # test failure/cancellation, but gated to the same opt-in as
+    # build-minds-ci-env so it is skipped on normal pushes (nothing to destroy).
     if: >-
       always() &&
-      vars.DISABLE_MINDS_SNAPSHOT_CI != 'true' &&
-      (github.event_name != 'pull_request' ||
-       github.event.pull_request.head.repo.full_name == github.repository)
+      github.event_name == 'workflow_dispatch' &&
+      inputs.run_minds_release_tests &&
+      vars.DISABLE_MINDS_SNAPSHOT_CI != 'true'
     environment: minds-ci-env
     permissions:
       contents: read
