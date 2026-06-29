@@ -106,6 +106,21 @@ def _make_consumer(cg: ConcurrencyGroup) -> tuple[DiscoveryStreamConsumer, _Reco
     return consumer, handlers
 
 
+def _write_fake_observe_binary(directory: Path) -> Path:
+    """Write an executable stub standing in for the ``mngr observe`` child.
+
+    The consumer only needs a real, long-running subprocess it can terminate
+    and respawn; the stub ignores its ``observe --discovery-only --quiet`` args
+    and blocks in ``sleep`` until it is signalled, so a bounce's ``terminate``
+    delivers SIGTERM and the child exits with a non-zero (signal) status -- the
+    exact condition the ``is_checked_by_group=False`` fix must tolerate.
+    """
+    script = directory / "fake_observe.sh"
+    script.write_text("#!/bin/sh\nexec sleep 30\n")
+    script.chmod(0o755)
+    return script
+
+
 def _make_agent(host_id: HostId, agent_name: str) -> DiscoveredAgent:
     return DiscoveredAgent(
         host_id=host_id,
@@ -402,6 +417,33 @@ def test_bounce_observe_no_op_when_not_started(tmp_path: Path) -> None:
     with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
         consumer, _handlers = _make_consumer(cg)
         consumer.bounce_observe()
+
+
+def test_bounce_does_not_treat_deliberately_terminated_observe_as_a_failure(tmp_path: Path) -> None:
+    """A real bounce terminates the observe child and respawns it without surfacing a failure.
+
+    ``terminate`` delivers SIGTERM, so the old child exits with a non-zero
+    (signal) status. Because the observe stream is stopped deliberately, that
+    child is spawned with ``is_checked_by_group=False``; otherwise the group
+    would re-check it on the respawn -- and again at group exit -- and raise a
+    ``ConcurrencyExceptionGroup``. That escaping group was what killed the
+    SIGHUP watcher thread and wedged the discovery pipeline, so this guards the
+    fix end to end: the bounce respawns a live child and the group exits clean.
+    """
+    fake_observe = _write_fake_observe_binary(tmp_path)
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        consumer = DiscoveryStreamConsumer(concurrency_group=cg, mngr_binary=str(fake_observe))
+        consumer.start()
+        # With a *checked* observe strand, this call raised the group exception.
+        consumer.bounce_observe()
+        # The respawn produced a fresh, still-running child (None or a dead
+        # process would mean the bounce silently dropped the discovery stream).
+        assert consumer._process is not None
+        assert consumer._process.poll() is None
+        consumer.stop()
+    # Leaving the ``with`` block re-checks every tracked strand; reaching here
+    # without a ``ConcurrencyExceptionGroup`` proves the SIGTERM exits are not
+    # treated as failures.
 
 
 def test_stderr_line_is_dropped(tmp_path: Path) -> None:

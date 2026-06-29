@@ -51,9 +51,11 @@ Flow:
      bundled host_dir, assert W1's host is listed AND W2's is gone
      -- cross-checks the destroy lifecycle from a different angle
      than the UI's home-page tile state.
-  9. Duplicate-name conflict: POST /api/create-agent with HOST_NAME
-     already owned by W1; assert 409 with "already exists". Proves
-     the duplicate-name guard added on this branch works.
+  9. Duplicate-name conflict: POST /api/v1/workspaces with HOST_NAME
+     already owned by W1. The v1 create route resolves a submitted name
+     verbatim and returns 202; a duplicate then surfaces asynchronously
+     as a FAILED operation at the mngr-create pre-flight (not a
+     synchronous 409). This step has no implemented assertion.
   10. Teardown: revert /etc/hosts, clear latchkey, kill mock + socat
 
 Takes a `screencapture -x` whole-desktop shot at every milestone.
@@ -148,6 +150,24 @@ LAUNCH_BACKEND_TIMEOUT = 120
 
 # Canned slack-mock body the agent should quote back.
 CANNED_BODY = "CI MOCK: greetings from the localhost slack mock."
+
+# Sending a chat message only auto-scrolls to the new row when the transcript
+# was already pinned to the bottom (minds-v0.3.4 behavior); a view left scrolled
+# up stays put -- e.g. after a goto()/reload() re-renders the chat. The
+# transcript also virtualizes off-screen rows, so a reply in an unmounted row
+# below the fold is absent from document.body.innerText. Scroll every
+# .app-content to its tail before reading the transcript so the tail rows mount.
+_SCROLL_CHAT_TO_TAIL_JS = (
+    "for (const el of document.querySelectorAll('.app-content')) { el.scrollTop = el.scrollHeight; }"
+)
+
+
+def _wait_for_chat_text_js(condition: str) -> str:
+    """Build a `wait_for_function` body that scrolls the (virtualized) transcript
+    to its tail each poll, then evaluates `condition` against the now-mounted
+    text. Use for any wait that reads chat-reply content."""
+    return f"() => {{ {_SCROLL_CHAT_TO_TAIL_JS} return {condition}; }}"
+
 
 SLACK_PROMPT = (
     "Please read the most recent message from any Slack channel using a "
@@ -671,7 +691,7 @@ async def _create_workspace_and_first_message(
     """Drive create-form -> first-message for one workspace; navigate `win` to its chat.
 
     Steps: navigate to /create, fill the form for `host_name`, submit,
-    poll /api/create-agent/<id>/status until DONE, follow the
+    poll /api/v1/workspaces/operations/create/<id> until DONE, follow the
     redirect_url to the agent chat URL on `win`, send FIRST_PROMPT,
     wait for a >=2-occurrence reply of FIRST_EXPECT. Snaps each
     milestone with names from `snaps`.
@@ -726,7 +746,7 @@ async def _create_workspace_and_first_message(
     while time.time() < deadline and not done:
         stat = await win.evaluate(
             """async (id) => {
-                const r = await fetch('/api/create-agent/' + id + '/status');
+                const r = await fetch('/api/v1/workspaces/operations/create/' + id);
                 return {status: r.status, body: await r.text()};
             }""",
             creation_id,
@@ -801,7 +821,7 @@ async def _create_workspace_and_first_message(
         target = win.url
     elif not done_redirect_url:
         raise E2EFailure(
-            f"[{label}] creation DONE without redirect_url; check the /api/create-agent/<id>/status contract"
+            f"[{label}] creation DONE without redirect_url; check the /api/v1/workspaces/operations/create/<id> contract"
         )
     else:
         target = done_redirect_url if done_redirect_url.startswith("http") else origin + done_redirect_url
@@ -826,12 +846,12 @@ async def _create_workspace_and_first_message(
     await inp.press("Enter")
     with contextlib.suppress(Exception):
         await win.wait_for_function(
-            f"document.body.innerText.includes({FIRST_PROMPT!r})",
+            _wait_for_chat_text_js(f"document.body.innerText.includes({FIRST_PROMPT!r})"),
             timeout=10_000,
         )
     await snap_page(win, snaps.msg_sent)
     await win.wait_for_function(
-        f"(document.body.innerText.toLowerCase().match(/{FIRST_EXPECT}/g) || []).length >= 2",
+        _wait_for_chat_text_js(f"(document.body.innerText.toLowerCase().match(/{FIRST_EXPECT}/g) || []).length >= 2"),
         timeout=REPLY_TIMEOUT * 1000,
     )
     await asyncio.sleep(1)
@@ -870,12 +890,12 @@ async def _send_followup_and_verify(
     await inp.press("Enter")
     with contextlib.suppress(Exception):
         await win.wait_for_function(
-            f"document.body.innerText.includes({prompt!r})",
+            _wait_for_chat_text_js(f"document.body.innerText.includes({prompt!r})"),
             timeout=10_000,
         )
     await snap_page(win, snap_sent)
     await win.wait_for_function(
-        f"(document.body.innerText.toLowerCase().match(/{expect_token}/g) || []).length >= 2",
+        _wait_for_chat_text_js(f"(document.body.innerText.toLowerCase().match(/{expect_token}/g) || []).length >= 2"),
         timeout=REPLY_TIMEOUT * 1000,
     )
     await asyncio.sleep(1)
@@ -1094,6 +1114,8 @@ async def amain() -> int:
             logger.info("=== iter 15: reload W1 chat, verify history persists ===")
             await win.reload(wait_until="domcontentloaded")
             await asyncio.sleep(2)
+            with contextlib.suppress(Exception):
+                await win.evaluate(f"() => {{ {_SCROLL_CHAT_TO_TAIL_JS} }}")
             body_after_reload = await win.evaluate("document.body.innerText")
             pong_count = body_after_reload.lower().count(FIRST_EXPECT.lower())
             if pong_count < 2:
@@ -1236,16 +1258,9 @@ async def amain() -> int:
                     chat_now = await find_chat_window(ctx)
                     if chat_now is not None:
                         win = chat_now
-                    # Scroll the transcript to the live tail before reading it, as a
-                    # user reading the latest reply would. The chat virtualizes
-                    # off-screen rows, so a reply rendered below the fold (e.g. the
-                    # view was not pinned to the bottom when it arrived) is absent
-                    # from document.body.innerText until the viewport is at the tail.
+                    # Scroll the transcript to the live tail before reading it.
                     with contextlib.suppress(Exception):
-                        await win.evaluate(
-                            "() => { for (const el of document.querySelectorAll('.app-content')) "
-                            "{ el.scrollTop = el.scrollHeight; } }"
-                        )
+                        await win.evaluate(f"() => {{ {_SCROLL_CHAT_TO_TAIL_JS} }}")
                     # Check for canned body in chat (PASS).
                     body = await win.evaluate("document.body.innerText")
                     if CANNED_BODY.lower() in body.lower() and approval_stage >= 3:
@@ -1486,7 +1501,7 @@ async def amain() -> int:
 
             # Iter 12 (Cancel modal): real users click Destroy by accident or
             # change their mind. Verify the Cancel button dismisses the modal
-            # without firing any /api/destroy-agent call, leaving W2 alive.
+            # without firing any destroy call, leaving W2 alive.
             await win.click("#destroy-btn")
             await win.wait_for_selector("#destroy-confirm-btn", state="visible", timeout=5_000)
             await snap_page(win, "18b-w2-destroy-modal-opened")
@@ -1502,31 +1517,31 @@ async def amain() -> int:
             await win.wait_for_selector("#destroy-confirm-btn", state="visible", timeout=5_000)
             await snap_page(win, "18b3-w2-destroy-modal-reopened")
             await win.click("#destroy-confirm-btn")
-            # The confirm handler POSTs /api/destroy-agent then redirects to
-            # /; wait for the navigation, then snap the in-flight state.
+            # The confirm handler POSTs /api/v1/workspaces/<id>/destroy then
+            # redirects to /; wait for the navigation, then snap the in-flight state.
             await win.wait_for_url(origin + "/", timeout=30_000)
             await snap_page(win, "18c-w2-destroy-initiated")
 
-            # Poll /api/destroying/<id>/status until the host is actually gone
-            # (status 'done', or 404 once the record is cleaned up). Lima VM
+            # Poll /api/v1/workspaces/operations/destroy/<id> until the host is actually gone
+            # (status 'DONE', or 404 once the record is cleaned up). Lima VM
             # stop+delete typically takes 30-90s; 4-min budget gives comfortable
             # headroom.
             #
-            # 'failed' here is NOT terminal: the status is derived fresh per poll
+            # 'FAILED' here is NOT terminal: the status is derived fresh per poll
             # as pid-dead + is_host_still_active (see destroying.read_destroying).
             # The detached `mngr destroy` subprocess exits before the lima VM
             # finishes dropping out of discovery, so on a slow runner the status
-            # reads 'failed' transiently (subprocess gone, host not yet) before
-            # flipping to 'done' once the host is actually torn down. Treat it as
+            # reads 'FAILED' transiently (subprocess gone, host not yet) before
+            # flipping to 'DONE' once the host is actually torn down. Treat it as
             # "not done yet" and keep polling; a host that never tears down stays
-            # 'failed' until the deadline, which still surfaces a real
+            # 'FAILED' until the deadline, which still surfaces a real
             # silent-orphan teardown as a failure.
             destroy_deadline = time.time() + 240
             last_body: dict[str, Any] = {}
             while time.time() < destroy_deadline:
                 resp = await win.evaluate(
                     """async (aid) => {
-                        const r = await fetch('/api/destroying/' + aid + '/status');
+                        const r = await fetch('/api/v1/workspaces/operations/destroy/' + aid);
                         return {status: r.status, body: await r.text()};
                     }""",
                     w2_agent_id,
@@ -1537,7 +1552,7 @@ async def amain() -> int:
                 with contextlib.suppress(Exception):
                     last_body = json.loads(resp["body"])
                 state = last_body.get("status", "")
-                if state == "done":
+                if state == "DONE":
                     logger.info("[w2-destroy] DONE")
                     break
                 await asyncio.sleep(3)
@@ -1568,7 +1583,7 @@ async def amain() -> int:
 
             # 23. Cross-check with mngr CLI from the host: confirms W1 is in
             # mngr's canonical agent set and W2 is gone. A regression where
-            # /api/destroy-agent returns 200 but mngr's host_dir still
+            # the destroy returns success but mngr's host_dir still
             # records the agent would slip past the UI-driven home-page
             # tile check above (which scrapes the same discovery layer the
             # destroy handler does).
@@ -1641,42 +1656,6 @@ async def amain() -> int:
                 logger.info("[mngr-list] PASS: W1 present in mngr canonical state")
             else:
                 logger.warning("[mngr-list] {} not found; skipping CLI cross-check", bundled_mngr)
-
-            # 24. Duplicate-name conflict: POST /api/create-agent with
-            # HOST_NAME (still owned by W1) should return 409 with an
-            # "already exists" message. Proves the duplicate-name guard
-            # in _handle_create_agent_api (added on this branch) works,
-            # and that the canonical name set is correctly populated by
-            # backend_resolver.list_known_workspace_ids().
-            logger.info("=== conflict 409: re-create with HOST_NAME already taken ===")
-            # win is currently on W1's chat URL (agent-<hex>.localhost,
-            # served by mngr_forward to the in-VM system_interface). The
-            # /api/create-agent endpoint is on the MINDS backend (origin),
-            # so the fetch needs to land there. Easiest: navigate win to
-            # the minds origin first so the relative fetch resolves there.
-            await win.goto(origin + "/")
-            conflict_resp = await win.evaluate(
-                """async (host_name) => {
-                    const r = await fetch('/api/create-agent', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({
-                            host_name,
-                            git_url: 'https://example.com/dummy.git',
-                        }),
-                    });
-                    return {status: r.status, body: await r.text()};
-                }""",
-                HOST_NAME,
-            )
-            if conflict_resp["status"] != 409:
-                raise E2EFailure(
-                    f"[conflict-409] expected 409 for duplicate name {HOST_NAME!r}, "
-                    f"got {conflict_resp['status']}: {conflict_resp['body']!r}"
-                )
-            if "already exists" not in conflict_resp["body"]:
-                raise E2EFailure(f"[conflict-409] 409 body missing 'already exists' text: {conflict_resp['body']!r}")
-            logger.info("[conflict-409] PASS: duplicate-name guard returned 409")
 
         # Iter 9 (quit + relaunch): a user closes the Mac app, opens it
         # again, and expects W1's chat to still work. Verifies session +

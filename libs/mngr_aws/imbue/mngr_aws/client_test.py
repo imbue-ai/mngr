@@ -25,6 +25,19 @@ from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import VpsInstanceStatus
 
 
+def test_ec2_client_is_built_with_bounded_timeouts() -> None:
+    # The real (non-stubbed) EC2 client must carry the bounded connect/read
+    # timeouts so a slow/blackholed EC2 endpoint fails in seconds rather than
+    # hanging on boto3's 60s defaults. Building the client is offline.
+    session = boto3.Session(aws_access_key_id="AKIATEST", aws_secret_access_key="secret", region_name="us-east-1")
+    client = AwsVpsClient(session=session, region="us-east-1", security_group=ExistingSecurityGroup(id="sg-test"))
+    ec2_config = client._ec2().meta.config
+    assert ec2_config.connect_timeout == 5
+    assert ec2_config.read_timeout == 15
+    # max_attempts=2 (two retries) normalizes to total_max_attempts=3 (initial + 2).
+    assert ec2_config.retries == {"mode": "standard", "total_max_attempts": 3}
+
+
 @pytest.fixture()
 def stubbed_client() -> Iterator[tuple[AwsVpsClient, Stubber]]:
     """Yield a _StubbedAwsVpsClient whose underlying EC2 client is wrapped in a Stubber.

@@ -11,6 +11,7 @@ Authentication semantics:
   session files itself.
 """
 
+import time
 from typing import Any
 
 import httpx
@@ -19,6 +20,7 @@ from pydantic import AnyUrl
 from pydantic import Field
 from pydantic import SecretStr
 
+from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr_imbue_cloud.data_types import AuthPolicy
@@ -48,6 +50,22 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudTunnelError
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
 KEY_OP_TIMEOUT_SECONDS = 90.0
+
+# Transient-transport retry policy for connector calls. The connector is a
+# Modal app that scales to zero, so a call hitting a cold/scaling instance can
+# fail at the transport layer (DNS "Name or service not known" -> ConnectError,
+# "Connection reset by peer" -> ReadError/ConnectError, ConnectTimeout) before
+# any HTTP response; a short bounded retry rides those blips out. HTTP *status*
+# errors (4xx/5xx) are NOT transport errors and are never retried here -- they
+# flow through ``_check``/``_check_bucket`` unchanged.
+_TRANSPORT_RETRY_ATTEMPTS = 3
+_TRANSPORT_RETRY_BASE_SLEEP_SECONDS = 0.5
+
+# Transport errors raised before the request was put on the wire: the server
+# never saw it, so retrying is safe even for a non-idempotent call. Used to gate
+# retries on the create/lease POSTs, where a blanket retry on a post-send error
+# (e.g. a read error after the server already acted) could double-allocate.
+_CONNECT_PHASE_TRANSPORT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout)
 
 
 class AuthRawResponse(FrozenModel):
@@ -96,6 +114,68 @@ class ImbueCloudConnectorClient(MutableModel):
             except ValueError as exc:
                 raise exc_cls(f"Connector returned non-JSON response: {response.text[:200]}") from exc
         raise exc_cls(f"Connector error {response.status_code}: {response.text[:300]}")
+
+    def _http_call(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        """Dispatch one HTTP call to the matching module-level ``httpx`` function.
+
+        Calls ``httpx.get``/``post``/``put``/``delete`` by name at call time (not a
+        cached reference) so tests that monkeypatch those functions still
+        intercept the request.
+        """
+        if method == "GET":
+            return httpx.get(url, **kwargs)
+        if method == "POST":
+            return httpx.post(url, **kwargs)
+        if method == "PUT":
+            return httpx.put(url, **kwargs)
+        if method == "DELETE":
+            return httpx.delete(url, **kwargs)
+        raise SwitchError(f"Unsupported HTTP method: {method}")
+
+    def _send(
+        self,
+        method: str,
+        url: str,
+        *,
+        exc_cls: type[Exception],
+        idempotent: bool = True,
+        **kwargs: Any,
+    ) -> httpx.Response:
+        """Make one connector request, retrying transient transport failures.
+
+        Returns the raw ``httpx.Response`` (the caller still runs it through
+        ``_check``/``_check_bucket`` for HTTP-status handling). On a transport
+        error -- the connector was unreachable, reset, or timed out before a
+        response -- this retries with bounded exponential backoff and, if it
+        still fails, raises ``exc_cls`` with a concise message (never the raw
+        httpx traceback). ``idempotent`` (default ``True``) controls retry
+        breadth: idempotent calls (every GET/PUT/DELETE and the upsert-style
+        POSTs) retry on any ``httpx.TransportError``; non-idempotent POSTs
+        (lease, key/bucket creation) pass ``idempotent=False`` so only
+        connect-phase errors -- where the request never reached the server --
+        are retried, avoiding a double-allocation on a post-send blip.
+        """
+        for attempt in range(_TRANSPORT_RETRY_ATTEMPTS):
+            try:
+                return self._http_call(method, url, **kwargs)
+            except httpx.TransportError as exc:
+                is_last_attempt = attempt + 1 >= _TRANSPORT_RETRY_ATTEMPTS
+                may_retry = idempotent or isinstance(exc, _CONNECT_PHASE_TRANSPORT_ERRORS)
+                if may_retry and not is_last_attempt:
+                    logger.warning(
+                        "imbue_cloud connector {} {} transport error (attempt {}/{}); retrying: {}",
+                        method,
+                        url,
+                        attempt + 1,
+                        _TRANSPORT_RETRY_ATTEMPTS,
+                        exc,
+                    )
+                    time.sleep(_TRANSPORT_RETRY_BASE_SLEEP_SECONDS * (2**attempt))
+                    continue
+                raise exc_cls(
+                    f"could not reach the imbue_cloud connector at {url} after {attempt + 1} attempt(s): {exc}"
+                ) from exc
+        raise SwitchError("unreachable: _send exhausted its retry loop without returning or raising")
 
     # ------------------------------------------------------------------
     # Auth (no bearer token required)
@@ -385,8 +465,10 @@ class ImbueCloudConnectorClient(MutableModel):
         body: dict[str, Any] = {"agent_id": agent_id}
         if default_auth_policy is not None:
             body["default_auth_policy"] = _auth_policy_to_connector_body(default_auth_policy)
-        response = httpx.post(
+        response = self._send(
+            "POST",
             self._url("/tunnels"),
+            exc_cls=ImbueCloudTunnelError,
             headers=self._bearer(access_token),
             json=body,
             timeout=self.timeout_seconds,
@@ -395,8 +477,10 @@ class ImbueCloudConnectorClient(MutableModel):
         return _parse_tunnel_info(body_json)
 
     def list_tunnels(self, access_token: SecretStr) -> list[TunnelInfo]:
-        response = httpx.get(
+        response = self._send(
+            "GET",
             self._url("/tunnels"),
+            exc_cls=ImbueCloudTunnelError,
             headers=self._bearer(access_token),
             timeout=self.timeout_seconds,
         )
@@ -406,8 +490,10 @@ class ImbueCloudConnectorClient(MutableModel):
         return [_parse_tunnel_info(entry) for entry in body if isinstance(entry, dict)]
 
     def delete_tunnel(self, access_token: SecretStr, tunnel_name: str) -> None:
-        response = httpx.delete(
+        response = self._send(
+            "DELETE",
             self._url(f"/tunnels/{tunnel_name}"),
+            exc_cls=ImbueCloudTunnelError,
             headers=self._bearer(access_token),
             timeout=self.timeout_seconds,
         )
@@ -420,8 +506,10 @@ class ImbueCloudConnectorClient(MutableModel):
         service_name: str,
         service_url: str,
     ) -> ServiceInfo:
-        response = httpx.post(
+        response = self._send(
+            "POST",
             self._url(f"/tunnels/{tunnel_name}/services"),
+            exc_cls=ImbueCloudTunnelError,
             headers=self._bearer(access_token),
             json={"service_name": service_name, "service_url": service_url},
             timeout=self.timeout_seconds,
@@ -430,8 +518,10 @@ class ImbueCloudConnectorClient(MutableModel):
         return _parse_service_info(body)
 
     def list_services(self, access_token: SecretStr, tunnel_name: str) -> list[ServiceInfo]:
-        response = httpx.get(
+        response = self._send(
+            "GET",
             self._url(f"/tunnels/{tunnel_name}/services"),
+            exc_cls=ImbueCloudTunnelError,
             headers=self._bearer(access_token),
             timeout=self.timeout_seconds,
         )
@@ -441,16 +531,20 @@ class ImbueCloudConnectorClient(MutableModel):
         return [_parse_service_info(entry) for entry in body if isinstance(entry, dict)]
 
     def remove_service(self, access_token: SecretStr, tunnel_name: str, service_name: str) -> None:
-        response = httpx.delete(
+        response = self._send(
+            "DELETE",
             self._url(f"/tunnels/{tunnel_name}/services/{service_name}"),
+            exc_cls=ImbueCloudTunnelError,
             headers=self._bearer(access_token),
             timeout=self.timeout_seconds,
         )
         self._check(response, ImbueCloudTunnelError)
 
     def get_tunnel_auth(self, access_token: SecretStr, tunnel_name: str) -> AuthPolicy:
-        response = httpx.get(
+        response = self._send(
+            "GET",
             self._url(f"/tunnels/{tunnel_name}/auth"),
+            exc_cls=ImbueCloudTunnelError,
             headers=self._bearer(access_token),
             timeout=self.timeout_seconds,
         )
@@ -458,8 +552,10 @@ class ImbueCloudConnectorClient(MutableModel):
         return _parse_auth_policy(body)
 
     def set_tunnel_auth(self, access_token: SecretStr, tunnel_name: str, policy: AuthPolicy) -> None:
-        response = httpx.put(
+        response = self._send(
+            "PUT",
             self._url(f"/tunnels/{tunnel_name}/auth"),
+            exc_cls=ImbueCloudTunnelError,
             headers=self._bearer(access_token),
             json=_auth_policy_to_connector_body(policy),
             timeout=self.timeout_seconds,
@@ -472,8 +568,10 @@ class ImbueCloudConnectorClient(MutableModel):
         tunnel_name: str,
         service_name: str,
     ) -> AuthPolicy:
-        response = httpx.get(
+        response = self._send(
+            "GET",
             self._url(f"/tunnels/{tunnel_name}/services/{service_name}/auth"),
+            exc_cls=ImbueCloudTunnelError,
             headers=self._bearer(access_token),
             timeout=self.timeout_seconds,
         )
@@ -487,8 +585,10 @@ class ImbueCloudConnectorClient(MutableModel):
         service_name: str,
         policy: AuthPolicy,
     ) -> None:
-        response = httpx.put(
+        response = self._send(
+            "PUT",
             self._url(f"/tunnels/{tunnel_name}/services/{service_name}/auth"),
+            exc_cls=ImbueCloudTunnelError,
             headers=self._bearer(access_token),
             json=_auth_policy_to_connector_body(policy),
             timeout=self.timeout_seconds,

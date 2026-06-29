@@ -55,6 +55,7 @@ from pydantic import PrivateAttr
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.primitives import AgentId
+from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 
 _DEFAULT_STUCK_THRESHOLD_SECONDS: Final[float] = 5.0
 
@@ -65,7 +66,10 @@ _DEFAULT_STUCK_THRESHOLD_SECONDS: Final[float] = 5.0
 _BACKEND_UNREACHABLE_STATUSES: Final[frozenset[int]] = frozenset({502, 503, 504})
 
 
-def should_enroll_suspect_for_backend_failure(status_code: int | None) -> bool:
+def should_enroll_suspect_for_backend_failure(
+    reason: SystemInterfaceBackendFailureReason,
+    status_code: int | None,
+) -> bool:
     """Whether a ``system_interface_backend_failure`` should enroll a probe suspect.
 
     The plugin emits a failure envelope for every non-2xx response and for
@@ -75,7 +79,19 @@ def should_enroll_suspect_for_backend_failure(status_code: int | None) -> bool:
     errors (app 500s, ordinary 4xx) mean the backend is alive and responding, so
     they are left alone; the background probe still catches a genuinely-wrong or
     wedged backend.
+
+    ``UNRESOLVED`` is ignored outright: it means the forward has no route for the
+    agent at all. A restart routes *through* the forward, so it cannot help a
+    routeless agent regardless. In practice ``UNRESOLVED`` is either a cold-start
+    / fresh-forward warm-up (the forward has not caught up to discovery yet --
+    this self-resolves the moment it does, so enrolling would only mark a healthy
+    workspace STUCK and needlessly restart it) or a genuinely-gone agent (which a
+    restart cannot revive). A workspace that is present but unreachable does NOT
+    land here: discovery retains its (stale) route, so the dial failure surfaces
+    as ``CONNECT_ERROR`` / a 5xx, which still enrolls and still drives recovery.
     """
+    if reason == SystemInterfaceBackendFailureReason.UNRESOLVED:
+        return False
     return status_code is None or status_code in _BACKEND_UNREACHABLE_STATUSES
 
 
@@ -205,7 +221,13 @@ class SystemInterfaceHealthTracker(MutableModel):
             if record is None:
                 record = _AgentRecord()
                 self._records[aid_str] = record
+            was_suspect = record.is_suspect
             record.is_suspect = True
+        # Only the False -> True edge is interesting; duplicate envelopes for an
+        # already-suspect agent are noise. Enrollment is the entry point of the
+        # recovery lifecycle, so it is the one log worth keeping at this layer.
+        if not was_suspect:
+            logger.debug("Enrolled {} as a system-interface probe suspect (backend-failure envelope)", agent_id)
 
     def record_probe_failure(self, agent_id: AgentId) -> None:
         """Record that a background probe observed ``agent_id`` as unreachable.
@@ -219,6 +241,7 @@ class SystemInterfaceHealthTracker(MutableModel):
         """
         aid_str = str(agent_id)
         fire_health: AgentHealth | None = None
+        stuck_after_seconds: float | None = None
         with self._lock:
             record = self._records.get(aid_str)
             if record is None or record.health != AgentHealth.HEALTHY:
@@ -228,11 +251,18 @@ class SystemInterfaceHealthTracker(MutableModel):
                 record.failure_run_started_at = now
                 record.failure_run_started_wall_at = datetime.now(timezone.utc)
             elapsed = now - record.failure_run_started_at
-            if elapsed + 1e-6 < self.stuck_threshold_seconds:
-                return
-            record.health = AgentHealth.STUCK
-            fire_health = AgentHealth.STUCK
-        if fire_health is not None:
+            if elapsed + 1e-6 >= self.stuck_threshold_seconds:
+                record.health = AgentHealth.STUCK
+                fire_health = AgentHealth.STUCK
+                stuck_after_seconds = elapsed
+        # The STUCK edge is the key diagnostic; the elapsed time tells us exactly
+        # how long the workspace was continuously failing before it tripped.
+        if fire_health is not None and stuck_after_seconds is not None:
+            logger.info(
+                "System-interface health for {}: HEALTHY -> STUCK after {:.1f}s of continuous probe failures",
+                agent_id,
+                stuck_after_seconds,
+            )
             self._fire_on_change(agent_id, fire_health)
 
     def record_probe_success(self, agent_id: AgentId) -> None:
@@ -249,13 +279,20 @@ class SystemInterfaceHealthTracker(MutableModel):
         """
         aid_str = str(agent_id)
         fire_health: AgentHealth | None = None
+        prior_health: AgentHealth | None = None
         with self._lock:
             record = self._records.pop(aid_str, None)
             if record is None:
                 return
             if record.health != AgentHealth.HEALTHY:
+                prior_health = record.health
                 fire_health = AgentHealth.HEALTHY
         if fire_health is not None:
+            logger.info(
+                "System-interface health for {}: {} -> HEALTHY (probe succeeded)",
+                agent_id,
+                prior_health.value if prior_health is not None else "?",
+            )
             self._fire_on_change(agent_id, fire_health)
             self._fire_on_recovery(agent_id)
 

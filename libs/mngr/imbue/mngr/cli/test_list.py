@@ -480,6 +480,7 @@ def test_list_command_with_basic_fields(
 
 
 @pytest.mark.tmux
+@pytest.mark.timeout(30)
 def test_list_command_with_nested_fields(
     cli_runner: CliRunner,
     temp_work_dir: Path,

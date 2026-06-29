@@ -823,6 +823,7 @@ class VpsProvider(BaseProviderInstance):
         lifecycle: HostLifecycleOptions | None,
         known_hosts: Sequence[str] | None,
         authorized_keys: Sequence[str] | None,
+        allow_local_image: bool = False,
     ) -> Host:
         """Build the container and finalize host state on an already-reachable VPS.
 
@@ -853,6 +854,7 @@ class VpsProvider(BaseProviderInstance):
                 base_image=base_image,
                 effective_start_args=effective_start_args,
                 docker_build_args=parsed.docker_build_args,
+                allow_local_image=allow_local_image,
                 git_depth=parsed.git_depth,
                 tags=tags,
                 known_hosts=known_hosts,
