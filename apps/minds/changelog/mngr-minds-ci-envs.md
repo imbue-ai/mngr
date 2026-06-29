@@ -4,7 +4,7 @@ Added a per-run minds CI environment to the snapshot test pipeline so live tests
 
 - Per-env dynamic secrets (the env's own SuperTokens app + Neon DSNs) are handed between jobs via an env-name-keyed Vault path (`secrets/minds/ci/runs/<env-name>/shared-<role>`); the `shared_env` fixture resolves them from injected env vars or Vault, and a new `ci_test_user` fixture supplies the fixed CI credentials.
 
-- New `minds_services` integration test: log in to the per-run env as the fixed CI user, mint a LiteLLM key, and make a live LLM call. Runs on every push.
+- New `minds_services` integration test: log in to the per-run env as the fixed CI user, mint a LiteLLM key, and make a live LLM call.
 
 - Test tiers: both `minds_services` and `minds_deployment` (deploy / rollback / round-trip) need a remote `ci-*` env, so both run only in the manual release tier (`workflow_dispatch` with `run_minds_release_tests=true`); normal pushes run only `minds_snapshot_resume` (which needs just the built snapshot image, not a ci env). See `apps/minds/deployment_tests/README.md` for the capability-mark + tier matrix and local-invocation recipes.
 
