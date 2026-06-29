@@ -1,0 +1,1 @@
+Added a blueprint under `blueprint/caretaker-scheduler/` documenting the design for the nightly Caretaker agent and the file-driven scheduler: the contract, the implementation plan, and the end-to-end test plan.
