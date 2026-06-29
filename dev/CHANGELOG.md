@@ -4,6 +4,27 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-06-28
+
+### Added
+
+- Added: Per-run minds CI environment in the snapshot test pipeline. New `build-minds-ci-env` job deploys a `ci-*` env and publishes its per-run secrets to Vault; `test-minds-snapshot` runs `minds_services` live tests (login + mint LiteLLM key + live LLM call) against it; `destroy-minds-ci-env` (`always()`) tears it down, with a parallel `cleanup-minds-ci-envs` backstop sweeping leaked `ci-*` envs older than 1 hour. New Vault-OIDC `minds_ci_env_gh` / `minds_ci_test_gh` roles. Opt-in: standing up a `ci-*` env requires `workflow_dispatch` with `run_minds_release_tests=true`; normal pushes still run `minds_snapshot_resume` (needs only the snapshot image).
+- Added: Manual release-tier CI job `test-minds-release` (same `run_minds_release_tests` switch) runs the heavy `minds_deployment` tests (deploy / rollback / round-trip), each minting and destroying its own ephemeral env.
+- Added: `just minds-test-electron-flow` recipe drives the full minds Electron workspace lifecycle end-to-end under `xvfb` (create local Docker workspace -> chat round-trip -> terminal -> home -> v1 destroy), complementing the create-only `just minds-test-electron`.
+- Added: `openapi-spec-validator` in the root dev dependency group; used to validate the minds `GET /api/schema` OpenAPI document in tests (test-only, not shipped in the minds wheel).
+- Added: Design and blueprint documents — `blueprint/accelerate-slice-bake/plan-accelerate-slice-bake.md`, `blueprint/minds-workspace-api/plan-minds-workspace-api.md` + `HANDOFF.md`, `blueprint/minds-api-spectree/plan-minds-api-spectree.md`, and `blueprint/minds-api-route-consolidation/plan-minds-api-route-consolidation.md`.
+
+### Changed
+
+- Changed: Removed the dedicated `test-docker-electron` CI job and consolidated all Electron e2e coverage into `test-minds-snapshot`. The Electron create+chat test now carries the `minds_snapshot_resume` mark and runs in the snapshot offload sandbox, reusing the snapshot image's already-baked Electron/Playwright/Xvfb toolchain instead of cold-installing them on every push.
+- Changed: Snapshot-test offload pin unified to `0.9.10`.
+- Changed: Pinned the changelog-consolidation schedule's mngr `user_id` to a committed constant (`USER_ID` in `scripts/changelog_schedule_utils.py`, exposed via `--print-user-id`). `changelog_deploy.sh` and the `changelog-trigger` justfile recipe now export it as `MNGR_USER_ID`, so deploys and on-demand triggers always target the same Modal environment regardless of which machine runs them. Previously the environment name depended on a random per-profile `user_id`, so redeploying from a fresh checkout would silently fork the schedule into a new, empty environment.
+- Changed: `just minds-start` no longer takes an `agent_name` argument or sets `MINDS_WORKSPACE_NAME`. Its parameters are now `branch` and `fct` (positional, in that order). The workspace gets an automatic `mind-N` name unless typed into the create form's advanced "Name" field — type a name there if you want a predictable handle for `just propagate-changes <name>` / `just forward-system-interface <name>`.
+
+### Fixed
+
+- Fixed: `just sync-vendor-mngr` now resolves the forever-claude-template path to an absolute path before use, so passing a relative path no longer breaks the recipe's second `cd`.
+
 ## 2026-06-26
 
 ### Added

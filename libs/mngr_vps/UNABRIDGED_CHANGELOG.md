@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-28
+
+The container realizer can now run a base image that is already present in the VPS's local Docker daemon, skipping both the build and the pull.
+
+`RealizePlacementContext` gained an opt-in `allow_local_image` flag (off by default, so OVH/vultr/aws behavior is unchanged); when set and the image is already loaded locally, `realize_placement` runs it as-is. This backs the imbue_cloud slice "build once per box, `docker load` per slice" acceleration.
+
 ## 2026-06-23
 
 SSH host keys are now unique per host. Every VPS-backed host (AWS, GCP, Azure, OVH, Vultr, and imbue_cloud slices) gets its own freshly-generated VPS/VM-root and container sshd host keypair at create time, stored under `<key_dir>/host_keys/<host_id>/`, instead of one host keypair shared across every host a provider instance created. This removes the risk of one host's key being reused to impersonate another. The per-host keys are removed when the host is destroyed.

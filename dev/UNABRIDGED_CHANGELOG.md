@@ -4,6 +4,48 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-28
+
+Added an implementation plan for accelerating imbue_cloud slice bakes (build the FCT image once per box, docker-load it per slice) at `blueprint/accelerate-slice-bake/plan-accelerate-slice-bake.md`.
+
+Add a `just minds-test-electron-flow` recipe that drives the full minds Electron workspace lifecycle end-to-end under `xvfb` (create a local Docker workspace -> send a chat message and await the agent's reply -> open a terminal -> navigate home -> destroy via the v1 settings flow), complementing the create-only `just minds-test-electron` acceptance test.
+
+Also fix `just sync-vendor-mngr` to resolve the forever-claude-template path to an absolute path before use, so passing a relative path no longer breaks the recipe's second `cd`.
+
+Added a design/blueprint document at `blueprint/minds-workspace-api/plan-minds-workspace-api.md` capturing the plan for the versioned Minds workspace API (cross-workspace, backup, version, and SSH capabilities reachable by agents through the latchkey gateway).
+
+Updates `blueprint/minds-workspace-api/HANDOFF.md` for the SSH work: marks SSH access between workspaces (item #5) as done -- grant pruning plus refresh-not-stack are wired in (in `apps/minds`), and the remote->local SSH tunnel broker is now implemented. Corrects the earlier (incorrect) "blocker" note: a local Docker/Lima target uses an SSH connector, so the hub *can* resolve its `127.0.0.1:<published port>` endpoint and brokers a reverse tunnel into the calling workspace.
+
+Adds `openapi-spec-validator` to the root dev dependency group; it validates the minds `GET /api/schema` OpenAPI document in tests (test-only -- not shipped in the minds wheel).
+
+Adds `blueprint/minds-api-spectree/plan-minds-api-spectree.md`: the design + implementation-status doc for converting the minds `/api/v1` to spectree + pydantic validation (records what landed, the spectree-2.0.1 behaviors that shaped the approach, and the resolved design decisions).
+
+CI: the minds snapshot test pipeline now stands up a real per-run minds `ci-*` environment that the test stage exercises with live tests, and tears it down afterward.
+
+- New `build-minds-ci-env` job (parallel to `build-minds-snapshot`) deploys the per-run env via the deployment-tests orchestrator and publishes its per-run secrets to Vault.
+
+- `test-minds-snapshot` now depends on both build jobs and additionally runs the `minds_services` tests (login + mint LiteLLM key + live LLM call) on the runner against the per-run env.
+
+- New `destroy-minds-ci-env` job (`always()`) tears the per-run env down after the test stage; a new parallel `cleanup-minds-ci-envs` job sweeps leaked `ci-*` envs older than 1 hour as a backstop.
+
+- New Vault-OIDC auth in these jobs uses the `minds_ci_env_gh` / `minds_ci_test_gh` roles (env `minds-ci-env` / `minds-ci-test`); the ci-env jobs deploy to the minds-dev Modal workspace via `MINDS_DEV_MODAL_TOKEN_*`; the snapshot-test offload pin is unified to `0.9.10`.
+
+- New `workflow_dispatch` input `run_minds_release_tests` + `test-minds-release` job: the manual release tier that runs the heavy `minds_deployment` tests (deploy / rollback / round-trip), each minting + destroying its own ephemeral env.
+
+- Standing up a per-run `ci-*` env is now opt-in: `build-minds-ci-env`, `cleanup-minds-ci-envs`, `destroy-minds-ci-env`, and the `minds_services` step in `test-minds-snapshot` run ONLY on a `workflow_dispatch` with `run_minds_release_tests=true` (the same switch that gates `test-minds-release`). Normal pushes/PRs no longer create any ci env -- `test-minds-snapshot` still runs the `minds_snapshot_resume` tests (which need only the built snapshot image), via `always()` + a `build-minds-snapshot` success gate so the opt-in (skipped) ci-env build does not skip the whole job.
+
+- Removed the dedicated `test-docker-electron` CI job and consolidated all Electron e2e coverage into the `test-minds-snapshot` stage. The Electron create+chat test now carries the `minds_snapshot_resume` mark and runs in the snapshot offload sandbox, reusing the snapshot image's already-baked Electron/Playwright/Xvfb toolchain instead of a separate job that cold-installed Node/pnpm/Electron/xvfb on every push. The `test-docker` filter dropped its `not minds_electron` exclusion (the marker is gone), and `just minds-test-electron` now runs the consolidated test locally.
+
+Adds the minds workspace-API blueprint plan and handoff doc under `blueprint/minds-workspace-api/`, and updates root `justfile` recipes supporting the minds app and workspace-API development workflow.
+
+Updates those blueprint docs to match the shipped permission design: the cross-workspace permissions use a `minds-workspaces` scope whose schemas (including per-target ones) arrive with each grant and merge by name, rather than the originally-planned per-host `anyOf` allowlist synced at startup. The plan carries a superseded-notice pointing at `apps/minds/docs/latchkey-permissions.md`, and the handoff now reflects current status (telegram/per-target/create-parity done; SSH remote→local broker outstanding; old UI routes still in use enumerated).
+
+Adds a new plan, `blueprint/minds-api-route-consolidation/plan-minds-api-route-consolidation.md`, for consolidating the leftover desktop-client UI routes onto a single, consistently-authed `/api/v1` surface (workspace/desktop/provider vocabulary, three new per-target `minds-workspaces` verbs, unified auth, and the browser create-flow repoint).
+
+Pin the changelog-consolidation schedule's mngr `user_id` to a committed constant (`USER_ID` in `scripts/changelog_schedule_utils.py`, exposed via `--print-user-id`). `changelog_deploy.sh` and the `changelog-trigger` justfile recipe now export it as `MNGR_USER_ID`, so deploys and on-demand triggers always target the same Modal environment (`mngr-changelog-schedule-<user_id>`) regardless of which machine runs them. Previously the environment name depended on a random per-profile `user_id`, so redeploying from a fresh checkout would silently fork the schedule into a new, empty environment instead of replacing the live one.
+
+`just minds-start` no longer takes an `agent_name` argument or sets `MINDS_WORKSPACE_NAME`. Its parameters are now `branch` and `fct` (positional, in that order): `just minds-start my-branch`, or `just minds-start "" .external_worktrees/my-fct-worktree`. The workspace always gets an automatic `mind-N` name unless you type one into the create form's advanced "Name" field -- type a name there if you want a predictable handle for `just propagate-changes <name>` / `just forward-system-interface <name>`.
+
 ## 2026-06-26
 
 Changed: Bumped the offload CI pin in `.github/workflows/ci.yml` from `0.9.9` to `0.9.10` (cargo cache key, version check, and `cargo install` invocation updated to match).
