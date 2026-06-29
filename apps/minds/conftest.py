@@ -19,7 +19,11 @@ both recognize.
 """
 
 import os
+import subprocess
+import time
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Final
 
 import pytest
 
@@ -56,17 +60,13 @@ register_marker(
     "`just test-quick`."
 )
 register_marker(
-    "minds_electron: tests that drive the Electron minds desktop app end-to-end via Playwright "
-    "over CDP. Need Node, pnpm, Electron's native deps, and a display server (`xvfb-run` on "
-    "Linux). Split out into its own CI job (`test-docker-electron`) so the heavyweight "
-    "Electron + docker spin-up does not serialize behind every other docker-marked test."
-)
-register_marker(
-    "minds_snapshot_resume: tests that assume the sandbox was booted from a Modal snapshot "
-    "produced by `scripts/snapshot_minds_e2e_state.py` (a stopped FCT workspace Docker "
-    "container already on disk). Run only via `just test-offload-minds-snapshot <image-id>` -- "
-    "explicitly excluded from every other offload run because they would fail anywhere without "
-    "the snapshot's pre-baked state."
+    "minds_snapshot_resume: tests that run in a sandbox booted from a Modal snapshot produced by "
+    "`scripts/snapshot_minds_e2e_state.py` (a stopped FCT workspace Docker container already on "
+    "disk, plus a warm Electron/Playwright/Xvfb/Docker toolchain). Includes both the resume "
+    "sanity checks (against the baked workspace) and the Electron-driven create+chat test (which "
+    "drives the warm toolchain to create a fresh workspace). Run only via "
+    "`just test-offload-minds-snapshot <image-id>` -- explicitly excluded from every other "
+    "offload run because they need the snapshot's pre-baked state."
 )
 register_conftest_hooks(globals())
 register_plugin_test_fixtures(globals())
@@ -92,3 +92,54 @@ def mngr_test_prefix() -> str:
     spawn AND clean_env()-based subprocess calls uniformly.
     """
     return f"{generate_test_environment_name()}-"
+
+
+_XVFB_DISPLAY: Final[str] = ":99"
+_XVFB_READY_TIMEOUT_SECONDS: Final[int] = 30
+
+
+@pytest.fixture(scope="session")
+def xvfb_display() -> Iterator[str]:
+    """Provide an X display for Electron tests, starting Xvfb if none is set.
+
+    Two contexts:
+    - Local runs go through ``xvfb-run -a`` (the ``just minds-test-electron``
+      recipe), which already sets ``DISPLAY``; this fixture then just yields it.
+    - The snapshot offload stage runs ``uv run pytest`` directly (no
+      ``xvfb-run`` wrapper) in a sandbox booted from the snapshot image, which
+      has the ``Xvfb`` binary baked in but no running display server. There this
+      fixture starts ``Xvfb`` and points ``DISPLAY`` at it so the Electron
+      renderer has somewhere to draw.
+    """
+    existing = os.environ.get("DISPLAY")
+    if existing:
+        yield existing
+        return
+
+    process = subprocess.Popen(
+        ["Xvfb", _XVFB_DISPLAY, "-screen", "0", "1280x1024x24", "-nolisten", "tcp"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    socket_path = Path(f"/tmp/.X11-unix/X{_XVFB_DISPLAY.lstrip(':')}")
+    deadline = time.monotonic() + _XVFB_READY_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if socket_path.exists():
+            break
+        if process.poll() is not None:
+            raise RuntimeError(f"Xvfb exited early with code {process.returncode} before {socket_path} appeared")
+        time.sleep(0.2)
+    else:
+        process.terminate()
+        raise TimeoutError(f"Xvfb did not create {socket_path} within {_XVFB_READY_TIMEOUT_SECONDS}s")
+
+    os.environ["DISPLAY"] = _XVFB_DISPLAY
+    try:
+        yield _XVFB_DISPLAY
+    finally:
+        os.environ.pop("DISPLAY", None)
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()

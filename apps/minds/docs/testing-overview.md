@@ -39,8 +39,7 @@ run. By area:
 | File / test | Marks | What it exercises |
 |---|---|---|
 | `test_aws_workspace_release.py::test_aws_workspace_runs_in_runsc_container_on_ec2` | `release`, `timeout(900)`, skip unless AWS creds + `MNGR_AWS_RELEASE_TESTS=1` | Provisions a real EC2 instance, asserts the agent runs in a runsc/gVisor container. Costs money. |
-| `test_desktop_client_e2e.py::test_create_local_docker_workspace_via_electron` | `acceptance`, `docker`, `rsync`, `minds_electron`, `timeout(900)` | Launches the real Electron app, drives the create form via Playwright/CDP, creates a local Docker FCT workspace, asserts `system_interface` renders, then `mngr destroy`s in `finally`. Shares its driver with `desktop_client/e2e_workspace_runner.py`. |
-| `test_snapshot_resume.py` (5 tests) | each `minds_snapshot_resume` + `docker` + per-test `timeout` | Assert against a Modal-snapshot sandbox (pre-baked, stopped FCT workspace container). Only via `just test-offload-minds-snapshot`. See 1.5. |
+| `test_snapshot_resume.py` (6 tests) | each `minds_snapshot_resume` + `docker` (+ `rsync` on the electron test) + per-test `timeout` | Five assert against a Modal-snapshot sandbox (pre-baked, stopped FCT workspace container). The sixth, `test_create_apikey_workspace_and_chat_via_electron`, reuses the snapshot image's warm Electron/Playwright/Xvfb toolchain to drive the real Electron app: it creates a fresh local Docker FCT workspace via the manual `api_key` AI provider (needs `ANTHROPIC_API_KEY`), sends a chat message, and asserts the agent replies, then `mngr destroy`s in `finally`. Shares its driver with `desktop_client/e2e_workspace_runner.py`. Only via `just test-offload-minds-snapshot` (or `just minds-test-electron` locally). See 1.5. |
 | `test_sse_redirect.py::test_sse_redirect_on_done` | `release` | Werkzeug server + Playwright; verifies the creating-page SSE stream delivers `done` and the JS redirects. No Docker/agent. |
 | `imbue/minds/test_claude_version_alignment.py::test_claude_code_version_matches_forever_claude_template_pin` | `release` | Checks the Claude Code CLI pin matches the FCT pin. |
 
@@ -84,13 +83,12 @@ driven only by `just minds-test-deployment` and siblings (orchestrator
   docker and not docker_sdk and not minds_deployment and not minds_services and
   not minds_snapshot_resume`; pre-creates a shared Modal env.
 - **`test-docker`** -- real Docker daemon on a GitHub runner; `(docker or
-  docker_sdk) and not release and not minds_electron and not
-  minds_snapshot_resume`.
-- **`test-docker-electron`** -- the single Electron e2e test; installs
-  Node/pnpm/Electron/xvfb and runs `minds_electron and not release` under
-  `xvfb-run`.
+  docker_sdk) and not release and not minds_snapshot_resume`.
 - **`build-minds-snapshot` + `test-minds-snapshot`** ("Minds Snapshot Resume
-  Tests") -- the modal-snapshot stage (see below).
+  Tests") -- the modal-snapshot stage (see below). All `minds_snapshot_resume`
+  tests run here, including the Electron create+chat test (which reuses the
+  snapshot image's baked Electron toolchain) -- there is no longer a separate
+  `test-docker-electron` job.
 - **`cleanup-modal-environments`** -- sweeps old Modal test envs + leaked
   snapshot images.
 
@@ -162,8 +160,11 @@ Legend for where each test best fits:
   already in Docker); add to `test_snapshot_resume.py`-style files with marks
   `minds_snapshot_resume` + `docker`. These fan out in parallel in offload and
   need no imbue_cloud login.
-- **[electron]** -- needs the real Electron app driver (`minds_electron`); runs
-  in `test-docker-electron`.
+- **[electron]** -- needs the real Electron app driver. These now run in the
+  modal-snapshot stage too (mark `minds_snapshot_resume`), reusing the snapshot
+  image's baked Electron/Playwright/Xvfb toolchain; request the `xvfb_display`
+  fixture so the test gets a display in the offload sandbox. See
+  `test_create_apikey_workspace_and_chat_via_electron`.
 - **[local]** -- a plain integration test (Flask test client or pure logic), no
   Docker; runs in the default offload suite.
 
