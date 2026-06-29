@@ -44,7 +44,7 @@ def test_build_assist_chat_omits_workspace_label_when_name_unknown() -> None:
 def test_build_assist_chat_quotes_description_so_it_cannot_break_the_shell_command() -> None:
     # ``mngr exec`` runs the inner command through a shell, so a description with shell
     # metacharacters must stay contained in the single --message argument.
-    hostile = 'oops"; rm -rf / #  $(whoami) `id`'
+    hostile = 'oops"; rm -rf /; echo $(whoami) `id` && touch /tmp/pwned'
     args = build_assist_chat_mngr_args(
         workspace_agent_id=AgentId.generate(),
         workspace_name="ws",
