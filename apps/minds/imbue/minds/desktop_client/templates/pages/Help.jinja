@@ -6,8 +6,10 @@
 
   Two options are offered: "have an agent help" and "report a bug to Imbue". Agent
   help is available (and the default) only when opened from a loaded workspace --
-  ``workspace_agent_id`` is set; submitting POSTs the description to /help/assist,
-  which spawns an ``/assist`` chat in that workspace. Report mode POSTs the
+  ``workspace_agent_id`` is set; submitting swaps the body to a loading spinner and
+  POSTs the description to /help/assist, which blocks until the ``/assist`` chat is
+  created and its first message sent, then auto-closes the modal (the new chat tab has
+  already auto-opened in the workspace). Report mode POSTs the
   description plus the chosen diagnostics to /help/report, which collects state and
   sends a manually-tagged Sentry report; the response carries the Sentry ``event_id``
   (or null when Sentry is inactive), shown in the confirmation so the user can quote
@@ -86,21 +88,21 @@
     });
     applyMode();
 
-    function showAgentStarted() {
-      document.getElementById("help-sent-title").textContent = "Agent ready";
-      document.getElementById("help-sent-body").textContent =
-        "Your agent is in a new chat tab in this workspace.";
-      document.getElementById("help-event-id-row").classList.add("hidden");
+    // Agent-help swaps the whole modal body to a loading state while the request
+    // blocks (the /help/assist route waits for the chat to be created and its first
+    // message sent, ~15s).
+    function showAgentLoading() {
       document.getElementById("help-form").classList.add("hidden");
-      document.getElementById("help-sent").classList.remove("hidden");
+      document.getElementById("help-loading").classList.remove("hidden");
+    }
+    function hideAgentLoading() {
+      document.getElementById("help-loading").classList.add("hidden");
+      document.getElementById("help-form").classList.remove("hidden");
     }
 
     function submitAgentHelp(description) {
       submit.disabled = true;
-      // The request blocks until the chat is created (~15s), so the spinner stays up the
-      // whole time rather than dismissing into a blank gap before the tab appears.
-      status.textContent = "Starting an agent to help. This can take a few seconds…";
-      status.className = "type-helper text-tertiary mt-2";
+      showAgentLoading();
       fetch("/help/assist", {
         method: "POST",
         credentials: "same-origin",
@@ -110,13 +112,17 @@
         return resp.json().then(function (data) { return { ok: resp.ok, data: data }; });
       }).then(function (result) {
         if (result.ok) {
-          showAgentStarted();
+          // Creation + first message are done and the new chat tab has already
+          // auto-opened in the workspace, so just dismiss the modal.
+          closeHelp();
         } else {
+          hideAgentLoading();
           submit.disabled = false;
           status.textContent = (result.data && result.data.error) || "Could not start an agent.";
           status.className = "type-helper text-danger mt-2";
         }
       }).catch(function () {
+        hideAgentLoading();
         submit.disabled = false;
         status.textContent = "Network error starting the agent.";
         status.className = "type-helper text-danger mt-2";
@@ -286,6 +292,12 @@
 
         <Button variant="primary" block id="help-submit" extra="mt-4">Send report</Button>
         <p id="help-status" class="type-helper text-tertiary mt-2"></p>
+      </div>
+
+      <div id="help-loading" class="p-8 hidden text-center">
+        <div class="flex justify-center mb-4"><Spinner size="lg" /></div>
+        <p class="type-body text-primary">Starting an agent to help&hellip;</p>
+        <p class="type-helper text-tertiary mt-1">Setting up a new chat in this workspace. This can take a few seconds.</p>
       </div>
 
       <div id="help-sent" class="p-4 hidden text-center">
