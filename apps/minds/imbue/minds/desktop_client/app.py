@@ -517,8 +517,9 @@ def _handle_help_assist() -> Response:
     Only valid when the help flow was opened from a loaded workspace: the body carries that
     workspace's agent id and the user's description. The desktop app runs ``mngr create`` inside that
     workspace's container (via ``mngr exec``) to spawn a new chat seeded with ``/assist <description>``;
-    the system interface auto-opens its tab. Returns as soon as the spawn is dispatched -- the chat
-    appears asynchronously.
+    the system interface auto-opens its tab. The call blocks until ``mngr create`` finishes so the
+    get-help modal can hold its "starting..." state until the chat exists, then returns 200 on success
+    or 502 if the spawn failed.
     """
     body = request.get_json(silent=True, force=True)
     if not isinstance(body, dict):
