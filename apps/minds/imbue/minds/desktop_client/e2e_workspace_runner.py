@@ -789,8 +789,9 @@ def _drive_create_flow(
     agent then talks to the official Anthropic API directly, no LiteLLM proxy).
     Mutually exclusive with ``account_label`` (the manual key needs no account).
     """
-    if anthropic_api_key is not None and account_label is not None:
-        raise ValueError("anthropic_api_key (API_KEY mode) and account_label are mutually exclusive")
+    assert anthropic_api_key is None or account_label is None, (
+        "anthropic_api_key (API_KEY mode) and account_label are mutually exclusive"
+    )
     backend_origin = _backend_origin_from_page(page)
     logger.info("Backend origin: {}", backend_origin)
 

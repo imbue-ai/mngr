@@ -20,10 +20,8 @@ both recognize.
 
 import os
 import subprocess
-import time
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Final
 
 import pytest
 
@@ -94,8 +92,8 @@ def mngr_test_prefix() -> str:
     return f"{generate_test_environment_name()}-"
 
 
-_XVFB_DISPLAY: Final[str] = ":99"
-_XVFB_READY_TIMEOUT_SECONDS: Final[int] = 30
+class _XvfbStartupError(RuntimeError):
+    """Raised when the Xvfb display server fails to start for an Electron test."""
 
 
 @pytest.fixture(scope="session")
@@ -110,32 +108,39 @@ def xvfb_display() -> Iterator[str]:
       has the ``Xvfb`` binary baked in but no running display server. There this
       fixture starts ``Xvfb`` and points ``DISPLAY`` at it so the Electron
       renderer has somewhere to draw.
+
+    Uses Xvfb's ``-displayfd`` so there is no poll/sleep: Xvfb picks a free
+    display itself and writes its number to the pipe once the server is ready
+    (and EOFs if it dies first), so a single blocking read both waits for
+    readiness and learns the display number.
     """
     existing = os.environ.get("DISPLAY")
     if existing:
         yield existing
         return
 
-    process = subprocess.Popen(
-        ["Xvfb", _XVFB_DISPLAY, "-screen", "0", "1280x1024x24", "-nolisten", "tcp"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    socket_path = Path(f"/tmp/.X11-unix/X{_XVFB_DISPLAY.lstrip(':')}")
-    deadline = time.monotonic() + _XVFB_READY_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        if socket_path.exists():
-            break
-        if process.poll() is not None:
-            raise RuntimeError(f"Xvfb exited early with code {process.returncode} before {socket_path} appeared")
-        time.sleep(0.2)
-    else:
-        process.terminate()
-        raise TimeoutError(f"Xvfb did not create {socket_path} within {_XVFB_READY_TIMEOUT_SECONDS}s")
-
-    os.environ["DISPLAY"] = _XVFB_DISPLAY
+    read_fd, write_fd = os.pipe()
     try:
-        yield _XVFB_DISPLAY
+        process = subprocess.Popen(
+            ["Xvfb", "-displayfd", str(write_fd), "-screen", "0", "1280x1024x24", "-nolisten", "tcp"],
+            pass_fds=(write_fd,),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    finally:
+        # Close the parent's copy so the read end EOFs if Xvfb dies before writing.
+        os.close(write_fd)
+
+    with os.fdopen(read_fd, "r") as ready_reader:
+        display_number = ready_reader.readline().strip()
+    if not display_number:
+        process.terminate()
+        raise _XvfbStartupError("Xvfb exited before reporting a display number; cannot run the Electron test")
+
+    display = f":{display_number}"
+    os.environ["DISPLAY"] = display
+    try:
+        yield display
     finally:
         os.environ.pop("DISPLAY", None)
         process.terminate()

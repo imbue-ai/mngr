@@ -430,17 +430,18 @@ def test_minds_recovery_restores_dead_system_interface() -> None:
     )
 
 
-# -- Electron-driven create + chat (workspace #2) -----------------------------
+# -- Electron-driven create + chat (a second workspace) -----------------------
 #
 # The snapshot image bakes a warm Electron/Playwright/Xvfb/Docker toolchain (the
-# snapshot *build* drives that same toolchain to create workspace #1). This test
-# reuses that warm toolchain to drive the real Electron app and create a SECOND
-# workspace -- this time via the manual ``api_key`` AI-provider option -- then
-# sends a chat message to its ``system_interface`` and asserts the agent replies.
-# It runs in the same offload snapshot stage (carries minds_snapshot_resume), so
-# all the "drive Electron" coverage lives in one place instead of a separate
-# cold-install CI job. It does NOT use the baked workspace #1 (it creates its own
-# #2), so it is independent of the ``running_workspace`` fixture.
+# snapshot *build* drives that same toolchain to create the first workspace).
+# This test reuses that warm toolchain to drive the real Electron app and create
+# a SECOND workspace -- this time via the manual ``api_key`` AI-provider option
+# -- then sends a chat message to its ``system_interface`` and asserts the agent
+# replies. It runs in the same offload snapshot stage (carries
+# minds_snapshot_resume), so all the "drive Electron" coverage lives in one place
+# instead of a separate cold-install CI job. It does NOT use the baked first
+# workspace (it creates its own), so it is independent of the
+# ``running_workspace`` fixture.
 
 
 def _opt_into_pytest_config_guard(settings_path: Path) -> None:
