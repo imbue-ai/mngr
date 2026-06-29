@@ -36,6 +36,7 @@ Linux CI requires ``xvfb`` (the recipe wraps the invocation with
 ``xvfb-run -a``).
 """
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -44,6 +45,7 @@ import tomlkit
 from loguru import logger
 
 from imbue.minds.desktop_client.e2e_workspace_runner import _REPO_ROOT
+from imbue.minds.desktop_client.e2e_workspace_runner import _send_message_and_await_reply
 from imbue.minds.desktop_client.e2e_workspace_runner import configure_logging
 from imbue.minds.desktop_client.e2e_workspace_runner import create_workspace_via_electron
 from imbue.minds.desktop_client.e2e_workspace_runner import destroy_agent_best_effort
@@ -99,6 +101,40 @@ def _isolated_host_config_root(scratch_dir: Path) -> Path:
     return root
 
 
+def _prepare_electron_workspace_inputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Path, Path]:
+    """Set the minds env + provider overrides and materialize the throwaway FCT + host config.
+
+    Returns ``(fct_path, host_config_root)`` for ``create_workspace_via_electron``.
+    Shared by every Electron-driving test here; see the long comments in
+    :func:`test_create_local_docker_workspace_via_electron` for why each piece
+    is needed (env defaults, Modal disabled, runc runtime, the two opted-in
+    config trees).
+    """
+    configure_logging()
+    # Route env-var defaults through `monkeypatch.setenv` so any
+    # `MINDS_ROOT_NAME` / `MINDS_CLIENT_CONFIG_PATH` values the runner injects get
+    # reverted between tests instead of leaking into siblings.
+    ensure_minds_env_defaults(setenv=monkeypatch.setenv)
+    # No Modal creds in this local-Docker test, so the Electron-spawned `mngr`'s
+    # provider discovery would otherwise log "Modal is not authorized" every ~10s.
+    monkeypatch.setenv("MNGR__PROVIDERS__MODAL__IS_ENABLED", "false")
+    # FCT's `[providers.docker]` sets `docker_runtime = "runsc"` (gVisor), which CI
+    # runners do not have; override to the default runtime (the FCT settings name
+    # this exact env var as the supported CI/Modal escape hatch).
+    monkeypatch.setenv("MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME", "runc")
+    # The Electron-spawned `mngr` loads two project-config trees under
+    # PYTEST_CURRENT_TEST (host-side for `mngr forward`/discovery, the FCT checkout
+    # for `mngr create`); both must opt into the pytest config guard, and neither
+    # opt-in lives in committed state, so we point at throwaway opted-in copies.
+    fct_path = materialize_isolated_fct(resolve_fct_path(tmp_path), tmp_path)
+    _opt_into_pytest_config_guard(fct_path / ".mngr" / "settings.toml")
+    host_config_root = _isolated_host_config_root(tmp_path)
+    return fct_path, host_config_root
+
+
 # Carrying only the resource marks the *test process* sees a host-side
 # invocation of, after the test passes end-to-end:
 #
@@ -133,46 +169,7 @@ def test_create_local_docker_workspace_via_electron(
     through the desktop client proxy. Cleans up the mngr agent in
     ``finally`` regardless of outcome.
     """
-    configure_logging()
-    # Route env-var defaults through `monkeypatch.setenv` so any
-    # `MINDS_ROOT_NAME` / `MINDS_CLIENT_CONFIG_PATH` values the runner
-    # injects get reverted between tests instead of leaking into siblings.
-    # The runner intentionally has no default setter -- the snapshot
-    # script (which runs in a throwaway sandbox) passes an
-    # `os.environ`-mutating setter, which is exactly what we want to
-    # avoid here.
-    ensure_minds_env_defaults(setenv=monkeypatch.setenv)
-
-    # No Modal creds in this local-Docker test, so the Electron-spawned `mngr`'s
-    # provider discovery would otherwise log "Modal is not authorized" every ~10s.
-    # The env is inherited by the Electron child via `_build_electron_env`.
-    monkeypatch.setenv("MNGR__PROVIDERS__MODAL__IS_ENABLED", "false")
-
-    # FCT's `[providers.docker]` block sets `docker_runtime = "runsc"` to harden
-    # the local-docker provider with gVisor. CI runners (and most dev machines)
-    # do not have runsc installed, so `docker run --runtime runsc` would fail
-    # immediately with "unknown or invalid runtime name: runsc" and the test
-    # times out waiting for the agent navigation that never happens. Override
-    # back to the default runtime; FCT's settings.toml comment names this exact
-    # env var as the supported escape hatch for CI / Modal.
-    monkeypatch.setenv("MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME", "runc")
-
-    # The Electron-spawned `mngr` loads two project-config trees under
-    # PYTEST_CURRENT_TEST: the host-side tree (where `mngr auth list` / `mngr
-    # forward` and the proxy's agent discovery run) and the FCT checkout's (where
-    # `mngr create` runs). Both must opt into the pytest config guard or `mngr`
-    # refuses to run, and neither opt-in lives in committed state. The two need
-    # *different* configs -- the host side needs the repo's `.mngr` (its `forward`
-    # plugin + provider config drive the proxy/discovery), `mngr create` needs
-    # FCT's own templates -- and they differ only by cwd, so a single
-    # MNGR_PROJECT_CONFIG_DIR cannot serve both. Instead of editing the real
-    # files, we point the Electron host process at `host_config_root` (an
-    # opted-in copy of the repo's `.mngr`) and hand `mngr create` `fct_path` (a
-    # throwaway FCT tree) whose own opted-in `.mngr/settings.toml` rides into the
-    # container.
-    fct_path = materialize_isolated_fct(resolve_fct_path(tmp_path), tmp_path)
-    _opt_into_pytest_config_guard(fct_path / ".mngr" / "settings.toml")
-    host_config_root = _isolated_host_config_root(tmp_path)
+    fct_path, host_config_root = _prepare_electron_workspace_inputs(tmp_path, monkeypatch)
 
     workspace_name = f"forever-{get_short_random_string()}"
     debug_port = find_free_port()
@@ -180,5 +177,54 @@ def test_create_local_docker_workspace_via_electron(
 
     try:
         create_workspace_via_electron(fct_path, workspace_name, debug_port, host_config_dir=host_config_root)
+    finally:
+        destroy_agent_best_effort(workspace_name, config_project_dir=host_config_root / ".mngr")
+
+
+@pytest.mark.acceptance
+@pytest.mark.docker
+@pytest.mark.rsync
+@pytest.mark.minds_electron
+@pytest.mark.timeout(900)
+def test_create_apikey_docker_workspace_and_message_via_electron(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Drive Electron to create a Docker workspace with a manual Anthropic key, then chat.
+
+    This is the product-level round-trip: a user picks the ``api_key`` AI
+    provider, types a raw Anthropic key, creates a local Docker workspace from
+    FCT, and the agent in the workspace's ``system_interface`` answers a chat
+    message. It asserts both that the workspace renders AND that a message gets a
+    reply (the agent echoes a unique token), end-to-end through the desktop
+    client proxy -- the layer the in-process and connector tests can't reach.
+
+    Needs a real Anthropic API key: the ``API_KEY`` path talks to the official
+    Anthropic API directly (no LiteLLM proxy), so the agent only replies if the
+    key works. The key is read from ``ANTHROPIC_API_KEY`` and typed into the
+    create form -- ``_build_electron_env`` scrubs that var from the Electron
+    child, so the key reaches the agent only via the form, exercising the real
+    manual-key UX. Skips if the key is absent (e.g. a fork PR with no secret).
+    """
+    anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not anthropic_api_key:
+        pytest.skip("ANTHROPIC_API_KEY is required for the manual-key workspace chat round-trip")
+
+    fct_path, host_config_root = _prepare_electron_workspace_inputs(tmp_path, monkeypatch)
+
+    workspace_name = f"forever-{get_short_random_string()}"
+    token = get_short_random_string()
+    debug_port = find_free_port()
+    logger.info("Workspace name: {}; chat token: {}; CDP debug port: {}", workspace_name, token, debug_port)
+
+    try:
+        create_workspace_via_electron(
+            fct_path,
+            workspace_name,
+            debug_port,
+            host_config_dir=host_config_root,
+            anthropic_api_key=anthropic_api_key,
+            on_workspace_ready=lambda page: _send_message_and_await_reply(page, token),
+        )
     finally:
         destroy_agent_best_effort(workspace_name, config_project_dir=host_config_root / ".mngr")
