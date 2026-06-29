@@ -42,6 +42,27 @@ def existing_workspace_host_names(backend_resolver: BackendResolverInterface) ->
     return names
 
 
+def taken_host_names_on_provider(backend_resolver: BackendResolverInterface, provider_instance_name: str) -> set[str]:
+    """Case-folded names of active workspaces on a single provider instance.
+
+    Scopes to the provider instance a create would target -- where the host-name
+    uniqueness check actually fires -- and to *active* workspaces only (a
+    destroyed host's name is free to reuse), reading the discovery snapshot per
+    the resolver-cache read convention. Names are case-folded so the create
+    form's availability check treats ``My-Mind`` and ``my-mind`` as the same
+    name. Feeds the ``GET /api/v1/desktop/host-name-available`` check.
+    """
+    taken: set[str] = set()
+    for agent_id in backend_resolver.list_active_workspace_ids():
+        info = backend_resolver.get_agent_display_info(agent_id)
+        if info is None or info.provider_name != provider_instance_name:
+            continue
+        name = backend_resolver.get_workspace_name(agent_id)
+        if name is not None:
+            taken.add(name.casefold())
+    return taken
+
+
 def color_for_new_workspace(raw_color: object) -> str:
     """Lenient parse of a create request's submitted color, with default fallback.
 
