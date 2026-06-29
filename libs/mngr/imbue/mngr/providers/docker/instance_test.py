@@ -9,6 +9,7 @@ import docker
 import docker.errors
 import docker.models.containers
 import pytest
+import requests
 import requests.exceptions
 
 from imbue.concurrency_group.errors import ProcessError
@@ -21,7 +22,9 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import OfflineHostWithVolume
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.host import HostFileReadInterface
 from imbue.mngr.interfaces.host import HostFileWriteInterface
 from imbue.mngr.primitives import DockerBuilder
@@ -49,6 +52,7 @@ from imbue.mngr.providers.docker.testing import make_offline_docker_provider
 from imbue.mngr.providers.docker.testing import write_fake_docker_context
 from imbue.mngr.providers.docker.volume import STATE_CONTAINER_TYPE_LABEL
 from imbue.mngr.providers.docker.volume import STATE_CONTAINER_TYPE_VALUE
+from imbue.mngr.providers.local.volume import LocalVolume
 
 HOST_ID_A = "host-00000000000000000000000000000001"
 HOST_ID_B = "host-00000000000000000000000000000002"
@@ -978,6 +982,240 @@ def test_docker_build_timeout_error_help_text_mentions_config_setting() -> None:
     assert error.user_help_text is not None
     assert "build_timeout_seconds" in error.user_help_text
     assert "my-docker" in error.user_help_text
+
+
+# =========================================================================
+# Build-image removal during destroy / GC
+# =========================================================================
+
+
+class _BuildRemovalImages:
+    """Minimal stand-in for ``docker_client.images`` for build-image removal."""
+
+    def __init__(self, *, present: bool, remove_error: Exception | None = None) -> None:
+        self._present = present
+        self._remove_error = remove_error
+        self.remove_calls: list[dict] = []
+
+    def list(self, name: str | None = None) -> list[object]:
+        return [object()] if self._present else []
+
+    def remove(self, tag: str, force: bool = False) -> None:
+        self.remove_calls.append({"tag": tag, "force": force})
+        if self._remove_error is not None:
+            raise self._remove_error
+
+
+class _BuildRemovalDockerClient:
+    def __init__(self, images: _BuildRemovalImages) -> None:
+        self.images = images
+
+
+def test_remove_build_image_force_untags_present_image(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """_remove_build_image drops mngr's tag with force=True.
+
+    Callers remove the host's container first, so force deletes the now-
+    unreferenced image; force also lets mngr relinquish its tag when something
+    unexpected still references the image, rather than failing with a 409.
+    """
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    fake_images = _BuildRemovalImages(present=True)
+    provider.__dict__["_docker_client"] = _BuildRemovalDockerClient(fake_images)
+
+    provider._remove_build_image(HostId(HOST_ID_A))
+
+    expected_tag = DockerProviderInstance._build_image_tag(HostId(HOST_ID_A))
+    assert fake_images.remove_calls == [{"tag": expected_tag, "force": True}]
+
+
+def test_remove_build_image_noops_when_absent(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """_remove_build_image does nothing when the build image is not present."""
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    fake_images = _BuildRemovalImages(present=False)
+    provider.__dict__["_docker_client"] = _BuildRemovalDockerClient(fake_images)
+
+    provider._remove_build_image(HostId(HOST_ID_A))
+
+    assert fake_images.remove_calls == []
+
+
+def _image_in_use_conflict() -> docker.errors.APIError:
+    """The 409 Docker raises when a build image's last tag is removed while a container holds it."""
+    response = requests.Response()
+    response.status_code = 409
+    return docker.errors.APIError(
+        "409 Client Error: Conflict (must be forced) - container is using its referenced image",
+        response=response,
+    )
+
+
+class _LeakedContainer:
+    """A container in `_LeakedContainerDaemon`, referencing one host's build image."""
+
+    def __init__(self, daemon: "_LeakedContainerDaemon", host_id: HostId, remove_error: Exception | None) -> None:
+        self._daemon = daemon
+        self.id = f"container-{host_id}"
+        self.host_id = host_id
+        self.status = "exited"
+        self._remove_error = remove_error
+
+    def reload(self) -> None:
+        if self not in self._daemon.containers_present:
+            raise docker.errors.NotFound(f"container {self.id} gone")
+
+    def stop(self, timeout: int | None = None) -> None:
+        pass
+
+    def remove(self, force: bool = False) -> None:
+        if self._remove_error is not None:
+            raise self._remove_error
+        if self in self._daemon.containers_present:
+            self._daemon.containers_present.remove(self)
+
+
+class _LeakedContainerContainers:
+    def __init__(self, daemon: "_LeakedContainerDaemon") -> None:
+        self._daemon = daemon
+
+    def list(self, all: bool = False, filters: dict | None = None) -> list[_LeakedContainer]:
+        wanted_host_id: str | None = None
+        for label in (filters or {}).get("label", []):
+            if label.startswith(f"{LABEL_HOST_ID}="):
+                wanted_host_id = label.split("=", 1)[1]
+        return [c for c in self._daemon.containers_present if wanted_host_id in (None, str(c.host_id))]
+
+
+class _LeakedContainerImages:
+    def __init__(self, daemon: "_LeakedContainerDaemon") -> None:
+        self._daemon = daemon
+
+    def list(self, name: str | None = None) -> list[object]:
+        return [object()] if name in self._daemon.image_tags else []
+
+    def remove(self, tag: str, force: bool = False) -> None:
+        if tag not in self._daemon.image_tags:
+            raise docker.errors.NotFound(f"image {tag} not found")
+        referenced = any(
+            DockerProviderInstance._build_image_tag(c.host_id) == tag for c in self._daemon.containers_present
+        )
+        if referenced and not force:
+            raise _image_in_use_conflict()
+        self._daemon.image_tags.discard(tag)
+
+
+class _LeakedContainerDaemon:
+    """Stateful fake Docker client modeling the leaked-container/build-image conflict.
+
+    The build image ``mngr-build-<host_id>`` is "in use" -- its unforced removal
+    raises Docker's 409 conflict -- while a container for that host_id exists.
+    force=True drops the tag regardless, and removing the container clears the
+    conflict, mirroring real Docker semantics.
+    """
+
+    def __init__(self) -> None:
+        self.image_tags: set[str] = set()
+        self.containers_present: list[_LeakedContainer] = []
+        self.images = _LeakedContainerImages(self)
+        self.containers = _LeakedContainerContainers(self)
+
+    def add_host_with_leaked_container(self, host_id: HostId, remove_error: Exception | None = None) -> None:
+        self.image_tags.add(DockerProviderInstance._build_image_tag(host_id))
+        self.containers_present.append(_LeakedContainer(self, host_id, remove_error))
+
+
+def _write_destroyed_host_record(provider: DockerProviderInstance, host_id: str) -> OfflineHost:
+    record = HostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=host_id,
+            host_name="h",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+    )
+    provider._host_store.write_host_record(record)
+    return provider._create_host_from_host_record(record)
+
+
+def test_delete_host_destroys_leaked_container_then_removes_build_image(
+    temp_mngr_ctx: MngrContext, tmp_path: Path
+) -> None:
+    """delete_host clears a leaked container so no trace of the host remains.
+
+    A container left over from an earlier failed destroy still references the
+    build image. delete_host re-runs destroy_host, which removes that container
+    before its build image, leaving no container, no image, and no host record
+    -- rather than force-untagging the image and leaking the container.
+    """
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    daemon = _LeakedContainerDaemon()
+    daemon.add_host_with_leaked_container(HostId(HOST_ID_A))
+    provider.__dict__["_docker_client"] = daemon
+    host = _write_destroyed_host_record(provider, HOST_ID_A)
+
+    provider.delete_host(host)
+
+    assert daemon.containers_present == []
+    assert daemon.image_tags == set()
+    assert provider._host_store.read_host_record(HostId(HOST_ID_A), use_cache=False) is None
+
+
+@pytest.mark.allow_warnings(match=r"Failed to remove container for host")
+def test_delete_host_records_leak_when_container_removal_stays_stuck(
+    temp_mngr_ctx: MngrContext, tmp_path: Path
+) -> None:
+    """A container that cannot be removed is surfaced as a leak, not a crash.
+
+    When destroy_host still cannot remove the conflicting container, that
+    container is recorded as a CleanupFailedGroup leak (which GC aggregates and
+    continues past). The build image tag is force-dropped regardless -- mngr
+    relinquishes its claim -- but the host record is kept (not forgotten) so the
+    next sweep can retry the leftover.
+    """
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    daemon = _LeakedContainerDaemon()
+    daemon.add_host_with_leaked_container(HostId(HOST_ID_A), remove_error=docker.errors.APIError("stuck"))
+    provider.__dict__["_docker_client"] = daemon
+    host = _write_destroyed_host_record(provider, HOST_ID_A)
+
+    with pytest.raises(CleanupFailedGroup) as exc_info:
+        provider.delete_host(host)
+
+    assert any(f.category == CleanupFailureCategory.HOST_RESOURCE_REMAINS for f in exc_info.value.failures)
+    # The stuck container is reported as a leak and remains, but mngr force-drops
+    # its build image tag regardless...
+    assert daemon.containers_present != []
+    assert daemon.image_tags == set()
+    # ...and the host record is KEPT (not forgotten) so the next sweep can retry the leak.
+    assert provider._host_store.read_host_record(HostId(HOST_ID_A), use_cache=False) is not None
+
+
+class _RemoveDirectoryFailingVolume(LocalVolume):
+    """LocalVolume whose remove_directory always fails (mirrors DockerVolume's `rm -rf` failure)."""
+
+    def remove_directory(self, path: str) -> None:
+        raise MngrError(f"failed to remove directory {path}")
+
+
+@pytest.mark.allow_warnings(match=r"Failed to remove host volume for host")
+def test_delete_host_records_volume_removal_failure_as_leak(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """A host volume that cannot be removed is recorded as a leak, not dismissed.
+
+    remove_directory is idempotent on a missing path, so an exception means the
+    volume data still exists and could not be removed -- a leftover resource,
+    not a benign "no volume" case. delete_host must record it as a
+    CleanupFailedGroup and keep the host record for the next sweep to retry.
+    """
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    provider.__dict__["_state_volume"] = _RemoveDirectoryFailingVolume(root_path=tmp_path)
+    provider.__dict__["_docker_client"] = _LeakedContainerDaemon()
+    host = _write_destroyed_host_record(provider, HOST_ID_A)
+
+    with pytest.raises(CleanupFailedGroup) as exc_info:
+        provider.delete_host(host)
+
+    assert any("host volume" in f.message for f in exc_info.value.failures)
+    # The host record is kept on failure so the next sweep can retry.
+    assert provider._host_store.read_host_record(HostId(HOST_ID_A), use_cache=False) is not None
 
 
 def test_gvisor_runsc_without_overlay_none_is_ephemeral() -> None:

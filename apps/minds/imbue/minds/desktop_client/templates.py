@@ -105,7 +105,7 @@ _BTN_VARIANTS: Final[Mapping[str, str]] = {
 # recoloring it.
 _INPUT_BASE: Final[str] = (
     "p-2 type-body border border-strong bg-surface-primary text-primary "
-    "placeholder:text-tertiary hover:border-stronger "
+    "placeholder:text-tertiary hover:border-stronger focus:border-stronger "
     "focus:outline-2 focus:outline-offset-2 focus:outline-accent"
 )
 
