@@ -444,7 +444,7 @@ def test_landing_page_shows_create_form_after_discovery_finds_no_agents(tmp_path
 
     response = client.get("/")
     assert response.status_code == 200
-    assert "Where do you want to run your mind?" in response.text
+    assert "Where should it run?" in response.text
     assert "git_url" in response.text
 
 
@@ -475,7 +475,7 @@ def test_create_page_shows_form(tmp_path: Path) -> None:
 
     response = client.get("/create")
     assert response.status_code == 200
-    assert "Where do you want to run your mind?" in response.text
+    assert "Where should it run?" in response.text
     assert 'data-preset="remote"' in response.text
     assert 'data-preset="local"' in response.text
 
@@ -567,7 +567,7 @@ def test_creating_page_shows_status(tmp_path: Path) -> None:
 
     response = client.get("/creating/{}".format(agent_id))
     assert response.status_code == 200
-    assert "Creating your project" in response.text
+    assert "Creating your workspace" in response.text
     assert "Setting up your workspace" in response.text
     # The onboarding question UI was removed, so none of its markers render.
     assert "data-question" not in response.text
@@ -1050,10 +1050,10 @@ def test_auth_page_with_return_to_shows_back_link_and_explainer(tmp_path: Path) 
     response = client.get("/auth/signup", query_string={"return_to": "/create"})
     assert response.status_code == 200
     # Back link to the picker.
-    assert "Back to mind setup" in response.text
+    assert "Back to workspace setup" in response.text
     assert 'href="/create"' in response.text
     # Default explainer banner (no explicit message supplied).
-    assert "run your mind on Imbue Cloud" in response.text
+    assert "run your workspace on Imbue Cloud" in response.text
 
 
 def test_auth_signin_modal_page_renders_overlay_with_auth_form(tmp_path: Path) -> None:
@@ -1064,7 +1064,7 @@ def test_auth_signin_modal_page_renders_overlay_with_auth_form(tmp_path: Path) -
     assert response.status_code == 200
     assert 'id="signin-modal-backdrop"' in response.text
     assert 'id="signin-form"' in response.text
-    assert "run your mind on Imbue Cloud" in response.text
+    assert "run your workspace on Imbue Cloud" in response.text
 
 
 def test_auth_page_ignores_unsafe_return_to(tmp_path: Path) -> None:
@@ -1072,9 +1072,9 @@ def test_auth_page_ignores_unsafe_return_to(tmp_path: Path) -> None:
     client = _create_test_client_with_auth_routes(tmp_path)
     response = client.get("/auth/signup", query_string={"return_to": "https://evil.com"})
     assert response.status_code == 200
-    assert "Back to mind setup" not in response.text
+    assert "Back to workspace setup" not in response.text
     assert "evil.com" not in response.text
-    assert "run your mind on Imbue Cloud" not in response.text
+    assert "run your workspace on Imbue Cloud" not in response.text
 
 
 def test_accounts_page_requires_auth(tmp_path: Path) -> None:

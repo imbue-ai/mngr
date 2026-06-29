@@ -407,7 +407,7 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     structured body: ``{"error", "field"}`` names the offending field where
     applicable (agents ignore ``field``), and the no-account imbue_cloud backstop
     returns ``{"error", "redirect_url"}`` pointing at the sign-up flow. An empty
-    ``host_name`` is auto-resolved to the next free ``mind-N`` (the form no
+    ``host_name`` is auto-resolved to the next free ``workspace-N`` (the form no
     longer asks for a name).
 
     Backup provisioning and Cloudflare tunnel injection match the desktop UI's
@@ -459,7 +459,7 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
 
     # The workspace name is chosen automatically unless one was submitted (the
     # advanced view's optional "Name" field): a submitted value, else the next
-    # free ``mind-N`` name (computed from the host names already in use across
+    # free ``workspace-N`` name (computed from the host names already in use across
     # every provider). Resolve it eagerly so an invalid name surfaces as a 400
     # here rather than as a deferred FAILED status on the creating page.
     backend_resolver = get_state().backend_resolver
