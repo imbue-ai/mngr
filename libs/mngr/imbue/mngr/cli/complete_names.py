@@ -39,12 +39,18 @@ def _get_discovery_events_path() -> Path:
 def _find_replay_start_idx(lines: list[str]) -> int:
     """Find the earliest line index whose replay still includes every provider's latest snapshot.
 
-    Reverse-scans (for efficiency) to find the latest legacy ``DISCOVERY_FULL`` line and
-    each provider's latest ``DISCOVERY_PROVIDER`` line, then returns the minimum of those
-    indices. Returns 0 if no snapshot is found (the whole file is replayed). Replaying a
-    little extra is harmless: per-provider snapshots reset only their own provider.
+    Reverse-scans (for efficiency) for each provider's latest ``DISCOVERY_PROVIDER``
+    line and returns the minimum of those indices. Returns 0 if no snapshot is found
+    (the whole file is replayed). Replaying a little extra is harmless: per-provider
+    snapshots reset only their own provider.
+
+    Stops as soon as a legacy ``DISCOVERY_FULL`` is reached: that snapshot resets all
+    state on replay, so any line below it is irrelevant and every per-provider snapshot
+    already seen above it has a larger index, making the full snapshot's index the
+    minimum. This keeps the legacy/mixed-log case cheap on this every-TAB hot path; a
+    purely per-provider log (no full snapshot) is still scanned to the start to locate
+    every provider's latest snapshot.
     """
-    last_full_idx: int | None = None
     latest_idx_by_provider: dict[str, int] = {}
     for idx in range(len(lines) - 1, -1, -1):
         line = lines[idx].strip()
@@ -58,8 +64,8 @@ def _find_replay_start_idx(lines: list[str]) -> int:
         except json.JSONDecodeError:
             continue
         event_type = data.get("type")
-        if event_type == "DISCOVERY_FULL" and last_full_idx is None:
-            last_full_idx = idx
+        if event_type == "DISCOVERY_FULL":
+            return idx
         elif event_type == "DISCOVERY_PROVIDER":
             provider_name = data.get("provider_name", "")
             # First time we see a provider in reverse order is its latest snapshot.
@@ -68,12 +74,9 @@ def _find_replay_start_idx(lines: list[str]) -> int:
         else:
             pass
 
-    candidate_indices = list(latest_idx_by_provider.values())
-    if last_full_idx is not None:
-        candidate_indices.append(last_full_idx)
-    if not candidate_indices:
+    if not latest_idx_by_provider:
         return 0
-    return min(candidate_indices)
+    return min(latest_idx_by_provider.values())
 
 
 def _drop_provider_state(
