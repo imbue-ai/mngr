@@ -103,7 +103,7 @@ _BTN_VARIANTS: Final[Mapping[str, str]] = {
 # recoloring it.
 _INPUT_BASE: Final[str] = (
     "p-2 type-body border border-strong bg-surface-primary text-primary "
-    "placeholder:text-tertiary hover:border-stronger "
+    "placeholder:text-tertiary hover:border-stronger focus:border-stronger "
     "focus:outline-2 focus:outline-offset-2 focus:outline-accent"
 )
 
@@ -275,7 +275,10 @@ def render_landing_page(
 # Hardcoded fallbacks for the workspace-creation form. Overridable via the
 # MINDS_WORKSPACE_* env vars only when the operator explicitly opts in -- see
 # ``_operator_workspace_default`` for the gating rationale.
-_FALLBACK_GIT_URL: Final[str] = "https://github.com/imbue-ai/forever-claude-template.git"
+# Public alias: the default forever-claude-template repo URL. The pre-baked Lima
+# image gate (lima_image_prefetch) keys on this to recognize the default workspace.
+DEFAULT_FOREVER_CLAUDE_GIT_URL: Final[str] = "https://github.com/imbue-ai/forever-claude-template.git"
+_FALLBACK_GIT_URL: Final[str] = DEFAULT_FOREVER_CLAUDE_GIT_URL
 # Pin to an annotated FCT tag so a shipped binary clones the exact FCT
 # snapshot it was verified against. Bump to a newer tag only after
 # re-verifying launch-to-msg CI against (this binary, the new tag).
@@ -291,6 +294,16 @@ FALLBACK_BRANCH: Final[str] = "minds-v0.3.4"
 # form back to the public GitHub FCT on ``main``) while leaving dev tiers exposed
 # to stray vars.
 _WORKSPACE_DEFAULTS_OPT_IN_ENV_VAR: Final[str] = "MINDS_USE_LOCAL_WORKSPACE_DEFAULTS"
+
+
+def is_local_workspace_defaults_opt_in() -> bool:
+    """Return whether the operator opted into local-worktree create-form defaults (the dev loop).
+
+    True when ``MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1`` -- the same signal that
+    routes the create form at the operator's local FCT worktree. The pre-baked
+    image gate treats this as "dev loop" and falls back to build-in-VM.
+    """
+    return os.environ.get(_WORKSPACE_DEFAULTS_OPT_IN_ENV_VAR) == "1"
 
 
 def _operator_workspace_default(env_var: str, fallback: str) -> str:
@@ -316,8 +329,8 @@ def _operator_workspace_default(env_var: str, fallback: str) -> str:
 
 
 # Base for auto-generated workspace host names. The generic default is never
-# used bare -- it is always numbered (``mind-1``, ``mind-2``, ...).
-_DEFAULT_HOST_NAME_BASE: Final[str] = "mind"
+# used bare -- it is always numbered (``workspace-1``, ``workspace-2``, ...).
+_DEFAULT_HOST_NAME_BASE: Final[str] = "workspace"
 
 
 @pure
@@ -333,8 +346,8 @@ def make_unique_host_name(base: str, existing_host_names: Collection[str], *, al
 
     With ``always_number`` True, ``base`` is never used bare: the smallest free
     ``base-1``, ``base-2``, ... is returned. This is the generic default's
-    scheme, which has no bare ``mind`` form; a gap left by a destroyed
-    ``mind-2`` is reused before climbing to ``mind-4``.
+    scheme, which has no bare ``workspace`` form; a gap left by a destroyed
+    ``workspace-2`` is reused before climbing to ``workspace-4``.
 
     Raises ``InvalidName`` if the chosen name is not a valid ``HostName`` (i.e.
     ``base`` itself is invalid); appending ``-N`` to a valid base stays valid.
@@ -351,18 +364,18 @@ def make_unique_host_name(base: str, existing_host_names: Collection[str], *, al
 def resolve_create_host_name(submitted_host_name: str, existing_host_names: Collection[str] = ()) -> HostName:
     """Resolve the host name for a new workspace.
 
-    The name defaults to an automatic ``mind-N`` unless the operator types one
-    into the create form's advanced "Name" field. Resolution order:
+    The name defaults to an automatic ``workspace-N`` unless the operator types
+    one into the create form's advanced "Name" field. Resolution order:
 
     1. the user-submitted name, if any, used verbatim (validated as a
        ``HostName``);
-    2. the next free ``mind-N`` name (smallest positive ``N`` whose ``mind-N``
-       is not already in ``existing_host_names``).
+    2. the next free ``workspace-N`` name (smallest positive ``N`` whose
+       ``workspace-N`` is not already in ``existing_host_names``).
 
     The submitted name is used verbatim and never uniquified -- an explicit
     collision is the API's 409 to reject, not ours to silently rename (a
     duplicate name fails the ``mngr create`` pre-flight). Only the generated
-    ``mind-N`` fallback consults ``existing_host_names`` to pick a free name.
+    ``workspace-N`` fallback consults ``existing_host_names`` to pick a free name.
 
     Raises ``InvalidName`` if a non-empty submitted name is not a valid host
     name; the generated fallback is always valid.
@@ -424,7 +437,7 @@ def render_create_form(
 
     ``host_name`` is an optional explicit workspace name, exposed as a "Name"
     field in the advanced view. When empty the name is chosen automatically
-    server-side (the next free ``mind-N`` via ``resolve_create_host_name``); a
+    server-side (the next free ``workspace-N`` via ``resolve_create_host_name``); a
     submitted value is carried back here so it survives a validation-error
     re-render. The color is always chosen automatically (the first unused
     palette entry); ``color`` is the ``#rrggbb`` hex carried in the hidden
@@ -607,17 +620,31 @@ def render_consent_page(report_unexpected_errors: bool, include_logs: bool) -> s
 
 
 @pure
-def render_help_page(include_logs_setting: bool, workspace_agent_id: str) -> str:
+def render_help_page(
+    include_logs_setting: bool,
+    workspace_agent_id: str,
+    description: str = "",
+    is_agent_report: bool = False,
+    workspace_name: str = "",
+) -> str:
     """Render the get-help modal page (report a bug; agent help disabled for now).
 
     ``include_logs_setting`` is the persistent include-logs preference: when on, logs are always
     attached and the form hides its one-off "include logs" checkbox. ``workspace_agent_id`` is the
     workspace the help flow was opened from ("" on a general screen), enabling workspace-scoped options.
+    ``description`` pre-fills the report textarea -- non-empty when an in-workspace ``/assist`` agent
+    asked the app to open the modal with its diagnosis already written in. ``is_agent_report`` is set
+    for that agent-escalation flow: the modal then frames the pre-filled report as the agent's
+    submission (titled with ``workspace_name``, when known) and hides the mode choice, since a report
+    is already underway.
     """
     return CATALOG.render(
         "pages.Help",
         include_logs_setting=include_logs_setting,
         workspace_agent_id=workspace_agent_id,
+        description=description,
+        is_agent_report=is_agent_report,
+        workspace_name=workspace_name,
     )
 
 
@@ -890,10 +917,11 @@ _RECOVERY_STYLE: Final[str] = """\
       #copy-diagnostics-btn:hover,
       #copy-ssh-btn:hover { background: #f4f4f5; }
 
-      /* A quiet "Report a problem" link under the primary action, always visible
-         so the user can open the bug-report modal from any recovery state. Kept
-         de-emphasized (text-only) so it never competes with the restart/retry
-         button above it. */
+      /* A quiet "Report a problem" link under the primary action, shown only on
+         the terminal recovery states that offer a restart/retry (not the
+         transient "Loading workspace" spinner, where there is nothing to report
+         yet). Kept de-emphasized (text-only) so it never competes with the
+         restart/retry button above it. */
       #recovery-report-btn {
         margin-top: 12px;
         align-self: center;
@@ -929,6 +957,9 @@ _RECOVERY_SCRIPT: Final[str] = """\
         // workspace-unreachable states, where a restart cannot help; re-runs the
         // host-health probe so the user can re-check reachability on demand.
         var retryBtn = document.getElementById('recovery-retry-btn');
+        // The "Report a problem" link. Hidden on the transient loading spinner;
+        // shown only on the terminal states that offer a restart or retry.
+        var reportBtn = document.getElementById('recovery-report-btn');
         // Holds the verbatim provider error on the backend-unreachable state;
         // hidden (and emptied) on every other state. Populated by
         // renderBackendUnreachable from the response's ``unreachable_reason``.
@@ -1069,6 +1100,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
           show(errorEl, false);
           show(hostBtn, false);
           show(retryBtn, false);
+          show(reportBtn, false);
           // A stale diagnostic from the previous tick would be misleading
           // while we're in flight to a fresh check; hide it and drop the
           // cached payload so renderDebugMenu starts blank next time.
@@ -1092,6 +1124,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
           hostBtn.textContent = 'Restart workspace';
           hostBtn.classList.remove('secondary');
           show(hostBtn, true);
+          show(reportBtn, true);
         }
         function renderDispatchError() {
           titleEl.textContent = 'Workspace unresponsive';
@@ -1101,6 +1134,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
           hostBtn.textContent = 'Restart workspace';
           hostBtn.classList.remove('secondary');
           show(hostBtn, true);
+          show(reportBtn, true);
         }
         // The provider/backend hosting this workspace is unreachable or rejected
         // us (connector down, docker daemon stopped or paused, expired login,
@@ -1127,6 +1161,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
           show(errorEl, false);
           show(hostBtn, false);
           show(retryBtn, true);
+          show(reportBtn, true);
           // No diagnostics here: when the backend itself is unreachable the
           // in-container probes are moot -- the cause is the provider's own
           // error, shown verbatim above -- so suppress the Diagnostics disclosure.
@@ -1241,7 +1276,6 @@ _RECOVERY_SCRIPT: Final[str] = """\
         if (copyBtn) {
           copyBtn.addEventListener('click', copyDiagnostics);
         }
-        var reportBtn = document.getElementById('recovery-report-btn');
         if (reportBtn) {
           reportBtn.addEventListener('click', function () {
             // Ask the shell to open the get-help / report-a-bug modal, scoped to this
@@ -1349,7 +1383,7 @@ def render_recovery_page(
         '      <p id="recovery-provider-reason" class="recovery-provider-reason hidden"></p>\n'
         '      <button id="recovery-host-btn" class="hidden">Restart workspace</button>\n'
         '      <button id="recovery-retry-btn" class="hidden">Retry</button>\n'
-        '      <button type="button" id="recovery-report-btn">Report a problem</button>\n'
+        '      <button type="button" id="recovery-report-btn" class="hidden">Report a problem</button>\n'
         '      <div class="recovery-troubleshooting">\n'
         '        <p class="recovery-troubleshooting-label">Troubleshooting</p>\n'
         + error_block

@@ -988,10 +988,20 @@ function toggleInbox(bundle) {
 // currently-displayed workspace, or falsy on a general screen) is forwarded as a
 // ?workspace= query so the help page can scope its bug report to that workspace.
 
-function helpUrlFor(agentId) {
+function helpUrlFor(agentId, description) {
   if (!backendBaseUrl) return null;
-  const query = agentId ? '?workspace=' + encodeURIComponent(agentId) : '';
-  return backendBaseUrl + '/help' + query;
+  const params = new URLSearchParams();
+  if (agentId) params.set('workspace', agentId);
+  // A description is only ever passed by the open_help (agent-escalation) flow; the
+  // titlebar button opens /help with none. So a present description marks this as an
+  // agent-submitted report, which the /help page frames differently (agent wording,
+  // no mode choice).
+  if (description) {
+    params.set('description', description);
+    params.set('agent_report', '1');
+  }
+  const query = params.toString();
+  return backendBaseUrl + '/help' + (query ? '?' + query : '');
 }
 
 function isHelpModalOpen(bundle) {
@@ -1004,9 +1014,9 @@ function isHelpModalOpen(bundle) {
   }
 }
 
-function openHelp(bundle, agentId) {
+function openHelp(bundle, agentId, description) {
   if (!bundle || bundle.window.isDestroyed()) return;
-  const url = helpUrlFor(agentId);
+  const url = helpUrlFor(agentId, description);
   if (!url) return;
   openModal(bundle, url);
 }
@@ -1607,6 +1617,19 @@ function handleChromeSSEEvent(evt) {
           scheduleInboxListRefresh(b, evt);
         }
       }
+    }
+  } else if (evt.type === 'open_help') {
+    // An in-workspace ``/assist`` agent asked the app to open the report-a-bug
+    // modal pre-filled with its diagnosis (the /api/v1 report route). Surface it
+    // in the window currently showing that workspace; if no window is showing it,
+    // fall back to the most-recent window so the report isn't silently lost. Leave
+    // an already-open modal alone (matching the requests auto-open), so we never
+    // yank a menu the user has up.
+    const description = typeof evt.description === 'string' ? evt.description : '';
+    const wsId = evt.workspace_agent_id ? String(evt.workspace_agent_id) : '';
+    const target = (wsId && findBundleForWorkspace(wsId)) || getMostRecentWindow();
+    if (target && !target.modalVisible) {
+      openHelp(target, wsId, description);
     }
   } else if (evt.type === 'discovery_health') {
     // App-global discovery-pipeline health. Only the terminal `blocked` state is
