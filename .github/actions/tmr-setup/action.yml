@@ -43,17 +43,4 @@ runs:
       # integrator config then inherits the trust via the plugin's
       # copy_project_config_from path.
       shell: bash
-      run: |
-        uv run --project libs/mngr_claude python - <<'EOF'
-        from pathlib import Path
-        from imbue.mngr_claude.claude_config import (
-            add_claude_trust_for_path,
-            complete_onboarding,
-            dismiss_effort_callout,
-            find_user_claude_config,
-        )
-        config_path = find_user_claude_config()
-        add_claude_trust_for_path(config_path, Path.cwd().resolve())
-        dismiss_effort_callout(config_path)
-        complete_onboarding(config_path)
-        EOF
+      run: uv run --project libs/mngr_claude python libs/mngr_claude/scripts/pretrust_ci_checkout.py

@@ -1,0 +1,3 @@
+Fixed the scheduled TMR CI workflow, which had been failing at the `tmr-setup` step with `ImportError: cannot import name 'find_user_claude_config'`. The pre-trust step inlined a Python heredoc that imported `find_user_claude_config`, a function that was renamed to `find_user_config_in_isolated_mode`; the rename updated every call site except the one buried in the workflow's heredoc, which no grep or type checker could see.
+
+The `tmr-setup` action now invokes a real module (`libs/mngr_claude/scripts/pretrust_ci_checkout.py`) instead of an inline heredoc, so future renames of the claude-config API are caught by `ty` rather than only at CI runtime.
