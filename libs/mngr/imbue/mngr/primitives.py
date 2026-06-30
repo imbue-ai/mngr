@@ -362,12 +362,28 @@ class AgentName(SafeName):
     """Human-readable name for an agent."""
 
 
+MAX_HOST_NAME_LENGTH: Final[int] = 32
+
+
 class HostName(SafeName):
     """Human-readable name for a host.
 
     Host names never contain dots: the dot is reserved as the deterministic
     separator in ``HOST.PROVIDER`` host addresses (see ``api/addresses.py``).
+
+    Host names are capped at ``MAX_HOST_NAME_LENGTH`` characters because they
+    end up in provider-side identifiers with their own limits (Lima instance
+    names, Docker resource names, cloud tags). The cap lives on ``HostName``
+    rather than the shared ``SafeName`` base so longer ``AgentName`` and
+    ``ProviderInstanceName`` values (e.g. ``imbue_cloud_<email-slug>``) are not
+    retroactively invalidated.
     """
+
+    def __new__(cls, value: str) -> Self:
+        stripped = value.strip()
+        if len(stripped) > MAX_HOST_NAME_LENGTH:
+            raise InvalidName(f"{cls.__name__} must be at most {MAX_HOST_NAME_LENGTH} characters: '{stripped}'")
+        return super().__new__(cls, stripped)
 
 
 # A "name or id" reference where the parser couldn't disambiguate at parse time;
