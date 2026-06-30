@@ -41,7 +41,7 @@ Flow:
   6d. W1 settings page renders: visit /workspace/<w1>/settings, assert
      destroy button + HOST_NAME present in body (screenshot 17d)
   7. Destroy W2 via the UI (gear icon -> WorkspaceSettings page ->
-     "Back to projects" link round-trip [iter 14, screenshot 18a] ->
+     "Back to workspaces" link round-trip [iter 14, screenshot 18a] ->
      Destroy button -> modal Cancel-and-reopen round-trip [iter 12,
      screenshots 18b/18b2/18b3] -> Destroy Confirm), poll until done,
      assert home drops W2 tile; send a unique-token follow-up to W1
@@ -1487,15 +1487,15 @@ async def amain() -> int:
             await win.wait_for_selector("#destroy-btn", state="visible", timeout=30_000)
             await snap_page(win, "18-w2-settings-page")
 
-            # Iter 14 (Back to projects link): real users navigate back from
+            # Iter 14 (Back to workspaces link): real users navigate back from
             # settings via the top-level link without ever opening the
             # destroy modal. The template renders it as ``&larr; Back to
-            # projects`` (a left-arrow glyph + the phrase), so an exact
+            # workspaces`` (a left-arrow glyph + the phrase), so an exact
             # text= match for the phrase alone won't find it. Match by
             # href= on the wrapping Link instead.
-            await win.click('a[href="/"]:has-text("Back to projects")')
+            await win.click('a[href="/"]:has-text("Back to workspaces")')
             await win.wait_for_url(origin + "/", timeout=10_000)
-            await snap_page(win, "18a-back-to-projects-from-settings")
+            await snap_page(win, "18a-back-to-workspaces-from-settings")
             await win.goto(origin + f"/workspace/{w2_agent_id}/settings")
             await win.wait_for_selector("#destroy-btn", state="visible", timeout=30_000)
 

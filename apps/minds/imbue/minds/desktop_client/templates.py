@@ -103,7 +103,7 @@ _BTN_VARIANTS: Final[Mapping[str, str]] = {
 # recoloring it.
 _INPUT_BASE: Final[str] = (
     "p-2 type-body border border-strong bg-surface-primary text-primary "
-    "placeholder:text-tertiary hover:border-stronger "
+    "placeholder:text-tertiary hover:border-stronger focus:border-stronger "
     "focus:outline-2 focus:outline-offset-2 focus:outline-accent"
 )
 
@@ -316,8 +316,8 @@ def _operator_workspace_default(env_var: str, fallback: str) -> str:
 
 
 # Base for auto-generated workspace host names. The generic default is never
-# used bare -- it is always numbered (``mind-1``, ``mind-2``, ...).
-_DEFAULT_HOST_NAME_BASE: Final[str] = "mind"
+# used bare -- it is always numbered (``workspace-1``, ``workspace-2``, ...).
+_DEFAULT_HOST_NAME_BASE: Final[str] = "workspace"
 
 
 @pure
@@ -333,8 +333,8 @@ def make_unique_host_name(base: str, existing_host_names: Collection[str], *, al
 
     With ``always_number`` True, ``base`` is never used bare: the smallest free
     ``base-1``, ``base-2``, ... is returned. This is the generic default's
-    scheme, which has no bare ``mind`` form; a gap left by a destroyed
-    ``mind-2`` is reused before climbing to ``mind-4``.
+    scheme, which has no bare ``workspace`` form; a gap left by a destroyed
+    ``workspace-2`` is reused before climbing to ``workspace-4``.
 
     Raises ``InvalidName`` if the chosen name is not a valid ``HostName`` (i.e.
     ``base`` itself is invalid); appending ``-N`` to a valid base stays valid.
@@ -351,18 +351,18 @@ def make_unique_host_name(base: str, existing_host_names: Collection[str], *, al
 def resolve_create_host_name(submitted_host_name: str, existing_host_names: Collection[str] = ()) -> HostName:
     """Resolve the host name for a new workspace.
 
-    The name defaults to an automatic ``mind-N`` unless the operator types one
-    into the create form's advanced "Name" field. Resolution order:
+    The name defaults to an automatic ``workspace-N`` unless the operator types
+    one into the create form's advanced "Name" field. Resolution order:
 
     1. the user-submitted name, if any, used verbatim (validated as a
        ``HostName``);
-    2. the next free ``mind-N`` name (smallest positive ``N`` whose ``mind-N``
-       is not already in ``existing_host_names``).
+    2. the next free ``workspace-N`` name (smallest positive ``N`` whose
+       ``workspace-N`` is not already in ``existing_host_names``).
 
     The submitted name is used verbatim and never uniquified -- an explicit
     collision is the API's 409 to reject, not ours to silently rename (a
     duplicate name fails the ``mngr create`` pre-flight). Only the generated
-    ``mind-N`` fallback consults ``existing_host_names`` to pick a free name.
+    ``workspace-N`` fallback consults ``existing_host_names`` to pick a free name.
 
     Raises ``InvalidName`` if a non-empty submitted name is not a valid host
     name; the generated fallback is always valid.
@@ -424,7 +424,7 @@ def render_create_form(
 
     ``host_name`` is an optional explicit workspace name, exposed as a "Name"
     field in the advanced view. When empty the name is chosen automatically
-    server-side (the next free ``mind-N`` via ``resolve_create_host_name``); a
+    server-side (the next free ``workspace-N`` via ``resolve_create_host_name``); a
     submitted value is carried back here so it survives a validation-error
     re-render. The color is always chosen automatically (the first unused
     palette entry); ``color`` is the ``#rrggbb`` hex carried in the hidden
