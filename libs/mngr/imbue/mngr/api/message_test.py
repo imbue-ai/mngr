@@ -238,7 +238,7 @@ def test_send_message_to_agents_revives_done_agent_when_start_desired(
     # Kill the agent's process but leave the tmux session up, exactly as a ctrl-c
     # (or an OOM shed of the main process) would: the pane drops back to its shell,
     # so the agent reports DONE rather than STOPPED.
-    session_name = f"{temp_mngr_ctx.config.prefix}{agent.name}"
+    session_name = temp_mngr_ctx.config.agent_session_name(agent.name)
     window_name = temp_mngr_ctx.config.tmux.primary_window_name
     host.execute_idempotent_command(
         f"tmux send-keys -t '{session_name}:{window_name}' C-c",
