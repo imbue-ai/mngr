@@ -207,9 +207,7 @@ def _should_emit_system_interface_status(
     return last_snapshot_at is not None and last_snapshot_at >= onset
 
 
-def _workspace_provider_snapshot_at(
-    backend_resolver: MngrCliBackendResolver, agent_id: AgentId
-) -> datetime | None:
+def _workspace_provider_snapshot_at(backend_resolver: MngrCliBackendResolver, agent_id: AgentId) -> datetime | None:
     """Last per-provider snapshot time for ``agent_id``'s provider, or the aggregate fallback.
 
     The recovery redirect gates on whether discovery has re-observed *this

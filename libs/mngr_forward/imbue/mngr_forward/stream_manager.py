@@ -388,7 +388,9 @@ class ForwardStreamManager(MutableModel):
         with self._lock:
             self._ssh_by_host_id[host_id_str] = ssh_info
         self._aggregator.apply_event(event)
-        agents_on_host = [agent.agent_id for agent in self._aggregator.get_agents() if str(agent.host_id) == host_id_str]
+        agents_on_host = [
+            agent.agent_id for agent in self._aggregator.get_agents() if str(agent.host_id) == host_id_str
+        ]
 
         for agent_id in agents_on_host:
             self.resolver.update_ssh_info(agent_id, ssh_info)
