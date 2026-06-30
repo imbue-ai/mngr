@@ -681,11 +681,20 @@ def _build_mngr_create_command(
         "--format",
         "jsonl",
         # The workspace's arbitrary human-readable display name lives on the
-        # primary (system-services) agent. The host's normalized slug name lives
-        # on the host itself; there is no ``workspace`` label. Falls back to the
-        # host name when no separate display name is supplied.
+        # primary (system-services) agent. Falls back to the host name when no
+        # separate display name is supplied.
         "--label",
         f"workspace_display_name={display_name or host_name}",
+        # Transitional backwards-compat: nothing in minds reads the ``workspace``
+        # label anymore (discovery keys off ``is_primary``, collisions off the
+        # host name, display off ``workspace_display_name``). But the deployed
+        # forever-claude-template's in-container ``mngr list`` still filters on
+        # ``has(labels.workspace)``, so the primary agent must keep the label or
+        # it disappears from that listing. Set it to the host-name slug (the old
+        # convention) for presence. Remove this once the FCT change that drops
+        # the filter has shipped (FALLBACK_BRANCH advanced). See follow-up issue.
+        "--label",
+        f"workspace={host_name}",
         # Pin the agent's per-workspace branch to the host name. mngr's
         # default for ``--branch`` is ``:mngr/*`` where ``*`` expands to the
         # agent name, but our agent name is the constant ``system-services``
