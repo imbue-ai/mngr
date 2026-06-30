@@ -8,6 +8,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Added
 
+- Added: Live validation of the create-form's advanced "Name" field — format errors and availability conflicts surface inline as you type. The availability check is case-insensitive and scoped to the selected compute provider (and account, for Imbue Cloud); pressing Create with an invalid or taken name surfaces the inline error instead of starting creation.
 - Added: Versioned `/api/v1/workspaces` cross-workspace management API reachable by agents through the latchkey gateway — list, get detail, version, list/export backups, create, destroy, start/stop (with operation-status polling and SSE operation logs), restart, SSH, and `PATCH` workspace fields. All routes accept either the central bearer key (agents) or the desktop session cookie.
 - Added: `GET /api/schema` — self-describing OpenAPI 3.1 document of every agent-reachable Minds API route, generated at request time from the live Flask routes plus pydantic models. Default-granted to every workspace.
 - Added: `GET /api/v1/accounts` — lists signed-in accounts so an agent can discover the id/email to pass to workspace association. Gated by a new must-ask `minds-accounts-read` permission (not in the agent baseline).
@@ -84,6 +85,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Changed
 
+- Changed: Renamed the unit you create from "mind" / "project" to "workspace" throughout the desktop UI (the product is still called Minds). Auto-generated names now use `workspace-N` instead of `mind-N`.
 - Changed: Workspace permission flow extended with a third `workspace` permission-request type for the `minds-workspaces` API (alongside `predefined` and `file-sharing`). The grant dialog lets the user pick which verbs (read / create / destroy / lifecycle / backups-export / ssh / update / recover / sharing) to allow and, for target-scoped verbs, whether to grant only the target workspace or all workspaces.
 - Changed: Browser create flow now submits to the same `POST /api/v1/workspaces` endpoint agents use (one create path that can no longer drift); the `/creating/<id>` page polls v1 operation routes for status and live logs. Destroy/start/stop, backup-export, color, account associate/disassociate, provider toggle, recovery, and quit-flow stop-hosts/state-container were repointed to the corresponding `/api/v1` routes.
 - Changed: Operation polling restructured from a single untyped `/api/v1/workspaces/operations/<id>` to type-segmented `/operations/create|destroy|restart/<id>` (+ `/logs`), with precise per-type response models. Each typed endpoint reads only its own store, eliminating a shadowing bug between destroy and restart records.
