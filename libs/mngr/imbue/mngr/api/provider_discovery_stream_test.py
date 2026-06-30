@@ -1,0 +1,168 @@
+import threading
+from pathlib import Path
+
+import pytest
+from pydantic import PrivateAttr
+
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.primitives import PositiveFloat
+from imbue.mngr.api.discovery_events import ProviderDiscoverySnapshotEvent
+from imbue.mngr.api.discovery_events import get_discovery_events_path
+from imbue.mngr.api.discovery_events import parse_discovery_event_line
+from imbue.mngr.api.provider_discovery_stream import _ProviderDiscoveryPoller
+from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
+from imbue.mngr.primitives import ProviderBackendName
+from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.mock_provider_test import MockProviderInstance
+from imbue.mngr.utils.polling import poll_until
+
+
+class _ControllableProvider(MockProviderInstance):
+    """Mock provider whose discovery can succeed, raise, or block until released."""
+
+    discovery_call_count: int = 0
+    should_raise: bool = False
+    result_agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] | None = None
+
+    _release_gate: threading.Event = PrivateAttr(default_factory=threading.Event)
+
+    def discover_hosts_and_agents(
+        self,
+        cg: ConcurrencyGroup,
+        include_destroyed: bool = False,
+    ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
+        self.discovery_call_count = self.discovery_call_count + 1
+        self._release_gate.wait()
+        if self.should_raise:
+            raise RuntimeError("provider exploded during discovery")
+        return dict(self.result_agents_by_host or {})
+
+    def release(self) -> None:
+        self._release_gate.set()
+
+
+def _make_controllable_provider(
+    temp_host_dir: Path,
+    temp_mngr_ctx: MngrContext,
+    is_released: bool,
+) -> _ControllableProvider:
+    provider = _ControllableProvider(
+        name=ProviderInstanceName("controllable"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+    if is_released:
+        provider.release()
+    return provider
+
+
+def _fast_config() -> ProviderInstanceConfig:
+    return ProviderInstanceConfig(
+        backend=ProviderBackendName("controllable"),
+        discovery_poll_interval_seconds=PositiveFloat(0.05),
+        discovery_warn_seconds=PositiveFloat(0.05),
+        discovery_error_timeout_seconds=PositiveFloat(0.1),
+        host_discovery_timeout_seconds=PositiveFloat(0.05),
+        agent_discovery_timeout_seconds=PositiveFloat(0.05),
+    )
+
+
+def _read_snapshots(temp_mngr_ctx: MngrContext) -> list[ProviderDiscoverySnapshotEvent]:
+    events_path = get_discovery_events_path(temp_mngr_ctx.config)
+    if not events_path.exists():
+        return []
+    snapshots: list[ProviderDiscoverySnapshotEvent] = []
+    for line in events_path.read_text().splitlines():
+        parsed = parse_discovery_event_line(line)
+        if isinstance(parsed, ProviderDiscoverySnapshotEvent):
+            snapshots.append(parsed)
+    return snapshots
+
+
+def test_poller_emits_success_snapshot(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
+    provider = _make_controllable_provider(temp_host_dir, temp_mngr_ctx, is_released=True)
+    host = DiscoveredHost(
+        host_id=HostId.generate(),
+        host_name=HostName("h1"),
+        provider_name=provider.name,
+        host_state=HostState.RUNNING,
+    )
+    agent = DiscoveredAgent(
+        host_id=host.host_id,
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("a1"),
+        provider_name=provider.name,
+        certified_data={},
+    )
+    provider.result_agents_by_host = {host: [agent]}
+
+    poller = _ProviderDiscoveryPoller(provider=provider, mngr_ctx=temp_mngr_ctx, config=_fast_config())
+    poller.poll_and_emit()
+
+    snapshots = _read_snapshots(temp_mngr_ctx)
+    assert len(snapshots) == 1
+    snapshot = snapshots[0]
+    assert snapshot.provider_name == provider.name
+    assert snapshot.error is None
+    assert {a.agent_id for a in snapshot.agents} == {agent.agent_id}
+    assert {h.host_id for h in snapshot.hosts} == {host.host_id}
+    assert snapshot.discovery_finished_at >= snapshot.discovery_started_at
+
+
+def test_poller_emits_error_snapshot_on_exception(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
+    provider = _make_controllable_provider(temp_host_dir, temp_mngr_ctx, is_released=True)
+    provider.should_raise = True
+
+    poller = _ProviderDiscoveryPoller(provider=provider, mngr_ctx=temp_mngr_ctx, config=_fast_config())
+    poller.poll_and_emit()
+
+    snapshots = _read_snapshots(temp_mngr_ctx)
+    assert len(snapshots) == 1
+    assert snapshots[0].error is not None
+    assert snapshots[0].error.provider_name == provider.name
+    assert snapshots[0].agents == ()
+
+
+@pytest.mark.allow_warnings(match=r"discovery is slow|discovery timed out")
+def test_poller_timeout_emits_error_then_accepts_late_result(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
+    """A provider that does not finish within the error timeout yields an error snapshot,
+    then a later poll harvests the orphaned discovery's late result as a success snapshot."""
+    provider = _make_controllable_provider(temp_host_dir, temp_mngr_ctx, is_released=False)
+    host = DiscoveredHost(
+        host_id=HostId.generate(),
+        host_name=HostName("late-host"),
+        provider_name=provider.name,
+        host_state=HostState.RUNNING,
+    )
+    provider.result_agents_by_host = {host: []}
+    poller = _ProviderDiscoveryPoller(provider=provider, mngr_ctx=temp_mngr_ctx, config=_fast_config())
+
+    try:
+        # First poll times out (discovery is blocked) -> error snapshot, orphan kept.
+        poller.poll_and_emit()
+        timeout_snapshots = _read_snapshots(temp_mngr_ctx)
+        assert len(timeout_snapshots) == 1
+        assert timeout_snapshots[0].error is not None
+        assert provider.discovery_call_count == 1
+
+        # While the orphan is still in flight, another poll must NOT start a second discovery.
+        poller.poll_and_emit()
+        assert provider.discovery_call_count == 1
+
+        # Release the orphaned discovery; once it finishes, a poll harvests its late result.
+        provider.release()
+        poll_until(lambda: poller.poll_and_emit() or len(_read_snapshots(temp_mngr_ctx)) >= 2, timeout=5.0)
+        snapshots = _read_snapshots(temp_mngr_ctx)
+        assert len(snapshots) >= 2
+        assert snapshots[-1].error is None
+        assert {h.host_id for h in snapshots[-1].hosts} == {host.host_id}
+    finally:
+        provider.release()
