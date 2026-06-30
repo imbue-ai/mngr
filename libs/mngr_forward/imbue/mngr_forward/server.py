@@ -498,7 +498,8 @@ def _service_unavailable_response(request: Request) -> Response:
     separation keeps the plugin origin-agnostic: it does not need to know
     where any consumer is listening. For browsers that hit the plugin
     directly (including users landing here mid-restart), we serve a styled
-    auto-refreshing loader so the experience is not a blank flash.
+    loading page that polls the workspace in the background and reloads once
+    it answers, so the experience is not a blank flash.
     """
     accepts_html = "text/html" in request.headers.get("accept", "")
     if accepts_html:
