@@ -1807,7 +1807,7 @@ def test_transcript_rejects_invalid_format(tmp_path: Path) -> None:
     client = _build_client(
         tmp_path, StaticBackendResolver(url_by_agent_and_service={}), mngr_host_dir=tmp_path / "host"
     )
-    response = client.get(f"/api/v1/workspaces/{agent_id}/transcript?format=yaml", headers=_auth_header())
+    response = client.get(f"/api/v1/workspaces/{agent_id}/transcript?format=bogus", headers=_auth_header())
     assert response.status_code == 400
 
 
@@ -1816,9 +1816,7 @@ def test_transcript_rejects_head_and_tail_together(tmp_path: Path) -> None:
     agent_id = AgentId()
     _write_preserved_transcript(host_dir, AgentName("agent-x"), agent_id, [{"type": "user_message"}])
     client = _build_client(tmp_path, StaticBackendResolver(url_by_agent_and_service={}), mngr_host_dir=host_dir)
-    response = client.get(
-        f"/api/v1/workspaces/{agent_id}/transcript?head=1&tail=1", headers=_auth_header()
-    )
+    response = client.get(f"/api/v1/workspaces/{agent_id}/transcript?head=1&tail=1", headers=_auth_header())
     assert response.status_code == 400
 
 
