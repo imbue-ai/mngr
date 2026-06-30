@@ -25,6 +25,7 @@ from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import DEFAULT_SERVICE_NAME
 from imbue.minds.desktop_client.conftest import make_agents_json
@@ -55,7 +56,10 @@ from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 
@@ -1758,17 +1762,46 @@ def _drive_to_stuck_with_onset(tracker: SystemInterfaceHealthTracker, agent_id: 
     return onset
 
 
+def _register_workspace_agent(resolver: MngrCliBackendResolver, agent_id: AgentId, provider_name: str) -> None:
+    """Register one workspace agent on ``provider_name`` so its display info resolves a provider.
+
+    The recovery-redirect freshness gate scopes to the workspace's own provider's
+    last snapshot, so the agent must be discoverable with a provider for the gate
+    to find a per-provider snapshot time.
+    """
+    agent = DiscoveredAgent(
+        host_id=HostId("host-" + "0" * 31 + "1"),
+        agent_id=agent_id,
+        agent_name=AgentName("ws-agent"),
+        provider_name=ProviderInstanceName(provider_name),
+        certified_data={"labels": {"workspace": "true", "is_primary": "true"}},
+    )
+    resolver.update_agents(ParsedAgentsResult(agent_ids=(agent_id,), discovered_agents=(agent,)))
+
+
+def _set_provider_snapshot_at(resolver: MngrCliBackendResolver, provider_name: str, snapshot_at: datetime) -> None:
+    """Record ``provider_name``'s last per-provider snapshot time on the resolver."""
+    resolver.update_providers(
+        provider_name=ProviderInstanceName(provider_name),
+        provider=None,
+        error=None,
+        last_snapshot_at=snapshot_at,
+    )
+
+
 def test_should_emit_system_interface_status_gates_stuck_on_post_onset_snapshot() -> None:
     """The recovery redirect waits for a discovery snapshot taken *after* the outage began.
 
     STUCK is the only status the chrome redirects on. A snapshot that predates the
     outage still carries the pre-outage host state (a just-stopped container still
     reads RUNNING), so it must not promote the redirect -- only a snapshot at or
-    after the outage onset does. Other statuses never gate the redirect.
+    after the outage onset does. Freshness is scoped to the workspace's own
+    provider's snapshot time. Other statuses never gate the redirect.
     """
     resolver = MngrCliBackendResolver()
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
     agent_id = AgentId.generate()
+    _register_workspace_agent(resolver, agent_id, "docker")
 
     # Non-STUCK statuses do not drive the redirect, so they are never gated --
     # even with no discovery snapshot and no recorded onset.
@@ -1778,18 +1811,35 @@ def test_should_emit_system_interface_status_gates_stuck_on_post_onset_snapshot(
 
     onset = _drive_to_stuck_with_onset(tracker, agent_id)
 
-    # A recent snapshot that nonetheless predates the outage is the exact bug case:
-    # it is well within the absolute freshness window but still shows the pre-outage
-    # host state, so it must stay suppressed.
-    resolver.update_providers(
-        providers=(), error_by_provider_name={}, last_full_snapshot_at=onset - timedelta(seconds=1)
-    )
+    # A recent snapshot of the agent's provider that nonetheless predates the outage
+    # is the exact bug case: it is well within the absolute freshness window but
+    # still shows the pre-outage host state, so it must stay suppressed.
+    _set_provider_snapshot_at(resolver, "docker", onset - timedelta(seconds=1))
     assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.STUCK) is False
 
-    # A snapshot taken after the outage began reflects it; promote the redirect.
-    resolver.update_providers(
-        providers=(), error_by_provider_name={}, last_full_snapshot_at=onset + timedelta(seconds=1)
-    )
+    # A snapshot of the agent's provider taken after the outage began reflects it; promote.
+    _set_provider_snapshot_at(resolver, "docker", onset + timedelta(seconds=1))
+    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.STUCK) is True
+
+
+def test_should_emit_system_interface_status_gates_on_the_workspaces_own_provider() -> None:
+    """A fresh snapshot of an *unrelated* provider must not promote the redirect.
+
+    Each provider is discovered on its own loop, so only the workspace's own
+    provider's snapshot can establish that its host was re-observed post-onset.
+    """
+    resolver = MngrCliBackendResolver()
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    agent_id = AgentId.generate()
+    _register_workspace_agent(resolver, agent_id, "docker")
+    onset = _drive_to_stuck_with_onset(tracker, agent_id)
+
+    # A post-onset snapshot for a different provider leaves docker's freshness stale.
+    _set_provider_snapshot_at(resolver, "modal", onset + timedelta(seconds=1))
+    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.STUCK) is False
+
+    # Only the agent's own provider going fresh post-onset promotes the redirect.
+    _set_provider_snapshot_at(resolver, "docker", onset + timedelta(seconds=1))
     assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.STUCK) is True
 
 
@@ -1804,22 +1854,17 @@ def test_should_emit_system_interface_status_without_onset_falls_back_to_age() -
     resolver = MngrCliBackendResolver()
     tracker = SystemInterfaceHealthTracker()
     agent_id = AgentId.generate()
+    _register_workspace_agent(resolver, agent_id, "docker")
     tracker.mark_stuck(agent_id)
     assert tracker.get_failure_run_started_wall_at(agent_id) is None
 
     # Cold start, no snapshot yet: suppressed.
     assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.STUCK) is False
-    # A recent snapshot promotes via the age fallback.
-    resolver.update_providers(
-        providers=(), error_by_provider_name={}, last_full_snapshot_at=datetime.now(timezone.utc)
-    )
+    # A recent snapshot of the agent's provider promotes via the age fallback.
+    _set_provider_snapshot_at(resolver, "docker", datetime.now(timezone.utc))
     assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.STUCK) is True
     # A stale snapshot (a stalled pipeline) suppresses it again.
-    resolver.update_providers(
-        providers=(),
-        error_by_provider_name={},
-        last_full_snapshot_at=datetime.now(timezone.utc) - timedelta(minutes=5),
-    )
+    _set_provider_snapshot_at(resolver, "docker", datetime.now(timezone.utc) - timedelta(minutes=5))
     assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.STUCK) is False
     # No tracker at all behaves identically to a missing onset.
     assert _should_emit_system_interface_status(resolver, None, agent_id, AgentHealth.STUCK) is False
