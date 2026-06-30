@@ -8,9 +8,11 @@ spawning code; this file replaces them with a thin consumer that:
   ``mngr latchkey forward`` instead of running its own observe;
 - reads stdout line-by-line on a background thread and parses each line as a
   ``ForwardEnvelope``;
-- dispatches by ``stream``: ``observe`` lines drive the surviving
-  ``MngrCliBackendResolver`` plus a set of ``on_agent_discovered`` /
-  ``on_agent_destroyed`` callbacks; ``event`` lines drive the resolver's
+- dispatches by ``stream``: ``observe`` lines are folded into a shared
+  ``DiscoveryStateAggregator`` (the span-aware, per-provider reconciler), whose
+  view is then pushed into the surviving ``MngrCliBackendResolver`` and fanned
+  out to a set of ``on_agent_discovered`` / ``on_agent_destroyed`` callbacks;
+  ``event`` lines drive the resolver's
   service map and fan out to request callbacks; ``forward`` lines
   feed the ``system_interface_backend_failure`` health tracker and the
   ``listening`` port handshake;
@@ -71,28 +73,6 @@ OnSystemInterfaceBackendFailureCallback = Callable[[AgentId, SystemInterfaceBack
 OnUnexpectedExitCallback = Callable[[int], None]
 
 
-def _full_snapshot_observed_at(event: FullDiscoverySnapshotEvent) -> datetime:
-    """Producer-side poll time of a full snapshot, for freshness comparisons.
-
-    The envelope ``timestamp`` is stamped when the discovery producer finished the
-    poll, so the host states the snapshot carries were observed at that instant.
-    Minds gates the recovery redirect on whether a snapshot postdates an outage's
-    onset, so it must compare against *when discovery observed the world*, not when
-    minds happened to receive the line -- using the producer time removes the
-    receive-tail-latency slop between the two. The producer and this consumer run
-    on the same machine, so the timestamps share a clock. Falls back to the receive
-    time if the envelope timestamp is unparseable (which only loosens the gate back
-    to the prior receive-time behavior).
-    """
-    try:
-        return datetime.fromisoformat(event.timestamp)
-    except ValueError:
-        logger.warning(
-            "Full discovery snapshot carried an unparseable timestamp {!r}; using receive time", event.timestamp
-        )
-        return datetime.now(timezone.utc)
-
-
 class ForwardSubprocessConfig(FrozenModel):
     """Args for the ``mngr forward`` subprocess that ``minds run`` spawns.
 
@@ -126,10 +106,14 @@ class EnvelopeStreamConsumer(MutableModel):
     resolver: MngrCliBackendResolver = Field(frozen=True, description="Resolver to feed observe + event lines into")
 
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-    _agent_host_map: dict[str, str] = PrivateAttr(default_factory=dict)
+    # The shared span-aware, per-provider discovery reconciler. Every parsed
+    # observe event is folded into it; its accumulated view is what we push into
+    # the resolver and fan out as discovered/destroyed callbacks.
+    _aggregator: DiscoveryStateAggregator = PrivateAttr(default_factory=DiscoveryStateAggregator)
+    # SSH connection info keyed by host id. The aggregator does not model SSH info
+    # (it carries no agent/host membership), so it is tracked here and joined onto
+    # the agents on each host when building the resolver's view.
     _ssh_by_host_id: dict[str, RemoteSSHInfo] = PrivateAttr(default_factory=dict)
-    _host_state_by_host_id: dict[str, HostState] = PrivateAttr(default_factory=dict)
-    _discovered_agents: dict[str, DiscoveredAgent] = PrivateAttr(default_factory=dict)
     _services_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
     _on_agent_discovered_callbacks: list[OnAgentDiscoveredCallback] = PrivateAttr(default_factory=list)
     _on_agent_destroyed_callbacks: list[OnAgentDestroyedCallback] = PrivateAttr(default_factory=list)
