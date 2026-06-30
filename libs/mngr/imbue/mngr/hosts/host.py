@@ -454,6 +454,11 @@ _KILL_BENIGN_STDERR_SUBSTRINGS: Final[tuple[str, ...]] = ("no such process",)
 _DEFAULT_TMUX_WIDTH: Final[int] = 200
 _DEFAULT_TMUX_HEIGHT: Final[int] = 50
 
+# Resource script (shipped under mngr/resources/) that sends SIGWINCH to an agent's
+# pane processes so they repaint after a client attaches. Installed at host level and
+# invoked by the per-session tmux client-attached hook (see _build_start_agent_shell_command).
+_SIGWINCH_PANES_SCRIPT_NAME: Final[str] = "sigwinch_panes.sh"
+
 
 class Host(OuterHost, BaseHost, OnlineHostInterface):
     """Host implementation that proxies operations through a pyinfra connector.
@@ -2633,7 +2638,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     )
 
     def _ensure_shared_shell_libs(self, agent: AgentInterface) -> None:
-        """Write the shared shell libraries to host-level and agent-level commands dirs.
+        """Write the shared shell libraries (and the SIGWINCH repaint script) to the host.
 
         These libraries are sourced by mngr bash scripts and must exist on both
         levels so host-level (``activity_watcher.sh``) and agent-level
@@ -2662,6 +2667,17 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             content_bytes = importlib.resources.files(mngr_resources).joinpath(name).read_text().encode()
             self.write_file(host_commands / name, content_bytes, mode="0755")
             self.write_file(agent_commands / name, content_bytes, mode="0755")
+
+        # Install the post-attach SIGWINCH repaint script at host level only. Unlike
+        # the libs above it is executed directly (by the per-session tmux
+        # client-attached hook), not sourced, and the hook references the host-level
+        # commands dir -- so no agent-level copy is needed.
+        install_packaged_script_on_host(
+            self,
+            module=mngr_resources,
+            filename=_SIGWINCH_PANES_SCRIPT_NAME,
+            dest=host_commands / _SIGWINCH_PANES_SCRIPT_NAME,
+        )
 
     def _execute_agent_file_transfers(
         self,
@@ -3666,6 +3682,23 @@ def _build_start_agent_shell_command(
     )
     steps.append("bash -c " + shlex.quote(save_user_shell_script))
     steps.append(f"tmux set-option -t {quoted_exact_agent_window} default-command {shlex.quote(env_shell_cmd)}")
+
+    # Set a persistent client-attached hook that repaints the agent on every attach
+    # (a plain `tmux attach`, the ttyd terminal, a web-shell, or `mngr connect`) by
+    # sending SIGWINCH to the pane processes. It runs the shipped sigwinch_panes.sh
+    # (installed at host level during provisioning); keeping the pipeline in a script
+    # avoids nesting tmux format tokens (pane-pid/window-index lookups) inside the
+    # hook string, which tmux would otherwise expand. `run-shell -b` backgrounds it so
+    # the attach is never blocked, and the script delays before signaling so the window
+    # has resized to the new client first. This uses a distinct hook slot ([98]) from
+    # the onboarding hook ([99]) and, unlike that one-shot hook, is persistent (no
+    # `set-hook -u` self-removal).
+    sigwinch_script_path = host_dir / "commands" / _SIGWINCH_PANES_SCRIPT_NAME
+    sigwinch_inner_command = shlex.join(["bash", str(sigwinch_script_path), session_name, primary_window_name])
+    sigwinch_hook_value = f'run-shell -b "{sigwinch_inner_command}"'
+    steps.append(
+        f"tmux set-hook -t {quoted_exact_agent_window} client-attached[98] {shlex.quote(sigwinch_hook_value)}"
+    )
 
     # Set a one-shot client-attached hook that shows the onboarding popup
     # when the user first attaches to this tmux session. This must happen
