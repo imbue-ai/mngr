@@ -2,9 +2,24 @@
 
 This branch (`mngr/per-provider-discovery`, PR #2335) makes mngr's provider discovery
 **per-provider** instead of using a single global "full discovery snapshot", so that a
-hung/slow provider can no longer block discovery of *all* providers. Phases 1–5 are
-**done, green, and pushed**. Three items remain. This doc gives a fresh agent everything
-needed to finish them.
+hung/slow provider can no longer block discovery of *all* providers.
+
+> **STATUS (update): all three remaining items below are now DONE.**
+> - **Item 1** (per-host/agent sub-timeouts + UNKNOWN): implemented via
+>   `BoundedProviderDiscoveryResult` + `ProviderInstanceInterface.discover_hosts_and_agents_within_timeouts`
+>   (per-host reads run on abandonable daemon threads; a host past its timeout is UNKNOWN). Batch
+>   providers (modal/vps/imbue_cloud) override it to delegate to their batch path. The aggregator now
+>   retains agents on UNKNOWN hosts. The intervening-event immediate-re-poll optimization was left
+>   deferred (the correctness bug it would speed up is already fixed + tested by the span-aware aggregator).
+> - **Item 2** (deprecate legacy): `FullDiscoverySnapshotEvent` / `DISCOVERY_FULL` are kept + deprecated
+>   (old logs still parse); all live writers/producers removed; `mngr list` and `complete_names` migrated
+>   to per-provider; `find_discovery_snapshot_replay_offset` added for attach/replay.
+> - **Item 3** (forever-claude-template `system_interface`): rewritten onto `DiscoveryStateAggregator` on a
+>   matching branch in `.external_worktrees/forever-claude-template` (verification deferred to re-vendor).
+>
+> The original instructions for each item are retained below for reference.
+
+The historical context below describes the state when these items were still open.
 
 Read first (re-gather context): `CLAUDE.md`, `style_guide.md`,
 `blueprint/per-provider-discovery/plan-per-provider-discovery.md` (the spec + Q&A
