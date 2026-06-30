@@ -1,1 +1,3 @@
 Updated the Modal provider for mngr's new per-provider discovery: it now implements the bounded `discover_hosts_and_agents_within_timeouts` discovery entry point. Because Modal reads all host and agent state from the state volume in one batched pass, individual host reads are not separately bounded -- the provider is still bounded by the provider-level discovery error timeout, and no host is marked UNKNOWN by this path.
+
+Fixed a regression where Modal authentication failures during `mngr list` surfaced as a raw proxy auth error instead of the friendly Modal auth error (with the provider name and disable hint): the `discover_hosts_and_agents` batch path is decorated with the auth-error handler again.

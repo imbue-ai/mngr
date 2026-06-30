@@ -2490,6 +2490,7 @@ log "=== Shutdown script completed ==="
         agents_by_host = self.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
         return bounded_result_from_agents_by_host(agents_by_host)
 
+    @handle_modal_auth_error
     def discover_hosts_and_agents(
         self,
         cg: ConcurrencyGroup,
