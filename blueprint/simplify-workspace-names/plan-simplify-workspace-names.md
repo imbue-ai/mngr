@@ -15,7 +15,7 @@ Follow-up issue (deferred pending-rename): https://github.com/imbue-ai/mngr/issu
 ### Naming model
 
 - Every host keeps an immutable `host_id`. No provider derives identity from a name (fixes `ssh`'s `uuid5(name)` and `lima`'s instance-name coupling).
-- `host_name` is a lowercase slug, validated by mngr's `HostName` (strict: rejects invalid/over-long input, raises `InvalidName`, never silently mangles), now capped at 32 characters.
+- `host_name` is a lowercase slug, validated by mngr's `HostName` (strict: rejects invalid/over-long input, raises `InvalidName`, never silently mangles), capped at 63 characters (the DNS-label limit). minds applies a smaller 32-character target to the slugs it derives.
 - The human-readable name is fully arbitrary (only required to be non-empty after trimming). minds converts it to a slug (lowercase, strip disallowed chars, truncate to 32). If the conversion yields an empty slug (e.g. all-emoji input), minds rejects it with "include at least one letter or number".
 
 ### Create
@@ -51,7 +51,7 @@ Follow-up issue (deferred pending-rename): https://github.com/imbue-ai/mngr/issu
 
 ### mngr core (`libs/mngr`)
 
-- Add a 32-character max-length cap to `HostName` only (leave the shared `SafeName` base and `AgentName`/`ProviderInstanceName` uncapped so existing long names such as `imbue_cloud_<email-slug>` are not retroactively invalidated).
+- Add a 63-character (DNS-label limit) max-length cap to `HostName` only (leave the shared `SafeName` base and `AgentName`/`ProviderInstanceName` uncapped so existing long names such as `imbue_cloud_<email-slug>` are not retroactively invalidated). minds applies its own smaller 32-character target to derived slugs.
 - Implement the `mngr rename --host <current> <new>` CLI flag (currently `[future]`): rename strictly the host (wired to `provider.rename_host`); agent rename stays the separate existing behavior. Regenerate the auto-generated rename doc.
 
 ### imbue_cloud (`libs/mngr_imbue_cloud` + `apps/remote_service_connector`)
