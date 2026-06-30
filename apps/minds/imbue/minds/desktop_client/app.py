@@ -1557,10 +1557,10 @@ def _handle_recovery_page(
     initial_error = (tracker.get_last_restart_error(aid) or "") if tracker is not None else ""
     return_to = _sanitize_recovery_return_to(request.args.get("return_to", ""))
     is_explicit_restart = request.args.get("intent", "") == "restart"
-    # The recovery page renders from ``render_status`` and then auto-refreshes
-    # itself while a restart is in flight; every refresh re-runs this handler,
-    # so the live tracker state is re-read each tick. A HEALTHY tracker needs
-    # special handling rather than rendering a misleading "not responding" page.
+    # The recovery page renders from ``render_status`` and then polls itself in
+    # the background while a restart is in flight; every poll re-runs this
+    # handler, so the live tracker state is re-read each tick. A HEALTHY tracker
+    # needs special handling rather than rendering a misleading "not responding" page.
     render_status = initial_status
     if initial_status == AgentHealth.HEALTHY.value:
         if is_explicit_restart:
