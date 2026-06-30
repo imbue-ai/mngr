@@ -66,11 +66,24 @@
     frame.className = 'absolute inset-0 w-full h-full';
     frame.style.border = '0';
     frame.style.background = 'transparent';
+    frame.style.display = 'block';
     // Invisible until its content paints; the previously-shown modal stays up
     // until then so the swap doesn't flash.
     frame.style.visibility = 'hidden';
     frame.setAttribute('data-overlay-id', id);
     frame.addEventListener('load', function () {
+      // A fresh iframe fires a load for its initial about:blank document (on
+      // insertion, before the real page navigates in). Ignore that one and only
+      // act on the hosted page's own load -- otherwise the about:blank load would
+      // run the swap early, null out incomingFrame, and the real load would then
+      // see frame !== incomingFrame and destroy this frame.
+      var href = '';
+      try {
+        href = frame.contentWindow.location.href;
+      } catch (e) {
+        href = '';
+      }
+      if (!href || href === 'about:blank') return;
       // Tell main the iframe is ready so it can replay the cached chrome state
       // (workspace list / request count) into it.
       window.minds.overlayModalLoaded(id);
@@ -84,9 +97,9 @@
       modalFrame = frame;
       incomingFrame = null;
     });
+    frame.src = url;
     incomingFrame = frame;
     root.appendChild(frame);
-    frame.src = url;
   }
 
   function hideModal(id) {
