@@ -937,9 +937,11 @@ _RECOVERY_STYLE: Final[str] = """\
 
 # The recovery page's behavior. It drives the shared loading card (toggling
 # the spinner, heading and message) plus the recovery-only restart button and
-# error <details>. While a restart is in flight it auto-refreshes itself:
-# _handle_recovery_page re-renders from the live tracker state on every GET,
-# so a timed reload is the whole "is it healthy yet?" check.
+# error <details>. While a restart is in flight it polls the recovery route in
+# the background (so it does not steal focus from any overlaid view) and only
+# reloads once the state actually changes: _handle_recovery_page re-renders from
+# the live tracker state on every GET and exposes it via the X-Recovery-Status
+# header, which scheduleRefresh reads to decide "keep waiting" vs. "reload".
 _RECOVERY_SCRIPT: Final[str] = """\
       (function () {
         var root = document.querySelector('[data-agent-id]');
