@@ -34,7 +34,7 @@
 - The thumbnail is, for now, an **SVG icon the agent generates** (mock data only, never real user data); it can later be replaced with a real screenshot.
 - The worker rewrites the FCT `/welcome` stable region to be specific to the most-recently-published inspiration, runs the **boot smoke-check** (the mind boots from the clean base; selected apps need not fully function — holes are expected), and reports back. The lead proxies any mid-flight `question` gates to the user and merges the worker's branch back on `done`.
 - The agent raises the **publish popup directly in the system_interface web UI** (not a minds request type): a small box pre-filled with the proposed title, description, SVG thumbnail, and repo settings (name, private/public), with editable inputs and a Publish button. The skill waits for the user's submitted values.
-- Before pushing, if the in-VM `GH_TOKEN` is missing (or `gh auth status` fails), the agent surfaces the **GitHub-login modal** in the system_interface so the user can log in with one click; the token is written to the host env and agents pick it up on restart.
+- Before pushing, if `gh auth status` fails (no in-VM GitHub credential), the agent surfaces the **GitHub-login modal** in the system_interface so the user can log in with one click. The login configures `gh`'s credential store + git credential helper in place, so the **already-running agent can push immediately — no agent restart** (the token is only needed at push time, not in the process env at startup).
 - On confirmation, `/publish-inspiration` always creates a **new** GitHub repo (private by default; public if the popup says so) via `gh repo create` under the user's account using `GH_TOKEN`, and pushes the assembled branch.
 - If repo creation fails (name taken, token insufficient), the agent reports it and re-opens the publish popup for a new name, keeping the assembled commit intact.
 - Publishing a mind that already holds accumulated inspirations carries **all** existing `inspiration-*.md` manifests and their apps into the new repo, alongside the newly-published one.
@@ -51,7 +51,7 @@
 ### system_interface UI interaction (new behavior)
 
 - **Publish popup**: the skill posts the proposed fields to the system_interface backend, which pushes an event over the existing SSE/WebSocket channel; the frontend opens the publish box pre-filled. The user edits the fields and clicks Publish; the frontend POSTs the edited values, the backend writes them to a response file, and the skill polls that file for the result (mirroring how `launch-task` polls a worker's report file).
-- **GitHub-login modal**: mirrors the Claude-login modal. When the publish flow needs a `GH_TOKEN` it doesn't have, it triggers the modal; the user logs in via `gh auth login --web` (or pastes a PAT); the backend writes `GH_TOKEN` to `$MNGR_HOST_DIR/env` and restarts agents so the token is available at process start.
+- **GitHub-login modal**: mirrors the Claude-login modal's UI/endpoints, but **not** its restart step. The user logs in via `gh auth login --web` (or pastes a PAT); the backend completes the `gh` login so the credential persists to gh's store + git credential helper. The running agent's next `gh repo create` / `git push` uses it directly — **no agent restart** (unlike the Claude API-key flow, the publish skill only needs the credential at push time, not in its process env at startup).
 
 ## Implementation plan
 
@@ -78,7 +78,7 @@ Frontend (`apps/system_interface/frontend/src/`):
 
 Backend:
 - `github_auth_endpoints.py` (new), `github_auth.py` (new), `models.py`: mirror the Claude-auth modules. Endpoints: `POST /api/github-auth/start` (spawn `gh auth login --web` via pexpect; return the device code + verification URL), `POST /api/github-auth/submit-code` (device-flow completion) and/or `POST /api/github-auth/submit-raw-token` (paste a PAT), `POST /api/github-auth/abort`, `GET /api/github-auth/status` (`gh auth status`).
-- On success: write `GH_TOKEN=...` to `$MNGR_HOST_DIR/env`, then `mngr stop`/`mngr start` the `claude` agents (the same restart path the Claude API-key flow uses) so the token is in the env at process start. `.mngr/settings.toml` already forwards `GH_TOKEN` via `pass_env`.
+- On success: persist the credential via `gh` (`gh auth login --with-token` for a pasted PAT, or the completed web/device flow), which configures gh's store + git credential helper. **No agent restart** — the publish skill's `gh repo create` / `git push` in the already-running agent picks the credential up at push time. (Optionally also write `GH_TOKEN` to `$MNGR_HOST_DIR/env` for future agents, but that is not required for the current publish.)
 
 Frontend:
 - `views/GitHubLoginModal.ts` (new): mirror `ClaudeLoginModal.ts` — a single-provider GitHub login with two paths (web/device login, or paste a token).
@@ -122,7 +122,7 @@ Frontend:
   - Result: posting a publish-request opens the box pre-filled; submitting writes the response file with edited values. Backend pytest + manual UI check.
 
 - **Phase 2 — system_interface GitHub-login modal**
-  - Backend `github_auth_*` + frontend `GitHubLoginModal.ts` / `models/GitHubAuth.ts`, mirroring the Claude-auth modules; write `GH_TOKEN` to host env + restart agents.
+  - Backend `github_auth_*` + frontend `GitHubLoginModal.ts` / `models/GitHubAuth.ts`, mirroring the Claude-auth modules; persist the credential via `gh` (store + git credential helper), **no agent restart**.
   - Result: a user without `GH_TOKEN` can log in from the UI and the token reaches the agent.
 
 - **Phase 3 — FCT `/publish-inspiration` skill (happy path, launch-task)**
@@ -140,7 +140,7 @@ Frontend:
 ### system_interface backend (Python — pytest)
 
 - Unit/integration tests for `inspiration_endpoints.py` + `inspiration.py` (mirror the existing `claude_auth` tests): publish-request records the pending request and emits the event; publish-confirm writes the response file with the edited values; abort/status behave; malformed payloads are rejected.
-- Unit/integration tests for `github_auth_endpoints.py` + `github_auth.py`: start spawns the login subprocess (mock pexpect, as the Claude-auth tests do); submit-token / submit-raw-token writes `GH_TOKEN` to the host env file and triggers the restart path; status reflects `gh auth status`. Reuse the Claude-auth tests' subprocess/DI seams; do not monkeypatch.
+- Unit/integration tests for `github_auth_endpoints.py` + `github_auth.py`: start spawns the login subprocess (mock pexpect, as the Claude-auth tests do); submit-token / submit-raw-token completes the `gh` login (persists the credential) **without restarting agents**; status reflects `gh auth status`. Reuse the Claude-auth tests' subprocess/DI seams; do not monkeypatch.
 
 ### system_interface frontend (Mithril/TS)
 
@@ -172,7 +172,7 @@ Frontend:
 
 - **Publish UI location.** Built directly into the FCT `system_interface` web UI (a new modal + endpoints), **not** a minds desktop-client request type. No `apps/minds` changes.
 - **Clone/assembly mechanism.** Delegated to a `launch-task` sub-agent on an isolated worktree (`mngr/<slug>`), rather than a hand-rolled temp clone in the publish skill.
-- **GitHub auth.** A new system_interface GitHub-login modal mirroring the Claude-login modal; writes `GH_TOKEN` to `$MNGR_HOST_DIR/env` and restarts agents.
+- **GitHub auth.** A new system_interface GitHub-login modal mirroring the Claude-login modal's UI/endpoints; persists the credential via `gh` (store + git credential helper) so the running agent can push immediately — **no agent restart** (the credential is only needed at `git push` time, not in the process env at startup).
 - **Merge mechanics.** `/adapt-inspiration` uses `git subtree`; collisions between accumulated inspirations are surfaced to the user as holes and resolved interactively, in non-technical language.
 - **Upstream link.** Recorded both as a `parent.toml`-style pointer and a git remote.
 - **Secret denylist.** Baseline is the repo's existing `.gitignore` set (`.env*`, `.runtime/`, `memory/`, etc.); the agent additionally reasons about any other secrets in the selected changes and excludes them.
