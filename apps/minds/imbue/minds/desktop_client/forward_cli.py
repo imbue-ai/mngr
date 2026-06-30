@@ -56,6 +56,7 @@ from imbue.minds.utils.secret_redaction import redact_secret_flag_values
 from imbue.mngr.api.discovery_aggregator import AggregatorDelta
 from imbue.mngr.api.discovery_aggregator import DiscoveryStateAggregator
 from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
+from imbue.mngr.api.discovery_events import DiscoveryEvent
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import ProviderDiscoverySnapshotEvent
@@ -357,11 +358,7 @@ class EnvelopeStreamConsumer(MutableModel):
                 last_snapshot_at=event.discovery_finished_at,
             )
         else:
-            if isinstance(event, DiscoveryErrorEvent):
-                logger.warning(
-                    "Discovery error from {}: {} ({})", event.source_name, event.error_message, event.error_type
-                )
-            self.resolver.record_discovery_event_received(datetime.now(timezone.utc))
+            self._record_incremental_event(event)
         self._push_agents_view()
         self._fire_membership_delta(delta)
         # A HostSSHInfoEvent changes no membership (empty delta), so the agents on
@@ -369,6 +366,19 @@ class EnvelopeStreamConsumer(MutableModel):
         # that their host's SSH info is known.
         if isinstance(event, HostSSHInfoEvent):
             self._refire_discovered_for_host(str(event.host_id))
+
+    def _record_incremental_event(self, event: DiscoveryEvent) -> None:
+        """Log a discovery error (if any) and bump the resolver's last-event time for a non-snapshot event.
+
+        Incremental events (agent/host discovered or destroyed, SSH info, errors)
+        are not snapshots, so they advance only ``last_event_at`` -- the
+        per-provider snapshot freshness is bumped solely by ``update_providers``.
+        """
+        if isinstance(event, DiscoveryErrorEvent):
+            logger.warning(
+                "Discovery error from {}: {} ({})", event.source_name, event.error_message, event.error_type
+            )
+        self.resolver.record_discovery_event_received(datetime.now(timezone.utc))
 
     def _build_agents_result(self) -> ParsedAgentsResult:
         """Project the aggregator's agents + hosts (joined with SSH info) into a ParsedAgentsResult.
