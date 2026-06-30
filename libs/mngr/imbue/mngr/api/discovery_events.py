@@ -808,6 +808,19 @@ class _ResolutionMaps(MutableModel):
         self.host_id_by_agent_id.clear()
         self.destroyed_agent_ids.clear()
 
+    def reset_provider(self, provider_name: str) -> None:
+        """Drop all agents attributed to one provider.
+
+        Used when that provider's per-provider snapshot supersedes its prior state,
+        without disturbing agents owned by other providers.
+        """
+        agent_ids = [agent_id for agent_id, name in self.provider_by_agent_id.items() if name == provider_name]
+        for agent_id in agent_ids:
+            self.provider_by_agent_id.pop(agent_id, None)
+            self.name_by_agent_id.pop(agent_id, None)
+            self.host_id_by_agent_id.pop(agent_id, None)
+            self.destroyed_agent_ids.discard(agent_id)
+
 
 def _record_agent(maps: _ResolutionMaps, agent: DiscoveredAgent) -> None:
     """Record a single discovered agent into the resolution maps."""
@@ -840,6 +853,11 @@ def _replay_discovery_events_into_maps(events_path: Path) -> _ResolutionMaps:
             if isinstance(event, FullDiscoverySnapshotEvent):
                 # Reset maps -- this snapshot supersedes everything before it
                 maps.reset()
+                for agent in event.agents:
+                    _record_agent(maps, agent)
+            elif isinstance(event, ProviderDiscoverySnapshotEvent):
+                # A per-provider snapshot supersedes only that provider's prior agents.
+                maps.reset_provider(str(event.provider_name))
                 for agent in event.agents:
                     _record_agent(maps, agent)
             elif isinstance(event, AgentDiscoveryEvent):

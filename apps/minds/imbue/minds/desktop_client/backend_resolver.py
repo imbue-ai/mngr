@@ -226,13 +226,14 @@ class BackendResolverInterface(MutableModel, ABC):
         return {}
 
     def get_freshness_timestamps(self) -> tuple[datetime | None, datetime | None]:
-        """Return ``(last_event_at, last_full_snapshot_at)`` from discovery.
+        """Return ``(last_event_at, aggregate_last_snapshot_at)`` from discovery.
 
-        Default implementation returns ``(None, None)`` (resolvers without
-        discovery have no freshness to report); ``MngrCliBackendResolver``
-        overrides it. ``None`` for the last full snapshot means discovery has
-        not (recently) confirmed state, so callers that gate on freshness treat
-        it as stale.
+        The aggregate snapshot time is the most recent per-provider snapshot
+        across all providers. Default implementation returns ``(None, None)``
+        (resolvers without discovery have no freshness to report);
+        ``MngrCliBackendResolver`` overrides it. ``None`` for the aggregate means
+        discovery has not (recently) confirmed state, so callers that gate on
+        freshness treat it as stale.
         """
         return None, None
 
@@ -543,14 +544,19 @@ class MngrCliBackendResolver(BackendResolverInterface):
     _agents_result: ParsedAgentsResult = PrivateAttr(default_factory=ParsedAgentsResult)
     _services_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
     _initial_discovery_done: bool = PrivateAttr(default=False)
-    _providers: tuple[DiscoveredProvider, ...] = PrivateAttr(default=())
+    _provider_by_name: dict[ProviderInstanceName, DiscoveredProvider] = PrivateAttr(default_factory=dict)
     _error_by_provider_name: dict[ProviderInstanceName, DiscoveryError] = PrivateAttr(default_factory=dict)
     # Timestamp (UTC) of the most recently received discovery event of any kind.
-    # Used by the providers panel's "time since last discovery event" counter.
+    # Used by the providers panel's "time since last discovery event" counter and
+    # by the discovery-health watchdog's stall detection.
     _last_event_at: datetime | None = PrivateAttr(default=None)
-    # Timestamp (UTC) of the most recently received FullDiscoverySnapshotEvent.
-    # Used by the providers panel's "time since last full discovery event" counter.
-    _last_full_snapshot_at: datetime | None = PrivateAttr(default=None)
+    # Most recent per-provider snapshot time, keyed by provider name. Each provider
+    # is discovered on its own decoupled loop and emits its own snapshot, so
+    # freshness is tracked per provider rather than via a single global snapshot:
+    # the aggregate (max across providers) backs the providers panel's "time since
+    # last full discovery event" counter, while a workspace's recovery redirect
+    # gates on its own provider's entry.
+    _last_snapshot_at_by_provider: dict[ProviderInstanceName, datetime] = PrivateAttr(default_factory=dict)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _on_change_callbacks: list[Callable[[], None]] = PrivateAttr(default_factory=list)
     _on_request_callbacks: list[Callable[[str, str], None]] = PrivateAttr(default_factory=list)
@@ -692,34 +698,48 @@ class MngrCliBackendResolver(BackendResolverInterface):
 
     def update_providers(
         self,
-        providers: tuple[DiscoveredProvider, ...],
-        error_by_provider_name: Mapping[ProviderInstanceName, DiscoveryError],
-        last_full_snapshot_at: datetime,
+        provider_name: ProviderInstanceName,
+        provider: DiscoveredProvider | None,
+        error: DiscoveryError | None,
+        last_snapshot_at: datetime,
     ) -> None:
-        """Replace provider state from a FullDiscoverySnapshotEvent. Thread-safe.
+        """Merge one provider's discovery snapshot into provider state. Thread-safe.
 
-        Updates both ``_last_event_at`` and ``_last_full_snapshot_at`` to
-        ``last_full_snapshot_at`` since a full snapshot is also a discovery
-        event. Incremental events update ``_last_event_at`` only, via
-        :meth:`record_discovery_event_received`.
+        Per-provider MERGE, not a wholesale replace: a ``ProviderDiscoverySnapshotEvent``
+        is authoritative only for ``provider_name``, so this touches just that
+        provider's entry in the providers list, its error state, and its
+        last-snapshot time, leaving every other provider untouched (a snapshot for
+        one provider must never erase another provider's error). A provider that
+        errored this poll (``provider`` is None, ``error`` set) keeps any prior
+        ``DiscoveredProvider`` entry -- the panel renders it from the error map --
+        and records its error; a clean poll clears any prior error for it.
+        ``_last_event_at`` is bumped to the latest snapshot time since a snapshot is
+        also a discovery event. Incremental events update ``_last_event_at`` only,
+        via :meth:`record_discovery_event_received`.
         """
         with self._lock:
-            self._providers = tuple(providers)
-            self._error_by_provider_name = dict(error_by_provider_name)
-            self._last_full_snapshot_at = last_full_snapshot_at
-            self._last_event_at = last_full_snapshot_at
+            if provider is not None:
+                self._provider_by_name[provider_name] = provider
+            if error is not None:
+                self._error_by_provider_name[provider_name] = error
+            else:
+                self._error_by_provider_name.pop(provider_name, None)
+            self._last_snapshot_at_by_provider[provider_name] = last_snapshot_at
+            if self._last_event_at is None or last_snapshot_at > self._last_event_at:
+                self._last_event_at = last_snapshot_at
         self._fire_on_change()
 
     def record_discovery_event_received(self, event_at: datetime) -> None:
         """Bump ``_last_event_at`` for an incremental (non-snapshot) discovery event."""
         with self._lock:
-            self._last_event_at = event_at
+            if self._last_event_at is None or event_at > self._last_event_at:
+                self._last_event_at = event_at
         self._fire_on_change()
 
     def list_providers(self) -> tuple[DiscoveredProvider, ...]:
-        """Return the providers from the most recent full discovery snapshot."""
+        """Return the providers from the most recent per-provider discovery snapshots."""
         with self._lock:
-            return self._providers
+            return tuple(self._provider_by_name.values())
 
     def get_provider_errors(self) -> dict[ProviderInstanceName, DiscoveryError]:
         """Return errored providers keyed by provider name."""
@@ -727,9 +747,21 @@ class MngrCliBackendResolver(BackendResolverInterface):
             return dict(self._error_by_provider_name)
 
     def get_freshness_timestamps(self) -> tuple[datetime | None, datetime | None]:
-        """Return ``(last_event_at, last_full_snapshot_at)`` for the providers panel."""
+        """Return ``(last_event_at, aggregate_last_snapshot_at)`` for the providers panel.
+
+        The aggregate is the most recent per-provider snapshot time across all
+        providers (``None`` until any snapshot has arrived). Callers that need the
+        freshness of a *single* workspace's provider must use
+        :meth:`get_last_snapshot_at_for_provider` instead.
+        """
         with self._lock:
-            return self._last_event_at, self._last_full_snapshot_at
+            aggregate = max(self._last_snapshot_at_by_provider.values(), default=None)
+            return self._last_event_at, aggregate
+
+    def get_last_snapshot_at_for_provider(self, provider_name: ProviderInstanceName) -> datetime | None:
+        """Return the most recent snapshot time for ``provider_name``, or None if it has none yet."""
+        with self._lock:
+            return self._last_snapshot_at_by_provider.get(provider_name)
 
     def update_services(self, agent_id: AgentId, services: dict[str, str]) -> None:
         """Replace the known services for a single agent. Thread-safe."""

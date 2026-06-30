@@ -51,18 +51,14 @@ from imbue.minds.desktop_client.backend_resolver import ServiceDeregisteredRecor
 from imbue.minds.desktop_client.backend_resolver import parse_service_log_record
 from imbue.minds.errors import EnvelopeStreamConsumerError
 from imbue.minds.utils.secret_redaction import redact_secret_flag_values
-from imbue.mngr.api.discovery_events import AgentDestroyedEvent
-from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
+from imbue.mngr.api.discovery_aggregator import AggregatorDelta
+from imbue.mngr.api.discovery_aggregator import DiscoveryStateAggregator
 from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
-from imbue.mngr.api.discovery_events import HostDestroyedEvent
-from imbue.mngr.api.discovery_events import HostDiscoveryEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
+from imbue.mngr.api.discovery_events import ProviderDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
-from imbue.mngr.api.discovery_events import partition_removed_agents_by_provider_error
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import DiscoveredAgent
-from imbue.mngr.primitives import HostState
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
