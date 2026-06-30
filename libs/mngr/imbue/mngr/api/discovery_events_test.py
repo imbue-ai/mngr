@@ -20,7 +20,6 @@ from imbue.mngr.api.discovery_events import ResolvedAgentHost
 from imbue.mngr.api.discovery_events import _DISCOVERY_MAX_FILE_SIZE_BYTES
 from imbue.mngr.api.discovery_events import _build_ssh_info_from_host
 from imbue.mngr.api.discovery_events import _discovery_stream_emit_line
-from imbue.mngr.api.discovery_events import _discovery_stream_tail_events_file
 from imbue.mngr.api.discovery_events import _emit_lines_from_offset
 from imbue.mngr.api.discovery_events import _make_envelope_fields
 from imbue.mngr.api.discovery_events import _rotate_discovery_events_if_needed
@@ -46,6 +45,7 @@ from imbue.mngr.api.discovery_events import partition_removed_agents_by_provider
 from imbue.mngr.api.discovery_events import resolve_hosts_for_identifiers
 from imbue.mngr.api.discovery_events import resolve_provider_names_for_identifiers
 from imbue.mngr.api.discovery_events import tail_discovery_events_file
+from imbue.mngr.api.discovery_events import tail_discovery_events_from_offset
 from imbue.mngr.api.discovery_events import write_full_discovery_snapshot
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -1158,7 +1158,7 @@ def test_discovery_stream_tail_detects_new_content(temp_config: MngrConfig) -> N
 
     # Start tail thread with on_line callback instead of manipulating sys.stdout
     tail = threading.Thread(
-        target=_discovery_stream_tail_events_file,
+        target=tail_discovery_events_from_offset,
         args=(events_path, initial_offset, stop_event, emitted_ids, lock, warner, captured_lines.append),
         daemon=True,
     )
@@ -1194,7 +1194,7 @@ def test_discovery_stream_tail_preserves_partial_writes(tmp_path: Path) -> None:
     warner = MalformedJsonLineWarner(source_description="test partial")
 
     tail = threading.Thread(
-        target=_discovery_stream_tail_events_file,
+        target=tail_discovery_events_from_offset,
         args=(events_path, 0, stop_event, emitted_ids, lock, warner, captured_lines.append),
         daemon=True,
     )

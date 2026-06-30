@@ -1090,7 +1090,7 @@ def _discovery_stream_emit_line(
             sys.stdout.flush()
 
 
-def _discovery_stream_tail_events_file(
+def tail_discovery_events_from_offset(
     events_path: Path,
     initial_offset: int,
     stop_event: threading.Event,
@@ -1227,7 +1227,7 @@ def tail_discovery_events_file(
         )
     else:
         initial_offset = 0
-    _discovery_stream_tail_events_file(
+    tail_discovery_events_from_offset(
         events_path, initial_offset, stop_event, emitted_event_ids, emit_lock, warner, on_line
     )
 
@@ -1323,7 +1323,7 @@ def run_discovery_stream(
     # Phase 2: start tailing the events file for new events
     stop_event = threading.Event()
     tail = threading.Thread(
-        target=_discovery_stream_tail_events_file,
+        target=tail_discovery_events_from_offset,
         args=(events_path, initial_offset, stop_event, emitted_event_ids, emit_lock, warner, on_line),
         daemon=True,
     )

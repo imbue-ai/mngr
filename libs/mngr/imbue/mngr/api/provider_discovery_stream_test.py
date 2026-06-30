@@ -10,6 +10,7 @@ from imbue.mngr.api.discovery_events import ProviderDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import get_discovery_events_path
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.api.provider_discovery_stream import _ProviderDiscoveryPoller
+from imbue.mngr.api.provider_discovery_stream import _discover_one_provider
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.primitives import AgentId
@@ -23,6 +24,7 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.utils.polling import poll_until
+from imbue.mngr.utils.thread_cleanup import mngr_executor
 
 
 class _ControllableProvider(MockProviderInstance):
@@ -64,7 +66,23 @@ def _make_controllable_provider(
     return provider
 
 
-def _fast_config() -> ProviderInstanceConfig:
+def _generous_config() -> ProviderInstanceConfig:
+    """Config with a large error timeout, so a discovery that returns promptly is never
+    spuriously declared timed-out even under heavy CI load (where thread scheduling is slow)."""
+    return ProviderInstanceConfig(
+        backend=ProviderBackendName("controllable"),
+        discovery_poll_interval_seconds=PositiveFloat(60.0),
+        discovery_warn_seconds=PositiveFloat(30.0),
+        discovery_error_timeout_seconds=PositiveFloat(120.0),
+        host_discovery_timeout_seconds=PositiveFloat(30.0),
+        agent_discovery_timeout_seconds=PositiveFloat(30.0),
+    )
+
+
+def _tiny_timeout_config() -> ProviderInstanceConfig:
+    """Config with a tiny error timeout used only by the timeout test, whose discovery is
+    gated (never completes during the wait), so the timeout fires deterministically
+    regardless of load -- the small value just keeps the test fast."""
     return ProviderInstanceConfig(
         backend=ProviderBackendName("controllable"),
         discovery_poll_interval_seconds=PositiveFloat(0.05),
@@ -104,8 +122,9 @@ def test_poller_emits_success_snapshot(temp_host_dir: Path, temp_mngr_ctx: MngrC
     )
     provider.result_agents_by_host = {host: [agent]}
 
-    poller = _ProviderDiscoveryPoller(provider=provider, mngr_ctx=temp_mngr_ctx, config=_fast_config())
-    poller.poll_and_emit()
+    poller = _ProviderDiscoveryPoller(provider=provider, mngr_ctx=temp_mngr_ctx, config=_generous_config())
+    with mngr_executor(parent_cg=temp_mngr_ctx.concurrency_group, name="test-discover", max_workers=1) as executor:
+        poller.poll_and_emit(lambda: executor.submit(_discover_one_provider, provider, temp_mngr_ctx, True))
 
     snapshots = _read_snapshots(temp_mngr_ctx)
     assert len(snapshots) == 1
@@ -121,8 +140,9 @@ def test_poller_emits_error_snapshot_on_exception(temp_host_dir: Path, temp_mngr
     provider = _make_controllable_provider(temp_host_dir, temp_mngr_ctx, is_released=True)
     provider.should_raise = True
 
-    poller = _ProviderDiscoveryPoller(provider=provider, mngr_ctx=temp_mngr_ctx, config=_fast_config())
-    poller.poll_and_emit()
+    poller = _ProviderDiscoveryPoller(provider=provider, mngr_ctx=temp_mngr_ctx, config=_generous_config())
+    with mngr_executor(parent_cg=temp_mngr_ctx.concurrency_group, name="test-discover", max_workers=1) as executor:
+        poller.poll_and_emit(lambda: executor.submit(_discover_one_provider, provider, temp_mngr_ctx, True))
 
     snapshots = _read_snapshots(temp_mngr_ctx)
     assert len(snapshots) == 1
@@ -143,26 +163,30 @@ def test_poller_timeout_emits_error_then_accepts_late_result(temp_host_dir: Path
         host_state=HostState.RUNNING,
     )
     provider.result_agents_by_host = {host: []}
-    poller = _ProviderDiscoveryPoller(provider=provider, mngr_ctx=temp_mngr_ctx, config=_fast_config())
+    poller = _ProviderDiscoveryPoller(provider=provider, mngr_ctx=temp_mngr_ctx, config=_tiny_timeout_config())
 
     try:
-        # First poll times out (discovery is blocked) -> error snapshot, orphan kept.
-        poller.poll_and_emit()
-        timeout_snapshots = _read_snapshots(temp_mngr_ctx)
-        assert len(timeout_snapshots) == 1
-        assert timeout_snapshots[0].error is not None
-        assert provider.discovery_call_count == 1
+        with mngr_executor(parent_cg=temp_mngr_ctx.concurrency_group, name="test-discover", max_workers=1) as executor:
+            submit = lambda: executor.submit(_discover_one_provider, provider, temp_mngr_ctx, True)  # noqa: E731
 
-        # While the orphan is still in flight, another poll must NOT start a second discovery.
-        poller.poll_and_emit()
-        assert provider.discovery_call_count == 1
+            # First poll times out (discovery is blocked) -> error snapshot, orphan kept.
+            poller.poll_and_emit(submit)
+            timeout_snapshots = _read_snapshots(temp_mngr_ctx)
+            assert len(timeout_snapshots) == 1
+            assert timeout_snapshots[0].error is not None
+            # Wait for the orphaned discovery thread to actually begin (it then blocks on the gate).
+            poll_until(lambda: provider.discovery_call_count == 1, timeout=5.0)
 
-        # Release the orphaned discovery; once it finishes, a poll harvests its late result.
-        provider.release()
-        poll_until(lambda: poller.poll_and_emit() or len(_read_snapshots(temp_mngr_ctx)) >= 2, timeout=5.0)
-        snapshots = _read_snapshots(temp_mngr_ctx)
-        assert len(snapshots) >= 2
-        assert snapshots[-1].error is None
-        assert {h.host_id for h in snapshots[-1].hosts} == {host.host_id}
+            # While the orphan is still in flight, another poll must NOT start a second discovery.
+            poller.poll_and_emit(submit)
+            assert provider.discovery_call_count == 1
+
+            # Release the orphaned discovery; once it finishes, a poll harvests its late result.
+            provider.release()
+            poll_until(lambda: poller.poll_and_emit(submit) or len(_read_snapshots(temp_mngr_ctx)) >= 2, timeout=5.0)
+            snapshots = _read_snapshots(temp_mngr_ctx)
+            assert len(snapshots) >= 2
+            assert snapshots[-1].error is None
+            assert {h.host_id for h in snapshots[-1].hosts} == {host.host_id}
     finally:
         provider.release()

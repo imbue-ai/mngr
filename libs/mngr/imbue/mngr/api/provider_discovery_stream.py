@@ -13,20 +13,21 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
-from imbue.mngr.api.discovery_events import _discovery_stream_tail_events_file
 from imbue.mngr.api.discovery_events import get_discovery_events_path
 from imbue.mngr.api.discovery_events import make_discovered_provider
+from imbue.mngr.api.discovery_events import tail_discovery_events_from_offset
 from imbue.mngr.api.discovery_events import write_provider_discovery_snapshot
 from imbue.mngr.api.providers import get_all_provider_instances
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderError
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
-from imbue.mngr.utils.thread_cleanup import cleanup_thread_local_resources
+from imbue.mngr.utils.thread_cleanup import mngr_executor
 
 
 def _utc_now() -> datetime:
@@ -80,8 +81,20 @@ class _ProviderDiscoveryPoller(MutableModel):
     def _discovered_provider(self) -> DiscoveredProvider:
         return make_discovered_provider(self.provider.name, self.config)
 
-    def poll_and_emit(self) -> None:
-        """Run (or resume) one bounded discovery poll for this provider and write a snapshot."""
+    def poll_and_emit(
+        self,
+        submit_discovery: Callable[[], "Future[dict[DiscoveredHost, list[DiscoveredAgent]]]"],
+    ) -> None:
+        """Run (or resume) one bounded discovery poll for this provider and write a snapshot.
+
+        ``submit_discovery`` starts this provider's discovery in a background thread and
+        returns a Future. It is supplied by ``run`` (bound to a long-lived executor) so
+        that abandoning a timed-out discovery merely stops waiting -- the background
+        thread keeps running and resolves the Future, whose late result is harvested on a
+        subsequent poll. The Future captures any discovery exception (read via
+        ``future.exception()``), so a failing provider becomes a per-provider error
+        snapshot rather than propagating.
+        """
         # If a previous poll's discovery is still running, only act once it finishes,
         # so we never run two concurrent discoveries for the same provider.
         if self._in_flight_future is not None:
@@ -93,7 +106,7 @@ class _ProviderDiscoveryPoller(MutableModel):
             return
 
         started_at = _utc_now()
-        future = self._start_discovery()
+        future = submit_discovery()
         # Two-threshold wait: warn first, then declare errored.
         if not _wait_for_future(future, self.config.discovery_warn_seconds):
             logger.warning(
@@ -110,48 +123,19 @@ class _ProviderDiscoveryPoller(MutableModel):
                 return
         self._harvest_and_emit(future, started_at)
 
-    def _start_discovery(self) -> "Future[dict[DiscoveredHost, list[DiscoveredAgent]]]":
-        """Run this provider's discovery in a background cg thread, returning a Future.
-
-        Uses a raw thread + manually-resolved Future rather than a pooled executor so
-        that abandoning a timed-out discovery simply stops waiting -- the thread keeps
-        running and resolves the Future later (its late result is harvested on a
-        subsequent poll). Mirrors the per-task gevent-hub cleanup that ``mngr_executor``
-        performs, since discovery may run pyinfra ops in this thread.
-        """
-        future: Future[dict[DiscoveredHost, list[DiscoveredAgent]]] = Future()
-
-        def _run() -> None:
-            # Capture any failure into the Future (the standard executor pattern) so the
-            # poller can attribute it to this provider rather than failing the cg strand.
-            try:
-                result = _discover_one_provider(self.provider, self.mngr_ctx, self.include_destroyed)
-            except Exception as exc:
-                future.set_exception(exc)
-            else:
-                future.set_result(result)
-            finally:
-                cleanup_thread_local_resources()
-
-        self.mngr_ctx.concurrency_group.start_new_thread(
-            target=_run,
-            name=f"discover_provider_{self.provider.name}",
-            daemon=True,
-            is_checked=False,
-        )
-        return future
-
     def _harvest_and_emit(
         self,
         future: "Future[dict[DiscoveredHost, list[DiscoveredAgent]]]",
         started_at: datetime,
     ) -> None:
         """Emit a snapshot from a finished discovery future (success or error)."""
-        try:
-            agents_by_host = future.result()
-        except Exception as exc:
-            self._emit_error_snapshot(started_at, exc)
+        # ``exception()`` reads the captured failure without re-raising it, so a failing
+        # provider becomes an error snapshot rather than propagating out of the poll.
+        error = future.exception()
+        if error is not None:
+            self._emit_error_snapshot(started_at, error)
             return
+        agents_by_host = future.result()
         agents: list[DiscoveredAgent] = []
         hosts: list[DiscoveredHost] = []
         for host_ref, agent_refs in agents_by_host.items():
@@ -211,14 +195,32 @@ class _ProviderDiscoveryPoller(MutableModel):
         )
 
     def run(self, stop_event: threading.Event) -> None:
-        """Loop: poll, emit, then wait this provider's poll interval (until stopped)."""
-        while not stop_event.is_set():
-            try:
-                with log_span("Polling discovery for provider {}", self.provider.name):
-                    self.poll_and_emit()
-            except Exception as e:
-                logger.opt(exception=e).error("Provider {} discovery poll failed (continuing)", self.provider.name)
-            stop_event.wait(timeout=self.config.discovery_poll_interval_seconds)
+        """Loop: poll, emit, then wait this provider's poll interval (until stopped).
+
+        Holds one long-lived executor for the poller's lifetime; each poll submits the
+        provider's discovery to it. The executor only runs one discovery at a time, but
+        a poll never submits while a prior discovery is still in flight, so the abandoned
+        (timed-out) discovery is never blocked by a new one.
+        """
+        with mngr_executor(
+            parent_cg=self.mngr_ctx.concurrency_group,
+            name=f"discover_provider_{self.provider.name}",
+            max_workers=1,
+        ) as executor:
+            while not stop_event.is_set():
+                # Expected transient failures (a failed snapshot write, a provider-config
+                # error) must not kill this provider's poll loop; truly unexpected errors
+                # propagate and stop only this poller (its thread is is_checked=False).
+                try:
+                    with log_span("Polling discovery for provider {}", self.provider.name):
+                        self.poll_and_emit(
+                            lambda: executor.submit(
+                                _discover_one_provider, self.provider, self.mngr_ctx, self.include_destroyed
+                            )
+                        )
+                except (OSError, MngrError) as e:
+                    logger.warning("Provider {} discovery poll failed (continuing): {}", self.provider.name, e)
+                stop_event.wait(timeout=self.config.discovery_poll_interval_seconds)
 
 
 def _wait_for_future(future: Future[dict[DiscoveredHost, list[DiscoveredAgent]]], timeout_seconds: float) -> bool:
@@ -253,7 +255,7 @@ def run_per_provider_discovery_stream(
     # below (and by other processes) are appended and picked up by the tail.
     initial_offset = events_path.stat().st_size if events_path.exists() else 0
     tail = threading.Thread(
-        target=_discovery_stream_tail_events_file,
+        target=tail_discovery_events_from_offset,
         args=(events_path, initial_offset, stop_event, emitted_event_ids, emit_lock, warner, on_line),
         daemon=True,
     )
@@ -268,12 +270,18 @@ def run_per_provider_discovery_stream(
         )
         for provider in providers
     ]
+    # is_checked=False so one provider's poller crashing cannot fail the whole group
+    # (and thus the other providers' pollers); on_failure logs which poller died.
     poller_threads = [
         mngr_ctx.concurrency_group.start_new_thread(
             target=poller.run,
             args=(stop_event,),
             daemon=True,
             name=f"discovery-poller-{poller.provider.name}",
+            is_checked=False,
+            on_failure=lambda exc, failed_poller=poller: logger.opt(exception=exc).error(
+                "Discovery poller for provider {} crashed", failed_poller.provider.name
+            ),
         )
         for poller in pollers
     ]
