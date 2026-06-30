@@ -338,10 +338,16 @@ class ForwardStreamManager(MutableModel):
         self._apply_event_and_reconcile(filtered_event)
         # A per-agent events stream can die (e.g. its host rebooted and broke the
         # long-lived --follow connection). Nothing respawns it on its own, so the
-        # periodic snapshot drives the retry: re-start it for every agent still
-        # present in this provider's snapshot (the call is a no-op for live ones).
+        # periodic snapshot drives the retry: re-start it for every agent the
+        # aggregator still tracks (the call is a no-op for live ones). Restrict this
+        # to agents the aggregator kept -- it is span-aware and deliberately does not
+        # re-add an agent whose own destroy event landed during this snapshot's span,
+        # so restarting a stream from the raw event.agents would resurrect (and never
+        # tear down) a stream for an agent already considered gone.
+        present_agent_ids = self._aggregator.get_agent_by_id()
         for agent in filtered_agents:
-            self._start_events_stream(agent.agent_id)
+            if str(agent.agent_id) in present_agent_ids:
+                self._start_events_stream(agent.agent_id)
 
     def _apply_event_and_reconcile(self, event: DiscoveryEvent) -> None:
         """Fold one discovery event into the aggregator and apply the resulting membership delta."""

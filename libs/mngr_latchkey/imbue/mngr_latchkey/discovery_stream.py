@@ -244,8 +244,15 @@ class DiscoveryStreamConsumer(MutableModel):
             self._safely_call_destroyed(AgentId(aid_str))
 
         if isinstance(event, ProviderDiscoverySnapshotEvent):
+            # Fire discovered only for snapshot agents the aggregator actually kept.
+            # It is span-aware: an agent whose own destroy/state-change event landed
+            # during this snapshot's discovery span is deliberately not re-added, so
+            # firing discovered from the raw event.agents would re-establish a reverse
+            # tunnel for an agent the aggregator already considers gone.
+            present_agent_ids = self._aggregator.get_agent_by_id()
             for agent in event.agents:
-                self._fire_discovered(agent)
+                if str(agent.agent_id) in present_agent_ids:
+                    self._fire_discovered(agent)
         elif isinstance(event, AgentDiscoveryEvent):
             self._fire_discovered(event.agent)
         elif isinstance(event, HostSSHInfoEvent):
