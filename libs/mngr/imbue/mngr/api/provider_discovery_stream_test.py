@@ -167,10 +167,8 @@ def test_poller_timeout_emits_error_then_accepts_late_result(temp_host_dir: Path
 
     try:
         with mngr_executor(parent_cg=temp_mngr_ctx.concurrency_group, name="test-discover", max_workers=1) as executor:
-            submit = lambda: executor.submit(_discover_one_provider, provider, temp_mngr_ctx, True)  # noqa: E731
-
             # First poll times out (discovery is blocked) -> error snapshot, orphan kept.
-            poller.poll_and_emit(submit)
+            poller.poll_and_emit(lambda: executor.submit(_discover_one_provider, provider, temp_mngr_ctx, True))
             timeout_snapshots = _read_snapshots(temp_mngr_ctx)
             assert len(timeout_snapshots) == 1
             assert timeout_snapshots[0].error is not None
@@ -178,12 +176,18 @@ def test_poller_timeout_emits_error_then_accepts_late_result(temp_host_dir: Path
             poll_until(lambda: provider.discovery_call_count == 1, timeout=5.0)
 
             # While the orphan is still in flight, another poll must NOT start a second discovery.
-            poller.poll_and_emit(submit)
+            poller.poll_and_emit(lambda: executor.submit(_discover_one_provider, provider, temp_mngr_ctx, True))
             assert provider.discovery_call_count == 1
 
             # Release the orphaned discovery; once it finishes, a poll harvests its late result.
             provider.release()
-            poll_until(lambda: poller.poll_and_emit(submit) or len(_read_snapshots(temp_mngr_ctx)) >= 2, timeout=5.0)
+            poll_until(
+                lambda: poller.poll_and_emit(
+                    lambda: executor.submit(_discover_one_provider, provider, temp_mngr_ctx, True)
+                )
+                or len(_read_snapshots(temp_mngr_ctx)) >= 2,
+                timeout=5.0,
+            )
             snapshots = _read_snapshots(temp_mngr_ctx)
             assert len(snapshots) >= 2
             assert snapshots[-1].error is None
