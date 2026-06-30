@@ -1889,6 +1889,21 @@ def test_rename_host_403_for_non_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     assert backend.pool_rows[0].host_name != "renamed-host"
 
 
+def test_rename_host_404_when_not_leased(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST /hosts/{id}/rename returns 404 when the requester owns the row but it is not leased."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_removing_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000054"), version="v0.1.0", leased_to_user=_ADMIN_STUB_USERNAME
+    )
+    resp = client.post(
+        "/hosts/00000000-0000-0000-0000-000000000054/rename",
+        json={"host_name": "renamed-host"},
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 404
+    assert backend.pool_rows[0].host_name != "renamed-host"
+
+
 def test_release_host_succeeds_for_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     """POST /hosts/{id}/release strips OVH tags, cancels the VPS, and drops the row."""
     client, backend = _make_pool_test_client(monkeypatch)
