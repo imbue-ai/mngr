@@ -412,12 +412,19 @@ function updateBundleBounds(bundle) {
   // transparent, so the dialog's own dim backdrop shows the workspace
   // behind it.
   if (bundle.modalView && !bundle.modalView.webContents.isDestroyed()) {
-    bundle.modalView.setBounds({
-      x: 0,
-      y: 0,
-      width,
-      height,
-    });
+    // While a tooltip is showing (and no modal is open), the overlay manager
+    // owns the view's bounds (it's shrunk to the tooltip's rect); leave them so
+    // a resize doesn't snap it back to full-window. Tooltips dismiss on resize,
+    // which restores the full-window bounds. Otherwise the overlay view spans
+    // the whole window (hidden when idle, captured/visible when a modal opens).
+    if (!(bundle.tooltipVisible && !bundle.modalVisible)) {
+      bundle.modalView.setBounds({
+        x: 0,
+        y: 0,
+        width,
+        height,
+      });
+    }
   }
 }
 
@@ -588,6 +595,10 @@ function createBundle() {
     // The latest 'show-modal' overlay command, replayed on the overlay host's
     // did-finish-load if it was issued before the host page finished loading.
     pendingOverlayCommand: null,
+    // True while a hover tooltip is showing (overlay view shrunk to the tooltip
+    // rect). Gates updateBundleBounds so a resize doesn't clobber that rect with
+    // the full-window modal bounds.
+    tooltipVisible: false,
     inboxListReloadTimer: null,
     currentContentUrl: null,
     currentWorkspaceId: null,
@@ -1033,6 +1044,9 @@ function createBundleOverlayView(bundle) {
     });
   }
   loadOverlayHost(bundle);
+  // Give the view its full-window bounds now (it stays hidden) so the overlay
+  // host has a real viewport to measure tooltips against before the first show.
+  updateBundleBounds(bundle);
 }
 
 function openModal(bundle, url) {
@@ -3120,6 +3134,67 @@ ipcMain.on('close-modal', (event) => {
 ipcMain.on('overlay-modal-loaded', (event) => {
   const bundle = getBundleFromEvent(event);
   if (bundle) primeOverlayFrames(bundle);
+});
+
+// Custom titlebar tooltip: the chrome view sends the trigger's rect + label;
+// forward it to the overlay host, which renders/measures the bubble and reports
+// the rect back via overlay-set-bounds. Suppressed while a modal is open (the
+// titlebar is covered by the modal then, so no titlebar hover should occur).
+ipcMain.on('show-tooltip', (event, payload) => {
+  const bundle = getBundleFromEvent(event);
+  if (!bundle || !bundle.modalView || bundle.modalView.webContents.isDestroyed()) return;
+  if (bundle.modalVisible) return;
+  if (!payload || typeof payload !== 'object' || !payload.rect) return;
+  try {
+    bundle.modalView.webContents.send('overlay-command', {
+      type: 'show-tooltip',
+      rect: payload.rect,
+      text: typeof payload.text === 'string' ? payload.text : '',
+      shortcut: typeof payload.shortcut === 'string' ? payload.shortcut : '',
+      html: typeof payload.html === 'string' ? payload.html : null,
+    });
+  } catch { /* noop */ }
+});
+
+ipcMain.on('hide-tooltip', (event) => {
+  const bundle = getBundleFromEvent(event);
+  if (!bundle || !bundle.modalView || bundle.modalView.webContents.isDestroyed()) return;
+  try {
+    bundle.modalView.webContents.send('overlay-command', { type: 'hide-tooltip' });
+  } catch { /* noop */ }
+});
+
+// The overlay host reports the overlay view's required bounds (it is the only
+// authority on its size, since Electron 40 has no per-view click-through). A
+// tooltip reports a small rect so the rest of the window stays interactive;
+// 'hidden' restores the full-window (hidden) bounds so the next tooltip can be
+// measured. Modals are full-window and own their own visibility, so tooltip
+// bounds are ignored while a modal is open.
+ipcMain.on('overlay-set-bounds', (event, spec) => {
+  const bundle = getBundleFromEvent(event);
+  if (!bundle || !bundle.modalView || bundle.modalView.webContents.isDestroyed()) return;
+  if (!spec || typeof spec !== 'object') return;
+  if (bundle.modalVisible) return;
+  if (spec.mode === 'rect' && spec.rect) {
+    const r = spec.rect;
+    bundle.tooltipVisible = true;
+    // Raise above the content view (it may have been re-added on a crash
+    // rebuild) and size to the tooltip's rect.
+    bundle.window.contentView.removeChildView(bundle.modalView);
+    bundle.window.contentView.addChildView(bundle.modalView);
+    bundle.modalView.setBounds({
+      x: Math.round(r.x),
+      y: Math.round(r.y),
+      width: Math.max(1, Math.round(r.width)),
+      height: Math.max(1, Math.round(r.height)),
+    });
+    bundle.modalView.setVisible(true);
+  } else {
+    bundle.tooltipVisible = false;
+    bundle.modalView.setVisible(false);
+    // Restore the full-window (hidden) bounds for the next measurement.
+    updateBundleBounds(bundle);
+  }
 });
 
 // Settings-page color picker: optimistic chrome-titlebar paint for the

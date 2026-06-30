@@ -83,6 +83,13 @@ contextBridge.exposeInMainWorld('minds', {
   // the inbox's request count) without waiting for the next SSE push.
   overlayModalLoaded: (id) => ipcRenderer.send('overlay-modal-loaded', id),
 
+  // Custom titlebar tooltips. The chrome view computes a trigger's
+  // viewport-relative rect and its label, and main forwards it to the overlay
+  // host to render above both chrome and content. ``payload`` is
+  // { rect: {x, y, width, height}, text, shortcut?, html? }.
+  showTooltip: (payload) => ipcRenderer.send('show-tooltip', payload),
+  hideTooltip: () => ipcRenderer.send('hide-tooltip'),
+
   // Native file/directory picker used by the file-sharing permission
   // dialog so the user can pick the path to share instead of typing it.
   // ``options.mode`` is 'file' or 'directory'; ``options.defaultPath``
