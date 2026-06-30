@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-29
+
+Added a blueprint planning document (`blueprint/hostname-live-validation/`) for live validation of the mind-creation Name field.
+
 ## 2026-06-28
 
 Added an implementation plan for accelerating imbue_cloud slice bakes (build the FCT image once per box, docker-load it per slice) at `blueprint/accelerate-slice-bake/plan-accelerate-slice-bake.md`.

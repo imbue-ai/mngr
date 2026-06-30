@@ -37,7 +37,7 @@ def render_auth_page(
 # Copy shown above the sign-in modal's tabs explaining why the user is being
 # asked to sign in (the create screen needs an Imbue account for Imbue Cloud).
 _SIGNIN_MODAL_INTRO: str = (
-    "To run your mind on Imbue Cloud, sign in or create an Imbue account. "
+    "To run your workspace on Imbue Cloud, sign in or create an Imbue account. "
     "You can also close this and run it directly on your computer instead."
 )
 

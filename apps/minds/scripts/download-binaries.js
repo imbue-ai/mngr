@@ -25,6 +25,9 @@ const UV_VERSION = '0.11.15';
 const GIT_FOR_WINDOWS_VERSION = '2.49.0';
 const GIT_FOR_WINDOWS_TAG = `v${GIT_FOR_WINDOWS_VERSION}.windows.1`;
 const RESTIC_VERSION = '0.18.1';
+// desync: content-defined-chunking client used to fetch the pre-baked Lima image
+// (issue #2306). Only bundled on macOS/Linux (the Lima launch mode's platforms).
+const DESYNC_VERSION = '1.0.3';
 
 /**
  * SHA256 hashes for each downloaded archive, pinned by filename.
@@ -49,6 +52,10 @@ const EXPECTED_SHA256 = {
   'restic_0.18.1_darwin_amd64.bz2':     'eb8543ed92ff1ddb67762daebf09f7bea4b0c37d21edb6a910bee3d4f514015f',
   'restic_0.18.1_linux_amd64.bz2':      '680838f19d67151adba227e1570cdd8af12c19cf1735783ed1ba928bc41f363d',
   'restic_0.18.1_windows_amd64.zip':    '0c1a713440578cb400d2e76208feb24f1b339426b075a21f73b6b2132692515d',
+  'desync_1.0.3_darwin_arm64.tar.gz':   'd3082017b9f12d8716aa1fb4b33f80a4e781305971508db45bf777fc110a657d',
+  'desync_1.0.3_darwin_amd64.tar.gz':   'ab029448074428dc757d2235109dd557e9f34e4865052432a6ea7c431f0a5a19',
+  'desync_1.0.3_linux_amd64.tar.gz':    'ad4dd9e91b57eef8627d2038df09281d7f38dca02eeca0e66592b54087619953',
+  'desync_1.0.3_linux_arm64.tar.gz':    '9008e297f527634efe94688f67c7a49a534c561bf43d223e50f64bec899c15ca',
 };
 
 const MAX_REDIRECTS = 5;
@@ -86,6 +93,15 @@ function getResticDownloadUrl({ platform, arch }) {
     return `https://github.com/restic/restic/releases/download/v${RESTIC_VERSION}/restic_${RESTIC_VERSION}_windows_${goArch}.zip`;
   }
   return `https://github.com/restic/restic/releases/download/v${RESTIC_VERSION}/restic_${RESTIC_VERSION}_${platform}_${goArch}.bz2`;
+}
+
+function getDesyncDownloadUrl({ platform, arch }) {
+  // desync ships per-platform tar.gz at desync_<ver>_<os>_<goarch>.tar.gz.
+  const goArch = arch === 'x86_64' ? 'amd64' : arch === 'aarch64' ? 'arm64' : null;
+  if (!goArch) {
+    throw new Error(`Unsupported desync arch: ${arch}`);
+  }
+  return `https://github.com/folbricht/desync/releases/download/v${DESYNC_VERSION}/desync_${DESYNC_VERSION}_${platform}_${goArch}.tar.gz`;
 }
 
 /**
@@ -250,6 +266,37 @@ async function downloadRestic(resourcesDir, { platform, arch }) {
   console.log(`[download-binaries] restic installed at ${resticPath}`);
 }
 
+async function downloadDesync(resourcesDir, { platform, arch }) {
+  // desync supports the Lima launch mode only (macOS/Linux). Windows has no Lima
+  // launch mode, so there is nothing to fetch there.
+  if (platform === 'win32') {
+    console.log('[download-binaries] Skipping desync on win32 (no Lima launch mode).');
+    return;
+  }
+  const desyncDir = path.join(resourcesDir, 'desync');
+  if (fs.existsSync(desyncDir)) fs.rmSync(desyncDir, { recursive: true });
+  fs.mkdirSync(desyncDir, { recursive: true });
+
+  const url = getDesyncDownloadUrl({ platform, arch });
+  const filename = path.basename(new URL(url).pathname);
+  console.log(`[download-binaries] Downloading desync from ${url}...`);
+
+  const archive = await download(url);
+  verifyChecksum(archive, filename);
+
+  const tarPath = path.join(desyncDir, 'desync.tar.gz');
+  fs.writeFileSync(tarPath, archive);
+  execSync(`tar xzf "${tarPath}" -C "${desyncDir}"`, { stdio: 'inherit' });
+  fs.unlinkSync(tarPath);
+
+  const desyncBinary = path.join(desyncDir, 'desync');
+  if (!fs.existsSync(desyncBinary)) {
+    throw new Error(`desync binary not found at ${desyncBinary} after extraction`);
+  }
+  fs.chmodSync(desyncBinary, 0o755);
+  console.log(`[download-binaries] desync installed at ${desyncBinary}`);
+}
+
 /**
  * Recursively copy Apple's git libexec tree into destDir, dereferencing
  * symlinks into real file copies.
@@ -391,6 +438,7 @@ async function downloadBinaries(resourcesDir) {
     downloadUv(resourcesDir, { platform, arch }),
     downloadGit(resourcesDir, { platform }),
     downloadRestic(resourcesDir, { platform, arch }),
+    downloadDesync(resourcesDir, { platform, arch }),
   ]);
 
   console.log('[download-binaries] Done.');
@@ -409,6 +457,7 @@ async function beforeInstall({ appDir }) {
 beforeInstall.downloadGit = downloadGit;
 beforeInstall.downloadUv = downloadUv;
 beforeInstall.downloadRestic = downloadRestic;
+beforeInstall.downloadDesync = downloadDesync;
 beforeInstall.download = download;
 module.exports = beforeInstall;
 

@@ -100,6 +100,19 @@ _MINDS_API_PROXY_PER_AGENT_PATH_PATTERN: Final[str] = rf"^{_MINDS_API_PROXY_PER_
 _SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED: Final[str] = "minds-api-proxy-per-agent-unauthorized"
 _PERM_MINDS_API_PROXY_PER_AGENT: Final[str] = "minds-api-proxy-per-agent"
 
+# The per-agent bug-report route is reachable by ANY in-workspace agent without
+# per-agent registration. An agent escalates a bug report by POSTing its
+# diagnosis here; the effect is that the desktop app pops the report-a-bug modal
+# pre-filled for a human to review and submit (the agent never sends to Sentry
+# itself). Because detent stops at the first matching scope, a rule allowing this
+# exact path must come before the unauthorized gate below. This is an interim
+# bypass pending the broader minds-API-surface latchkey work; the route's
+# bearer-key auth still applies, so only requests that came through the gateway
+# reach it.
+_MINDS_API_PROXY_REPORT_PATH_PATTERN: Final[str] = rf"^{_MINDS_API_PROXY_PER_AGENT_PATH_PREFIX}[^/]+/report$"
+_SCOPE_MINDS_API_PROXY_REPORT: Final[str] = "minds-api-proxy-report"
+_PERM_MINDS_API_PROXY_REPORT: Final[str] = "minds-api-proxy-report-allow"
+
 # The version-agnostic, read-only API schema endpoint (an OpenAPI document
 # describing every gateway-reachable ``/api/v*`` route). Granted to every agent
 # by default -- unlike the per-agent endpoints it is not agent-scoped (the schema
@@ -167,6 +180,9 @@ def _extract_agent_id_from_anyof_entry(entry: JsonValue) -> str:
 
 _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissionsConfig(
     rules=(
+        # The bug-report route is allowed for any agent (see note above), so it must be matched
+        # before the unauthorized gate -- detent stops at the first matching scope.
+        {_SCOPE_MINDS_API_PROXY_REPORT: [_PERM_MINDS_API_PROXY_REPORT]},
         # Unauthorized agents trying to access agent-scoped Minds API endpoint get an empty list of permissions, leading to immediate rejection.
         {_SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED: []},
         {
@@ -182,6 +198,27 @@ _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissi
         },
     ),
     schemas={
+        _SCOPE_MINDS_API_PROXY_REPORT: {
+            "properties": {
+                "domain": {"const": _GATEWAY_SELF_HOST},
+                "method": {"const": "POST"},
+                "path": {
+                    "type": "string",
+                    "pattern": _MINDS_API_PROXY_REPORT_PATH_PATTERN,
+                },
+            },
+            "required": ["domain", "method", "path"],
+        },
+        _PERM_MINDS_API_PROXY_REPORT: {
+            "properties": {
+                "method": {"const": "POST"},
+                "path": {
+                    "type": "string",
+                    "pattern": _MINDS_API_PROXY_REPORT_PATH_PATTERN,
+                },
+            },
+            "required": ["method", "path"],
+        },
         _SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED: {
             "properties": {
                 "domain": {"const": _GATEWAY_SELF_HOST},
