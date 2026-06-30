@@ -81,6 +81,23 @@ class ClientEnvConfig(FrozenModel):
     litellm_proxy_url: AnyUrl = Field(
         description="Base URL of the `llm` (LiteLLM proxy) Modal app for this env. Used as the default `ANTHROPIC_BASE_URL` for IMBUE_CLOUD-mode agents."
     )
+    lima_image_base_url: AnyUrl | None = Field(
+        default=None,
+        description=(
+            "Root URL of the pre-baked Lima image chunk store / CDN for this env (issue 2306). "
+            "When set together with `lima_image_minisign_public_key`, the desktop app prefetches the "
+            "current release's image and points Lima at it for fast local creates. None disables the "
+            "pre-baked path (the app always builds the workspace in-VM). Validated as a URL at config "
+            "load so a malformed value fails fast rather than at first fetch."
+        ),
+    )
+    lima_image_minisign_public_key: str | None = Field(
+        default=None,
+        description=(
+            "Minisign public key (single-line 'RW...' form) the pre-baked image's signed root manifest "
+            "is verified against. Required alongside `lima_image_base_url`."
+        ),
+    )
 
 
 class DeploySecretsConfig(FrozenModel):
