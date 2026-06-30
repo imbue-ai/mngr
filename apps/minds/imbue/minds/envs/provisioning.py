@@ -20,7 +20,7 @@ Split into two deploy paths driven by the activated env's tier:
 
 The orchestration is pure logic; the CLI plumbing in
 ``imbue.minds.cli.env`` builds the :class:`Providers` bundle with the
-real Modal CLI / Neon HTTP / SuperTokens HTTP / OVH HTTP / Modal
+real Modal CLI / Neon HTTP / SuperTokens HTTP / Modal
 deploy callables, and dispatches to the right deploy function based
 on the activated env's name.
 

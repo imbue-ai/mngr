@@ -10,7 +10,7 @@ which keeps "I'm activated against dev env A but accidentally typed
 ``minds env destroy production``" impossible.
 
 The CLI side constructs real provider callables (Modal CLI / Neon /
-SuperTokens / OVH HTTP / Modal deploy) and threads them into the
+SuperTokens / Modal deploy) and threads them into the
 pure orchestration in :mod:`imbue.minds.envs.provisioning`.
 
 Dev-tier credentials needed for provisioning come from HCP Vault at
