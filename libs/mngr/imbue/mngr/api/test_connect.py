@@ -39,6 +39,42 @@ def _build_sigwinch_catcher_command(marker_file: Path, ready_file: Path) -> str:
     return f"trap 'echo received > {marker_file}' WINCH; echo ready > {ready_file}; sleep 60 & wait"
 
 
+def _start_catcher_session(session_name: str, tmp_path: Path) -> tuple[Path, Path]:
+    """Start a detached tmux SIGWINCH-catcher session and wait until its trap is installed.
+
+    Creates a 200x50 session whose single ``agent`` window runs the catcher command,
+    then blocks until the pane has written its ready file (so a later signal is not
+    lost to bash's default WINCH action). Returns ``(marker_file, ready_file)``.
+    """
+    marker_file = tmp_path / "sigwinch_received"
+    ready_file = tmp_path / "catcher_ready"
+    subprocess.run(
+        [
+            "tmux",
+            "new-session",
+            "-d",
+            "-s",
+            session_name,
+            "-x",
+            "200",
+            "-y",
+            "50",
+            "-n",
+            "agent",
+            "bash",
+            "-c",
+            _build_sigwinch_catcher_command(marker_file, ready_file),
+        ],
+        check=True,
+    )
+    wait_for(
+        lambda: ready_file.exists(),
+        timeout=5.0,
+        error_message="catcher pane did not install its SIGWINCH trap",
+    )
+    return marker_file, ready_file
+
+
 @pytest.mark.flaky
 @pytest.mark.tmux
 def test_sigwinch_panes_script_delivers_to_pane_process(mngr_test_prefix: str, tmp_path) -> None:
@@ -51,36 +87,9 @@ def test_sigwinch_panes_script_delivers_to_pane_process(mngr_test_prefix: str, t
     signal reached the pane's child process.
     """
     session_name = f"{mngr_test_prefix}sigwinch-deliver"
-    marker_file = tmp_path / "sigwinch_received"
-    ready_file = tmp_path / "catcher_ready"
 
     try:
-        subprocess.run(
-            [
-                "tmux",
-                "new-session",
-                "-d",
-                "-s",
-                session_name,
-                "-x",
-                "200",
-                "-y",
-                "50",
-                "-n",
-                "agent",
-                "bash",
-                "-c",
-                _build_sigwinch_catcher_command(marker_file, ready_file),
-            ],
-            check=True,
-        )
-
-        # Wait until the pane has installed its WINCH trap before signaling.
-        wait_for(
-            lambda: ready_file.exists(),
-            timeout=5.0,
-            error_message="catcher pane did not install its SIGWINCH trap",
-        )
+        marker_file, _ = _start_catcher_session(session_name, tmp_path)
 
         subprocess.run(
             ["bash", _SIGWINCH_PANES_SCRIPT_PATH, session_name, "agent"],
@@ -111,40 +120,14 @@ def test_sigwinch_panes_script_skips_pinned_window(mngr_test_prefix: str, tmp_pa
     must short-circuit before signaling.
     """
     session_name = f"{mngr_test_prefix}sigwinch-pinned"
-    marker_file = tmp_path / "sigwinch_received"
-    ready_file = tmp_path / "catcher_ready"
 
     try:
-        subprocess.run(
-            [
-                "tmux",
-                "new-session",
-                "-d",
-                "-s",
-                session_name,
-                "-x",
-                "200",
-                "-y",
-                "50",
-                "-n",
-                "agent",
-                "bash",
-                "-c",
-                _build_sigwinch_catcher_command(marker_file, ready_file),
-            ],
-            check=True,
-        )
+        # Start the catcher (which waits for its WINCH trap to be installed) so that,
+        # if the guard were (incorrectly) to signal, the trap would record it.
+        marker_file, _ = _start_catcher_session(session_name, tmp_path)
         subprocess.run(
             ["tmux", "set-option", "-t", f"={session_name}:agent", "window-size", "manual"],
             check=True,
-        )
-
-        # Wait until the pane has installed its WINCH trap so that, if the guard were
-        # (incorrectly) to signal, the trap would be in place to record it.
-        wait_for(
-            lambda: ready_file.exists(),
-            timeout=5.0,
-            error_message="catcher pane did not install its SIGWINCH trap",
         )
 
         # The script runs synchronously (delay disabled), so by the time it returns the
