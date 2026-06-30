@@ -43,4 +43,4 @@ runs:
       # integrator config then inherits the trust via the plugin's
       # copy_project_config_from path.
       shell: bash
-      run: uv run --project libs/mngr_claude python libs/mngr_claude/scripts/pretrust_ci_checkout.py
+      run: uv run --project libs/mngr_claude python scripts/pretrust_claude_checkout.py

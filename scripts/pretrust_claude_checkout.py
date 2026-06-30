@@ -1,18 +1,22 @@
 """Pre-seed the global Claude config so an agent can run unattended in CI.
 
-The TMR integrator agent runs on the local CI host, where mngr_claude's
-provisioning path goes through Claude Code's trust dialog (see
+When a Claude agent runs on the local host, mngr_claude's provisioning path goes
+through Claude Code's trust dialog (see
 mngr_claude/plugin.py:interactively_dismiss_claude_dialogs). In CI there is no
 human to accept the dialog and no prior ~/.claude.json entry to inherit, so
-without seeding trust the integrator either raises ClaudeDirectoryNotTrustedError
-or hangs waiting on the dialog. This script pre-seeds the global ~/.claude.json
-with trust for the checkout plus the other dialogs the plugin gates on; the
-per-agent integrator config then inherits the trust via the plugin's
-copy_project_config_from path.
+without seeding trust the agent either raises ClaudeDirectoryNotTrustedError or
+hangs waiting on the dialog. This script pre-seeds the global ~/.claude.json with
+trust for the checkout plus the other dialogs the plugin gates on; a per-agent
+config then inherits the trust via the plugin's copy_project_config_from path.
 
-Run from the repo root (which must be the checkout to trust):
+This is used by the TMR CI workflows (.github/actions/tmr-setup), but nothing
+here is TMR-specific -- any CI job that launches a local Claude agent against the
+checkout can run it.
 
-    uv run --project libs/mngr_claude python libs/mngr_claude/scripts/pretrust_ci_checkout.py
+Run from the repo root (which must be the checkout to trust). The ``--project``
+selects the env where ``imbue.mngr_claude`` is importable:
+
+    uv run --project libs/mngr_claude python scripts/pretrust_claude_checkout.py
 
 This lives as a real module (rather than an inline heredoc in the CI workflow)
 so the type checker catches breakages when claude_config's API changes.

@@ -1,1 +1,0 @@
-Added `scripts/pretrust_ci_checkout.py`, which pre-seeds the global Claude config (trust for the checkout, dismissed effort callout, completed onboarding) so an agent can run unattended in CI. This replaces an inline Python heredoc in the TMR setup workflow that had silently broken when the `claude_config` resolver functions were renamed; as a real module it is now type-checked.
