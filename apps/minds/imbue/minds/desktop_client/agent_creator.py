@@ -514,6 +514,46 @@ _FAST_MODE_PREVENT: Final[str] = "prevent"
 _FAST_PATH_UNAVAILABLE_ERROR_CLASS: Final[str] = "FastPathUnavailableError"
 
 
+def provider_instance_name_for_launch(
+    launch_mode: LaunchMode,
+    imbue_cloud_account: str | None = None,
+    region: str | None = None,
+) -> str:
+    """Return the mngr provider-instance name a ``mngr create`` on ``launch_mode`` targets.
+
+    This is the scope within which host names must be unique: the create address
+    is ``system-services@<host_name>.<provider-instance>`` and the provider's
+    ``create_host`` raises ``HostNameConflictError`` only against existing hosts on
+    this same instance. Imbue Cloud is per-account (``imbue_cloud_<slug>``) and AWS
+    is per-region (``aws-<region>``); the other backends are single instances.
+
+    Kept as the single source of truth for that mapping so the create command and
+    the create form's availability check (which must agree on what "taken" means)
+    never drift apart. ``imbue_cloud_account`` is the account *email* (slugified to
+    match the provider block minds registers); ``region`` is required for AWS.
+    """
+    match launch_mode:
+        case LaunchMode.DOCKER:
+            return "docker"
+        case LaunchMode.LIMA:
+            return "lima"
+        case LaunchMode.VULTR:
+            return "vultr"
+        case LaunchMode.AWS:
+            # AWS is region-locked per provider instance (EC2's API is per-region),
+            # so minds writes one ``[providers.aws-<region>]`` block per configured
+            # region at startup. The region is required.
+            if not region:
+                raise MngrCommandError("AWS mode requires a region")
+            return f"aws-{region}"
+        case LaunchMode.IMBUE_CLOUD:
+            if not imbue_cloud_account:
+                raise MngrCommandError("IMBUE_CLOUD mode requires imbue_cloud_account")
+            return f"imbue_cloud_{_slugify_account(imbue_cloud_account)}"
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def _build_mngr_create_command(
     launch_mode: LaunchMode,
     host_name: HostName,
@@ -573,28 +613,13 @@ def _build_mngr_create_command(
     gateway wiring. Pass ``None`` or an empty dict to opt the host out
     of latchkey wiring.
     """
-    match launch_mode:
-        case LaunchMode.DOCKER:
-            address = f"{_DEFAULT_AGENT_NAME}@{host_name}.docker"
-        case LaunchMode.LIMA:
-            address = f"{_DEFAULT_AGENT_NAME}@{host_name}.lima"
-        case LaunchMode.VULTR:
-            address = f"{_DEFAULT_AGENT_NAME}@{host_name}.vultr"
-        case LaunchMode.AWS:
-            # AWS is region-locked per provider instance (EC2's API is
-            # per-region), so minds writes one ``[providers.aws-<region>]``
-            # block per configured region at startup and the create address
-            # selects the region-specific provider. The region is required.
-            if not region:
-                raise MngrCommandError("AWS mode requires a region")
-            address = f"{_DEFAULT_AGENT_NAME}@{host_name}.aws-{region}"
-        case LaunchMode.IMBUE_CLOUD:
-            if not imbue_cloud_account:
-                raise MngrCommandError("IMBUE_CLOUD mode requires imbue_cloud_account")
-            slug = _slugify_account(imbue_cloud_account)
-            address = f"{_DEFAULT_AGENT_NAME}@{host_name}.imbue_cloud_{slug}"
-        case _ as unreachable:
-            assert_never(unreachable)
+    # The provider instance the create targets (and thus the scope its host-name
+    # uniqueness check runs in) is derived once here so the create address and the
+    # form's availability check share a single mapping.
+    provider_instance = provider_instance_name_for_launch(
+        launch_mode, imbue_cloud_account=imbue_cloud_account, region=region
+    )
+    address = f"{_DEFAULT_AGENT_NAME}@{host_name}.{provider_instance}"
 
     # The `/welcome` initial message is now baked into the FCT template's
     # [create_templates.main] section, so we no longer pass `--message` here.

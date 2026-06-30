@@ -357,19 +357,33 @@ def _gc_single_host(
                     HostState.DESTROYED,
                 ):
                     # permanently delete the host's data
-                    if not dry_run:
+                    if dry_run:
+                        with results_lock:
+                            result.machines_deleted.append(host_ref)
+                    else:
                         # FOLLOWUP: when there are multiple instance of gc running concurrently on different hosts
                         #  there's a risk of getting into a screwy situation here--if we delete this right as
                         #  someone else starts it, you might have a host that is running but is untracked
                         #  This can be easily fixed by adding some host-id-keyed locking at the provider level (which both create/start/delete would acquire)
-                        provider.delete_host(host)
-                        emit_host_destroyed(
-                            mngr_ctx.config,
-                            host_ref.host_id,
-                            [ref.agent_id for ref in agent_refs],
-                        )
-                    with results_lock:
-                        result.machines_deleted.append(host_ref)
+                        # delete_host raises a CleanupFailedGroup when a resource was
+                        # left behind; in that case it keeps the host record so the
+                        # next sweep retries. Record the leak and continue the sweep
+                        # rather than letting one host's leak abort GC, but only count
+                        # the host as deleted (and emit the destroyed event) on a
+                        # clean delete (the else).
+                        try:
+                            provider.delete_host(host)
+                        except CleanupFailedGroup as group:
+                            with results_lock:
+                                result.failures.extend(group.failures)
+                        else:
+                            emit_host_destroyed(
+                                mngr_ctx.config,
+                                host_ref.host_id,
+                                [ref.agent_id for ref in agent_refs],
+                            )
+                            with results_lock:
+                                result.machines_deleted.append(host_ref)
             # no matter what we're done--the rest of the logic only applies to online hosts
             return
 

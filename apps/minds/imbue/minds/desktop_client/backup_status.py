@@ -40,7 +40,7 @@ _MAX_STATUS_WORKERS: Final[int] = 8
 
 
 class BackupStatusState(UpperCaseStrEnum):
-    """The backup state shown for a project on the landing page."""
+    """The backup state shown for a workspace on the landing page."""
 
     # No canonical env -- backups were never configured for this workspace.
     NOT_CONFIGURED = auto()
@@ -57,7 +57,7 @@ class BackupStatusState(UpperCaseStrEnum):
 class BackupStatus(FrozenModel):
     """The backup status of a single workspace."""
 
-    state: BackupStatusState = Field(description="Coarse backup state for the project tile")
+    state: BackupStatusState = Field(description="Coarse backup state for the workspace tile")
     last_success_at: datetime | None = Field(
         default=None,
         description="Time of the most recent successful snapshot, when known (UTC)",
