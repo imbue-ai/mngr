@@ -1,5 +1,6 @@
 """Tests for config data types."""
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated
 from typing import Any
@@ -10,6 +11,7 @@ from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
+from imbue.imbue_common.primitives import PositiveFloat
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import CreateTemplate
@@ -286,18 +288,44 @@ def test_provider_config_discovery_timeout_defaults_are_ordered() -> None:
     assert config.agent_discovery_timeout_seconds < config.discovery_error_timeout_seconds
 
 
+def _make_provider_config_with_host_timeout_too_high() -> ProviderInstanceConfig:
+    return ProviderInstanceConfig(
+        backend=ProviderBackendName("docker"),
+        host_discovery_timeout_seconds=PositiveFloat(200.0),
+        discovery_error_timeout_seconds=PositiveFloat(120.0),
+    )
+
+
+def _make_provider_config_with_agent_timeout_equal() -> ProviderInstanceConfig:
+    return ProviderInstanceConfig(
+        backend=ProviderBackendName("docker"),
+        agent_discovery_timeout_seconds=PositiveFloat(120.0),
+        discovery_error_timeout_seconds=PositiveFloat(120.0),
+    )
+
+
+def _make_provider_config_with_warn_too_high() -> ProviderInstanceConfig:
+    return ProviderInstanceConfig(
+        backend=ProviderBackendName("docker"),
+        discovery_warn_seconds=PositiveFloat(130.0),
+        discovery_error_timeout_seconds=PositiveFloat(120.0),
+    )
+
+
 @pytest.mark.parametrize(
-    "overrides",
+    "make_config",
     [
-        {"host_discovery_timeout_seconds": 200.0, "discovery_error_timeout_seconds": 120.0},
-        {"agent_discovery_timeout_seconds": 120.0, "discovery_error_timeout_seconds": 120.0},
-        {"discovery_warn_seconds": 130.0, "discovery_error_timeout_seconds": 120.0},
+        _make_provider_config_with_host_timeout_too_high,
+        _make_provider_config_with_agent_timeout_equal,
+        _make_provider_config_with_warn_too_high,
     ],
 )
-def test_provider_config_rejects_sub_timeouts_at_or_above_error_timeout(overrides: dict[str, float]) -> None:
+def test_provider_config_rejects_sub_timeouts_at_or_above_error_timeout(
+    make_config: Callable[[], ProviderInstanceConfig],
+) -> None:
     """Host/agent/warn timeouts must be strictly below the provider error timeout."""
     with pytest.raises(ValidationError):
-        ProviderInstanceConfig(backend=ProviderBackendName("docker"), **overrides)
+        make_config()
 
 
 # =============================================================================
