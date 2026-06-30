@@ -3145,6 +3145,11 @@ ipcMain.on('show-tooltip', (event, payload) => {
   if (!bundle || !bundle.modalView || bundle.modalView.webContents.isDestroyed()) return;
   if (bundle.modalVisible) return;
   if (!payload || typeof payload !== 'object' || !payload.rect) return;
+  // Pass the real window size: the overlay host can't trust its own
+  // window.innerWidth for measuring/positioning, because between tooltips the
+  // view is hidden and a hidden WebContentsView doesn't update innerWidth when
+  // main resizes it -- so it can be stale (a previous tooltip's small rect).
+  const cb = bundle.window.getContentBounds();
   try {
     bundle.modalView.webContents.send('overlay-command', {
       type: 'show-tooltip',
@@ -3152,6 +3157,8 @@ ipcMain.on('show-tooltip', (event, payload) => {
       text: typeof payload.text === 'string' ? payload.text : '',
       shortcut: typeof payload.shortcut === 'string' ? payload.shortcut : '',
       html: typeof payload.html === 'string' ? payload.html : null,
+      windowWidth: cb.width,
+      windowHeight: cb.height,
     });
   } catch { /* noop */ }
 });

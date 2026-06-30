@@ -116,11 +116,11 @@
   // A tooltip is display-only. Because Electron 40 has no per-view click-through,
   // we shrink the overlay view to just the tooltip's rectangle (reported via
   // overlaySetBounds) so everywhere else stays interactive. To size that rect we
-  // first render + measure the bubble while the host still has its full-window
-  // viewport (the view is full-window but hidden when idle), then pin the bubble
-  // at the view's top-left and report the window-coordinate rect; main shrinks
-  // the view to it and shows it. Hiding restores the full-window (hidden) bounds
-  // so the next tooltip can be measured.
+  // render + measure the bubble in a context sized to the real window (passed by
+  // main, since the hidden view's own innerWidth is unreliable -- see below),
+  // then pin the bubble at the view's top-left and report the window-coordinate
+  // rect; main shrinks the view to it and shows it. Hiding reports 'hidden' so
+  // main restores the full-window (hidden) bounds.
   var TOOLTIP_MARGIN = 6; // min gap from the window edges
   var TOOLTIP_GAP = 6; // gap between the trigger and the bubble
   var tooltipEl = null;
@@ -152,7 +152,17 @@
         el.appendChild(kbd);
       }
     }
-    // Measure at the natural (max-width-capped) size while still full-window.
+    // Use the real window size from main, NOT window.innerWidth. Between tooltips
+    // the overlay view is hidden, and a hidden WebContentsView does not update
+    // its page's innerWidth when main resizes it -- so innerWidth can be stale
+    // (the previous tooltip's small rect), which would both squeeze the measured
+    // bubble and clamp its position to the wrong edge.
+    var vw = typeof cmd.windowWidth === 'number' && cmd.windowWidth > 0 ? cmd.windowWidth : window.innerWidth;
+    var vh = typeof cmd.windowHeight === 'number' && cmd.windowHeight > 0 ? cmd.windowHeight : window.innerHeight;
+    // Measure in a context as wide/tall as the real window so the bubble's
+    // shrink-to-fit width isn't constrained by a stale, small view viewport.
+    root.style.width = vw + 'px';
+    root.style.height = vh + 'px';
     el.style.width = '';
     el.style.left = '0';
     el.style.top = '0';
@@ -160,8 +170,8 @@
     el.style.display = 'inline-flex';
     var w = el.offsetWidth;
     var h = el.offsetHeight;
-    var vw = window.innerWidth;
-    var vh = window.innerHeight;
+    root.style.width = '';
+    root.style.height = '';
     var a = cmd.rect || { x: 0, y: 0, width: 0, height: 0 };
     // Centered under the trigger by default; flip above if it would overflow the
     // bottom; clamp horizontally to stay on-screen.
