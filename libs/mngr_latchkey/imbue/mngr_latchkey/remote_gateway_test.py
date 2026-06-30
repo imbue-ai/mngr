@@ -468,6 +468,11 @@ def test_ensure_latchkey_gateway_reachable_opens_reverse_tunnel_into_container()
     assert "pgrep" not in command
     assert "$HOME/.latchkey/tunnel.pid" in command
     assert f'grep -qaF 127.0.0.1:{INNER_PORT}:127.0.0.1:{OUTER_PORT} "/proc/$_pid/cmdline"' in command
+    # After backgrounding, the script confirms the ssh process survives a short
+    # window so a refused/failed-to-bind tunnel is a failed launch, not a silent
+    # success that gets cached as "provisioned" and never retried.
+    assert 'kill -0 "$(cat "$_pidfile")"' in command
+    assert "exited early" in command
 
 
 def test_ensure_latchkey_gateway_reachable_quotes_key_path_with_spaces() -> None:
