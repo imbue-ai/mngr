@@ -215,16 +215,15 @@ def _workspace_provider_snapshot_at(backend_resolver: MngrCliBackendResolver, ag
     on its own decoupled loop, a healthy provider keeps emitting fresh snapshots
     even while an unrelated provider is down -- so the gate must use the
     workspace's own provider's snapshot time, not a single global one. When the
-    agent's provider is not yet known (e.g. it has not appeared in a snapshot
-    yet), fall back to the aggregate snapshot time across all providers.
+    agent's provider is known, its snapshot time is returned even if ``None`` (no
+    snapshot of that provider has completed yet, so freshness cannot be
+    established and the caller treats it as stale). Only when the agent's provider
+    is *unknown* (it has not appeared in discovery at all) do we fall back to the
+    aggregate snapshot time across all providers.
     """
     info = backend_resolver.get_agent_display_info(agent_id)
     if info is not None and info.provider_name is not None:
-        provider_snapshot_at = backend_resolver.get_last_snapshot_at_for_provider(
-            ProviderInstanceName(info.provider_name)
-        )
-        if provider_snapshot_at is not None:
-            return provider_snapshot_at
+        return backend_resolver.get_last_snapshot_at_for_provider(ProviderInstanceName(info.provider_name))
     _, aggregate_snapshot_at = backend_resolver.get_freshness_timestamps()
     return aggregate_snapshot_at
 
