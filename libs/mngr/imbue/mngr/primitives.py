@@ -362,7 +362,14 @@ class AgentName(SafeName):
     """Human-readable name for an agent."""
 
 
-MAX_HOST_NAME_LENGTH: Final[int] = 32
+# The hard upper bound on a host name. Chosen as the DNS-label / typical
+# hostname-component limit so a host name is always safe to embed in
+# provider-side identifiers (Lima instance names, Docker resource names, cloud
+# tags). This is deliberately generous: callers that derive a *pretty* short
+# slug from arbitrary user text (e.g. minds) apply their own, smaller target on
+# top of this. Kept on ``HostName`` rather than the shared ``SafeName`` base so
+# longer ``AgentName`` / ``ProviderInstanceName`` values are not invalidated.
+MAX_HOST_NAME_LENGTH: Final[int] = 63
 
 
 class HostName(SafeName):
@@ -372,11 +379,7 @@ class HostName(SafeName):
     separator in ``HOST.PROVIDER`` host addresses (see ``api/addresses.py``).
 
     Host names are capped at ``MAX_HOST_NAME_LENGTH`` characters because they
-    end up in provider-side identifiers with their own limits (Lima instance
-    names, Docker resource names, cloud tags). The cap lives on ``HostName``
-    rather than the shared ``SafeName`` base so longer ``AgentName`` and
-    ``ProviderInstanceName`` values (e.g. ``imbue_cloud_<email-slug>``) are not
-    retroactively invalidated.
+    end up in provider-side identifiers with their own limits.
     """
 
     def __new__(cls, value: str) -> Self:
