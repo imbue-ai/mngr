@@ -65,9 +65,10 @@ class DiscoveryEventType(UpperCaseStrEnum):
     AGENT_DESTROYED = auto()
     HOST_DESTROYED = auto()
     DISCOVERY_FULL = auto()
-    # A snapshot of a single provider's agents/hosts. Replaces DISCOVERY_FULL:
-    # each provider is discovered on its own decoupled loop and emits its own
-    # snapshot, so a slow/hung provider cannot block any other provider.
+    # A snapshot of a single provider's agents/hosts. Will supersede DISCOVERY_FULL
+    # once every consumer migrates (both currently coexist): each provider is
+    # discovered on its own decoupled loop and emits its own snapshot, so a
+    # slow/hung provider cannot block any other provider.
     DISCOVERY_PROVIDER = auto()
     HOST_SSH_INFO = auto()
     DISCOVERY_ERROR = auto()
@@ -165,9 +166,10 @@ class FullDiscoverySnapshotEvent(EventEnvelope):
 class ProviderDiscoverySnapshotEvent(EventEnvelope):
     """A snapshot of one provider's agents and hosts from a single discovery poll.
 
-    Replaces :class:`FullDiscoverySnapshotEvent`. Each provider is discovered on
-    its own decoupled loop and emits its own snapshot independently, so a slow or
-    hung provider cannot delay any other provider's discovery.
+    Will supersede :class:`FullDiscoverySnapshotEvent` once every consumer migrates
+    (both currently coexist). Each provider is discovered on its own decoupled loop
+    and emits its own snapshot independently, so a slow or hung provider cannot delay
+    any other provider's discovery.
 
     A snapshot is authoritative *only* for ``provider_name`` -- it says nothing
     about any other provider's agents or hosts, so a consumer must scope its
