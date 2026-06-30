@@ -665,7 +665,18 @@ def _handle_workspace_health(agent_id: str) -> Response:
         concurrency_group=parent_cg,
         envelope_stream_consumer=state.envelope_stream_consumer,
     )
-    logger.info("Workspace health probe for {}: dispatch_tier={}", parsed_id, response.dispatch_tier.value)
+    # The dispatch tier alone hides *why* it was chosen. INTERFACE_UNRESPONSIVE in
+    # particular is derived from a single in-container `curl /` != 200 snapshot and
+    # does NOT consult the supervisord-state or port-listening probes, so a still-
+    # starting SI is classified identically to a wedged one. Log every probe's
+    # answer + raw output (the supervisord state word, the LISTEN sockets, the curl
+    # result) so a future false-restart can be told apart from a genuine wedge.
+    logger.info(
+        "Workspace health probe for {}: dispatch_tier={} | probes: {}",
+        parsed_id,
+        response.dispatch_tier.value,
+        " | ".join(f"[{p.answer.value}] {p.question} {p.output.strip()!r}" for p in response.probes),
+    )
     return make_response(content=response.model_dump_json(), media_type="application/json")
 
 

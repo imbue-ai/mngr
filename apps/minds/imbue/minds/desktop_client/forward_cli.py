@@ -640,6 +640,16 @@ class EnvelopeStreamConsumer(MutableModel):
                 status_code: int | None = int(raw_status_code) if raw_status_code is not None else None
             except (ValueError, TypeError):
                 status_code = None
+            # Per-envelope log: the reason (CONNECT_ERROR / UNRESOLVED / ERROR_RESPONSE
+            # / SSE_EOF) and status code are what disambiguate a cold-start warm-up from
+            # a genuine backend wedge, so they are worth the volume while we chase the
+            # recurring false-restart. ``record_failure`` only logs the enrollment edge.
+            logger.debug(
+                "Received system_interface_backend_failure envelope for {}: reason={} status_code={}",
+                agent_id,
+                reason.value,
+                status_code,
+            )
             with self._lock:
                 callbacks = list(self._on_system_interface_backend_failure_callbacks)
             for callback in callbacks:

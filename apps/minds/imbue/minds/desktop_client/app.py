@@ -2301,6 +2301,14 @@ def _run_system_interface_health_probe_loop(
                 if probe_status == 200:
                     tracker.record_probe_success(aid)
                 else:
+                    # Log every non-200 background tick (status, or transport-error for a
+                    # connection-level failure) so a STUCK run can be traced edge-by-edge
+                    # against the recovery-probe verdict while we chase the false-restart.
+                    logger.debug(
+                        "System-interface probe for {} returned {}",
+                        aid,
+                        probe_status if probe_status is not None else "transport-error",
+                    )
                     tracker.record_probe_failure(aid)
             threading.Event().wait(timeout=_HEALTH_PROBE_INTERVAL_SECONDS)
 
