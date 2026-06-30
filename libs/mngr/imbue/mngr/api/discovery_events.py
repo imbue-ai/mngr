@@ -2,6 +2,7 @@ import json
 import sys
 import threading
 from collections.abc import Callable
+from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
@@ -31,6 +32,8 @@ from imbue.imbue_common.logging import generate_rotation_timestamp
 from imbue.imbue_common.logging import rotation_lock
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr.api.discovery_reconciliation import is_intervening_event
+from imbue.mngr.api.discovery_reconciliation import parse_event_timestamp
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
@@ -670,24 +673,55 @@ def parse_discovery_event_line(line: str) -> DiscoveryEvent | None:
         raise DiscoverySchemaChangedError(str(event_type), str(e)) from e
 
 
-def find_discovery_snapshot_replay_offset(events_path: Path) -> int:
-    """Byte offset to replay from so a reader reconstructs current state without re-reading the whole file.
+def _find_earliest_snapshot_window_start(events_path: Path) -> datetime | None:
+    """Earliest discovery-span start that a correct replay must reach back to, or None.
 
-    Returns the earliest offset whose replay still includes (a) the latest per-provider
-    ``DISCOVERY_PROVIDER`` snapshot for every provider seen, and (b) the latest legacy
-    ``DISCOVERY_FULL`` snapshot, if any (back-compat for historical logs). Returns 0 when
-    the file is absent or holds no snapshot (the whole file should be read). Replaying a
-    little extra is harmless: per-provider snapshots reset only their own provider and
-    consumers deduplicate by event_id.
+    For each provider, a ``DISCOVERY_PROVIDER`` snapshot is authoritative back to its
+    ``discovery_started_at`` (when its read began), which is *earlier* than its own line
+    position (written at ``discovery_finished_at``). So the value here is the minimum,
+    across every provider's *latest* snapshot, of that snapshot's ``discovery_started_at``
+    -- plus the latest legacy ``DISCOVERY_FULL`` snapshot's own timestamp, for historical
+    logs. Returns None when the file holds no snapshot at all.
+    """
+    latest_start_by_provider: dict[str, datetime] = {}
+    latest_full_started_at: datetime | None = None
+    warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
+    with open(events_path) as f:
+        for line in f:
+            parsed = warner.parse(line)
+            if parsed is None:
+                continue
+            data, _ = parsed
+            event_type = data.get("type")
+            if event_type == DiscoveryEventType.DISCOVERY_PROVIDER:
+                started_at_raw = data.get("discovery_started_at")
+                if started_at_raw is not None:
+                    latest_start_by_provider[str(data.get("provider_name", ""))] = parse_event_timestamp(
+                        IsoTimestamp(str(started_at_raw))
+                    )
+            elif event_type == DiscoveryEventType.DISCOVERY_FULL:
+                # The legacy global snapshot has no span; its own write time is the
+                # furthest back its (whole-world) reset needs replaying from.
+                timestamp_raw = data.get("timestamp")
+                if timestamp_raw is not None:
+                    latest_full_started_at = parse_event_timestamp(IsoTimestamp(str(timestamp_raw)))
+            else:
+                pass
+
+    candidate_starts = list(latest_start_by_provider.values())
+    if latest_full_started_at is not None:
+        candidate_starts.append(latest_full_started_at)
+    if not candidate_starts:
+        return None
+    return min(candidate_starts)
+
+
+def _find_offset_of_first_event_at_or_after(events_path: Path, start: datetime) -> int:
+    """Byte offset of the first event line whose timestamp is at or after ``start`` (0 if none).
 
     Uses ``f.tell()`` to track byte positions rather than ``len(line)``, which counts
     characters and would be wrong for multi-byte UTF-8 content.
     """
-    if not events_path.exists():
-        return 0
-
-    last_full_offset: int | None = None
-    latest_offset_by_provider: dict[str, int] = {}
     warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
     with open(events_path, "rb") as f:
         for raw_line in f:
@@ -697,21 +731,38 @@ def find_discovery_snapshot_replay_offset(events_path: Path) -> int:
             if parsed is None:
                 continue
             data, _ = parsed
-            event_type = data.get("type")
-            if event_type == DiscoveryEventType.DISCOVERY_FULL:
-                last_full_offset = line_start
-            elif event_type == DiscoveryEventType.DISCOVERY_PROVIDER:
-                latest_offset_by_provider[str(data.get("provider_name", ""))] = line_start
-            else:
-                # Incremental / non-snapshot events do not move the replay start.
-                pass
+            timestamp_raw = data.get("timestamp")
+            if timestamp_raw is None:
+                continue
+            if parse_event_timestamp(IsoTimestamp(str(timestamp_raw))) >= start:
+                return line_start
+    return 0
 
-    candidate_offsets = list(latest_offset_by_provider.values())
-    if last_full_offset is not None:
-        candidate_offsets.append(last_full_offset)
-    if not candidate_offsets:
+
+def find_discovery_snapshot_replay_offset(events_path: Path) -> int:
+    """Byte offset to replay from so a reader reconstructs current state without re-reading the whole file.
+
+    A per-provider snapshot's authority window reaches back to its ``discovery_started_at``
+    (when its read began), which is *earlier* than its own line position (written at
+    ``discovery_finished_at``). Incremental events that landed during that window -- e.g.
+    an agent created mid-discovery -- sit before the snapshot line but reflect newer truth
+    than the snapshot. Starting the replay at the snapshot line would skip them (a
+    read-after-write gap), so instead we start at the earliest such window across all
+    providers.
+
+    Returns the offset of the first event line at or after the earliest
+    ``discovery_started_at`` among every provider's latest ``DISCOVERY_PROVIDER`` snapshot
+    (and the latest legacy ``DISCOVERY_FULL`` snapshot's timestamp). Returns 0 when the
+    file is absent or holds no snapshot (read the whole file). Starting a little early is
+    harmless: per-provider snapshots reset only their own provider, and the per-item span
+    rule keeps a stale snapshot from clobbering newer in-span events.
+    """
+    if not events_path.exists():
         return 0
-    return min(candidate_offsets)
+    earliest_window_start = _find_earliest_snapshot_window_start(events_path)
+    if earliest_window_start is None:
+        return 0
+    return _find_offset_of_first_event_at_or_after(events_path, earliest_window_start)
 
 
 class ResolvedAgentHost(FrozenModel):
@@ -747,18 +798,12 @@ class _ResolutionMaps(MutableModel):
         self.host_id_by_agent_id.clear()
         self.destroyed_agent_ids.clear()
 
-    def reset_provider(self, provider_name: str) -> None:
-        """Drop all agents attributed to one provider.
-
-        Used when that provider's per-provider snapshot supersedes its prior state,
-        without disturbing agents owned by other providers.
-        """
-        agent_ids = [agent_id for agent_id, name in self.provider_by_agent_id.items() if name == provider_name]
-        for agent_id in agent_ids:
-            self.provider_by_agent_id.pop(agent_id, None)
-            self.name_by_agent_id.pop(agent_id, None)
-            self.host_id_by_agent_id.pop(agent_id, None)
-            self.destroyed_agent_ids.discard(agent_id)
+    def forget_agent(self, agent_id: str) -> None:
+        """Drop a single agent from every map (it is confirmed gone)."""
+        self.provider_by_agent_id.pop(agent_id, None)
+        self.name_by_agent_id.pop(agent_id, None)
+        self.host_id_by_agent_id.pop(agent_id, None)
+        self.destroyed_agent_ids.discard(agent_id)
 
 
 def _record_agent(maps: _ResolutionMaps, agent: DiscoveredAgent) -> None:
@@ -770,15 +815,60 @@ def _record_agent(maps: _ResolutionMaps, agent: DiscoveredAgent) -> None:
     maps.destroyed_agent_ids.discard(id_str)
 
 
-def _replay_discovery_events_into_maps(events_path: Path) -> _ResolutionMaps:
-    """Replay events from the latest full snapshot into a :class:`_ResolutionMaps`.
+def _apply_provider_snapshot_to_maps(
+    maps: _ResolutionMaps,
+    event: ProviderDiscoverySnapshotEvent,
+    last_event_time_by_agent_id: Mapping[str, datetime],
+) -> None:
+    """Fold one per-provider snapshot into the resolution maps, span-aware.
 
-    Raises DiscoverySchemaChangedError if any event line in the file fails
-    schema validation (the caller is responsible for regenerating and retrying).
-    Raises OSError on file I/O failure.
+    A per-provider snapshot is authoritative only for its own provider, and only for
+    agents with no newer incremental event during its discovery span. Mirrors the
+    rule in :class:`DiscoveryStateAggregator` so the resolution replay does not
+    resurrect an agent destroyed mid-span, nor drop one created mid-span (the
+    read-after-write case): the snapshot's read began at ``discovery_started_at``, so
+    any event at/after that instant reflects newer truth than the snapshot.
+    """
+    span_start = event.discovery_started_at
+    provider_str = str(event.provider_name)
+    snapshot_agent_ids = {str(agent.agent_id) for agent in event.agents}
+
+    # Reconcile agents previously attributed to this provider but absent from the
+    # snapshot: forget them only if no newer in-span event contradicts the omission.
+    prior_provider_agent_ids = [aid for aid, name in maps.provider_by_agent_id.items() if name == provider_str]
+    for agent_id in prior_provider_agent_ids:
+        if agent_id in snapshot_agent_ids:
+            continue
+        if is_intervening_event(last_event_time_by_agent_id.get(agent_id), span_start):
+            continue
+        maps.forget_agent(agent_id)
+
+    # Apply each snapshot agent unless a newer in-span event already superseded it
+    # (e.g. a destroy during the span must not be undone by this stale snapshot).
+    for agent in event.agents:
+        if is_intervening_event(last_event_time_by_agent_id.get(str(agent.agent_id)), span_start):
+            continue
+        _record_agent(maps, agent)
+
+
+def _replay_discovery_events_into_maps(events_path: Path) -> _ResolutionMaps:
+    """Replay events from the latest snapshot window into a span-aware :class:`_ResolutionMaps`.
+
+    Starts from :func:`find_discovery_snapshot_replay_offset` -- early enough to include
+    every provider's latest snapshot *and* the incremental events that landed during that
+    snapshot's discovery span -- then folds events in order, applying the same span rule
+    the shared aggregator uses so an in-flight snapshot never clobbers newer events.
+
+    Raises DiscoverySchemaChangedError if any event line in the file fails schema
+    validation (the caller is responsible for regenerating and retrying). Raises OSError
+    on file I/O failure.
     """
     offset = find_discovery_snapshot_replay_offset(events_path)
     maps = _ResolutionMaps()
+    # Most recent incremental-event time per agent, used to refuse clobbering by an
+    # in-flight snapshot whose span the event falls within. Snapshots do not update it
+    # (only AGENT_DISCOVERED / AGENT_DESTROYED do), matching the aggregator.
+    last_event_time_by_agent_id: dict[str, datetime] = {}
 
     warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
     with open(events_path) as f:
@@ -790,24 +880,23 @@ def _replay_discovery_events_into_maps(events_path: Path) -> _ResolutionMaps:
             _data, stripped_line = parsed
             event = parse_discovery_event_line(stripped_line)
             if isinstance(event, FullDiscoverySnapshotEvent):
-                # Reset maps -- this snapshot supersedes everything before it
+                # Legacy global snapshot: supersedes everything before it.
                 maps.reset()
+                last_event_time_by_agent_id.clear()
                 for agent in event.agents:
                     _record_agent(maps, agent)
             elif isinstance(event, ProviderDiscoverySnapshotEvent):
-                # A per-provider snapshot supersedes only that provider's prior agents.
-                maps.reset_provider(str(event.provider_name))
-                for agent in event.agents:
-                    _record_agent(maps, agent)
+                _apply_provider_snapshot_to_maps(maps, event, last_event_time_by_agent_id)
             elif isinstance(event, AgentDiscoveryEvent):
                 _record_agent(maps, event.agent)
+                last_event_time_by_agent_id[str(event.agent.agent_id)] = parse_event_timestamp(event.timestamp)
             elif isinstance(event, AgentDestroyedEvent):
                 maps.destroyed_agent_ids.add(str(event.agent_id))
+                last_event_time_by_agent_id[str(event.agent_id)] = parse_event_timestamp(event.timestamp)
             else:
-                # Host, SSH info, and error events are not relevant for
-                # resolution. A host's continued existence (and its name) come
-                # from provider.get_host when the caller fetches the host to
-                # stop it, so there is no need to replay host events here.
+                # Host, SSH info, and error events are not relevant for resolution. A
+                # host's continued existence (and its name) come from provider.get_host
+                # when the caller fetches the host to stop it, so host events are skipped.
                 pass
 
     return maps
@@ -899,6 +988,7 @@ def resolve_provider_names_for_identifiers(
 def resolve_hosts_for_identifiers(
     mngr_ctx: MngrContext,
     identifiers: Sequence[str],
+    live_discovery_fallback: Callable[[Sequence[str]], Sequence[DiscoveredAgent]] | None = None,
 ) -> dict[str, ResolvedAgentHost]:
     """Resolve agent identifiers to the hosts that run them, without any SSH.
 
@@ -918,9 +1008,14 @@ def resolve_hosts_for_identifiers(
 
     Returns a map from each input identifier to its :class:`ResolvedAgentHost`.
 
-    Raises :class:`AgentNotFoundError` if any identifier is absent from the
-    event stream, has been destroyed, or maps to agents on more than one host
-    (which must be disambiguated with ``NAME@HOST.PROVIDER``).
+    ``live_discovery_fallback`` (injected by the caller to avoid a circular import on
+    the live discovery path) is consulted for any identifier the event stream cannot
+    resolve -- so an agent created during an in-flight discovery span (and thus missing
+    from the latest snapshot), or one created before any stream exists, still resolves.
+
+    Raises :class:`AgentNotFoundError` if any identifier is absent from both the event
+    stream and the live fallback, has been destroyed, or maps to agents on more than one
+    host (which must be disambiguated with ``NAME@HOST.PROVIDER``).
 
     If the on-disk events are stale relative to the current model schema, this
     regenerates the snapshot once and retries, mirroring
@@ -928,16 +1023,16 @@ def resolve_hosts_for_identifiers(
     """
     events_path = get_discovery_events_path(mngr_ctx.config)
     if not events_path.exists():
-        raise AgentNotFoundError(
-            f"Could not resolve a host for: {', '.join(identifiers)} (no discovery event stream available)"
-        )
-
-    try:
-        maps = _replay_discovery_events_into_maps(events_path)
-    except DiscoverySchemaChangedError as e:
-        logger.warning("Discovery event schema mismatch; regenerating snapshot and retrying ({})", e)
-        _regenerate_discovery_events(mngr_ctx)
-        maps = _replay_discovery_events_into_maps(events_path)
+        # No stream yet (e.g. a fresh install where nothing has listed/observed): start
+        # from empty maps and rely entirely on the live fallback below.
+        maps = _ResolutionMaps()
+    else:
+        try:
+            maps = _replay_discovery_events_into_maps(events_path)
+        except DiscoverySchemaChangedError as e:
+            logger.warning("Discovery event schema mismatch; regenerating snapshot and retrying ({})", e)
+            _regenerate_discovery_events(mngr_ctx)
+            maps = _replay_discovery_events_into_maps(events_path)
 
     # Drop destroyed agents so they cannot resolve.
     for destroyed_id in maps.destroyed_agent_ids:
@@ -949,6 +1044,24 @@ def resolve_hosts_for_identifiers(
     agent_ids_by_name: dict[str, set[str]] = {}
     for agent_id_str, name_str in maps.name_by_agent_id.items():
         agent_ids_by_name.setdefault(name_str, set()).add(agent_id_str)
+
+    # Read-after-write fallback: an agent created during an in-flight discovery span may
+    # be absent from the latest on-disk snapshot, so the stream alone can miss it. For any
+    # identifier the stream cannot resolve, ``live_discovery_fallback`` (injected by the
+    # caller to avoid a circular import on the live discovery path) is consulted and its
+    # agents folded in before giving up, so a just-created agent is still resolvable.
+    if live_discovery_fallback is not None:
+        unresolved_identifiers = [
+            identifier
+            for identifier in identifiers
+            if identifier not in maps.provider_by_agent_id and identifier not in agent_ids_by_name
+        ]
+        if unresolved_identifiers:
+            for agent in live_discovery_fallback(unresolved_identifiers):
+                _record_agent(maps, agent)
+            agent_ids_by_name = {}
+            for agent_id_str, name_str in maps.name_by_agent_id.items():
+                agent_ids_by_name.setdefault(name_str, set()).add(agent_id_str)
 
     resolved: dict[str, ResolvedAgentHost] = {}
     for identifier in identifiers:

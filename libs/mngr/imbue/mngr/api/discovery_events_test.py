@@ -1,6 +1,8 @@
 import json
 import threading
+from collections.abc import Sequence
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
 from threading import Lock
@@ -8,6 +10,11 @@ from typing import cast
 
 import pytest
 
+from imbue.imbue_common.event_envelope import EventId
+from imbue.imbue_common.event_envelope import IsoTimestamp
+from imbue.imbue_common.logging import format_nanosecond_iso_timestamp
+from imbue.imbue_common.logging import generate_log_event_id
+from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import DISCOVERY_EVENT_SOURCE
@@ -49,6 +56,7 @@ from imbue.mngr.api.discovery_events import resolve_provider_names_for_identifie
 from imbue.mngr.api.discovery_events import tail_discovery_events_file
 from imbue.mngr.api.discovery_events import tail_discovery_events_from_offset
 from imbue.mngr.api.discovery_events import write_provider_discovery_snapshot
+from imbue.mngr.cli.testing import create_test_agent_state
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
@@ -1177,6 +1185,145 @@ def test_resolve_hosts_picks_up_incremental_agent_event(
 
     resolved = resolve_hosts_for_identifiers(temp_mngr_ctx, ["incremental-host-agent"])
     assert resolved["incremental-host-agent"].host_id == host_id
+
+
+def _iso_at(at: datetime) -> IsoTimestamp:
+    return IsoTimestamp(format_nanosecond_iso_timestamp(at))
+
+
+def _agent_discovered_event_at(agent: DiscoveredAgent, at: datetime) -> AgentDiscoveryEvent:
+    return AgentDiscoveryEvent(
+        timestamp=_iso_at(at),
+        event_id=EventId(generate_log_event_id()),
+        source=DISCOVERY_EVENT_SOURCE,
+        agent=agent,
+    )
+
+
+def _agent_destroyed_event_at(agent: DiscoveredAgent, at: datetime) -> AgentDestroyedEvent:
+    return AgentDestroyedEvent(
+        timestamp=_iso_at(at),
+        event_id=EventId(generate_log_event_id()),
+        source=DISCOVERY_EVENT_SOURCE,
+        agent_id=agent.agent_id,
+        host_id=agent.host_id,
+    )
+
+
+def test_replay_retains_agent_created_during_snapshot_span(temp_mngr_ctx: MngrContext) -> None:
+    """An agent created mid-discovery is not dropped by a stale snapshot.
+
+    The create event precedes a per-provider snapshot whose read began before the create
+    (so the snapshot omits the agent). The span-aware replay must keep the agent --
+    otherwise a freshly-created agent would vanish from resolution until the next poll.
+    resolve_provider_names has no live fallback, so a non-None result proves the *replay*
+    retained the agent rather than a live rescan masking the bug.
+    """
+    config = temp_mngr_ctx.config
+    span_start = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    created_at = span_start + timedelta(seconds=1)
+    span_end = span_start + timedelta(seconds=2)
+    agent = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("raced-in-agent"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={},
+    )
+    append_discovery_event(config, _agent_discovered_event_at(agent, created_at))
+    append_discovery_event(
+        config,
+        make_provider_discovery_snapshot_event(
+            provider_name=ProviderInstanceName("local"),
+            agents=(),
+            hosts=(),
+            discovery_started_at=span_start,
+            discovery_finished_at=span_end,
+        ),
+    )
+
+    resolved = resolve_provider_names_for_identifiers(temp_mngr_ctx, ["raced-in-agent"])
+    assert resolved == ("local",)
+
+
+def test_replay_does_not_resurrect_agent_destroyed_during_snapshot_span(temp_mngr_ctx: MngrContext) -> None:
+    """An agent destroyed mid-discovery is not resurrected by a stale snapshot that still lists it.
+
+    The destroy event lands during a snapshot's discovery span, so the snapshot (whose
+    read began before the destroy) still reports the agent alive. The span-aware replay
+    must honor the newer destroy, leaving the agent unresolved.
+    """
+    config = temp_mngr_ctx.config
+    span_start = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    discovered_at = span_start + timedelta(seconds=1)
+    destroyed_at = span_start + timedelta(seconds=2)
+    span_end = span_start + timedelta(seconds=3)
+    agent = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("doomed-raced-agent"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={},
+    )
+    append_discovery_event(config, _agent_discovered_event_at(agent, discovered_at))
+    append_discovery_event(config, _agent_destroyed_event_at(agent, destroyed_at))
+    append_discovery_event(
+        config,
+        make_provider_discovery_snapshot_event(
+            provider_name=ProviderInstanceName("local"),
+            agents=(agent,),
+            hosts=(),
+            discovery_started_at=span_start,
+            discovery_finished_at=span_end,
+        ),
+    )
+
+    resolved = resolve_provider_names_for_identifiers(temp_mngr_ctx, ["doomed-raced-agent"])
+    assert resolved is None
+
+
+def _live_discovery_fallback(mngr_ctx: MngrContext, identifiers: Sequence[str]) -> list[DiscoveredAgent]:
+    """Test stand-in for the live-discovery fallback the stop CLI injects into resolution."""
+    agents_by_host, _providers = discover_hosts_and_agents(
+        mngr_ctx,
+        provider_names=None,
+        agent_identifiers=tuple(identifiers),
+        include_destroyed=False,
+        reset_caches=False,
+    )
+    return [agent for agent_refs in agents_by_host.values() for agent in agent_refs]
+
+
+def test_resolve_hosts_falls_back_to_live_discovery_for_agent_absent_from_stream(
+    temp_mngr_ctx: MngrContext, local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """An agent present live but absent from the event stream still resolves via live fallback.
+
+    Models an agent created during an in-flight discovery span: it exists on its host but
+    the latest on-disk snapshot omits it. ``resolve_hosts_for_identifiers`` must consult the
+    injected live-discovery fallback rather than raising, so ``mngr stop`` can act on a
+    just-created agent (read-after-write).
+    """
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    create_test_agent_state(host, tmp_path, "fresh-unstreamed-agent")
+    # Seed an unrelated per-provider snapshot so the stream exists but lacks this agent.
+    _seed_local_host_snapshot(temp_mngr_ctx, local_provider, "unrelated-agent")
+
+    resolved = resolve_hosts_for_identifiers(
+        temp_mngr_ctx,
+        ["fresh-unstreamed-agent"],
+        live_discovery_fallback=lambda identifiers: _live_discovery_fallback(temp_mngr_ctx, identifiers),
+    )
+    assert resolved["fresh-unstreamed-agent"].host_id == host.id
+
+
+def test_resolve_hosts_without_fallback_still_raises_for_absent_agent(
+    temp_mngr_ctx: MngrContext, local_provider: LocalProviderInstance
+) -> None:
+    """Without an injected fallback, an identifier absent from the stream still raises."""
+    _seed_local_host_snapshot(temp_mngr_ctx, local_provider, "present-agent")
+    with pytest.raises(AgentNotFoundError):
+        resolve_hosts_for_identifiers(temp_mngr_ctx, ["never-existed-agent"])
 
 
 # === Discovery Stream Tests ===
