@@ -7,9 +7,11 @@ from pathlib import Path
 import docker
 import docker.errors
 import docker.models.containers
+import pytest
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.docker.config import DockerProviderConfig
 from imbue.mngr.providers.docker.instance import DockerProviderInstance
@@ -204,20 +206,32 @@ def make_docker_provider_with_cleanup(
     worker_docker_state_prefixes.append(mngr_ctx.config.prefix)
     yield provider
 
+    # Best-effort teardown. Tear down every host and fail loudly only when a
+    # step reports a resource it could not remove (a CleanupFailedGroup leak).
+    # "Couldn't even attempt cleanup" conditions -- the daemon being unavailable,
+    # or the resource guard blocking SDK access for a test not marked
+    # docker_sdk -- are tolerated; the CLI/prefix fallback below and the
+    # session-end safety net handle real leaks in those cases.
+    cleanup_failures: list[str] = []
     try:
         cg = mngr_ctx.concurrency_group
         discovered = provider.discover_hosts(cg, include_destroyed=True)
-        for host in discovered:
-            try:
-                provider.destroy_host(host.host_id)
-            except (MngrError, docker.errors.DockerException, OSError):
-                pass
-            try:
-                provider.delete_host(provider.get_host(host.host_id))
-            except (MngrError, docker.errors.DockerException, OSError):
-                pass
-    except (MngrError, docker.errors.DockerException, OSError):
-        pass
+    except (MngrError, docker.errors.DockerException):
+        discovered = []
+
+    for host in discovered:
+        try:
+            provider.destroy_host(host.host_id)
+        except CleanupFailedGroup as group:
+            cleanup_failures.extend(f.message for f in group.failures)
+        except (MngrError, docker.errors.DockerException):
+            pass
+        try:
+            provider.delete_host(provider.get_host(host.host_id))
+        except CleanupFailedGroup as group:
+            cleanup_failures.extend(f.message for f in group.failures)
+        except (MngrError, docker.errors.DockerException):
+            pass
 
     try:
         for container in provider._list_containers():
@@ -243,3 +257,6 @@ def make_docker_provider_with_cleanup(
         provider.close()
     except (OSError, docker.errors.DockerException):
         pass
+
+    if cleanup_failures:
+        pytest.fail("docker provider test teardown failed to clean up:\n  " + "\n  ".join(cleanup_failures))
