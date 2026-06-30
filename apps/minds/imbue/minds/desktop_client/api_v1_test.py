@@ -440,16 +440,16 @@ def test_create_workspace_invalid_host_name_returns_field_error(
     assert json.loads(response.data)["field"] == "host_name"
 
 
-def test_create_workspace_auto_names_next_mind_when_host_name_omitted(
+def test_create_workspace_auto_names_next_workspace_when_host_name_omitted(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
     notification_dispatcher: NotificationDispatcher,
 ) -> None:
-    # With no host_name and ``mind-1`` already known, the route resolves the next
-    # free ``mind-N`` (mind-2) before handing off to the creator.
+    # With no host_name and ``workspace-1`` already known, the route resolves the
+    # next free ``workspace-N`` (workspace-2) before handing off to the creator.
     existing_id = AgentId()
     resolver = make_resolver_with_data(
-        make_agents_json(existing_id, labels={"workspace": "mind-1", "is_primary": "true"}),
+        make_agents_json(existing_id, labels={"workspace": "workspace-1", "is_primary": "true"}),
     )
     creator = _make_recording_creator(tmp_path, root_concurrency_group, notification_dispatcher)
     client = _client_with_agent_creator(
@@ -459,7 +459,7 @@ def test_create_workspace_auto_names_next_mind_when_host_name_omitted(
     response = client.post("/api/v1/workspaces", headers=_auth_header(), json={"git_url": "https://example/repo"})
 
     assert response.status_code == 202
-    assert str(creator.last_call["host_name"]) == "mind-2"
+    assert str(creator.last_call["host_name"]) == "workspace-2"
 
 
 def test_create_operation_status_includes_status_text(

@@ -38,6 +38,7 @@ from imbue.minds.desktop_client.agent_creator import checkout_branch
 from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
+from imbue.minds.desktop_client.agent_creator import provider_instance_name_for_launch
 from imbue.minds.desktop_client.agent_creator import run_mngr_aws_prepare
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
@@ -357,6 +358,52 @@ def test_build_mngr_create_command_aws_requires_region() -> None:
             launch_mode=LaunchMode.AWS,
             host_name=HostName("hello"),
         )
+
+
+def test_provider_instance_name_for_launch_local_backends() -> None:
+    """The single-instance local/VPS backends map to their bare provider name."""
+    assert provider_instance_name_for_launch(LaunchMode.DOCKER) == "docker"
+    assert provider_instance_name_for_launch(LaunchMode.LIMA) == "lima"
+    assert provider_instance_name_for_launch(LaunchMode.VULTR) == "vultr"
+
+
+def test_provider_instance_name_for_launch_aws_is_per_region() -> None:
+    """AWS is region-locked per provider instance (``aws-<region>``)."""
+    assert provider_instance_name_for_launch(LaunchMode.AWS, region="us-west-2") == "aws-us-west-2"
+
+
+def test_provider_instance_name_for_launch_aws_requires_region() -> None:
+    with pytest.raises(MngrCommandError, match="AWS mode requires a region"):
+        provider_instance_name_for_launch(LaunchMode.AWS)
+
+
+def test_provider_instance_name_for_launch_imbue_cloud_is_per_account() -> None:
+    """Imbue Cloud is per-account; the slug mirrors the registered provider block."""
+    assert (
+        provider_instance_name_for_launch(LaunchMode.IMBUE_CLOUD, imbue_cloud_account="Alice@Imbue.com")
+        == "imbue_cloud_alice-imbue-com"
+    )
+
+
+def test_provider_instance_name_for_launch_imbue_cloud_requires_account() -> None:
+    with pytest.raises(MngrCommandError, match="IMBUE_CLOUD mode requires imbue_cloud_account"):
+        provider_instance_name_for_launch(LaunchMode.IMBUE_CLOUD)
+
+
+def test_provider_instance_name_matches_create_address() -> None:
+    """The create address suffix must equal the helper's instance name.
+
+    The availability check scopes "taken" to ``provider_instance_name_for_launch``,
+    so it has to be exactly the provider the create address selects -- otherwise
+    the live check and the create-time conflict check would disagree.
+    """
+    instance = provider_instance_name_for_launch(LaunchMode.IMBUE_CLOUD, imbue_cloud_account="alice@imbue.com")
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.IMBUE_CLOUD,
+        host_name=HostName("hello"),
+        imbue_cloud_account="alice@imbue.com",
+    )
+    assert f"system-services@hello.{instance}" in command
 
 
 def test_run_mngr_aws_prepare_requires_region() -> None:
