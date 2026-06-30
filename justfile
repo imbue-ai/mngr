@@ -401,6 +401,46 @@ minds-install:
     . apps/minds/scripts/select_node_version.sh || exit 2
     cd apps/minds && pnpm install
 
+# Create a new LOCAL dev minds env by copying an existing one's client config
+# into a fresh data root -- no `minds env deploy`, no cloud provisioning. The
+# copy reuses whatever connector/proxy (and, if the source was deployed, the
+# secrets.toml -> Neon/SuperTokens) the source env already points at. Use this
+# to spin up a per-feature env to test branches without standing one up from
+# scratch:
+#   just minds-env-copy dev-oauth dev-transcript-search
+# Then activate it and launch against your current branches (the FCT worktree
+# supplies the branch; the live checkout is synced into vendor/mngr):
+#   eval "$(uv run minds env activate dev-transcript-search)"
+#   just minds-start
+minds-env-copy from to:
+    #!/usr/bin/env bash
+    set -ueo pipefail
+    src="$HOME/.minds-{{from}}"
+    dst="$HOME/.minds-{{to}}"
+    if [ ! -f "$src/client.toml" ]; then
+        echo "error: source env '{{from}}' has no client.toml at $src" >&2
+        echo "       (run \`uv run minds env list\` to see local dev envs)" >&2
+        exit 2
+    fi
+    if [ -e "$dst" ]; then
+        echo "error: target env '{{to}}' already exists at $dst" >&2
+        exit 2
+    fi
+    mkdir -p "$dst"
+    cp "$src/client.toml" "$dst/client.toml"
+    if [ -f "$src/secrets.toml" ]; then
+        cp "$src/secrets.toml" "$dst/secrets.toml"
+        chmod 600 "$dst/secrets.toml"
+    fi
+    if [ -f "$src/last_seen_generation" ]; then
+        cp "$src/last_seen_generation" "$dst/last_seen_generation"
+    fi
+    echo "Created dev env '{{to}}' at $dst (copied client config from '{{from}}'; no cloud deploy)."
+    echo ""
+    echo "Next:"
+    echo "  eval \"\$(uv run minds env activate {{to}})\""
+    echo "  just minds-start    # uses the FCT worktree's branch + your live mngr checkout"
+
 # Override branch / fct (FCT worktree path) via positional args (just has no
 # name=value form for recipe params -- pass them in order):
 #   just minds-start                     # launch against the worktree's branch
