@@ -48,7 +48,6 @@ from imbue.minds.desktop_client.api_models import AccountsResponse
 from imbue.minds.desktop_client.api_models import AgentNotificationRequest
 from imbue.minds.desktop_client.api_models import ApiErrorResponse
 from imbue.minds.desktop_client.api_models import BugReportRequest
-from imbue.minds.desktop_client.api_models import BugReportResponse
 from imbue.minds.desktop_client.api_models import CreateOperationStatusResponse
 from imbue.minds.desktop_client.api_models import CreateWorkspaceRequest
 from imbue.minds.desktop_client.api_models import DestroyOperationStatusResponse
@@ -111,7 +110,7 @@ _ROUTE_MODELS: Final[Mapping[tuple[str, str], _RouteModels]] = {
         request_model=AgentNotificationRequest, response_model=OkResponse
     ),
     ("POST", "/api/v1/agents/{agent_id}/report"): _RouteModels(
-        request_model=BugReportRequest, response_model=BugReportResponse
+        request_model=BugReportRequest, response_model=OkResponse
     ),
     ("GET", "/api/v1/workspaces"): _RouteModels(response_model=WorkspaceListResponse),
     ("GET", "/api/v1/accounts"): _RouteModels(response_model=AccountsResponse),

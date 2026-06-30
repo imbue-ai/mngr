@@ -43,6 +43,14 @@ function getLimaBinDir() {
   return path.dirname(getLimaPath());
 }
 
+function getDesyncPath() {
+  return path.join(getResourcesDir(), 'desync', 'desync');
+}
+
+function getDesyncBinDir() {
+  return path.dirname(getDesyncPath());
+}
+
 /**
  * Path to the bundled restic binary used by the desktop client to
  * provision and query per-workspace backup repositories.
@@ -228,6 +236,8 @@ module.exports = {
   getGitBinDir,
   getLimaPath,
   getLimaBinDir,
+  getDesyncPath,
+  getDesyncBinDir,
   getLatchkeyPath,
   getLatchkeyDirectory,
   getResticPath,

@@ -1,5 +1,7 @@
 import os
+import queue
 import subprocess
+import threading
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -37,6 +39,7 @@ from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.discovery_health import ProducerRemediator
+from imbue.minds.desktop_client.help_modal_requests import OpenHelpRequest
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
@@ -1616,6 +1619,68 @@ def test_help_page_renders_report_option(tmp_path: Path) -> None:
     assert "disabled" in agent_radio
 
 
+def test_help_page_enables_agent_option_in_a_workspace(tmp_path: Path) -> None:
+    """Opened from a loaded workspace, the agent-help option is enabled and the default choice."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get(f"/help?workspace={AgentId()}")
+    assert response.status_code == 200
+    agent_radio = response.text.split('value="agent"')[1].split(">")[0]
+    assert "disabled" not in agent_radio
+    assert "checked" in agent_radio
+
+
+def test_help_assist_requires_a_workspace(tmp_path: Path) -> None:
+    """Agent help is only available inside a workspace, so a request without one is rejected."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.post("/help/assist", json={"description": "it broke"})
+    assert response.status_code == 400
+
+
+def test_help_assist_requires_a_description(tmp_path: Path) -> None:
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.post("/help/assist", json={"description": "  ", "workspace_agent_id": str(AgentId())})
+    assert response.status_code == 400
+
+
+def test_help_page_prefills_description_from_query(tmp_path: Path) -> None:
+    """When an /assist agent asks the app to open the modal, the description arrives pre-filled."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/help?description=the+database+migration+failed")
+    assert response.status_code == 200
+    assert "the database migration failed" in response.text
+
+
+def test_help_page_with_prefilled_description_defaults_to_report_mode(tmp_path: Path) -> None:
+    """An agent escalation opens the modal with both a workspace and a description; it must land on
+    the report form (so a human reviews and submits) rather than agent-help mode (which would spawn
+    another /assist chat)."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get(f"/help?workspace={AgentId()}&description=it+broke")
+    assert response.status_code == 200
+    agent_radio = response.text.split('value="agent"')[1].split(">")[0]
+    report_radio = response.text.split('value="report"')[1].split(">")[0]
+    assert "checked" not in agent_radio
+    assert "checked" in report_radio
+
+
+def test_help_page_agent_report_frames_as_agent_submission_and_hides_mode_choice(tmp_path: Path) -> None:
+    """An agent escalation (``agent_report=1``) frames the modal as the agent's submission and drops
+    the have-an-agent-help / report-a-bug choice -- a report is already underway, so there is nothing
+    to choose. The mode radios must not be rendered, and the description is still pre-filled."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get(f"/help?workspace={AgentId()}&description=it+broke&agent_report=1")
+    assert response.status_code == 200
+    assert "wants to submit this report" in response.text
+    # The mode-choice radios are gone (so the user cannot redirect an agent report into agent-help
+    # mode). ``value="agent"`` / ``value="report"`` are unique to those radio inputs -- the submit JS
+    # references the mode by ``input[name="help-mode"]`` and bare ``"agent"`` / ``"report"`` strings,
+    # so keying off ``value="..."`` isolates the rendered radios from the always-present script.
+    assert 'value="agent"' not in response.text
+    assert 'value="report"' not in response.text
+    # The pre-filled description still survives into the textarea.
+    assert "it broke" in response.text
+
+
 def test_help_page_hides_include_logs_checkbox_when_setting_on(tmp_path: Path) -> None:
     """With the persistent include-logs setting on, logs are always attached and the checkbox is hidden."""
     MindsConfig(data_dir=tmp_path).set_include_error_logs(True)
@@ -1711,15 +1776,28 @@ def test_api_v1_bug_report_requires_bearer_token(tmp_path: Path) -> None:
     assert response.status_code == 401
 
 
-def test_api_v1_bug_report_accepts_authorized_request(tmp_path: Path) -> None:
+def test_api_v1_bug_report_opens_prefilled_modal_instead_of_submitting(tmp_path: Path) -> None:
+    """The agent report route does not submit to Sentry: it asks the app to open the report modal
+    pre-filled with the agent's description, scoped to the caller's own workspace."""
     client = _create_test_client_with_api_key(tmp_path, api_key="secret-key")
+    agent_id = AgentId()
+    request_queue: "queue.Queue[OpenHelpRequest]" = queue.Queue()
+    wake_event = threading.Event()
+    get_state(client.application).help_modal_request_broker.subscribe(request_queue, wake_event)
     response = client.post(
-        f"/api/v1/agents/{AgentId()}/report",
+        f"/api/v1/agents/{agent_id}/report",
         json={"description": "agent saw an error"},
         headers={"Authorization": "Bearer secret-key"},
     )
     assert response.status_code == 200
-    assert response.get_json()["ok"] is True
+    body = response.get_json()
+    assert body["ok"] is True
+    # No Sentry submission happens here, so there is no event_id to return.
+    assert "event_id" not in body
+    # The route published an open-help request (scoped to the caller's workspace) instead of submitting.
+    received = request_queue.get_nowait()
+    assert received.description == "agent saw an error"
+    assert received.workspace_agent_id == str(agent_id)
 
 
 def test_api_v1_bug_report_rejects_empty_description(tmp_path: Path) -> None:
@@ -1901,8 +1979,10 @@ def test_recovery_page_renders_for_authenticated_user(tmp_path: Path) -> None:
     assert "/health" in response.text
     assert "/restart" in response.text
     # The recovery page offers an in-page report button that opens the get-help modal
-    # via the ``minds:open-help`` relay message.
-    assert 'id="recovery-report-btn"' in response.text
+    # via the ``minds:open-help`` relay message. It renders hidden by default so it
+    # never shows on the transient "Loading workspace" spinner; the recovery JS
+    # reveals it only on the terminal restart/retry states.
+    assert '<button type="button" id="recovery-report-btn" class="hidden">' in response.text
     assert "minds:open-help" in response.text
 
 

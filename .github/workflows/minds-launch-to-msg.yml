@@ -170,16 +170,9 @@ jobs:
     # native binary. Linux runners produce ELF binaries that the shipped
     # .app can't exec on Mac.
     runs-on: [self-hosted, macOS, minds-runner]
-    # 60 min covers cold-cache install + full pnpm dist that waits on
-    # ToDesktop's per-target cloud build (sign + notarize x64 + arm64).
-    # 25 min was too tight (cache-miss installs grazed the deadline).
-    # 40 min was also too tight (run 26935971928 stalled at "Notarizing
-    # Minds for arm64 (this may take up to 30 minutes) 35%" -- Apple's
-    # notarization service is the long pole and the worst case really is
-    # ~30 min per arch). 60 min absorbs that worst-case for both archs
-    # without leaving the post-failure cancel step needlessly tearing
-    # down builds that just needed a few more minutes.
-    timeout-minutes: 60
+    # 85 min = the 70-min `pnpm dist` step budget (below) + ~15 min for the
+    # post-failure cancel step to tear an orphaned ToDesktop build down.
+    timeout-minutes: 85
     env:
       TODESKTOP_ACCESS_TOKEN: ${{ secrets.TODESKTOP_ACCESS_TOKEN }}
       TODESKTOP_EMAIL:        ${{ secrets.TODESKTOP_EMAIL }}
@@ -304,13 +297,10 @@ jobs:
       - name: pnpm dist (build + upload to ToDesktop)
         id: dist
         if: steps.existing.outputs.url == ''
-        # 45 min covers a healthy cold build (~15-25 min observed) plus
-        # tail latency on Apple's notarization service. When ToDesktop's
-        # signing wedges (silent stall mid-notarize, e.g. run
-        # 27310529771), failing here at 45 surfaces the wedge instead of
-        # consuming the job-level 60-min budget and starving the cancel
-        # step of time to tear the build down.
-        timeout-minutes: 45
+        # A fresh dual-arch build historically runs ~43 min, up to ~60+ min
+        # when ToDesktop's "Downloading application source" step stalls
+        # (~16 min); notarization is the long pole.
+        timeout-minutes: 70
         working-directory: apps/minds
         # build.js::bundleLatchkey smoke-tests the bundled CLI via
         # `latchkey --version`. Latchkey tries to read/init an encryption
@@ -1175,17 +1165,24 @@ jobs:
           done
           metrics_line=""
           [[ -n "$metrics_inner" ]] && metrics_line="[${metrics_inner}]"
-          # Build links line: `[<binary> | <run logs> | <mngr commit> | <fct commit>]`.
-          # Derive the ToDesktop dashboard URL from the build's app_zip_url:
-          # https://dl.todesktop.com/<APP_ID>/builds/<BID>/mac/zip/arm64
-          dashboard_url=""
+          # Build links line: `[todesktop(mac-arm64) | <run logs> | <mngr commit> | <fct commit>]`.
+          # The ToDesktop dashboard URL and the arm64 .dmg download are both
+          # derived from the build's app_zip_url
+          # (https://dl.todesktop.com/<APP_ID>/builds/<BID>/mac/zip/arm64):
+          #   todesktop -> https://app.todesktop.com/apps/<APP_ID>/builds/<BID>
+          #   mac-arm64 -> https://dl.todesktop.com/<APP_ID>/builds/<BID>/mac/dmg/arm64
+          binary_link=""
           if [[ -n "$APP_ZIP_URL" && "$APP_ZIP_URL" =~ dl\.todesktop\.com/([^/]+)/builds/([^/]+)/ ]]; then
-            dashboard_url="https://app.todesktop.com/apps/${BASH_REMATCH[1]}/builds/${BASH_REMATCH[2]}"
+            td_app_id="${BASH_REMATCH[1]}"
+            td_build_id="${BASH_REMATCH[2]}"
+            dashboard_url="https://app.todesktop.com/apps/${td_app_id}/builds/${td_build_id}"
+            dmg_url="https://dl.todesktop.com/${td_app_id}/builds/${td_build_id}/mac/dmg/arm64"
+            binary_link="<${dashboard_url}|todesktop>(<${dmg_url}|mac-arm64>)"
           fi
           links_inner=""
           sep=""
-          if [[ -n "$dashboard_url" ]]; then
-            links_inner+="<${dashboard_url}|binary>"
+          if [[ -n "$binary_link" ]]; then
+            links_inner+="$binary_link"
             sep=" | "
           fi
           links_inner+="${sep}<${RUN_URL}|run logs>"
@@ -1194,8 +1191,8 @@ jobs:
           links_line="[${links_inner}]"
           # Assemble the final message. Line 1 is always present. Line 2
           # (SHAs) is always present. Line 3 (metrics) is omitted when we
-          # have no values. Line 4 (links) is always present, though
-          # `binary` falls out when build didn't produce one.
+          # have no values. Line 4 (links) is always present, though the
+          # todesktop(mac-arm64) link falls out when build didn't produce one.
           line1=$(printf '%s *launch-to-msg* — %s in %s%s, _trigger=_ `%s`' \
             "$emoji" "$verdict_word" "$duration" "$detail" "$TRIGGER")
           # Show "<ref> (<commit>)" when the ref is a name (tag / branch);
