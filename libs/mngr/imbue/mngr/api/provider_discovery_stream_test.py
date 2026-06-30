@@ -1,4 +1,5 @@
 import threading
+from concurrent.futures import Future
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,7 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.utils.polling import poll_until
+from imbue.mngr.utils.thread_cleanup import _MngrExecutor
 from imbue.mngr.utils.thread_cleanup import mngr_executor
 
 
@@ -68,6 +70,23 @@ def _make_controllable_provider(
     if is_released:
         provider.release()
     return provider
+
+
+def _submit_discovery(
+    executor: _MngrExecutor,
+    provider: _ControllableProvider,
+    mngr_ctx: MngrContext,
+    poller: _ProviderDiscoveryPoller,
+) -> "Future[BoundedProviderDiscoveryResult]":
+    """Submit one bounded discovery for ``provider`` to ``executor`` (the poll's submit hook)."""
+    return executor.submit(
+        _discover_one_provider,
+        provider,
+        mngr_ctx,
+        poller.config.host_discovery_timeout_seconds,
+        poller.config.agent_discovery_timeout_seconds,
+        True,
+    )
 
 
 def _generous_config() -> ProviderInstanceConfig:
@@ -128,16 +147,7 @@ def test_poller_emits_success_snapshot(temp_host_dir: Path, temp_mngr_ctx: MngrC
 
     poller = _ProviderDiscoveryPoller(provider=provider, mngr_ctx=temp_mngr_ctx, config=_generous_config())
     with mngr_executor(parent_cg=temp_mngr_ctx.concurrency_group, name="test-discover", max_workers=1) as executor:
-        poller.poll_and_emit(
-            lambda: executor.submit(
-                _discover_one_provider,
-                provider,
-                temp_mngr_ctx,
-                poller.config.host_discovery_timeout_seconds,
-                poller.config.agent_discovery_timeout_seconds,
-                True,
-            )
-        )
+        poller.poll_and_emit(lambda: _submit_discovery(executor, provider, temp_mngr_ctx, poller))
 
     snapshots = _read_snapshots(temp_mngr_ctx)
     assert len(snapshots) == 1
@@ -155,16 +165,7 @@ def test_poller_emits_error_snapshot_on_exception(temp_host_dir: Path, temp_mngr
 
     poller = _ProviderDiscoveryPoller(provider=provider, mngr_ctx=temp_mngr_ctx, config=_generous_config())
     with mngr_executor(parent_cg=temp_mngr_ctx.concurrency_group, name="test-discover", max_workers=1) as executor:
-        poller.poll_and_emit(
-            lambda: executor.submit(
-                _discover_one_provider,
-                provider,
-                temp_mngr_ctx,
-                poller.config.host_discovery_timeout_seconds,
-                poller.config.agent_discovery_timeout_seconds,
-                True,
-            )
-        )
+        poller.poll_and_emit(lambda: _submit_discovery(executor, provider, temp_mngr_ctx, poller))
 
     snapshots = _read_snapshots(temp_mngr_ctx)
     assert len(snapshots) == 1
@@ -190,16 +191,7 @@ def test_poller_timeout_emits_error_then_accepts_late_result(temp_host_dir: Path
     try:
         with mngr_executor(parent_cg=temp_mngr_ctx.concurrency_group, name="test-discover", max_workers=1) as executor:
             # First poll times out (discovery is blocked) -> error snapshot, orphan kept.
-            poller.poll_and_emit(
-                lambda: executor.submit(
-                    _discover_one_provider,
-                    provider,
-                    temp_mngr_ctx,
-                    poller.config.host_discovery_timeout_seconds,
-                    poller.config.agent_discovery_timeout_seconds,
-                    True,
-                )
-            )
+            poller.poll_and_emit(lambda: _submit_discovery(executor, provider, temp_mngr_ctx, poller))
             timeout_snapshots = _read_snapshots(temp_mngr_ctx)
             assert len(timeout_snapshots) == 1
             assert timeout_snapshots[0].error is not None
@@ -207,31 +199,13 @@ def test_poller_timeout_emits_error_then_accepts_late_result(temp_host_dir: Path
             poll_until(lambda: provider.discovery_call_count == 1, timeout=5.0)
 
             # While the orphan is still in flight, another poll must NOT start a second discovery.
-            poller.poll_and_emit(
-                lambda: executor.submit(
-                    _discover_one_provider,
-                    provider,
-                    temp_mngr_ctx,
-                    poller.config.host_discovery_timeout_seconds,
-                    poller.config.agent_discovery_timeout_seconds,
-                    True,
-                )
-            )
+            poller.poll_and_emit(lambda: _submit_discovery(executor, provider, temp_mngr_ctx, poller))
             assert provider.discovery_call_count == 1
 
             # Release the orphaned discovery; once it finishes, a poll harvests its late result.
             provider.release()
             poll_until(
-                lambda: poller.poll_and_emit(
-                    lambda: executor.submit(
-                        _discover_one_provider,
-                        provider,
-                        temp_mngr_ctx,
-                        poller.config.host_discovery_timeout_seconds,
-                        poller.config.agent_discovery_timeout_seconds,
-                        True,
-                    )
-                )
+                lambda: poller.poll_and_emit(lambda: _submit_discovery(executor, provider, temp_mngr_ctx, poller))
                 or len(_read_snapshots(temp_mngr_ctx)) >= 2,
                 timeout=5.0,
             )
