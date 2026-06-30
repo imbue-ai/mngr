@@ -44,6 +44,12 @@
 
   // id -> { frame: HTMLIFrameElement, url: string|null, visible: bool }
   var modals = Object.create(null);
+  // The most recently requested modal. An incoming modal's iframe is kept hidden
+  // while it (re)loads and only revealed -- with the modal it replaces hidden at
+  // the same instant -- once its load fires, so switching modals never flashes
+  // the incoming iframe's stale (previously-rendered) content. A load that has
+  // been superseded by a newer show (id !== activeModalId) is ignored.
+  var activeModalId = null;
 
   function ensureModal(id) {
     if (modals[id]) return modals[id];
@@ -55,10 +61,17 @@
     frame.style.background = 'transparent';
     frame.style.display = 'none';
     frame.setAttribute('data-overlay-id', id);
-    // Tell main the iframe is ready so it can replay the cached chrome state
-    // into this frame (workspace list / request count). Runs on every (re)load.
     frame.addEventListener('load', function () {
+      // Tell main the iframe is ready so it can replay the cached chrome state
+      // into this frame (workspace list / request count). Runs on every (re)load.
       window.minds.overlayModalLoaded(id);
+      // Now that the fresh content has painted, reveal this modal and hide the
+      // one it replaced in the same frame -- a flash-free swap. Skip if a newer
+      // show already superseded this load.
+      if (id === activeModalId) {
+        frame.style.visibility = 'visible';
+        hideOthers(id);
+      }
     });
     root.appendChild(frame);
     var entry = { frame: frame, url: null, visible: false };
@@ -77,7 +90,13 @@
 
   function showModal(id, url) {
     var entry = ensureModal(id);
-    hideOthers(id);
+    activeModalId = id;
+    // Show the iframe but keep it invisible until its (re)load paints, so the
+    // switch never flashes this iframe's stale content. The previously-shown
+    // modal stays visible until the load handler swaps them.
+    entry.frame.style.display = 'block';
+    entry.frame.style.visibility = 'hidden';
+    entry.visible = true;
     // Reload on every show so the hosted page re-fetches its state and replays
     // its entry animation -- preserving the old "fresh every open" feel even
     // though the iframe stays mounted/warm between opens.
@@ -91,18 +110,18 @@
       entry.url = url;
       entry.frame.src = url;
     }
-    entry.frame.style.display = 'block';
-    entry.visible = true;
   }
 
   function hideModal(id) {
     var entry = modals[id];
     if (!entry || !entry.visible) return;
+    if (activeModalId === id) activeModalId = null;
     entry.visible = false;
     entry.frame.style.display = 'none';
   }
 
   function hideAll() {
+    activeModalId = null;
     for (var id in modals) {
       if (modals[id].visible) {
         modals[id].visible = false;
