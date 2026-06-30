@@ -1,0 +1,3 @@
+Messaging an agent whose main process had exited but whose tmux session was still alive (lifecycle state `DONE` -- e.g. after a ctrl-c, a crash, or an out-of-memory kill of just the agent process) now restarts the agent and delivers the message, instead of silently typing the message into the leftover shell where it was lost.
+
+Previously only `STOPPED` agents (those with no tmux session at all) were auto-restarted on message. A `DONE` agent's lingering session is now torn down and recreated first, mirroring `mngr start --restart`, so the relaunch actually happens rather than no-op'ing on the existing session.

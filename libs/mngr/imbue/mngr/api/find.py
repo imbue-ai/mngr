@@ -354,8 +354,14 @@ def ensure_host_started(
 def ensure_agent_started(agent: AgentInterface, host: OnlineHostInterface, is_start_desired: bool) -> None:
     """Ensure an agent is started, starting it if needed and desired.
 
-    If the agent is stopped and is_start_desired is True, starts the agent.
-    If the agent is stopped and is_start_desired is False, raises UserInputError.
+    If the agent is not live and is_start_desired is True, (re)starts it.
+    If the agent is not live and is_start_desired is False, raises UserInputError.
+
+    A DONE agent is a special case of "not live": its main process has exited but
+    tmux still holds the session open (e.g. after a ctrl-c, a crash, or an OOM
+    shed). ``start_agents`` short-circuits on an existing session, so the husk is
+    torn down first -- mirroring ``mngr start --restart`` -- otherwise the relaunch
+    would silently no-op and the agent would stay dead.
     """
     lifecycle_state = agent.get_lifecycle_state()
     if lifecycle_state not in (
@@ -365,6 +371,11 @@ def ensure_agent_started(agent: AgentInterface, host: OnlineHostInterface, is_st
         AgentLifecycleState.WAITING,
     ):
         if is_start_desired:
+            if lifecycle_state == AgentLifecycleState.DONE:
+                logger.info(
+                    "Agent {} is DONE with a lingering tmux session; stopping it before restart", agent.name
+                )
+                host.stop_agents([agent.id])
             logger.info("Agent {} is stopped, starting it", agent.name)
             agent.wait_for_ready_signal(
                 is_creating=False,
