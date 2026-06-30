@@ -144,7 +144,8 @@ class DiscoveryStateAggregator(MutableModel):
             case DiscoveryErrorEvent():
                 return self._apply_discovery_error(event)
             case HostSSHInfoEvent():
-                self._bump_last_event_at(parse_event_timestamp(event.timestamp))
+                with self._lock:
+                    self._bump_last_event_at(parse_event_timestamp(event.timestamp))
                 return AggregatorDelta()
             case _:
                 # Legacy FullDiscoverySnapshotEvent and any unmodeled type are ignored.
