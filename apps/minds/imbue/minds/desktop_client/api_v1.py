@@ -72,8 +72,6 @@ from imbue.minds.desktop_client.api_models import EstablishSshRequest
 from imbue.minds.desktop_client.api_models import OkResponse
 from imbue.minds.desktop_client.api_models import OperationHandleResponse
 from imbue.minds.desktop_client.api_models import PatchWorkspaceRequest
-from imbue.minds.desktop_client.api_models import PreservedAgentSummary
-from imbue.minds.desktop_client.api_models import PreservedAgentsResponse
 from imbue.minds.desktop_client.api_models import ProviderToggleResponse
 from imbue.minds.desktop_client.api_models import RestartOperationStatusResponse
 from imbue.minds.desktop_client.api_models import RestartWorkspaceRequest
@@ -87,7 +85,6 @@ from imbue.minds.desktop_client.api_models import WorkspaceBackupsResponse
 from imbue.minds.desktop_client.api_models import WorkspaceLifecycleResponse
 from imbue.minds.desktop_client.api_models import WorkspaceListResponse
 from imbue.minds.desktop_client.api_models import WorkspaceSummary
-from imbue.minds.desktop_client.api_models import WorkspaceTranscriptResponse
 from imbue.minds.desktop_client.api_models import WorkspaceVersionResponse
 from imbue.minds.desktop_client.api_spec import API_SPEC
 from imbue.minds.desktop_client.api_spec import json_response_model
@@ -135,13 +132,9 @@ from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import ServiceName
-from imbue.mngr.api.preservation import list_preserved_agents
-from imbue.mngr.api.transcript import render_preserved_agent_transcript
-from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import InvalidName
-from imbue.mngr.primitives import OutputFormat
 
 # A blocking lifecycle (start/stop) call shells out to ``mngr`` and waits for
 # the host transition to resolve before returning the final state.
@@ -386,109 +379,6 @@ def _handle_workspace_backup_export(agent_id: str, snapshot_id: str) -> Response
         return _json_error(str(e), 500)
     return make_file_response(
         path=str(zip_path), media_type="application/zip", filename=f"{download_label}-backup.zip"
-    )
-
-
-# -- Past-agent transcript routes (preserved listing + transcript retrieval) --
-
-# When an agent is destroyed, mngr copies its conversation transcript to the
-# controller-local preserved store (``<mngr_host_dir>/preserved/``). These routes
-# let an agent find that "old stuff" a user references: list what was preserved,
-# then read any agent's transcript -- the durable preserved copy for destroyed
-# agents, falling back to the live agent (via ``mngr transcript``) otherwise.
-
-
-def _parse_output_format(format_value: str) -> OutputFormat | None:
-    """Map a ``format`` query value (human/json/jsonl) to an OutputFormat, or None if invalid."""
-    try:
-        return OutputFormat(format_value.upper())
-    except ValueError:
-        return None
-
-
-@require_api_or_cookie_auth
-@API_SPEC.validate(resp=json_response_model(PreservedAgentsResponse))
-def _handle_preserved_agents() -> PreservedAgentsResponse:
-    """List agents whose transcripts were preserved when they were destroyed, newest-first."""
-    preserved = list_preserved_agents(get_state().mngr_host_dir)
-    return PreservedAgentsResponse(
-        agents=tuple(
-            PreservedAgentSummary(
-                agent_id=str(info.agent_id),
-                agent_name=str(info.agent_name),
-                preserved_at=info.preserved_at.isoformat(),
-            )
-            for info in preserved
-        )
-    )
-
-
-@require_api_or_cookie_auth
-@API_SPEC.validate(resp=json_response_model(WorkspaceTranscriptResponse))
-def _handle_workspace_transcript(agent_id: str) -> WorkspaceTranscriptResponse | Response:
-    """Return an agent's transcript: the preserved copy for destroyed agents, else the live agent's."""
-    parsed_id = AgentId(agent_id)
-    state = get_state()
-
-    # Parse the mngr transcript-style filter query params.
-    format_value = request.args.get("format", "human")
-    output_format = _parse_output_format(format_value)
-    if output_format is None:
-        return _json_error("Invalid format; expected one of: human, json, jsonl", 400)
-    roles = tuple(request.args.getlist("role"))
-    head_value = request.args.get("head")
-    tail_value = request.args.get("tail")
-    try:
-        head = int(head_value) if head_value is not None else None
-        tail = int(tail_value) if tail_value is not None else None
-    except ValueError:
-        return _json_error("head and tail must be integers", 400)
-    if (head is not None and head < 1) or (tail is not None and tail < 1):
-        return _json_error("head and tail must be >= 1", 400)
-    if head is not None and tail is not None:
-        return _json_error("Cannot specify both head and tail", 400)
-
-    # Prefer the durable preserved copy: it is the only source for a fully
-    # destroyed agent, and it is read locally without resolving a live host.
-    try:
-        preserved_content = render_preserved_agent_transcript(
-            host_dir=state.mngr_host_dir,
-            agent_id=parsed_id,
-            roles=roles,
-            head=head,
-            tail=tail,
-            output_format=output_format,
-        )
-    except MngrError as e:
-        logger.warning("Failed to render preserved transcript for {}: {}", parsed_id, e)
-        return _json_error(f"Could not read the preserved transcript for {agent_id}", 500)
-    if preserved_content is not None:
-        return WorkspaceTranscriptResponse(
-            agent_id=str(parsed_id), format=format_value, is_preserved=True, content=preserved_content
-        )
-
-    # Not preserved: fall back to the live agent via ``mngr transcript`` (which
-    # resolves the agent's host, including remote ones over SSH).
-    if parsed_id not in state.backend_resolver.list_known_workspace_ids():
-        return _json_error(f"No transcript found for agent {agent_id}", 404)
-    parent_cg = state.root_concurrency_group
-    if parent_cg is None:
-        return _json_error("Live transcript retrieval is unavailable in this configuration", 503)
-    argv = [state.mngr_binary, "transcript", str(parsed_id), "--format", format_value]
-    for role in roles:
-        argv += ["--role", role]
-    if head is not None:
-        argv += ["--head", str(head)]
-    if tail is not None:
-        argv += ["--tail", str(tail)]
-    try:
-        returncode, stdout, stderr = _run_mngr_blocking(argv, parent_cg)
-    except (OSError, ConcurrencyGroupError) as e:
-        return _json_error(f"Could not read the transcript for {agent_id}: {e}", 502)
-    if returncode != 0:
-        return _json_error(f"Could not read the transcript for {agent_id}: {stderr.strip()}", 502)
-    return WorkspaceTranscriptResponse(
-        agent_id=str(parsed_id), format=format_value, is_preserved=False, content=stdout
     )
 
 
@@ -1483,19 +1373,11 @@ def create_api_v1_blueprint() -> Blueprint:
     # Cross-workspace management (read surface). Gated by the
     # ``minds-workspaces`` detent scope at the gateway.
     blueprint.add_url_rule("/workspaces", view_func=_handle_list_workspaces, methods=["GET"])
-    # The literal ``/workspaces/preserved`` route is registered before the
-    # ``/workspaces/<agent_id>`` parameterized route so it resolves to its own
-    # handler (Werkzeug ranks static routes above dynamic ones regardless, but
-    # ordering it first keeps the intent explicit).
-    blueprint.add_url_rule("/workspaces/preserved", view_func=_handle_preserved_agents, methods=["GET"])
     blueprint.add_url_rule("/workspaces/<agent_id>", view_func=_handle_get_workspace, methods=["GET"])
     # Gated by the must-ask ``minds-accounts-read`` permission (not in the agent baseline).
     blueprint.add_url_rule("/accounts", view_func=_handle_list_accounts, methods=["GET"])
     blueprint.add_url_rule("/workspaces/<agent_id>/version", view_func=_handle_workspace_version, methods=["GET"])
     blueprint.add_url_rule("/workspaces/<agent_id>/backups", view_func=_handle_workspace_backups, methods=["GET"])
-    blueprint.add_url_rule(
-        "/workspaces/<agent_id>/transcript", view_func=_handle_workspace_transcript, methods=["GET"]
-    )
     blueprint.add_url_rule(
         "/workspaces/<agent_id>/backups/<snapshot_id>/export",
         view_func=_handle_workspace_backup_export,

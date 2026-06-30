@@ -325,33 +325,6 @@ class WorkspaceBackupsResponse(FrozenModel):
     snapshots: tuple[BackupSnapshotSummary, ...] = Field(default=(), description="All snapshots, newest-first")
 
 
-class PreservedAgentSummary(FrozenModel):
-    """One destroyed agent whose transcript was preserved and can be retrieved."""
-
-    agent_id: str = Field(description="The preserved agent's id (pass to the transcript endpoint)")
-    agent_name: str = Field(description="The preserved agent's name (use to match a user's description)")
-    preserved_at: str = Field(
-        description="When the transcript was preserved, approximately when the agent was destroyed (UTC ISO 8601)"
-    )
-
-
-class PreservedAgentsResponse(FrozenModel):
-    """All agents whose transcripts were preserved on destroy, newest-first."""
-
-    agents: tuple[PreservedAgentSummary, ...] = Field(description="Preserved agents, newest-first")
-
-
-class WorkspaceTranscriptResponse(FrozenModel):
-    """An agent's rendered conversation transcript (preserved copy for destroyed agents, else live)."""
-
-    agent_id: str = Field(description="The agent id whose transcript this is")
-    format: str = Field(description="The render format: human, json, or jsonl")
-    is_preserved: bool = Field(
-        description="True when read from the destroyed-agent preserved copy, False when read from a live agent"
-    )
-    content: str = Field(description="The rendered transcript content in the requested format")
-
-
 class SharingReadinessResponse(FrozenModel):
     """Whether a shared service's hostname is live yet at the Cloudflare edge."""
 

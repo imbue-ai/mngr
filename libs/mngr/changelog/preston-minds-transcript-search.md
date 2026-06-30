@@ -1,3 +1,0 @@
-Added a public transcript-rendering API (`imbue.mngr.api.transcript`) so the same human/json/jsonl rendering used by `mngr transcript` can be reused programmatically. The `mngr transcript` command's behavior is unchanged.
-
-Added helpers to enumerate and read preserved (destroyed-agent) transcripts: `list_preserved_agents`, `find_preserved_agent_by_id`, and `read_preserved_common_transcript` in `imbue.mngr.api.preservation`, plus `render_preserved_agent_transcript`. These read the durable preserved copy under `<host_dir>/preserved/{agent_name}--{agent_id}/`, which survives after an agent's host is fully destroyed.

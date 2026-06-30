@@ -58,7 +58,6 @@ from imbue.minds.desktop_client.api_models import EstablishSshRequest
 from imbue.minds.desktop_client.api_models import OkResponse
 from imbue.minds.desktop_client.api_models import OperationHandleResponse
 from imbue.minds.desktop_client.api_models import PatchWorkspaceRequest
-from imbue.minds.desktop_client.api_models import PreservedAgentsResponse
 from imbue.minds.desktop_client.api_models import RestartOperationStatusResponse
 from imbue.minds.desktop_client.api_models import RestartWorkspaceRequest
 from imbue.minds.desktop_client.api_models import SharingReadinessResponse
@@ -68,7 +67,6 @@ from imbue.minds.desktop_client.api_models import WorkspaceBackupsResponse
 from imbue.minds.desktop_client.api_models import WorkspaceLifecycleResponse
 from imbue.minds.desktop_client.api_models import WorkspaceListResponse
 from imbue.minds.desktop_client.api_models import WorkspaceSummary
-from imbue.minds.desktop_client.api_models import WorkspaceTranscriptResponse
 from imbue.minds.desktop_client.api_models import WorkspaceVersionResponse
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.responses import make_response
@@ -116,7 +114,6 @@ _ROUTE_MODELS: Final[Mapping[tuple[str, str], _RouteModels]] = {
         request_model=BugReportRequest, response_model=BugReportResponse
     ),
     ("GET", "/api/v1/workspaces"): _RouteModels(response_model=WorkspaceListResponse),
-    ("GET", "/api/v1/workspaces/preserved"): _RouteModels(response_model=PreservedAgentsResponse),
     ("GET", "/api/v1/accounts"): _RouteModels(response_model=AccountsResponse),
     ("POST", "/api/v1/workspaces"): _RouteModels(
         request_model=CreateWorkspaceRequest, response_model=OperationHandleResponse, success_status=202
@@ -125,7 +122,6 @@ _ROUTE_MODELS: Final[Mapping[tuple[str, str], _RouteModels]] = {
     ("PATCH", "/api/v1/workspaces/{agent_id}"): _RouteModels(request_model=PatchWorkspaceRequest),
     ("GET", "/api/v1/workspaces/{agent_id}/version"): _RouteModels(response_model=WorkspaceVersionResponse),
     ("GET", "/api/v1/workspaces/{agent_id}/backups"): _RouteModels(response_model=WorkspaceBackupsResponse),
-    ("GET", "/api/v1/workspaces/{agent_id}/transcript"): _RouteModels(response_model=WorkspaceTranscriptResponse),
     ("POST", "/api/v1/workspaces/{agent_id}/destroy"): _RouteModels(
         response_model=OperationHandleResponse, success_status=202
     ),

@@ -1,5 +1,7 @@
+import json
 import sys
 from typing import Any
+from typing import assert_never
 
 import click
 from click_option_group import optgroup
@@ -9,8 +11,6 @@ from imbue.mngr.api.events import discover_event_sources
 from imbue.mngr.api.events import read_event_content
 from imbue.mngr.api.events import resolve_events_target
 from imbue.mngr.api.find import find_one_agent
-from imbue.mngr.api.transcript import parse_transcript_events
-from imbue.mngr.api.transcript import render_transcript_to_string
 from imbue.mngr.cli.address_params import AGENT_OR_HOST_ADDRESS
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
@@ -19,11 +19,14 @@ from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentOrHostAddress
+from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 
 
 class TranscriptCliOptions(CommonCliOptions):
@@ -94,6 +97,123 @@ def _find_common_transcript_source(target: EventsTarget) -> str:
     return matching_sources[0].source_path
 
 
+def _parse_transcript_events(
+    content: str,
+    roles: tuple[str, ...],
+    source_description: str,
+) -> list[dict[str, Any]]:
+    """Parse JSONL content into transcript events, optionally filtering by role."""
+    events: list[dict[str, Any]] = []
+    warner = MalformedJsonLineWarner(source_description=source_description)
+    for line in content.splitlines():
+        parsed = warner.parse(line)
+        if parsed is None:
+            continue
+        event, _ = parsed
+        if roles and _get_event_role(event) not in roles:
+            continue
+        events.append(event)
+    return events
+
+
+def _get_event_role(event: dict[str, Any]) -> str | None:
+    """Extract the role from a common transcript event.
+
+    The role is either an explicit 'role' field, or derived from the event type:
+    - user_message -> 'user'
+    - assistant_message -> 'assistant'
+    - tool_result -> 'tool'
+    """
+    role = event.get("role")
+    if role is not None:
+        return str(role)
+    match event.get("type", ""):
+        case "user_message":
+            return "user"
+        case "assistant_message":
+            return "assistant"
+        case "tool_result":
+            return "tool"
+        case _:
+            return None
+
+
+def _format_event_human(event: dict[str, Any]) -> str:
+    """Format a single transcript event for human-readable display."""
+    event_type = event.get("type", "unknown")
+    timestamp = event.get("timestamp", "")
+
+    # Trim sub-second precision for readability
+    if "." in timestamp:
+        timestamp = timestamp.split(".")[0] + "Z"
+
+    match event_type:
+        case "user_message":
+            content = event.get("content", "")
+            return f"[{timestamp}] user:\n{content}"
+
+        case "assistant_message":
+            # Every emitter fills the ordered parts[]; render it directly (the flat
+            # text + tool_calls are kept on the record as a convenience baseline, but
+            # parts[] is the authoritative ordered view).
+            lines: list[str] = []
+            for part in event.get("parts", []):
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "text":
+                    content = part.get("content", "")
+                    if content:
+                        lines.append(content)
+                elif part.get("type") == "tool_call":
+                    tool_name = part.get("tool_name", "unknown")
+                    preview = part.get("input_preview", "")
+                    lines.append(f"  -> {tool_name}({preview})")
+                else:
+                    # Unknown part type (e.g. a future reasoning part): nothing to render here.
+                    continue
+            body = "\n".join(lines) if lines else "(no content)"
+            return f"[{timestamp}] assistant:\n{body}"
+
+        case "tool_result":
+            tool_name = event.get("tool_name", "unknown")
+            output = event.get("output", "")
+            is_error = event.get("is_error", False)
+            error_marker = " [ERROR]" if is_error else ""
+            # Truncate long output for display
+            if len(output) > 500:
+                output = output[:500] + "..."
+            return f"[{timestamp}] tool ({tool_name}){error_marker}:\n{output}"
+
+        case _:
+            return f"[{timestamp}] {event_type}: {json.dumps(event)}"
+
+
+def _emit_transcript(
+    events: list[dict[str, Any]],
+    output_opts: OutputOptions,
+) -> None:
+    """Emit transcript events in the requested format."""
+    match output_opts.output_format:
+        case OutputFormat.JSONL:
+            for event in events:
+                sys.stdout.write(json.dumps(event, separators=(",", ":")) + "\n")
+            sys.stdout.flush()
+
+        case OutputFormat.JSON:
+            sys.stdout.write(json.dumps(events, indent=2) + "\n")
+            sys.stdout.flush()
+
+        case OutputFormat.HUMAN:
+            for idx, event in enumerate(events):
+                if idx > 0:
+                    sys.stdout.write("\n")
+                sys.stdout.write(_format_event_human(event) + "\n")
+            sys.stdout.flush()
+
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 @click.command(name="transcript")
 @click.argument("target", type=AGENT_OR_HOST_ADDRESS)
 @optgroup.group("Filtering")
@@ -148,7 +268,7 @@ def transcript(ctx: click.Context, **kwargs: Any) -> None:
         raise MngrError(f"Failed to read transcript for {target.display_name}: {e}") from e
 
     # Parse and filter events
-    all_events = parse_transcript_events(
+    all_events = _parse_transcript_events(
         content, roles=opts.role, source_description=f"transcript file '{event_file_name}' for {target.display_name}"
     )
 
@@ -161,8 +281,7 @@ def transcript(ctx: click.Context, **kwargs: Any) -> None:
         pass
 
     # Emit
-    sys.stdout.write(render_transcript_to_string(all_events, output_opts.output_format))
-    sys.stdout.flush()
+    _emit_transcript(all_events, output_opts)
 
 
 # Register help metadata for git-style help formatting
