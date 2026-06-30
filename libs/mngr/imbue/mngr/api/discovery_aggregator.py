@@ -164,7 +164,9 @@ class DiscoveryStateAggregator(MutableModel):
             # across providers -- other providers' state is untouched).
             if event.provider is not None:
                 self._provider_by_name[provider_name] = event.provider
-            if is_errored:
+            # Narrow on event.error directly (not via the is_errored alias) so the
+            # type checker can see it is non-None for the assignment below.
+            if event.error is not None:
                 self._error_by_provider_name[provider_name] = event.error
             else:
                 self._error_by_provider_name.pop(provider_name, None)
