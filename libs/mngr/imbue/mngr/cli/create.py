@@ -974,7 +974,6 @@ def _create_agent(
         reuse_result = _try_reuse_existing_agent(
             agent_name=agent_opts.name,
             provider_name=address.provider_name,
-            target_host_ref=target_host if isinstance(target_host, DiscoveredHost) else None,
             host_name=address.host_name,
             mngr_ctx=mngr_ctx,
             agent_and_host_loader=setup.agent_and_host_loader,
@@ -1290,10 +1289,36 @@ def _parse_project_name(
     )
 
 
+@pure
+def _is_host_in_reuse_scope(
+    discovered_host: DiscoveredHost,
+    provider_name: ProviderInstanceName | None,
+    host_name: HostName | HostId | None,
+) -> bool:
+    """Whether ``discovered_host`` matches the address parts that were specified.
+
+    An unspecified (``None``) provider or host does not constrain the match.
+
+    Examples (caller args -> which discovered hosts are in scope):
+
+    - ``provider_name=None, host_name=None`` -> every host
+    - ``provider_name="modal", host_name=None`` -> every host on modal
+    - ``provider_name=None, host_name=HostName("h2")`` -> every host named "h2"
+    - ``provider_name="modal", host_name=HostName("h2")`` -> the "h2" host on modal
+    - ``provider_name=None, host_name=HostId("host-1")`` -> the host with that exact id
+    """
+    if provider_name is not None and discovered_host.provider_name != provider_name:
+        return False
+    if host_name is None:
+        return True
+    if isinstance(host_name, HostId):
+        return discovered_host.host_id == host_name
+    return discovered_host.host_name == host_name
+
+
 def _try_reuse_existing_agent(
     agent_name: AgentName,
     provider_name: ProviderInstanceName | None,
-    target_host_ref: DiscoveredHost | None,
     host_name: HostName | HostId | None,
     mngr_ctx: MngrContext,
     agent_and_host_loader: Callable[[], dict[DiscoveredHost, list[DiscoveredAgent]]],
@@ -1312,31 +1337,14 @@ def _try_reuse_existing_agent(
     names every workspace's primary agent the constant ``system-services`` and
     relies on the host name for identity): without host scoping the lookup would
     match every same-named agent on the provider and fail to disambiguate.
-    ``target_host_ref`` is the already-resolved host for an existing-host create;
-    it scopes by host id when present and co-occurs with ``host_name``.
     """
     agents_by_host = agent_and_host_loader()
 
     matching_agents: list[tuple[DiscoveredHost, DiscoveredAgent]] = []
 
     for host_ref, agent_refs in agents_by_host.items():
-        # Skip hosts that don't match the provider filter (if specified)
-        if provider_name is not None and host_ref.provider_name != provider_name:
+        if not _is_host_in_reuse_scope(host_ref, provider_name, host_name):
             continue
-
-        # Skip hosts that don't match the target host filter (if specified)
-        if target_host_ref is not None and host_ref.host_id != target_host_ref.host_id:
-            continue
-
-        # Skip hosts that don't match the host named in the address (if specified).
-        # The address host may be a HostId (exact id) or a HostName (the host's name).
-        if host_name is not None:
-            if isinstance(host_name, HostId):
-                host_matches_address = host_ref.host_id == host_name
-            else:
-                host_matches_address = host_ref.host_name == host_name
-            if not host_matches_address:
-                continue
 
         for agent_ref in agent_refs:
             if agent_ref.agent_name == agent_name:
