@@ -57,7 +57,10 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 
-_DEFAULT_STUCK_THRESHOLD_SECONDS: Final[float] = 5.0
+# TEMPORARY (revert): lowered from 5.0 to 1.0 to force the cold-start STUCK race
+# for reproduction -- the forward's VPS path provisioning takes ~10s, so a 1s
+# threshold trips reliably during that window. Do NOT ship this value.
+_DEFAULT_STUCK_THRESHOLD_SECONDS: Final[float] = 1.0
 
 # HTTP statuses that suggest the backend itself is unreachable / not serving,
 # as opposed to an application-layer error. The plugin reports every non-2xx
