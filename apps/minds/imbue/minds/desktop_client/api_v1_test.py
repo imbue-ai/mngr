@@ -49,7 +49,9 @@ from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.testing import stub_mngr_host_dir
+from imbue.mngr.api.preservation import get_preserved_agent_dir
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentName
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 _TEST_KEY = "test-minds-api-key"
@@ -1681,3 +1683,182 @@ def test_operation_logs_streams_restart_log_lines(tmp_path: Path) -> None:
     text = response.get_data(as_text=True)
     assert "restarting now" in text
     assert '"done": true' in text
+
+
+# =============================================================================
+# GET /api/v1/workspaces/preserved  and  /api/v1/workspaces/<id>/transcript
+# =============================================================================
+
+
+def _write_preserved_transcript(
+    mngr_host_dir: Path,
+    agent_name: AgentName,
+    agent_id: AgentId,
+    events: list[dict[str, Any]],
+    mtime_epoch_seconds: float | None = None,
+) -> None:
+    """Lay down a preserved common-transcript JSONL file for a destroyed agent."""
+    agent_dir = get_preserved_agent_dir(mngr_host_dir, agent_name, agent_id)
+    transcript_dir = agent_dir / "events" / "claude" / "common_transcript"
+    transcript_dir.mkdir(parents=True, exist_ok=True)
+    (transcript_dir / "events.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events))
+    if mtime_epoch_seconds is not None:
+        os.utime(agent_dir, (mtime_epoch_seconds, mtime_epoch_seconds))
+
+
+def _write_fake_transcript_mngr(directory: Path, output: str) -> str:
+    """Write a fake ``mngr`` whose ``transcript`` subcommand prints ``output`` to stdout."""
+    directory.mkdir(parents=True, exist_ok=True)
+    script = directory / "mngr"
+    script.write_text(f"#!/bin/sh\nprintf '%s' {shlex.quote(output)}\nexit 0\n")
+    script.chmod(0o755)
+    return str(script)
+
+
+def test_preserved_agents_lists_newest_first(tmp_path: Path) -> None:
+    host_dir = tmp_path / "host"
+    older_id = AgentId()
+    newer_id = AgentId()
+    _write_preserved_transcript(
+        host_dir, AgentName("older-agent"), older_id, [{"type": "user_message"}], mtime_epoch_seconds=1000.0
+    )
+    _write_preserved_transcript(
+        host_dir, AgentName("newer-agent"), newer_id, [{"type": "user_message"}], mtime_epoch_seconds=2000.0
+    )
+    client = _build_client(tmp_path, StaticBackendResolver(url_by_agent_and_service={}), mngr_host_dir=host_dir)
+
+    response = client.get("/api/v1/workspaces/preserved", headers=_auth_header())
+
+    assert response.status_code == 200
+    agents = json.loads(response.data)["agents"]
+    assert [a["agent_name"] for a in agents] == ["newer-agent", "older-agent"]
+    assert agents[0]["agent_id"] == str(newer_id)
+    assert agents[0]["preserved_at"].startswith("1970-01-01T00:33:20")
+
+
+def test_preserved_agents_empty_when_none(tmp_path: Path) -> None:
+    client = _build_client(
+        tmp_path, StaticBackendResolver(url_by_agent_and_service={}), mngr_host_dir=tmp_path / "empty-host"
+    )
+    response = client.get("/api/v1/workspaces/preserved", headers=_auth_header())
+    assert response.status_code == 200
+    assert json.loads(response.data)["agents"] == []
+
+
+def test_preserved_agents_requires_auth(tmp_path: Path) -> None:
+    client = _build_client(
+        tmp_path, StaticBackendResolver(url_by_agent_and_service={}), mngr_host_dir=tmp_path / "host"
+    )
+    assert client.get("/api/v1/workspaces/preserved").status_code == 401
+
+
+def test_transcript_returns_preserved_copy_for_destroyed_agent(tmp_path: Path) -> None:
+    host_dir = tmp_path / "host"
+    agent_id = AgentId()
+    _write_preserved_transcript(
+        host_dir,
+        AgentName("destroyed-agent"),
+        agent_id,
+        [
+            {"type": "user_message", "role": "user", "content": "set up auth"},
+            {"type": "assistant_message", "role": "assistant", "parts": [{"type": "text", "content": "done"}]},
+        ],
+    )
+    # Resolver does NOT know the agent (it is destroyed); the preserved copy still serves it.
+    client = _build_client(tmp_path, StaticBackendResolver(url_by_agent_and_service={}), mngr_host_dir=host_dir)
+
+    response = client.get(f"/api/v1/workspaces/{agent_id}/transcript?format=jsonl", headers=_auth_header())
+
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body["is_preserved"] is True
+    assert body["agent_id"] == str(agent_id)
+    lines = [line for line in body["content"].split("\n") if line]
+    assert json.loads(lines[0])["content"] == "set up auth"
+
+
+def test_transcript_applies_role_and_head_filters(tmp_path: Path) -> None:
+    host_dir = tmp_path / "host"
+    agent_id = AgentId()
+    _write_preserved_transcript(
+        host_dir,
+        AgentName("filtered-agent"),
+        agent_id,
+        [
+            {"type": "user_message", "role": "user", "content": "first"},
+            {"type": "assistant_message", "role": "assistant", "parts": []},
+            {"type": "user_message", "role": "user", "content": "second"},
+        ],
+    )
+    client = _build_client(tmp_path, StaticBackendResolver(url_by_agent_and_service={}), mngr_host_dir=host_dir)
+
+    response = client.get(
+        f"/api/v1/workspaces/{agent_id}/transcript?format=jsonl&role=user&head=1", headers=_auth_header()
+    )
+
+    assert response.status_code == 200
+    lines = [line for line in json.loads(response.data)["content"].split("\n") if line]
+    assert len(lines) == 1
+    assert json.loads(lines[0])["content"] == "first"
+
+
+def test_transcript_rejects_invalid_format(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client = _build_client(
+        tmp_path, StaticBackendResolver(url_by_agent_and_service={}), mngr_host_dir=tmp_path / "host"
+    )
+    response = client.get(f"/api/v1/workspaces/{agent_id}/transcript?format=yaml", headers=_auth_header())
+    assert response.status_code == 400
+
+
+def test_transcript_rejects_head_and_tail_together(tmp_path: Path) -> None:
+    host_dir = tmp_path / "host"
+    agent_id = AgentId()
+    _write_preserved_transcript(host_dir, AgentName("agent-x"), agent_id, [{"type": "user_message"}])
+    client = _build_client(tmp_path, StaticBackendResolver(url_by_agent_and_service={}), mngr_host_dir=host_dir)
+    response = client.get(
+        f"/api/v1/workspaces/{agent_id}/transcript?head=1&tail=1", headers=_auth_header()
+    )
+    assert response.status_code == 400
+
+
+def test_transcript_unknown_agent_returns_404(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    # Not preserved and not a known live workspace -> 404.
+    client = _build_client(
+        tmp_path, StaticBackendResolver(url_by_agent_and_service={}), mngr_host_dir=tmp_path / "host"
+    )
+    response = client.get(f"/api/v1/workspaces/{agent_id}/transcript", headers=_auth_header())
+    assert response.status_code == 404
+
+
+def test_transcript_malformed_agent_id_returns_400(tmp_path: Path) -> None:
+    client = _build_client(
+        tmp_path, StaticBackendResolver(url_by_agent_and_service={}), mngr_host_dir=tmp_path / "host"
+    )
+    response = client.get("/api/v1/workspaces/not-a-valid-id/transcript", headers=_auth_header())
+    assert response.status_code == 400
+
+
+def test_transcript_falls_back_to_live_agent_via_mngr(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    agent_id = AgentId()
+    live_output = '{"type":"user_message","content":"live hello"}\n'
+    fake_mngr = _write_fake_transcript_mngr(tmp_path / "bin", live_output)
+    # The agent is known (live) but has no preserved copy, so the route shells out to mngr.
+    resolver = StaticBackendResolver(url_by_agent_and_service={str(agent_id): {}})
+    client = _build_client(
+        tmp_path,
+        resolver,
+        root_concurrency_group=root_concurrency_group,
+        mngr_binary=fake_mngr,
+        mngr_host_dir=tmp_path / "host",
+    )
+
+    response = client.get(f"/api/v1/workspaces/{agent_id}/transcript?format=jsonl", headers=_auth_header())
+
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body["is_preserved"] is False
+    assert body["content"] == live_output

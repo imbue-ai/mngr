@@ -24,13 +24,17 @@ mirror the agent-state-dir layout verbatim under the destination root.
 from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Sequence
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
+from typing import Final
 from typing import TypeVar
 
 from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
@@ -51,6 +55,7 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import InvalidName
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 
 
@@ -254,6 +259,90 @@ def get_local_preserved_agent_dir(mngr_ctx: MngrContext, agent_name: AgentName, 
     """Return the local preserved-files directory for an agent."""
     local_host_dir = Path(mngr_ctx.config.default_host_dir).expanduser()
     return get_preserved_agent_dir(local_host_dir, agent_name, agent_id)
+
+
+class PreservedAgentInfo(FrozenModel):
+    """Identity and preservation time of one agent whose state was preserved on destroy."""
+
+    agent_name: AgentName = Field(description="The preserved agent's name")
+    agent_id: AgentId = Field(description="The preserved agent's id")
+    preserved_at: datetime = Field(
+        description="When the agent's state was preserved (the preserved directory's mtime, "
+        "which approximates when the agent was destroyed)"
+    )
+
+
+# Preserved directories are named '{agent_name}--{agent_id}'. An AgentName may itself
+# contain '--' (SafeName allows it mid-string) but an AgentId ('agent-<hex>') never does,
+# so the final '--' is always the name/id boundary.
+_PRESERVED_DIR_NAME_SEPARATOR: Final[str] = "--"
+
+# The preserved layout mirrors the agent state dir, so the common transcript lives at
+# events/<source>/common_transcript/events.jsonl (source is the agent type, e.g. 'claude').
+_PRESERVED_COMMON_TRANSCRIPT_GLOB: Final[str] = "events/*/common_transcript/events.jsonl"
+
+
+def _parse_preserved_agent_dir_name(dir_name: str) -> tuple[AgentName, AgentId] | None:
+    """Parse a '{agent_name}--{agent_id}' preserved directory name, or None if malformed."""
+    if _PRESERVED_DIR_NAME_SEPARATOR not in dir_name:
+        return None
+    agent_name_str, _, agent_id_str = dir_name.rpartition(_PRESERVED_DIR_NAME_SEPARATOR)
+    try:
+        agent_name = AgentName(agent_name_str)
+        agent_id = AgentId(agent_id_str)
+    except (InvalidName, InvalidRandomIdError):
+        return None
+    return agent_name, agent_id
+
+
+def list_preserved_agents(host_dir: Path) -> list[PreservedAgentInfo]:
+    """List every preserved agent under ``host_dir``, newest-first by preservation time.
+
+    Scans ``<host_dir>/preserved/`` for ``{agent_name}--{agent_id}`` directories.
+    Directory names that do not parse to a valid name/id are skipped (logged at
+    debug). Returns an empty list when nothing has ever been preserved.
+    """
+    preserved_root = get_preserved_agents_root_dir(host_dir)
+    if not preserved_root.is_dir():
+        return []
+    infos: list[PreservedAgentInfo] = []
+    for agent_dir in preserved_root.iterdir():
+        if not agent_dir.is_dir():
+            continue
+        parsed = _parse_preserved_agent_dir_name(agent_dir.name)
+        if parsed is None:
+            logger.debug("Skipping preserved directory with unparseable name {}", agent_dir.name)
+            continue
+        agent_name, agent_id = parsed
+        preserved_at = datetime.fromtimestamp(agent_dir.stat().st_mtime, tz=timezone.utc)
+        infos.append(PreservedAgentInfo(agent_name=agent_name, agent_id=agent_id, preserved_at=preserved_at))
+    return sorted(infos, key=lambda info: info.preserved_at, reverse=True)
+
+
+def find_preserved_agent_by_id(host_dir: Path, agent_id: AgentId) -> PreservedAgentInfo | None:
+    """Return the preserved agent with this id, or None if it was never preserved."""
+    for info in list_preserved_agents(host_dir):
+        if info.agent_id == agent_id:
+            return info
+    return None
+
+
+def read_preserved_common_transcript(host_dir: Path, info: PreservedAgentInfo) -> str | None:
+    """Read a preserved agent's common-transcript JSONL, or None when none was preserved."""
+    preserved_dir = get_preserved_agent_dir(host_dir, info.agent_name, info.agent_id)
+    matches = sorted(preserved_dir.glob(_PRESERVED_COMMON_TRANSCRIPT_GLOB))
+    if len(matches) == 0:
+        return None
+    if len(matches) > 1:
+        source_paths = ", ".join(str(match) for match in matches)
+        raise MngrError(
+            f"Multiple preserved common transcripts found for agent '{info.agent_name}': {source_paths}. "
+            "This is unexpected -- please report this as a bug."
+        )
+    try:
+        return matches[0].read_text()
+    except OSError as e:
+        raise MngrError(f"Failed to read preserved transcript for agent '{info.agent_name}': {e}") from e
 
 
 def preserve_agent_data(

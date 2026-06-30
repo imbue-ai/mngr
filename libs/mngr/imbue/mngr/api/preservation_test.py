@@ -1,4 +1,5 @@
 import json
+import os
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
@@ -6,19 +7,25 @@ from pathlib import Path
 
 import pytest
 
+from imbue.mngr.api.preservation import PreservedAgentInfo
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import adopt_sessions
 from imbue.mngr.api.preservation import build_transcript_preserved_items
 from imbue.mngr.api.preservation import dedupe_by_resolved_path
+from imbue.mngr.api.preservation import find_preserved_agent_by_id
 from imbue.mngr.api.preservation import flag_gated_items
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.preservation import get_preserved_agent_dir
+from imbue.mngr.api.preservation import get_preserved_agents_root_dir
+from imbue.mngr.api.preservation import list_preserved_agents
 from imbue.mngr.api.preservation import preserve_agent_data
 from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
+from imbue.mngr.api.preservation import read_preserved_common_transcript
 from imbue.mngr.api.preservation import require_unique_match
 from imbue.mngr.api.preservation import run_adopt_session_preflight
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.host import get_agent_state_dir_path
@@ -484,3 +491,120 @@ def test_adopt_sessions_no_op_when_neither() -> None:
         raise AssertionError("resume must not run")
 
     adopt_sessions((), None, copy_explicit=fail_explicit, copy_clone=fail_clone, resume=fail_resume)
+
+
+# =============================================================================
+# list_preserved_agents / find_preserved_agent_by_id / read_preserved_common_transcript
+# =============================================================================
+
+
+def _make_preserved_agent_dir(
+    host_dir: Path,
+    agent_name: AgentName,
+    agent_id: AgentId,
+    mtime_epoch_seconds: float,
+) -> Path:
+    agent_dir = get_preserved_agent_dir(host_dir, agent_name, agent_id)
+    agent_dir.mkdir(parents=True)
+    os.utime(agent_dir, (mtime_epoch_seconds, mtime_epoch_seconds))
+    return agent_dir
+
+
+def _write_preserved_common_transcript(
+    host_dir: Path,
+    agent_name: AgentName,
+    agent_id: AgentId,
+    events: Sequence[dict],
+    source: str = "claude",
+) -> None:
+    transcript_dir = get_preserved_agent_dir(host_dir, agent_name, agent_id) / "events" / source / "common_transcript"
+    transcript_dir.mkdir(parents=True, exist_ok=True)
+    (transcript_dir / "events.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events))
+
+
+def test_list_preserved_agents_returns_empty_when_no_preserved_root(tmp_path: Path) -> None:
+    assert list_preserved_agents(tmp_path) == []
+
+
+def test_list_preserved_agents_parses_name_and_id(tmp_path: Path) -> None:
+    agent_id = AgentId.generate()
+    _make_preserved_agent_dir(tmp_path, AgentName("my-agent"), agent_id, mtime_epoch_seconds=1000.0)
+    agents = list_preserved_agents(tmp_path)
+    assert len(agents) == 1
+    assert agents[0].agent_name == AgentName("my-agent")
+    assert agents[0].agent_id == agent_id
+    assert agents[0].preserved_at == datetime.fromtimestamp(1000.0, tz=timezone.utc)
+
+
+def test_list_preserved_agents_parses_name_containing_double_dash(tmp_path: Path) -> None:
+    # SafeName allows '--' mid-name; the final '--' is the name/id boundary.
+    agent_id = AgentId.generate()
+    _make_preserved_agent_dir(tmp_path, AgentName("foo--bar"), agent_id, mtime_epoch_seconds=1000.0)
+    agents = list_preserved_agents(tmp_path)
+    assert len(agents) == 1
+    assert agents[0].agent_name == AgentName("foo--bar")
+    assert agents[0].agent_id == agent_id
+
+
+def test_list_preserved_agents_orders_newest_first(tmp_path: Path) -> None:
+    _make_preserved_agent_dir(tmp_path, AgentName("oldest"), AgentId.generate(), mtime_epoch_seconds=1000.0)
+    _make_preserved_agent_dir(tmp_path, AgentName("newest"), AgentId.generate(), mtime_epoch_seconds=3000.0)
+    _make_preserved_agent_dir(tmp_path, AgentName("middle"), AgentId.generate(), mtime_epoch_seconds=2000.0)
+    names = [str(info.agent_name) for info in list_preserved_agents(tmp_path)]
+    assert names == ["newest", "middle", "oldest"]
+
+
+def test_list_preserved_agents_skips_unparseable_directories(tmp_path: Path) -> None:
+    (get_preserved_agents_root_dir(tmp_path) / "not-a-valid-preserved-dir").mkdir(parents=True)
+    _make_preserved_agent_dir(tmp_path, AgentName("real"), AgentId.generate(), mtime_epoch_seconds=1000.0)
+    agents = list_preserved_agents(tmp_path)
+    assert [str(info.agent_name) for info in agents] == ["real"]
+
+
+def test_find_preserved_agent_by_id_returns_match(tmp_path: Path) -> None:
+    agent_id = AgentId.generate()
+    _make_preserved_agent_dir(tmp_path, AgentName("target"), agent_id, mtime_epoch_seconds=1000.0)
+    _make_preserved_agent_dir(tmp_path, AgentName("other"), AgentId.generate(), mtime_epoch_seconds=1000.0)
+    info = find_preserved_agent_by_id(tmp_path, agent_id)
+    assert info is not None
+    assert info.agent_id == agent_id
+
+
+def test_find_preserved_agent_by_id_returns_none_when_absent(tmp_path: Path) -> None:
+    assert find_preserved_agent_by_id(tmp_path, AgentId.generate()) is None
+
+
+def test_read_preserved_common_transcript_reads_jsonl(tmp_path: Path) -> None:
+    agent_id = AgentId.generate()
+    agent_name = AgentName("with-transcript")
+    _make_preserved_agent_dir(tmp_path, agent_name, agent_id, mtime_epoch_seconds=1000.0)
+    _write_preserved_common_transcript(tmp_path, agent_name, agent_id, [{"type": "user_message", "content": "hi"}])
+    info = PreservedAgentInfo(
+        agent_name=agent_name, agent_id=agent_id, preserved_at=datetime.fromtimestamp(1000.0, tz=timezone.utc)
+    )
+    content = read_preserved_common_transcript(tmp_path, info)
+    assert content is not None
+    assert json.loads(content.splitlines()[0])["content"] == "hi"
+
+
+def test_read_preserved_common_transcript_returns_none_when_no_transcript(tmp_path: Path) -> None:
+    agent_id = AgentId.generate()
+    agent_name = AgentName("no-transcript")
+    _make_preserved_agent_dir(tmp_path, agent_name, agent_id, mtime_epoch_seconds=1000.0)
+    info = PreservedAgentInfo(
+        agent_name=agent_name, agent_id=agent_id, preserved_at=datetime.fromtimestamp(1000.0, tz=timezone.utc)
+    )
+    assert read_preserved_common_transcript(tmp_path, info) is None
+
+
+def test_read_preserved_common_transcript_raises_on_multiple_sources(tmp_path: Path) -> None:
+    agent_id = AgentId.generate()
+    agent_name = AgentName("two-sources")
+    _make_preserved_agent_dir(tmp_path, agent_name, agent_id, mtime_epoch_seconds=1000.0)
+    _write_preserved_common_transcript(tmp_path, agent_name, agent_id, [{"type": "user_message"}], source="claude")
+    _write_preserved_common_transcript(tmp_path, agent_name, agent_id, [{"type": "user_message"}], source="codex")
+    info = PreservedAgentInfo(
+        agent_name=agent_name, agent_id=agent_id, preserved_at=datetime.fromtimestamp(1000.0, tz=timezone.utc)
+    )
+    with pytest.raises(MngrError):
+        read_preserved_common_transcript(tmp_path, info)
