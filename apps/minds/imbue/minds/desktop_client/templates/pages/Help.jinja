@@ -134,6 +134,7 @@
     document.getElementById("help-done-btn").addEventListener("click", closeHelp);
   })();
 </script>
+<script src="/_static/tooltip_triggers.js" defer></script>
 {% endset %}
 <Base title="Get help"
       body_class="bg-transparent text-primary font-sans antialiased"
@@ -145,7 +146,7 @@
          class="relative w-full max-w-md max-h-[90vh] overflow-y-auto bg-surface-primary rounded-lg border border-default shadow-overlay">
       <div class="flex items-center justify-between px-4 h-[44px] border-b border-default">
         <h1 class="type-section text-primary">Get help</h1>
-        <button type="button" aria-label="Close" id="help-close-btn"
+        <button type="button" aria-label="Close" id="help-close-btn" data-tooltip="Close"
                 class="inline-flex items-center justify-center w-6 h-6 rounded-md text-tertiary hover:text-primary hover:bg-fill-hover cursor-pointer">
           <Icon16 name="close" />
         </button>

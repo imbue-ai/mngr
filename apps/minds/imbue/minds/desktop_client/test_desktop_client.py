@@ -1633,6 +1633,16 @@ def test_help_page_renders_report_option(tmp_path: Path) -> None:
     assert "disabled" in agent_radio
 
 
+def test_help_page_close_button_has_tooltip(tmp_path: Path) -> None:
+    """The help dialog's close button carries a custom tooltip wired by the shared
+    trigger script (modal pages can render tooltips on the overlay surface too)."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/help")
+    assert response.status_code == 200
+    assert 'data-tooltip="Close"' in response.text
+    assert "/_static/tooltip_triggers.js" in response.text
+
+
 def test_help_page_hides_include_logs_checkbox_when_setting_on(tmp_path: Path) -> None:
     """With the persistent include-logs setting on, logs are always attached and the checkbox is hidden."""
     MindsConfig(data_dir=tmp_path).set_include_error_logs(True)

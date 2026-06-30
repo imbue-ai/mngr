@@ -414,6 +414,9 @@ html {
   box-shadow: var(--shadow-overlay);
   white-space: normal;
   pointer-events: none;
+  /* Always topmost on the overlay surface -- in particular above a hosted modal
+     iframe when a tooltip is shown over an open modal. */
+  z-index: 2147483647;
 }
 .minds-tooltip-shortcut {
   padding: 0.0625rem 0.25rem;

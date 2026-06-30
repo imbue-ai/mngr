@@ -3136,14 +3136,18 @@ ipcMain.on('overlay-modal-loaded', (event) => {
   if (bundle) primeOverlayFrames(bundle);
 });
 
-// Custom titlebar tooltip: the chrome view sends the trigger's rect + label;
-// forward it to the overlay host, which renders/measures the bubble and reports
-// the rect back via overlay-set-bounds. Suppressed while a modal is open (the
-// titlebar is covered by the modal then, so no titlebar hover should occur).
+// Custom tooltip: a trigger (a titlebar button in the chrome view, or an element
+// in a hosted modal page like the help dialog) sends its rect + label; forward
+// it to the overlay host to render. When NO modal is open the host measures the
+// bubble and reports a small rect so the overlay view shrinks to it (the rest of
+// the window stays interactive). When a modal IS open the overlay view is already
+// full-window and capturing, so ``inModal`` tells the host to render the bubble
+// in-page above the modal iframe (above everything via z-index) without a bounds
+// change. Titlebar tooltips can't fire while a modal is open (the modal covers
+// the titlebar), so this only enables modal-internal tooltips.
 ipcMain.on('show-tooltip', (event, payload) => {
   const bundle = getBundleFromEvent(event);
   if (!bundle || !bundle.modalView || bundle.modalView.webContents.isDestroyed()) return;
-  if (bundle.modalVisible) return;
   if (!payload || typeof payload !== 'object' || !payload.rect) return;
   // Pass the real window size: the overlay host can't trust its own
   // window.innerWidth for measuring/positioning, because between tooltips the
@@ -3159,6 +3163,7 @@ ipcMain.on('show-tooltip', (event, payload) => {
       html: typeof payload.html === 'string' ? payload.html : null,
       windowWidth: cb.width,
       windowHeight: cb.height,
+      inModal: !!bundle.modalVisible,
     });
   } catch { /* noop */ }
 });

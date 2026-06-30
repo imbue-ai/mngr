@@ -1,3 +1,5 @@
 Titlebar buttons (Projects, Home, Back, Forward, Get help, Requests, and the window controls) now show custom styled tooltips on hover and keyboard focus, replacing the OS `title=` tooltips that were unreliable in the desktop window and could not extend past the titlebar. Tooltips appear after a short hover delay, float above both the chrome and the workspace content, and reposition to stay on-screen.
 
 Under the hood, the desktop client's overlay layer was reworked into a single always-warm surface. The workspace menu, inbox, help, and sign-in dialogs now share one persistent overlay (hosted as kept-warm iframes that load once and stay mounted) instead of loading a fresh page every time one opens; their appearance and behavior are unchanged. The custom tooltips render on this same surface.
+
+Tooltips can also be triggered from elements inside the overlay's dialogs (rendered above the open dialog) -- the help dialog's close button now shows a "Close" tooltip.

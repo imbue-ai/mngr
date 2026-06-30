@@ -124,6 +124,10 @@
   var TOOLTIP_MARGIN = 6; // min gap from the window edges
   var TOOLTIP_GAP = 6; // gap between the trigger and the bubble
   var tooltipEl = null;
+  // True while the current tooltip is shown over an open modal -- the view is
+  // already full-window then, so we position the bubble in-page and don't drive
+  // the view's bounds (main ignores bounds reports while a modal is open).
+  var tooltipInModal = false;
 
   function ensureTooltipEl() {
     if (tooltipEl) return tooltipEl;
@@ -184,16 +188,26 @@
     if (tx + w > vw - TOOLTIP_MARGIN) tx = vw - TOOLTIP_MARGIN - w;
     if (tx < TOOLTIP_MARGIN) tx = TOOLTIP_MARGIN;
     if (ty < TOOLTIP_MARGIN) ty = TOOLTIP_MARGIN;
-    // Pin the bubble at the view's top-left and fix its width so it does not
-    // reflow when the view shrinks to the reported rect.
+    // Fix the bubble's width so it doesn't reflow when the viewport changes.
     el.style.width = w + 'px';
-    el.style.left = '0';
-    el.style.top = '0';
-    el.style.visibility = 'visible';
-    window.minds.overlaySetBounds({
-      mode: 'rect',
-      rect: { x: tx, y: ty, width: w, height: h },
-    });
+    tooltipInModal = !!cmd.inModal;
+    if (tooltipInModal) {
+      // A modal owns the (full-window) view; place the bubble at its window
+      // position in-page, above the modal iframe (via z-index). No bounds change.
+      el.style.left = tx + 'px';
+      el.style.top = ty + 'px';
+      el.style.visibility = 'visible';
+    } else {
+      // No modal: pin the bubble at the view's top-left and shrink the view to
+      // its rect so the rest of the window stays interactive.
+      el.style.left = '0';
+      el.style.top = '0';
+      el.style.visibility = 'visible';
+      window.minds.overlaySetBounds({
+        mode: 'rect',
+        rect: { x: tx, y: ty, width: w, height: h },
+      });
+    }
   }
 
   function hideTooltip() {
@@ -201,14 +215,17 @@
       tooltipEl.style.display = 'none';
       tooltipEl.style.visibility = 'hidden';
     }
-    window.minds.overlaySetBounds({ mode: 'hidden' });
+    // Only restore the view's bounds when the tooltip drove them (no modal). When
+    // shown over a modal, the modal owns the view -- leave it full-window.
+    if (!tooltipInModal) window.minds.overlaySetBounds({ mode: 'hidden' });
+    tooltipInModal = false;
   }
 
   window.minds.onOverlayCommand(function (cmd) {
     if (!cmd || typeof cmd !== 'object') return;
     if (cmd.type === 'show-modal' && cmd.id && cmd.url) showModal(cmd.id, cmd.url);
     else if (cmd.type === 'hide-modal' && cmd.id) hideModal(cmd.id);
-    else if (cmd.type === 'hide-all') hideAll();
+    else if (cmd.type === 'hide-all') { hideAll(); hideTooltip(); }
     else if (cmd.type === 'show-tooltip') showTooltip(cmd);
     else if (cmd.type === 'hide-tooltip') hideTooltip();
   });

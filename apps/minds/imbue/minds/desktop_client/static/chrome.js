@@ -277,61 +277,9 @@
     });
   }
 
-  // -- Custom titlebar tooltips (Electron only) -----------------------------
-  // Native ``title=`` is unreliable in the desktop WebContentsView and can't
-  // extend past the chrome view, so titlebar buttons carry a ``data-tooltip``
-  // label and we render a styled bubble on the overlay surface (which floats
-  // above both chrome and content). Shown on hover (after a short delay) and on
-  // keyboard focus; hidden on leave / blur / click / window resize or blur.
-  // Browser mode has no overlay surface, so it gets no tooltip.
-  if (isElectron && window.minds.showTooltip) {
-    var TOOLTIP_DELAY_MS = 150;
-    var tooltipTimer = null;
-    var tooltipShown = false;
-
-    var clearTooltipTimer = function () {
-      if (tooltipTimer) { clearTimeout(tooltipTimer); tooltipTimer = null; }
-    };
-    var hideTooltip = function () {
-      clearTooltipTimer();
-      if (tooltipShown) { window.minds.hideTooltip(); tooltipShown = false; }
-    };
-    var showTooltipFor = function (el) {
-      var text = el.getAttribute('data-tooltip');
-      if (!text) return;
-      var r = el.getBoundingClientRect();
-      window.minds.showTooltip({
-        rect: { x: r.left, y: r.top, width: r.width, height: r.height },
-        text: text,
-      });
-      tooltipShown = true;
-    };
-    var scheduleTooltip = function (el) {
-      clearTooltipTimer();
-      tooltipTimer = setTimeout(function () {
-        tooltipTimer = null;
-        showTooltipFor(el);
-      }, TOOLTIP_DELAY_MS);
-    };
-    var triggers = document.querySelectorAll('[data-tooltip]');
-    for (var ti = 0; ti < triggers.length; ti++) {
-      (function (el) {
-        el.addEventListener('mouseenter', function () { scheduleTooltip(el); });
-        el.addEventListener('mouseleave', hideTooltip);
-        el.addEventListener('click', hideTooltip);
-        // Keyboard focus only -- not focus that came from a mouse click (which
-        // would flash the tooltip and then immediately hide it on the click).
-        el.addEventListener('focus', function () {
-          try {
-            if (el.matches(':focus-visible')) showTooltipFor(el);
-          } catch (e) { /* :focus-visible unsupported -- skip focus tooltips */ }
-        });
-        el.addEventListener('blur', hideTooltip);
-      })(triggers[ti]);
-    }
-    window.addEventListener('resize', hideTooltip);
-    window.addEventListener('blur', hideTooltip);
-  }
+  // Custom titlebar tooltips: the titlebar buttons carry ``data-tooltip``
+  // labels and are wired by the shared /_static/tooltip_triggers.js (included
+  // by Chrome.jinja), which is the same script the overlay's modal pages use.
 
   // -- Title + URL tracking -------------------------------------------------
   function refreshAuthStatus() {
