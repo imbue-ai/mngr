@@ -1,18 +1,18 @@
-# Plan: Minds Inspirations (publish & adapt)
+# Plan: Minds Inspirations (publish & use)
 
 ## Overview
 
 - Adds an "inspirations" concept: a way for a running mind to **publish** a reusable snapshot of the apps/features it built, and for another mind to **adapt** an existing inspiration into itself.
 - All work lands in the **forever-claude-template (FCT)** repo (edited via a `.external_worktrees/forever-claude-template` worktree, per CLAUDE.md). There are **no `apps/minds` (desktop-client) changes** — the publish UI lives in the agent's in-container web UI (`system_interface`), not the minds request-inbox.
 - Deliverables:
-  - Agent-awareness: an "Inspirations" section in the FCT `CLAUDE.md` so the agent knows what inspirations are and **when to offer to publish one** (it already knows which skills exist — no need to enumerate them).
+  - Agent-awareness: a **one-sentence** mention in the FCT `CLAUDE.md` that inspirations exist (so the agent knows the concept). It does **not** push the agent to proactively offer publishing, and does not enumerate the skills (the agent already knows them).
   - `/publish-inspiration` skill (FCT): assembles a clean, shareable repo from the current mind (via a `launch-task` sub-agent on an isolated worktree) and pushes it to GitHub.
-  - `/adapt-inspiration` skill (FCT): merges an existing inspiration (by git URL) into the current mind and fills in its holes.
+  - `/use-inspiration` skill (FCT): merges an existing inspiration (by git URL) into the current mind and fills in its holes.
   - **system_interface publish popup** (FCT `apps/system_interface`): a small in-UI box with editable inputs (title, description, repo name, visibility, thumbnail) the user confirms before publishing — built directly into the system_interface, not as a minds request type.
   - **system_interface GitHub-login modal** (FCT `apps/system_interface`): a one-click GitHub login mirroring the existing Claude-login modal, for users without an in-VM `GH_TOKEN`.
 - Key design decisions locked during planning:
-  - The inspiration is assembled by a **`launch-task` sub-agent on its own git worktree** (`mngr/<slug>`), so the live mind is untouched during assembly. The worktree is reduced to a **clean FCT base** (the FCT upstream `main` via `parent.toml`) plus only the user-selected app/feature paths — no experimental cruft, no user data, no secrets.
-  - The published repo keeps an **upstream link to FCT** so it can still pull template/runtime updates.
+  - The inspiration is assembled by a **`launch-task` sub-agent on its own git worktree** (`mngr/<slug>`), so the live mind is untouched during assembly. The worktree is reduced to a **clean base = the FCT version the mind was created from** (its own FCT base commit/ref — *not* a freshly fetched upstream), plus only the user-selected app/feature paths — no experimental cruft, no user data, no secrets.
+  - The published repo records a **simple provenance link** to the FCT version it was based on — and does **nothing else** with upstream: no fetching, no pulling, no updating. Reusing whatever FCT version the mind already had keeps inspiration creation dead simple; because the base is a real FCT tree, the inspiration works as a proper template when later used.
   - A single inspiration repo can **accumulate multiple inspirations** over time (one `inspiration-<name>.md` manifest per inspiration at the repo root); each inspiration can contain multiple apps.
   - The manifest is a **worksheet**: it records what the inspiration is, its holes/permissions (freeform prose), and how it was later adapted.
   - Scope is intentionally bounded: no catalog/discovery UI for browsing inspirations (separate, later effort).
@@ -21,18 +21,15 @@
 
 ### Agent-awareness (CLAUDE.md)
 
-- The agent reads an "Inspirations" section in `CLAUDE.md` on startup and understands what an inspiration is and **when to offer to publish one**. The section does not enumerate the skills — the agent already knows which skills exist.
-- When to offer (once the product is relatively finished and the user seems happy), two cues:
-  - The agent can ask whether the user is happy or wants any more changes; if the user says no more changes, offer to publish an inspiration.
-  - Or, when the user spontaneously shows excitement/joy about their app(s), offer then.
-- The offer is a lightweight nudge over whatever chat channel the user is on (Telegram or minds chat), **not** the popup (the popup only appears once publishing is underway).
+- A single sentence in `CLAUDE.md` tells the agent that inspirations exist (a publishable/usable snapshot of what a mind built). That is all — it does **not** instruct the agent to proactively offer publishing, and does not enumerate the skills.
+- Consequence: publishing is **user-initiated** for now (the user asks to publish, or invokes `/publish-inspiration`). Proactive "offer to publish" behavior is intentionally deferred.
 
 ### Publishing (`/publish-inspiration`)
 
 - The agent (the primary mind) asks the user a few setup questions in chat: what to call the inspiration, which apps/features to include, and whether any data should be included. It does **not** enumerate specific files to the user.
 - By default, **no user data** is included — only app/UI/code — and data is included only when the user explicitly asks.
 - The agent delegates the repo **assembly** to a sub-agent via the existing **`launch-task`** skill, which `mngr create`s a worker on an isolated worktree (`mngr/<slug>`). The live mind keeps running untouched during assembly.
-- In its worktree, the worker establishes a **clean FCT base** (checks out the FCT upstream `main` recorded in `parent.toml`), copies in only the file/paths backing the chosen apps/features, strips secrets, and makes a single commit. The upstream link to FCT is preserved.
+- In its worktree, the worker establishes a **clean base = the FCT version the mind was created from** (resets to the mind's own FCT base commit/ref — no upstream fetch), copies in only the file/paths backing the chosen apps/features, strips secrets, and makes a single commit. A simple provenance link to that FCT version is recorded; nothing is pulled or updated from upstream.
 - The worker generates an `inspiration-<name>.md` manifest at the repo root: YAML front-matter (title, description, thumbnail) plus a markdown body explaining what it is, its holes, and the permissions it may need (freeform prose).
 - The thumbnail is, for now, an **SVG icon the agent generates** (mock data only, never real user data); it can later be replaced with a real screenshot.
 - The worker rewrites the FCT `/welcome` stable region to be specific to the most-recently-published inspiration, runs the **boot smoke-check** (the mind boots from the clean base; selected apps need not fully function — holes are expected), and reports back. The lead proxies any mid-flight `question` gates to the user and merges the worker's branch back on `done`.
@@ -42,11 +39,11 @@
 - If repo creation fails (name taken, token insufficient), the agent reports it and re-opens the publish popup for a new name, keeping the assembled commit intact.
 - Publishing a mind that already holds accumulated inspirations carries **all** existing `inspiration-*.md` manifests and their apps into the new repo, alongside the newly-published one.
 
-### Adapting (`/adapt-inspiration`)
+### Using an inspiration (`/use-inspiration`)
 
 - Two entry points:
   1. **Template path**: a new mind is created with an inspiration repo as its template. On startup, the rewritten `/welcome` drives the adaptation. The agent defaults to adapting the **latest** inspiration; older manifests are primarily reference (likely already adapted). The agent may ask the user what they want to do.
-  2. **Merge path**: an existing mind (built from a different template) runs `/adapt-inspiration <git-url>`. The skill `git remote add`s the inspiration and merges/subtrees it in.
+  2. **Merge path**: an existing mind (built from a different template) runs `/use-inspiration <git-url>`. The skill `git remote add`s the inspiration and merges/subtrees it in.
 - After bringing in the inspiration, the agent reads the relevant `inspiration-<name>.md` manifest, asks the user in chat how they want to adapt it, and works through the manifest's holes interactively (e.g. swapping Slack for email).
 - Merged-in `inspiration-<name>.md` manifests stay at the repo root and accumulate alongside existing ones.
 - As it adapts, the agent appends a dated "how it was adapted" section to the relevant manifest so the file captures its own history (the worksheet behavior).
@@ -95,20 +92,20 @@ Frontend:
 ### Forever-claude-template skills + docs (FCT)
 
 - `CLAUDE.md`
-  - Add an "Inspirations" section: what inspirations are and **when to offer to publish** — do not list the skills (the agent already knows them). Offer when the product is relatively finished and the user is happy: either after asking "are you happy, or want any more changes?" and the user wants none, or when the user spontaneously shows excitement about their app(s). The offer is a lightweight nudge over the user's current chat channel, not the popup.
+  - Add a **single sentence** noting that inspirations exist (a publishable/usable snapshot of what a mind built). Do **not** enumerate the skills and do **not** tell the agent to proactively offer publishing — that nudge is deferred for now.
 - `.agents/skills/publish-inspiration/SKILL.md` (new)
-  - Implements the publish flow: setup Q&A; **delegate assembly to a `launch-task` worker** (write the task file, `create_worker.py launch --template worker`, background `await` for the report, proxy `question` gates, merge the worker's `mngr/<slug>` branch back); the worker establishes the clean FCT base (upstream `main` from `parent.toml`), does file/path-level selection + single commit, secret stripping, `inspiration-<name>.md` + SVG thumbnail generation, `/welcome` stable-region rewrite, and the boot smoke-check; then raise the **system_interface publish popup** and wait for the edited values; ensure `GH_TOKEN` (raising the **GitHub-login modal** if missing); `gh repo create` + push; failure handling (re-open popup); and accumulation (carry existing manifests/apps forward).
+  - Implements the publish flow: setup Q&A; **delegate assembly to a `launch-task` worker** (write the task file, `create_worker.py launch --template worker`, background `await` for the report, proxy `question` gates, merge the worker's `mngr/<slug>` branch back); the worker establishes the clean base by resetting to the FCT version the mind was created from (the mind's own FCT base commit/ref — no upstream fetch), does file/path-level selection + single commit, secret stripping, `inspiration-<name>.md` + SVG thumbnail generation, `/welcome` stable-region rewrite, and the boot smoke-check; then raise the **system_interface publish popup** and wait for the edited values; ensure `GH_TOKEN` (raising the **GitHub-login modal** if missing); `gh repo create` + push; failure handling (re-open popup); and accumulation (carry existing manifests/apps forward).
   - May include a helper script (e.g. `.agents/skills/publish-inspiration/scripts/build_inspiration.sh`) for the git assembly the worker runs, kept self-contained in the FCT (the dev `create-new-mind-repo` recipe is **not** available inside the VM).
-- `.agents/skills/adapt-inspiration/SKILL.md` (new)
-  - Implements the merge path: `git remote add` + **`git subtree`** of the inspiration URL (preserves provenance and coexists with the upstream-FCT link), manifest reading, interactive hole-filling Q&A, manifest worksheet append (dated "how it was adapted"), and accumulation (manifests stay at root).
+- `.agents/skills/use-inspiration/SKILL.md` (new)
+  - Implements the merge path: `git remote add` + **`git subtree`** of the inspiration URL (preserves provenance and coexists with the provenance link), manifest reading, interactive hole-filling Q&A, manifest worksheet append (dated "how it was adapted"), and accumulation (manifests stay at root).
   - Conflict handling: when a second inspiration collides with an existing app dir/file, the agent figures it out and resolves interactively, surfacing the collision to the user as a "hole" — always in non-technical language, asking the user only if it is unsure.
 - `.agents/skills/welcome/SKILL.md` (existing in FCT)
   - Updated by `/publish-inspiration` at publish time to reflect the latest inspiration. The plan adds the rewrite logic to the publish skill; the welcome skill itself needs a stable, templated structure the publish skill can target.
 - Manifest convention
   - Define the `inspiration-<name>.md` format (front-matter keys: `title`, `description`, `thumbnail`; body sections: What it is, Apps included, Holes, Permissions it may need, Adaptation history).
   - The thumbnail is stored as `inspiration-<name>.svg` next to the manifest at the repo root; the front-matter `thumbnail` key holds its relative path.
-- Upstream link
-  - The published repo records its FCT upstream **both** as a `parent.toml`-style pointer (per FCT v2's upstream convention) **and** as a git remote, so template-path minds and `/adapt-inspiration` can pull FCT template/runtime updates.
+- Provenance link (no upstream updating)
+  - The inspiration records **which FCT version it was based on** (reuse the `parent.toml` pointer the mind already carries). This is provenance only: the published repo does **not** fetch, pull, or update from upstream. The clean base simply *is* whatever FCT version the mind started from, so the tree is already a proper FCT tree and works as a template when used. Keeping it link-only is what makes inspiration creation simple.
 - FCT changelog
   - New entry per FCT changelog conventions describing the two skills + CLAUDE.md awareness.
 
@@ -130,10 +127,10 @@ Frontend:
 
 - **Phase 3 — FCT `/publish-inspiration` skill (happy path, launch-task)**
   - Write the skill + helper script: setup Q&A, launch-task delegation, clean-base assembly, manifest + thumbnail, `/welcome` rewrite, boot smoke-check, `gh repo create` + push.
-  - Wire to the Phase-1 popup and the Phase-2 GitHub-login modal. Add the `CLAUDE.md` "Inspirations" section + proactive-nudge guidance.
+  - Wire to the Phase-1 popup and the Phase-2 GitHub-login modal. Add the one-sentence `CLAUDE.md` mention that inspirations exist (no proactive-nudge guidance).
   - Result: a mind can publish a single-app inspiration to a fresh private repo. Manually verified end-to-end.
 
-- **Phase 4 — FCT `/adapt-inspiration` skill (both paths)**
+- **Phase 4 — FCT `/use-inspiration` skill (both paths)**
   - Merge path: `git remote add` + `git subtree`, manifest read, interactive hole-filling, worksheet append.
   - Template path: rewrite `/welcome` so a new mind built from an inspiration repo adapts the latest inspiration on startup; surface older manifests as reference.
   - Result: a mind can adapt an existing inspiration both by URL and by being created from an inspiration repo.
@@ -168,15 +165,17 @@ Frontend:
 - **Lead vs. worker division for popup + push.** Whether the `launch-task` worker raises the publish popup and pushes, or only assembles + smoke-checks in isolation while the lead (which owns the user conversation) raises the popup, handles GitHub login, and pushes. Leaning toward the latter; confirm.
 - **Publish-popup transport.** The exact channel skill → system_interface (a `POST /api/inspiration/publish-request` vs. a watched `runtime/inspiration/*.json` file) and back (response-file polling vs. an SSE-driven `mngr message`). Mirror whatever the system_interface already standardizes on (the Claude-auth endpoints + SSE event + a polled response file).
 - **GitHub login flow.** `gh auth login --web` device flow (no PAT needed, but requires a device-code paste-back UI) vs. a raw-PAT paste (simplest, mirrors the Claude API-key path). Likely support both, default to web/device.
-- **Clean-base mechanism in the worker.** How the worker reduces its worktree to the FCT upstream `main` baseline (fresh/orphan branch from `parent.toml`'s upstream vs. a fresh clone) and how the selected app paths are conveyed to it (launch-task `source_artifacts_dir`).
+- **Clean-base mechanism in the worker.** Exactly how the worker resets to the FCT version the mind was created from (the mind's FCT base commit/ref) so that only the selected paths remain — and how the selected app paths are conveyed to the worker (launch-task `source_artifacts_dir`). The reset must drop tracked-but-not-in-base files (not just untracked), so it cannot leak the mind's other committed content into the inspiration.
 - **`/welcome` rewrite target.** Confirm the exact stable region/markers in `.agents/skills/welcome/SKILL.md` the publish skill rewrites (now that FCT is available to inspect).
 
 ### Resolved during planning
 
-- **Publish UI location.** Built directly into the FCT `system_interface` web UI (a new modal + endpoints), **not** a minds desktop-client request type. No `apps/minds` changes.
+- **Publish UI location.** Built directly into the FCT `system_interface` web UI (a new modal + endpoints), **not** a minds desktop-client request type. **No `apps/minds` changes are needed** — the minds desktop client already proxies the system_interface web UI as the workspace, and forwards its HTTP/WebSocket traffic generically, so the new routes/SSE events and modals appear with no minds-side awareness. Everything ships by updating FCT.
 - **Clone/assembly mechanism.** Delegated to a `launch-task` sub-agent on an isolated worktree (`mngr/<slug>`), rather than a hand-rolled temp clone in the publish skill.
 - **GitHub auth.** A new system_interface GitHub-login modal mirroring the Claude-login modal's UI/endpoints; persists the credential via `gh` (store + git credential helper) so the running agent can push immediately — **no agent restart** (the credential is only needed at `git push` time, not in the process env at startup).
-- **Merge mechanics.** `/adapt-inspiration` uses `git subtree`; collisions between accumulated inspirations are surfaced to the user as holes and resolved interactively, in non-technical language.
-- **Upstream link.** Recorded both as a `parent.toml`-style pointer and a git remote.
+- **Merge mechanics.** `/use-inspiration` uses `git subtree`; collisions between accumulated inspirations are surfaced to the user as holes and resolved interactively, in non-technical language.
+- **Upstream handling.** Provenance link only — the inspiration records which FCT version it was based on (the `parent.toml` pointer the mind already has) and does nothing else: no fetching, pulling, or updating from upstream. The clean base is whatever FCT version the mind started from.
+- **Agent-awareness.** `CLAUDE.md` gets a single sentence noting inspirations exist; no proactive "offer to publish" behavior (deferred). Publishing is user-initiated.
+- **Skill name.** The use/adapt skill is `/use-inspiration` (formerly `/adapt-inspiration`).
 - **Secret denylist.** Baseline is the repo's existing `.gitignore` set (`.env*`, `.runtime/`, `memory/`, etc.); the agent additionally reasons about any other secrets in the selected changes and excludes them.
 - **Thumbnail storage.** `inspiration-<name>.svg` next to the manifest, referenced by relative path in the front-matter `thumbnail` key.
