@@ -1,0 +1,5 @@
+Fixed the VPS-resident ("secondary") latchkey gateway being unreachable from the agent's container on lima-slice hosts, which left agents with no latchkey access whenever the desktop (primary) gateway was unavailable -- e.g. while the user's laptop was offline.
+
+The VPS->container reverse tunnel was opened to the container's externally-routable SSH port instead of the port the container's sshd is published on from the outer host's own loopback. On a slice (where those two ports differ) the tunnel was refused, so the secondary gateway never bound inside the container. The reverse tunnel now uses the outer-host-loopback port supplied by the provider.
+
+Tunnel setup is also no longer silently treated as successful when the `ssh -R` process dies immediately (e.g. connection refused or a failed forward bind): after backgrounding it, the launch now confirms the process survives a short window, so a broken tunnel surfaces as a failed provision and is retried instead of being cached as "provisioned".
