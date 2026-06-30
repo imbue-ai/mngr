@@ -386,9 +386,7 @@ class EnvelopeStreamConsumer(MutableModel):
             for agent in agents
             if str(agent.host_id) in ssh_by_host_id
         }
-        host_state_by_host_id = {
-            str(host.host_id): host.host_state for host in hosts if host.host_state is not None
-        }
+        host_state_by_host_id = {str(host.host_id): host.host_state for host in hosts if host.host_state is not None}
         return ParsedAgentsResult(
             agent_ids=tuple(agent.agent_id for agent in agents),
             discovered_agents=tuple(agents),
