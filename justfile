@@ -1002,8 +1002,9 @@ backfill-pool-host-keys:
 #   just destroy-pool-host <pool-host-id>
 #
 # Note: the steady-state teardown is automatic -- the connector destroys a host's
-# slice VM when its lease ends. `minds env destroy` tears down a whole env's
-# unleased slices. This recipe is the manual single-host escape hatch.
+# slice VM when its lease ends. `minds env destroy` releases the env's leased
+# hosts (by destroying their mngr agents) but does NOT remove unleased slices left
+# in the pool. This recipe is the manual single-host escape hatch for those.
 destroy-pool-host pool_host_id *extra_args:
     uv run minds pool destroy "{{pool_host_id}}" {{extra_args}}
 
