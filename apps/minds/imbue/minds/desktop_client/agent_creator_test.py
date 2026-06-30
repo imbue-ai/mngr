@@ -1180,7 +1180,9 @@ def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_
 
     assert len(cli.create_calls) == 1
     assert cli.create_calls[0]["account"] == "alice@imbue.com"
-    assert cli.create_calls[0]["metadata"] == {"host_name": "my-workspace"}
+    # The LiteLLM key no longer carries host_name metadata (the host name is
+    # mutable and the key is minted before the host exists).
+    assert cli.create_calls[0]["metadata"] is None
 
 
 # Deterministic sync test, but the setup spins up fresh ConcurrencyGroups and a
