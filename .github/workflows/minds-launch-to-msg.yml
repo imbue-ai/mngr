@@ -1177,17 +1177,24 @@ jobs:
           done
           metrics_line=""
           [[ -n "$metrics_inner" ]] && metrics_line="[${metrics_inner}]"
-          # Build links line: `[<binary> | <run logs> | <mngr commit> | <fct commit>]`.
-          # Derive the ToDesktop dashboard URL from the build's app_zip_url:
-          # https://dl.todesktop.com/<APP_ID>/builds/<BID>/mac/zip/arm64
-          dashboard_url=""
+          # Build links line: `[todesktop(mac-arm64) | <run logs> | <mngr commit> | <fct commit>]`.
+          # The ToDesktop dashboard URL and the arm64 .dmg download are both
+          # derived from the build's app_zip_url
+          # (https://dl.todesktop.com/<APP_ID>/builds/<BID>/mac/zip/arm64):
+          #   todesktop -> https://app.todesktop.com/apps/<APP_ID>/builds/<BID>
+          #   mac-arm64 -> https://dl.todesktop.com/<APP_ID>/builds/<BID>/mac/dmg/arm64
+          binary_link=""
           if [[ -n "$APP_ZIP_URL" && "$APP_ZIP_URL" =~ dl\.todesktop\.com/([^/]+)/builds/([^/]+)/ ]]; then
-            dashboard_url="https://app.todesktop.com/apps/${BASH_REMATCH[1]}/builds/${BASH_REMATCH[2]}"
+            td_app_id="${BASH_REMATCH[1]}"
+            td_build_id="${BASH_REMATCH[2]}"
+            dashboard_url="https://app.todesktop.com/apps/${td_app_id}/builds/${td_build_id}"
+            dmg_url="https://dl.todesktop.com/${td_app_id}/builds/${td_build_id}/mac/dmg/arm64"
+            binary_link="<${dashboard_url}|todesktop>(<${dmg_url}|mac-arm64>)"
           fi
           links_inner=""
           sep=""
-          if [[ -n "$dashboard_url" ]]; then
-            links_inner+="<${dashboard_url}|binary>"
+          if [[ -n "$binary_link" ]]; then
+            links_inner+="$binary_link"
             sep=" | "
           fi
           links_inner+="${sep}<${RUN_URL}|run logs>"
@@ -1196,8 +1203,8 @@ jobs:
           links_line="[${links_inner}]"
           # Assemble the final message. Line 1 is always present. Line 2
           # (SHAs) is always present. Line 3 (metrics) is omitted when we
-          # have no values. Line 4 (links) is always present, though
-          # `binary` falls out when build didn't produce one.
+          # have no values. Line 4 (links) is always present, though the
+          # todesktop(mac-arm64) link falls out when build didn't produce one.
           line1=$(printf '%s *launch-to-msg* — %s in %s%s, _trigger=_ `%s`' \
             "$emoji" "$verdict_word" "$duration" "$detail" "$TRIGGER")
           # Show "<ref> (<commit>)" when the ref is a name (tag / branch);
