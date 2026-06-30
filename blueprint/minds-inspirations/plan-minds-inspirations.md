@@ -5,7 +5,7 @@
 - Adds an "inspirations" concept: a way for a running mind to **publish** a reusable snapshot of the apps/features it built, and for another mind to **adapt** an existing inspiration into itself.
 - All work lands in the **forever-claude-template (FCT)** repo (edited via a `.external_worktrees/forever-claude-template` worktree, per CLAUDE.md). There are **no `apps/minds` (desktop-client) changes** — the publish UI lives in the agent's in-container web UI (`system_interface`), not the minds request-inbox.
 - Deliverables:
-  - Agent-awareness: an "Inspirations" section in the FCT `CLAUDE.md` so the agent knows what inspirations are, that a publish skill exists, and when to offer it.
+  - Agent-awareness: an "Inspirations" section in the FCT `CLAUDE.md` so the agent knows what inspirations are and **when to offer to publish one** (it already knows which skills exist — no need to enumerate them).
   - `/publish-inspiration` skill (FCT): assembles a clean, shareable repo from the current mind (via a `launch-task` sub-agent on an isolated worktree) and pushes it to GitHub.
   - `/adapt-inspiration` skill (FCT): merges an existing inspiration (by git URL) into the current mind and fills in its holes.
   - **system_interface publish popup** (FCT `apps/system_interface`): a small in-UI box with editable inputs (title, description, repo name, visibility, thumbnail) the user confirms before publishing — built directly into the system_interface, not as a minds request type.
@@ -21,8 +21,11 @@
 
 ### Agent-awareness (CLAUDE.md)
 
-- The agent reads an "Inspirations" section in `CLAUDE.md` on startup and understands: what an inspiration is, that `/publish-inspiration` and `/adapt-inspiration` exist, and when to use them.
-- After the agent builds something meaningful that the user is happy with, it proactively offers to publish — as a lightweight nudge over whatever chat channel the user is on (Telegram or minds chat), **not** the popup.
+- The agent reads an "Inspirations" section in `CLAUDE.md` on startup and understands what an inspiration is and **when to offer to publish one**. The section does not enumerate the skills — the agent already knows which skills exist.
+- When to offer (once the product is relatively finished and the user seems happy), two cues:
+  - The agent can ask whether the user is happy or wants any more changes; if the user says no more changes, offer to publish an inspiration.
+  - Or, when the user spontaneously shows excitement/joy about their app(s), offer then.
+- The offer is a lightweight nudge over whatever chat channel the user is on (Telegram or minds chat), **not** the popup (the popup only appears once publishing is underway).
 
 ### Publishing (`/publish-inspiration`)
 
@@ -92,7 +95,7 @@ Frontend:
 ### Forever-claude-template skills + docs (FCT)
 
 - `CLAUDE.md`
-  - Add an "Inspirations" section: what inspirations are, that `/publish-inspiration` and `/adapt-inspiration` exist, when to offer publishing (after building something meaningful the user likes), and the proactive-nudge channel guidance.
+  - Add an "Inspirations" section: what inspirations are and **when to offer to publish** — do not list the skills (the agent already knows them). Offer when the product is relatively finished and the user is happy: either after asking "are you happy, or want any more changes?" and the user wants none, or when the user spontaneously shows excitement about their app(s). The offer is a lightweight nudge over the user's current chat channel, not the popup.
 - `.agents/skills/publish-inspiration/SKILL.md` (new)
   - Implements the publish flow: setup Q&A; **delegate assembly to a `launch-task` worker** (write the task file, `create_worker.py launch --template worker`, background `await` for the report, proxy `question` gates, merge the worker's `mngr/<slug>` branch back); the worker establishes the clean FCT base (upstream `main` from `parent.toml`), does file/path-level selection + single commit, secret stripping, `inspiration-<name>.md` + SVG thumbnail generation, `/welcome` stable-region rewrite, and the boot smoke-check; then raise the **system_interface publish popup** and wait for the edited values; ensure `GH_TOKEN` (raising the **GitHub-login modal** if missing); `gh repo create` + push; failure handling (re-open popup); and accumulation (carry existing manifests/apps forward).
   - May include a helper script (e.g. `.agents/skills/publish-inspiration/scripts/build_inspiration.sh`) for the git assembly the worker runs, kept self-contained in the FCT (the dev `create-new-mind-repo` recipe is **not** available inside the VM).
