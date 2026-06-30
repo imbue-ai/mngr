@@ -257,7 +257,8 @@ class ProviderInstanceConfig(FrozenModel):
     discovery_warn_seconds: PositiveFloat = Field(
         default=PositiveFloat(_DEFAULT_DISCOVERY_WARN_SECONDS),
         description="How long (in seconds) a single discovery poll for this provider may run before "
-        "a 'discovery is slow' warning is logged. The first threshold of the two-threshold timeout.",
+        "a 'discovery is slow' warning is logged. The first threshold of the two-threshold timeout; "
+        "must be below discovery_error_timeout_seconds.",
     )
     discovery_error_timeout_seconds: PositiveFloat = Field(
         default=PositiveFloat(_DEFAULT_DISCOVERY_ERROR_TIMEOUT_SECONDS),
@@ -279,18 +280,21 @@ class ProviderInstanceConfig(FrozenModel):
 
     @model_validator(mode="after")
     def _validate_discovery_timeouts_are_ordered(self) -> "ProviderInstanceConfig":
-        # The host/agent sub-provider timeouts must fire before the provider error
-        # timeout, otherwise a single slow host/agent could never surface as UNKNOWN
-        # before its whole provider is declared errored.
+        # The host/agent sub-provider timeouts and the warn threshold must all fire
+        # before the provider error timeout. Otherwise a slow host/agent could never
+        # surface as UNKNOWN before the whole provider is declared errored, and the
+        # "warn first, then error" two-threshold pattern would be incoherent.
         for field_name, value in (
             ("host_discovery_timeout_seconds", self.host_discovery_timeout_seconds),
             ("agent_discovery_timeout_seconds", self.agent_discovery_timeout_seconds),
+            ("discovery_warn_seconds", self.discovery_warn_seconds),
         ):
             if value >= self.discovery_error_timeout_seconds:
                 raise ProviderTimeoutConfigError(
                     f"{field_name} ({value}s) must be below discovery_error_timeout_seconds "
                     f"({self.discovery_error_timeout_seconds}s) so a slow host/agent surfaces as "
-                    f"UNKNOWN before the whole provider is declared errored"
+                    f"UNKNOWN (and the slow-discovery warning fires) before the whole provider is "
+                    f"declared errored"
                 )
         return self
 
