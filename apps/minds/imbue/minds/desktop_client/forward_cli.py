@@ -413,9 +413,13 @@ class EnvelopeStreamConsumer(MutableModel):
 
         A removed agent also has its accumulated service map cleared from both this
         consumer and the resolver. A discovered agent's SSH info is looked up from
-        its host (populated by a prior ``HostSSHInfoEvent``, if any).
+        its host (populated by a prior ``HostSSHInfoEvent``, if any). A removed
+        host's cached SSH info is forgotten so the map does not grow without bound.
         """
         agent_by_id = self._aggregator.get_agent_by_id()
+        for host_id_str in delta.removed_host_ids:
+            with self._lock:
+                self._ssh_by_host_id.pop(host_id_str, None)
         for agent_id_str in delta.removed_agent_ids:
             agent_id = AgentId(agent_id_str)
             with self._lock:
