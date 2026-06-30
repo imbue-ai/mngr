@@ -2,32 +2,30 @@
 //
 // This runs in the shared modal WebContentsView, which main.js loads ONCE with
 // /_chrome/overlay at window creation and keeps mounted for the window's life
-// (see openOverlayHost in electron/main.js). Instead of loading a fresh page
-// per modal (the old openModal -> loadURL model), every overlay is hosted here
-// as in-page DOM driven over IPC, so opens are instant.
-//
-// Electron 40 has no per-view click-through: setIgnoreMouseEvents is
-// window-level only, and a WebContentsView's bounds rectangle always captures
-// clicks (transparency and rounded-corner cutouts included). The only lever is
-// the view's bounds, so this manager is the single authority for how large the
-// overlay view must be and reports it to main via window.minds.overlaySetBounds:
-//   { mode: 'hidden' }                        -- nothing shown; main hides the view
-//   { mode: 'full' }                          -- a capturing modal is open; full window
-//   { mode: 'rect', rect: {x,y,width,height} }-- only tooltips; just their bounding box
-// main maps these onto modalView.setBounds / setVisible, and treats 'full' as
-// "a modal is open" for the titlebar drag-suppression it already does.
+// (see createBundleOverlayView in electron/main.js). Instead of loading a fresh
+// page per modal (the old openModal -> loadURL model), every overlay is hosted
+// here as in-page DOM driven over IPC, so opens are instant.
 //
 // IPC contract (main -> host), delivered on window.minds.onOverlayCommand:
 //   { type: 'show-modal', id, url }  -- show (lazy-create + (re)load) a migrated
 //                                       modal iframe; hides any other modal.
 //   { type: 'hide-modal', id }       -- hide the named modal iframe.
-//   { type: 'hide-all' }             -- hide every overlay (takeover / teardown).
+//   { type: 'hide-all' }             -- hide every overlay (close / takeover).
 //
-// The migrated modal pages (workspace menu / inbox / help / sign-in) are served
-// by the same origin as this host, so after each iframe loads we hand it the
-// parent's window.minds bridge. Their existing window.minds.* calls
-// (closeModal, onChromeEvent, navigateContent, ...) then work unchanged, with
-// no edits to those pages.
+// The migrated modal pages (workspace menu / inbox / help / sign-in) are
+// first-party and served by the same origin as this host. The overlay view sets
+// ``nodeIntegrationInSubFrames`` so the preload runs in each iframe and exposes
+// ``window.minds`` there before the iframe's own scripts run -- their existing
+// window.minds.*() calls and onChromeEvent subscriptions work unchanged. Main
+// fans chrome-events / current-workspace / priming out per-frame (see
+// sendToOverlayFrames in main.js), since webContents.send reaches only the top
+// frame.
+//
+// While a modal is open the overlay view is shown full-window by main and
+// captures pointer events (Electron 40 has no per-view click-through). The
+// view's visibility/bounds for modals are owned by main (openModal/closeModal);
+// this manager only decides which iframe is on screen. The dynamic-bounds path
+// for tooltips (window.minds.overlaySetBounds) lands in a later change.
 
 (function () {
   'use strict';
@@ -36,32 +34,7 @@
   if (!root || !window.minds) return;
 
   // id -> { frame: HTMLIFrameElement, url: string|null, visible: bool }
-  // Every entry here is a "capturing" overlay (a modal/menu with a full-window
-  // backdrop), so any visible entry forces the overlay view to full-window.
   var modals = Object.create(null);
-
-  function reportBounds() {
-    var anyCapturing = false;
-    for (var id in modals) {
-      if (modals[id].visible) { anyCapturing = true; break; }
-    }
-    // Tooltips (which report { mode: 'rect', ... }) arrive in a later change.
-    // Until then, "no capturing overlay" means there is nothing to show.
-    window.minds.overlaySetBounds(anyCapturing ? { mode: 'full' } : { mode: 'hidden' });
-  }
-
-  // Same-origin: hand the iframe the parent's IPC bridge so the hosted modal
-  // page's window.minds.* calls work exactly as when it was the top document.
-  function injectBridge(frame) {
-    try {
-      frame.contentWindow.minds = window.minds;
-    } catch (err) {
-      // These pages are same-origin, so this should never throw; if it ever
-      // does, the hosted page can't reach the bridge (e.g. won't dismiss), so
-      // surface it loudly rather than failing silently.
-      console.error('[overlay] failed to inject minds bridge into iframe', err);
-    }
-  }
 
   function ensureModal(id) {
     if (modals[id]) return modals[id];
@@ -73,7 +46,11 @@
     frame.style.background = 'transparent';
     frame.style.display = 'none';
     frame.setAttribute('data-overlay-id', id);
-    frame.addEventListener('load', function () { injectBridge(frame); });
+    // Tell main the iframe is ready so it can replay the cached chrome state
+    // into this frame (workspace list / request count). Runs on every (re)load.
+    frame.addEventListener('load', function () {
+      window.minds.overlayModalLoaded(id);
+    });
     root.appendChild(frame);
     var entry = { frame: frame, url: null, visible: false };
     modals[id] = entry;
@@ -107,7 +84,6 @@
     }
     entry.frame.style.display = 'block';
     entry.visible = true;
-    reportBounds();
   }
 
   function hideModal(id) {
@@ -115,7 +91,6 @@
     if (!entry || !entry.visible) return;
     entry.visible = false;
     entry.frame.style.display = 'none';
-    reportBounds();
   }
 
   function hideAll() {
@@ -125,7 +100,6 @@
         modals[id].frame.style.display = 'none';
       }
     }
-    reportBounds();
   }
 
   window.minds.onOverlayCommand(function (cmd) {
@@ -134,7 +108,4 @@
     else if (cmd.type === 'hide-modal' && cmd.id) hideModal(cmd.id);
     else if (cmd.type === 'hide-all') hideAll();
   });
-
-  // Start hidden until main asks for something to be shown.
-  reportBounds();
 })();

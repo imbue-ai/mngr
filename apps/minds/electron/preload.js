@@ -78,6 +78,10 @@ contextBridge.exposeInMainWorld('minds', {
     ipcRenderer.on('overlay-command', (_event, cmd) => callback(cmd));
   },
   overlaySetBounds: (spec) => ipcRenderer.send('overlay-set-bounds', spec),
+  // Fired by the overlay host once a hosted modal iframe has loaded, so main can
+  // replay the cached chrome state into that frame (the sidebar's workspace list,
+  // the inbox's request count) without waiting for the next SSE push.
+  overlayModalLoaded: (id) => ipcRenderer.send('overlay-modal-loaded', id),
 
   // Native file/directory picker used by the file-sharing permission
   // dialog so the user can pick the path to share instead of typing it.
