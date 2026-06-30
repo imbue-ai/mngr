@@ -7,10 +7,10 @@
 // here as in-page DOM driven over IPC, so opens are instant.
 //
 // IPC contract (main -> host), delivered on window.minds.onOverlayCommand:
-//   { type: 'show-modal', id, url }       -- show (lazy-create + (re)load) a
-//                                            migrated modal iframe; hides others.
-//   { type: 'hide-modal', id }            -- hide the named modal iframe.
-//   { type: 'hide-all' }                  -- hide every modal (close / takeover).
+//   { type: 'show-modal', id, url }       -- mount a fresh modal iframe,
+//                                            destroying any previously-shown one.
+//   { type: 'hide-modal', id }            -- destroy the named modal iframe.
+//   { type: 'hide-all' }                  -- destroy every modal (close/takeover).
 //   { type: 'show-tooltip', rect, text,   -- render + position a tooltip bubble
 //     shortcut?, html? }                     anchored to the trigger's rect.
 //   { type: 'hide-tooltip' }              -- hide the tooltip.
@@ -42,92 +42,70 @@
   var root = document.getElementById('overlay-root');
   if (!root || !window.minds) return;
 
-  // id -> { frame: HTMLIFrameElement, url: string|null, visible: bool }
-  var modals = Object.create(null);
-  // The most recently requested modal. An incoming modal's iframe is kept hidden
-  // while it (re)loads and only revealed -- with the modal it replaces hidden at
-  // the same instant -- once its load fires, so switching modals never flashes
-  // the incoming iframe's stale (previously-rendered) content. A load that has
-  // been superseded by a newer show (id !== activeModalId) is ignored.
-  var activeModalId = null;
+  // Mount-on-demand modal iframes: each open creates a fresh iframe and each
+  // close destroys it, so no hidden modal documents linger. Keeping them mounted
+  // ("warm") bought nothing here -- every show reloads anyway -- while a hidden
+  // warm page keeps doing background work (e.g. the workspace menu re-fetching
+  // auth on content navigations). The incoming iframe is kept invisible until its
+  // load paints, and the modal it replaces stays visible until that instant, so
+  // switching modals is flash-free.
+  var modalFrame = null; // the currently-visible modal iframe (front buffer)
+  var incomingFrame = null; // a modal iframe still loading (back buffer)
 
-  function ensureModal(id) {
-    if (modals[id]) return modals[id];
+  function destroyFrame(frame) {
+    if (frame && frame.parentNode) frame.parentNode.removeChild(frame);
+  }
+
+  function showModal(id, url) {
+    // Drop any earlier incoming frame that never became visible -- this show
+    // supersedes it, and it was never shown, so there's no flash.
+    destroyFrame(incomingFrame);
     var frame = document.createElement('iframe');
     // Fill the host; the hosted page paints its own backdrop and positions its
     // own panel within the full window.
     frame.className = 'absolute inset-0 w-full h-full';
     frame.style.border = '0';
     frame.style.background = 'transparent';
-    frame.style.display = 'none';
+    // Invisible until its content paints; the previously-shown modal stays up
+    // until then so the swap doesn't flash.
+    frame.style.visibility = 'hidden';
     frame.setAttribute('data-overlay-id', id);
     frame.addEventListener('load', function () {
       // Tell main the iframe is ready so it can replay the cached chrome state
-      // into this frame (workspace list / request count). Runs on every (re)load.
+      // (workspace list / request count) into it.
       window.minds.overlayModalLoaded(id);
-      // Now that the fresh content has painted, reveal this modal and hide the
-      // one it replaced in the same frame -- a flash-free swap. Skip if a newer
-      // show already superseded this load.
-      if (id === activeModalId) {
-        frame.style.visibility = 'visible';
-        hideOthers(id);
+      if (frame !== incomingFrame) {
+        // Superseded by a newer show before it finished loading; discard it.
+        destroyFrame(frame);
+        return;
       }
+      frame.style.visibility = 'visible';
+      destroyFrame(modalFrame); // swap: remove the modal this one replaced
+      modalFrame = frame;
+      incomingFrame = null;
     });
+    incomingFrame = frame;
     root.appendChild(frame);
-    var entry = { frame: frame, url: null, visible: false };
-    modals[id] = entry;
-    return entry;
-  }
-
-  function hideOthers(keepId) {
-    for (var id in modals) {
-      if (id !== keepId && modals[id].visible) {
-        modals[id].visible = false;
-        modals[id].frame.style.display = 'none';
-      }
-    }
-  }
-
-  function showModal(id, url) {
-    var entry = ensureModal(id);
-    activeModalId = id;
-    // Show the iframe but keep it invisible until its (re)load paints, so the
-    // switch never flashes this iframe's stale content. The previously-shown
-    // modal stays visible until the load handler swaps them.
-    entry.frame.style.display = 'block';
-    entry.frame.style.visibility = 'hidden';
-    entry.visible = true;
-    // Reload on every show so the hosted page re-fetches its state and replays
-    // its entry animation -- preserving the old "fresh every open" feel even
-    // though the iframe stays mounted/warm between opens.
-    if (entry.url === url && entry.frame.contentWindow) {
-      try {
-        entry.frame.contentWindow.location.reload();
-      } catch (err) {
-        entry.frame.src = url;
-      }
-    } else {
-      entry.url = url;
-      entry.frame.src = url;
-    }
+    frame.src = url;
   }
 
   function hideModal(id) {
-    var entry = modals[id];
-    if (!entry || !entry.visible) return;
-    if (activeModalId === id) activeModalId = null;
-    entry.visible = false;
-    entry.frame.style.display = 'none';
+    // main only sends 'hide-all' today, but honor a targeted hide too.
+    if (modalFrame && modalFrame.getAttribute('data-overlay-id') === id) {
+      destroyFrame(modalFrame);
+      modalFrame = null;
+    }
+    if (incomingFrame && incomingFrame.getAttribute('data-overlay-id') === id) {
+      destroyFrame(incomingFrame);
+      incomingFrame = null;
+    }
   }
 
-  function hideAll() {
-    activeModalId = null;
-    for (var id in modals) {
-      if (modals[id].visible) {
-        modals[id].visible = false;
-        modals[id].frame.style.display = 'none';
-      }
-    }
+  function hideAllModals() {
+    destroyFrame(incomingFrame);
+    destroyFrame(modalFrame);
+    incomingFrame = null;
+    modalFrame = null;
   }
 
   // -- Tooltips ----------------------------------------------------------
@@ -244,7 +222,7 @@
     if (!cmd || typeof cmd !== 'object') return;
     if (cmd.type === 'show-modal' && cmd.id && cmd.url) showModal(cmd.id, cmd.url);
     else if (cmd.type === 'hide-modal' && cmd.id) hideModal(cmd.id);
-    else if (cmd.type === 'hide-all') { hideAll(); hideTooltip(); }
+    else if (cmd.type === 'hide-all') { hideAllModals(); hideTooltip(); }
     else if (cmd.type === 'show-tooltip') showTooltip(cmd);
     else if (cmd.type === 'hide-tooltip') hideTooltip();
   });
