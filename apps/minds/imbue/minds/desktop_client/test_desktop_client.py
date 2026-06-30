@@ -1659,6 +1659,24 @@ def test_help_page_with_prefilled_description_defaults_to_report_mode(tmp_path: 
     assert "checked" in report_radio
 
 
+def test_help_page_agent_report_frames_as_agent_submission_and_hides_mode_choice(tmp_path: Path) -> None:
+    """An agent escalation (``agent_report=1``) frames the modal as the agent's submission and drops
+    the have-an-agent-help / report-a-bug choice -- a report is already underway, so there is nothing
+    to choose. The mode radios must not be rendered, and the description is still pre-filled."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get(f"/help?workspace={AgentId()}&description=it+broke&agent_report=1")
+    assert response.status_code == 200
+    assert "wants to submit this report" in response.text
+    # The mode-choice radios are gone (so the user cannot redirect an agent report into agent-help
+    # mode). ``value="agent"`` / ``value="report"`` are unique to those radio inputs -- the submit JS
+    # references the mode by ``input[name="help-mode"]`` and bare ``"agent"`` / ``"report"`` strings,
+    # so keying off ``value="..."`` isolates the rendered radios from the always-present script.
+    assert 'value="agent"' not in response.text
+    assert 'value="report"' not in response.text
+    # The pre-filled description still survives into the textarea.
+    assert "it broke" in response.text
+
+
 def test_help_page_hides_include_logs_checkbox_when_setting_on(tmp_path: Path) -> None:
     """With the persistent include-logs setting on, logs are always attached and the checkbox is hidden."""
     MindsConfig(data_dir=tmp_path).set_include_error_logs(True)

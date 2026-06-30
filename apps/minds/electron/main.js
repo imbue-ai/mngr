@@ -1020,7 +1020,14 @@ function helpUrlFor(agentId, description) {
   if (!backendBaseUrl) return null;
   const params = new URLSearchParams();
   if (agentId) params.set('workspace', agentId);
-  if (description) params.set('description', description);
+  // A description is only ever passed by the open_help (agent-escalation) flow; the
+  // titlebar button opens /help with none. So a present description marks this as an
+  // agent-submitted report, which the /help page frames differently (agent wording,
+  // no mode choice).
+  if (description) {
+    params.set('description', description);
+    params.set('agent_report', '1');
+  }
   const query = params.toString();
   return backendBaseUrl + '/help' + (query ? '?' + query : '');
 }

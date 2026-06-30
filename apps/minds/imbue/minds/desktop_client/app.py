@@ -468,11 +468,25 @@ def _handle_help_page() -> Response:
     include_logs_setting = minds_config.get_include_error_logs() if minds_config else False
     workspace_agent_id = request.args.get("workspace", "")
     description = request.args.get("description", "")
+    # An in-workspace agent's escalation opens this modal via the open_help flow with
+    # ``agent_report=1``. In that case the modal frames the pre-filled report as the
+    # agent's submission (titled with the workspace it came from) and drops the
+    # have-an-agent-help / report-a-bug choice -- we are already reporting. The
+    # workspace name is best-effort (empty for an unknown/label-less workspace).
+    is_agent_report = request.args.get("agent_report") == "1"
+    workspace_name = ""
+    if is_agent_report and workspace_agent_id:
+        try:
+            workspace_name = get_state().backend_resolver.get_workspace_name(AgentId(workspace_agent_id)) or ""
+        except ValueError:
+            workspace_name = ""
     return make_html_response(
         content=render_help_page(
             include_logs_setting=include_logs_setting,
             workspace_agent_id=workspace_agent_id,
             description=description,
+            is_agent_report=is_agent_report,
+            workspace_name=workspace_name,
         )
     )
 

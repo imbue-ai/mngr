@@ -1,4 +1,4 @@
-{#def include_logs_setting=false, workspace_agent_id="", description="" #}
+{#def include_logs_setting=false, workspace_agent_id="", description="", is_agent_report=false, workspace_name="" #}
 {#
   Get-help modal page. Loaded into the shared modal overlay view in Electron (and
   into the content frame as a fallback in browser mode), so the body is transparent
@@ -224,8 +224,19 @@
       </div>
 
       <div id="help-form" class="p-4">
+        {% if is_agent_report %}
+        {# Agent escalation: a report is already underway, so frame it as the agent's submission and
+           drop the mode choice below. The workspace name is best-effort (falls back to generic copy). #}
+        <p class="type-body text-primary mb-4">
+          {% if workspace_name %}An agent in workspace <span class="font-semibold">{{ workspace_name }}</span> wants to submit this report:{% else %}An agent in this workspace wants to submit this report:{% endif %}
+        </p>
+        {% else %}
         <p class="type-body text-primary mb-4">Seems like you're running into a problem &mdash; we can help.</p>
+        {% endif %}
 
+        {# The have-an-agent-help / report-a-bug choice is hidden for an agent escalation (we are
+           already reporting). With no radios rendered, the submit JS falls back to report mode. #}
+        {% if not is_agent_report %}
         <div class="flex flex-col gap-2 mb-4">
           {% if workspace_agent_id %}
           {# In a loaded workspace, agent help is available and is the default choice -- except
@@ -257,6 +268,7 @@
             </span>
           </label>
         </div>
+        {% endif %}
 
         <label class="block type-label text-secondary mb-1" for="help-description">What happened?</label>
         <textarea id="help-description" rows="4"
