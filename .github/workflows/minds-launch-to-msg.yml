@@ -170,13 +170,8 @@ jobs:
     # native binary. Linux runners produce ELF binaries that the shipped
     # .app can't exec on Mac.
     runs-on: [self-hosted, macOS, minds-runner]
-    # 85 min = the 70-min `pnpm dist` step budget (below) + ~15 min for
-    # the post-failure cancel step to tear an orphaned ToDesktop build
-    # down. A fresh dual-arch cloud build (serial sign + notarize x64 +
-    # arm64, then a ~15-min final packaging phase) runs ~43 min even with
-    # a fast source download, and ~60+ min when ToDesktop's source
-    # download stalls; Apple notarization ("up to 30 min per arch") is the
-    # long pole.
+    # 85 min = the 70-min `pnpm dist` step budget (below) + ~15 min for the
+    # post-failure cancel step to tear an orphaned ToDesktop build down.
     timeout-minutes: 85
     env:
       TODESKTOP_ACCESS_TOKEN: ${{ secrets.TODESKTOP_ACCESS_TOKEN }}
@@ -302,16 +297,9 @@ jobs:
       - name: pnpm dist (build + upload to ToDesktop)
         id: dist
         if: steps.existing.outputs.url == ''
-        # 70 min covers a fresh dual-arch cloud build end to end: even
-        # with a fast source download `pnpm dist` runs ~43 min (serial
-        # sign + notarize x64 + arm64, then a ~15-min final packaging
-        # phase), and ~60+ min when ToDesktop's "Downloading application
-        # source" phase stalls ~16 min (runs 28312671748 / 28389420591
-        # timed out at the old 45-min budget while still notarizing).
-        # Notarization ("up to 30 min per arch") is the long pole. Kept
-        # below the job's 85-min budget so a genuine signing wedge still
-        # fails here, leaving the cancel step time to tear the orphaned
-        # build down.
+        # A fresh dual-arch build historically runs ~43 min, up to ~60+ min
+        # when ToDesktop's "Downloading application source" step stalls
+        # (~16 min); notarization is the long pole.
         timeout-minutes: 70
         working-directory: apps/minds
         # build.js::bundleLatchkey smoke-tests the bundled CLI via
