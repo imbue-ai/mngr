@@ -93,5 +93,5 @@ $ mngr forward --service system_interface --reverse 8420:8420
 **Filter to a single label set**
 
 ```bash
-$ mngr forward --service system_interface --agent-include 'has(agent.labels.workspace)'
+$ mngr forward --service system_interface --agent-include 'has(agent.labels.is_primary)'
 ```
