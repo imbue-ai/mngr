@@ -63,7 +63,6 @@ from imbue.minds.desktop_client.api_models import AccountsResponse
 from imbue.minds.desktop_client.api_models import AgentNotificationRequest
 from imbue.minds.desktop_client.api_models import BackupSnapshotSummary
 from imbue.minds.desktop_client.api_models import BugReportRequest
-from imbue.minds.desktop_client.api_models import BugReportResponse
 from imbue.minds.desktop_client.api_models import CreateOperationStatusResponse
 from imbue.minds.desktop_client.api_models import CreateWorkspaceRequest
 from imbue.minds.desktop_client.api_models import DestroyOperationStatusResponse
@@ -95,10 +94,10 @@ from imbue.minds.desktop_client.create_helpers import REMOTE_SIGNIN_REDIRECT_URL
 from imbue.minds.desktop_client.create_helpers import color_for_new_workspace
 from imbue.minds.desktop_client.create_helpers import existing_workspace_host_names
 from imbue.minds.desktop_client.create_helpers import taken_host_names_on_provider
+from imbue.minds.desktop_client.help_modal_requests import OpenHelpRequest
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
-from imbue.minds.desktop_client.report_collector import submit_bug_report_from_body
 from imbue.minds.desktop_client.responses import make_file_response
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.responses import make_streaming_response
@@ -1129,29 +1128,29 @@ def _handle_establish_ssh(agent_id: str) -> SshConnectionResponse | Response:
 
 
 @require_api_or_cookie_auth
-@API_SPEC.validate(json=BugReportRequest, resp=json_response_model(BugReportResponse))
-def _handle_bug_report(agent_id: str) -> BugReportResponse | Response:
-    """Submit a bug report to Imbue on behalf of an in-workspace agent.
+@API_SPEC.validate(json=BugReportRequest, resp=json_response_model(OkResponse))
+def _handle_bug_report(agent_id: str) -> OkResponse | Response:
+    """Ask the desktop app to open the report-a-bug modal pre-filled, on behalf of an in-workspace agent.
 
-    Backed by the same collector/submitter as the local help form, so an agent-initiated report and a
-    user-initiated one carry the same shape. The report is scoped to the caller's own workspace (the
-    path ``agent_id``, which the gateway has already authorized), not to whatever the body claims.
+    The agent does not submit to Sentry itself: a human gates every send. This route hands the agent's
+    description to the desktop app, which pops the report modal -- pre-filled with that description and
+    scoped to the caller's own workspace (the path ``agent_id``, which the gateway has already
+    authorized) -- in the window showing that workspace. The user then reviews, picks what to attach, and
+    submits through the same ``/help/report`` path as a manual report.
     """
     # ``description`` presence/type is enforced by the spectree model; the
     # whitespace-only rejection below is value-semantic.
     body = request.get_json(silent=True, force=True) or {}
-    if not str(body.get("description", "")).strip():
+    description = str(body.get("description", "")).strip()
+    if not description:
         return _json_error("'description' field is required and must be a non-empty string", 400)
 
-    state = get_state()
-    event_id = submit_bug_report_from_body(
-        body={**body, "workspace_agent_id": agent_id},
-        session_store=state.session_store,
-        backend_resolver=state.backend_resolver,
-        minds_config=state.minds_config,
-        paths=state.api_v1_paths,
+    get_state().help_modal_request_broker.request_open(
+        OpenHelpRequest(description=description, workspace_agent_id=agent_id)
     )
-    return BugReportResponse(ok=True, event_id=event_id)
+    # The agent never submits to Sentry itself, so no report event is written here (the
+    # response carries no ``event_id``); the human-reviewed send flows through ``/help/report``.
+    return OkResponse(ok=True)
 
 
 # -- Workspace metadata update route (color + account association) --
