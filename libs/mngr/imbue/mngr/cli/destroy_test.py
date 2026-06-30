@@ -369,8 +369,7 @@ class _StubOnlineHost:
         self._raise_on_get_agents = raise_on_get_agents
 
     def get_name(self) -> HostName:
-        # Keep within the HostName length cap (the full host id would overflow it).
-        return HostName(f"stub-host-{str(self.id)[-8:]}")
+        return HostName(f"stub-host-{self.id}")
 
     def get_agents(self) -> list[object]:
         if self._raise_on_get_agents is not None:

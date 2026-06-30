@@ -1630,8 +1630,7 @@ def make_test_discovered_host() -> DiscoveredHost:
     """Create a DiscoveredHost with random IDs for testing."""
     return DiscoveredHost(
         host_id=HostId.generate(),
-        # Keep within the HostName length cap while staying unique enough for tests.
-        host_name=HostName(f"test-host-{uuid4().hex[:8]}"),
+        host_name=HostName(f"test-host-{uuid4().hex}"),
         provider_name=ProviderInstanceName("local"),
     )
 
