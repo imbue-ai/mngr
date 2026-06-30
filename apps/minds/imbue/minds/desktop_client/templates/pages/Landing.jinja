@@ -629,11 +629,11 @@
   })();
 </script>
 {% endset %}
-<Base title="Projects" scripts={{ _scripts }}>
+<Base title="Workspaces" scripts={{ _scripts }}>
   <PageContainer>
     {% if agent_ids %}
       <div class="flex items-center justify-between mb-4" data-landing-agent-ids="{{ agent_ids | map('string') | join(',') }}">
-        <h1 class="type-heading text-primary">Projects</h1>
+        <h1 class="type-heading text-primary">Workspaces</h1>
         <ButtonLink href="/create" variant="primary">Create</ButtonLink>
       </div>
 
@@ -695,16 +695,16 @@
                         extra="landing-start-btn"
                         :style="start_btn_style"
                         onclick="event.stopPropagation(); window.landingStartClick(this)"
-                        title="Start mind"
-                        aria-label="Start mind">
+                        title="Start workspace"
+                        aria-label="Start workspace">
                   <Icon16 name="play" />
                 </Button>
                 <Button variant="ghost" size="icon"
                         extra="landing-stop-btn"
                         :style="stop_btn_style"
                         onclick="event.stopPropagation(); window.landingStopClick(this)"
-                        title="Stop mind"
-                        aria-label="Stop mind">
+                        title="Stop workspace"
+                        aria-label="Stop workspace">
                   <Icon16 name="pause" />
                 </Button>
               {% else %}
@@ -739,7 +739,7 @@
         <script>setTimeout(function() { location.reload(); }, 2000);</script>
       {% else %}
         <div class="text-center py-12">
-          <p class="text-tertiary mb-6">No projects yet</p>
+          <p class="text-tertiary mb-6">No workspaces yet</p>
           <ButtonLink href="/create" variant="primary">Create</ButtonLink>
         </div>
       {% endif %}

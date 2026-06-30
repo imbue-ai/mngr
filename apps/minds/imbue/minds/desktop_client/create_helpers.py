@@ -30,9 +30,9 @@ def existing_workspace_host_names(backend_resolver: BackendResolverInterface) ->
     providers) rather than shelling out per workspace, per the resolver-cache
     read convention. Uses ``list_known_workspace_ids`` -- the *full* set,
     including workspaces on destroyed-but-still-lingering hosts -- so an
-    auto-generated ``mind-N`` name does not collide with one that discovery has
+    auto-generated ``workspace-N`` name does not collide with one that discovery has
     not yet fully dropped. Feeds both the duplicate-name guard and the
-    ``mind-N`` auto-naming in ``resolve_create_host_name``.
+    ``workspace-N`` auto-naming in ``resolve_create_host_name``.
     """
     names: set[str] = set()
     for aid in backend_resolver.list_known_workspace_ids():
@@ -49,7 +49,7 @@ def taken_host_names_on_provider(backend_resolver: BackendResolverInterface, pro
     uniqueness check actually fires -- and to *active* workspaces only (a
     destroyed host's name is free to reuse), reading the discovery snapshot per
     the resolver-cache read convention. Names are case-folded so the create
-    form's availability check treats ``My-Mind`` and ``my-mind`` as the same
+    form's availability check treats ``My-Workspace`` and ``my-workspace`` as the same
     name. Feeds the ``GET /api/v1/desktop/host-name-available`` check.
     """
     taken: set[str] = set()
