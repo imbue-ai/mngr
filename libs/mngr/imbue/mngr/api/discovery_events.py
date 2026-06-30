@@ -65,6 +65,10 @@ class DiscoveryEventType(UpperCaseStrEnum):
     AGENT_DESTROYED = auto()
     HOST_DESTROYED = auto()
     DISCOVERY_FULL = auto()
+    # A snapshot of a single provider's agents/hosts. Replaces DISCOVERY_FULL:
+    # each provider is discovered on its own decoupled loop and emits its own
+    # snapshot, so a slow/hung provider cannot block any other provider.
+    DISCOVERY_PROVIDER = auto()
     HOST_SSH_INFO = auto()
     DISCOVERY_ERROR = auto()
 
@@ -158,6 +162,55 @@ class FullDiscoverySnapshotEvent(EventEnvelope):
     )
 
 
+class ProviderDiscoverySnapshotEvent(EventEnvelope):
+    """A snapshot of one provider's agents and hosts from a single discovery poll.
+
+    Replaces :class:`FullDiscoverySnapshotEvent`. Each provider is discovered on
+    its own decoupled loop and emits its own snapshot independently, so a slow or
+    hung provider cannot delay any other provider's discovery.
+
+    A snapshot is authoritative *only* for ``provider_name`` -- it says nothing
+    about any other provider's agents or hosts, so a consumer must scope its
+    "what disappeared" diff to this provider's prior agents/hosts only.
+
+    ``error`` is set when this provider's discovery raised this poll; its
+    previously-known agents/hosts MUST be retained by consumers (their state is
+    unknown, not gone). ``unknown_host_ids`` / ``unknown_agent_ids`` mark items
+    whose individual read exceeded the per-host / per-agent sub-provider timeout:
+    their state is explicitly unknown, distinct from being destroyed (absent from
+    the snapshot) or from a fully-errored provider.
+
+    ``discovery_started_at`` / ``discovery_finished_at`` bound the wall-clock span
+    during which this provider's state was read. A consumer must NOT let this
+    snapshot overwrite an item whose own state-change / destroy event was observed
+    at or after ``discovery_started_at`` -- that event reflects newer truth than
+    this in-flight snapshot. See :class:`DiscoveryStateAggregator`.
+    """
+
+    type: Literal[DiscoveryEventType.DISCOVERY_PROVIDER] = DiscoveryEventType.DISCOVERY_PROVIDER
+    provider_name: ProviderInstanceName = Field(description="The provider this snapshot is authoritative for")
+    agents: tuple[DiscoveredAgent, ...] = Field(description="All agents discovered on this provider this poll")
+    hosts: tuple[DiscoveredHost, ...] = Field(description="All hosts discovered on this provider this poll")
+    provider: DiscoveredProvider | None = Field(
+        default=None,
+        description="The provider's base configuration, when its construction succeeded this poll",
+    )
+    error: DiscoveryError | None = Field(
+        default=None,
+        description="Set when this provider's discovery raised this poll (retain prior agents/hosts as stale)",
+    )
+    unknown_host_ids: tuple[HostId, ...] = Field(
+        default=(),
+        description="Hosts whose individual read exceeded the per-host timeout (state explicitly unknown)",
+    )
+    unknown_agent_ids: tuple[AgentId, ...] = Field(
+        default=(),
+        description="Agents whose individual read exceeded the per-agent timeout (state explicitly unknown)",
+    )
+    discovery_started_at: datetime = Field(description="When this provider's discovery poll began")
+    discovery_finished_at: datetime = Field(description="When this provider's discovery poll completed")
+
+
 class HostSSHInfoEvent(EventEnvelope):
     """Records SSH connection info for a host."""
 
@@ -189,6 +242,7 @@ DiscoveryEvent = Annotated[
     | AgentDestroyedEvent
     | HostDestroyedEvent
     | FullDiscoverySnapshotEvent
+    | ProviderDiscoverySnapshotEvent
     | HostSSHInfoEvent
     | DiscoveryErrorEvent,
     Discriminator("type"),
@@ -376,6 +430,35 @@ def make_full_discovery_snapshot_event(
     )
 
 
+def make_provider_discovery_snapshot_event(
+    provider_name: ProviderInstanceName,
+    agents: Sequence[DiscoveredAgent],
+    hosts: Sequence[DiscoveredHost],
+    discovery_started_at: datetime,
+    discovery_finished_at: datetime,
+    provider: DiscoveredProvider | None = None,
+    error: DiscoveryError | None = None,
+    unknown_host_ids: Sequence[HostId] = (),
+    unknown_agent_ids: Sequence[AgentId] = (),
+) -> ProviderDiscoverySnapshotEvent:
+    """Build a per-provider discovery snapshot event."""
+    timestamp, event_id = _make_envelope_fields()
+    return ProviderDiscoverySnapshotEvent(
+        timestamp=timestamp,
+        event_id=event_id,
+        source=DISCOVERY_EVENT_SOURCE,
+        provider_name=provider_name,
+        agents=tuple(agents),
+        hosts=tuple(hosts),
+        provider=provider,
+        error=error,
+        unknown_host_ids=tuple(unknown_host_ids),
+        unknown_agent_ids=tuple(unknown_agent_ids),
+        discovery_started_at=discovery_started_at,
+        discovery_finished_at=discovery_finished_at,
+    )
+
+
 def make_discovered_provider(
     provider_name: ProviderInstanceName,
     config: ProviderInstanceConfig,
@@ -396,6 +479,11 @@ def make_discovered_provider(
             is_enabled=config.is_enabled,
             destroyed_host_persisted_seconds=config.destroyed_host_persisted_seconds,
             min_online_host_age_seconds=config.min_online_host_age_seconds,
+            discovery_poll_interval_seconds=config.discovery_poll_interval_seconds,
+            discovery_warn_seconds=config.discovery_warn_seconds,
+            discovery_error_timeout_seconds=config.discovery_error_timeout_seconds,
+            host_discovery_timeout_seconds=config.host_discovery_timeout_seconds,
+            agent_discovery_timeout_seconds=config.agent_discovery_timeout_seconds,
         ),
     )
 
@@ -590,6 +678,41 @@ def write_full_discovery_snapshot(
         len(hosts),
         len(event.providers),
         len(event.error_by_provider_name),
+    )
+    return event
+
+
+def write_provider_discovery_snapshot(
+    config: MngrConfig,
+    provider_name: ProviderInstanceName,
+    agents: Sequence[DiscoveredAgent],
+    hosts: Sequence[DiscoveredHost],
+    discovery_started_at: datetime,
+    discovery_finished_at: datetime,
+    provider: DiscoveredProvider | None = None,
+    error: DiscoveryError | None = None,
+    unknown_host_ids: Sequence[HostId] = (),
+    unknown_agent_ids: Sequence[AgentId] = (),
+) -> ProviderDiscoverySnapshotEvent:
+    """Build and append a per-provider discovery snapshot event. Returns the event."""
+    event = make_provider_discovery_snapshot_event(
+        provider_name,
+        agents,
+        hosts,
+        discovery_started_at,
+        discovery_finished_at,
+        provider=provider,
+        error=error,
+        unknown_host_ids=unknown_host_ids,
+        unknown_agent_ids=unknown_agent_ids,
+    )
+    append_discovery_event(config, event)
+    logger.trace(
+        "Emitted discovery_provider event for {} with {} agent(s), {} host(s), error={}",
+        provider_name,
+        len(agents),
+        len(hosts),
+        error is not None,
     )
     return event
 

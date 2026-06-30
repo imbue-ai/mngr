@@ -164,6 +164,11 @@ def test_make_discovered_provider_drops_subclass_fields() -> None:
         "is_enabled": True,
         "destroyed_host_persisted_seconds": None,
         "min_online_host_age_seconds": None,
+        "discovery_poll_interval_seconds": 30.0,
+        "discovery_warn_seconds": 20.0,
+        "discovery_error_timeout_seconds": 120.0,
+        "host_discovery_timeout_seconds": 30.0,
+        "agent_discovery_timeout_seconds": 30.0,
     }
 
 

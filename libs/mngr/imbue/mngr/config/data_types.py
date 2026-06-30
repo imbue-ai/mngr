@@ -16,17 +16,20 @@ from pydantic import AfterValidator
 from pydantic import Field
 from pydantic import GetCoreSchemaHandler
 from pydantic import field_validator
+from pydantic import model_validator
 from pydantic_core import CoreSchema
 from pydantic_core import core_schema
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.primitives import PositiveFloat
 from imbue.imbue_common.pure import pure
 from imbue.mngr.config.field_markers import RegistryField
 from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import ParseSpecError
+from imbue.mngr.errors import ProviderTimeoutConfigError
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import LifecycleHook
@@ -51,6 +54,20 @@ _DEFAULT_DESTROYED_HOST_PERSISTED_SECONDS: Final[float] = 60.0 * 60.0 * 24.0 * 7
 # Short because we only need to protect against transient empty states (e.g. between
 # agent creation and discovery).
 _DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS: Final[float] = 60.0 * 10.0
+
+# Per-provider discovery cadence and timeout defaults. Each provider is
+# discovered on its own decoupled loop (see api/discovery_events.py) so a slow
+# or hung provider cannot block discovery of any other provider. These bound
+# that loop with the project's two-threshold timeout pattern: warn first, then
+# declare the provider errored after the (longer) error timeout. The host and
+# agent sub-timeouts bound a single slow host/agent read so it surfaces as
+# UNKNOWN rather than holding up its whole provider; they are validated to stay
+# below the provider error timeout.
+_DEFAULT_DISCOVERY_POLL_INTERVAL_SECONDS: Final[float] = 30.0
+_DEFAULT_DISCOVERY_WARN_SECONDS: Final[float] = 20.0
+_DEFAULT_DISCOVERY_ERROR_TIMEOUT_SECONDS: Final[float] = 120.0
+_DEFAULT_HOST_DISCOVERY_TIMEOUT_SECONDS: Final[float] = 30.0
+_DEFAULT_AGENT_DISCOVERY_TIMEOUT_SECONDS: Final[float] = 30.0
 
 # === Helper Functions ===
 
@@ -232,6 +249,50 @@ class ProviderInstanceConfig(FrozenModel):
         description="Minimum age (in seconds) before GC will destroy an online host with no agents. "
         "Overrides the global default_min_online_host_age_seconds when set.",
     )
+    discovery_poll_interval_seconds: PositiveFloat = Field(
+        default=PositiveFloat(_DEFAULT_DISCOVERY_POLL_INTERVAL_SECONDS),
+        description="How often (in seconds) this provider's decoupled discovery loop re-polls. "
+        "Each provider polls independently so a slow provider cannot delay any other.",
+    )
+    discovery_warn_seconds: PositiveFloat = Field(
+        default=PositiveFloat(_DEFAULT_DISCOVERY_WARN_SECONDS),
+        description="How long (in seconds) a single discovery poll for this provider may run before "
+        "a 'discovery is slow' warning is logged. The first threshold of the two-threshold timeout.",
+    )
+    discovery_error_timeout_seconds: PositiveFloat = Field(
+        default=PositiveFloat(_DEFAULT_DISCOVERY_ERROR_TIMEOUT_SECONDS),
+        description="How long (in seconds) a single discovery poll for this provider may run before it "
+        "is declared errored and a per-provider DiscoveryError is emitted (the poll's thread keeps "
+        "running and its late result is accepted if it eventually returns). Set effectively infinite "
+        "to reproduce the old wait-for-this-provider behavior.",
+    )
+    host_discovery_timeout_seconds: PositiveFloat = Field(
+        default=PositiveFloat(_DEFAULT_HOST_DISCOVERY_TIMEOUT_SECONDS),
+        description="How long (in seconds) to wait for a single host's discovery before marking it "
+        "UNKNOWN in the provider's snapshot. Must be below discovery_error_timeout_seconds.",
+    )
+    agent_discovery_timeout_seconds: PositiveFloat = Field(
+        default=PositiveFloat(_DEFAULT_AGENT_DISCOVERY_TIMEOUT_SECONDS),
+        description="How long (in seconds) to wait for a single agent's discovery before marking it "
+        "UNKNOWN in the provider's snapshot. Must be below discovery_error_timeout_seconds.",
+    )
+
+    @model_validator(mode="after")
+    def _validate_discovery_timeouts_are_ordered(self) -> "ProviderInstanceConfig":
+        # The host/agent sub-provider timeouts must fire before the provider error
+        # timeout, otherwise a single slow host/agent could never surface as UNKNOWN
+        # before its whole provider is declared errored.
+        for field_name, value in (
+            ("host_discovery_timeout_seconds", self.host_discovery_timeout_seconds),
+            ("agent_discovery_timeout_seconds", self.agent_discovery_timeout_seconds),
+        ):
+            if value >= self.discovery_error_timeout_seconds:
+                raise ProviderTimeoutConfigError(
+                    f"{field_name} ({value}s) must be below discovery_error_timeout_seconds "
+                    f"({self.discovery_error_timeout_seconds}s) so a slow host/agent surfaces as "
+                    f"UNKNOWN before the whole provider is declared errored"
+                )
+        return self
 
 
 class PluginConfig(FrozenModel):
