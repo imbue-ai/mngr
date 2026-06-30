@@ -99,6 +99,7 @@ from imbue.minds.desktop_client.templates import render_inbox_unavailable_fragme
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
+from imbue.minds.desktop_client.templates import render_overlay_host_page
 from imbue.minds.desktop_client.templates import render_recovery_page
 from imbue.minds.desktop_client.templates import render_settings_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
@@ -861,6 +862,19 @@ def _handle_chrome_sidebar() -> Response:
         offset_y=_int_query_param("offset_y", 2),
     )
     return make_html_response(content=html)
+
+
+def _handle_chrome_overlay() -> Response:
+    """Serve the always-warm overlay host page loaded into the shared modal WebContentsView.
+
+    Loaded once at window creation (see openOverlayHost in electron/main.js) and
+    kept mounted for the window's life. It hosts every overlay -- the migrated
+    workspace menu / inbox / help / sign-in modals (as kept-warm iframes) and
+    hover tooltips -- as in-page DOM driven over IPC, so overlays open without a
+    per-open page load. Unauthenticated, like /_chrome: the host shell renders
+    for all users and the overlays it hosts handle their own auth.
+    """
+    return make_html_response(content=render_overlay_host_page())
 
 
 def _handle_dev_styleguide() -> Response:
@@ -2150,6 +2164,7 @@ def create_desktop_client(
     # Chrome (persistent shell) routes
     app.add_url_rule("/_chrome", view_func=_handle_chrome_page)
     app.add_url_rule("/_chrome/sidebar", view_func=_handle_chrome_sidebar)
+    app.add_url_rule("/_chrome/overlay", view_func=_handle_chrome_overlay)
     app.add_url_rule("/_chrome/events", view_func=_handle_chrome_events)
 
     app.add_url_rule("/_dev/styleguide", view_func=_handle_dev_styleguide)

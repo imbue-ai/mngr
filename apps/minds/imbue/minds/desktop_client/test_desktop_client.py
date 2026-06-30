@@ -731,6 +731,16 @@ def test_chrome_sidebar_page_renders(tmp_path: Path) -> None:
     assert "/_static/sidebar.js" in response.text
 
 
+def test_chrome_overlay_page_renders(tmp_path: Path) -> None:
+    """The /_chrome/overlay route returns the always-warm overlay host HTML."""
+    client, _, _ = _setup_test_server(tmp_path)
+
+    response = client.get("/_chrome/overlay")
+    assert response.status_code == 200
+    assert "overlay-root" in response.text
+    assert "/_static/overlay.js" in response.text
+
+
 def test_chrome_events_sse_returns_auth_required_when_unauthenticated(tmp_path: Path) -> None:
     """The /_chrome/events SSE endpoint returns auth_required for unauthenticated users."""
     client, _, _ = _setup_test_server(tmp_path)
