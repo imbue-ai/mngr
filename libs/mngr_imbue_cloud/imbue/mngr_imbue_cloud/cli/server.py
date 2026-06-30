@@ -684,8 +684,7 @@ def _bake_one_slice(
                 )
             else:
                 wait_for_deferred_install(_slice_run_in_container, baked, host_name=host_name)
-            # Stop the services agent so it lands in the pool STOPPED, exactly like an
-            # OVH pool host (which ``_create_single_pool_host`` stops via local mngr).
+            # Stop the services agent so it lands in the pool STOPPED.
             # The fast-path lease then *starts* the adopted agent, which re-runs the
             # FCT bootstrap -- and because finalize removed the initial-chat sentinel,
             # the bootstrap re-creates the chat agent under the leasing user's
