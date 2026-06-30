@@ -15,7 +15,7 @@ Tracks [issue #2322](https://github.com/imbue-ai/mngr/issues/2322).
 - Attaching to an agent session via a plain `tmux attach` (not `mngr connect`) sends `SIGWINCH` to the agent process **and its children** and triggers a clean repaint.
 - The ttyd agent terminal and any web-shell `tmux attach` get the same repaint, because the hook is on the session, not the connect path.
 - `mngr connect` still produces a clean repaint -- now via the hook that fires on its attach, not via `sigwinch_step`.
-- The attach is **never blocked**: the hook body runs fully detached (`run-shell -b` / self-backgrounded), so the deliberate ~3s delay before signaling does not stall the attaching client.
+- The attach is **never blocked**: the hook invokes the script via `run-shell -b`, which backgrounds it relative to the attach, so the deliberate ~3s delay before signaling does not stall the attaching client. (The script itself runs synchronously; backgrounding is provided solely by `run-shell -b`.)
 - The nudge is skipped (no-op) when the agent's primary window is pinned to `window-size manual`: such a window never resizes on attach, so there is nothing to repaint and the fixed dimensions are left untouched.
 - `window-size` stays at tmux's default `latest` for unpinned sessions, so the window still resizes to match the client on attach and on every later terminal resize (unchanged).
 - Every pane's children across **all windows** in the session are signaled (preserves today's pipeline behavior); the `manual` guard is read from the primary window.
@@ -31,7 +31,7 @@ Tracks [issue #2322](https://github.com/imbue-ai/mngr/issues/2322).
 - Otherwise the ~3s delay then the existing pipeline (run by bash, so `#{pane_pid}` / `#I` go to `tmux ... -F` and are never seen by tmux's hook layer):
   - `tmux list-windows -t "=$1" -F '#I'` -> for each window `W`, `tmux list-panes -t "=$1:$W" -F '#{pane_pid}'` -> `xargs -I{} sh -c 'kill -WINCH {} $(pgrep -P {})' 2>/dev/null`.
 - Uses `=`-prefixed exact-match targets, matching `TmuxSessionTarget` / `TmuxWindowTarget` semantics.
-- Self-backgrounds the delay+signal so the script returns immediately (belt-and-suspenders with `run-shell -b`).
+- Runs synchronously (delay then signal); the hook's `run-shell -b` provides the backgrounding. Direct/synchronous invocation (e.g. tests) sets the delay to 0 via `MNGR_SIGWINCH_DELAY_SECONDS`.
 - Ships in the wheel automatically: lives under the already-packaged `imbue` tree (`imbue/mngr/resources/`), so no `pyproject.toml` change.
 
 ### Delete the Python pipeline builder
@@ -63,7 +63,7 @@ Tracks [issue #2322](https://github.com/imbue-ai/mngr/issues/2322).
 
 ## Implementation phases
 
-1. **Ship the script.** Add `sigwinch_panes.sh` (manual-pin guard + 3s delay + all-windows pipeline, self-backgrounded). Add the `@pytest.mark.tmux` integration test that runs it against a SIGWINCH-catcher session.
+1. **Ship the script.** Add `sigwinch_panes.sh` (manual-pin guard + 3s delay + all-windows pipeline, run synchronously; backgrounding comes from the hook's `run-shell -b`). Add the `@pytest.mark.tmux` integration test that runs it against a SIGWINCH-catcher session.
 2. **Delete the Python builder.** Remove `build_post_attach_sigwinch_script`; repoint `test_connect.py` at the `.sh`.
 3. **Install on hosts.** Wire the script into `_ensure_shared_shell_libs` so `<host_dir>/commands/sigwinch_panes.sh` exists for all host types. System still works; hook not yet set.
 4. **Set the hook.** Add the persistent `client-attached[98]` hook in `_build_start_agent_shell_command`. Both the hook and the old `sigwinch_step` now fire on `mngr connect` (harmless double-nudge). Add the unit string-shape test.
@@ -80,5 +80,5 @@ Tracks [issue #2322](https://github.com/imbue-ai/mngr/issues/2322).
 
 ## Open questions
 
-- Confirm during implementation that tmux fires `client-attached` *after* the window has resized to the new client (the chosen 3s self-backgrounded delay is the safety margin; verify it is sufficient and that `run-shell -b` does not itself reorder relative to the resize).
+- Confirm during implementation that tmux fires `client-attached` *after* the window has resized to the new client (the chosen 3s in-script delay is the safety margin; verify it is sufficient and that `run-shell -b` does not itself reorder relative to the resize).
 - Pin the exact destination for the user-facing note (conventions doc vs the tmux concepts page) when writing it; either is acceptable.
