@@ -67,6 +67,7 @@ from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.data_types import BoundedProviderDiscoveryResult
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
@@ -80,6 +81,7 @@ from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
+from imbue.mngr.interfaces.provider_instance import bounded_result_from_agents_by_host
 from imbue.mngr.interfaces.provider_instance import build_agent_details_from_offline_ref
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -441,6 +443,21 @@ class ImbueCloudProvider(BaseProviderInstance):
     # even the outer SSH is unreachable -- in normal operation we expect
     # outer SSH to be reachable for every leased VPS.
     # ------------------------------------------------------------------
+
+    def discover_hosts_and_agents_within_timeouts(
+        self,
+        cg: ConcurrencyGroup,
+        host_discovery_timeout_seconds: float,
+        agent_discovery_timeout_seconds: float,
+        include_destroyed: bool = False,
+    ) -> BoundedProviderDiscoveryResult:
+        """Delegate to the batch discovery path; bounded only by the provider-level error timeout.
+
+        Imbue Cloud discovery reads all leased hosts (and their agents) in one batched
+        pass, so individual host reads cannot be bounded; nothing is marked UNKNOWN here.
+        """
+        agents_by_host = self.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
+        return bounded_result_from_agents_by_host(agents_by_host)
 
     def discover_hosts_and_agents(
         self,

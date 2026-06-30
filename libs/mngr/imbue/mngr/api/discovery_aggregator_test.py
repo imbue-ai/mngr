@@ -214,6 +214,23 @@ def test_unknown_agent_id_in_snapshot_retains_and_marks_unknown() -> None:
     assert str(agent.agent_id) in aggregator.get_unknown_agent_ids()
 
 
+def test_unknown_host_in_snapshot_retains_its_agents_as_unknown() -> None:
+    aggregator = DiscoveryStateAggregator()
+    host = _make_host("vps", "slow-host")
+    agent = _make_agent("vps", "a-on-slow-host", host_id=host.host_id)
+    aggregator.apply_event(_snapshot("vps", (agent,), (host,)))
+
+    # Next poll: the host's read times out, so the producer omits the host (and its
+    # never-read agents) and marks the host unknown. The agent must be retained as
+    # unknown rather than dropped (its host was simply unread, not destroyed).
+    aggregator.apply_event(_snapshot("vps", (), (), unknown_host_ids=(host.host_id,)))
+
+    assert host.host_id in {h.host_id for h in aggregator.get_hosts()}
+    assert str(host.host_id) in aggregator.get_unknown_host_ids()
+    assert agent.agent_id in {a.agent_id for a in aggregator.get_agents()}
+    assert str(agent.agent_id) in aggregator.get_unknown_agent_ids()
+
+
 def test_error_then_success_clears_error_and_unknown() -> None:
     aggregator = DiscoveryStateAggregator()
     agent = _make_agent("modal", "a")

@@ -192,6 +192,9 @@ class DiscoveryStateAggregator(MutableModel):
     ) -> None:
         snapshot_agent_by_id = {str(agent.agent_id): agent for agent in event.agents}
         unknown_agent_ids = {str(agent_id) for agent_id in event.unknown_agent_ids}
+        # Hosts whose read timed out this poll: their agents were never read, so an
+        # agent absent from this snapshot but living on such a host is unknown, not gone.
+        unknown_host_ids = {str(host_id) for host_id in event.unknown_host_ids}
 
         # Apply each snapshot agent unless a newer event already updated it.
         for agent_id_str, agent in snapshot_agent_by_id.items():
@@ -213,6 +216,12 @@ class DiscoveryStateAggregator(MutableModel):
         for agent_id_str in removed_agent_ids:
             if agent_id_str in unknown_agent_ids:
                 # Explicitly unknown (sub-provider timeout): retain prior data, mark unknown.
+                self._unknown_agent_ids.add(agent_id_str)
+                continue
+            prior_agent = self._agent_by_id.get(agent_id_str)
+            if prior_agent is not None and str(prior_agent.host_id) in unknown_host_ids:
+                # The agent's host timed out, so its agents were never read this poll:
+                # retain the agent's prior data and mark it unknown rather than dropping it.
                 self._unknown_agent_ids.add(agent_id_str)
                 continue
             has_intervening = is_intervening_event(

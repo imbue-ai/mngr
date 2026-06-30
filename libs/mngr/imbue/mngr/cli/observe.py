@@ -38,8 +38,8 @@ class ObserveCliOptions(CommonCliOptions):
     "--discovery-only",
     is_flag=True,
     help="Stream only discovery events as JSONL (hosts and agents discovered/destroyed). "
-    "Outputs a full snapshot, then tails the event file for updates. "
-    "Periodically re-polls to catch any missed changes. "
+    "Polls each provider independently on its own loop, emitting a per-provider snapshot "
+    "as each finishes, then tails the event file for updates. "
     "Does not start activity streams or emit agent state events.",
 )
 @click.option(

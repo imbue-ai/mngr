@@ -22,8 +22,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderError
-from imbue.mngr.primitives import DiscoveredAgent
-from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.interfaces.data_types import BoundedProviderDiscoveryResult
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
@@ -49,10 +48,21 @@ def _resolve_provider_config(provider: BaseProviderInstance, mngr_ctx: MngrConte
 def _discover_one_provider(
     provider: BaseProviderInstance,
     mngr_ctx: MngrContext,
+    host_discovery_timeout_seconds: float,
+    agent_discovery_timeout_seconds: float,
     include_destroyed: bool,
-) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
-    """Run a single provider's discovery, returning its host->agents map. Raises on failure."""
-    return provider.discover_hosts_and_agents(cg=mngr_ctx.concurrency_group, include_destroyed=include_destroyed)
+) -> BoundedProviderDiscoveryResult:
+    """Run a single provider's per-host-bounded discovery. Raises on failure.
+
+    A slow/wedged host is marked UNKNOWN within the returned result rather than
+    stalling the whole provider's snapshot.
+    """
+    return provider.discover_hosts_and_agents_within_timeouts(
+        cg=mngr_ctx.concurrency_group,
+        host_discovery_timeout_seconds=host_discovery_timeout_seconds,
+        agent_discovery_timeout_seconds=agent_discovery_timeout_seconds,
+        include_destroyed=include_destroyed,
+    )
 
 
 class _ProviderDiscoveryPoller(MutableModel):
@@ -74,7 +84,7 @@ class _ProviderDiscoveryPoller(MutableModel):
     config: ProviderInstanceConfig = Field(frozen=True)
     include_destroyed: bool = Field(default=True, frozen=True)
 
-    _in_flight_future: Future[dict[DiscoveredHost, list[DiscoveredAgent]]] | None = PrivateAttr(default=None)
+    _in_flight_future: Future[BoundedProviderDiscoveryResult] | None = PrivateAttr(default=None)
     _in_flight_started_at: datetime | None = PrivateAttr(default=None)
 
     @property
@@ -83,7 +93,7 @@ class _ProviderDiscoveryPoller(MutableModel):
 
     def poll_and_emit(
         self,
-        submit_discovery: Callable[[], "Future[dict[DiscoveredHost, list[DiscoveredAgent]]]"],
+        submit_discovery: Callable[[], "Future[BoundedProviderDiscoveryResult]"],
     ) -> None:
         """Run (or resume) one bounded discovery poll for this provider and write a snapshot.
 
@@ -125,7 +135,7 @@ class _ProviderDiscoveryPoller(MutableModel):
 
     def _harvest_and_emit(
         self,
-        future: "Future[dict[DiscoveredHost, list[DiscoveredAgent]]]",
+        future: "Future[BoundedProviderDiscoveryResult]",
         started_at: datetime,
     ) -> None:
         """Emit a snapshot from a finished discovery future (success or error)."""
@@ -135,20 +145,17 @@ class _ProviderDiscoveryPoller(MutableModel):
         if error is not None:
             self._emit_error_snapshot(started_at, error)
             return
-        agents_by_host = future.result()
-        agents: list[DiscoveredAgent] = []
-        hosts: list[DiscoveredHost] = []
-        for host_ref, agent_refs in agents_by_host.items():
-            hosts.append(host_ref)
-            agents.extend(agent_refs)
+        result = future.result()
         write_provider_discovery_snapshot(
             self.mngr_ctx.config,
             provider_name=self.provider.name,
-            agents=agents,
-            hosts=hosts,
+            agents=result.agents,
+            hosts=result.hosts,
             discovery_started_at=started_at,
             discovery_finished_at=_utc_now(),
             provider=self._discovered_provider,
+            unknown_host_ids=result.unknown_host_ids,
+            unknown_agent_ids=result.unknown_agent_ids,
         )
 
     def _emit_error_snapshot(self, started_at: datetime, exc: BaseException) -> None:
@@ -215,7 +222,12 @@ class _ProviderDiscoveryPoller(MutableModel):
                     with log_span("Polling discovery for provider {}", self.provider.name):
                         self.poll_and_emit(
                             lambda: executor.submit(
-                                _discover_one_provider, self.provider, self.mngr_ctx, self.include_destroyed
+                                _discover_one_provider,
+                                self.provider,
+                                self.mngr_ctx,
+                                self.config.host_discovery_timeout_seconds,
+                                self.config.agent_discovery_timeout_seconds,
+                                self.include_destroyed,
                             )
                         )
                 except (OSError, MngrError) as e:
@@ -223,7 +235,7 @@ class _ProviderDiscoveryPoller(MutableModel):
                 stop_event.wait(timeout=self.config.discovery_poll_interval_seconds)
 
 
-def _wait_for_future(future: Future[dict[DiscoveredHost, list[DiscoveredAgent]]], timeout_seconds: float) -> bool:
+def _wait_for_future(future: Future[BoundedProviderDiscoveryResult], timeout_seconds: float) -> bool:
     """Wait up to ``timeout_seconds`` for ``future``; return whether it completed."""
     done, _not_done = wait([future], timeout=timeout_seconds)
     return future in done
