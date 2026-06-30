@@ -2,9 +2,7 @@ import json
 import sys
 import threading
 from collections.abc import Callable
-from collections.abc import Mapping
 from collections.abc import Sequence
-from collections.abc import Set as AbstractSet
 from datetime import datetime
 from datetime import timezone
 from enum import auto
@@ -278,49 +276,6 @@ def get_discovery_events_dir(config: MngrConfig) -> Path:
 def get_discovery_events_path(config: MngrConfig) -> Path:
     """Return the path to the discovery events JSONL file."""
     return get_discovery_events_dir(config) / "events.jsonl"
-
-
-# === Provider-error retention ===
-
-
-class RemovedAgentPartition(FrozenModel):
-    """How a snapshot's removed agents split by their prior provider's error state.
-
-    ``retained`` are agents absent from the new snapshot whose prior provider
-    is currently errored: their state is unknown, not gone, so the consumer
-    keeps them. ``dropped`` are agents the consumer should now forget (their
-    provider succeeded and still omitted them, or it is unknown).
-    """
-
-    retained: frozenset[str] = Field(description="Agent id strings to keep despite absence from the snapshot")
-    dropped: frozenset[str] = Field(description="Agent id strings to drop (confirmed gone or unattributable)")
-
-
-@pure
-def partition_removed_agents_by_provider_error(
-    removed_agent_ids: AbstractSet[str],
-    provider_name_by_prior_agent_id: Mapping[str, str],
-    error_by_provider_name: Mapping[ProviderInstanceName, DiscoveryError],
-) -> RemovedAgentPartition:
-    """Split removed agent ids into those to retain vs drop, by provider error state.
-
-    An agent absent from a fresh snapshot is *retained* when its prior provider
-    is in ``error_by_provider_name`` -- the snapshot omitted it only because
-    that provider's discovery raised this poll, so its state is unknown rather
-    than confirmed gone. Every other removed agent is *dropped*. Shared by all
-    discovery-snapshot consumers so the retention rule has exactly one
-    definition (see :class:`FullDiscoverySnapshotEvent`).
-    """
-    errored_provider_names = {str(name) for name in error_by_provider_name}
-    retained: set[str] = set()
-    dropped: set[str] = set()
-    for agent_id_str in removed_agent_ids:
-        prior_provider_name = provider_name_by_prior_agent_id.get(agent_id_str)
-        if prior_provider_name is not None and prior_provider_name in errored_provider_names:
-            retained.add(agent_id_str)
-        else:
-            dropped.add(agent_id_str)
-    return RemovedAgentPartition(retained=frozenset(retained), dropped=frozenset(dropped))
 
 
 # === Conversion Helpers ===

@@ -44,7 +44,6 @@ from imbue.mngr.api.discovery_events import make_discovered_provider
 from imbue.mngr.api.discovery_events import make_host_discovery_event
 from imbue.mngr.api.discovery_events import make_provider_discovery_snapshot_event
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
-from imbue.mngr.api.discovery_events import partition_removed_agents_by_provider_error
 from imbue.mngr.api.discovery_events import resolve_hosts_for_identifiers
 from imbue.mngr.api.discovery_events import resolve_provider_names_for_identifiers
 from imbue.mngr.api.discovery_events import tail_discovery_events_file
@@ -1568,58 +1567,3 @@ def test_rotate_discovery_events_cleans_up_old_rotated_files(tmp_path: Path) -> 
     rotated = sorted(f for f in tmp_path.iterdir() if f.name.startswith("events.jsonl."))
     # With max_rotated_count=1, only the newest file should remain
     assert len(rotated) == 1
-
-
-# -- partition_removed_agents_by_provider_error --
-
-
-def _provider_error(provider_name: ProviderInstanceName) -> DiscoveryError:
-    return DiscoveryError(type_name="RuntimeError", message="discovery failed", provider_name=provider_name)
-
-
-def test_partition_retains_agent_whose_provider_errored() -> None:
-    """An absent agent whose provider is currently errored is retained, not dropped."""
-    errored = ProviderInstanceName("imbue_cloud")
-    partition = partition_removed_agents_by_provider_error(
-        removed_agent_ids={"agent-1"},
-        provider_name_by_prior_agent_id={"agent-1": str(errored)},
-        error_by_provider_name={errored: _provider_error(errored)},
-    )
-    assert partition.retained == frozenset({"agent-1"})
-    assert partition.dropped == frozenset()
-
-
-def test_partition_drops_agent_whose_provider_succeeded() -> None:
-    """An absent agent whose provider is not errored is dropped (confirmed gone)."""
-    partition = partition_removed_agents_by_provider_error(
-        removed_agent_ids={"agent-1"},
-        provider_name_by_prior_agent_id={"agent-1": "local"},
-        error_by_provider_name={},
-    )
-    assert partition.retained == frozenset()
-    assert partition.dropped == frozenset({"agent-1"})
-
-
-def test_partition_drops_agent_with_unknown_prior_provider() -> None:
-    """An absent agent with no recorded prior provider is dropped (unattributable)."""
-    errored = ProviderInstanceName("imbue_cloud")
-    partition = partition_removed_agents_by_provider_error(
-        removed_agent_ids={"agent-1"},
-        provider_name_by_prior_agent_id={},
-        error_by_provider_name={errored: _provider_error(errored)},
-    )
-    assert partition.retained == frozenset()
-    assert partition.dropped == frozenset({"agent-1"})
-
-
-def test_partition_splits_mixed_removed_agents_by_their_providers() -> None:
-    """Each removed agent is classified independently by its own prior provider."""
-    errored = ProviderInstanceName("imbue_cloud")
-    healthy = ProviderInstanceName("local")
-    partition = partition_removed_agents_by_provider_error(
-        removed_agent_ids={"agent-errored", "agent-healthy"},
-        provider_name_by_prior_agent_id={"agent-errored": str(errored), "agent-healthy": str(healthy)},
-        error_by_provider_name={errored: _provider_error(errored)},
-    )
-    assert partition.retained == frozenset({"agent-errored"})
-    assert partition.dropped == frozenset({"agent-healthy"})

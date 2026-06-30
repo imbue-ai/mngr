@@ -8,4 +8,4 @@ Made provider discovery per-provider and resilient to slow/hung providers, so a 
 
 - A hung provider is bounded without killing threads: discovery warns after the warn threshold, then emits a per-provider `DiscoveryError` after the error timeout while the abandoned read keeps running; its late result is accepted on a later poll.
 
-- Added a shared, span-aware discovery state aggregator (`DiscoveryStateAggregator`) so a host/agent state change that arrives while a provider is mid-discovery is no longer clobbered by that older in-flight snapshot. All discovery consumers now reconcile through it.
+- Added a shared, span-aware discovery state aggregator (`DiscoveryStateAggregator`) so a host/agent state change that arrives while a provider is mid-discovery is no longer clobbered by that older in-flight snapshot. All discovery consumers now reconcile through it. The aggregator's retain/drop rule supersedes the former `partition_removed_agents_by_provider_error` helper, which has been removed now that every consumer reconciles through the aggregator.
