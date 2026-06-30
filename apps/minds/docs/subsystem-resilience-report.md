@@ -153,6 +153,11 @@ blast radius justifies maximal detection.
 app takeover. Per-request proxy errors map to 502/503/504 with a 1s meta-refresh
 loader.
 
+> **Status: PR #2328 (open, `gabriel/mngr-forward-orphans`) -- pending.** Removes
+> the duplicate-forward *reaping* machinery (item 4 below + 2.5) by leashing the
+> producer to the embedder's PID (`--exit-alongside-pid`) instead of hunting and
+> reaping orphan forwards (-173 prod / -316 test lines).
+
 **Simplicity violations.**
 
 1. **The producer has no in-process respawn; the minds watchdog is its sole
@@ -168,37 +173,45 @@ loader.
    babysitting a Ring-1B grandchild because Ring 1B does not babysit its own child.
    A standalone (non-minds) `mngr latchkey forward` gets no producer recovery at all.
 
-2. **`restart()` is a host-wide hammer used as a producer-stall remedy. [judgment]**
+2. **The *watchdog's* `restart()` is a host-wide hammer used as a producer-stall
+   remedy. [judgment]**
    `LatchkeyForwardSupervisor.restart()` (`forward_supervisor.py:524`) is
    `stop()` + `ensure_running()`, and a fresh forward re-provisions *every* managed
    VPS host (`discovery.py:436`; `_provisioned_hosts` cleared on restart). The
    watchdog itself documents this (`discovery_health.py:32-33`). For the common
    failure (a lone observe child dying under a healthy parent), the cheap
    `bounce()` (SIGHUP, gateway/tunnels/provisioning untouched) already suffices.
-   The heaviness of `restart` is a direct consequence of violation #1: if the
-   forward respawned its own observe child, the watchdog would rarely need bounce
-   and `restart` could stay a true last resort.
+   **Caller distinction:** `restart()` has two callers. The *launch-time* caller
+   (`run.py:795`) is **justified and kept** -- the gateway's
+   `minds-api-proxy` extension is keyed by a per-launch bearer key + a possibly-changed
+   backend port injected only at spawn time, so adopting an old supervisor would 401
+   every agent after reopen. The *watchdog's* stall-time caller
+   (`discovery_health.py:148`) is the one this item targets: re-provisioning every
+   host to fix a stalled producer is the over-broad remedy. If the forward respawned
+   its own observe child (item 1), the watchdog would rarely need bounce and its
+   `restart` could stay a true last resort.
 
 3. **`mark_stuck` test-only path is *not* here** -- see 2.3; noting only that the
    discovery watchdog's `now_fn` clock injection (`discovery_health.py:184`) is the
    pattern the workspace tracker is *missing* (and the reason it grew a test hook).
 
-4. **Minor supervisor nits. [verified/judgment]** A stale docstring claims
-   `_terminate_pid` "mirrors `core._terminate_pid`" but no such function exists in
-   `core.py` (`forward_supervisor.py:239` -- a false cross-reference that would
-   mislead a future maintainer). `_terminate_pid`/`_terminate_process` are
-   near-duplicate helpers that one parametrized function would cover. The
-   `ensure_running` adopt-vs-spawn branch is largely dead in the minds path (minds
-   calls `restart()` -- stop-then-spawn -- on every startup, `run.py:795`), so the
-   adoption generality serves no current caller.
+4. **Minor supervisor nits. [verified/judgment] [#2328: mostly resolved]**
+   `_terminate_pid`/`_terminate_process` are near-duplicate helpers -- **#2328
+   consolidates them to one `_terminate_pid`** (the early-identity-capture variant
+   existed only for the reaper's descendant capture). The `ensure_running`
+   adopt-vs-reap branching also collapses to a clean "adopt live record, else spawn"
+   once the reaper is gone. **Residual:** the consolidated `_terminate_pid` still
+   carries the false "Mirrors `imbue.mngr_latchkey.core._terminate_pid`" docstring --
+   verified: `core.py` has no such function (no terminate helper at all). One-line
+   docstring fix, independent of the reaping removal.
 
 **Recommended direction.** Add a passive exit-callback on the latchkey observe
 child (mirror `forward_cli.py:185`) so the forward bounces its *own* observe; that
-moves producer liveness to Tier 0 where it belongs, demotes the minds watchdog's
-`restart()` to a genuine last resort, and lets the watchdog's producer half shrink
-dramatically. Before acting, confirm (a) where in the forward process main loop
-(`cli.py:477-597`, currently just `shutdown_event.wait()`) such a monitor would
-live, and (b) that the freshness-gated STUCK redirect (2.3) keeps working when
+moves producer liveness to Tier 0 where it belongs, demotes the watchdog's
+stall-time `restart()` to a genuine last resort, and lets the watchdog's producer
+half shrink dramatically. Before acting, confirm (a) where in the forward process
+main loop (`cli.py:477-597`, currently just `shutdown_event.wait()`) such a monitor
+would live, and (b) that the freshness-gated STUCK redirect (2.3) keeps working when
 producer liveness is solid.
 
 **User scope.** A **single-workspace user already loaded in does not notice a
@@ -353,13 +366,19 @@ Covered under 2.2 (producer respawn gap, `restart` hammer, supervisor nits). Two
 additional structural notes:
 
 - **Duplicate-forward reaping is substantial machinery for a self-inflicted problem.
-  [judgment].** Seven module-level helpers (`forward_supervisor.py:55-179`) +
-  `_reap_duplicate_forwards` (`:415`) scan the process table, cmdline-match, scope by
-  resolved latchkey directory, and kill duplicates + descendants. It is real
-  defensive code against a real past incident (duplicate forwards -> stuck-new-mind
-  503s, PR #2285), and the reaper is load-bearing. But the adopt-vs-reap generality
-  in `ensure_running` exceeds what the sole real caller (minds, always
-  stop-then-spawn) needs.
+  [judgment] [#2328: resolved -- pending].** Seven module-level helpers
+  (`forward_supervisor.py:55-179`) + `_reap_duplicate_forwards` (`:415`) scan the
+  process table, cmdline-match, scope by resolved latchkey directory, and kill
+  duplicates + descendants. It is real defensive code against a real past incident
+  (duplicate forwards -> stuck-new-mind 503s, PR #2285). **PR #2328 removes all of
+  it** (the six scanning helpers + `_reap_duplicate_forwards` + both calls in
+  `ensure_running`, -173 prod / -316 test lines), replacing "parent polices orphans
+  after the fact" with "producer leashed to the embedder's lifetime via
+  `--exit-alongside-pid`" -- a root-cause fix and a clean "do as little as possible"
+  win. The accepted regression (no producer while the app is closed, so a brand-new
+  agent appearing then gets no tunnel until next launch) corroborates the 2.2 user
+  scope: producer absence only bites new-agent discovery; existing tunnels + the
+  gateway persist.
 - **The remote-state-sync watchdog uses three threads (fs observer + stop-on-shutdown
   + fail-loudly sentinel). [judgment].** `discovery.py:419-491`. Each has a distinct
   blocking wait and the checked/unchecked split is meaningful, but three threads to
@@ -489,10 +508,10 @@ Ordered roughly by clarity-of-win. Effort is a rough estimate.
 | 7 | Workspace recovery | restart worker dual-writes tracker + registry | duplicated mechanisms | verified | M | Finish the v1 migration: chrome reads restart status from the registry. |
 | 8 | Workspace recovery | STUCK redirect emitted from 4 sites + latch | emit-site sprawl | verified/judgment | M | Consolidate to one per-wake reconcile (verify SSE delivery first). |
 | 9 | Auth | `_AuthBackendShim` hollow legacy methods; empty `base_url` redirect | premature/legacy scaffolding | verified | M | Collapse the shim; delete inert verify/reset routes. |
-| 10 | Discovery/forward | `restart()` re-provisions every host as a producer-stall remedy | over-broad recovery | judgment | (folds into #6) | Resolve via #6. |
+| 10 | Discovery/forward | *watchdog's* stall-time `restart()` re-provisions every host as a producer-stall remedy | over-broad recovery | judgment | (folds into #6) | Resolve via #6. |
 | 11 | Backup | three hand-rolled secure-writes vs shared `atomic_write` | duplicated mechanisms | judgment | S | Fold `write_canonical_env` into `atomic_write`; fix the `.tmp` collision. |
 | 12 | Latchkey perms | gateway error subclasses never distinguished | premature abstraction | verified | S | Collapse to the base error, or branch on them. |
-| 13 | Discovery/forward | stale `core._terminate_pid` docstring; `_terminate_*` near-dup; dead adopt path | dead reference / nits | verified/judgment | S | Fix the docstring; consider merging the helpers. |
+| 13 | Discovery/forward | stale `core._terminate_pid` docstring; `_terminate_*` near-dup; dead adopt path | dead reference / nits | verified/judgment | S | *(#2328 resolves the near-dup + adopt-path; residual: the false "Mirrors core._terminate_pid" docstring -- one-line fix.)* |
 | 14 | Latchkey perms | `LatchkeyAutoRegister` lock guards a non-existent reader | over-guard | judgment | S | Simplify if touched; low stakes. |
 | 15 | Workspace recovery | `_run_mngr_capturing` distinguishing behavior unused | premature abstraction | verified | S | Inline if touched; low priority. |
 
