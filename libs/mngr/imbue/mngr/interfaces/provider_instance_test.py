@@ -724,3 +724,70 @@ def test_discover_within_timeouts_reuses_in_flight_read_across_polls(
     finally:
         # Release the orphaned read so its daemon thread can exit cleanly.
         provider.release()
+
+
+def test_discover_within_timeouts_harvests_late_finished_read_on_next_poll(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A wedged host whose read finishes late is harvested (reported discovered) on a later poll.
+
+    Change 2: complements the in-flight-skip path. Sharing one registry, a gated host is
+    UNKNOWN on the first poll (its read is left in flight). After the gate is released and the
+    read completes, the next poll harvests that finished future -- the host is now discovered
+    (its agents surface) rather than UNKNOWN -- and the registry entry is cleared so a third
+    poll starts a fresh read.
+    """
+    provider = _PerHostGatedProvider(
+        name=ProviderInstanceName("gated"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+    host = DiscoveredHost(
+        host_id=HostId.generate(),
+        host_name=HostName("late"),
+        provider_name=provider.name,
+        host_state=HostState.RUNNING,
+    )
+    agent = _make_agent_ref(host.host_id, AgentId.generate(), provider.name)
+    provider.mock_discovered_hosts = [host]
+    provider.gated_host_id = host.host_id
+    provider.agents_by_host_id = {str(host.host_id): [agent]}
+    registry = HostDiscoveryReadRegistry()
+
+    first = provider.discover_hosts_and_agents_within_timeouts(
+        cg=temp_mngr_ctx.concurrency_group,
+        host_discovery_timeout_seconds=0.3,
+        agent_discovery_timeout_seconds=0.3,
+        registry=registry,
+    )
+    # The first poll left the read in flight (host UNKNOWN, one read started).
+    assert host.host_id in first.unknown_host_ids
+    assert poll_until(lambda: provider.read_count_for_host(host.host_id) >= 1)
+
+    # Let the wedged read complete, then wait until its future is actually done so the next
+    # poll takes the harvest branch rather than the still-in-flight branch.
+    provider.release()
+    in_flight = registry.future_by_host_id[host.host_id]
+    assert poll_until(in_flight.done)
+
+    second = provider.discover_hosts_and_agents_within_timeouts(
+        cg=temp_mngr_ctx.concurrency_group,
+        host_discovery_timeout_seconds=0.3,
+        agent_discovery_timeout_seconds=0.3,
+        registry=registry,
+    )
+    # The finished-late read is harvested: the host is discovered (not UNKNOWN) and its agent
+    # surfaces, without starting a second read.
+    assert host.host_id not in second.unknown_host_ids
+    assert {h.host_id for h in second.hosts} == {host.host_id}
+    assert {a.agent_id for a in second.agents} == {agent.agent_id}
+    assert provider.read_count_for_host(host.host_id) == 1
+    # The harvest cleared the registry entry, so a third poll starts a fresh read.
+    assert host.host_id not in registry.future_by_host_id
+    provider.discover_hosts_and_agents_within_timeouts(
+        cg=temp_mngr_ctx.concurrency_group,
+        host_discovery_timeout_seconds=0.3,
+        agent_discovery_timeout_seconds=0.3,
+        registry=registry,
+    )
+    assert provider.read_count_for_host(host.host_id) == 2
