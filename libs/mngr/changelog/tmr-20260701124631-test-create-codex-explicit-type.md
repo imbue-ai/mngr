@@ -1,0 +1,3 @@
+Fixed the `test_create_codex_explicit_type` e2e tutorial test so it verifies its documented scope (that `mngr create --type codex` resolves the codex agent type) without requiring a codex binary or npm on the host.
+
+The test now sets `agent_types.codex.check_installation = false` before creating the agent, so provisioning no longer shells out to `npm i -g @openai/codex` (which `-y` would otherwise auto-approve and which fails on a host without npm/codex). It also drops the stale `@pytest.mark.rsync` mark: a local codex create runs the agent directly in a git worktree of the source repo and never copies a workspace via rsync, so the resource-guard mark was superfluous.

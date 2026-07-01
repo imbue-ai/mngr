@@ -1,0 +1,1 @@
+Fixed the `test_config_unset` e2e tutorial test so it seeds the project `settings.toml` with the pytest opt-in before running `mngr config set`/`unset`. Without the opt-in, the reload performed by `config unset` was rejected by the pytest safety guard, causing a spurious failure.

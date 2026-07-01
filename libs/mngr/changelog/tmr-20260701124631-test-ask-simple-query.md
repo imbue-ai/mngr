@@ -1,0 +1,1 @@
+Marked the `mngr ask` acceptance test (`test_ask_simple_query`) with `@pytest.mark.rsync` so it declares the rsync usage that occurs when the headless agent's lifecycle preserves logs on teardown. Without the mark the resource guard failed the test even though the command round-tripped correctly.

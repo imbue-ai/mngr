@@ -10,6 +10,7 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(120)
 def test_create_with_template(e2e: E2eSession) -> None:
     """Creating with a ``--template`` applies that template's settings to the agent.
 
@@ -61,6 +62,7 @@ def test_create_with_template(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+@pytest.mark.timeout(120)
 def test_create_with_nonexistent_template(e2e: E2eSession) -> None:
     """Unhappy path: creating with an unknown template fails with a helpful error.
 

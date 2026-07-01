@@ -1,0 +1,1 @@
+Gave the `mngr plugin list --active` tutorial e2e test the same 120s timeout as its sibling agent-type tests, since loading every installed plugin entry point can approach the default 10s per-test timeout on a cold interpreter.

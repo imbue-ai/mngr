@@ -1,0 +1,1 @@
+Added the missing `@pytest.mark.timeout(120)` marker to the `test_create_with_template` e2e release test. Without it the test inherited the global 10-second pytest timeout and failed while waiting on `mngr create`, even though the template behavior it verifies was correct.
