@@ -1936,6 +1936,38 @@ def test_discover_agents_threads_timeout_into_directory_and_file_reads(
     assert recorded_read_timeouts == [7.0]
 
 
+def test_read_file_within_timeout_applies_timeout_to_sftp_channel(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """read_file_within_timeout must set the SFTP channel's socket timeout.
+
+    Change 1: bounding the per-agent ``data.json`` read is what stops an abandoned
+    discovery thread from hanging forever on a stalled SFTP transfer. This exercises
+    the real ``read_text_file_within_timeout`` -> ``_get_file`` -> ``_get_file_via_paramiko``
+    path (not a stubbed read) and asserts the timeout actually reaches the channel.
+    """
+    recorded_settimeouts: list[float] = []
+    file_contents = b'{"hello": "world"}'
+
+    class _RecordingChannel:
+        def settimeout(self, timeout_seconds: float) -> None:
+            recorded_settimeouts.append(timeout_seconds)
+
+    class _TimeoutRecordingSFTP(_BaseFakeSFTP):
+        def get_channel(self) -> _RecordingChannel:
+            return _RecordingChannel()
+
+        def getfo(self, remote_path: str, fl: IO[bytes]) -> None:
+            fl.write(file_contents)
+
+    host = _create_host_with_custom_sftp(local_provider, _TimeoutRecordingSFTP)
+
+    result = host.read_text_file_within_timeout(Path("/remote/data.json"), 7.0)
+
+    assert result == file_contents.decode()
+    assert recorded_settimeouts == [7.0]
+
+
 def test_put_file_wraps_timeout_error_in_host_connection_error(
     local_provider: LocalProviderInstance,
 ) -> None:
