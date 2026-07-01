@@ -953,4 +953,9 @@ jobs:
         run: uv run playwright install --with-deps chromium
       - name: Run plain minds release tests (no ci env needed)
         if: ${{ !cancelled() }}
-        run: uv run pytest apps/minds --no-cov -p no:xdist -v -m 'release and not minds_deployment and not minds_services and not minds_snapshot_resume'
+        # Clear apps/minds's addopts (pytest picks up apps/minds/pyproject.toml
+        # as the config when the target is apps/minds): its `--timeout=10` is far
+        # too tight for these release tests (test_sse_redirect launches a browser
+        # and waits on an SSE redirect; the version-alignment test does a network
+        # fetch). Set an explicit, generous per-test timeout instead.
+        run: uv run pytest apps/minds --override-ini='addopts=' --no-cov -p no:xdist --timeout=300 -v -m 'release and not minds_deployment and not minds_services and not minds_snapshot_resume'
