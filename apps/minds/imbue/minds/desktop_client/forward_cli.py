@@ -109,7 +109,7 @@ class ForwardSubprocessConfig(FrozenModel):
 
     service: str = Field(default="system_interface", description="Service name to forward")
     agent_include: tuple[str, ...] = Field(
-        default=("has(agent.labels.workspace) && has(agent.labels.is_primary)",),
+        default=("has(agent.labels.is_primary)",),
         description="CEL include filters passed to --agent-include",
     )
     reverse_specs: tuple[str, ...] = Field(
@@ -133,6 +133,7 @@ class EnvelopeStreamConsumer(MutableModel):
     _agent_host_map: dict[str, str] = PrivateAttr(default_factory=dict)
     _ssh_by_host_id: dict[str, RemoteSSHInfo] = PrivateAttr(default_factory=dict)
     _host_state_by_host_id: dict[str, HostState] = PrivateAttr(default_factory=dict)
+    _host_name_by_host_id: dict[str, str] = PrivateAttr(default_factory=dict)
     _discovered_agents: dict[str, DiscoveredAgent] = PrivateAttr(default_factory=dict)
     _services_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
     _on_agent_discovered_callbacks: list[OnAgentDiscoveredCallback] = PrivateAttr(default_factory=list)
@@ -437,6 +438,7 @@ class EnvelopeStreamConsumer(MutableModel):
                     merged_host_state[retained_host_id] = prior_host_state[retained_host_id]
             self._host_state_by_host_id = merged_host_state
             host_state_snapshot = dict(merged_host_state)
+            host_name_snapshot = dict(self._host_name_by_host_id)
         # Push the merged set (fresh + retained) so retained agents stay listed
         # in the workspace UI; their provider_name lets the workspace list mark
         # them stale by cross-referencing the errored providers below.
@@ -446,6 +448,7 @@ class EnvelopeStreamConsumer(MutableModel):
                 discovered_agents=tuple(merged_agents.values()),
                 ssh_info_by_agent_id=ssh_info_by_agent,
                 host_state_by_host_id=host_state_snapshot,
+                host_name_by_host_id=host_name_snapshot,
             )
         )
         # Push provider state + freshness timestamp through the resolver so the
@@ -486,11 +489,13 @@ class EnvelopeStreamConsumer(MutableModel):
         }
         discovered = tuple(self._discovered_agents.values())
         host_state_snapshot = dict(self._host_state_by_host_id)
+        host_name_snapshot = dict(self._host_name_by_host_id)
         return ParsedAgentsResult(
             agent_ids=agent_ids,
             discovered_agents=discovered,
             ssh_info_by_agent_id=ssh_info_by_agent,
             host_state_by_host_id=host_state_snapshot,
+            host_name_by_host_id=host_name_snapshot,
         )
 
     def _handle_host_ssh_info(self, event: HostSSHInfoEvent) -> None:
@@ -507,10 +512,13 @@ class EnvelopeStreamConsumer(MutableModel):
             self._fire_discovered(agent_id, ssh_info, self._provider_name_for_agent(agent_id))
 
     def _handle_host_discovered(self, event: HostDiscoveryEvent) -> None:
-        if event.host.host_state is None:
-            return
         with self._lock:
-            self._host_state_by_host_id[str(event.host.host_id)] = event.host.host_state
+            # Capture the host's normalized name regardless of whether its state
+            # is known, so display-name fallback and host-name collision checks
+            # have it. State is recorded only when present.
+            self._host_name_by_host_id[str(event.host.host_id)] = str(event.host.host_name)
+            if event.host.host_state is not None:
+                self._host_state_by_host_id[str(event.host.host_id)] = event.host.host_state
             agents_result = self._build_agents_result_locked()
         self.resolver.update_agents(agents_result)
 

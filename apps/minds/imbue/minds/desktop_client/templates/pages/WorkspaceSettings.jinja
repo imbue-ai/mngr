@@ -27,6 +27,54 @@
     var destroyErrorEl = document.getElementById('destroy-error');
     var agentId = document.getElementById('workspace-settings').dataset.agentId;
 
+    // -- Rename ------------------------------------------------------------
+    // Ultra-basic: a text input + Save that POSTs the new (arbitrary) name.
+    // The server normalizes it to the host-name slug and updates both the
+    // host name and the display label together. Reload on success so every
+    // surface (title, sidebar) repaints with the new name.
+    var renameInput = document.getElementById('workspace-name-input');
+    var renameSaveBtn = document.getElementById('rename-save-btn');
+    var renameErrorEl = document.getElementById('rename-error');
+    var renameSavingBadge = document.getElementById('rename-saving-badge');
+    if (renameInput && renameSaveBtn) {
+      renameSaveBtn.addEventListener('click', function() {
+        var newName = (renameInput.value || '').trim();
+        renameErrorEl.classList.add('hidden');
+        if (!newName) {
+          renameErrorEl.textContent = 'A workspace name is required.';
+          renameErrorEl.classList.remove('hidden');
+          return;
+        }
+        renameSaveBtn.disabled = true;
+        if (renameSavingBadge) renameSavingBadge.classList.remove('hidden');
+        fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/rename', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: newName })
+        })
+          .then(function(resp) {
+            if (resp.ok) {
+              window.location.reload();
+              return null;
+            }
+            return resp.json().then(function(data) {
+              renameSaveBtn.disabled = false;
+              if (renameSavingBadge) renameSavingBadge.classList.add('hidden');
+              var message = (data && (data.error || data.message || data.detail)) ||
+                ('Rename failed (HTTP ' + resp.status + ')');
+              renameErrorEl.textContent = message;
+              renameErrorEl.classList.remove('hidden');
+            });
+          })
+          .catch(function() {
+            renameSaveBtn.disabled = false;
+            if (renameSavingBadge) renameSavingBadge.classList.add('hidden');
+            renameErrorEl.textContent = 'Rename failed (network error)';
+            renameErrorEl.classList.remove('hidden');
+          });
+      });
+    }
+
     destroyBtn.addEventListener('click', function() {
       destroyDialog.classList.remove('hidden');
     });
@@ -71,6 +119,30 @@
     <div id="workspace-settings" data-agent-id="{{ agent_id }}" data-is-stale="{{ 'true' if is_stale else 'false' }}">
       <h1 class="type-heading text-primary">{{ ws_name }}</h1>
       <p class="type-helper text-tertiary mb-4">{{ agent_id }}</p>
+
+      <SectionHeader>Workspace Name</SectionHeader>
+      <div id="rename-section" class="mb-4">
+        {% if is_stale %}
+          <Notice variant="warn">
+            This workspace is currently unreachable, so it can't be renamed right now.
+            Try again once the workspace reconnects.
+          </Notice>
+        {% endif %}
+        <div class="flex items-center gap-2">
+          <input id="workspace-name-input"
+                 type="text"
+                 class="h-[34px] px-3 rounded-full type-body text-primary placeholder:text-tertiary disabled:opacity-40 bg-surface-secondary"
+                 value="{{ ws_name }}"
+                 maxlength="200"
+                 spellcheck="false"
+                 autocomplete="off"
+                 aria-label="Workspace name"
+                 {% if is_stale %}disabled{% endif %}>
+          <Button variant="secondary" id="rename-save-btn" {{ "disabled" if is_stale else "" }}>Save</Button>
+          <span id="rename-saving-badge" class="hidden type-section text-secondary">Saving...</span>
+        </div>
+        <p id="rename-error" class="hidden type-body text-important mt-2" role="alert"></p>
+      </div>
 
       {# ``extra`` turns the h2 into a flex row so the badge centers on
          the title's vertical axis; ``leading-none`` + fixed badge height

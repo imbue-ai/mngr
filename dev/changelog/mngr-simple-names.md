@@ -1,0 +1,1 @@
+Added the implementation plan for simplifying workspace names (`blueprint/simplify-workspace-names/`): one canonical home per datum (immutable `host_id`, mutable normalized `host_name`, arbitrary human-readable name as a `workspace_display_name` label), renamable workspaces, host rename for more providers, and removal of the duplicative `workspace` label.

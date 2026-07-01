@@ -1,15 +1,21 @@
 import json
 
 import pluggy
+import pytest
 from click.testing import CliRunner
 
 from imbue.mngr.cli.rename import RenameCliOptions
 from imbue.mngr.cli.rename import _output
+from imbue.mngr.cli.rename import _output_host_result
 from imbue.mngr.cli.rename import _output_result
+from imbue.mngr.cli.rename import _run_host_rename
 from imbue.mngr.cli.rename import rename
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import MAX_HOST_NAME_LENGTH
 from imbue.mngr.primitives import OutputFormat
 
 
@@ -101,6 +107,50 @@ def test_rename_output_result_jsonl(capsys) -> None:
     assert output["old_name"] == "alpha"
     assert output["new_name"] == "beta"
     assert output["agent_id"] == "agent-xyz"
+
+
+def test_rename_output_host_result_human(capsys) -> None:
+    """_output_host_result with HUMAN should show a host rename message."""
+    _output_host_result("old-host", "new-host", "host-id", _make_output_opts(OutputFormat.HUMAN))
+    captured = capsys.readouterr()
+    assert "Renamed host" in captured.out
+    assert "old-host" in captured.out
+    assert "new-host" in captured.out
+
+
+def test_rename_output_host_result_json(capsys) -> None:
+    """_output_host_result with JSON should emit the host rename fields."""
+    _output_host_result("old-host", "new-host", "host-abc", _make_output_opts(OutputFormat.JSON))
+    captured = capsys.readouterr()
+    output = json.loads(captured.out.strip())
+    assert output["old_name"] == "old-host"
+    assert output["new_name"] == "new-host"
+    assert output["host_id"] == "host-abc"
+
+
+def _make_host_rename_opts(new_name: str) -> RenameCliOptions:
+    return RenameCliOptions(
+        output_format="human",
+        quiet=False,
+        verbose=0,
+        log_file=None,
+        log_commands=None,
+        plugin=(),
+        disable_plugin=(),
+        current=AgentAddress(agent=AgentName("my-agent")),
+        new_name=AgentName(new_name),
+        dry_run=False,
+        start=False,
+        host=True,
+    )
+
+
+def test_run_host_rename_rejects_over_length_name(temp_mngr_ctx: MngrContext) -> None:
+    """A new host name over the HostName length cap is rejected before any provider work."""
+    over_length = "a" * (MAX_HOST_NAME_LENGTH + 1)
+    opts = _make_host_rename_opts(over_length)
+    with pytest.raises(UserInputError, match="at most"):
+        _run_host_rename(opts, _make_output_opts(), temp_mngr_ctx)
 
 
 def test_rename_requires_two_arguments(

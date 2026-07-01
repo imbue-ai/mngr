@@ -13,7 +13,6 @@ def test_build_assist_chat_targets_workspace_by_id_and_runs_create_inside() -> N
     agent_id = AgentId.generate()
     args = build_assist_chat_mngr_args(
         workspace_agent_id=agent_id,
-        workspace_name="my-workspace",
         description="the database migration failed",
         chat_name="assist-abc123",
     )
@@ -23,25 +22,15 @@ def test_build_assist_chat_targets_workspace_by_id_and_runs_create_inside() -> N
     assert len(args) == 4
     inner = shlex.split(args[3])
     # Inner: a chat-template create on the existing host, tagged so the system interface
-    # auto-opens its tab, grouped with its workspace, seeded with /assist <description>.
+    # auto-opens its tab, seeded with /assist <description>. No workspace grouping label:
+    # the chat lives in the same container as the workspace it was exec'd into.
     assert inner[0:3] == ["mngr", "create", "assist-abc123"]
     assert "--template" in inner and inner[inner.index("--template") + 1] == "chat"
     assert "--transfer" in inner and inner[inner.index("--transfer") + 1] == "none"
     assert "--no-connect" in inner
     assert f"{ASSIST_CHAT_LABEL}=true" in inner
-    assert "workspace=my-workspace" in inner
-    assert inner[-2:] == ["--message", "/assist the database migration failed"]
-
-
-def test_build_assist_chat_omits_workspace_label_when_name_unknown() -> None:
-    args = build_assist_chat_mngr_args(
-        workspace_agent_id=AgentId.generate(),
-        workspace_name=None,
-        description="broken",
-        chat_name="assist-x",
-    )
-    inner = shlex.split(args[3])
     assert not any(token.startswith("workspace=") for token in inner)
+    assert inner[-2:] == ["--message", "/assist the database migration failed"]
 
 
 def test_build_assist_chat_quotes_description_so_it_cannot_break_the_shell_command() -> None:
@@ -50,7 +39,6 @@ def test_build_assist_chat_quotes_description_so_it_cannot_break_the_shell_comma
     hostile = 'oops"; rm -rf /; echo $(whoami) `id` && touch /tmp/pwned'
     args = build_assist_chat_mngr_args(
         workspace_agent_id=AgentId.generate(),
-        workspace_name="ws",
         description=hostile,
         chat_name="assist-x",
     )
@@ -76,7 +64,6 @@ def test_spawn_assist_chat_succeeds_and_passes_the_built_args() -> None:
     succeeded = spawn_assist_chat(
         mngr_caller=caller,
         workspace_agent_id=agent_id,
-        workspace_name="my-workspace",
         description="it broke",
         chat_name="assist-abc123",
     )
@@ -84,7 +71,6 @@ def test_spawn_assist_chat_succeeds_and_passes_the_built_args() -> None:
     assert caller.calls == [
         build_assist_chat_mngr_args(
             workspace_agent_id=agent_id,
-            workspace_name="my-workspace",
             description="it broke",
             chat_name="assist-abc123",
         )
@@ -97,7 +83,6 @@ def test_spawn_assist_chat_returns_false_on_nonzero_exit() -> None:
     succeeded = spawn_assist_chat(
         mngr_caller=caller,
         workspace_agent_id=AgentId.generate(),
-        workspace_name="ws",
         description="it broke",
         chat_name="assist-x",
     )
