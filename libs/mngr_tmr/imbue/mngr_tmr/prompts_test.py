@@ -48,6 +48,54 @@ def test_build_agent_prompt_includes_e2e_run_name_guidance_when_provided() -> No
     assert "tmr_run1_try_1" in prompt
 
 
+def test_build_agent_prompt_uses_override_template(tmp_path: Path) -> None:
+    # An override template file replaces the packaged mapper prompt, and still
+    # receives the same render context (here, the run command).
+    override = tmp_path / "custom_mapper.j2"
+    override.write_text("CUSTOM MAPPER for {{ run_cmd }}\n")
+    prompt = build_test_agent_prompt("tests/test_x.py::test_y", ("-m", "release"), template_path=override)
+    assert prompt.startswith("CUSTOM MAPPER for pytest tests/test_x.py::test_y -m release")
+
+
+def test_build_agent_prompt_override_can_extend_packaged_template(tmp_path: Path) -> None:
+    # An override may include the packaged template by name, so a variant can
+    # prepend guidance without duplicating the whole prompt.
+    override = tmp_path / "extended_mapper.j2"
+    override.write_text("MINDS-SPECIFIC PREAMBLE\n{% include 'mapper.j2' %}\n")
+    prompt = build_test_agent_prompt("tests/test_x.py::test_y", (), template_path=override)
+    assert prompt.startswith("MINDS-SPECIFIC PREAMBLE")
+    # The included packaged template still renders its docstring-anchored body.
+    assert "docstring" in prompt.lower()
+
+
+def test_committed_minds_mapper_template_renders() -> None:
+    # The minds variant ships apps/minds/tmr/mapper.j2; render it through the
+    # builder to prove it is valid Jinja against the mapper context and is
+    # minds-tailored (no mngr-only tutorial guidance, no leading blank line).
+    repo_root = Path(__file__).resolve().parents[4]
+    minds_template = repo_root / "apps" / "minds" / "tmr" / "mapper.j2"
+    if not minds_template.is_file():
+        pytest.skip("apps/minds tree not present (running outside the monorepo checkout)")
+    prompt = build_test_agent_prompt(
+        "apps/minds/test_x.py::test_y", ("-m", "release"), template_path=minds_template
+    )
+    assert prompt.startswith("You are working on the tests for the minds app")
+    assert "docstring" in prompt.lower()
+    assert TESTING_AGENT_OUTCOME_FILENAME in prompt
+    # mngr-only guidance must not leak into the minds variant.
+    assert "FIX_TUTORIAL" not in prompt
+    assert "mega_tutorial" not in prompt
+    assert "--mngr-e2e-run-name" not in prompt
+
+
+def test_build_integrator_prompt_uses_override_template(tmp_path: Path) -> None:
+    override = tmp_path / "custom_reducer.j2"
+    override.write_text("CUSTOM REDUCER reading {{ inputs_dirname }}\n")
+    prompt = build_integrator_prompt(template_path=override)
+    assert prompt.startswith("CUSTOM REDUCER reading ")
+    assert REDUCER_INPUTS_DIRNAME in prompt
+
+
 def test_collect_tests_with_real_pytest(tmp_path: Path, cg: ConcurrencyGroup) -> None:
     test_file = tmp_path / "test_sample.py"
     test_file.write_text("def test_one(): pass\ndef test_two(): pass\n")
