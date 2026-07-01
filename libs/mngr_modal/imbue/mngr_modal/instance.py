@@ -70,6 +70,7 @@ from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.provider_instance import HostDiscoveryReadRegistry
 from imbue.mngr.interfaces.provider_instance import bounded_result_from_agents_by_host
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import ActivitySource
@@ -2481,11 +2482,14 @@ log "=== Shutdown script completed ==="
         host_discovery_timeout_seconds: float,
         agent_discovery_timeout_seconds: float,
         include_destroyed: bool = False,
+        registry: HostDiscoveryReadRegistry | None = None,
     ) -> BoundedProviderDiscoveryResult:
         """Delegate to the batch discovery path; bounded only by the provider-level error timeout.
 
         Modal reads all host/agent state from the state volume in one batched pass,
         so individual host reads cannot be bounded; nothing is marked UNKNOWN here.
+        ``registry`` is accepted for interface compatibility but unused: this path
+        spawns no per-host reads to de-duplicate across polls.
         """
         agents_by_host = self.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
         return bounded_result_from_agents_by_host(agents_by_host)

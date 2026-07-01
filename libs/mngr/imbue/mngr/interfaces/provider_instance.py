@@ -14,6 +14,7 @@ from typing import Sequence
 from typing import TypeVar
 
 from loguru import logger
+from pydantic import ConfigDict
 from pydantic import Field
 from pyinfra.api.host import Host as PyinfraHost
 
@@ -279,8 +280,14 @@ def connected_host(
 def _discover_agents_on_host(
     provider: "ProviderInstanceInterface",
     host_id: HostId,
+    timeout_seconds: float | None = None,
 ) -> list[DiscoveredAgent]:
-    """Discover agents on a host, disconnecting afterward."""
+    """Discover agents on a host, disconnecting afterward.
+
+    When ``timeout_seconds`` is set (the per-host-bounded discovery path), the
+    host's reads are bounded by that wall-clock so a wedged host self-terminates
+    its reads rather than hanging the (potentially abandoned) discovery thread.
+    """
     # FIXME: wrap this in a bounded retry (e.g. tenacity) so a *transient*
     # connection failure (timeout, connection refused, banner reset) is retried
     # here rather than immediately surfacing to the caller. The retry predicate
@@ -291,12 +298,13 @@ def _discover_agents_on_host(
     # (e.g. SSH), where a transient blip would otherwise propagate as a
     # ProviderDiscoveryError.
     with connected_host(provider, host_id) as host:
-        return host.discover_agents()
+        return host.discover_agents(timeout_seconds=timeout_seconds)
 
 
 def _discover_agents_on_host_with_offline_fallback(
     provider: "ProviderInstanceInterface",
     host_ref: DiscoveredHost,
+    timeout_seconds: float | None = None,
 ) -> list[DiscoveredAgent]:
     """Discover a host's agents, falling back to the provider's offline view on connection error.
 
@@ -305,9 +313,13 @@ def _discover_agents_on_host_with_offline_fallback(
     fail the whole provider, recover the host's agents from the provider's
     persisted/offline records so its workspaces stay visible. Mirrors the
     inline recovery in ``discover_hosts_and_agents``.
+
+    ``timeout_seconds``, when set, bounds the online read (a per-host-timeout hit
+    surfaces as ``HostConnectionError`` and lands in the offline fallback, which
+    is itself bounded because it reads persisted records rather than the host).
     """
     try:
-        return _discover_agents_on_host(provider, host_ref.host_id)
+        return _discover_agents_on_host(provider, host_ref.host_id, timeout_seconds)
     except HostConnectionError as e:
         # Drop any cached per-host handle so the next cycle does not re-hit the
         # wedged connection, then recover the host's agents from the offline view.
@@ -340,22 +352,43 @@ def _set_host_agents_future(
     provider: "ProviderInstanceInterface",
     host_ref: DiscoveredHost,
     future: "Future[list[DiscoveredAgent]]",
+    timeout_seconds: float,
 ) -> None:
     """Read one host's agents on a daemon thread, recording the outcome on ``future``.
 
     Captures the expected discovery failure modes onto the future so a failed
-    host can be treated as UNKNOWN rather than crashing the poll. Always releases
-    thread-local gevent resources, since this thread may be abandoned (left
-    running past the per-host timeout) and only resolves its future late.
+    host can be treated as UNKNOWN rather than crashing the poll. ``timeout_seconds``
+    bounds each of the host's reads so an abandoned thread (left running past the
+    per-host timeout) still self-terminates rather than running forever. Always
+    releases thread-local gevent resources, since this thread may be abandoned and
+    only resolves its future late.
     """
     try:
-        agents = provider.read_host_agents_for_bounded_discovery(host_ref)
+        agents = provider.read_host_agents_for_bounded_discovery(host_ref, timeout_seconds)
     except (MngrError, OSError) as e:
         future.set_exception(e)
     else:
         future.set_result(agents)
     finally:
         cleanup_thread_local_resources()
+
+
+class HostDiscoveryReadRegistry(MutableModel):
+    """Holds in-flight per-host discovery reads so a wedged host is not re-read every poll.
+
+    A long-lived registry (owned by a provider's discovery poller) that maps a
+    host to the ``Future`` of its currently-running bounded read. When a poll finds
+    a host whose prior read is still in flight, it reuses that future instead of
+    spawning a second read, bounding accumulation to at most one abandoned read per
+    host. A per-call (fresh) registry is used for one-shot discovery, where there is
+    nothing to carry across polls.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    future_by_host_id: dict[HostId, "Future[list[DiscoveredAgent]]"] = Field(
+        default_factory=dict, description="In-flight per-host agent-read futures, keyed by host id"
+    )
 
 
 class ProviderInstanceInterface(MutableModel, ABC):
@@ -635,15 +668,20 @@ class ProviderInstanceInterface(MutableModel, ABC):
                 results[host_ref] = offline_agents
         return results
 
-    def read_host_agents_for_bounded_discovery(self, host_ref: DiscoveredHost) -> list[DiscoveredAgent]:
+    def read_host_agents_for_bounded_discovery(
+        self,
+        host_ref: DiscoveredHost,
+        timeout_seconds: float,
+    ) -> list[DiscoveredAgent]:
         """Read one host's agents (with offline fallback) for the per-host-bounded discovery path.
 
         A seam used by ``discover_hosts_and_agents_within_timeouts``: each host's read
         runs through this method on its own daemon thread so a slow host can be
-        abandoned. Tests override it to inject a controllable per-host delay without a
-        live host connection.
+        abandoned. ``timeout_seconds`` bounds each of the host's reads so an abandoned
+        thread self-terminates rather than running forever. Tests override it to inject
+        a controllable per-host delay without a live host connection.
         """
-        return _discover_agents_on_host_with_offline_fallback(self, host_ref)
+        return _discover_agents_on_host_with_offline_fallback(self, host_ref, timeout_seconds)
 
     def discover_hosts_and_agents_within_timeouts(
         self,
@@ -651,14 +689,20 @@ class ProviderInstanceInterface(MutableModel, ABC):
         host_discovery_timeout_seconds: float,
         agent_discovery_timeout_seconds: float,
         include_destroyed: bool = False,
+        registry: "HostDiscoveryReadRegistry | None" = None,
     ) -> BoundedProviderDiscoveryResult:
         """Discover this provider's hosts/agents, bounding each host's agent read by a timeout.
 
         A host whose agent read does not finish within ``host_discovery_timeout_seconds``
         (or fails) is omitted from the result and reported in ``unknown_host_ids`` -- so one
         slow or wedged host cannot stall the whole provider's snapshot. The abandoned read
-        keeps running on a daemon thread (threads cannot be killed) and simply resolves its
-        now-unused future late.
+        keeps running on a daemon thread (threads cannot be killed) but ``host_discovery_timeout_seconds``
+        is threaded down as a per-command bound so it self-terminates instead of hanging forever.
+
+        ``registry`` carries in-flight per-host reads across polls: a host whose prior read is
+        still running is *not* re-spawned (a warning is logged instead), so at most one abandoned
+        read exists per host at a time. When ``None`` (one-shot discovery), a fresh per-call
+        registry is used, so there is no cross-poll state and every host is read.
 
         The default per-host implementation bounds at host granularity, which already
         encompasses that host's agent enumeration, so ``agent_discovery_timeout_seconds`` is
@@ -667,15 +711,41 @@ class ProviderInstanceInterface(MutableModel, ABC):
         ``discover_hosts_and_agents`` (bounded only by the provider-level error timeout).
         """
         host_refs = self.discover_hosts(cg=cg, include_destroyed=include_destroyed)
-        future_by_host_ref: dict[DiscoveredHost, Future[list[DiscoveredAgent]]] = {}
-        # Each host's read runs on its own daemon thread via _set_host_agents_future,
+        active_registry = registry if registry is not None else HostDiscoveryReadRegistry()
+        host_ref_by_id = {host_ref.host_id: host_ref for host_ref in host_refs}
+
+        # Decide, per host, whether to spawn a fresh read or reuse an in-flight one from a
+        # prior poll. Each fresh read runs on its own daemon thread via _set_host_agents_future,
         # which calls read_host_agents_for_bounded_discovery (overridable for testing).
+        future_by_host_ref: dict[DiscoveredHost, Future[list[DiscoveredAgent]]] = {}
+        skipped_unknown_host_ids: list[HostId] = []
         for host_ref in host_refs:
+            in_flight = active_registry.future_by_host_id.get(host_ref.host_id)
+            if in_flight is not None and not in_flight.done():
+                # A prior poll's read for this host is still running. Do not spawn a second
+                # read; with the per-command timeout in place this should essentially never
+                # happen, so warn loudly -- it is a precise "host wedged past its timeout" alarm.
+                # The host is still UNKNOWN this poll (its state is retained by the consumer).
+                logger.warning(
+                    "Skipped discovery for host {} on provider {}: prior read still in flight "
+                    "(host wedged past its {:.0f}s timeout)",
+                    host_ref.host_id,
+                    self.name,
+                    host_discovery_timeout_seconds,
+                )
+                skipped_unknown_host_ids.append(host_ref.host_id)
+                continue
+            if in_flight is not None:
+                # A prior poll's read finished (possibly late). Harvest it this poll; the
+                # harvest loop below clears it so the next poll starts a fresh read.
+                future_by_host_ref[host_ref] = in_flight
+                continue
             host_future: Future[list[DiscoveredAgent]] = Future()
+            active_registry.future_by_host_id[host_ref.host_id] = host_future
             future_by_host_ref[host_ref] = host_future
             cg.start_new_thread(
                 target=_set_host_agents_future,
-                args=(self, host_ref, host_future),
+                args=(self, host_ref, host_future, host_discovery_timeout_seconds),
                 daemon=True,
                 is_checked=False,
                 name=f"discover_host_{host_ref.host_id}",
@@ -695,13 +765,25 @@ class ProviderInstanceInterface(MutableModel, ABC):
             # (not gone): the consumer retains its previously-known state.
             if not host_future.done() or host_future.exception() is not None:
                 unknown_host_ids.append(host_ref.host_id)
+                # A read that finished (with an exception) is cleared so the next poll retries
+                # it fresh; a still-running read is kept so the next poll does not re-spawn it.
+                if host_future.done():
+                    active_registry.future_by_host_id.pop(host_ref.host_id, None)
                 continue
             discovered_hosts.append(host_ref)
             discovered_agents.extend(host_future.result())
+            active_registry.future_by_host_id.pop(host_ref.host_id, None)
+
+        # Drop registry entries for hosts no longer discovered (e.g. destroyed while wedged)
+        # so the registry stays bounded to currently-known hosts.
+        stale_host_ids = [host_id for host_id in active_registry.future_by_host_id if host_id not in host_ref_by_id]
+        for host_id in stale_host_ids:
+            active_registry.future_by_host_id.pop(host_id, None)
+
         return BoundedProviderDiscoveryResult(
             hosts=tuple(discovered_hosts),
             agents=tuple(discovered_agents),
-            unknown_host_ids=tuple(unknown_host_ids),
+            unknown_host_ids=tuple(skipped_unknown_host_ids) + tuple(unknown_host_ids),
         )
 
     @abstractmethod

@@ -1,6 +1,8 @@
 # Spec: bound per-host discovery reads (no unbounded abandoned-thread leak)
 
-Status: proposed follow-up to the per-provider-discovery branch (`mngr/per-provider-discovery`, PR #2335). Not yet implemented.
+Status: implemented on branch `mngr/bounded-per-host-discovery` (stacked on
+`mngr/per-provider-discovery`, PR #2335). Both changes below are in place; the
+connect-phase timeouts were deliberately left untouched per the non-goals.
 
 ## Context
 

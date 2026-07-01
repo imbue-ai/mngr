@@ -148,8 +148,14 @@ class HostInterface(MutableModel, ABC):
     # =========================================================================
 
     @abstractmethod
-    def discover_agents(self) -> list[DiscoveredAgent]:
-        """Return lightweight data for all agents on this host."""
+    def discover_agents(self, timeout_seconds: float | None = None) -> list[DiscoveredAgent]:
+        """Return lightweight data for all agents on this host.
+
+        When ``timeout_seconds`` is set, online implementations bound each remote
+        read by that wall-clock so a wedged host self-terminates its discovery
+        reads instead of hanging. Offline implementations read local/persisted
+        data and ignore it.
+        """
         ...
 
     @abstractmethod

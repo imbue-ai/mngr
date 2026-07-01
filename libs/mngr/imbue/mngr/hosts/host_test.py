@@ -1869,6 +1869,7 @@ def test_get_file_wraps_timeout_error_in_host_connection_error(
             remote_filename: str,
             filename_or_io: str | IO[bytes],
             remote_temp_filename: str | None = None,
+            timeout_seconds: float | None = None,
         ) -> bool:
             raise TimeoutError("Timed out reading output")
 
@@ -1884,6 +1885,55 @@ def test_get_file_wraps_timeout_error_in_host_connection_error(
 
     with pytest.raises(HostConnectionError, match="timed out while reading file"):
         host._get_file("/remote/file.txt", io.BytesIO())
+
+
+def test_discover_agents_threads_timeout_into_directory_and_file_reads(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """When a per-host timeout is given, discover_agents bounds *both* reads it makes.
+
+    Change 1: an unbounded discovery read can leave an abandoned thread running forever.
+    Here we assert discover_agents(timeout_seconds=T) threads T into the directory listing
+    and into the per-agent data.json read (using the timeout-carrying read helper), rather
+    than falling back to the unbounded ``read_text_file`` path.
+    """
+    agent_id = AgentId.generate()
+    agent_data = {
+        "id": str(agent_id),
+        "name": "recorded-agent",
+        "type": "claude",
+        "work_dir": "/tmp/work",
+    }
+    recorded_list_timeouts: list[float | None] = []
+    recorded_read_timeouts: list[float] = []
+
+    class _RecordingReadHost(Host):
+        def _list_directory(self, path: Path, timeout_seconds: float | None = None) -> list[str]:
+            recorded_list_timeouts.append(timeout_seconds)
+            return [str(agent_id)]
+
+        def read_text_file_within_timeout(self, path: Path, timeout_seconds: float, encoding: str = "utf-8") -> str:
+            recorded_read_timeouts.append(timeout_seconds)
+            return json.dumps(agent_data)
+
+        def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
+            raise AssertionError("bounded discovery must not use the unbounded read_text_file path")
+
+    fake = _FakeHostWithSSH(ssh_client=_FakeSSHClient(transport_return=_FakeTransport()))
+    connector = PyinfraConnector(cast(PyinfraHost, fake))
+    host = _RecordingReadHost(
+        id=HostId.generate(),
+        host_name=HostName("test"),
+        connector=connector,
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+
+    refs = host.discover_agents(timeout_seconds=7.0)
+
+    assert [ref.agent_id for ref in refs] == [agent_id]
+    assert recorded_list_timeouts == [7.0]
+    assert recorded_read_timeouts == [7.0]
 
 
 def test_put_file_wraps_timeout_error_in_host_connection_error(
@@ -2062,6 +2112,7 @@ def test_get_file_wraps_ssh_exception_in_host_connection_error(
             remote_filename: str,
             filename_or_io: str | IO[bytes],
             remote_temp_filename: str | None = None,
+            timeout_seconds: float | None = None,
         ) -> bool:
             raise SSHException("connection lost")
 
