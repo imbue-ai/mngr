@@ -838,10 +838,11 @@ function notifyOpenFailed(url) {
 
 // -- Sidebar helpers (per-bundle) --
 //
-// The sidebar is just the modal overlay loaded with /_chrome/sidebar -- it
-// shares ``modalView``, the same lazy-creation + transparent background +
-// Escape handling + ``modal-state-changed`` titlebar-drag suppression as
-// the inbox. There is no separate sidebar WebContentsView.
+// The sidebar is just the workspace menu hosted on the shared warm overlay
+// surface (``modalView``), loaded with /_chrome/sidebar -- it shares the same
+// transparent background + Escape handling + ``modal-state-changed``
+// titlebar-drag suppression as the inbox. There is no separate sidebar
+// WebContentsView.
 
 function sidebarUrlFor(anchor) {
   if (!backendBaseUrl) return null;
