@@ -1490,7 +1490,7 @@ class _FakeLockChannel:
     def exec_command(self, command: str) -> None:
         self.exec_command_call_count += 1
 
-    def recv(self, num_bytes: int) -> bytes:
+    def recv(self, size: int) -> bytes:
         idx = self._recv_call_count
         self._recv_call_count += 1
         if idx < len(self._recv_chunks):
