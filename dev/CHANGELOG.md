@@ -4,6 +4,12 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-06-29
+
+### Added
+
+- Added: Blueprint planning document `blueprint/hostname-live-validation/` for live validation of the workspace-creation Name field.
+
 ## 2026-06-28
 
 ### Added

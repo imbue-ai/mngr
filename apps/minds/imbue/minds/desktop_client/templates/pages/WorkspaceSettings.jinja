@@ -146,12 +146,12 @@
       {% endif %}
 
       <SectionHeader divider>Danger zone</SectionHeader>
-      <p class="type-body text-secondary mb-3">Permanently destroy this project and release any associated resources.</p>
-      <Button variant="danger" id="destroy-btn">Destroy project</Button>
+      <p class="type-body text-secondary mb-3">Permanently destroy this workspace and release any associated resources.</p>
+      <Button variant="danger" id="destroy-btn">Destroy workspace</Button>
       <p id="destroy-error" class="hidden type-body text-important mt-2"></p>
 
       <Modal id="destroy-dialog">
-        <h2 class="type-heading text-primary mb-3">Destroy project?</h2>
+        <h2 class="type-heading text-primary mb-3">Destroy workspace?</h2>
         <p class="type-body text-primary mb-4">This will permanently destroy <strong>{{ ws_name }}</strong> and all its data. This action cannot be undone.</p>
         <div class="flex justify-end gap-3">
           <Button variant="secondary" id="destroy-cancel-btn">Cancel</Button>
@@ -160,7 +160,7 @@
       </Modal>
 
       <div class="mt-8">
-        <Link href="/" extra="type-helper">&larr; Back to projects</Link>
+        <Link href="/" extra="type-helper">&larr; Back to workspaces</Link>
       </div>
     </div>
   </PageContainer>
