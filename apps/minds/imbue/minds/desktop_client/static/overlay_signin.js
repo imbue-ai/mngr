@@ -43,6 +43,11 @@
         try { teardownAuthForm(); } catch (e) { /* noop */ }
         teardownAuthForm = null;
       }
+      // The overlay host page never reloads, so drop the globals this modal set
+      // rather than leaving stale post-auth hooks on window between opens.
+      delete window.MINDS_AUTH_RETURN_TO;
+      delete window.MINDS_AUTH_NAV;
+      delete window.dismissSigninModal;
     },
   };
 })();
