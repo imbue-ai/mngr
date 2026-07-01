@@ -35,6 +35,8 @@ from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
 from imbue.minds.desktop_client.api_schema import create_api_schema_blueprint
 from imbue.minds.desktop_client.api_v1 import create_api_v1_blueprint
+from imbue.minds.desktop_client.assist_chat import AssistSupport
+from imbue.minds.desktop_client.assist_chat import check_assist_support
 from imbue.minds.desktop_client.assist_chat import spawn_assist_chat
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
@@ -116,6 +118,7 @@ from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
+from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.mngr.api.discovery_events import DISCOVERY_STREAM_POLL_INTERVAL_SECONDS
 from imbue.mngr.primitives import AgentId
@@ -462,11 +465,15 @@ def _handle_help_page() -> Response:
     """Render the get-help modal page (GET /help).
 
     Intentionally unauthenticated: reporting a bug must work even when sign-in itself is broken. The
-    ``workspace`` query param (set by the titlebar button) scopes the optional workspace section.
+    ``workspace`` query param (set by the titlebar button) scopes the optional workspace section. The
+    ``assist`` query param (``1``) marks the workspace as reachable/healthy enough to host an
+    ``/assist`` chat; the titlebar only sets it when the displayed workspace is healthy, so the
+    agent-help option stays disabled on a loading/stuck workspace (whose chat couldn't be reached).
     """
     minds_config: MindsConfig | None = get_state().minds_config
     include_logs_setting = minds_config.get_include_error_logs() if minds_config else False
     workspace_agent_id = request.args.get("workspace", "")
+    assist_available = request.args.get("assist") == "1"
     description = request.args.get("description", "")
     # An in-workspace agent's escalation opens this modal via the open_help flow with
     # ``agent_report=1``. In that case the modal frames the pre-filled report as the
@@ -484,6 +491,7 @@ def _handle_help_page() -> Response:
         content=render_help_page(
             include_logs_setting=include_logs_setting,
             workspace_agent_id=workspace_agent_id,
+            assist_available=assist_available,
             description=description,
             is_agent_report=is_agent_report,
             workspace_name=workspace_name,
@@ -529,11 +537,13 @@ def _handle_help_assist() -> Response:
     """Spawn an in-workspace ``/assist`` chat to help with a problem (POST /help/assist).
 
     Only valid when the help flow was opened from a loaded workspace: the body carries that
-    workspace's agent id and the user's description. The desktop app runs ``mngr create`` inside that
-    workspace's container (via ``mngr exec``) to spawn a new chat seeded with ``/assist <description>``;
-    the system interface auto-opens its tab. The call blocks until ``mngr create`` finishes so the
-    get-help modal can hold its "starting..." state until the chat exists, then returns 200 on success
-    or 502 if the spawn failed.
+    workspace's agent id and the user's description. Before spawning, we probe the workspace for the
+    ``/assist`` skill and return 409 if it lacks it (an older FCT template) or 502 if the workspace is
+    unreachable -- so we never spawn a chat that could only hang. Otherwise the desktop app runs
+    ``mngr create`` inside that workspace's container (via ``mngr exec``) to spawn a new chat seeded
+    with ``/assist <description>``; the system interface auto-opens its tab. The call blocks until
+    ``mngr create`` finishes so the get-help modal can hold its "starting..." state until the chat
+    exists, then returns 200 on success or 502 if the spawn failed.
     """
     body = request.get_json(silent=True, force=True)
     if not isinstance(body, dict):
@@ -560,12 +570,39 @@ def _handle_help_assist() -> Response:
         )
 
     state = get_state()
+    mngr_caller = state.mngr_caller or get_default_mngr_caller()
+
+    # Refuse before spawning if this workspace can't actually host an /assist chat.
+    # Workspaces created from an FCT predating the /assist skill would otherwise accept
+    # the ``mngr create`` but hang on the ``/assist`` message (an unknown slash command
+    # never submits a prompt, so the send blocks to its full timeout) and leave a
+    # half-created chat behind. The probe is a quick filesystem check inside the
+    # container; on an unsupported/unreachable workspace we return a clear error the
+    # modal turns into a "report a bug instead" screen rather than a dead spinner.
+    support = check_assist_support(mngr_caller, workspace_agent_id)
+    if support is AssistSupport.UNSUPPORTED:
+        return make_response(
+            status_code=409,
+            content=json.dumps(
+                {"error": "This workspace doesn't have the agent-assist skill, so an agent can't help here yet."}
+            ),
+            media_type="application/json",
+        )
+    if support is AssistSupport.UNREACHABLE:
+        return make_response(
+            status_code=502,
+            content=json.dumps(
+                {"error": "Couldn't reach this workspace to start an agent. It may be starting up or unavailable."}
+            ),
+            media_type="application/json",
+        )
+
     workspace_name = state.backend_resolver.get_workspace_name(workspace_agent_id)
     # Wait for the create to finish before responding so the get-help modal keeps its
     # "starting..." state until the chat exists, rather than dismissing into a blank gap
     # while the agent boots. The cheroot WSGI pool (50 threads) absorbs the blocking call.
     started = spawn_assist_chat(
-        mngr_caller=get_default_mngr_caller(),
+        mngr_caller=mngr_caller,
         workspace_agent_id=workspace_agent_id,
         workspace_name=workspace_name,
         description=description,
@@ -2153,6 +2190,7 @@ def create_desktop_client(
     minds_api_key: str | None = None,
     latchkey_forward_supervisor: LatchkeyForwardSupervisor | None = None,
     discovery_health_watchdog: DiscoveryHealthWatchdog | None = None,
+    mngr_caller: MngrCaller | None = None,
 ) -> Flask:
     """Create the bare-origin minds Flask application.
 
@@ -2221,6 +2259,7 @@ def create_desktop_client(
         minds_api_key=minds_api_key,
         latchkey_forward_supervisor=latchkey_forward_supervisor,
         discovery_health_watchdog=discovery_health_watchdog,
+        mngr_caller=mngr_caller,
     )
     set_state(app, state)
 

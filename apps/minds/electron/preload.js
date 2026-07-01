@@ -49,7 +49,9 @@ contextBridge.exposeInMainWorld('minds', {
   // Get-help modal (report a bug). ``agentId`` is the currently-displayed
   // workspace id (or '' on a general screen) so the help page can scope its
   // report to that workspace; it is packed into the help page URL by main.
-  toggleHelp: (agentId) => ipcRenderer.send('toggle-help', agentId),
+  // ``assistAvailable`` marks the workspace healthy enough to host an /assist
+  // chat, gating the "have an agent help" option (see chrome.js).
+  toggleHelp: (agentId, assistAvailable) => ipcRenderer.send('toggle-help', agentId, assistAvailable),
 
   // One-shot bug report from the full-app error takeover (shell.html) when the
   // backend is down and the normal /help flow is unreachable. Reports the

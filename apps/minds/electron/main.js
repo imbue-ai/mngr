@@ -988,10 +988,14 @@ function toggleInbox(bundle) {
 // currently-displayed workspace, or falsy on a general screen) is forwarded as a
 // ?workspace= query so the help page can scope its bug report to that workspace.
 
-function helpUrlFor(agentId, description) {
+function helpUrlFor(agentId, description, assistAvailable) {
   if (!backendBaseUrl) return null;
   const params = new URLSearchParams();
   if (agentId) params.set('workspace', agentId);
+  // ``assist=1`` enables the "have an agent help" option; the titlebar sets it only when the
+  // displayed workspace is healthy (chrome.js), so it stays off for the recovery / agent-escalation
+  // open-help paths that don't pass it. The workspace id is still sent for report scoping.
+  if (assistAvailable) params.set('assist', '1');
   // A description is only ever passed by the open_help (agent-escalation) flow; the
   // titlebar button opens /help with none. So a present description marks this as an
   // agent-submitted report, which the /help page frames differently (agent wording,
@@ -1014,17 +1018,17 @@ function isHelpModalOpen(bundle) {
   }
 }
 
-function openHelp(bundle, agentId, description) {
+function openHelp(bundle, agentId, description, assistAvailable) {
   if (!bundle || bundle.window.isDestroyed()) return;
-  const url = helpUrlFor(agentId, description);
+  const url = helpUrlFor(agentId, description, assistAvailable);
   if (!url) return;
   openModal(bundle, url);
 }
 
-function toggleHelp(bundle, agentId) {
+function toggleHelp(bundle, agentId, assistAvailable) {
   if (!bundle || bundle.window.isDestroyed()) return;
   if (isHelpModalOpen(bundle)) closeModal(bundle);
-  else openHelp(bundle, agentId);
+  else openHelp(bundle, agentId, undefined, assistAvailable);
 }
 
 // Coalesce rapid SSE-triggered chrome-event posts so the inbox shell
@@ -2896,8 +2900,8 @@ ipcMain.on('toggle-inbox', (event) => {
   toggleInbox(getBundleFromEvent(event));
 });
 
-ipcMain.on('toggle-help', (event, agentId) => {
-  toggleHelp(getBundleFromEvent(event), agentId);
+ipcMain.on('toggle-help', (event, agentId, assistAvailable) => {
+  toggleHelp(getBundleFromEvent(event), agentId, assistAvailable);
 });
 
 // One-shot bug report from the full-app error takeover (shell.html), used when the
