@@ -45,7 +45,7 @@
 
 ## Changes
 
-- **Overlay surface lifecycle**: `modalView` is created and its host page loaded once at window creation, then kept present for the window's life (visible but click-through when idle) instead of being created lazily and `loadURL`'d per open. The error/loading/quitting takeover still collapses it.
+- **Overlay surface lifecycle**: `modalView` is created and its host page loaded once at window creation, then kept present for the window's life (hidden while idle, since a visible full-window view would capture every pointer event and per-view click-through does not exist; shown only when an overlay or tooltip is up) instead of being created lazily and `loadURL`'d per open. The error/loading/quitting takeover still collapses it.
 
 - **Pointer model**: the overlay manager computes the bounding rect of all visible overlays (or full-window if any is a modal/backdrop overlay) and reports it to main, which calls `modalView.setBounds(rect)`. The page offsets each overlay by the current view origin so it renders correctly within the shrunk viewport. To size a tooltip, the manager measures it in the full-window-but-invisible page, then shrinks the view to the measured rect before showing it. No `setIgnoreMouseEvents` is used (it does not exist per-view).
 
