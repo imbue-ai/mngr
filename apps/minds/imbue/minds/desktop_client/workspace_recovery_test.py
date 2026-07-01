@@ -273,6 +273,48 @@ def test_run_restart_sequence_recovers_on_clean_dispatch_without_plugin(tmp_path
     assert record is not None and record.status == WorkspaceOperationStatus.DONE
 
 
+def test_run_restart_sequence_skips_unsupported_stop_and_proceeds(tmp_path: Path) -> None:
+    """A host-restart on a provider that cannot stop a host in place (Modal: ``mngr stop
+    --stop-host`` raises HostShutdownNotSupportedError) must NOT fail the restart -- the stop
+    step is skipped and the sequence proceeds to ``mngr start``, which restarts it on its own."""
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    tracker.mark_restarting(workspace_agent)
+    resolver = _resolver_with_system_services(workspace_agent, services_agent)
+    registry = _started_registry(workspace_agent)
+    # A fake mngr whose ``stop`` fails with the host-shutdown-not-supported signal (as Modal
+    # does) and whose ``start`` succeeds -- mirrors a no-shutdown provider's restart.
+    script = tmp_path / "fake_mngr_no_shutdown"
+    script.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        '  stop) echo "Provider modal does not support stopping hosts" >&2; exit 1 ;;\n'
+        "  *) exit 0 ;;\n"
+        "esac\n"
+    )
+    script.chmod(0o755)
+
+    with ConcurrencyGroup(name="test-restart") as cg:
+        run_restart_sequence(
+            workspace_agent_id=workspace_agent,
+            is_host_restart=True,
+            tracker=tracker,
+            backend_resolver=resolver,
+            mngr_binary=str(script),
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            mngr_forward_port=0,
+            mngr_forward_preauth_cookie=None,
+            registry=registry,
+        )
+
+    # The unsupported stop is treated as "skip and proceed", so the restart recovers (not FAILED).
+    assert tracker.get_health(workspace_agent) == AgentHealth.HEALTHY
+    record = registry.get(workspace_agent)
+    assert record is not None and record.status == WorkspaceOperationStatus.DONE
+
+
 def test_run_restart_sequence_skips_stop_when_host_already_stopped(tmp_path: Path) -> None:
     """``skip_stop=True`` on a host restart goes straight to ``mngr start`` (no stop subprocess)."""
     tracker = SystemInterfaceHealthTracker()

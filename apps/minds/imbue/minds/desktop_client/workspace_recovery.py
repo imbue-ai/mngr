@@ -69,6 +69,12 @@ _SURGICAL_STARTUP_WAIT_SECONDS: Final[float] = 15.0
 _HOST_RESTART_STARTUP_WAIT_SECONDS: Final[float] = 30.0
 # Poll cadence while waiting for the system interface to come back post-restart.
 _RESTART_PROBE_INTERVAL_SECONDS: Final[float] = 1.0
+# Substring of HostShutdownNotSupportedError's message (raised by ``mngr stop --stop-host``
+# when a provider's ``supports_shutdown_hosts`` is False, e.g. Modal). A host-restart on
+# such a provider hits this on the stop step; it is expected, not a failure -- ``mngr start``
+# performs the restart on its own (reconnect-if-alive, else recreate-from-snapshot), so the
+# restart worker treats it as "skip the stop" and proceeds rather than aborting.
+_HOST_SHUTDOWN_NOT_SUPPORTED_SIGNAL: Final[str] = "does not support stopping hosts"
 
 
 def _build_mngr_stop_argv(mngr_binary: str, agent_id: AgentId, is_host_restart: bool) -> list[str]:
@@ -233,11 +239,25 @@ def run_restart_sequence(
         try:
             _run_mngr(concurrency_group, _build_mngr_stop_argv(mngr_binary, services_agent_id, is_host_restart), env)
         except MngrCommandError as exc:
-            logger.warning("Stop step of {} for {} failed: {}", tier_label, workspace_agent_id, exc)
-            message = f"Stop step of {tier_label} failed: {exc}"
-            tracker.mark_restart_failed(workspace_agent_id, message)
-            registry.fail(workspace_agent_id, message)
-            return
+            if _HOST_SHUTDOWN_NOT_SUPPORTED_SIGNAL in str(exc):
+                # Provider can't stop a host in place (e.g. Modal). Expected, not a
+                # failure: the start step below restarts it on its own (reconnect-if-alive,
+                # else recreate-from-snapshot), so skip the stop and proceed.
+                logger.info(
+                    "Stop step of {} for {} skipped: provider does not support host shutdown; "
+                    "restart proceeds via start alone",
+                    tier_label,
+                    workspace_agent_id,
+                )
+                registry.append_log(
+                    workspace_agent_id, "Provider does not support stopping the host; skipping stop step."
+                )
+            else:
+                logger.warning("Stop step of {} for {} failed: {}", tier_label, workspace_agent_id, exc)
+                message = f"Stop step of {tier_label} failed: {exc}"
+                tracker.mark_restart_failed(workspace_agent_id, message)
+                registry.fail(workspace_agent_id, message)
+                return
 
     registry.append_log(workspace_agent_id, "Starting the system-services agent.")
     try:
