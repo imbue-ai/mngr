@@ -1,0 +1,1 @@
+The TMR workflow (`.github/workflows/tmr.yml`) now accepts `name`, `mapper_prompt`, and `reducer_prompt` inputs, so a dispatch can run a named TMR variant (e.g. `tmr-minds` over `apps/minds`) with its own branch/agent prefix and optional prompt-template overrides.

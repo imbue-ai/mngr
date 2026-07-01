@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr tmr [TEST_PATHS...] [-- TESTING_FLAGS...] [--provider <PROVIDER>] [--env KEY=VALUE] [--label KEY=VALUE] [--timeout <SECS>] [--agent-type <TYPE>]
+mngr tmr [TEST_PATHS...] [-- TESTING_FLAGS...] [--name <VARIANT>] [--mapper-prompt <FILE>] [--reducer-prompt <FILE>] [--provider <PROVIDER>] [--env KEY=VALUE] [--label KEY=VALUE] [--timeout <SECS>] [--agent-type <TYPE>]
 ```
 
 Run and fix tests in parallel using agents (test map-reduce).
@@ -32,6 +32,16 @@ mngr tmr tests/e2e -- -m release
 
 This discovers tests with `pytest --collect-only tests/e2e -m release` and runs
 each test with `pytest tests/e2e/test_foo.py::test_bar -m release`.
+
+Use --name to give a run its own variant prefix (agent/branch/host names), so
+distinct suites stay separable and reviewable on their own. For example, run the
+mngr suite and the minds suite as separate variants:
+
+mngr tmr libs/mngr --name tmr-mngr -- -m "release and not docker and not docker_sdk"
+  mngr tmr apps/minds --name tmr-minds -- -m "release and not minds_deployment and not minds_services and not minds_snapshot_resume"
+
+Use --mapper-prompt / --reducer-prompt to point a variant at its own Jinja
+prompt templates (they may extend or include the packaged ones by name).
 
 Use --provider to run agents on a specific provider (e.g. docker, modal).
 On providers that support snapshots (e.g. modal), the orchestrator
@@ -76,6 +86,9 @@ mngr tmr [OPTIONS] [PYTEST_ARGS]...
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
+| `--name` | text | Variant name, used as the prefix for this run's agent/branch/host names (e.g. tmr-mngr, tmr-minds) so distinct test suites stay separable and reviewable on their own. Distinct from --run-name, which identifies one run within a variant. | `tmr` |
+| `--mapper-prompt` | file | Override the packaged mapper prompt with this Jinja template file. It may '{% extends %}' or '{% include %}' the packaged mapper.j2 by name. | None |
+| `--reducer-prompt` | file | Override the packaged reducer prompt with this Jinja template file. It may '{% extends %}' or '{% include %}' the packaged reducer.j2 by name. | None |
 | `--agent-type` | text | Type of agent to launch for each task | `claude` |
 | `-t`, `--agent-template` | text | Create template to apply for mapper agents [repeatable, stacks in order] | None |
 | `--provider` | text | Provider for agent hosts (e.g. local, docker, modal). Used for both mappers and the reducer. | `local` |
@@ -119,6 +132,18 @@ $ mngr tmr tests/test_foo.py
 
 ```bash
 $ mngr tmr tests/e2e -- -m release
+```
+
+**Run the minds suite as its own variant**
+
+```bash
+$ mngr tmr apps/minds --name tmr-minds -- -m release
+```
+
+**Use a custom mapper prompt**
+
+```bash
+$ mngr tmr apps/minds --name tmr-minds --mapper-prompt prompts/minds_mapper.j2
 ```
 
 **Use Docker provider**
