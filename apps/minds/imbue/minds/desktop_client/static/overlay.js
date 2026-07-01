@@ -20,21 +20,24 @@
 // { mode: 'hidden' } when none); modals are full-window and main owns their
 // visibility directly (see openModal/closeModal).
 //
-// The migrated modal pages (workspace menu / inbox / help / sign-in) are
-// first-party and served by the same origin as this host. The overlay view sets
-// ``nodeIntegrationInSubFrames`` so the preload runs in each iframe and exposes
-// ``window.minds`` there before the iframe's own scripts run -- their existing
-// window.minds.*() calls and onChromeEvent subscriptions work unchanged. Main
-// fans chrome-events / current-workspace / priming out per-frame (see
+// Modals are being migrated from iframes to in-page DOM (see the -- Modals --
+// section below). A migrated modal (currently sign-in) registers itself in
+// window.MINDS_OVERLAY_MODALS and is fetched as ``?fragment=1`` markup and
+// injected here -- no iframe, no per-frame IPC. The not-yet-migrated modal pages
+// (inbox / help / workspace menu) still mount as first-party same-origin
+// iframes; the overlay view sets ``nodeIntegrationInSubFrames`` so the preload
+// runs in each and exposes ``window.minds`` before the iframe's own scripts run,
+// and main fans chrome-events / current-workspace / priming out per-frame (see
 // sendToOverlayFrames in main.js), since webContents.send reaches only the top
-// frame.
+// frame. Both the subframe integration and the per-frame fan-out go away once
+// every modal is an in-page fragment.
 //
 // While a modal is open the overlay view is shown full-window by main and
 // captures pointer events (Electron 40 has no per-view click-through). For
 // modals, the view's visibility/bounds are owned by main (openModal/closeModal)
-// and this manager only decides which iframe is on screen; for tooltips, this
-// manager measures the bubble and reports a small rect so the rest of the window
-// stays interactive.
+// and this manager decides what is on screen (an injected fragment or an
+// iframe); for tooltips, this manager measures the bubble and reports a small
+// rect so the rest of the window stays interactive.
 
 (function () {
   'use strict';
@@ -42,21 +45,101 @@
   var root = document.getElementById('overlay-root');
   if (!root || !window.minds) return;
 
-  // Mount-on-demand modal iframes: each open creates a fresh iframe and each
-  // close destroys it, so no hidden modal documents linger. Keeping them mounted
-  // ("warm") bought nothing here -- every show reloads anyway -- while a hidden
-  // warm page keeps doing background work (e.g. the workspace menu re-fetching
-  // auth on content navigations). The incoming iframe is kept invisible until its
-  // load paints, and the modal it replaces stays visible until that instant, so
-  // switching modals is flash-free.
-  var modalFrame = null; // the currently-visible modal iframe (front buffer)
-  var incomingFrame = null; // a modal iframe still loading (back buffer)
+  // -- Modals -----------------------------------------------------------
+  //
+  // Two paths coexist during the iframe -> in-page migration:
+  //
+  //   * Fragment path (in-page DOM): a modal registered in
+  //     window.MINDS_OVERLAY_MODALS (by a per-modal module script loaded in this
+  //     host page, e.g. overlay_signin.js) is fetched as ``?fragment=1`` markup
+  //     and injected here -- no iframe. The host owns the backdrop dismiss and
+  //     calls the module's init(container) / destroy().
+  //   * Legacy iframe path: a modal NOT in the registry still mounts a fresh
+  //     iframe per open (inbox / help / workspace menu until each is migrated).
+  //     The incoming iframe stays invisible until its load paints, and the modal
+  //     it replaces stays visible until that instant, so switching is flash-free.
+  //
+  // At most one modal is shown at a time; opening one supersedes the other path.
+  var modalFrame = null; // legacy path: the currently-visible modal iframe
+  var incomingFrame = null; // legacy path: a modal iframe still loading
+  var fragmentModal = null; // fragment path: { id, el, entry } of the injected modal
+  var fragmentToken = 0; // supersede guard for in-flight fragment fetches
+
+  function modalRegistry() {
+    return window.MINDS_OVERLAY_MODALS || {};
+  }
 
   function destroyFrame(frame) {
     if (frame && frame.parentNode) frame.parentNode.removeChild(frame);
   }
 
+  function teardownFragmentModal() {
+    if (!fragmentModal) return;
+    var current = fragmentModal;
+    fragmentModal = null;
+    if (current.entry && typeof current.entry.destroy === 'function') {
+      try { current.entry.destroy(); } catch (e) { /* noop */ }
+    }
+    if (current.el && current.el.parentNode) current.el.parentNode.removeChild(current.el);
+  }
+
+  // Host-owned dismiss: route through main so it hides the overlay view and fans
+  // a hide-all back to us, keeping main's modal-open / titlebar-drag state in
+  // sync (main handles Escape the same way).
+  function requestCloseModal() {
+    if (window.minds && window.minds.closeModal) window.minds.closeModal();
+  }
+
   function showModal(id, url) {
+    var entry = modalRegistry()[id];
+    if (entry) showFragmentModal(id, url, entry);
+    else showIframeModal(id, url);
+  }
+
+  function showFragmentModal(id, url, entry) {
+    // Supersede anything currently shown (a fragment, or a still-loading iframe).
+    teardownFragmentModal();
+    destroyFrame(incomingFrame);
+    incomingFrame = null;
+    var separator = url.indexOf('?') === -1 ? '?' : '&';
+    var token = ++fragmentToken;
+    fetch(url + separator + 'fragment=1', { credentials: 'same-origin' })
+      .then(function (response) { return response.text(); })
+      .then(function (html) {
+        // A newer show (or a close) superseded this fetch before it resolved.
+        if (token !== fragmentToken) return;
+        mountFragmentModal(id, entry, html);
+      })
+      .catch(function () { /* leave nothing shown; the open simply fails */ });
+  }
+
+  function mountFragmentModal(id, entry, html) {
+    // Drop any legacy iframe still on screen now that the fragment is in hand
+    // (18b: only reveal once the markup is ready, so there's no empty panel).
+    destroyFrame(modalFrame);
+    modalFrame = null;
+    var container = document.createElement('div');
+    container.className = 'absolute inset-0';
+    container.setAttribute('data-overlay-id', id);
+    container.innerHTML = html;
+    // Backdrop-mode modals paint a full-window backdrop as their outermost
+    // element; a click landing on it (outside the panel) dismisses the modal.
+    if ((entry.positioning || 'backdrop') === 'backdrop') {
+      var backdrop = container.firstElementChild;
+      if (backdrop) {
+        backdrop.addEventListener('mousedown', function (event) {
+          if (event.target === backdrop) requestCloseModal();
+        });
+      }
+    }
+    root.appendChild(container);
+    fragmentModal = { id: id, el: container, entry: entry };
+    if (typeof entry.init === 'function') {
+      try { entry.init(container); } catch (e) { /* a broken modal must not wedge the host */ }
+    }
+  }
+
+  function showIframeModal(id, url) {
     // Drop any earlier incoming frame that never became visible -- this show
     // supersedes it, and it was never shown, so there's no flash.
     destroyFrame(incomingFrame);
@@ -93,7 +176,9 @@
         return;
       }
       frame.style.visibility = 'visible';
-      destroyFrame(modalFrame); // swap: remove the modal this one replaced
+      // Swap: remove whatever this one replaced (an old iframe or a fragment).
+      destroyFrame(modalFrame);
+      teardownFragmentModal();
       modalFrame = frame;
       incomingFrame = null;
     });
@@ -104,6 +189,7 @@
 
   function hideModal(id) {
     // main only sends 'hide-all' today, but honor a targeted hide too.
+    if (fragmentModal && fragmentModal.id === id) teardownFragmentModal();
     if (modalFrame && modalFrame.getAttribute('data-overlay-id') === id) {
       destroyFrame(modalFrame);
       modalFrame = null;
@@ -115,6 +201,10 @@
   }
 
   function hideAllModals() {
+    // Bump the token so any in-flight fragment fetch that resolves after this
+    // close won't mount itself.
+    fragmentToken++;
+    teardownFragmentModal();
     destroyFrame(incomingFrame);
     destroyFrame(modalFrame);
     incomingFrame = null;
