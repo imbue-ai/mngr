@@ -195,13 +195,19 @@ def _send_message_to_agent(
     """
     agent_name = str(agent.name)
 
-    # Check if agent has a tmux session (only STOPPED agents cannot receive messages)
+    # (Re)start the agent unless it is live enough to receive a message. STOPPED
+    # has no tmux session at all; DONE has a lingering session whose agent process
+    # already exited (a ctrl-c, a crash, or an OOM shed leaves tmux holding the
+    # pane open on a bare shell). In both cases there is no agent to deliver to, so
+    # a raw send would just type the message into a dead shell and silently lose
+    # it. ensure_agent_started revives the agent first (tearing down a DONE husk so
+    # the relaunch actually happens) before we send.
     lifecycle_state = agent.get_lifecycle_state()
-    if lifecycle_state == AgentLifecycleState.STOPPED:
+    if lifecycle_state in (AgentLifecycleState.STOPPED, AgentLifecycleState.DONE):
         if is_start_desired:
             ensure_agent_started(agent, host, is_start_desired=True)
         else:
-            error_msg = f"Agent has no tmux session (state: {lifecycle_state.value})"
+            error_msg = f"Agent is not running (state: {lifecycle_state.value})"
             with result_lock:
                 result.failed_agents.append((agent_name, error_msg))
             if on_error:
