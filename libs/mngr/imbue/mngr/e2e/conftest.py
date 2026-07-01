@@ -474,13 +474,17 @@ def _stop_asciinema_processes(test_output_dir: Path) -> None:
         pid_file.unlink(missing_ok=True)
 
 
-def _setup_test_profile(host_dir: Path) -> str:
+def _setup_test_profile(host_dir: Path, enabled_backends: list[str]) -> str:
     """Create a mngr profile in the test's host directory.
 
     Sets up config.toml, profile directory, user_id, and tmux_onboarding_shown
     so that the subprocess mngr uses a predictable profile with a user_id that
     follows the mngr_test-YYYY-MM-DD-HH-MM-SS convention (parseable by the
     Modal environment cleanup script).
+
+    ``enabled_backends`` is written into the profile's settings.toml so that
+    subprocess discovery is confined to the backends the test opted into (see
+    the call site for how the list is derived from the test's markers).
 
     Returns the user_id that was written.
     """
@@ -496,7 +500,23 @@ def _setup_test_profile(host_dir: Path) -> str:
     # PYTEST_CURRENT_TEST and loads this profile's settings.toml, so without
     # is_allowed_in_pytest = true (it defaults to False) the config loader would
     # refuse to run.
-    (profile_dir / "settings.toml").write_text("is_allowed_in_pytest = true\n")
+    #
+    # Restrict the enabled provider backends to the ones this test actually
+    # exercises. Every registered backend is loaded by default, and a remote
+    # backend that cannot be reached during discovery (an unconfigured cloud
+    # plugin such as aws, a Modal environment that does not exist, a Docker
+    # daemon that is not running) reports itself unavailable. That makes an
+    # otherwise-successful bare `mngr list` exit with
+    # EXIT_CODE_PROVIDER_INACCESSIBLE, spuriously failing any test that lists.
+    # The allowlist below pins discovery to the backends the test opted into via
+    # its markers: ``local`` is always available, while the ``modal``/``docker``
+    # remote backends are enabled only for tests carrying the matching resource
+    # marker (which is exactly the set of tests that use ``--provider
+    # modal``/``--provider docker`` and drive those providers).
+    backends_toml = ", ".join(f'"{backend}"' for backend in enabled_backends)
+    (profile_dir / "settings.toml").write_text(
+        f"is_allowed_in_pytest = true\nenabled_backends = [{backends_toml}]\n"
+    )
 
     # Build a user_id that produces a Modal environment name matching the
     # mngr_test-YYYY-MM-DD-HH-MM-SS-{identifier} pattern (recognized by
@@ -599,7 +619,8 @@ def e2e(
     - Isolated TMUX_TMPDIR (own tmux server, separate from the one the parent
       autouse fixture creates for the in-process test environment)
     - A temporary git repo as the working directory
-    - Remote providers (Modal, Docker) left enabled for e2e testing
+    - Provider backends restricted (via marker-gated enabled_backends) to
+      ``local`` plus the modal/docker remotes the test's markers opt into
     - A custom connect_command that records tmux sessions via asciinema
 
     Output is saved to .test_output/e2e/<timestamp>/<test_name>/ (relative to repo root).
@@ -642,10 +663,24 @@ def e2e(
     test_prefix = "mngr_test-"
     env["MNGR_PREFIX"] = test_prefix
 
+    # Derive the set of provider backends the subprocess should enable from the
+    # test's resource markers. ``local`` is always available; the modal/docker
+    # remote backends are enabled only when the test carries the matching marker
+    # (the same marker its `--provider modal`/`--provider docker` commands
+    # already require to satisfy the resource guard). Confining discovery this
+    # way keeps a bare `mngr list` from contacting -- and failing on -- a remote
+    # backend the test never opted into (an unreachable Docker daemon, a missing
+    # Modal environment, or an unconfigured cloud plugin such as aws).
+    enabled_backends = ["local"]
+    if request.node.get_closest_marker("modal") is not None:
+        enabled_backends.append("modal")
+    if request.node.get_closest_marker("docker") is not None:
+        enabled_backends.append("docker")
+
     # Create the mngr profile proactively so that:
     # 1. The user_id follows the timestamp convention for Modal cleanup
     # 2. The tmux onboarding screen is suppressed in test transcripts
-    test_user_id = _setup_test_profile(temp_host_dir)
+    test_user_id = _setup_test_profile(temp_host_dir, enabled_backends)
     # Pre-compute the Modal environment name so create (inside the mngr
     # subprocess) and delete (below) agree without either side re-deriving it.
     test_modal_env_name = truncate_modal_name(f"{test_prefix}{test_user_id}", max_length=MODAL_NAME_MAX_LENGTH)
@@ -654,9 +689,10 @@ def e2e(
     env["PATH"] = f"{_BIN_DIR}:{env.get('PATH', '')}"
 
     # Configure connect_command for create/start.
-    # Remote providers (Modal, Docker) are left enabled so that e2e tests
-    # exercise the full discovery path. Tests that trigger Modal (via
-    # mngr list, mngr destroy --gc, etc.) need @pytest.mark.modal.
+    # The modal/docker remote backends are enabled per-test via the marker-gated
+    # enabled_backends written into the profile settings.toml above, so tests
+    # that drive those providers (which carry @pytest.mark.modal / .docker)
+    # exercise the full discovery path while unmarked tests stay local-only.
     # is_allowed_in_pytest opts this local-layer config into the pytest run.
     # Every config file loaded during a pytest run must opt in individually, and
     # this one is loaded alongside the profile's settings.toml.

@@ -1,0 +1,1 @@
+Tightened the `test_help_succeeds` e2e test to verify exactly its documented scope: removed an out-of-scope assertion on the "Usage" header (the scope only calls for `mngr --help` to exit 0 and list the advertised subcommands).

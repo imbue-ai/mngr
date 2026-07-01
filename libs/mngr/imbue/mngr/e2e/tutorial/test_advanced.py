@@ -19,7 +19,6 @@ def _create_my_task(e2e: E2eSession, sleep_value: int) -> None:
     ).to_succeed()
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
@@ -98,7 +97,7 @@ def test_advanced_watch_dashboard_running(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(60)
+@pytest.mark.timeout(90)
 def test_advanced_observe_stream(e2e: E2eSession) -> None:
     """Tutorial block:
         # or get a JSONL stream of host/agent discovery events for programmatic consumers
@@ -120,10 +119,16 @@ def test_advanced_observe_stream(e2e: E2eSession) -> None:
     #
     # The stream emits an initial full discovery snapshot and then keeps running,
     # so we bound it with `timeout` and treat the resulting SIGTERM exit as success.
+    # The initial snapshot is written only once discovery finishes polling *every*
+    # configured provider (batch listing), so a slow-failing cloud provider gates
+    # it: e.g. gcp's credential resolution probes the (absent) GCE metadata server
+    # and takes ~12s to raise ProviderNotAuthorizedError. Add mngr's cold start on
+    # top and the first DISCOVERY_FULL lands ~20s in, so `timeout 20` raced it. Give
+    # the stream ample headroom to emit that first snapshot before we SIGTERM it.
     result = e2e.run(
-        "timeout 20 mngr observe --discovery-only || true",
+        "timeout 35 mngr observe --discovery-only || true",
         comment="JSONL stream of discovery events",
-        timeout=45.0,
+        timeout=55.0,
     )
     expect(result).to_succeed()
     # The output is a JSONL stream for programmatic consumers: every non-blank
@@ -154,7 +159,6 @@ def test_advanced_observe_stream(e2e: E2eSession) -> None:
     assert snapshot["agents"] == [], snapshot
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(300)
@@ -233,9 +237,13 @@ def test_advanced_create_reuse_modal(e2e: E2eSession) -> None:
     # the Modal environment does not exist yet, bootstraps the environment too).
     expect(e2e.run(create_cmd, comment="use --reuse to make create idempotent", timeout=150.0)).to_succeed()
 
-    # Capture the agent ID of the newly created my-task agent.
+    # Capture the agent ID of the newly created my-task agent. Scope discovery to
+    # the modal provider (the agent lives there): this isolated environment leaves
+    # every registered backend enabled by default, and an unscoped list would try
+    # to reach the credential-less AWS provider and exit non-zero (exit code 6,
+    # provider-inaccessible) even though the modal agent was found.
     first_list = e2e.run(
-        "mngr list --include 'name == \"my-task\"' --ids",
+        "mngr list --provider modal --include 'name == \"my-task\"' --ids",
         comment="record the my-task agent ID after first create",
     )
     expect(first_list).to_succeed()
@@ -261,7 +269,7 @@ def test_advanced_create_reuse_modal(e2e: E2eSession) -> None:
 
     # The reuse must not have created a second agent: same single ID as before.
     second_list = e2e.run(
-        "mngr list --include 'name == \"my-task\"' --ids",
+        "mngr list --provider modal --include 'name == \"my-task\"' --ids",
         comment="verify --reuse did not create a duplicate agent",
     )
     expect(second_list).to_succeed()
@@ -272,7 +280,6 @@ def test_advanced_create_reuse_modal(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.rsync
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_advanced_watch_list_live_dashboard(e2e: E2eSession) -> None:
@@ -303,7 +310,6 @@ def test_advanced_watch_list_live_dashboard(e2e: E2eSession) -> None:
     ).to_succeed()
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -320,8 +326,14 @@ def test_tips_exec_env_inspect(e2e: E2eSession) -> None:
     _create_my_task(e2e, 101015)
     # Capture the id mngr records for my-task so we can confirm exec ran inside
     # *that* agent's environment, not merely that some env was dumped. Only one
-    # agent exists, so `mngr list --ids` prints exactly its id.
-    list_result = e2e.run("mngr list --ids", comment="get the agent id to cross-check the exec env")
+    # agent exists, so `mngr list --ids` prints exactly its id. Scope discovery to
+    # the local provider so the assertion does not depend on (or contact) other
+    # providers -- my-task is a local `--type command` agent, and an enabled but
+    # unreachable provider (e.g. AWS without credentials) would otherwise make
+    # `mngr list` exit non-zero.
+    list_result = e2e.run(
+        "mngr list --ids --provider local", comment="get the agent id to cross-check the exec env"
+    )
     expect(list_result).to_succeed()
     agent_id = list_result.stdout.strip()
     assert agent_id, f"expected an agent id from `mngr list --ids`, got: {list_result.stdout!r}"
@@ -414,13 +426,19 @@ def test_tips_xargs_parallel_exec(e2e: E2eSession) -> None:
     ).to_succeed()
     # Sanity: the modal filter discovers the host we just created. Capture its id
     # so we can confirm the pipeline actually exec'd on it. `mngr list --ids`
-    # prints `{id}`, which equals the `$MNGR_AGENT_ID` exported into the exec env.
+    # prints `{id}` to stdout, which equals the `$MNGR_AGENT_ID` exported into the
+    # exec env. We deliberately do NOT assert `mngr list` exits 0 here: it
+    # enumerates every enabled provider backend, so any credential-less cloud
+    # provider (e.g. aws) makes it exit EXIT_CODE_PROVIDER_INACCESSIBLE while
+    # still printing the modal ids -- which is precisely why the tutorial pipes
+    # the ids into xargs (the pipeline's exit code is xargs', not `mngr list`'s).
+    # The documented scope is the pipeline, not standalone `mngr list` success, so
+    # capturing the id from stdout is all this sanity step needs.
     list_result = e2e.run(
         "mngr list --include 'host.provider == \"modal\"' --ids",
         comment="list modal host ids",
         timeout=60.0,
     )
-    expect(list_result).to_succeed()
     agent_id = list_result.stdout.strip()
     assert agent_id, f"expected a modal host id from `mngr list --ids`, got: {list_result.stdout!r}"
     # The tutorial command: fan `mngr exec` out across the modal hosts in
@@ -477,6 +495,7 @@ def _seed_claude_transcript(host_dir: Path, events: list[dict[str, Any]]) -> Non
 
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(120)
 def test_tips_transcript_tail_assistant(e2e: E2eSession, temp_host_dir: Path) -> None:
     """Tutorial block:
         # check the transcript to see what an agent has been up to

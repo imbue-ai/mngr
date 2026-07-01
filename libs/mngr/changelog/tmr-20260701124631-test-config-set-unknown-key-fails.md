@@ -1,0 +1,1 @@
+Fixed the `test_config_set_unknown_key_fails` e2e tutorial test so its non-persistence check no longer assumes the project-scope `settings.toml` is pre-seeded (the e2e fixture only seeds `settings.local.toml`). The rejected-write verification now tolerates the file's absence, which is itself proof nothing was persisted.

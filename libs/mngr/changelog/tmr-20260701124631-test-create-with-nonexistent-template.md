@@ -1,0 +1,1 @@
+Added a `@pytest.mark.timeout(120)` marker to the `test_create_with_nonexistent_template` e2e release test so it matches the other e2e release tests. The 10s global pytest timeout was too short for a test that shells out to `mngr` twice (the CLI startup alone takes about 10s), causing the test to time out before the command could report its "template not found" error.

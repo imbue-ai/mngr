@@ -1,0 +1,1 @@
+Raised the pytest timeout on the `test_create_rejects_unknown_option` e2e tutorial test. The `mngr create` subprocess's startup import cost routinely exceeds the global 10s pytest timeout even though it rejects the unknown option immediately, so the test now uses `@pytest.mark.timeout(120)`, matching the other e2e create tests.

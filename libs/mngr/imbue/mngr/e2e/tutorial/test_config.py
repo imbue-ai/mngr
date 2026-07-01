@@ -203,10 +203,15 @@ def test_config_set_unknown_key_fails(e2e: E2eSession) -> None:
     result = e2e.run("mngr config set totally_unknown_key value", comment="setting an unknown key is rejected")
     expect(result).to_fail()
     expect(result.stderr).to_contain("Unknown configuration fields")
-    # The rejected write must not be persisted. The e2e fixture pre-seeds the
-    # project settings file with the pytest opt-in key, so the file exists; assert
-    # the rejected key was never written into it rather than that the file is absent.
-    settings = e2e.run("cat .$MNGR_ROOT_NAME/settings.toml", comment="verify the invalid value was not written")
+    # The rejected write must not be persisted. The e2e fixture deliberately does
+    # NOT seed the project-scope settings.toml (only settings.local.toml), so a
+    # persisted write is the only thing that would create it. Read the file if it
+    # exists (tolerating its absence, which is itself proof nothing was written)
+    # and assert the rejected key is not present.
+    settings = e2e.run(
+        "cat .$MNGR_ROOT_NAME/settings.toml 2>/dev/null || true",
+        comment="verify the invalid value was not written",
+    )
     expect(settings).to_succeed()
     expect(settings.stdout).not_to_contain("totally_unknown_key")
 
@@ -278,7 +283,7 @@ def test_config_set_invalid_scope(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.timeout(60)
-def test_config_unset(e2e: E2eSession) -> None:
+def test_config_unset(e2e: E2eSession, project_config_dir: Path) -> None:
     """Tutorial block:
         # unset a config value
         mngr config unset commands.create.provider
@@ -287,6 +292,15 @@ def test_config_unset(e2e: E2eSession) -> None:
     scope, reports the removed key and the scope it came from (project), and the
     value is actually gone from the settings file afterward.
     """
+    # Seed the project settings.toml with the pytest opt-in. The e2e fixture
+    # deliberately leaves settings.toml unseeded, but `config unset` reloads the
+    # merged config -- which includes the project settings.toml that `config set`
+    # writes to below -- and every config file loaded during a pytest run must
+    # opt in. `config set` preserves this key (it loads and rewrites the file),
+    # so it is still present when `unset` reloads. Mirrors test_config_unset_missing_key.
+    settings_path = project_config_dir / "settings.toml"
+    settings_path.write_text("is_allowed_in_pytest = true\n")
+
     # `config unset` only succeeds for a key that is actually present in the
     # target scope (a missing key fails with "Key not found"), so first set the
     # value at the default (project) scope, then unset it the way the tutorial

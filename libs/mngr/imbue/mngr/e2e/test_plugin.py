@@ -1,6 +1,7 @@
 """Tests for plugin system behavior via the real CLI."""
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -30,9 +31,13 @@ def test_plugin_disable_enable_roundtrip(e2e: E2eSession) -> None:
     # claude must start out enabled, otherwise the roundtrip below is vacuous
     assert [p for p in plugins_before if p["name"] == "claude"][0]["enabled"] == "true"
 
-    # Disable a plugin
+    # Disable a plugin. Use --scope local so the enabled flag is written to the
+    # settings.local.toml that the e2e fixture opts into pytest runs
+    # (is_allowed_in_pytest = true); a project-scope write would create a fresh
+    # settings.toml without that opt-in and the follow-up `mngr plugin list`
+    # (which loads config) would then trip the pytest config guard.
     disable_result = e2e.run(
-        "mngr plugin disable claude",
+        "mngr plugin disable claude --scope local",
         comment="Disable the claude plugin",
     )
     expect(disable_result).to_succeed()
@@ -48,9 +53,10 @@ def test_plugin_disable_enable_roundtrip(e2e: E2eSession) -> None:
     assert len(claude_plugins) == 1
     assert claude_plugins[0]["enabled"] == "false"
 
-    # Re-enable it
+    # Re-enable it (same scope as the disable above, so the roundtrip clears the
+    # exact flag it set).
     enable_result = e2e.run(
-        "mngr plugin enable claude",
+        "mngr plugin enable claude --scope local",
         comment="Re-enable the claude plugin",
     )
     expect(enable_result).to_succeed()
@@ -73,8 +79,8 @@ def test_plugin_disable_enable_roundtrip(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(60)
-def test_plugin_disable_affects_create(e2e: E2eSession) -> None:
+@pytest.mark.timeout(300)
+def test_plugin_disable_affects_create(e2e: E2eSession, project_config_dir: Path) -> None:
     """Disabling a plugin removes its agent type and gates ``mngr create``.
 
     Verifies that while the claude plugin is disabled, ``mngr create ... claude``
@@ -83,6 +89,15 @@ def test_plugin_disable_affects_create(e2e: E2eSession) -> None:
     from the active agent-type list. Re-enabling makes both succeed again: the
     claude agent type reappears in the active list.
     """
+    # ``mngr plugin disable`` writes the disabled flag into the *project*
+    # settings.toml, which the e2e fixture deliberately does not seed (so
+    # first-use tutorial tests observe genuine behavior). Left absent, that
+    # fresh file would lack ``is_allowed_in_pytest`` and the pytest opt-in guard
+    # would reject it on the next config load -- making ``mngr create`` fail for
+    # the wrong reason. Seed the opt-in here; ``plugin disable`` preserves it
+    # (it round-trips the file with tomlkit and only sets the plugin key).
+    (project_config_dir / "settings.toml").write_text("is_allowed_in_pytest = true\n")
+
     # Disable the claude plugin so its agent type should be unavailable
     expect(e2e.run("mngr plugin disable claude", comment="Disable claude plugin")).to_succeed()
 

@@ -1,0 +1,1 @@
+Scoped the `mngr list` verification in the `test_create_command_custom_script` e2e tutorial test to `--provider local`, matching the sibling codex/yolo tests. The command agent under test is created on the local provider, so the check no longer fans out to (and fails on) unreachable remote providers such as AWS.

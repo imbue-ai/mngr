@@ -1,0 +1,1 @@
+Raised the per-test timeout on the release test `test_create_with_dirty_tree_fails` to 120s. The dirty-tree guard aborts before any host/tmux/rsync work, but `mngr create` still runs full CLI startup and source resolution first, which routinely exceeds the default 10s timeout.

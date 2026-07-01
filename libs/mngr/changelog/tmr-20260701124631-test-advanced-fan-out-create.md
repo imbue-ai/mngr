@@ -1,0 +1,1 @@
+Dropped the superfluous `@pytest.mark.rsync` mark from the `test_advanced_fan_out_create` e2e tutorial test. The test creates local `--type command` agents in a git repo, which use the git-worktree transfer mode and never invoke rsync, so the mark tripped the resource guard's never-invoked check.
