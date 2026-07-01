@@ -33,7 +33,7 @@
 
   - Sign-in: centered dimmed modal, open-only (no toggle), auto-closes on successful sign-in.
 
-- Opening any of these is instant after the first open (the iframe is already warm); on each open it re-fetches its state and replays its entry animation, so it still feels "fresh every time."
+- Opening any of these mounts its iframe on demand onto the always-warm overlay surface; each open loads fresh, re-fetching its state and replaying its entry animation, so it feels "fresh every time."
 
 - Multiple overlays can be visible at once and stack in strict open order (the most recently opened is on top); a tooltip raised while a modal is open appears above it.
 
