@@ -72,7 +72,7 @@ contextBridge.exposeInMainWorld('minds', {
   // show/hide commands from main via ``onOverlayCommand`` and reports the
   // overlay view's required bounds back via ``overlaySetBounds`` so main can
   // size the view (Electron has no per-view click-through; bounds are the only
-  // lever). ``spec`` is { mode: 'hidden' } | { mode: 'full' } |
+  // lever). ``spec`` is { mode: 'hidden' } |
   // { mode: 'rect', rect: {x, y, width, height} }.
   onOverlayCommand: (callback) => {
     ipcRenderer.on('overlay-command', (_event, cmd) => callback(cmd));
