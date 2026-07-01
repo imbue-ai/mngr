@@ -89,12 +89,9 @@ jobs:
 
       - uses: ./.github/actions/tmr-setup
 
-      # ANTHROPIC key, imbue Modal workspace token (id + secret), and AWS creds
-      # from Vault, migrated off the ANTHROPIC_API_KEY / MODAL_TOKEN_SECRET /
-      # AWS_* GitHub Actions secrets and the MODAL_TOKEN_ID variable. The AWS
-      # creds enable mirroring the HTML report to
-      # s3://int8-shared-internal/tmr-reports/ (the orchestrator silently skips
-      # the upload when they are absent).
+      # ANTHROPIC key + imbue Modal workspace token (id + secret) from Vault,
+      # migrated off the ANTHROPIC_API_KEY / MODAL_TOKEN_SECRET GitHub Actions
+      # secrets and the MODAL_TOKEN_ID variable.
       - name: Fetch credentials from Vault
         uses: imbue-ai/use-vault-secrets@2375c28b61513dadebebdce845c109a01777a197
         with:
@@ -103,6 +100,18 @@ jobs:
             mngr/ci/ANTHROPIC_API_KEY
             mngr/ci/modal/MODAL_TOKEN_ID
             mngr/ci/modal/MODAL_TOKEN_SECRET
+
+      # AWS creds enable mirroring the HTML report to
+      # s3://int8-shared-internal/tmr-reports/. Optional: continue-on-error so a
+      # missing entry (or unreadable path) leaves AWS_* unset and the
+      # orchestrator silently skips the upload -- matching the pre-migration
+      # behaviour when the AWS_* GitHub Actions secrets were unset.
+      - name: Fetch AWS credentials from Vault (optional)
+        continue-on-error: true
+        uses: imbue-ai/use-vault-secrets@2375c28b61513dadebebdce845c109a01777a197
+        with:
+          role: mngr_ci_gh
+          secrets: |
             mngr/ci/aws/AWS_ACCESS_KEY_ID
             mngr/ci/aws/AWS_SECRET_ACCESS_KEY
 
