@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-30
+
+Simplified the internal `--reuse` agent-lookup scoping introduced for `mngr create <agent>@<host>.<provider>`: the lookup is now driven entirely by the host named in the create address. No user-visible behavior change -- a fresh-host create still skips same-named agents on other hosts, an existing-host re-create still reuses the agent on the named host, and a bare-name `--reuse` with multiple matches still raises the disambiguation error.
+
+The redundant `target_host_ref` parameter (which scoped by host id only for already-resolved existing hosts) has been removed; its constraint was already covered by the address's host name plus provider. Host-in-scope matching now lives in a single pure `_is_host_in_reuse_scope` helper.
+
 ## 2026-06-29
 
 Fixed `mngr destroy` (and `mngr gc`) crashing with a Docker `409 Conflict` traceback when a Docker host's per-host build image was still referenced by a leaked (often orphaned, stopped) container.
