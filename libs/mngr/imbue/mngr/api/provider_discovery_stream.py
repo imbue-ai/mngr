@@ -23,6 +23,7 @@ from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderError
 from imbue.mngr.interfaces.data_types import BoundedProviderDiscoveryResult
+from imbue.mngr.interfaces.provider_instance import HostDiscoveryReadRegistry
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
@@ -51,17 +52,20 @@ def _discover_one_provider(
     host_discovery_timeout_seconds: float,
     agent_discovery_timeout_seconds: float,
     include_destroyed: bool,
+    registry: HostDiscoveryReadRegistry,
 ) -> BoundedProviderDiscoveryResult:
     """Run a single provider's per-host-bounded discovery. Raises on failure.
 
     A slow/wedged host is marked UNKNOWN within the returned result rather than
-    stalling the whole provider's snapshot.
+    stalling the whole provider's snapshot. ``registry`` carries in-flight per-host
+    reads across polls so a wedged host is not re-read on every poll.
     """
     return provider.discover_hosts_and_agents_within_timeouts(
         cg=mngr_ctx.concurrency_group,
         host_discovery_timeout_seconds=host_discovery_timeout_seconds,
         agent_discovery_timeout_seconds=agent_discovery_timeout_seconds,
         include_destroyed=include_destroyed,
+        registry=registry,
     )
 
 
@@ -86,6 +90,9 @@ class _ProviderDiscoveryPoller(MutableModel):
 
     _in_flight_future: Future[BoundedProviderDiscoveryResult] | None = PrivateAttr(default=None)
     _in_flight_started_at: datetime | None = PrivateAttr(default=None)
+    # Carries in-flight per-host reads across this poller's polls so a wedged host is not
+    # re-read every poll (bounding accumulation to at most one abandoned read per host).
+    _host_read_registry: HostDiscoveryReadRegistry = PrivateAttr(default_factory=HostDiscoveryReadRegistry)
 
     @property
     def _discovered_provider(self) -> DiscoveredProvider:
@@ -228,6 +235,7 @@ class _ProviderDiscoveryPoller(MutableModel):
                                 self.config.host_discovery_timeout_seconds,
                                 self.config.agent_discovery_timeout_seconds,
                                 self.include_destroyed,
+                                self._host_read_registry,
                             )
                         )
                 except (OSError, MngrError) as e:

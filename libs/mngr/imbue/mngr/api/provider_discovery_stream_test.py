@@ -15,6 +15,7 @@ from imbue.mngr.api.provider_discovery_stream import _discover_one_provider
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.interfaces.data_types import BoundedProviderDiscoveryResult
+from imbue.mngr.interfaces.provider_instance import HostDiscoveryReadRegistry
 from imbue.mngr.interfaces.provider_instance import bounded_result_from_agents_by_host
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -46,6 +47,7 @@ class _ControllableProvider(MockProviderInstance):
         host_discovery_timeout_seconds: float,
         agent_discovery_timeout_seconds: float,
         include_destroyed: bool = False,
+        registry: HostDiscoveryReadRegistry | None = None,
     ) -> BoundedProviderDiscoveryResult:
         self.discovery_call_count = self.discovery_call_count + 1
         self._release_gate.wait()
@@ -86,6 +88,7 @@ def _submit_discovery(
         poller.config.host_discovery_timeout_seconds,
         poller.config.agent_discovery_timeout_seconds,
         True,
+        poller._host_read_registry,
     )
 
 
