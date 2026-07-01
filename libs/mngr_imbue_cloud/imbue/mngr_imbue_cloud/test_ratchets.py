@@ -126,6 +126,10 @@ def test_prevent_exit_stack() -> None:
     rc.check_exit_stack(_DIR, snapshot(0))
 
 
+def test_prevent_async_await() -> None:
+    rc.check_async_await(_DIR, snapshot(7))
+
+
 # --- Hardcoded paths ---
 
 
@@ -148,7 +152,7 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    rc.check_trailing_comments(_DIR, snapshot(2))
+    rc.check_trailing_comments(_DIR, snapshot(1))
 
 
 def test_prevent_init_docstrings() -> None:

@@ -51,6 +51,7 @@ from imbue.minds.desktop_client import workspace_version
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
+from imbue.minds.desktop_client.agent_creator import provider_instance_name_for_launch
 from imbue.minds.desktop_client.agent_creator import resolve_template_version
 from imbue.minds.desktop_client.api_auth import handle_invalid_random_id as _handle_invalid_random_id
 from imbue.minds.desktop_client.api_auth import json_error as _json_error
@@ -62,7 +63,6 @@ from imbue.minds.desktop_client.api_models import AccountsResponse
 from imbue.minds.desktop_client.api_models import AgentNotificationRequest
 from imbue.minds.desktop_client.api_models import BackupSnapshotSummary
 from imbue.minds.desktop_client.api_models import BugReportRequest
-from imbue.minds.desktop_client.api_models import BugReportResponse
 from imbue.minds.desktop_client.api_models import CreateOperationStatusResponse
 from imbue.minds.desktop_client.api_models import CreateWorkspaceRequest
 from imbue.minds.desktop_client.api_models import DestroyOperationStatusResponse
@@ -93,10 +93,11 @@ from imbue.minds.desktop_client.backup_export import export_snapshot_zip
 from imbue.minds.desktop_client.create_helpers import REMOTE_SIGNIN_REDIRECT_URL
 from imbue.minds.desktop_client.create_helpers import color_for_new_workspace
 from imbue.minds.desktop_client.create_helpers import existing_workspace_host_names
+from imbue.minds.desktop_client.create_helpers import taken_host_names_on_provider
+from imbue.minds.desktop_client.help_modal_requests import OpenHelpRequest
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
-from imbue.minds.desktop_client.report_collector import submit_bug_report_from_body
 from imbue.minds.desktop_client.responses import make_file_response
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.responses import make_streaming_response
@@ -126,6 +127,7 @@ from imbue.minds.desktop_client.workspace_recovery import probe_workspace_health
 from imbue.minds.desktop_client.workspace_recovery import run_restart_sequence
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.errors import BackupProvisioningError
+from imbue.minds.errors import MngrCommandError
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupEncryptionMethod
 from imbue.minds.primitives import BackupProvider
@@ -134,6 +136,7 @@ from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import InvalidName
 
 # A blocking lifecycle (start/stop) call shells out to ``mngr`` and waits for
@@ -404,7 +407,7 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     structured body: ``{"error", "field"}`` names the offending field where
     applicable (agents ignore ``field``), and the no-account imbue_cloud backstop
     returns ``{"error", "redirect_url"}`` pointing at the sign-up flow. An empty
-    ``host_name`` is auto-resolved to the next free ``mind-N`` (the form no
+    ``host_name`` is auto-resolved to the next free ``workspace-N`` (the form no
     longer asks for a name).
 
     Backup provisioning and Cloudflare tunnel injection match the desktop UI's
@@ -456,7 +459,7 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
 
     # The workspace name is chosen automatically unless one was submitted (the
     # advanced view's optional "Name" field): a submitted value, else the next
-    # free ``mind-N`` name (computed from the host names already in use across
+    # free ``workspace-N`` name (computed from the host names already in use across
     # every provider). Resolve it eagerly so an invalid name surfaces as a 400
     # here rather than as a deferred FAILED status on the creating page.
     backend_resolver = get_state().backend_resolver
@@ -1125,29 +1128,29 @@ def _handle_establish_ssh(agent_id: str) -> SshConnectionResponse | Response:
 
 
 @require_api_or_cookie_auth
-@API_SPEC.validate(json=BugReportRequest, resp=json_response_model(BugReportResponse))
-def _handle_bug_report(agent_id: str) -> BugReportResponse | Response:
-    """Submit a bug report to Imbue on behalf of an in-workspace agent.
+@API_SPEC.validate(json=BugReportRequest, resp=json_response_model(OkResponse))
+def _handle_bug_report(agent_id: str) -> OkResponse | Response:
+    """Ask the desktop app to open the report-a-bug modal pre-filled, on behalf of an in-workspace agent.
 
-    Backed by the same collector/submitter as the local help form, so an agent-initiated report and a
-    user-initiated one carry the same shape. The report is scoped to the caller's own workspace (the
-    path ``agent_id``, which the gateway has already authorized), not to whatever the body claims.
+    The agent does not submit to Sentry itself: a human gates every send. This route hands the agent's
+    description to the desktop app, which pops the report modal -- pre-filled with that description and
+    scoped to the caller's own workspace (the path ``agent_id``, which the gateway has already
+    authorized) -- in the window showing that workspace. The user then reviews, picks what to attach, and
+    submits through the same ``/help/report`` path as a manual report.
     """
     # ``description`` presence/type is enforced by the spectree model; the
     # whitespace-only rejection below is value-semantic.
     body = request.get_json(silent=True, force=True) or {}
-    if not str(body.get("description", "")).strip():
+    description = str(body.get("description", "")).strip()
+    if not description:
         return _json_error("'description' field is required and must be a non-empty string", 400)
 
-    state = get_state()
-    event_id = submit_bug_report_from_body(
-        body={**body, "workspace_agent_id": agent_id},
-        session_store=state.session_store,
-        backend_resolver=state.backend_resolver,
-        minds_config=state.minds_config,
-        paths=state.api_v1_paths,
+    get_state().help_modal_request_broker.request_open(
+        OpenHelpRequest(description=description, workspace_agent_id=agent_id)
     )
-    return BugReportResponse(ok=True, event_id=event_id)
+    # The agent never submits to Sentry itself, so no report event is written here (the
+    # response carries no ``event_id``); the human-reviewed send flows through ``/help/report``.
+    return OkResponse(ok=True)
 
 
 # -- Workspace metadata update route (color + account association) --
@@ -1323,6 +1326,59 @@ def _handle_running_workspaces() -> Response:
 
 
 @require_api_or_cookie_auth
+def _handle_host_name_available() -> Response:
+    """Report whether a workspace name is free (``GET .../desktop/host-name-available``).
+
+    Read-only liveness check for the create form's Name field. Reads the
+    discovery snapshot (resolver cache) -- no provider/subprocess call -- and
+    answers whether ``name`` is already taken by an *active* workspace on the
+    provider instance the selected ``launch_mode`` / ``account_id`` / ``region``
+    would target. Format validation is left to the client; an empty or malformed
+    name reports available (only a valid name can collide, and the client
+    surfaces its own format message). Cookie-only (desktop namespace): the
+    browser create page is the sole caller.
+
+    Query params: ``name`` (required), ``launch_mode``, ``account_id``,
+    ``region``. Returns ``{"available": bool}``.
+    """
+    name = request.args.get("name", "").strip()
+    if not name:
+        return _json_response({"available": True})
+    try:
+        HostName(name)
+    except InvalidName:
+        return _json_response({"available": True})
+
+    try:
+        launch_mode = LaunchMode(str(request.args.get("launch_mode", LaunchMode.DOCKER.value)))
+    except ValueError:
+        launch_mode = LaunchMode.DOCKER
+    account_id = request.args.get("account_id", "").strip()
+    region = request.args.get("region", "").strip()
+
+    # Imbue Cloud is per-account, so its provider instance (``imbue_cloud_<slug>``)
+    # is named from the account email; the session store maps user_id -> email.
+    account_email = ""
+    if account_id and launch_mode is LaunchMode.IMBUE_CLOUD:
+        session_store: MultiAccountSessionStore | None = get_state().session_store
+        if session_store is not None:
+            account_email = session_store.get_account_email(account_id) or ""
+
+    try:
+        provider_instance_name = provider_instance_name_for_launch(
+            launch_mode, imbue_cloud_account=account_email or None, region=region or None
+        )
+    except MngrCommandError:
+        # Not enough context to scope (imbue_cloud without an account, or AWS
+        # without a region). The form blocks submit on those separately, so
+        # report available rather than a spurious conflict.
+        return _json_response({"available": True})
+
+    taken = taken_host_names_on_provider(get_state().backend_resolver, provider_instance_name)
+    return _json_response({"available": name.casefold() not in taken})
+
+
+@require_api_or_cookie_auth
 def _handle_stop_hosts() -> Response:
     """Stop the hosts of the requested workspaces in one ``mngr stop --stop-host``.
 
@@ -1490,6 +1546,7 @@ def create_api_v1_blueprint() -> Blueprint:
     # Desktop namespace (cookie-or-bearer; no agent verb, so deny-all at the gateway).
     blueprint.add_url_rule("/desktop/providers/<provider_name>", view_func=_handle_patch_provider, methods=["PATCH"])
     blueprint.add_url_rule("/desktop/running-workspaces", view_func=_handle_running_workspaces, methods=["GET"])
+    blueprint.add_url_rule("/desktop/host-name-available", view_func=_handle_host_name_available, methods=["GET"])
     blueprint.add_url_rule("/desktop/stop-hosts", view_func=_handle_stop_hosts, methods=["POST"])
     blueprint.add_url_rule("/desktop/state-container/stop", view_func=_handle_stop_state_container, methods=["POST"])
 

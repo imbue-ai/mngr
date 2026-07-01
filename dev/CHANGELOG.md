@@ -4,6 +4,28 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-06-30
+
+### Added
+
+- Added: Operator-run build + publish pipeline for the pre-baked Lima VM image (issue #2306). `scripts/build-lima-image.sh` + `scripts/lima_image/bake_provision.sh` bake the image with Lima itself (`vz` on Apple Silicon, accelerated QEMU on Linux) so the artifact is guaranteed Lima-bootable, and `scripts/lima_image/publish.py` chunks the raw image with `desync`, signs the per-release root manifest with `minisign`, and uploads chunks + index + signed manifest to Cloudflare R2 (content-addressed chunks already present are skipped). Replaces the stale Packer/QEMU pipeline (removed `scripts/packer/` and `scripts/publish-lima-image.sh`); implementation spec at `blueprint/lima-image-cache/`.
+- Added: Updated `blueprint/minds-error-reporting-help/` design doc to record the phase-3 design — the in-workspace agent-help flow escalates by opening a pre-filled report modal for human review, the outer app spawns the `/assist` chat via `mngr create` against the workspace's container host, and `/update-self` gains a recognizable merge-commit convention.
+
+### Changed
+
+- Changed: `minds-launch-to-msg.yml` build timeouts raised — `pnpm dist` step 45 → 70 min and build job 60 → 85 min — so a fresh ToDesktop bundle (~43 min normal, ~60+ min with a slow source download) can finish without hitting the mid-notarize timeout that had been failing back-to-back scheduled runs. The 70/85 split preserves the ~15-min margin the post-failure cancel step needs.
+- Changed: Slack notification's build link updated — the single `binary` link (pointing at the ToDesktop dashboard) becomes `todesktop(mac-arm64)`, where `todesktop` links to the dashboard build page and `mac-arm64` links to the arm64 `.dmg` download.
+
+### Fixed
+
+- Fixed: Scheduled TMR CI workflow's `tmr-setup` step (`ImportError: cannot import name 'find_user_claude_config'`). The pre-trust step now invokes a real module (`scripts/pretrust_claude_checkout.py`) instead of an inline Python heredoc, so future renames of the claude-config API are caught by `ty` rather than only at CI runtime.
+
+## 2026-06-29
+
+### Added
+
+- Added: Blueprint planning document `blueprint/hostname-live-validation/` for live validation of the workspace-creation Name field.
+
 ## 2026-06-28
 
 ### Added

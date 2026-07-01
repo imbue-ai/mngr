@@ -30,9 +30,9 @@ def existing_workspace_host_names(backend_resolver: BackendResolverInterface) ->
     providers) rather than shelling out per workspace, per the resolver-cache
     read convention. Uses ``list_known_workspace_ids`` -- the *full* set,
     including workspaces on destroyed-but-still-lingering hosts -- so an
-    auto-generated ``mind-N`` name does not collide with one that discovery has
+    auto-generated ``workspace-N`` name does not collide with one that discovery has
     not yet fully dropped. Feeds both the duplicate-name guard and the
-    ``mind-N`` auto-naming in ``resolve_create_host_name``.
+    ``workspace-N`` auto-naming in ``resolve_create_host_name``.
     """
     names: set[str] = set()
     for aid in backend_resolver.list_known_workspace_ids():
@@ -40,6 +40,27 @@ def existing_workspace_host_names(backend_resolver: BackendResolverInterface) ->
         if name is not None:
             names.add(name)
     return names
+
+
+def taken_host_names_on_provider(backend_resolver: BackendResolverInterface, provider_instance_name: str) -> set[str]:
+    """Case-folded names of active workspaces on a single provider instance.
+
+    Scopes to the provider instance a create would target -- where the host-name
+    uniqueness check actually fires -- and to *active* workspaces only (a
+    destroyed host's name is free to reuse), reading the discovery snapshot per
+    the resolver-cache read convention. Names are case-folded so the create
+    form's availability check treats ``My-Workspace`` and ``my-workspace`` as the same
+    name. Feeds the ``GET /api/v1/desktop/host-name-available`` check.
+    """
+    taken: set[str] = set()
+    for agent_id in backend_resolver.list_active_workspace_ids():
+        info = backend_resolver.get_agent_display_info(agent_id)
+        if info is None or info.provider_name != provider_instance_name:
+            continue
+        name = backend_resolver.get_workspace_name(agent_id)
+        if name is not None:
+            taken.add(name.casefold())
+    return taken
 
 
 def color_for_new_workspace(raw_color: object) -> str:
