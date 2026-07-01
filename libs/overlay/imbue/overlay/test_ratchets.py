@@ -135,6 +135,10 @@ def test_prevent_exit_stack() -> None:
     rc.check_exit_stack(_DIR, snapshot(0))
 
 
+def test_prevent_async_await() -> None:
+    rc.check_async_await(_DIR, snapshot(0))
+
+
 # --- Hardcoded paths ---
 
 

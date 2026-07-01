@@ -17,7 +17,7 @@ from imbue.minds.deployment_tests.data_types import SharedEnvHandle
 from imbue.minds.deployment_tests.helpers import wait_for_env_ready
 from imbue.mngr.utils.testing import get_short_random_string
 
-pytestmark = pytest.mark.minds_services
+pytestmark = [pytest.mark.release, pytest.mark.minds_services]
 
 # Cheapest model in the litellm proxy config; the call only needs to prove the
 # key + proxy + upstream Anthropic creds all work, not exercise a big model.
