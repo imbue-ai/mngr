@@ -49,8 +49,9 @@ An importable helper package, excluded from all offload runs and `test-quick`;
 driven only by `just minds-test-deployment` and siblings (orchestrator
 `apps/minds/scripts/test_deployments.py`). Every test here carries
 `@pytest.mark.release` (so it is part of the shared release suite, discoverable
-by tag) in addition to its capability mark; the mngr release workflow excludes
-these capability marks, so they run only from the minds jobs.
+by tag) in addition to its capability mark; all minds release tests run from the
+minds jobs (`test-minds-release`), never from the mngr release workflow, which
+excludes the whole `apps/minds` tree by path.
 
 - `@pytest.mark.minds_deployment` (each mints its own ephemeral CI env):
   `test_deploy_new_version`, `test_deploy_auto_rollback_on_broken_healthcheck`,
@@ -94,19 +95,24 @@ these capability marks, so they run only from the minds jobs.
   `test-docker-electron` job.
 - **`cleanup-modal-environments`** -- sweeps old Modal test envs + leaked
   snapshot images.
+- **`test-minds-release`** (manual only -- `workflow_dispatch` +
+  `run_minds_release_tests`) -- the home for **all** minds release tests. Runs
+  the `minds_deployment` group via the deployment orchestrator (each mints +
+  destroys its own ephemeral ci env), then the plain minds `@release` tests that
+  need no ci env, selected by tag: `-m 'release and not minds_deployment and not
+  minds_services and not minds_snapshot_resume'`. That is where
+  `test_claude_version_alignment.py`, `test_sse_redirect.py` (Chromium installed
+  in-job), and `test_aws_workspace_release.py` (skips without AWS opt-in) run.
 
 `.github/workflows/release-tests.yml` (`workflow_dispatch` + `v*` tags) -- the
-*mngr* release suite. Both jobs exclude the minds capability marks
-(`minds_deployment` / `minds_services` / `minds_snapshot_resume`), which need a
-remote ci env or a snapshot image and run from the minds jobs in `ci.yml`
-instead. The plain minds `@release` tests (no capability mark) still run here:
+*mngr* release suite only. Both jobs exclude the whole `apps/minds` tree by path
+(`--ignore apps/minds`); all minds release tests run from `test-minds-release`
+above (the minds release procedure is a manual dispatch, not a `v*` tag):
 
-- **`test-mngr-release-docker`** -- `(docker or docker_sdk) and release and not
-  minds_deployment and not minds_services and not minds_snapshot_resume`.
-- **`test-mngr-release`** -- the `release` suite (minus the minds capability
-  marks), matrixed `[ubuntu, macos] x group 1..12` (pytest-split). Where
-  `test_aws_workspace_release.py`, `test_sse_redirect.py`, and
-  `test_claude_version_alignment.py` run.
+- **`test-mngr-release-docker`** -- `(docker or docker_sdk) and release`, with
+  `--ignore apps/minds`.
+- **`test-mngr-release`** -- the `release` suite with `--ignore apps/minds`,
+  matrixed `[ubuntu, macos] x group 1..12` (pytest-split).
 
 `.github/workflows/minds-launch-to-msg.yml`: builds the `.app` via ToDesktop,
 runs `scripts/launch_to_msg_e2e.py` (Python launch-to-first-message + Slack), and

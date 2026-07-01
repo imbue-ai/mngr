@@ -8,13 +8,12 @@ name: Release Tests
 # Note: this is NOT a hard publish gate -- publish.yml runs on the same `v*`
 # tag independently. Run this workflow and confirm it is green before tagging.
 #
-# These jobs cover the *mngr* release suite. The minds release tests share the
-# `@pytest.mark.release` tag but additionally carry a minds capability mark
-# (`minds_deployment` / `minds_services` / `minds_snapshot_resume`); they need a
-# remote ci env or a pre-baked snapshot image, so they are excluded here and run
-# from their own minds jobs in `ci.yml` (manual `run_minds_release_tests`
-# dispatch). The plain minds `@release` tests (no capability mark) still run in
-# `test-mngr-release` below.
+# These jobs cover the *mngr* release suite only. All minds release tests --
+# whether or not they carry a minds capability mark -- run from the minds jobs in
+# `ci.yml` (manual `run_minds_release_tests` dispatch), since the minds release
+# procedure is a manual dispatch, not a `v*` tag. So these jobs simply exclude
+# the entire `apps/minds` tree by path (`--ignore apps/minds`) rather than
+# enumerating minds markers.
 on:
   workflow_dispatch:
   push:
@@ -23,8 +22,8 @@ on:
 jobs:
   # Docker mngr release tests - runs on a GitHub runner with a real Docker
   # daemon, since Docker-in-Docker under gVisor (offload-modal-release) is too
-  # flaky. Filters for release-marked docker tests, excluding the minds
-  # capability-marked tests (they run from their own minds jobs in ci.yml).
+  # flaky. Filters for release-marked docker tests; the whole minds tree is
+  # excluded by path (minds release tests run from their own minds jobs in ci.yml).
   test-mngr-release-docker:
     runs-on: ubuntu-latest
     env:
@@ -60,11 +59,11 @@ jobs:
         run: npm install -g @anthropic-ai/claude-code@2.1.141
 
       - name: Run Docker release tests
-        run: PYTEST_MAX_DURATION_SECONDS=900 uv run pytest -n 0 --timeout 600 --no-cov --cov-fail-under=0 -v --tb=short -m '(docker or docker_sdk) and release and not minds_deployment and not minds_services and not minds_snapshot_resume'
+        run: PYTEST_MAX_DURATION_SECONDS=900 uv run pytest -n 0 --timeout 600 --no-cov --cov-fail-under=0 -v --tb=short --ignore apps/minds -m '(docker or docker_sdk) and release'
 
-  # mngr release tests - the `@pytest.mark.release` suite, minus the minds
-  # capability-marked tests (which need a remote ci env / snapshot image and run
-  # from their own minds jobs in ci.yml). Plain minds `@release` tests still run.
+  # mngr release tests - the `@pytest.mark.release` suite, with the whole minds
+  # tree excluded by path (all minds release tests run from their own minds jobs
+  # in ci.yml).
   test-mngr-release:
     runs-on: ${{ matrix.os }}
     env:
@@ -115,15 +114,13 @@ jobs:
       - name: Run release tests
         run: |
           export IS_RELEASE=1
-          # Exclude the minds capability-marked tests everywhere: they need a
-          # remote ci env or a pre-baked snapshot image and run from their own
-          # minds jobs in ci.yml. The plain minds `@release` tests (no capability
-          # mark) still run here.
+          # Exclude the whole minds tree by path: all minds release tests run
+          # from their own minds jobs in ci.yml (manual dispatch).
           if [ "$RUNNER_OS" = "macOS" ]; then
             # macOS runners don't have Docker; skip Docker-marked tests
-            uv run pytest -n 0 --timeout 90 --override-ini='addopts=-n 0' --no-cov -v --tb=short --splits 12 --group ${{ matrix.group }} --splitting-algorithm=least_duration -m 'release and not docker and not docker_sdk and not minds_deployment and not minds_services and not minds_snapshot_resume'
+            uv run pytest -n 0 --timeout 90 --override-ini='addopts=-n 0' --no-cov -v --tb=short --splits 12 --group ${{ matrix.group }} --splitting-algorithm=least_duration --ignore apps/minds -m 'release and not docker and not docker_sdk'
           else
-            uv run pytest -n 0 --timeout 90 --override-ini='addopts=-n 0' --no-cov -v --tb=short --splits 12 --group ${{ matrix.group }} --splitting-algorithm=least_duration -m 'not minds_deployment and not minds_services and not minds_snapshot_resume'
+            uv run pytest -n 0 --timeout 90 --override-ini='addopts=-n 0' --no-cov -v --tb=short --splits 12 --group ${{ matrix.group }} --splitting-algorithm=least_duration --ignore apps/minds
           fi
 
       - name: Upload test timing data

@@ -11,7 +11,7 @@ Every test here carries `pytest.mark.release` (it is part of the release suite) 
 
 (The snapshot-resume suite under `apps/minds/test_snapshot_resume.py` carries a separate `minds_snapshot_resume` capability mark; a test may compose marks when it needs more than one capability.)
 
-The `release` mark makes these tests discoverable as part of the shared release suite by tag rather than by path. The capability mark is what routes each test to the right tier/infra. The mngr release workflow (`.github/workflows/release-tests.yml`) selects `release` but excludes `minds_deployment` / `minds_services` / `minds_snapshot_resume`, so these run only from the minds jobs below, never on a mngr runner that has no ci env.
+The `release` mark makes these tests discoverable as part of the shared release suite by tag rather than by path. The capability mark is what routes each test to the right tier/infra. All minds release tests run from the minds jobs (manual `run_minds_release_tests` dispatch), never from the mngr release workflow (`.github/workflows/release-tests.yml`), which excludes the whole `apps/minds` tree by path -- so they never land on a mngr runner that has no ci env.
 
 These map onto two **tiers**:
 
