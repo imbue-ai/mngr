@@ -404,10 +404,17 @@
   // modal is the shared overlay view, in browser mode it loads into the content frame.
   document.getElementById('help-toggle').onclick = function () {
     var aid = currentTitleAgentId || '';
+    // Agent-help spawns an /assist chat *inside* the displayed workspace, so it is only usable when
+    // that workspace is actually reachable: on a loading/stuck workspace the new chat couldn't be
+    // seen or reached (and the spawn would fail). Gate the option on health -- a truthy
+    // systemInterfaceStatusByAgent entry means stuck/restarting -- while still passing the workspace
+    // id so a bug report stays scoped to it even when it's down.
+    var assistAvailable = !!aid && !systemInterfaceStatusByAgent[aid];
     if (isElectron) {
-      window.minds.toggleHelp(aid);
+      window.minds.toggleHelp(aid, assistAvailable);
     } else {
-      navigateContent('/help' + (aid ? '?workspace=' + encodeURIComponent(aid) : ''));
+      var helpQuery = aid ? '?workspace=' + encodeURIComponent(aid) + (assistAvailable ? '&assist=1' : '') : '';
+      navigateContent('/help' + helpQuery);
     }
   };
 
