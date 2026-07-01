@@ -1,12 +1,16 @@
 """Tests for ProviderInstanceInterface default method implementations."""
 
+import threading
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import Field
+from pydantic import PrivateAttr
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.hosts.offline_host import OfflineHost
@@ -506,3 +510,107 @@ def test_discover_hosts_and_agents_falls_back_to_offline_on_connection_error(
     # The connected_host cleanup and on_connection_error hook still run.
     broken_host.disconnect.assert_called_once()
     assert provider.connection_errors_cleared == [host_id]
+
+
+# =============================================================================
+# discover_hosts_and_agents_within_timeouts per-host timeout tests
+# =============================================================================
+
+
+class _PerHostGatedProvider(MockProviderInstance):
+    """Provider whose per-host agent reads can be individually gated.
+
+    Exercises the per-host timeout in ``discover_hosts_and_agents_within_timeouts``
+    without a live host connection: ``read_host_agents_for_bounded_discovery`` blocks
+    for ``gated_host_id`` until ``release()`` is called, and returns the configured
+    agents for every other host immediately.
+    """
+
+    gated_host_id: HostId | None = Field(default=None)
+    agents_by_host_id: dict[str, list[DiscoveredAgent]] = Field(default_factory=dict)
+
+    _gate: threading.Event = PrivateAttr(default_factory=threading.Event)
+
+    def discover_hosts(
+        self,
+        cg: ConcurrencyGroup,
+        include_destroyed: bool = False,
+    ) -> list[DiscoveredHost]:
+        return list(self.mock_discovered_hosts)
+
+    def read_host_agents_for_bounded_discovery(self, host_ref: DiscoveredHost) -> list[DiscoveredAgent]:
+        if self.gated_host_id is not None and host_ref.host_id == self.gated_host_id:
+            self._gate.wait()
+        return list(self.agents_by_host_id.get(str(host_ref.host_id), []))
+
+    def release(self) -> None:
+        self._gate.set()
+
+
+def test_discover_within_timeouts_marks_slow_host_unknown(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
+    """A host whose agent read exceeds the per-host timeout is reported UNKNOWN, and the
+    method returns without waiting for that host -- other hosts' agents still come through."""
+    provider = _PerHostGatedProvider(
+        name=ProviderInstanceName("gated"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+    fast_host = DiscoveredHost(
+        host_id=HostId.generate(),
+        host_name=HostName("fast"),
+        provider_name=provider.name,
+        host_state=HostState.RUNNING,
+    )
+    slow_host = DiscoveredHost(
+        host_id=HostId.generate(),
+        host_name=HostName("slow"),
+        provider_name=provider.name,
+        host_state=HostState.RUNNING,
+    )
+    fast_agent = _make_agent_ref(fast_host.host_id, AgentId.generate(), provider.name)
+    provider.mock_discovered_hosts = [fast_host, slow_host]
+    provider.agents_by_host_id = {str(fast_host.host_id): [fast_agent]}
+    provider.gated_host_id = slow_host.host_id
+
+    try:
+        result = provider.discover_hosts_and_agents_within_timeouts(
+            cg=temp_mngr_ctx.concurrency_group,
+            host_discovery_timeout_seconds=1.0,
+            agent_discovery_timeout_seconds=1.0,
+        )
+
+        assert slow_host.host_id in result.unknown_host_ids
+        assert fast_host.host_id not in result.unknown_host_ids
+        assert {h.host_id for h in result.hosts} == {fast_host.host_id}
+        assert {a.agent_id for a in result.agents} == {fast_agent.agent_id}
+    finally:
+        # Release the orphaned read so its daemon thread can exit cleanly.
+        provider.release()
+
+
+def test_discover_within_timeouts_returns_all_when_fast(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
+    """With no slow host, every host's agents are returned and nothing is marked unknown."""
+    provider = _PerHostGatedProvider(
+        name=ProviderInstanceName("gated"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+    host = DiscoveredHost(
+        host_id=HostId.generate(),
+        host_name=HostName("h"),
+        provider_name=provider.name,
+        host_state=HostState.RUNNING,
+    )
+    agent = _make_agent_ref(host.host_id, AgentId.generate(), provider.name)
+    provider.mock_discovered_hosts = [host]
+    provider.agents_by_host_id = {str(host.host_id): [agent]}
+
+    result = provider.discover_hosts_and_agents_within_timeouts(
+        cg=temp_mngr_ctx.concurrency_group,
+        host_discovery_timeout_seconds=5.0,
+        agent_discovery_timeout_seconds=5.0,
+    )
+
+    assert result.unknown_host_ids == ()
+    assert {h.host_id for h in result.hosts} == {host.host_id}
+    assert {a.agent_id for a in result.agents} == {agent.agent_id}

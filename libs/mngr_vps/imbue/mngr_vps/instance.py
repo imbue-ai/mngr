@@ -48,6 +48,7 @@ from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.cleanup_failures import collect_cleanup_failures
 from imbue.mngr.interfaces.cleanup_failures import collecting_cleanup_failures
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.data_types import BoundedProviderDiscoveryResult
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
@@ -62,6 +63,7 @@ from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
+from imbue.mngr.interfaces.provider_instance import bounded_result_from_agents_by_host
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -1576,6 +1578,23 @@ class VpsProvider(BaseProviderInstance):
                 self._create_offline_host(record)
 
         return discovered
+
+    def discover_hosts_and_agents_within_timeouts(
+        self,
+        cg: ConcurrencyGroup,
+        host_discovery_timeout_seconds: float,
+        agent_discovery_timeout_seconds: float,
+        include_destroyed: bool = False,
+    ) -> BoundedProviderDiscoveryResult:
+        """Delegate to the batch discovery path; bounded only by the provider-level error timeout.
+
+        VPS discovery reads all host records (and their live agents) in one batched
+        pass, so individual host reads cannot be bounded; nothing is marked UNKNOWN
+        here. Subclasses that override ``discover_hosts_and_agents`` (e.g. the
+        offline-capable provider) are honored via ``self`` dispatch.
+        """
+        agents_by_host = self.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
+        return bounded_result_from_agents_by_host(agents_by_host)
 
     def discover_hosts_and_agents(
         self,

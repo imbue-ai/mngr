@@ -20,6 +20,7 @@ from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.conftest import seed_provider_snapshots
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.testing import stub_mngr_host_dir
 from imbue.mngr.api.discovery_events import DiscoveredProvider
@@ -59,10 +60,11 @@ def test_build_providers_state_payload_hides_local_provider() -> None:
     """The ``local`` provider is filtered out of the panel even when reported as healthy."""
     resolver = MngrCliBackendResolver()
     now = datetime.now(timezone.utc)
-    resolver.update_providers(
+    seed_provider_snapshots(
+        resolver,
         providers=(_make_discovered_provider("local"),),
         error_by_provider_name={},
-        last_full_snapshot_at=now,
+        last_snapshot_at=now,
     )
 
     payload = _build_providers_state_payload(resolver)
@@ -76,10 +78,11 @@ def test_build_providers_state_payload_hides_default_imbue_cloud_provider() -> N
     """The default ``imbue_cloud`` singleton is hidden -- minds uses per-account variants."""
     resolver = MngrCliBackendResolver()
     now = datetime.now(timezone.utc)
-    resolver.update_providers(
+    seed_provider_snapshots(
+        resolver,
         providers=(_make_discovered_provider("imbue_cloud", backend="imbue_cloud"),),
         error_by_provider_name={},
-        last_full_snapshot_at=now,
+        last_snapshot_at=now,
     )
 
     payload = _build_providers_state_payload(resolver)
@@ -91,10 +94,11 @@ def test_build_providers_state_payload_keeps_per_account_imbue_cloud_provider() 
     """Per-account ``imbue_cloud_<slug>`` providers are NOT hidden; only the default is."""
     resolver = MngrCliBackendResolver()
     now = datetime.now(timezone.utc)
-    resolver.update_providers(
+    seed_provider_snapshots(
+        resolver,
         providers=(_make_discovered_provider("imbue_cloud_alice-example-com", backend="imbue_cloud"),),
         error_by_provider_name={},
-        last_full_snapshot_at=now,
+        last_snapshot_at=now,
     )
 
     payload = _build_providers_state_payload(resolver)
@@ -114,7 +118,8 @@ def test_build_providers_state_payload_combines_ok_error_disabled(
 
     errored_name = ProviderInstanceName("modal")
     resolver = MngrCliBackendResolver()
-    resolver.update_providers(
+    seed_provider_snapshots(
+        resolver,
         providers=(_make_discovered_provider("zzz_last"), _make_discovered_provider("local")),
         error_by_provider_name={
             errored_name: DiscoveryError(
@@ -123,7 +128,7 @@ def test_build_providers_state_payload_combines_ok_error_disabled(
                 provider_name=errored_name,
             ),
         },
-        last_full_snapshot_at=datetime.now(timezone.utc),
+        last_snapshot_at=datetime.now(timezone.utc),
     )
 
     payload = _build_providers_state_payload(resolver)
@@ -156,7 +161,8 @@ def test_build_providers_state_payload_dedups_provider_appearing_in_multiple_buc
 
     errored_name = ProviderInstanceName("modal")
     resolver = MngrCliBackendResolver()
-    resolver.update_providers(
+    seed_provider_snapshots(
+        resolver,
         providers=(),
         error_by_provider_name={
             errored_name: DiscoveryError(
@@ -165,7 +171,7 @@ def test_build_providers_state_payload_dedups_provider_appearing_in_multiple_buc
                 provider_name=errored_name,
             ),
         },
-        last_full_snapshot_at=datetime.now(timezone.utc),
+        last_snapshot_at=datetime.now(timezone.utc),
     )
 
     payload = _build_providers_state_payload(resolver)
@@ -186,10 +192,11 @@ def test_build_providers_state_payload_dedups_healthy_provider_also_in_disabled_
     settings_path.write_text("[providers.docker]\nis_enabled = false\n")
 
     resolver = MngrCliBackendResolver()
-    resolver.update_providers(
+    seed_provider_snapshots(
+        resolver,
         providers=(_make_discovered_provider("docker"),),
         error_by_provider_name={},
-        last_full_snapshot_at=datetime.now(timezone.utc),
+        last_snapshot_at=datetime.now(timezone.utc),
     )
 
     payload = _build_providers_state_payload(resolver)
@@ -228,12 +235,13 @@ def test_build_workspace_list_marks_workspace_stale_when_its_provider_errored() 
 
     # Its provider's latest poll errored -> the retained workspace is stale.
     errored = ProviderInstanceName(provider_name)
-    resolver.update_providers(
+    seed_provider_snapshots(
+        resolver,
         providers=(),
         error_by_provider_name={
             errored: DiscoveryError(type_name="RuntimeError", message="boom", provider_name=errored)
         },
-        last_full_snapshot_at=datetime.now(timezone.utc),
+        last_snapshot_at=datetime.now(timezone.utc),
     )
     stale = _build_workspace_list(resolver)
     assert len(stale) == 1
@@ -247,10 +255,11 @@ def test_build_workspace_list_does_not_mark_stale_for_unrelated_provider_error()
     resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))
 
     other = ProviderInstanceName("some_other_provider")
-    resolver.update_providers(
+    seed_provider_snapshots(
+        resolver,
         providers=(),
         error_by_provider_name={other: DiscoveryError(type_name="RuntimeError", message="boom", provider_name=other)},
-        last_full_snapshot_at=datetime.now(timezone.utc),
+        last_snapshot_at=datetime.now(timezone.utc),
     )
     workspaces = _build_workspace_list(resolver)
     assert len(workspaces) == 1
