@@ -722,13 +722,18 @@ def test_chrome_page_includes_sidebar_toggle(tmp_path: Path) -> None:
 
 def test_chrome_titlebar_buttons_have_tooltips(tmp_path: Path) -> None:
     """Titlebar buttons carry data-tooltip labels (rendered as custom tooltips on
-    the overlay surface) rather than native title= attributes."""
+    the overlay surface) rather than native title= attributes, plus an aria-label
+    so these icon-only buttons keep an accessible name for assistive tech."""
     client, _, _ = _setup_test_server(tmp_path)
 
     response = client.get("/_chrome")
     assert response.status_code == 200
     assert 'data-tooltip="Projects"' in response.text
     assert 'data-tooltip="Get help"' in response.text
+    # data-tooltip is not exposed to assistive tech, so each icon-only titlebar
+    # button also needs an aria-label to keep an accessible name.
+    assert 'aria-label="Projects"' in response.text
+    assert 'aria-label="Get help"' in response.text
 
 
 def test_chrome_sidebar_page_renders(tmp_path: Path) -> None:
