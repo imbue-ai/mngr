@@ -306,7 +306,6 @@ def setup_command_context(
     # Store resolved logging config on the click context for callers that need it
     ctx.meta["logging_config"] = resolved_logging_config
 
-    # Set up logging
     setup_logging(resolved_logging_config, default_host_dir=mngr_ctx.config.default_host_dir, command=command_name)
 
     # Enter a log span for the command lifetime

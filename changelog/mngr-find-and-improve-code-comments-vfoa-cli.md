@@ -1,0 +1,1 @@
+- Removed three redundant block comments in `libs/mngr/imbue/mngr/cli/` (`common_opts.py`, `message.py`) that only restated the identifier on the next line. No behavior change.
