@@ -16,7 +16,7 @@ from imbue.minds.deployment_tests.data_types import SharedEnvHandle
 from imbue.minds.deployment_tests.data_types import VerifiedUserHandle
 from imbue.minds.deployment_tests.helpers import wait_for_env_ready
 
-pytestmark = pytest.mark.minds_services
+pytestmark = [pytest.mark.release, pytest.mark.minds_services]
 
 
 _REQUEST_TIMEOUT_SECONDS = 30.0
