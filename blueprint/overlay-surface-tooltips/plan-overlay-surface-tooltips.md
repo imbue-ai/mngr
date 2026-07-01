@@ -57,7 +57,7 @@
 
 - **Modal migration**: sidebar, inbox, help, and sign-in move from per-open `loadURL` pages into iframes hosted by the surface, mounted on demand (created on open, destroyed on close). On show they load fresh (re-fetch state, replay entry animation). Their triggering, positioning, backdrop, dismissal, and animation are preserved 1:1. The inbox is modeled as a modal-kind overlay with a drawer geometry/position option rather than a distinct kind.
 
-- **Dismissal ownership**: Escape and all dismissal move fully into the overlay manager; the main process no longer intercepts Escape on the surface (removing today's main-level backstop). The unrelated `registerShortcutsFor` shortcuts (devtools / cmd+Q / cmd+N) are untouched.
+- **Dismissal ownership**: the overlay manager drives dismissal (per-kind rules, outside/backdrop clicks, Escape), but the main process keeps its Escape backstop on the surface -- a `before-input-event` handler that closes the open overlay even if a hosted page's own key handling fails, the same main-level backstop the modal overlay had before. The unrelated `registerShortcutsFor` shortcuts (devtools / cmd+Q / cmd+N) are untouched.
 
 - **Window-drag preservation**: the existing `modal-state-changed` signal that drops the titlebar drag region is preserved and driven off "a capturing overlay is open"; the inbox keeps its own in-overlay drag strips.
 
