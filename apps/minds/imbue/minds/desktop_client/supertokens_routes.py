@@ -476,8 +476,13 @@ def _handle_signin_modal_page() -> Response:
     Served into the desktop client's shared modal WebContentsView (the overlay
     layer that also hosts the inbox) so the create screen's sign-in prompt
     covers the whole window, including the title bar.
+
+    ``?fragment=1`` returns just the panel markup (no document shell) for the
+    overlay host to inject as in-page DOM; the default full page still serves
+    the browser (dev) path.
     """
-    return make_html_response(render_signin_modal_page())
+    is_fragment = request.args.get("fragment") == "1"
+    return make_html_response(render_signin_modal_page(is_fragment=is_fragment))
 
 
 def _handle_check_email_page() -> Response:

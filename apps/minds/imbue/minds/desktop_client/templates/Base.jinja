@@ -1,4 +1,4 @@
-{#def title="Minds", body_class="bg-surface-primary text-primary font-sans antialiased", body_style="", body_attrs="", head="", scripts="" #}
+{#def title="Minds", body_class="bg-surface-primary text-primary font-sans antialiased", body_style="", body_attrs="", head="", scripts="", bare=False #}
 {#
   Base layout. Every page wraps its content in this component.
   Pulls in the compiled, minified Tailwind v4 stylesheet (/_static/app.min.css)
@@ -23,7 +23,15 @@
     head        extra head content (page-specific link/meta tags). HTML.
     scripts     script tags emitted just before /body. HTML. Prefer
                 src=/_static/foo.js over inline JS.
+    bare        when true, emit ONLY the inner content -- no document
+                shell (doctype/head/body), no scripts. Used to serve a
+                modal page as a fragment (``?fragment=1``) that the
+                overlay host fetches and injects as in-page DOM; the
+                per-modal JS is loaded once in the host, not here. The
+                full-page render (bare=False) still serves the browser
+                (dev) path and standalone use.
 #}
+{% if bare %}{{ content }}{% else %}
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -54,3 +62,4 @@
   {{ scripts }}
 </body>
 </html>
+{% endif %}

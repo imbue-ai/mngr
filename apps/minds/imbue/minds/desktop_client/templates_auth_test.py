@@ -73,6 +73,24 @@ def test_render_signin_modal_page_shows_imbue_cloud_intro() -> None:
     assert "run it directly on your computer" in html
 
 
+def test_render_signin_modal_page_fragment_omits_document_shell_and_scripts() -> None:
+    # ``?fragment=1`` renders only the modal's panel markup so the overlay host
+    # can inject it as in-page DOM: no document shell (doctype/html/head) and no
+    # scripts (the per-modal JS is loaded once in the host, not in the fragment).
+    # The full page still carries both for the browser (dev) path.
+    fragment = render_signin_modal_page(is_fragment=True)
+    assert "<!DOCTYPE" not in fragment
+    assert "<html" not in fragment
+    assert "/_static/auth.js" not in fragment
+    # The panel content itself is still present (this is the same auth form).
+    assert 'id="signin-modal-backdrop"' in fragment
+    assert 'id="signin-form"' in fragment
+    # The full-page render is unchanged and still includes the shell + scripts.
+    full = render_signin_modal_page(is_fragment=False)
+    assert "<!DOCTYPE" in full
+    assert "/_static/auth.js" in full
+
+
 def test_render_check_email_page() -> None:
     html = render_check_email_page(email="user@example.com")
     assert "user@example.com" in html

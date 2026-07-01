@@ -42,15 +42,20 @@ _SIGNIN_MODAL_INTRO: str = (
 )
 
 
-def render_signin_modal_page() -> str:
+def render_signin_modal_page(is_fragment: bool = False) -> str:
     """Render the sign-in modal page served by ``GET /auth/signin-modal``.
 
     Loaded into the desktop client's shared modal WebContentsView (the same
     overlay layer as the inbox) so it covers the whole window, including the
     title bar, when a signed-out user presses "Create" with the Imbue Cloud
     preset selected on the create screen.
+
+    When ``is_fragment`` is true (``?fragment=1``), only the modal's panel
+    markup is emitted -- no document shell or scripts -- so the overlay host
+    can fetch and inject it as in-page DOM. The full page is still served for
+    the browser (dev) path.
     """
-    return CATALOG.render("pages.SigninModal", intro=_SIGNIN_MODAL_INTRO)
+    return CATALOG.render("pages.SigninModal", intro=_SIGNIN_MODAL_INTRO, is_fragment=is_fragment)
 
 
 def render_check_email_page(email: str) -> str:

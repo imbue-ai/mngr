@@ -1,0 +1,3 @@
+Overlay modals (workspace menu, inbox, help, sign-in) are being migrated from iframes to in-page DOM on the shared overlay surface, so opening a modal no longer mounts a nested iframe. Behavior is unchanged; the change simplifies the overlay internals (removing per-frame IPC fan-out, the SSE priming handshake, and the iframe swap machinery).
+
+As part of this, modal pages can now be served as bare fragments via `?fragment=1` -- just the panel markup, with no document shell or scripts -- which the overlay host fetches and injects directly. The full page render is still served for the browser (dev) path.
