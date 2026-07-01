@@ -369,6 +369,11 @@ function updateBundleBounds(bundle) {
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
       bundle.chromeView.setBounds({ x: 0, y: 0, width, height });
     }
+    // A takeover collapses the overlay view out from under any showing tooltip,
+    // so drop the flag that says the tooltip owns the view's bounds. Otherwise
+    // the gate below would keep skipping the full-window restore after recovery
+    // and leave the overlay surface stuck at 0x0.
+    bundle.tooltipVisible = false;
     for (const view of [bundle.contentView, bundle.modalView]) {
       if (view && !view.webContents.isDestroyed()) {
         view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
