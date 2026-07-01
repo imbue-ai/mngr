@@ -57,8 +57,8 @@ from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHe
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServiceName
-from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.mngr_caller import MngrCallResult
+from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
