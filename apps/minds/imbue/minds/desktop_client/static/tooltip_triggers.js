@@ -8,7 +8,10 @@
 // leave / blur / click / window resize or blur. Browser mode (no overlay
 // surface) gets no tooltip.
 //
-// An optional ``data-tooltip-shortcut`` adds a keyboard-shortcut chip.
+// An optional ``data-tooltip-shortcut`` populates the payload's ``shortcut``
+// field -- a forward hook for a keyboard-shortcut chip. Nothing renders it yet
+// (overlay.js drops the chip; there is no on-ramp chip size in the design
+// system), so it is a no-op until a real use arrives.
 
 (function () {
   'use strict';
