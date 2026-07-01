@@ -32,7 +32,7 @@ from imbue.minds.envs.paths import secrets_file
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
-pytestmark = pytest.mark.minds_deployment
+pytestmark = [pytest.mark.release, pytest.mark.minds_deployment]
 
 # The fixture's deploy (~3 min) + this test's destroy (~2 min) + the
 # four cloud probes (a few seconds each) fit well under this.

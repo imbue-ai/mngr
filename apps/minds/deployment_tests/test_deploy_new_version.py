@@ -31,7 +31,7 @@ from imbue.minds.deployment_tests.helpers import build_minds_env_subprocess_env
 # conftest._REPO_ROOT_FOR_SUBPROCESS.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
-pytestmark = pytest.mark.minds_deployment
+pytestmark = [pytest.mark.release, pytest.mark.minds_deployment]
 
 
 # Generous per-test timeout: v2 deploy adds another ~3 min on top of
