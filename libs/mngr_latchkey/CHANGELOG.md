@@ -19,6 +19,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Changed
 
+- Changed: `POST /minds-api-proxy/api/v1/agents/<id>/report` (the per-agent minds bug-report route) is now reachable by any in-workspace agent without a prior per-agent permission grant — a baseline rule allows that exact path ahead of the unauthorized gate. Bearer-key auth still applies. Interim allowance pending broader minds-API-surface latchkey work.
 - Changed: Bumped pinned latchkey CLI on remote VPS environments (the secondary gateway) to 2.19.1; minimum installed CLI is now 2.19.1.
 
 ### Fixed

@@ -29,11 +29,6 @@ services = [
     "neon",
     "pool-ssh",
     "supertokens",
-    # OVH AK/AS/CK -- the connector's release route + cleanup cron make signed
-    # OVH calls at runtime to strip per-lease tags and cancel released VPSes.
-    # The rsc app references `ovh-<tier>-<deploy_id>` via Secret.from_name, so
-    # this must be pushed or `modal deploy rsc-<tier>` fails.
-    "ovh",
 ]
 
 # Dev envs keep no warm containers (min_containers defaults to 0), so without

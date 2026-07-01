@@ -4,12 +4,14 @@ End-to-end tests that exercise the real deployed minds services and the deploy p
 
 ## Marks (capability) and tiers
 
-Each test carries one capability mark describing the infrastructure it needs:
+Every test here carries `pytest.mark.release` (it is part of the release suite) **plus** one capability mark describing the infrastructure it needs:
 
 - `pytest.mark.minds_services` -- runs against a pre-stood-up shared ci env (connector + litellm + SuperTokens). Fast; no env minting.
 - `pytest.mark.minds_deployment` -- mints its own ephemeral `ci-*` env via `minds env deploy` and tears it down (slow, real cloud spend). Exercises the deploy/rollback/destroy process itself.
 
 (The snapshot-resume suite under `apps/minds/test_snapshot_resume.py` carries a separate `minds_snapshot_resume` capability mark; a test may compose marks when it needs more than one capability.)
+
+The `release` mark makes these tests discoverable as part of the shared release suite by tag rather than by path. The capability mark is what routes each test to the right tier/infra. All minds release tests run from the minds jobs (manual `run_minds_release_tests` dispatch), never from the mngr release workflow (`.github/workflows/release-tests.yml`), which excludes the whole `apps/minds` tree by path -- so they never land on a mngr runner that has no ci env.
 
 These map onto two **tiers**:
 
