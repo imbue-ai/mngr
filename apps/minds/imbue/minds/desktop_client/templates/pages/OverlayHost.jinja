@@ -6,8 +6,9 @@
   old model of loading a fresh page into that view on every modal open.
 
   Every overlay is hosted here as in-page DOM driven over IPC -- the
-  migrated modals (workspace menu / inbox / help / sign-in) as kept-warm
-  iframes, and hover tooltips -- so opening an overlay never costs a page
+  migrated modals (workspace menu / inbox / help / sign-in) as
+  mount-on-demand iframes (created when opened, destroyed when closed),
+  and hover tooltips -- so opening an overlay never costs a page
   load. The overlay manager (/_static/overlay.js) owns the registry of
   open overlays and reports the overlay view's required bounds back to
   main, because Electron 40 has no per-view click-through: a

@@ -886,9 +886,10 @@ function toggleSidebar(bundle, anchor) {
 // The overlay surface is a single always-warm WebContentsView (``modalView``)
 // that main loads ONCE with /_chrome/overlay at window creation and keeps
 // mounted for the window's life. Every overlay -- the workspace menu, inbox,
-// help, and sign-in modals -- is hosted there as a kept-warm iframe driven over
-// IPC, instead of loading a fresh page into this view on every open. The hosted
-// pages are first-party and same-origin, so ``nodeIntegrationInSubFrames`` runs
+// help, and sign-in modals -- is hosted there as a mount-on-demand iframe
+// (created when opened, destroyed when closed) driven over IPC, so the surface
+// stays warm without loading a fresh page into this view on every open. The
+// hosted pages are first-party and same-origin, so ``nodeIntegrationInSubFrames`` runs
 // the preload in each iframe and exposes the same ``window.minds`` bridge their
 // existing code already calls; navigation is locked to the backend origin (see
 // createBundleOverlayView) so no foreign page can ever inherit that bridge.

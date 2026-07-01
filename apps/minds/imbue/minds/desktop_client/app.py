@@ -869,8 +869,9 @@ def _handle_chrome_overlay() -> Response:
 
     Loaded once at window creation (see openOverlayHost in electron/main.js) and
     kept mounted for the window's life. It hosts every overlay -- the migrated
-    workspace menu / inbox / help / sign-in modals (as kept-warm iframes) and
-    hover tooltips -- as in-page DOM driven over IPC, so overlays open without a
+    workspace menu / inbox / help / sign-in modals (as mount-on-demand iframes,
+    created when opened and destroyed when closed) and hover tooltips -- as
+    in-page DOM driven over IPC, so overlays open without a
     per-open page load. Unauthenticated, like /_chrome: the host shell renders
     for all users and the overlays it hosts handle their own auth.
     """
