@@ -6,7 +6,7 @@ The terminals in the minds dockview are backed by named [tmux](https://github.co
 - reloading the workspace,
 - and the terminal service itself restarting.
 
-They do **not** survive a container/host restart: the tmux server lives in memory and is cleared when the container stops, so a restored tab comes back as a fresh shell (with a one-line notice) rather than its previous state.
+They do **not** survive a container/host restart: the tmux server lives in memory and is cleared when the container stops, so a restored tab comes back as a fresh shell rather than its previous state.
 
 This is intentional. Nothing about your terminals -- input, output, commands, or scrollback -- is written to disk or included in any backup, which keeps secrets that pass through a terminal from being persisted anywhere.
 
