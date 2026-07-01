@@ -1,5 +1,14 @@
 name: TMR
 
+# The default inputs below run the *mngr* release suite (variant `tmr`, scoped to
+# libs/mngr). To dispatch the *minds* variant instead, set:
+#   test_paths:   apps/minds
+#   name:         tmr-minds
+#   mapper_prompt: apps/minds/tmr/mapper.j2
+#   pytest_args:  -m "release and not minds_deployment and not minds_services and not minds_snapshot_resume"
+# (the plain minds @release tests, which need no ci env / snapshot image). The
+# capability suites additionally need their secrets passed via env -- see the
+# `tmr-minds` justfile recipe, which is the canonical source for these flag sets.
 on:
   workflow_dispatch:
     inputs:
@@ -32,7 +41,7 @@ on:
         required: false
         default: "tmr"
       mapper_prompt:
-        description: "Optional repo-relative path to a Jinja template overriding the mapper prompt (blank = packaged default)."
+        description: "Optional repo-relative path to a Jinja template overriding the mapper prompt (blank = packaged default). For the minds variant use apps/minds/tmr/mapper.j2."
         required: false
         default: ""
       reducer_prompt:

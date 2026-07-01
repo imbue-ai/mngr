@@ -143,7 +143,7 @@ $ mngr tmr apps/minds --name tmr-minds -- -m release
 **Use a custom mapper prompt**
 
 ```bash
-$ mngr tmr apps/minds --name tmr-minds --mapper-prompt prompts/minds_mapper.j2
+$ mngr tmr apps/minds --name tmr-minds --mapper-prompt apps/minds/tmr/mapper.j2
 ```
 
 **Use Docker provider**

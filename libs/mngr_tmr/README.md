@@ -25,8 +25,10 @@ Example (two variants):
 
 ```bash
 mngr tmr libs/mngr  --name tmr-mngr  -- -m "release and not docker and not docker_sdk"
-mngr tmr apps/minds --name tmr-minds -- -m "release and not minds_deployment and not minds_services and not minds_snapshot_resume"
+mngr tmr apps/minds --name tmr-minds --mapper-prompt apps/minds/tmr/mapper.j2 -- -m "release and not minds_deployment and not minds_services and not minds_snapshot_resume"
 ```
 
-Variant definitions live in the caller (the `.github/workflows/tmr.yml`
-workflow inputs, or a justfile recipe), not in a registry inside this package.
+Variant definitions live in the caller, not in a registry inside this package.
+The canonical flag sets are the root `justfile` recipes `tmr-mngr` / `tmr-minds`
+(which the `.github/workflows/tmr.yml` workflow inputs mirror). The minds variant
+ships a minds-tailored mapper prompt at `apps/minds/tmr/mapper.j2`.

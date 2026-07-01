@@ -68,6 +68,26 @@ def test_build_agent_prompt_override_can_extend_packaged_template(tmp_path: Path
     assert "docstring" in prompt.lower()
 
 
+def test_committed_minds_mapper_template_renders() -> None:
+    # The minds variant ships apps/minds/tmr/mapper.j2; render it through the
+    # builder to prove it is valid Jinja against the mapper context and is
+    # minds-tailored (no mngr-only tutorial guidance, no leading blank line).
+    repo_root = Path(__file__).resolve().parents[4]
+    minds_template = repo_root / "apps" / "minds" / "tmr" / "mapper.j2"
+    if not minds_template.is_file():
+        pytest.skip("apps/minds tree not present (running outside the monorepo checkout)")
+    prompt = build_test_agent_prompt(
+        "apps/minds/test_x.py::test_y", ("-m", "release"), template_path=minds_template
+    )
+    assert prompt.startswith("You are working on the tests for the minds app")
+    assert "docstring" in prompt.lower()
+    assert TESTING_AGENT_OUTCOME_FILENAME in prompt
+    # mngr-only guidance must not leak into the minds variant.
+    assert "FIX_TUTORIAL" not in prompt
+    assert "mega_tutorial" not in prompt
+    assert "--mngr-e2e-run-name" not in prompt
+
+
 def test_build_integrator_prompt_uses_override_template(tmp_path: Path) -> None:
     override = tmp_path / "custom_reducer.j2"
     override.write_text("CUSTOM REDUCER reading {{ inputs_dirname }}\n")
