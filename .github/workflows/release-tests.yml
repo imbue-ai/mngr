@@ -18,10 +18,20 @@ jobs:
   # Filters for release-marked docker tests.
   test-docker-release:
     runs-on: ubuntu-latest
-    env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    permissions:
+      contents: read
+      # Lets the use-vault-secrets step below mint a GitHub OIDC token for Vault.
+      id-token: write
 
     steps:
+      # Anthropic key from Vault (migrated off the ANTHROPIC_API_KEY GitHub
+      # Actions secret).
+      - name: Fetch Anthropic key from Vault
+        uses: imbue-ai/use-vault-secrets@2375c28b61513dadebebdce845c109a01777a197
+        with:
+          role: mngr_ci_gh
+          secrets: |
+            mngr/ci/ANTHROPIC_API_KEY
       - uses: actions/checkout@v6
 
       - name: Set up Python
@@ -56,10 +66,10 @@ jobs:
   # Release tests - the full `@pytest.mark.release` suite.
   test-release:
     runs-on: ${{ matrix.os }}
-    env:
-      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    permissions:
+      contents: read
+      # Lets the use-vault-secrets step below mint a GitHub OIDC token for Vault.
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -67,6 +77,18 @@ jobs:
         group: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
 
     steps:
+      # Anthropic key + imbue Modal workspace token (id + secret) from Vault,
+      # migrated off the ANTHROPIC_API_KEY / MODAL_TOKEN_SECRET GitHub Actions
+      # secrets and the MODAL_TOKEN_ID variable. The GitHub-hosted macOS runners
+      # in this matrix have curl + jq preinstalled, which the action needs.
+      - name: Fetch Anthropic key and Modal credentials from Vault
+        uses: imbue-ai/use-vault-secrets@2375c28b61513dadebebdce845c109a01777a197
+        with:
+          role: mngr_ci_gh
+          secrets: |
+            mngr/ci/ANTHROPIC_API_KEY
+            mngr/ci/modal/MODAL_TOKEN_ID
+            mngr/ci/modal/MODAL_TOKEN_SECRET
       - uses: actions/checkout@v6
 
       - name: Set up Python

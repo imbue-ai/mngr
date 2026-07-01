@@ -25,14 +25,13 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      # Lets the use-vault-secrets step below mint a GitHub OIDC token for Vault.
+      id-token: write
     env:
-      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
       MNGR_USER_ID: ${{ inputs.mngr_user_id != '' && inputs.mngr_user_id || 'tmr-ci' }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      # The automatic per-run token, used for `git push` + `gh pr create` on this
+      # same repo. Intentionally NOT migrated to Vault.
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
     steps:
       - uses: actions/checkout@v6
@@ -40,6 +39,30 @@ jobs:
           fetch-depth: 0
 
       - uses: ./.github/actions/tmr-setup
+
+      # ANTHROPIC key + imbue Modal workspace token (id + secret) from Vault,
+      # migrated off the ANTHROPIC_API_KEY / MODAL_TOKEN_SECRET GitHub Actions
+      # secrets and the MODAL_TOKEN_ID variable.
+      - name: Fetch credentials from Vault
+        uses: imbue-ai/use-vault-secrets@2375c28b61513dadebebdce845c109a01777a197
+        with:
+          role: mngr_ci_gh
+          secrets: |
+            mngr/ci/ANTHROPIC_API_KEY
+            mngr/ci/modal/MODAL_TOKEN_ID
+            mngr/ci/modal/MODAL_TOKEN_SECRET
+
+      # AWS creds (optional): continue-on-error so a missing entry leaves AWS_*
+      # unset and the orchestrator silently skips the S3 report mirror, matching
+      # the pre-migration behaviour when the AWS_* secrets were unset.
+      - name: Fetch AWS credentials from Vault (optional)
+        continue-on-error: true
+        uses: imbue-ai/use-vault-secrets@2375c28b61513dadebebdce845c109a01777a197
+        with:
+          role: mngr_ci_gh
+          secrets: |
+            mngr/ci/aws/AWS_ACCESS_KEY_ID
+            mngr/ci/aws/AWS_SECRET_ACCESS_KEY
 
       - name: Run TMR reintegrator
         run: |

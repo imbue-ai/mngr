@@ -26,10 +26,13 @@ set -euo pipefail
 #   ./scripts/changelog_deploy.sh
 #
 # Secrets are read from Vault at deploy time and baked into the schedule via
-# the --pass-env flags below. Run `vault login -method=oidc` first:
-#   secrets/mngr/dev/github    key GH_TOKEN          - token for bot@imbue.com.
-#   secrets/mngr/dev/anthropic key ANTHROPIC_API_KEY - claude key for the cron
-#                                                       container.
+# the --pass-env flags below. Run `vault login -method=oidc` first. Each path
+# stores the actual value in a `value` field (our standard secret layout):
+#   secrets/mngr/dev/GH_TOKEN          - bot@imbue.com token for opening the
+#                                        changelog PR. Lives under the dev
+#                                        (developer-direct-access) path.
+#   secrets/mngr/ci/ANTHROPIC_API_KEY  - claude key for the cron container;
+#                                        shared with the mngr CI workflows.
 #
 # Optional environment:
 #   CHANGELOG_VERIFY             - Verification mode (default: "none"). Set to
@@ -98,12 +101,12 @@ read_vault_secret() {
     vault kv get -format=json -mount=secrets "$1/$2" | jq -er '.data.data.value // "" | select(. != "")'
 }
 
-if ! GH_TOKEN=$(read_vault_secret mngr/dev/github GH_TOKEN); then
-    echo "Error: could not read GH_TOKEN from secrets/mngr/dev/github/GH_TOKEN. Run 'vault login -method=oidc' and confirm the entry exists." >&2
+if ! GH_TOKEN=$(read_vault_secret mngr/dev GH_TOKEN); then
+    echo "Error: could not read GH_TOKEN from secrets/mngr/dev/GH_TOKEN. Run 'vault login -method=oidc' and confirm the entry exists." >&2
     exit 1
 fi
-if ! ANTHROPIC_API_KEY=$(read_vault_secret mngr/dev/anthropic ANTHROPIC_API_KEY); then
-    echo "Error: could not read ANTHROPIC_API_KEY from secrets/mngr/dev/anthropic/ANTHROPIC_API_KEY. Run 'vault login -method=oidc' and confirm the entry exists." >&2
+if ! ANTHROPIC_API_KEY=$(read_vault_secret mngr/ci ANTHROPIC_API_KEY); then
+    echo "Error: could not read ANTHROPIC_API_KEY from secrets/mngr/ci/ANTHROPIC_API_KEY. Run 'vault login -method=oidc' and confirm the entry exists." >&2
     exit 1
 fi
 export GH_TOKEN ANTHROPIC_API_KEY
