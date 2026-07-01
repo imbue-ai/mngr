@@ -1,8 +1,22 @@
 # Spec: bound per-host discovery reads (no unbounded abandoned-thread leak)
 
-Status: implemented on branch `mngr/bounded-per-host-discovery` (stacked on
-`mngr/per-provider-discovery`, PR #2335). Both changes below are in place; the
-connect-phase timeouts were deliberately left untouched per the non-goals.
+Status: implemented on branch `mngr/bounded-per-host-discovery` (PR #2353,
+stacked on `mngr/per-provider-discovery` / PR #2335). Both changes below are in
+place; the connect-phase timeouts were deliberately left untouched per the
+non-goals.
+
+Correction (post-implementation): the original draft of this spec assumed the
+per-file `data.json` read (`read_text_file`) also went through
+`execute_idempotent_command` / pyinfra `_timeout`. It does not -- `read_text_file`
+reads over an SFTP channel (`_get_file` -> paramiko `SFTPClient`), not an SSH exec
+command. Only the directory listing (`_list_directory` -> `ls`) uses
+`execute_idempotent_command`. The implementation therefore bounds the two reads by
+two different mechanisms (see Change 1 below): the `ls` via
+`execute_idempotent_command`'s `_timeout`, and the SFTP read via
+`channel.settimeout(...)` on the SFTP channel. Both still surface a stall as
+`HostConnectionError` (via the existing transient-retry + `_translate_ssh_errors`
+path) and land in the offline fallback, so the end-to-end behavior matches the
+intent below.
 
 ## Context
 
@@ -29,17 +43,23 @@ pyinfra's SSH connector.
   So the connect path does **not** accumulate threads. **Explicitly out of scope: do
   not touch the connect timeouts.**
 
-- **The exec/read phase is unbounded.** `_list_directory` / `read_text_file` call
-  `execute_idempotent_command` with `_timeout=None`. pyinfra threads `_timeout` into
-  `read_output_buffers(..., timeout=_timeout)`, which does
-  `gevent.wait((stdout_reader, stderr_reader), timeout=timeout)` and `raise
-  timeout_error()` on elapse. With `_timeout=None` there is no bound, so a connection
-  that establishes and then stalls mid-command (sshd hung after auth, network drops
-  mid-read) blocks the read **indefinitely** -> the abandoned thread never returns ->
-  threads accumulate on every poll.
+- **The exec/read phase is unbounded**, via two distinct paths:
+  - `_list_directory` (the `ls`) calls `execute_idempotent_command` with
+    `_timeout=None`. pyinfra threads `_timeout` into
+    `read_output_buffers(..., timeout=_timeout)`, which does
+    `gevent.wait((stdout_reader, stderr_reader), timeout=timeout)` and `raise
+    timeout_error()` on elapse. With `_timeout=None` there is no bound.
+  - `read_text_file` (each `data.json`) does **not** go through
+    `execute_idempotent_command` -- it reads over an SFTP channel
+    (`read_file` -> `_get_file` -> paramiko `SFTPClient`), which has no read timeout
+    set, so a stalled transfer blocks indefinitely on the channel socket.
 
-So the only genuinely-unbounded case is the mid-read stall, and it is caused by
-`_timeout=None` on the discovery reads.
+  Either way, a connection that establishes and then stalls mid-read (sshd hung after
+  auth, network drops mid-read) blocks **indefinitely** -> the abandoned thread never
+  returns -> threads accumulate on every poll.
+
+So the only genuinely-unbounded case is the mid-read stall, caused by the missing read
+timeout on both the `ls` exec and the SFTP file read.
 
 ## Purpose
 
@@ -56,19 +76,25 @@ offline last-known agents) without leaking threads or hiding the problem.
 - **Producer-side intervening-event immediate re-poll** — a separate, deferred
   convergence-speed optimization; correctness is already handled by the aggregator.
 
-## Change 1: bound the per-host exec read with a hard timeout
+## Change 1: bound the per-host reads with a hard timeout
 
-Thread `host_discovery_timeout_seconds` down as the pyinfra `_timeout` on the SSH
-commands that discovery issues, so each command self-terminates instead of hanging.
+Thread `host_discovery_timeout_seconds` down as a per-read wall-clock on the reads that
+discovery issues, so each read self-terminates instead of hanging. As implemented:
 
-- Give `Host.discover_agents` (and the `_list_directory` / `read_text_file` calls it
-  makes on the discovery path) an explicit per-command timeout sourced from the
-  provider's `host_discovery_timeout_seconds`. Do **not** change the default timeout of
-  the shared `_list_directory` / `read_text_file` methods for their other callers -- add
-  a timeout-carrying discovery path (e.g. a `timeout_seconds` parameter threaded through
-  `discover_agents`, or a discovery-specific read helper) so only discovery is affected.
-- On timeout, pyinfra raises `TimeoutError`, which the existing code at `hosts/host.py`
-  already converts to `HostConnectionError`. The discovery path
+- `Host.discover_agents` gained an optional `timeout_seconds` (the per-host-bounded path
+  passes it; other callers leave it `None` for prior, unbounded behavior). It threads the
+  timeout into the two reads it makes:
+  - the directory listing, via `_list_directory(..., timeout_seconds=...)` ->
+    `execute_idempotent_command(timeout_seconds=...)` (pyinfra `_timeout` on the `ls`);
+  - each `data.json` read, via a **discovery-specific read helper** on `OuterHost`
+    (`read_text_file_within_timeout` / `read_file_within_timeout`) that flows through the
+    private `_get_file` chain to `channel.settimeout(timeout_seconds)` on the SFTP channel.
+- The shared `read_file` / `read_text_file` methods (and the `HostFileReadInterface`) are
+  left **untouched**, so no other caller is affected; only the new bounded variants and
+  the private `_get_file*` chain gained an optional `timeout_seconds`.
+- On timeout, pyinfra / paramiko raise (`TimeoutError` / `socket.timeout`), which the
+  existing code (`hosts/host.py` for the exec path, `_translate_ssh_errors(timed_out=...)`
+  for the SFTP path) converts to `HostConnectionError`. The discovery path
   (`_discover_agents_on_host_with_offline_fallback`) already catches `HostConnectionError`
   and falls back to the provider's offline (last-known) agents. So a slow host resolves
   to its offline agents *within the timeout* rather than hanging -- a better outcome than
@@ -140,9 +166,15 @@ orphan future.
   `read_host_agents_for_bounded_discovery`, `_discover_agents_on_host_with_offline_fallback`.
 - `libs/mngr/imbue/mngr/api/provider_discovery_stream.py` - `_ProviderDiscoveryPoller`
   (the existing provider-level single-orphan pattern to mirror).
-- `libs/mngr/imbue/mngr/hosts/host.py` - `discover_agents`, `_list_directory`,
-  `read_text_file`, `_run_shell_command` (`_timeout` plumbing; existing `TimeoutError`
-  -> `HostConnectionError` handling).
+- `libs/mngr/imbue/mngr/hosts/host.py` - `discover_agents` (now takes `timeout_seconds`),
+  `_list_directory` (now takes `timeout_seconds`), `_run_shell_command` (`_timeout`
+  plumbing; existing `TimeoutError` -> `HostConnectionError` handling).
+- `libs/mngr/imbue/mngr/hosts/outer_host.py` - `read_file_within_timeout` /
+  `read_text_file_within_timeout` (the discovery-specific bounded read helpers), the
+  private `_get_file` / `_get_file_with_transient_retry` / `_get_file_via_paramiko` chain
+  (SFTP `channel.settimeout`), and `_translate_ssh_errors` (SFTP `TimeoutError` ->
+  `HostConnectionError`).
 - pyinfra `connectors/ssh.py` (`run_shell_command` passes `_timeout` to
   `read_output_buffers`) and `connectors/util.py` (`read_output_buffers` raises on
-  timeout).
+  timeout) -- the exec (`ls`) path only; the SFTP read is bounded by paramiko's channel
+  socket timeout instead.
