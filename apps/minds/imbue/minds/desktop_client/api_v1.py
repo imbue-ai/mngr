@@ -132,8 +132,10 @@ from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupEncryptionMethod
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import ServiceName
+from imbue.minds.primitives import default_docker_runtime
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -440,6 +442,13 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
         ai_provider = AIProvider(str(body.get("ai_provider", AIProvider.SUBSCRIPTION.value)))
     except ValueError:
         return _json_error(f"Invalid ai_provider: {body.get('ai_provider')!r}", 400)
+    # Docker container runtime (runc vs gVisor's runsc); only consumed for
+    # LaunchMode.DOCKER. Defaults to the platform-appropriate value so macOS
+    # (no gVisor) gets runc and Linux gets the hardened runsc.
+    try:
+        docker_runtime = DockerRuntime(str(body.get("runtime", default_docker_runtime().value)))
+    except ValueError:
+        return _json_error(f"Invalid runtime: {body.get('runtime')!r}", 400)
     try:
         backup_provider = BackupProvider(str(body.get("backup_provider", BackupProvider.CONFIGURE_LATER.value)))
     except ValueError:
@@ -544,6 +553,7 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
         on_created=on_created,
         backup_request=backup_request,
         color=color,
+        docker_runtime=docker_runtime,
         original_minds_version=(branch_or_tag or branch or FALLBACK_BRANCH),
     )
     return OperationHandleResponse(operation_id=str(creation_id), kind="create"), 202

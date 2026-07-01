@@ -490,8 +490,12 @@ def _prepare_electron_workspace_inputs(tmp_path: Path, monkeypatch: pytest.Monke
     ensure_minds_env_defaults(setenv=monkeypatch.setenv)
     # No Modal creds here, so silence the Electron-spawned mngr's Modal discovery.
     monkeypatch.setenv("MNGR__PROVIDERS__MODAL__IS_ENABLED", "false")
-    # FCT pins docker_runtime = "runsc" (gVisor), absent in CI / the sandbox;
-    # override to the default runtime (FCT names this exact escape-hatch env var).
+    # Pin the local-docker provider to runc. The current FCT `docker` template
+    # defaults to runc, but the resolved FCT checkout may be an older one whose
+    # `[providers.docker]` block still hardcodes `docker_runtime = "runsc"` to
+    # harden the provider with gVisor, which is absent in CI / the sandbox.
+    # Forcing runc here keeps the test robust regardless of the resolved FCT's
+    # default (FCT names this exact escape-hatch env var).
     monkeypatch.setenv("MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME", "runc")
     # The Electron-spawned mngr loads two project-config trees under
     # PYTEST_CURRENT_TEST (host-side + the FCT checkout); both must opt into the
