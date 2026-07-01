@@ -1,1 +1,0 @@
-The per-agent minds bug-report route (`POST /minds-api-proxy/api/v1/agents/<id>/report`) is now reachable by any in-workspace agent without a prior per-agent permission grant: a baseline rule allows that exact path ahead of the unauthorized gate. The route's bearer-key auth still applies. This is an interim allowance pending broader minds-API-surface latchkey work.
