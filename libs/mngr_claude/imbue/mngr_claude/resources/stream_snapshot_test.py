@@ -337,6 +337,103 @@ def test_read_last_complete_assistant_id_missing_file(tmp_path: Path) -> None:
     assert stream_snapshot._read_last_complete_assistant_id(tmp_path / "nope.jsonl") == ""
 
 
+def test_read_last_complete_assistant_id_empty_and_no_assistant(tmp_path: Path) -> None:
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("", encoding="utf-8")
+    assert stream_snapshot._read_last_complete_assistant_id(empty) == ""
+
+    no_assistant = tmp_path / "no_assistant.jsonl"
+    no_assistant.write_text(
+        '{"type": "user", "uuid": "u1"}\n{"type": "tool_result", "uuid": "t1"}\n',
+        encoding="utf-8",
+    )
+    assert stream_snapshot._read_last_complete_assistant_id(no_assistant) == ""
+
+
+def test_read_last_complete_assistant_id_trailing_non_assistant_events(tmp_path: Path) -> None:
+    # The newest assistant entry is not the last line: tool-result events follow
+    # it. The tail scan must still return that assistant uuid, not "".
+    transcript = tmp_path / "events.jsonl"
+    lines = ['{"type": "assistant", "uuid": "a_last"}']
+    lines += [f'{{"type": "tool_result", "uuid": "t{i}"}}' for i in range(50)]
+    transcript.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    assert stream_snapshot._read_last_complete_assistant_id(transcript) == "a_last"
+
+
+def test_read_last_complete_assistant_id_large_transcript_is_tailed(tmp_path: Path) -> None:
+    # A transcript far larger than the tail window: the newest assistant entry
+    # near the end must be found from a bounded read, without parsing the whole
+    # file. The result must match the newest assistant uuid.
+    transcript = tmp_path / "events.jsonl"
+    rows = []
+    for i in range(20000):
+        rows.append(f'{{"type": "user", "uuid": "u{i}", "content": "{"x" * 40}"}}')
+        rows.append(f'{{"type": "assistant", "uuid": "a{i}", "content": "{"y" * 40}"}}')
+    transcript.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    assert transcript.stat().st_size > stream_snapshot._TRANSCRIPT_TAIL_READ_BYTES
+    assert stream_snapshot._read_last_complete_assistant_id(transcript) == "a19999"
+
+
+def test_read_last_complete_assistant_id_oversized_final_line_falls_back(tmp_path: Path) -> None:
+    # The most recent assistant entry is a single line larger than the tail
+    # window, so the tail read captures only a fragment of it and finds no
+    # assistant entry; the lookup must fall back to a full-file read to find it.
+    transcript = tmp_path / "events.jsonl"
+    oversized = "z" * (stream_snapshot._TRANSCRIPT_TAIL_READ_BYTES * 3)
+    transcript.write_text(
+        f'{{"type": "user", "uuid": "u1"}}\n{{"type": "assistant", "uuid": "a_huge", "content": "{oversized}"}}\n',
+        encoding="utf-8",
+    )
+    assert stream_snapshot._read_last_complete_assistant_id(transcript) == "a_huge"
+
+
+def test_run_one_poll_idle_from_idle_does_no_work(tmp_path: Path) -> None:
+    # An idle agent that was already idle on the previous poll: no transcript
+    # read, no capture, no buffer write. The buffer file is never touched.
+    state = stream_snapshot.StreamBufferState()
+    buffer_path = tmp_path / "stream_buffer"
+    # active_path is absent, so the agent reads as idle.
+    active_path = tmp_path / "active"
+    # transcript_path is absent too, and must never be read on an idle poll.
+    transcript_path = tmp_path / "events.jsonl"
+
+    is_active = stream_snapshot._run_one_poll(
+        "dummy-session", "agent", state, active_path, transcript_path, buffer_path, was_active=False
+    )
+
+    assert is_active is False
+    assert not buffer_path.exists()
+
+
+def test_run_one_poll_active_to_idle_clears_buffer_once(tmp_path: Path) -> None:
+    # The active->idle transition empties the in-progress body and pins the id
+    # line to the last complete assistant message.
+    state = stream_snapshot.StreamBufferState()
+    block = stream_snapshot.extract_latest_assistant_block(_read_fixture("stream_markdown_demo_full.txt"))
+    assert block is not None
+    state.ingest_block(stream_snapshot.convert_block_to_markdown(block), has_marker=True)
+    # There is in-progress text in the accumulator for the transition to clear.
+    assert state.body_lines
+
+    buffer_path = tmp_path / "stream_buffer"
+    # active_path is absent, so the agent reads as idle.
+    active_path = tmp_path / "active"
+    transcript_path = tmp_path / "events.jsonl"
+    transcript_path.write_text(
+        '{"type": "assistant", "uuid": "a1"}\n{"type": "assistant", "uuid": "a2"}\n',
+        encoding="utf-8",
+    )
+
+    is_active = stream_snapshot._run_one_poll(
+        "dummy-session", "agent", state, active_path, transcript_path, buffer_path, was_active=True
+    )
+
+    assert is_active is False
+    # Body cleared (accumulator reset), id line pinned to the final message.
+    assert buffer_path.read_text(encoding="utf-8") == "a2"
+    assert state.body_lines == []
+
+
 def test_agent_pane_target_addresses_window_by_name() -> None:
     """The pane is targeted by the primary window name (not the literal :0 index), with
     the `=` exact-match prefix, so capture is correct regardless of the user's base-index."""

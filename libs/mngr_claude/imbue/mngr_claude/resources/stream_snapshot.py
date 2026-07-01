@@ -764,14 +764,29 @@ def _log(message: str) -> None:
     print(f"stream_snapshot: {message}", file=sys.stderr, flush=True)
 
 
-def _read_last_complete_assistant_id(transcript_path: Path) -> str:
-    """Return the uuid of the last assistant entry in the raw transcript, or ''."""
-    try:
-        content = transcript_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
-    last_uuid = ""
-    for line in content.splitlines():
+# How many bytes to read from the end of the transcript when looking up the last
+# complete assistant id. The transcript is append-only JSONL that grows for the
+# whole session, and the newest assistant entry sits at (or near) the end, so a
+# bounded tail read of this size almost always contains it; only when it does not
+# do we fall back to a full read. The common-case per-poll cost is therefore
+# bounded by the tail size rather than the (unbounded) transcript length.
+_TRANSCRIPT_TAIL_READ_BYTES: int = 65536
+
+
+def _last_assistant_uuid(chunk: bytes, drop_leading_partial: bool) -> str:
+    """Return the uuid of the last assistant entry in a transcript tail ``chunk``.
+
+    Lines are scanned from the end so the first assistant entry found is the most
+    recent. When ``drop_leading_partial`` is set the chunk began mid-record (the
+    read did not reach the start of the file), so its first line is a fragment
+    split by the read boundary and is discarded -- the newest assistant entry is
+    at the end, never in this leading fragment, so dropping it can never lose the
+    answer.
+    """
+    lines = chunk.decode("utf-8", errors="replace").split("\n")
+    if drop_leading_partial and lines:
+        lines = lines[1:]
+    for line in reversed(lines):
         stripped = line.strip()
         if stripped == "":
             continue
@@ -782,8 +797,39 @@ def _read_last_complete_assistant_id(transcript_path: Path) -> str:
         if isinstance(event, dict) and event.get("type") == "assistant":
             uuid = event.get("uuid")
             if isinstance(uuid, str) and uuid != "":
-                last_uuid = uuid
-    return last_uuid
+                return uuid
+    return ""
+
+
+def _read_last_complete_assistant_id(transcript_path: Path) -> str:
+    """Return the uuid of the last assistant entry in the raw transcript, or ''.
+
+    The transcript is append-only JSONL and grows for the whole session, so it is
+    read from the end in a bounded tail rather than parsed in full on every poll
+    (which would be O(transcript size), unbounded over a long session). The newest
+    assistant entry sits at (or near) the end, so the tail read almost always
+    contains it. Only when it does not -- a most-recent assistant entry further
+    from the end than the tail window (e.g. a record larger than the window, or a
+    long run of trailing non-assistant events) -- do we fall back to a full read,
+    which is correct and still bounded by the transcript size. Behaviour is
+    otherwise identical to a whole-file scan.
+    """
+    try:
+        with transcript_path.open("rb") as handle:
+            file_size = handle.seek(0, os.SEEK_END)
+            read_size = min(_TRANSCRIPT_TAIL_READ_BYTES, file_size)
+            handle.seek(file_size - read_size)
+            chunk = handle.read(read_size)
+            reached_start = read_size >= file_size
+            uuid = _last_assistant_uuid(chunk, drop_leading_partial=not reached_start)
+            if uuid != "" or reached_start:
+                return uuid
+            # The tail did not reach the start of the file and held no assistant
+            # entry: fall back to scanning the whole transcript.
+            handle.seek(0)
+            return _last_assistant_uuid(handle.read(), drop_leading_partial=False)
+    except OSError:
+        return ""
 
 
 def _agent_pane_target(session_name: str, window_name: str) -> str:
@@ -850,31 +896,48 @@ def _run_one_poll(
     active_path: Path,
     transcript_path: Path,
     buffer_path: Path,
-) -> None:
-    """Perform a single capture/convert/stitch/write cycle."""
-    last_id = _read_last_complete_assistant_id(transcript_path)
+    was_active: bool,
+) -> bool:
+    """Perform a single capture/convert/stitch/write cycle.
 
-    # Agent idle: empty the body, keep refreshing the id line.
+    Returns whether the agent was active this poll; the caller threads it back
+    in as ``was_active`` on the next poll so the active->idle edge is detectable.
+
+    While the agent is idle we do no streaming work at all -- no transcript read,
+    no pane capture, no buffer write. Streaming is a live preview of an
+    actively-working agent; an idle agent has nothing to preview, and the durable
+    transcript event already carries the finalized message. The sole exception is
+    the active->idle transition, where we clear the buffer body once (so a stale
+    in-progress preview cannot linger) and pin the id line to the now-final
+    message.
+    """
     if not active_path.exists():
-        state.reset()
-        _write_buffer_atomically(buffer_path, format_buffer(last_id, state.body_lines))
-        return
+        if was_active:
+            # active -> idle edge: empty the in-progress body once and refresh
+            # the id line to the last complete message. Resetting the accumulator
+            # also guarantees the next turn starts from a clean slate.
+            state.reset()
+            last_id = _read_last_complete_assistant_id(transcript_path)
+            _write_buffer_atomically(buffer_path, format_buffer(last_id, state.body_lines))
+        return False
 
+    last_id = _read_last_complete_assistant_id(transcript_path)
     pane = _capture_pane(session_name, window_name)
     if pane is None:
-        return
+        return True
 
     # Extract the message region (marker-anchored when the start is visible, or
     # the scrolled tail otherwise) and stitch it onto the accumulated body.
     region_result = extract_message_region(pane)
     if region_result is None:
         _write_buffer_atomically(buffer_path, format_buffer(last_id, state.body_lines))
-        return
+        return True
 
     region_lines, has_marker = region_result
     conversion = convert_block_to_markdown(region_lines)
     state.ingest_block(conversion, has_marker)
     _write_buffer_atomically(buffer_path, format_buffer(last_id, state.body_lines))
+    return True
 
 
 def main(argv: list[str]) -> int:
@@ -933,9 +996,15 @@ def main(argv: list[str]) -> int:
     state = StreamBufferState()
     _write_buffer_atomically(buffer_path, format_buffer("", []))
 
+    # The startup write above already left the buffer empty, so start from the
+    # idle baseline: an agent idle at startup does no work until it goes active,
+    # while the first active->idle transition still triggers the clearing write.
+    was_active = False
     try:
         while _session_is_alive(session_name):
-            _run_one_poll(session_name, window_name, state, active_path, transcript_path, buffer_path)
+            was_active = _run_one_poll(
+                session_name, window_name, state, active_path, transcript_path, buffer_path, was_active
+            )
             time.sleep(interval_seconds)
     finally:
         try:
