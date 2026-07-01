@@ -1,0 +1,3 @@
+Renamed the two jobs in `.github/workflows/release-tests.yml` to make it explicit they cover the *mngr* release suite: `test-docker-release` -> `test-mngr-release-docker` and `test-release` -> `test-mngr-release`.
+
+Both jobs now exclude the minds capability marks (`minds_deployment` / `minds_services` / `minds_snapshot_resume`) from collection, so the mngr release run never picks up minds tests that require a remote ci env or a pre-baked snapshot image (those run from the minds jobs in `ci.yml`). Plain minds `@release` tests with no capability mark still run in `test-mngr-release`. Updated the stale `test-docker-release` reference in `offload-modal-release.toml`.
