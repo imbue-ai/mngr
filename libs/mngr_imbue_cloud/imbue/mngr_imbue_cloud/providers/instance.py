@@ -13,8 +13,8 @@ This provider's responsibilities are then:
   volumes, per-host btrfs subvolume under ``/mngr-btrfs/``, ``docker system
   prune``, ``/root`` and ``/tmp`` content) and release the lease back to the
   pool. The privacy-first ordering means the agent's data is gone before the
-  connector flips the row to ``released``; ``cleanup_released_hosts.py``'s
-  later VPS-destroy becomes belt-and-suspenders.
+  connector flips the row to ``released`` and destroys the leased slice's VM, so
+  the data wipe is belt-and-suspenders.
 - `delete_host` -- called by mngr's GC after the destroyed-host grace
   period. Same flow as ``destroy_host``; treated as a no-op when the lease
   has already been released.
@@ -1698,14 +1698,14 @@ class ImbueCloudProvider(BaseProviderInstance):
            and wipe ``/root`` and ``/tmp`` (preserving ``authorized_keys``
            so the pool-management ssh path keeps working through cleanup).
         2. Release the lease via the connector's ``/hosts/{id}/release``
-           endpoint -- the row flips to ``released`` and gets picked up by
-           ``cleanup_released_hosts.py`` later for VPS-destroy.
+           endpoint -- the row flips to ``released`` and the connector destroys
+           the leased slice's VM.
         3. Drop local per-host state (ssh keys, known_hosts, cached records).
 
         Best-effort across steps: a failed wipe still proceeds to release
         (because a stuck VPS would otherwise leak a paid lease indefinitely),
-        and the data wipe is non-gating because the VPS is destroyed wholesale
-        by ``cleanup_released_hosts.py`` after release regardless. A failed
+        and the data wipe is non-gating because the slice's VM is destroyed
+        wholesale by the connector's release route regardless. A failed
         release, however, means the paid lease is leaked -- it is recorded as a
         ``HOST_RESOURCE_REMAINS`` failure and local cleanup is intentionally
         skipped (removing local SSH keys for a host that was never released
@@ -1748,8 +1748,8 @@ class ImbueCloudProvider(BaseProviderInstance):
 
         Raises a ``CleanupFailedGroup`` carrying the real cleanup failures
         (resources left behind); returns normally otherwise. The wipe step is
-        non-gating (warn-only): the leased VPS is destroyed wholesale by
-        ``cleanup_released_hosts.py`` after the release, so residual data on it
+        non-gating (warn-only): the leased slice's VM is destroyed wholesale by
+        the connector's release route after the release, so residual data on it
         is not a leaked resource from mngr's accounting. A failed release leaks
         the paid lease and is recorded as ``HOST_RESOURCE_REMAINS``.
         """

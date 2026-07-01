@@ -6,11 +6,6 @@ Pool hosts are **bare-metal slices**: lima/QEMU VMs carved on bare-metal boxes w
 operate. (The boxes are currently rented from OVH, but that is an internal
 implementation detail of the slice backend; other suppliers may be added later.)
 
-> **Deprecated:** baking new **OVH classic VPS** pool hosts (one VPS per host) is
-> no longer supported. The pool is baked exclusively with slices. Existing OVH VPS
-> pool hosts already in the pool keep working and can still be listed and
-> destroyed -- see [Legacy OVH VPS teardown](#legacy-ovh-vps-teardown).
-
 ## Prerequisites
 
 - Neon PostgreSQL database (two connection strings: pooled for runtime, direct for migrations)
@@ -19,8 +14,7 @@ implementation detail of the slice backend; other suppliers may be added later.)
   [Step 5](#step-5-bake-one-or-more-pool-hosts)). Slice baking targets an
   explicitly-chosen `ready` box.
 - Bare-metal box supplier credentials (currently OVH API AK / AS / CK). These
-  order the bare-metal boxes that slices run on, and also tear down legacy OVH
-  VPS hosts.
+  order the bare-metal boxes that slices run on.
 - Modal account (for deploying the remote_service_connector)
 
 ## Step 1: Create the database schema
@@ -99,10 +93,10 @@ file itself never leaves the operator's laptop.)
 ### secrets/minds/<tier>/ovh
 
 The shared per-tier bare-metal box supplier credentials (currently OVH
-AK / AS / CK). Read by `mngr imbue_cloud admin server` (to order the
-bare-metal boxes that slices run on) and by `minds env deploy / destroy`
-(to enumerate + delete legacy OVH VPSes belonging to a dev env). NOT
-pushed to Modal.
+AK / AS / CK). Sourced by the operator when running `mngr imbue_cloud
+admin server` (to order + manage the bare-metal boxes that slices run
+on). NOT pushed to Modal and NOT read by `minds env deploy` / `destroy`
+-- no deployed service makes supplier API calls at runtime.
 
 Generate the trio once per tier at
 <https://api.us.ovhcloud.com/createApp> (endpoint `ovh-us`; pick
@@ -142,7 +136,7 @@ for the staging tier.
 Pool hosts are baked as bare-metal slices. A slice bake carves a lima VM on a
 `ready` bare-metal box, runs the FCT template's `mngr create --template main
 --template pool_host` to build + bake the agent state inside it, then writes a
-`pool_hosts` row (`backend_kind=slice`).
+`pool_hosts` row.
 
 First register + prep the bare-metal box(es) the slices will be carved on (the
 box must be `ready` and have a free slot):
@@ -169,7 +163,7 @@ eval "$(uv run minds env activate production)"   # or `staging`
 just bake-slice-prod US-WEST-OR v0.3.0 1 --server-id <bare-metal-server-id>
 ```
 
-The `just bake-slice-{dev,prod}` recipes wrap `minds pool create --backend slice`
+The `just bake-slice-{dev,prod}` recipes wrap `minds pool create`
 (`apps/minds/imbue/minds/cli/pool.py`), the env-aware layer that, from the
 activated tier:
 
@@ -197,10 +191,9 @@ set for a more constrained pool generation; they're only required on the row whe
 the lease request also includes them. For slices, the per-slice size
 (`memory_gb` / `cpus`) is computed from the box and stamped automatically.
 
-Under the hood `minds pool create --backend slice` shells out to `mngr
-imbue_cloud admin pool create` (in `libs/mngr_imbue_cloud`), the provider-generic
-host-creation step. Call it directly only for non-minds / one-off baking outside
-an activated env.
+Under the hood `minds pool create` shells out to `mngr imbue_cloud admin pool
+create` (in `libs/mngr_imbue_cloud`), the provider-generic host-creation step.
+Call it directly only for non-minds / one-off baking outside an activated env.
 
 ### Fast path vs. slow path
 
@@ -227,29 +220,18 @@ just list-pool-hosts
 ## Step 6: Verify
 
 ```bash
-psql "$NEON_DB_DIRECT" -c "SELECT id, vps_address, status, backend_kind, attributes FROM pool_hosts ORDER BY created_at DESC"
+psql "$NEON_DB_DIRECT" -c "SELECT id, vps_address, status, attributes FROM pool_hosts ORDER BY created_at DESC"
 ```
 
 ## Cleanup
 
-Destroy a specific pool host (tears down its underlying machine, then drops the
-row -- for a slice it destroys the lima VM and frees the box slot; for a legacy
-OVH VPS row it cancels the VPS):
+Destroy a specific pool host (destroys its slice lima VM, freeing the box slot,
+then drops the row):
 
 ```bash
 just list-pool-hosts                          # find the row id (tier activated)
-just destroy-pool-host <pool-host-id>         # creds + DSN from the tier's Vault entry
+just destroy-pool-host <pool-host-id>         # pool SSH key + DSN from the tier's Vault entry
 ```
-
-Released hosts (after a user destroys their lease) can be bulk-cleaned with:
-
-```bash
-uv run python apps/remote_service_connector/scripts/cleanup_released_hosts.py \
-    --database-url "$NEON_DB_DIRECT"
-```
-
-Both paths tear down the underlying machine (slice VM or legacy OVH VPS) and
-remove the database row.
 
 ## Development workflow
 
@@ -269,20 +251,3 @@ just bake-slice-dev \
     --repo-branch-or-tag "$(git rev-parse --abbrev-ref HEAD)" \
     --mngr-source "$PWD"
 ```
-
-## Legacy OVH VPS teardown
-
-Baking new OVH classic VPS pool hosts is deprecated, but VPS hosts already in the
-pool keep working until they are migrated off and destroyed. Until then:
-
-- `just list-pool-hosts` lists every pool host, including legacy `ovh_vps` rows.
-- `just destroy-pool-host <id>` tears down a legacy VPS row: it cancels the
-  underlying OVH VPS and drops the row. This uses the per-tier OVH credentials
-  from `secrets/minds/<tier>/ovh`.
-- `minds env destroy` removes every OVH VPS belonging to a whole dev env (it
-  walks the OVH IAM `minds_env=<env>` tags).
-- The connector releases + an hourly Modal cron sweep any stragglers, cancelling
-  the OVH VPS for released `ovh_vps` rows.
-
-The per-tier OVH credentials therefore remain required for as long as any legacy
-VPS host exists (and for ordering bare-metal slice boxes).

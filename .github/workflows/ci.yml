@@ -871,15 +871,21 @@ jobs:
       - name: Destroy the per-run ci env
         run: uv run python apps/minds/scripts/test_deployments.py down
 
-  # Release tier (manual). Runs the heavy minds_deployment tests -- each mints +
-  # destroys its own ephemeral ci env (deploy / rollback / destroy round-trip),
-  # which is why they are gated to a manual run rather than every push. Dispatch
-  # via the Actions UI (or `gh workflow run ci.yml -f run_minds_release_tests=true`).
-  # Uses the minds-dev Modal workspace + the broad minds_ci_env_gh Vault role
-  # (the tests deploy envs and read neon-admin/supertokens), like build-minds-ci-env.
-  # Self-contained (no shared env needed): the `deployment-only` orchestrator
-  # command writes a shared-env-free deployment_envs.json and runs `pytest -m
-  # minds_deployment`; the ephemeral_env fixture deploys + tears down per test.
+  # Release tier (manual). The home for *all* minds release tests, gated to a
+  # manual run rather than every push (the minds release procedure is a manual
+  # dispatch, not a `v*` tag -- so these do not run in release-tests.yml, which
+  # excludes the whole minds tree by path). Dispatch via the Actions UI (or
+  # `gh workflow run ci.yml -f run_minds_release_tests=true`). Runs two groups:
+  #   1. The heavy minds_deployment tests -- each mints + destroys its own
+  #      ephemeral ci env (deploy / rollback / destroy round-trip). Uses the
+  #      minds-dev Modal workspace + the broad minds_ci_env_gh Vault role (the
+  #      tests deploy envs and read neon-admin/supertokens), like
+  #      build-minds-ci-env. Self-contained (no shared env needed): the
+  #      `deployment-only` orchestrator writes a shared-env-free
+  #      deployment_envs.json and runs `pytest -m minds_deployment`; the
+  #      ephemeral_env fixture deploys + tears down per test.
+  #   2. The plain minds @release tests that need no ci env (version-alignment,
+  #      SSE redirect, the opt-in AWS EC2 test). Selected by tag, not path.
   test-minds-release:
     runs-on: ubuntu-latest
     if: >-
@@ -895,6 +901,11 @@ jobs:
       MODAL_TOKEN_SECRET: ${{ secrets.MINDS_DEV_MODAL_TOKEN_SECRET }}
       VAULT_ADDR: https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200
       VAULT_NAMESPACE: admin
+      # Fixed, HOME-independent browser location for test_sse_redirect. The minds
+      # conftest autouse fixture re-points $HOME at a per-test tmpdir, so the
+      # default `$HOME/.cache/ms-playwright` install location would be invisible
+      # to the test process. Both the install step and the test read this var.
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.ms-playwright
     steps:
       - uses: actions/checkout@v6
       - name: Set up Python
@@ -931,3 +942,20 @@ jobs:
           EOF
       - name: Run minds release-tier tests (minds_deployment)
         run: uv run python apps/minds/scripts/test_deployments.py deployment-only
+      # The plain minds @release tests need no ci env, so run them here too
+      # (folded into the minds release job rather than the mngr release
+      # workflow). `!cancelled()` so they still run if the deployment group
+      # above failed. `test_sse_redirect` drives a real browser, so install the
+      # Chromium the project's playwright dep expects; `test_aws_workspace_release`
+      # skips unless AWS creds + MNGR_AWS_RELEASE_TESTS are set (they are not here).
+      - name: Install Playwright Chromium (for the SSE-redirect release test)
+        if: ${{ !cancelled() }}
+        run: uv run playwright install --with-deps chromium
+      - name: Run plain minds release tests (no ci env needed)
+        if: ${{ !cancelled() }}
+        # Clear apps/minds's addopts (pytest picks up apps/minds/pyproject.toml
+        # as the config when the target is apps/minds): its `--timeout=10` is far
+        # too tight for these release tests (test_sse_redirect launches a browser
+        # and waits on an SSE redirect; the version-alignment test does a network
+        # fetch). Set an explicit, generous per-test timeout instead.
+        run: uv run pytest apps/minds --override-ini='addopts=' --no-cov -p no:xdist --timeout=300 -v -m 'release and not minds_deployment and not minds_services and not minds_snapshot_resume'
