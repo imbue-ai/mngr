@@ -103,6 +103,7 @@ class _RecordingAgentCreator(AgentCreator):
         backup_request: BackupSetupRequest | None = None,
         color: str | None = None,
         original_minds_version: str = "",
+        timezone: str = "",
     ) -> CreationId:
         self._last_call = {
             "repo_source": repo_source,
@@ -116,6 +117,7 @@ class _RecordingAgentCreator(AgentCreator):
             "anthropic_api_key": anthropic_api_key,
             "color": color,
             "original_minds_version": original_minds_version,
+            "timezone": timezone,
         }
         return CreationId()
 
@@ -528,6 +530,50 @@ def test_create_workspace_full_surface_returns_202_and_threads_fields(
     assert str(creator.last_call["host_name"]) == "my-mind"
     assert str(creator.last_call["color"]) == "#0b292b"
     assert str(creator.last_call["branch"]) == "main"
+
+
+def test_create_workspace_threads_submitted_timezone_to_creator(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    # A valid submitted IANA timezone reaches the creator so the new workspace's
+    # scheduler runs nightly tasks in the user's local time.
+    creator = _make_recording_creator(tmp_path, root_concurrency_group, notification_dispatcher)
+    client = _client_with_agent_creator(
+        tmp_path, root_concurrency_group, notification_dispatcher, agent_creator=creator
+    )
+
+    response = client.post(
+        "/api/v1/workspaces",
+        headers=_auth_header(),
+        json={"git_url": "https://example/repo", "timezone": "America/New_York"},
+    )
+
+    assert response.status_code == 202
+    assert str(creator.last_call["timezone"]) == "America/New_York"
+
+
+def test_create_workspace_drops_unknown_timezone(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    # An unrecognized timezone is dropped (the creator gets "") rather than
+    # rejecting the create; the scheduler falls back to the host clock.
+    creator = _make_recording_creator(tmp_path, root_concurrency_group, notification_dispatcher)
+    client = _client_with_agent_creator(
+        tmp_path, root_concurrency_group, notification_dispatcher, agent_creator=creator
+    )
+
+    response = client.post(
+        "/api/v1/workspaces",
+        headers=_auth_header(),
+        json={"git_url": "https://example/repo", "timezone": "Not/AZone"},
+    )
+
+    assert response.status_code == 202
+    assert str(creator.last_call["timezone"]) == ""
 
 
 def test_create_workspace_requires_api_key_for_api_key_provider(

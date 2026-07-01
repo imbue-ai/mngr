@@ -94,6 +94,7 @@ from imbue.minds.desktop_client.create_helpers import REMOTE_SIGNIN_REDIRECT_URL
 from imbue.minds.desktop_client.create_helpers import color_for_new_workspace
 from imbue.minds.desktop_client.create_helpers import existing_workspace_host_names
 from imbue.minds.desktop_client.create_helpers import taken_host_names_on_provider
+from imbue.minds.desktop_client.create_helpers import validate_create_timezone
 from imbue.minds.desktop_client.help_modal_requests import OpenHelpRequest
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
@@ -398,7 +399,8 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     (default ``SUBSCRIPTION``), ``account_id`` (selects the imbue_cloud account
     for compute/AI -- required when ``launch_mode`` or ``ai_provider`` is
     ``IMBUE_CLOUD``), ``anthropic_api_key`` (required when ``ai_provider`` is
-    ``API_KEY``), and ``region``. Returns ``202`` with an ``operation_id`` the
+    ``API_KEY``), ``region``, and ``timezone`` (the browser IANA timezone the
+    workspace scheduler uses; the host clock when omitted/unrecognized). Returns ``202`` with an ``operation_id`` the
     caller polls at ``/api/v1/workspaces/operations/create/<operation_id>``; the
     canonical workspace id appears there once ``mngr create`` returns.
 
@@ -432,6 +434,7 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     host_name = str(body.get("host_name", "")).strip()
     branch = str(body.get("branch", "")).strip()
     color = color_for_new_workspace(body.get("color"))
+    client_timezone = validate_create_timezone(body.get("timezone"))
     try:
         launch_mode = LaunchMode(str(body.get("launch_mode", LaunchMode.DOCKER.value)))
     except ValueError:
@@ -545,6 +548,7 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
         backup_request=backup_request,
         color=color,
         original_minds_version=(branch_or_tag or branch or FALLBACK_BRANCH),
+        timezone=client_timezone,
     )
     return OperationHandleResponse(operation_id=str(creation_id), kind="create"), 202
 

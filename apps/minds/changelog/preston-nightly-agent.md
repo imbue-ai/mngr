@@ -1,0 +1,1 @@
+The create form now captures your browser's local timezone and stores it on the new workspace, so the workspace's scheduler runs nightly tasks (like the Caretaker's 3 AM run) in your local time rather than the host clock. If the timezone can't be determined it falls back to the host clock, so nothing breaks.
