@@ -142,7 +142,16 @@
   function ensureTooltipEl() {
     if (tooltipEl) return tooltipEl;
     tooltipEl = document.createElement('div');
-    tooltipEl.className = 'minds-tooltip';
+    // Styled with inline Tailwind utilities (this file is a Tailwind @source in
+    // app.css, so the classes are generated). A single-use JS-built element like
+    // this uses utilities directly; a shape shared across files would instead be
+    // an @apply recipe class (see templates/README.md). type-helper is the
+    // 12px/1.4 "captions/hints" role; the shadow token is the menus/modals/
+    // tooltips elevation; max-width and z-index are off-scale by nature.
+    tooltipEl.className =
+      'inline-flex items-center gap-1.5 max-w-[280px] py-1 px-2 rounded-md ' +
+      'bg-surface-inverse text-inverse-primary type-helper shadow-overlay ' +
+      'whitespace-normal pointer-events-none z-[2147483647]';
     tooltipEl.style.position = 'absolute';
     tooltipEl.style.left = '0';
     tooltipEl.style.top = '0';
@@ -153,18 +162,15 @@
 
   function showTooltip(cmd) {
     var el = ensureTooltipEl();
-    // Content: arbitrary HTML if supplied, else a plain label + optional
-    // keyboard-shortcut chip (the common, structured case).
+    // Content: arbitrary HTML if supplied, else a plain text label. The payload
+    // may carry a ``shortcut`` (a designed-for keyboard-shortcut chip), but no
+    // trigger supplies one yet and the design system has no on-ramp size for a
+    // sub-label chip, so it is not rendered; add it on-system when a real use
+    // arrives.
     if (cmd.html) {
       el.innerHTML = cmd.html;
     } else {
       el.textContent = cmd.text || '';
-      if (cmd.shortcut) {
-        var kbd = document.createElement('span');
-        kbd.className = 'minds-tooltip-shortcut';
-        kbd.textContent = cmd.shortcut;
-        el.appendChild(kbd);
-      }
     }
     // Use the real window size from main, NOT window.innerWidth. Between tooltips
     // the overlay view is hidden, and a hidden WebContentsView does not update
