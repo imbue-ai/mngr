@@ -97,6 +97,7 @@ def check_assist_support(mngr_caller: MngrCaller, workspace_agent_id: AgentId) -
     )
     return AssistSupport.UNREACHABLE
 
+
 # The mngr binary to invoke *inside* the container. Bare ``mngr`` resolves on the
 # container's PATH (set up by ``mngr exec``'s source-env prefix); the outer
 # binary path the desktop app uses would not exist inside the container.
