@@ -47,6 +47,10 @@ build_inputs = [
 type = "pytest"
 command = "uv run pytest"
 run_args = "--cov-fail-under=0 -p no:xdist"
+# EXPERIMENT: lower the affinity overhead from the 2.0s pytest default to 0.25s,
+# closer to the ~0.15s/module import cost measured on this suite. Tests whether a
+# better-calibrated overhead keeps batches balanced (vs over-concentrating at 2.0s).
+affinity_overhead_secs = 0.25
 
 [groups.all]
 retry_count = 0
