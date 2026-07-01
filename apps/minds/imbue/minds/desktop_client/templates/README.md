@@ -71,10 +71,24 @@ root of `templates/`. Auth-flow components live under `templates/auth/`.
 
 ### CSS classes for JS-rendered surfaces
 
-JavaScript can't call JinjaX components. When you build HTML in JS (e.g.
-`Landing.jinja`'s providers panel, `sharing.js`'s ACL rows), reference
-these CSS-only tokens defined in `static/app.css` so both sides stay
-in sync:
+JavaScript can't call JinjaX components, so JS-built HTML is styled with
+Tailwind directly -- `static/app.css` declares `static/*.js` as a Tailwind
+`@source`, so utility classes written into a `className` string are
+generated exactly as they are in a template. Rule of thumb:
+
+- **Used in a single place** (a one-off element built in one JS file):
+  write the utilities inline on the element. No CSS class -- see the
+  overlay tooltip bubble in `overlay.js` for an example.
+- **A shape repeated across files** (or that must stay in sync with a
+  JinjaX component): give it a named class in `static/app.css` and define
+  it with `@apply` on the same utilities, then reference the class from
+  both sides. Prefer `@apply` over hand-written CSS values so spacing /
+  type / radius still resolve through the scale (and its ratchets) rather
+  than drifting into raw magic numbers.
+
+The recipe classes below predate this and use raw token CSS (`var(--...)`);
+they still work and keep JS-built HTML matching its JinjaX twin
+(`.minds-card` ↔ `Card.jinja`), but new shared classes should use `@apply`:
 
 | Class | Role |
 |---|---|

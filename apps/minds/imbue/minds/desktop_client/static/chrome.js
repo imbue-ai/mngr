@@ -277,6 +277,10 @@
     });
   }
 
+  // Custom titlebar tooltips: the titlebar buttons carry ``data-tooltip``
+  // labels and are wired by the shared /_static/tooltip_triggers.js (included
+  // by Chrome.jinja), which is the same script the overlay's modal pages use.
+
   // -- Title + URL tracking -------------------------------------------------
   function refreshAuthStatus() {
     fetch('/auth/api/status').then(function (r) { return r.json(); }).then(updateAuthUI).catch(function () {});
