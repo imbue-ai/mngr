@@ -2,7 +2,7 @@
 {#
   Always-warm overlay host page. main.js loads this ONCE into the shared
   modal WebContentsView at window creation and keeps it mounted for the
-  window's life (see openOverlayHost in electron/main.js), instead of the
+  window's life (see createBundleOverlayView in electron/main.js), instead of the
   old model of loading a fresh page into that view on every modal open.
 
   Every overlay is hosted here as in-page DOM driven over IPC -- the

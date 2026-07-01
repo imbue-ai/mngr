@@ -867,7 +867,7 @@ def _handle_chrome_sidebar() -> Response:
 def _handle_chrome_overlay() -> Response:
     """Serve the always-warm overlay host page loaded into the shared modal WebContentsView.
 
-    Loaded once at window creation (see openOverlayHost in electron/main.js) and
+    Loaded once at window creation (see createBundleOverlayView in electron/main.js) and
     kept mounted for the window's life. It hosts every overlay -- the migrated
     workspace menu / inbox / help / sign-in modals (as mount-on-demand iframes,
     created when opened and destroyed when closed) and hover tooltips -- as
