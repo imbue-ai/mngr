@@ -13,16 +13,20 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 import httpx
 from cheroot import wsgi
 from flask.testing import FlaskClient
+from loguru import logger
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.minds.desktop_client.server import _shutdown_desktop_client
 from imbue.minds.desktop_client.server import desktop_client_runtime
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
@@ -58,6 +62,44 @@ def test_runtime_creates_http_client_on_entry_and_closes_it_with_shutdown_flag(t
     assert state.shutdown_event.is_set()
     assert state.http_client is not None
     assert state.http_client.is_closed
+
+
+def test_shutdown_flushes_sentry_uploads_before_draining_concurrency_group(tmp_path: Path) -> None:
+    """The Sentry / S3 upload flush must run BEFORE the concurrency-group drain.
+
+    The drain can block on a wedged strand up to the group's shutdown timeout, and
+    the supervising Electron shell force-kills the backend partway through it -- so
+    a flush placed *after* the drain routinely never runs, abandoning in-flight
+    bug-report / traceback uploads mid-request (the S3 object never lands). Assert
+    the ordering by observing the two log lines each step emits: the flush logs
+    "Checking whether S3 uploads..." and the drain is announced by "Exiting root
+    concurrency group...".
+    """
+    order: list[str] = []
+
+    def _record(message: Any) -> None:
+        text = message.record["message"]
+        if "Checking whether S3 uploads" in text:
+            order.append("flush")
+        elif "Exiting root concurrency group" in text:
+            order.append("drain")
+
+    sink_id = logger.add(_record, level=0)
+    # A real, *entered* group so its ``__exit__`` drains cleanly (no strands to
+    # wait on) instead of raising on a never-activated group.
+    concurrency_group = ConcurrencyGroup(name="server-test-shutdown-order")
+    concurrency_group.__enter__()
+    try:
+        state = DesktopClientState(
+            auth_store=FileAuthStore(data_directory=tmp_path / "auth"),
+            backend_resolver=MngrCliBackendResolver(),
+            root_concurrency_group=concurrency_group,
+        )
+        _shutdown_desktop_client(state, is_externally_managed_client=True)
+    finally:
+        logger.remove(sink_id)
+
+    assert order == ["flush", "drain"], f"the upload flush must precede the concurrency-group drain, got: {order!r}"
 
 
 def test_runtime_leaves_externally_managed_http_client_untouched(tmp_path: Path) -> None:
