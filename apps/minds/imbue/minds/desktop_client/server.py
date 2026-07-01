@@ -126,6 +126,18 @@ def _shutdown_desktop_client(state: DesktopClientState, is_externally_managed_cl
     # Terminate the idle pre-warmed mngr process so it doesn't wait out the
     # full shutdown timeout blocked reading its socket for the next request.
     get_default_mngr_caller().stop()
+    # Flush Sentry and any pending S3 attachment uploads *before* draining the
+    # concurrency group. The drain below can block up to the group's full
+    # shutdown timeout on a wedged strand, and in practice the supervising
+    # Electron shell force-kills the process partway through it -- so a flush
+    # placed after the drain routinely never runs, and in-flight bug-report /
+    # traceback uploads are abandoned mid-request (the S3 object never lands).
+    # Everything that produces a Sentry *event* has already run by this point;
+    # the drain itself only ever logs warnings (breadcrumbs, not events), so
+    # nothing of value is lost by flushing first. The flush is internally bounded
+    # by a short timeout, so it cannot itself stall the exit. No-op when Sentry
+    # was never initialized.
+    flush_sentry_on_shutdown()
     # Exit the root ConcurrencyGroup, waiting up to its shutdown timeout for any
     # still-in-flight strands (e.g. a detached tunnel-setup task) to finish.
     root_concurrency_group: ConcurrencyGroup | None = state.root_concurrency_group
@@ -137,10 +149,6 @@ def _shutdown_desktop_client(state: DesktopClientState, is_externally_managed_cl
             # Strands reported failures or timed out during shutdown; log but
             # don't propagate so other cleanup can run.
             logger.warning("Root concurrency group exit reported errors: {}", exc)
-    # Last: flush Sentry and any pending S3 attachment uploads so errors captured
-    # during the session (including any logged above during teardown) are sent
-    # before the process exits. No-op when Sentry was never initialized.
-    flush_sentry_on_shutdown()
 
 
 def serve_desktop_client(app: Flask, state: DesktopClientState, host: str, port: int) -> None:
@@ -163,6 +171,14 @@ def serve_desktop_client(app: Flask, state: DesktopClientState, host: str, port:
         # Flip the flag and wake the SSE loops BEFORE stopping the server so
         # their generators return cleanly instead of being cut off mid-stream.
         state.shutdown_event.set()
+        # The mngr forward child shares our process group, so this same signal
+        # reaches it too and it can exit (code -SIGTERM) before the ordered
+        # teardown below reaches ``consumer.terminate()``. Mark its shutdown
+        # intentional now so the consumer's lifecycle watcher does not misreport
+        # that expected exit as a dead pipeline and flip the whole app to the
+        # terminal BLOCKED "Restart Minds" takeover screen on the way down.
+        if state.envelope_stream_consumer is not None:
+            state.envelope_stream_consumer.note_shutdown_requested()
         _wake_sse_handlers(state)
         # ``stop()`` blocks until the serve loop winds down and must run on a
         # different thread than the one calling ``serve()``.

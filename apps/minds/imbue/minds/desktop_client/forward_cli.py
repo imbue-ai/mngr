@@ -252,6 +252,17 @@ class EnvelopeStreamConsumer(MutableModel):
         with self._lock:
             return self._listening_port
 
+    def note_shutdown_requested(self) -> None:
+        """Mark a pending subprocess exit as expected rather than a dead pipeline.
+
+        Sets the same ``_intentional_shutdown`` flag as :meth:`terminate`, but
+        without signalling the subprocess. If the subprocess then exits before
+        :meth:`terminate` runs, :meth:`_wait_and_report_exit` treats that exit as
+        an expected shutdown and does not fire the ``on_unexpected_exit``
+        callbacks. Idempotent.
+        """
+        self._intentional_shutdown = True
+
     def terminate(self) -> None:
         """Stop the plugin subprocess (SIGTERM, then SIGKILL on timeout).
 

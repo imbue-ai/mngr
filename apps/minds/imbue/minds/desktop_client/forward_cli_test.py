@@ -678,6 +678,33 @@ def test_intentional_terminate_does_not_report_exit() -> None:
     assert reported == [], f"Intentional shutdown should not report an exit, got: {reported!r}"
 
 
+def test_note_shutdown_requested_suppresses_exit_report() -> None:
+    """After ``note_shutdown_requested()``, a subprocess exit must not be reported.
+
+    On a signal-driven shutdown the mngr forward child (which shares minds'
+    process group) can be killed by the same SIGTERM and exit with code -15
+    *before* the ordered teardown reaches ``terminate()``. The SIGTERM handler
+    calls ``note_shutdown_requested()`` first; without honoring it the lifecycle
+    watcher would misreport that expected exit as a dead pipeline and latch the
+    app-global BLOCKED takeover screen mid-shutdown.
+    """
+    resolver = MngrCliBackendResolver()
+    consumer = EnvelopeStreamConsumer(resolver=resolver)
+    reported: list[int] = []
+    consumer.add_on_unexpected_exit_callback(reported.append)
+    fake = _FakeProcess(pid=4242)
+    # Simulate the process-group SIGTERM killing the child: exit code -15.
+    fake.returncode = -15
+    _attach_fake(consumer, fake)
+
+    # The signal handler marks the shutdown intentional before the child's exit
+    # is observed (terminate() has not been called).
+    consumer.note_shutdown_requested()
+    consumer._wait_and_report_exit()
+
+    assert reported == [], f"A signalled shutdown should not report an exit, got: {reported!r}"
+
+
 def test_unintentional_subprocess_exit_reports_to_callback() -> None:
     """If the subprocess exits without minds calling terminate(), the lifecycle
     watcher reports the exit code once to the on_unexpected_exit callbacks so
