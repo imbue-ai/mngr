@@ -23,8 +23,9 @@
 {% set _scripts %}
 {# Per-modal overlay modules register themselves in window.MINDS_OVERLAY_MODALS
    before overlay.js processes any show command. auth.js exposes
-   initSigninAuthForm; overlay_signin.js registers the sign-in modal. Each newly
-   migrated modal adds its module here. #}
+   initSigninAuthForm; overlay_signin.js registers the sign-in modal and
+   overlay_help.js registers the help modal. Each newly migrated modal adds its
+   module here. #}
 <script src="/_static/auth.js" defer></script>
 <script src="/_static/overlay_signin.js" defer></script>
 <script src="/_static/overlay_help.js" defer></script>
