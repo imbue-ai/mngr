@@ -2065,7 +2065,8 @@ def test_render_help_page_fragment_omits_shell_and_scripts_and_exposes_data() ->
     )
     assert "<!DOCTYPE" not in fragment
     assert "<html" not in fragment
-    assert "/help/report" not in fragment  # the inline submit script is gone
+    # the inline submit script is gone from the fragment
+    assert "/help/report" not in fragment
     assert 'onclick="onHelpBackdropClick' not in fragment
     assert 'data-workspace-agent-id="agent-00000000000000000000000000000001"' in fragment
     assert 'data-include-logs="false"' in fragment
