@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       commit_sha:
-        description: 'Commit SHA (or branch / tag) to verify. Empty -> mngr main HEAD at trigger time (matches the scheduled-cron behavior). The build job looks for an existing ToDesktop build for this SHA and reuses it; otherwise it packages a fresh one. Verify always runs against a bundle built from THIS SHA -- no implicit fallback to released or arbitrary URLs.'
+        description: 'mngr commit to verify: full 40-char SHA, branch, or tag. Empty -> mngr main HEAD at trigger time (matches the scheduled-cron behavior). A branch / tag is frozen to its SHA once, at run start (check_should_run); checkout, build reuse, the green marker, and the slack message all use that frozen SHA, so commits pushed to the ref after trigger are not picked up. The build job looks for an existing ToDesktop build for the frozen SHA and reuses it; otherwise it packages a fresh one. Verify always runs against a bundle built from THIS SHA -- no implicit fallback to released or arbitrary URLs.'
         required: false
         default: ''
       skip_slack_flow:
@@ -13,7 +13,7 @@ on:
         required: false
         default: false
       template_ref:
-        description: "forever-claude-template ref (branch / tag / SHA) the agent is created from. Empty -> `main`. Pass the FALLBACK_BRANCH tag (e.g. `v0.3.0`) for the production path, `main` for the user-default path, or a specific SHA for replay. Agent runtime behavior is a function of (minds binary, FCT template); pin both for reproducible replays."
+        description: "forever-claude-template commit the agent is created from: full 40-char SHA, branch, or tag. Empty -> `main`. Frozen to a SHA once, at run start (check_should_run); agent creation, the green marker, and the slack message all use that frozen SHA, so the run is immune to the ref moving mid-run. A SHA input must be reachable from some ref in the FCT repo (a commit orphaned by force-push is not fetchable). Agent runtime behavior is a function of (minds binary, FCT template); pin both for reproducible replays. SHA-based creates need a binary built from mngr 02bb71b44 (2026-06-11) or later -- older binaries clone with `git clone --branch`, which rejects SHAs."
         required: false
         default: ''
       template_url:
@@ -52,10 +52,14 @@ permissions:
   actions: read
 
 jobs:
-  # Free Linux job that decides whether the rest of the pipeline runs.
-  # Fingerprints the (mngr main HEAD, FCT main HEAD) pair and looks for
-  # an actions/cache entry keyed by that fingerprint. A cache hit means
-  # the last green run already verified this exact pair, so we skip the
+  # Free Linux job with two roles. (1) Freeze point: resolves the mngr +
+  # FCT inputs (branch / tag / SHA) to full SHAs exactly once; every
+  # downstream job consumes the `mngr_sha` / `fct_sha` outputs, never the
+  # raw inputs, so a moving ref like `main` cannot drift between resolve
+  # time and use time (the build takes ~15-45 min). (2) Skip decision:
+  # fingerprints the frozen (mngr, FCT) pair and looks for an
+  # actions/cache entry keyed by that fingerprint. A cache hit means the
+  # last green run already verified this exact pair, so we skip the
   # expensive jobs. The cache action only checks existence
   # (`lookup-only: true`), so no download happens here.
   check_should_run:
@@ -200,10 +204,13 @@ jobs:
             exit 1
           fi
           echo "TODESKTOP_ACCESS_TOKEN length=${#TODESKTOP_ACCESS_TOKEN}, TODESKTOP_EMAIL length=${#TODESKTOP_EMAIL}"
-      - name: checkout @ ${{ inputs.commit_sha || github.sha }}
+      # Checkout the frozen SHA, not the raw input: a branch input was
+      # resolved once in check_should_run, so a push to it mid-run can't
+      # change what gets built.
+      - name: checkout @ ${{ needs.check_should_run.outputs.mngr_sha }}
         uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.commit_sha || github.sha }}
+          ref: ${{ needs.check_should_run.outputs.mngr_sha }}
       - name: setup node
         uses: actions/setup-node@v6
         with:
@@ -224,18 +231,11 @@ jobs:
         run: |
           APP_ID=$(node -e "console.log(require('./todesktop.js').id)")
           echo "APP_ID=$APP_ID" >> "$GITHUB_ENV"
-      - name: resolve full commit_sha (input may be a branch/tag)
-        id: sha
-        working-directory: apps/minds
-        run: |
-          FULL_SHA=$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)
-          echo "full_sha=$FULL_SHA" >> "$GITHUB_OUTPUT"
-          echo "Resolved input ${{ inputs.commit_sha || github.sha }} -> $FULL_SHA"
       - name: check for existing ToDesktop build matching this commit
         id: existing
         working-directory: apps/minds
         env:
-          TARGET_SHA: ${{ steps.sha.outputs.full_sha }}
+          TARGET_SHA: ${{ needs.check_should_run.outputs.mngr_sha }}
         run: |
           set -o pipefail
           # ToDesktop returns versionControlInfo.commitId on each build via
@@ -362,7 +362,7 @@ jobs:
           {
             echo "## Build result ($SRC)"
             echo ""
-            echo "- commit: \`${{ inputs.commit_sha || github.sha }}\` (resolved \`${{ steps.sha.outputs.full_sha }}\`)"
+            echo "- commit: \`${{ needs.check_should_run.outputs.mngr_ref }}\` (frozen \`${{ needs.check_should_run.outputs.mngr_sha }}\`)"
             echo "- build_id: \`${BID:-<none>}\`"
             echo "- url: ${URL:-<none>}"
             echo "- dashboard: https://app.todesktop.com/apps/${APP_ID}/builds/${BID}"
@@ -447,9 +447,9 @@ jobs:
             exit 1
           fi
           if [[ "$REUSED" == "true" ]]; then
-            SRC='reused build (commit ${{ inputs.commit_sha || github.sha }}, build_id ${{ needs.build.outputs.build_id }})'
+            SRC='reused build (commit ${{ needs.check_should_run.outputs.mngr_sha }}, build_id ${{ needs.build.outputs.build_id }})'
           else
-            SRC='fresh build (commit ${{ inputs.commit_sha || github.sha }}, build_id ${{ needs.build.outputs.build_id }})'
+            SRC='fresh build (commit ${{ needs.check_should_run.outputs.mngr_sha }}, build_id ${{ needs.build.outputs.build_id }})'
           fi
           echo "url=$URL" >> "$GITHUB_OUTPUT"
           echo "Verifying: $URL"
@@ -605,40 +605,26 @@ jobs:
           MINDS_ELECTRON_EXEC_PATH=/Applications/Minds.app/Contents/MacOS/Minds \
             /Applications/Minds.app/Contents/Resources/latchkey/bin/latchkey ensure-browser
 
-      - name: resolve FCT template ref to a full SHA
-        # template_ref is required at the dispatch level (branch / tag /
-        # SHA accepted). Resolve to a full SHA so the run record names
-        # the exact FCT commit the agent was created from; otherwise a
-        # branch ref like `pilot` would silently drift between runs
-        # the same way the empty commit_sha trap did.
-        id: fct_sha
+      - name: report frozen FCT template pin
+        # The FCT input was frozen to a SHA in check_should_run; echo the
+        # pin here so this job's log + summary name the exact FCT commit
+        # the agent is created from. Deliberately NOT re-resolved: a
+        # second ls-remote at this point (after the ~15-45 min build) is
+        # exactly the drift window the freeze exists to close.
         env:
           FCT_REPO_URL: ${{ inputs.template_url || 'https://github.com/imbue-ai/forever-claude-template' }}
-          FCT_REF:      ${{ inputs.template_ref || 'main' }}
+          FCT_REF:      ${{ needs.check_should_run.outputs.fct_ref }}
+          FCT_SHA:      ${{ needs.check_should_run.outputs.fct_sha }}
         run: |
           set -euo pipefail
-          # Resolve FCT_REF to its commit. Peel annotated tags (`^{}`) to the
-          # commit they point at (not the tag object); else take the ref
-          # directly (branch / lightweight tag), or the literal 40-char SHA.
-          if [[ "$FCT_REF" =~ ^[0-9a-f]{40}$ ]]; then
-            FCT_SHA="$FCT_REF"
-          else
-            FCT_SHA=$(git ls-remote "$FCT_REPO_URL" "refs/tags/$FCT_REF^{}" 2>/dev/null | awk '{print $1; exit}')
-            [[ -z "$FCT_SHA" ]] && FCT_SHA=$(git ls-remote "$FCT_REPO_URL" "refs/heads/$FCT_REF" "refs/tags/$FCT_REF" 2>/dev/null | awk '{print $1; exit}')
-            if [[ -z "$FCT_SHA" ]]; then
-              echo "::error::could not resolve FCT ref '$FCT_REF' against $FCT_REPO_URL"
-              exit 1
-            fi
-          fi
-          echo "sha=$FCT_SHA" >> "$GITHUB_OUTPUT"
           {
             echo "## FCT template"
             echo ""
             echo "- repo: \`$FCT_REPO_URL\`"
             echo "- ref input: \`$FCT_REF\`"
-            echo "- resolved SHA: \`$FCT_SHA\`"
+            echo "- frozen SHA: \`$FCT_SHA\`"
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "FCT $FCT_REPO_URL @ $FCT_REF -> $FCT_SHA"
+          echo "FCT $FCT_REPO_URL @ $FCT_REF frozen at $FCT_SHA"
 
       - name: launch-to-msg + slack flow (Python)
         env:
@@ -648,21 +634,21 @@ jobs:
           # session for depth rather than spinning a separate workflow per
           # scenario.
           WORKSPACE_COUNT:    "2"
-          # Pin the FCT ref the binary creates against to the `template_ref`
-          # dispatch input. Without this, minds falls back to
-          # `FALLBACK_BRANCH = "v0.2.35"` (templates.py) regardless of what the
-          # workflow_dispatch input says, so a `template_ref=main` run silently
-          # exercises v0.2.35 instead.
+          # Pin the FCT commit the binary creates against to the SHA frozen
+          # in check_should_run. Without this, minds falls back to
+          # templates.py's FALLBACK_BRANCH regardless of what the
+          # workflow_dispatch input says.
           # MINDS_WORKSPACE_BRANCH is gated by MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1
           # in templates._operator_workspace_default (an end-user `minds run` ignores
           # a stray MINDS_WORKSPACE_* in the shell unless explicitly opted in).
-          # We pass the branch / tag name (not the resolved SHA) because the
-          # binary's `git clone --branch <ref>` only accepts branch names and
-          # tags. The resolved SHA is still recorded in the GHA step summary
-          # for audit. Moving refs (e.g. `main`) thus float between runs --
-          # the trade-off is "must clone-able" vs "must be byte-identical".
+          # We pass the frozen SHA, not the ref name, so what the agent is
+          # created from is byte-identical to what the pair key, green
+          # marker, and slack message name -- a ref like `main` re-resolved
+          # at clone time could have moved since the freeze. The binary's
+          # clone_git_repo fetches branch / tag / SHA uniformly (git fetch +
+          # FETCH_HEAD checkout; requires mngr 02bb71b44 or later).
           MINDS_USE_LOCAL_WORKSPACE_DEFAULTS: "1"
-          MINDS_WORKSPACE_BRANCH: ${{ inputs.template_ref || 'main' }}
+          MINDS_WORKSPACE_BRANCH: ${{ needs.check_should_run.outputs.fct_sha }}
         run: |
           # pipefail is REQUIRED: without it, the pipeline below exits
           # with tee's status (always 0), so an e2e failure (exit 1) is
@@ -957,10 +943,10 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
-      # Checkout the trigger ref (not commit_sha) so the e2e harness
-      # (playwright spec + fixtures) is the version being iterated, matching
-      # launch_to_msg. The binary under test is pinned to commit_sha via the
-      # build artifact below, not this checkout.
+      # Checkout the trigger ref (not the frozen mngr SHA) so the e2e
+      # harness (playwright spec + fixtures) is the version being iterated,
+      # matching launch_to_msg. The binary under test is pinned to the
+      # frozen mngr SHA via the build artifact below, not this checkout.
       - uses: actions/checkout@v6
       - name: install minds.app from the build job's artifact
         run: |
