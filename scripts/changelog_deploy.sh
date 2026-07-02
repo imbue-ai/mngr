@@ -92,20 +92,21 @@ if ! command -v vault >/dev/null 2>&1; then
     exit 1
 fi
 
-# Echo the value of the split-layout secret at secrets/<$1>/<$2>, or exit
-# non-zero. Secrets use the split layout: each key is its own leaf at
-# `<service>/<KEY>` holding a single `value` field. pipefail propagates a
+# Echo the `value` field of the secret at secrets/<$1>, or exit non-zero. In our
+# Vault schema the secret name is the last component of the path and the actual
+# value lives in a single `value` field alongside optional metadata like `owner`
+# (see docs/secret_organization.md in the vault repo). pipefail propagates a
 # failed `vault kv get` (e.g. not logged in); `jq -e` with the `// "" | select`
 # guard exits non-zero when the value is absent or empty. The value is never printed.
 read_vault_secret() {
-    vault kv get -format=json -mount=secrets "$1/$2" | jq -er '.data.data.value // "" | select(. != "")'
+    vault kv get -format=json -mount=secrets "$1" | jq -er '.data.data.value // "" | select(. != "")'
 }
 
-if ! GH_TOKEN=$(read_vault_secret mngr/dev GH_TOKEN); then
+if ! GH_TOKEN=$(read_vault_secret mngr/dev/GH_TOKEN); then
     echo "Error: could not read GH_TOKEN from secrets/mngr/dev/GH_TOKEN. Run 'vault login -method=oidc' and confirm the entry exists." >&2
     exit 1
 fi
-if ! ANTHROPIC_API_KEY=$(read_vault_secret mngr/ci ANTHROPIC_API_KEY); then
+if ! ANTHROPIC_API_KEY=$(read_vault_secret mngr/ci/ANTHROPIC_API_KEY); then
     echo "Error: could not read ANTHROPIC_API_KEY from secrets/mngr/ci/ANTHROPIC_API_KEY. Run 'vault login -method=oidc' and confirm the entry exists." >&2
     exit 1
 fi
