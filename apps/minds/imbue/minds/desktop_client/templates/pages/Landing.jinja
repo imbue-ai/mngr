@@ -94,10 +94,14 @@
       var row = button.closest('[data-agent-id]');
       if (!row) return;
       var agentId = row.dataset.agentId;
-      if (isElectronShell) {
-        // Route through the content relay -> main process, which opens (or
-        // focuses) a dedicated window for this workspace. Same channel the
-        // sidebar's open-in-new arrow uses.
+      if (window.minds && window.minds.openWorkspaceInNewWindow) {
+        // Trusted local page on the chrome surface: call the shell bridge
+        // directly (opens/focuses a dedicated window for this workspace).
+        window.minds.openWorkspaceInNewWindow(agentId);
+      } else if (isElectronShell) {
+        // Transitional fallback while this page may still render in the caged
+        // content view (no window.minds): route through the content relay ->
+        // main process. Same channel the sidebar's open-in-new arrow uses.
         window.postMessage({ type: 'minds:open-workspace-in-new-window', agentId: agentId }, '*');
       } else {
         // Plain browser: no native windows, so open the workspace URL in a
@@ -189,11 +193,17 @@
       if (!row) return;
       var agentId = row.dataset.agentId;
       var name = row.dataset.mindName || agentId;
-      // In the desktop shell, route through the relay so the main process can
-      // show a native confirmation dialog and issue the stop itself (no in-page
-      // optimistic flip -- the user may still cancel that dialog, and the result
-      // arrives over the SSE). In a plain browser there is no shell, so confirm
-      // in-page and stop via fetch with an optimistic transient.
+      // In the desktop shell, ask the main process to show a native
+      // confirmation dialog and issue the stop itself (no in-page optimistic
+      // flip -- the user may still cancel that dialog, and the result arrives
+      // over the SSE). Prefer the shell bridge (trusted local page on the chrome
+      // surface); fall back to the content relay while this page may still
+      // render in the caged content view. In a plain browser there is no shell,
+      // so confirm in-page and stop via fetch with an optimistic transient.
+      if (window.minds && window.minds.confirmStopMind) {
+        window.minds.confirmStopMind(agentId, name);
+        return;
+      }
       if (isElectronShell) {
         window.postMessage({ type: 'minds:confirm-stop-mind', agentId: agentId, name: name }, '*');
         return;
@@ -629,7 +639,7 @@
   })();
 </script>
 {% endset %}
-<Base title="Workspaces" scripts={{ _scripts }}>
+<ChromeShell title="Workspaces" scripts={{ _scripts }}>
   <PageContainer>
     {% if agent_ids %}
       <div class="flex items-center justify-between mb-4" data-landing-agent-ids="{{ agent_ids | map('string') | join(',') }}">
@@ -766,4 +776,4 @@
       </div>
     </section>
   </PageContainer>
-</Base>
+</ChromeShell>

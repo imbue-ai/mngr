@@ -1,29 +1,49 @@
-{#def title="Minds", is_mac=False, is_authenticated=False, mngr_forward_origin="", body_class="font-sans antialiased", body_style="background-color: var(--titlebar-bg, var(--c-surface-primary));", head="", scripts="" #}
+{#def title="Minds", is_mac=None, is_authenticated=False, mngr_forward_origin=None, is_agent_content_surface=False, body_class="", body_style="", head="", scripts="" #}
 {#
   Shared trusted app shell: the fixed titlebar + browser-mode floating sidebar
   + accent / chrome.js wiring, wrapping a page body passed in the content slot.
 
-  This is the trusted app chrome. It is used by pages.Chrome (which fills the
-  slot with the content iframe -- the agent-content surface in browser mode) and
-  by the trusted local/native pages (which fill it with their own body). Pulling
-  the shell into one component lets a single edit re-skin every trusted surface.
+  This is the trusted app chrome. Two modes:
 
-  is_mac controls macOS-specific styling (traffic-light spacer, hidden window
-  controls). mngr_forward_origin is exposed to page-level JS via a body data
-  attribute so chrome.js can build workspace links that target the plugin's port
-  directly. In Electron mode the browser-mode sidebar block is hidden via JS; the
-  content is a separate WebContentsView and window.minds exposes IPC adapters.
+  - Local page (default, ``is_agent_content_surface=False``): a trusted
+    local/native page (Landing, Create, Settings, ...) renders its own body in
+    the slot. The body is pushed below the fixed titlebar (``pt-[38px]``) and
+    scrolls normally; the surface is the neutral page background.
+  - Agent content surface (``is_agent_content_surface=True``): pages.Chrome
+    fills the slot with the content iframe (the browser-mode agent surface). The
+    document is locked to the viewport (``overflow: hidden``) and the body
+    background tracks ``--titlebar-bg`` so an active workspace accent bleeds
+    through the content surface's rounded corners.
 
-  head / scripts let a page append its own head tags / script tags; they are
-  emitted after the shell's own (workspace_accent.js, sidebar_workspace_row.js,
-  chrome.js). body_class / body_style default to the neutral chrome surface (the
-  body background tracks --titlebar-bg so an active workspace accent bleeds
-  through the content surface's rounded corners); a page may override either.
+  ``is_mac`` (traffic-light spacer + hidden window controls) and
+  ``mngr_forward_origin`` (the body data attribute chrome.js reads to build
+  ``/goto/<agent>/`` links) default to the live-request catalog globals so a
+  trusted page need not thread them through its render function; pages.Chrome
+  passes them explicitly. In Electron mode the browser-mode sidebar block is
+  hidden via JS; the content is a separate WebContentsView and window.minds
+  exposes IPC adapters. ``head`` / ``scripts`` let a page append its own head
+  tags / script tags after the shell's own (workspace_accent.js,
+  sidebar_workspace_row.js, chrome.js).
 #}
+{% set _is_mac = is_mac if is_mac is not none else chrome_is_mac() %}
+{% set _mngr_forward_origin = mngr_forward_origin if mngr_forward_origin is not none else chrome_mngr_forward_origin() %}
+{% if is_agent_content_surface %}
+  {% set _body_class = body_class if body_class else "font-sans antialiased" %}
+  {% set _body_style = body_style if body_style else "background-color: var(--titlebar-bg, var(--c-surface-primary));" %}
+{% else %}
+  {# Local pages: neutral page surface, and the body content sits below the
+     fixed 38px titlebar (which is out of flow). pt-[38px] pairs with a page's
+     own ``min-h-screen`` centering so, under border-box, the centered content
+     lands in the region below the titlebar rather than behind it. #}
+  {% set _body_class = (body_class if body_class else "bg-surface-primary text-primary font-sans antialiased") ~ " pt-[38px]" %}
+  {% set _body_style = body_style %}
+{% endif %}
 {% set _head %}
 <style>
   /* Things that can't easily be expressed as Tailwind utilities. */
+{%- if is_agent_content_surface %}
   html, body { height: 100%; overflow: hidden; }
+{%- endif %}
   #minds-titlebar { -webkit-app-region: drag; }
   #minds-titlebar button { -webkit-app-region: no-drag; }
   /* When the inbox modal (or any modal hosted in the main process's
@@ -39,7 +59,7 @@
 {{ head }}
 {%- endif %}
 {% endset %}
-{% set _body_attrs %}data-is-mac="{{ 'true' if is_mac else 'false' }}" data-is-authenticated="{{ 'true' if is_authenticated else 'false' }}" data-mngr-forward-origin="{{ mngr_forward_origin }}"{% endset %}
+{% set _body_attrs %}data-is-mac="{{ 'true' if _is_mac else 'false' }}" data-is-authenticated="{{ 'true' if is_authenticated else 'false' }}" data-mngr-forward-origin="{{ _mngr_forward_origin }}"{% endset %}
 {% set _scripts %}
 <script src="/_static/workspace_accent.js" defer></script>
 <script src="/_static/sidebar_workspace_row.js" defer></script>
@@ -49,8 +69,8 @@
 {%- endif %}
 {% endset %}
 <Base :title="title"
-      :body_class="body_class"
-      :body_style="body_style"
+      :body_class="_body_class"
+      :body_style="_body_style"
       head={{ _head }}
       body_attrs={{ _body_attrs }}
       scripts={{ _scripts }}>
@@ -69,7 +89,7 @@
        style="background-color: var(--titlebar-bg, var(--c-surface-primary));"
        class="fixed top-0 left-0 right-0 h-[38px] flex items-center select-none z-[100] px-1">
     <div class="flex-1 flex items-center gap-0.5 min-w-0">
-      {% if is_mac %}<div class="w-[72px] shrink-0" aria-hidden="true"></div>{% endif %}
+      {% if _is_mac %}<div class="w-[72px] shrink-0" aria-hidden="true"></div>{% endif %}
       <TitlebarButton id="sidebar-toggle" title="Workspaces"><Icon16 name="menu" /></TitlebarButton>
       <TitlebarButton id="home-btn" title="Home"><Icon16 name="home" /></TitlebarButton>
       <TitlebarButton id="back-btn" title="Back"><Icon16 name="chevron-left" /></TitlebarButton>
@@ -84,7 +104,7 @@
         <Icon16 name="inbox" />
         <Badge :count="0" id="requests-badge" hidden />
       </TitlebarButton>
-      <div class="flex {% if is_mac %}hidden{% endif %}">
+      <div class="flex {% if _is_mac %}hidden{% endif %}">
         <TitlebarButton variant="control" id="min-btn" title="Minimize"><Icon12 name="minimize" /></TitlebarButton>
         <TitlebarButton variant="control" id="max-btn" title="Maximize"><Icon12 name="maximize" /></TitlebarButton>
         <TitlebarButton variant="control" tone="danger" id="close-btn" title="Close"><Icon12 name="close" /></TitlebarButton>

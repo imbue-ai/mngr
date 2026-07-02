@@ -5,6 +5,15 @@
 (function () {
   var isElectron = !!window.minds;
 
+  // A trusted local/native page (Landing, Create, Settings, ...) now renders its
+  // own body directly under the titlebar via ChromeShell and has NO
+  // #content-frame -- it IS the main frame, so navigation is full-page rather
+  // than driving a child iframe (browser) or the content WebContentsView. The
+  // agent-wrapper page (pages.Chrome) and the Electron chrome view both carry a
+  // #content-frame; a local page does not. This holds in both browser and
+  // Electron mode, so it is the single signal for "am I a local page".
+  var isLocalPage = !document.getElementById('content-frame');
+
   // ``mngr forward`` plugin's bare origin (e.g. ``http://localhost:8421``).
   // Workspace links (``/goto/<agent>/``) target the plugin, not minds.
   var mngrForwardOrigin = (document.body && document.body.dataset.mngrForwardOrigin) || '';
@@ -37,14 +46,17 @@
   // -- Navigation adapter ---------------------------------------------------
   function navigateContent(url) {
     if (isElectron) window.minds.navigateContent(url);
+    else if (isLocalPage) window.location = url;
     else document.getElementById('content-frame').src = url;
   }
   function goBack() {
     if (isElectron) window.minds.contentGoBack();
+    else if (isLocalPage) window.history.back();
     else { try { document.getElementById('content-frame').contentWindow.history.back(); } catch (e) {} }
   }
   function goForward() {
     if (isElectron) window.minds.contentGoForward();
+    else if (isLocalPage) window.history.forward();
     else { try { document.getElementById('content-frame').contentWindow.history.forward(); } catch (e) {} }
   }
 
@@ -263,7 +275,10 @@
     document.getElementById('min-btn').onclick = function () { window.minds.minimize(); };
     document.getElementById('max-btn').onclick = function () { window.minds.maximize(); };
     document.getElementById('close-btn').onclick = function () { window.minds.close(); };
-    document.getElementById('content-frame').style.display = 'none';
+    // The agent-wrapper page hides its iframe in Electron (the content is a
+    // separate WebContentsView); a local page has no #content-frame to hide.
+    var electronContentFrame = document.getElementById('content-frame');
+    if (electronContentFrame) electronContentFrame.style.display = 'none';
     document.getElementById('sidebar-backdrop').style.display = 'none';
   } else {
     // Browser mode: backdrop click outside the panel + Escape close the
@@ -326,6 +341,17 @@
     window.minds.onAccentChanged(function (agentId) {
       applyTitleAccent(agentId || null);
     });
+  } else if (isLocalPage) {
+    // Local page in the browser: this page IS the content, so the titlebar
+    // page-title comes from our own document and the accent from our own path
+    // (each full-page navigation re-runs this script). No child iframe to poll,
+    // and a local page never displays agent content, so the displayed-workspace
+    // / recovery-redirect lock stays null. The accent still tracks the WIDER
+    // workspace-scoped screens (``/workspace/<id>/settings``, sharing, ...) via
+    // accentSourceFromPath, painting neutral chrome on general screens.
+    var localTitle = document.getElementById('page-title');
+    if (localTitle) localTitle.textContent = document.title || 'Minds';
+    applyTitleAccent(accentSourceFromPath(window.location.pathname));
   } else {
     setInterval(function () {
       try {

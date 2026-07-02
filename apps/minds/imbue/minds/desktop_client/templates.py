@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Final
 
 from flask import has_app_context
+from flask import request
 from jinja2 import Environment
 from jinja2 import select_autoescape
 from jinjax import Catalog
@@ -171,6 +172,35 @@ def _frontend_sentry_browser_payload() -> dict[str, str] | None:
     return frontend_sentry_browser_payload(is_error_reporting_enabled)
 
 
+def _chrome_is_mac() -> bool:
+    """Catalog-global resolving whether the request's User-Agent indicates macOS.
+
+    The shared ChromeShell titlebar (now on every trusted page, not just the
+    chrome shell) gates its macOS styling (traffic-light spacer, hidden window
+    controls) on this. Resolved per render from the live request rather than
+    threaded through every page's render function. Outside a request (e.g.
+    template unit tests) it defaults to False.
+    """
+    if not has_app_context():
+        return False
+    user_agent = request.headers.get("user-agent", "")
+    return "Macintosh" in user_agent or "Mac OS" in user_agent
+
+
+def _chrome_mngr_forward_origin() -> str:
+    """Catalog-global resolving the bare origin of the ``mngr forward`` plugin.
+
+    Exposed to ChromeShell so any trusted page's titlebar carries the
+    ``data-mngr-forward-origin`` attribute chrome.js reads to build
+    ``/goto/<agent>/`` links, without threading it through each render function.
+    Outside a request (e.g. template unit tests) it defaults to an empty string.
+    """
+    if not has_app_context():
+        return ""
+    port = get_state().mngr_forward_port or 8421
+    return f"http://localhost:{port}"
+
+
 def _build_catalog() -> Catalog:
     """Build the JinjaX Catalog used to render every desktop-client template.
 
@@ -200,6 +230,11 @@ def _build_catalog() -> Catalog:
             # See _frontend_sentry_browser_payload, imbue/minds/utils/sentry/frontend.py,
             # and Base.jinja.
             "frontend_sentry_browser_payload": _frontend_sentry_browser_payload,
+            # Resolved per render so any trusted page's ChromeShell titlebar can
+            # derive its macOS styling + workspace-link origin from the live
+            # request, without threading them through every render function.
+            "chrome_is_mac": _chrome_is_mac,
+            "chrome_mngr_forward_origin": _chrome_mngr_forward_origin,
         },
     )
     catalog.add_folder(str(TEMPLATE_DIR))

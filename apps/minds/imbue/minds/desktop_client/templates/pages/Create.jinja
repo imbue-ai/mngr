@@ -126,9 +126,14 @@
     }
 
     function openSigninModal() {
-      if (isElectronShell) {
-        // Relayed to the main process (content-relay-preload.js), which opens
-        // the shared modal WebContentsView loaded with /auth/signin-modal.
+      if (window.minds && window.minds.openSigninModal) {
+        // Trusted local page on the chrome surface: open the shared modal
+        // overlay (loaded with /auth/signin-modal) via the shell bridge.
+        window.minds.openSigninModal();
+      } else if (isElectronShell) {
+        // Transitional fallback while this page may still render in the caged
+        // content view (no window.minds): relay to the main process
+        // (content-relay-preload.js), which opens the same modal overlay.
         window.postMessage({ type: 'minds:open-signin-modal' }, '*');
       } else {
         window.location.href = '/auth/signin-modal';

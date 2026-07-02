@@ -11,6 +11,7 @@ from imbue.minds.desktop_client.templates import CATALOG
 from imbue.minds.desktop_client.templates import DEFAULT_EXPECTED_CREATION_DURATION_SECONDS
 from imbue.minds.desktop_client.templates import expected_creation_duration_seconds
 from imbue.minds.desktop_client.templates import make_unique_host_name
+from imbue.minds.desktop_client.templates import render_accounts_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
@@ -19,8 +20,10 @@ from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.desktop_client.templates import render_recovery_page
+from imbue.minds.desktop_client.templates import render_settings_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
+from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates import resolve_create_host_name
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
@@ -714,6 +717,45 @@ def test_chrome_shell_renders_titlebar_around_content_without_a_content_iframe()
     # The shell drives the page <title> and the mac traffic-light spacer.
     assert "<title>Settings</title>" in html
     assert 'class="w-[72px] shrink-0"' in html
+
+
+def test_local_pages_render_the_chromeshell_titlebar() -> None:
+    # After the content-in-chrome move, every trusted local page renders the
+    # shared ChromeShell titlebar directly (so the titlebar travels with the page
+    # on the chrome surface). Each is a single document that carries exactly one
+    # titlebar, offsets its body below the fixed 38px titlebar (pt-[38px]), loads
+    # chrome.js, and carries NO content iframe -- that belongs only to the agent
+    # content surface (pages.Chrome).
+    renders = {
+        "Landing": render_landing_page(accessible_agent_ids=()),
+        "Settings": render_settings_page(),
+        "Accounts": render_accounts_page(accounts=[]),
+        "Welcome": render_welcome_page(),
+        "Create": render_create_form(),
+        "Login": render_login_page(),
+    }
+    for name, html in renders.items():
+        assert html.count("<html") == 1, f"{name}: expected exactly one document"
+        assert html.count('id="minds-titlebar"') == 1, f"{name}: expected one ChromeShell titlebar"
+        assert 'id="content-frame"' not in html, f"{name}: local pages carry no content iframe"
+        assert "pt-[38px]" in html, f"{name}: body must sit below the fixed titlebar"
+        assert "/_static/chrome.js" in html, f"{name}: chrome.js drives the titlebar"
+
+
+def test_chrome_shell_local_mode_differs_from_agent_content_surface() -> None:
+    # The two ChromeShell modes render distinct document chrome. The agent
+    # content surface (pages.Chrome) locks the document to the viewport
+    # (overflow: hidden) and bleeds the workspace accent through the body
+    # background; a local page instead uses the neutral page surface and offsets
+    # its scrolling body below the titlebar (pt-[38px]) with no accent bleed.
+    agent = CATALOG.render("ChromeShell", is_agent_content_surface=True, _content="<i>x</i>")
+    local = CATALOG.render("ChromeShell", _content="<i>x</i>")
+    assert "overflow: hidden" in agent
+    assert "var(--titlebar-bg" in agent
+    assert "pt-[38px]" not in agent
+    assert "overflow: hidden" not in local
+    assert "pt-[38px]" in local
+    assert "bg-surface-primary text-primary" in local
 
 
 def test_render_sidebar_page_contains_workspace_list() -> None:
@@ -1655,15 +1697,19 @@ def test_oauth_button_github_uses_github_label_and_glyph() -> None:
 
 def test_page_narrow_container_default_padding_and_max_width() -> None:
     html = CATALOG.render("PageNarrowContainer", title="x", _content="<p>body</p>")
-    # Width/padding only: p-8 + max-w-[420px] + w-full, no surface chrome.
+    # Width/padding only for the content column: p-8 + max-w-[420px] + w-full.
     assert "p-8" in html
     assert "max-w-[420px]" in html
     assert "w-full" in html
     assert "<p>body</p>" in html
-    # No border/rounding/shadow -- this is a plain width container, not a card.
-    assert "rounded-lg" not in html
+    # The content column is a plain width container, not a card -- no raised card
+    # shadow or default-border card edge. (``rounded-lg`` is no longer a valid
+    # negative assertion: the page now renders the shared ChromeShell titlebar +
+    # sidebar, whose floating menu legitimately carries ``rounded-lg``.)
     assert "shadow-raised" not in html
     assert "border border-default" not in html
+    # The narrow page now carries the trusted app shell (titlebar) via ChromeShell.
+    assert "minds-titlebar" in html
     # The body is flex-centered around the column.
     assert "flex items-center justify-center min-h-screen" in html
 
