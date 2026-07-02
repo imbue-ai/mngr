@@ -78,7 +78,8 @@ generated exactly as they are in a template. Rule of thumb:
 
 - **Used in a single place** (a one-off element built in one JS file):
   write the utilities inline on the element. No CSS class -- see the
-  workspace-accent dot colored per row in `sidebar.js` for an example.
+  workspace-accent dot colored per row in `sidebar_workspace_row.js` for
+  an example.
 - **A shape repeated across files** (or that must stay in sync with a
   JinjaX component): give it a named class in `static/app.css` and define
   it with `@apply` on the same utilities, then reference the class from
