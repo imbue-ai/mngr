@@ -75,8 +75,14 @@
         b.textContent = el.getAttribute('data-tooltip');
         var vw = window.innerWidth;
         var vh = window.innerHeight;
-        // Measure at natural width (clear any width fixed by a prior show).
+        // Measure at natural width (clear any width fixed by a prior show). Also
+        // reset left/top to 0 first: the bubble is position:fixed, so a stale
+        // large left from a prior show would cap its shrink-to-fit width at
+        // (viewport - left) and wrap the label, mis-measuring w/h (overlay.js
+        // resets the same way before measuring).
         b.style.width = '';
+        b.style.left = '0';
+        b.style.top = '0';
         b.style.visibility = 'hidden';
         b.style.display = 'inline-flex';
         var w = b.offsetWidth;

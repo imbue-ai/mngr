@@ -60,9 +60,11 @@
 <body class="{{ body_class }}" style="{{ body_style }}" {{ body_attrs }}>
   {{ content }}
   {{ scripts }}
-  {# Custom tooltips for any element carrying ``data-tooltip``. Wires up only
-     where the ``window.minds`` bridge exists (the chrome titlebar + the overlay
-     modal pages); a safe no-op on content-view pages that lack it. See
+  {# Custom tooltips for any element carrying ``data-tooltip``. Wires the
+     triggers on every page and picks a render backend by environment: the
+     overlay surface where the ``window.minds`` bridge exists (the chrome
+     titlebar + the overlay modal pages), or an in-page bubble otherwise (e.g.
+     the landing workspace-row buttons in the bridge-less content view). See
      templates/README.md's "CSS classes for JS-rendered surfaces" note. #}
   <script src="/_static/tooltip_triggers.js" defer></script>
 </body>
