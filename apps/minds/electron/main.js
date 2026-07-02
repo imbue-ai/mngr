@@ -597,9 +597,15 @@ function createBundle() {
   // lock) while still tinting for the wider workspace-scoped screens.
   const onChromeNavigate = (url) => {
     if (bundle.isErrorState) return;
-    let pathname = null;
-    try { pathname = new URL(url).pathname; } catch { return; }
-    if (pathname === '/_chrome') return;
+    let parsed = null;
+    try { parsed = new URL(url); } catch { return; }
+    // Ignore the loading/quitting/error takeover pages (shell.html, a file://
+    // URL): they are not a trusted local page and must not overwrite the
+    // window's current URL / accent / current-workspace. Recording them would
+    // clobber preErrorUrl -- e.g. the quitting screen loads while isErrorState
+    // is false -- leaving nothing to restore the window to on a quit backout.
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return;
+    if (parsed.pathname === '/_chrome') return;
     bundle.currentContentUrl = url;
     bundle.preErrorUrl = url;
     if (bundle.currentWorkspaceId !== null) {
@@ -1350,9 +1356,15 @@ function restoreFromQuittingInAllWindows() {
   for (const bundle of bundles) {
     if (bundle.window.isDestroyed()) continue;
     bundle.isQuittingState = false;
-    if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed() && backendBaseUrl) {
-      bundle.chromeView.webContents.loadURL(backendBaseUrl + '/_chrome');
-    }
+    // Route the window back to the page it was on before the quitting takeover,
+    // via navigateBundle so it lands on the right surface: an agent URL reloads
+    // the /_chrome wrapper + re-shows the content view, while a trusted local
+    // page (Home, Create, settings, recovery, ...) renders straight in the
+    // chrome view. Hardcoding /_chrome here would leave a local-page window
+    // showing the empty agent wrapper over a hidden content view (a blank body).
+    const target = bundle.preErrorUrl || bundle.currentContentUrl
+      || (backendBaseUrl ? backendBaseUrl + '/' : null);
+    if (target) navigateBundle(bundle, target);
     if (bundle.modalView && bundle.modalVisible && !bundle.modalView.webContents.isDestroyed()) {
       bundle.modalView.setVisible(true);
     }
