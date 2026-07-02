@@ -1,4 +1,4 @@
-{#def mngr_forward_origin, trigger_x=0, trigger_y=0, trigger_w=0, trigger_h=38, offset_x=-2, offset_y=2 #}
+{#def mngr_forward_origin, trigger_x=0, trigger_y=0, trigger_w=0, trigger_h=38, offset_x=-2, offset_y=2, is_fragment=false #}
 {#
   Standalone sidebar page loaded into the shared modal WebContentsView
   when the user opens the sidebar. The modal view covers the full window
@@ -41,8 +41,13 @@
 <Base title="Workspaces"
       body_class="font-sans antialiased bg-transparent"
       body_attrs={{ _body_attrs }}
-      scripts={{ _scripts }}>
-  <div id="sidebar-backdrop" class="fixed inset-0">
+      scripts={{ _scripts }}
+      :bare="is_fragment">
+  {# In fragment mode the overlay host owns the backdrop click-outside dismiss
+     and reads mngr_forward_origin from the backdrop's data attribute (the full
+     page also sets it on <body> via body_attrs for sidebar.js). #}
+  <div id="sidebar-backdrop" class="fixed inset-0"
+       data-mngr-forward-origin="{{ mngr_forward_origin }}">
     <div id="sidebar-menu"
          style="left:{{ _menu_left }}px; top:{{ _menu_top }}px;"
          class="dark absolute w-[280px] flex flex-col gap-0.5 p-1 rounded-lg border border-subtle bg-surface-primary shadow-overlay overflow-hidden">

@@ -936,6 +936,7 @@ def _handle_chrome_sidebar() -> Response:
         trigger_h=_int_query_param("trigger_h", 38),
         offset_x=_int_query_param("offset_x", -2),
         offset_y=_int_query_param("offset_y", 2),
+        is_fragment=request.args.get("fragment") == "1",
     )
     return make_html_response(content=html)
 

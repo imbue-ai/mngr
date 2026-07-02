@@ -1449,6 +1449,7 @@ def render_sidebar_page(
     trigger_h: int = 38,
     offset_x: int = -2,
     offset_y: int = 2,
+    is_fragment: bool = False,
 ) -> str:
     """Render the standalone sidebar page loaded into the shared modal WebContentsView.
 
@@ -1476,6 +1477,7 @@ def render_sidebar_page(
         trigger_h=trigger_h,
         offset_x=offset_x,
         offset_y=offset_y,
+        is_fragment=is_fragment,
     )
 
 

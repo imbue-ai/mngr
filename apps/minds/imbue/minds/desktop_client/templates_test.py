@@ -2087,3 +2087,36 @@ def test_render_help_page_fragment_omits_shell_and_scripts_and_exposes_data() ->
     assert "<!DOCTYPE" in full
     assert "/help/report" in full
     assert 'onclick="onHelpBackdropClick(event)"' in full
+
+
+def test_render_sidebar_page_fragment_omits_shell_and_exposes_forward_origin() -> None:
+    # ``?fragment=1`` renders only the workspace-menu panel so the overlay host
+    # can inject it: no document shell and no scripts (its JS lives in
+    # overlay_sidebar.js). The server still positions the menu via inline style
+    # from the trigger geometry, and mngr_forward_origin moves onto a data
+    # attribute on the backdrop (the full page also sets it on <body>).
+    fragment = render_sidebar_page(
+        mngr_forward_origin="http://localhost:8421",
+        trigger_x=10,
+        trigger_y=38,
+        is_fragment=True,
+    )
+    assert "<!DOCTYPE" not in fragment
+    assert "<html" not in fragment
+    assert "/_static/sidebar.js" not in fragment
+    assert 'data-mngr-forward-origin="http://localhost:8421"' in fragment
+    # The panel content + its server-rendered position are still present.
+    assert 'id="sidebar-backdrop"' in fragment
+    assert 'id="sidebar-workspaces"' in fragment
+    # menu left = trigger_x(10) + default offset_x(-2)
+    assert "left:8px" in fragment
+
+    # The full page is unchanged: shell + the page's own scripts.
+    full = render_sidebar_page(
+        mngr_forward_origin="http://localhost:8421",
+        trigger_x=10,
+        trigger_y=38,
+        is_fragment=False,
+    )
+    assert "<!DOCTYPE" in full
+    assert "/_static/sidebar.js" in full

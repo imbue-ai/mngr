@@ -45,6 +45,65 @@
   var root = document.getElementById('overlay-root');
   if (!root || !window.minds) return;
 
+  // -- Host chrome-state cache ------------------------------------------
+  //
+  // SSE-driven modals (the workspace menu, the inbox) render from the same state
+  // the chrome view uses -- the workspace list, request counts, the current
+  // workspace. main broadcasts those streams to this always-warm host on every
+  // change (see broadcastChromeEvent / sendToOverlayFrames in main.js), so the
+  // host subscribes ONCE and caches the latest of each. A modal's init then
+  // reads the current value synchronously the instant it opens -- no per-frame
+  // priming handshake -- and stays live via a subscription it drops on close.
+  // Exposed to the per-modal modules as window.MINDS_OVERLAY_HOST.
+  var latestChromeEventByType = {};
+  var latestCurrentWorkspaceId = null;
+  var chromeEventListeners = [];
+  var currentWorkspaceListeners = [];
+  var contentUrlListeners = [];
+
+  function notifyListeners(listeners, arg) {
+    // Copy first: a listener may unsubscribe (mutating the array) mid-dispatch.
+    listeners.slice().forEach(function (fn) {
+      try { fn(arg); } catch (e) { /* one modal's handler must not break the rest */ }
+    });
+  }
+  function addListener(listeners, fn) {
+    listeners.push(fn);
+    return function () {
+      var index = listeners.indexOf(fn);
+      if (index >= 0) listeners.splice(index, 1);
+    };
+  }
+
+  if (window.minds.onChromeEvent) {
+    window.minds.onChromeEvent(function (data) {
+      if (data && data.type) latestChromeEventByType[data.type] = data;
+      notifyListeners(chromeEventListeners, data);
+    });
+  }
+  if (window.minds.onCurrentWorkspaceChanged) {
+    window.minds.onCurrentWorkspaceChanged(function (agentId) {
+      latestCurrentWorkspaceId = agentId || null;
+      notifyListeners(currentWorkspaceListeners, latestCurrentWorkspaceId);
+    });
+  }
+  if (window.minds.onContentURLChange) {
+    window.minds.onContentURLChange(function (url) {
+      notifyListeners(contentUrlListeners, url);
+    });
+  }
+
+  window.MINDS_OVERLAY_HOST = {
+    // Latest cached payload for a chrome-event type (e.g. 'workspaces',
+    // 'requests', 'auth_status'), or null if none has arrived yet.
+    getChromeEvent: function (type) { return latestChromeEventByType[type] || null; },
+    getCurrentWorkspaceId: function () { return latestCurrentWorkspaceId; },
+    // Each returns an unsubscribe function the modal calls on destroy.
+    onChromeEvent: function (fn) { return addListener(chromeEventListeners, fn); },
+    onCurrentWorkspaceChanged: function (fn) { return addListener(currentWorkspaceListeners, fn); },
+    onContentURLChange: function (fn) { return addListener(contentUrlListeners, fn); },
+  };
+
   // -- Modals -----------------------------------------------------------
   //
   // Two paths coexist during the iframe -> in-page migration:
