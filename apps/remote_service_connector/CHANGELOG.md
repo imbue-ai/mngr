@@ -31,6 +31,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `POST /hosts/{id}/release` now actually cleans up the leased pool host instead of just marking it `released`. The release route runs a synchronous, idempotent chain inline: flips the row to a new `removing` status, strips per-lease OVH IAM tags (`minds_env`, `mngr-host-id`) while keeping `mngr-provider=ovh`, cancels the VPS in OVH (`deleteAtExpiration=true`, by service name), then deletes the DB row. An already-gone row is treated as `already_released`. OVH calls are made directly via the official `ovh` SDK (added to the image); the connector now receives an `ovh-<tier>` Modal secret.
 - Changed: `cleanup_released_hosts.py` rewritten into a broad, dry-run-by-default operator runbook that tag-scans the OVH account and cleans every `mngr-provider` VPS (protecting those backing an `available`/`leased` row unless `--include-active`). Keys active-row protection and cleaned-host DB match on `vps_address` (the real OVH service name), not `vps_instance_id`.
 
+### Removed
+
+- Removed: All OVH logic from the connector service. `POST /hosts/{id}/release` is slice-only (no OVH tag-strip/cancel; a failed teardown returns 5xx and leaves the row `removing`), the hourly `cleanup_removing_pool_hosts` cron no longer runs OVH sweeps (now only the alert-only slice-box reconcile), and the `ovh` Python dependency and `ovh-<env>` Modal secret are gone. Migration `012_drop_pool_host_backend_kind.sql` deletes any residual `ovh_vps` rows and drops the `pool_hosts.backend_kind` column. Known follow-up: a slice row left in `removing` by a crashed inline release is no longer auto-swept.
+
 ### Fixed
 
 - Fixed: Connector auth endpoints no longer 500 on `/auth/session/revoke`, `/auth/email/is-verified`, and `/auth/email/send-verification` — these had been calling SuperTokens' `syncio.get_user` / `syncio.get_session_without_request_response` from inside an `async def`, where the syncio wrapper's `loop.run_until_complete` hit "RuntimeError: This event loop is already running" against the live FastAPI/uvicorn loop.

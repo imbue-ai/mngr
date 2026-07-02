@@ -4,6 +4,42 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-01
+
+The minds release-tier tests (`deployment_tests/`, marked `minds_deployment` / `minds_services`) now also carry `@pytest.mark.release`, so the whole release suite -- mngr and minds -- is discoverable by the `release` tag rather than by path.
+
+All minds release tests now run from the minds release job (`test-minds-release` in `ci.yml`, manual `run_minds_release_tests` dispatch), never from the mngr release workflow. That job now runs the heavy `minds_deployment` group (via the deployment orchestrator) and then the plain minds `@release` tests that need no ci env -- `test_claude_version_alignment`, `test_sse_redirect` (Chromium installed in-job), and `test_aws_workspace_release` (skips without AWS opt-in) -- selected by tag. Previously those three ran in the mngr release workflow on `v*` tags; they now run on the minds release dispatch instead, matching the minds release procedure.
+
+Fixed two pre-existing failures in the plain minds release tests that folding them into the minds release job surfaced:
+
+- `test_sse_redirect` was stale: it drove `/creating/<agent-id>`, but the creating page now takes a `CreationId` and polls the v1 operations resource (`/api/v1/workspaces/operations/create/<creation_id>`) for completion. Reworked it to key the fake creation by a `CreationId`, mount the `/api/v1` blueprint (pass `paths`), and assert the canonical `/goto/<agent>/` redirect.
+
+- `test_claude_version_alignment` was failing on a real drift (the release Dockerfile pinned an older Claude Code version than forever-claude-template); fixed by bumping the pin (see the mngr changelog).
+
+Docs updated: `deployment_tests/README.md` and `docs/testing-overview.md`.
+
+Removed the legacy OVH-VPS pool-host path from the minds env tooling. Pool hosts are bare-metal slices only.
+
+- `minds pool create` is slice-only: dropped `--backend` and the OVH-VPS-only flags; `--server-id` is required.
+
+- `minds env destroy` no longer tags/terminates OVH VPSes (deleted the `envs/providers/ovh_tags.py` module and its env-teardown step).
+
+- Stopped reading the `<tier>/ovh` Vault entry during deploy and dropped the `ovh` Modal secret from the connector deployment. The `<tier>/ovh` Vault entry and `.minds/template/ovh.sh` remain, reframed for operator-sourced bare-metal box ordering (`mngr imbue_cloud admin server`).
+
+- Dropped the now-unused `imbue-mngr-ovh` dependency from the minds package (the shipped Electron bundle keeps it, since `mngr_imbue_cloud`'s bare-metal box ordering still uses it).
+
+The direct OVH provider (`mngr create @host.ovh`) is unaffected.
+
+Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.
+
+Release minds v0.3.5: bump `apps/minds/package.json` to `0.3.5` and point the shipped binary's `FALLBACK_BRANCH` at the `minds-v0.3.5` forever-claude-template tag. This rolls up all mngr/minds changes that landed on `main` since `minds-v0.3.4`, notably:
+
+- The "get help" flow now spawns an `/assist` chat in the loaded workspace and frames the help modal as an agent submission for agent-escalated reports, with a full loading state that auto-closes on success.
+
+- UI copy renamed from "project" to "workspace" throughout (Login window title, page copy, and the "Back to workspaces" back-link).
+
+- Release tests split by tag: the minds release suite (`minds_deployment` / `minds_services` plus the plain minds `@release` tests) now runs from the minds release job rather than the mngr release workflow.
+
 ## 2026-06-30
 
 Workspace recovery page: the "Report a problem" link no longer appears on the transient "Loading workspace" spinner. It is now shown only on the terminal states that offer an action -- "Workspace unresponsive" (restart), the restart-dispatch error, and "Can't connect to ..." (provider unreachable, retry) -- where there is an actual failure to report.
