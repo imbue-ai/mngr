@@ -69,6 +69,15 @@
     return window.MINDS_OVERLAY_MODALS || {};
   }
 
+  // Supersede any in-flight fragment fetch: bump the token so a fetch started by
+  // an earlier show won't mount itself when it finally resolves. Every command
+  // that changes what should be on screen (a new show, a targeted hide, a
+  // hide-all) must call this, or a slow fetch can mount a modal that was already
+  // superseded or closed.
+  function invalidateFragmentFetch() {
+    fragmentToken++;
+  }
+
   function destroyFrame(frame) {
     if (frame && frame.parentNode) frame.parentNode.removeChild(frame);
   }
@@ -102,7 +111,8 @@
     destroyFrame(incomingFrame);
     incomingFrame = null;
     var separator = url.indexOf('?') === -1 ? '?' : '&';
-    var token = ++fragmentToken;
+    invalidateFragmentFetch();
+    var token = fragmentToken;
     fetch(url + separator + 'fragment=1', { credentials: 'same-origin' })
       .then(function (response) { return response.text(); })
       .then(function (html) {
@@ -140,6 +150,9 @@
   }
 
   function showIframeModal(id, url) {
+    // Supersede any in-flight fragment fetch (from an earlier fragment show)
+    // so it can't mount itself once this iframe modal has taken over.
+    invalidateFragmentFetch();
     // Drop any earlier incoming frame that never became visible -- this show
     // supersedes it, and it was never shown, so there's no flash.
     destroyFrame(incomingFrame);
@@ -189,6 +202,9 @@
 
   function hideModal(id) {
     // main only sends 'hide-all' today, but honor a targeted hide too.
+    // Invalidate any in-flight fragment fetch so a still-pending open (nothing
+    // mounted yet) can't mount itself after this hide.
+    invalidateFragmentFetch();
     if (fragmentModal && fragmentModal.id === id) teardownFragmentModal();
     if (modalFrame && modalFrame.getAttribute('data-overlay-id') === id) {
       destroyFrame(modalFrame);
@@ -201,9 +217,9 @@
   }
 
   function hideAllModals() {
-    // Bump the token so any in-flight fragment fetch that resolves after this
-    // close won't mount itself.
-    fragmentToken++;
+    // Invalidate any in-flight fragment fetch that resolves after this close so
+    // it won't mount itself.
+    invalidateFragmentFetch();
     teardownFragmentModal();
     destroyFrame(incomingFrame);
     destroyFrame(modalFrame);
