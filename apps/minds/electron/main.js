@@ -7,6 +7,10 @@ const { initSentry, captureManualReport, isLogInclusionEnabled } = require('./se
 const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 const { decideStartupRoute } = require('./startup-routing');
+// selectSurfaceForUrl / SURFACE_CONTENT / SURFACE_CHROME are also exported by
+// ./surface-routing and are consumed by the (in-progress) navigation router
+// that sends agent URLs to the content view and local pages to the chrome view.
+const { parseWorkspaceId, parseAccentSourceAgentId } = require('./surface-routing');
 
 // Initialize Sentry as early as possible so errors thrown during main-process
 // startup (window creation, env setup, backend spawn) are captured. The SDK is
@@ -137,55 +141,12 @@ function getSessionStatePath() {
 }
 
 // -- URL/workspace helpers --
-
-function parseWorkspaceId(url) {
-  if (!url) return null;
-  try {
-    const parsed = new URL(url);
-    // Final workspace URL: `<agent-id>.localhost:PORT/...`
-    const hostMatch = parsed.hostname.match(/^(agent-[a-f0-9]+)\.localhost$/i);
-    if (hostMatch) return hostMatch[1];
-    // Auth-bridge URL: `localhost:PORT/goto/<agent-id>/` is the pending
-    // state before the subdomain cookie is installed. Recognising it lets
-    // findBundleForWorkspace de-dupe clicks during the redirect window.
-    const pathMatch = parsed.pathname.match(/^\/goto\/(agent-[a-f0-9]+)(?:\/|$)/i);
-    return pathMatch ? pathMatch[1] : null;
-  } catch {
-    return null;
-  }
-}
-
-// Wider than ``parseWorkspaceId`` -- also recognises the workspace-scoped
-// minds-backend routes (``/workspace/<id>/settings``, ``/workspace/<id>/
-// associate``, ``/sharing/<id>/<service>``, ``/destroying/<id>``,
-// ``/agents/<id>/recovery``). Used ONLY to decide which workspace's
-// accent should tint the titlebar; deliberately not fed into
-// ``bundle.currentWorkspaceId`` / ``findBundleForWorkspace`` because
-// those drive workspace uniqueness, and we want the user to be able to
-// open ``/workspace/X/settings`` in one window while another window
-// holds the actual workspace X.
 //
-// Returns null for every non-workspace minds screen (Home, Create,
-// accounts, inbox, auth, ...). That null is load-bearing: the
-// navigation handlers feed it straight into
-// ``updateBundleAccentAgentId``, so leaving a workspace-scoped
-// screen clears the accent back to the neutral chrome rather than
-// stranding the previous workspace's color on a general screen.
-function parseAccentSourceAgentId(url) {
-  if (!url) return null;
-  try {
-    const parsed = new URL(url);
-    const hostMatch = parsed.hostname.match(/^(agent-[a-f0-9]+)\.localhost$/i);
-    if (hostMatch) return hostMatch[1];
-    const pathMatch =
-      parsed.pathname.match(/^\/(?:goto|workspace|sharing)\/(agent-[a-f0-9]+)(?:\/|$)/i) ||
-      parsed.pathname.match(/^\/destroying\/(agent-[a-f0-9]+)(?:\/|$)/i) ||
-      parsed.pathname.match(/^\/agents\/(agent-[a-f0-9]+)\/recovery(?:\/|$)/i);
-    return pathMatch ? pathMatch[1] : null;
-  } catch {
-    return null;
-  }
-}
+// ``parseWorkspaceId`` (is this URL a workspace?), ``parseAccentSourceAgentId``
+// (which workspace's accent tints the titlebar?), and ``selectSurfaceForUrl``
+// (content vs chrome surface) live in ./surface-routing so the classification
+// is unit-testable under plain node (main.js can't be required outside
+// Electron). They are required at the top of this file.
 
 function toAbsoluteUrl(url) {
   if (!url) return url;
