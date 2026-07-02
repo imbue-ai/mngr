@@ -4,6 +4,21 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
+## 2026-07-01
+
+### Added
+
+- Added: `blueprint/ratchet-async-await/` design doc for the new monorepo-wide async/await ratchet that freezes and gradually reduces `async def` / `await` usage.
+
+### Changed
+
+- Changed: Split the mngr and minds release test suites. `.github/workflows/release-tests.yml` jobs renamed (`test-docker-release` -> `test-mngr-release-docker`, `test-release` -> `test-mngr-release`) and now exclude `apps/minds` by path. All minds `@release` tests (`minds_deployment` group plus the plain minds `@release` tests, with Chromium installed in-job) now run from the minds release job (`test-minds-release` in `ci.yml`, manual `run_minds_release_tests` dispatch) instead of the mngr `v*`-tag workflow. Updated the stale `test-docker-release` reference in `offload-modal-release.toml`.
+- Changed: Bumped pinned Claude Code CLI version 2.1.141 -> 2.1.160 in the release-tests workflow, the `tmr-setup` action, and the minds snapshot build script, aligning with the release Dockerfile pin.
+
+### Removed
+
+- Removed: Dev-level OVH-VPS scaffolding. Dropped `--backend slice` from the `bake-slice-{dev,prod}` justfile recipes (the flag no longer exists) and reframed the pool recipe comments to slice-only; deleted the unused `scripts/remove_old_flat_vault_secrets.py`; and removed obsolete `specs/swap-pool-to-ovh/`, `blueprint/deprecate-ovh-vps/`, and `blueprint/disable-ovh-qemu-backups/`.
+
 ## 2026-06-30
 
 ### Added

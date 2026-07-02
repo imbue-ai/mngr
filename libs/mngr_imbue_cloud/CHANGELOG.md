@@ -36,6 +36,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Deprecated: Baking new OVH classic VPS pool hosts in `mngr imbue_cloud admin pool create`. Passing `--backend ovh_vps` fails with a deprecation error pointing at `--backend slice`. Existing OVH VPS pool hosts are unaffected and can still be listed and destroyed.
 
+### Removed
+
+- Removed: Legacy OVH-VPS pool-host backend from `mngr imbue_cloud admin pool`. `admin pool create` is slice-only (dropped `--backend`, `--tag`, `--management-public-key-file`, `--no-recycle`; `--server-id` is required), `admin pool destroy` always tears down the slice's lima VM before dropping the row, and the `backend_kind` discriminator (CLI/value/column) is gone. OVH as the bare-metal-box supplier is unchanged.
+
 ### Fixed
 
 - Fixed: Connector HTTP client now retries `httpx.TransportError` with bounded exponential backoff (idempotent GET/PUT/DELETE retry on any transport error; lease/create POSTs retry only on connect-phase errors to avoid double-allocation) and raises a clean domain error (`ImbueCloud*Error`) on terminal failure. The connector is a scale-to-zero Modal app, so a call that hit a cold/scaling instance previously surfaced as a raw httpx traceback — this fixes the intermittent `502 tunnels list failed` an agent hit when toggling workspace sharing through the minds API.
