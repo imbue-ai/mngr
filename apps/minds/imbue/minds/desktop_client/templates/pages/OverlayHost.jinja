@@ -1,0 +1,49 @@
+{#def #}
+{#
+  Always-warm overlay host page. main.js loads this ONCE into the shared
+  modal WebContentsView at window creation and keeps it mounted for the
+  window's life (see createBundleOverlayView in electron/main.js), instead of the
+  old model of loading a fresh page into that view on every modal open.
+
+  Every overlay is hosted here as in-page DOM driven over IPC -- the
+  modals (workspace menu / inbox / help / sign-in) as mount-on-demand
+  fragments (the host fetches each modal's ``?fragment=1`` markup and
+  injects it when opened, removing it when closed), and hover tooltips --
+  so opening an overlay never costs a page
+  load. The overlay manager (/_static/overlay.js) owns the registry of
+  open overlays and reports the overlay view's required bounds back to
+  main, because Electron 40 has no per-view click-through: a
+  WebContentsView's bounds rectangle always captures clicks, so the only
+  lever is how large the view is. The manager reports full-window while a
+  capturing modal is open, just the tooltip's rectangle while only
+  tooltips show, and hidden when nothing is shown.
+
+  The page itself is transparent; each hosted overlay paints its own
+  backdrop.
+#}
+{% set _scripts %}
+{# Per-modal overlay modules register themselves in window.MINDS_OVERLAY_MODALS
+   before overlay.js processes any show command. tooltip_triggers.js exposes
+   window.bindTooltips (the help modal binds its close-button tooltip on open);
+   auth.js exposes initSigninAuthForm; overlay_signin.js registers the sign-in modal;
+   overlay_help.js registers the help modal; overlay_sidebar.js registers the
+   workspace menu (and reuses the shared workspace_accent.js + sidebar row
+   builder); overlay_inbox.js registers the inbox. overlay.js defines
+   window.MINDS_OVERLAY_HOST (the cached SSE state the sidebar/inbox read) and
+   drives the modals, so it loads last. Each newly migrated modal adds its
+   module here. #}
+<script src="/_static/tooltip_triggers.js" defer></script>
+<script src="/_static/auth.js" defer></script>
+<script src="/_static/overlay_signin.js" defer></script>
+<script src="/_static/overlay_help.js" defer></script>
+<script src="/_static/workspace_accent.js" defer></script>
+<script src="/_static/sidebar_workspace_row.js" defer></script>
+<script src="/_static/overlay_sidebar.js" defer></script>
+<script src="/_static/overlay_inbox.js" defer></script>
+<script src="/_static/overlay.js" defer></script>
+{% endset %}
+<Base title="Minds"
+      body_class="font-sans antialiased bg-transparent"
+      scripts={{ _scripts }}>
+  <div id="overlay-root" class="fixed inset-0"></div>
+</Base>

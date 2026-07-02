@@ -1,4 +1,4 @@
-{#def cards, selected_id="", detail_html="", is_empty=False, auto_open=True #}
+{#def cards, selected_id="", detail_html="", is_empty=False, auto_open=True, is_fragment=False #}
 {#
   Inbox modal page. Hosts:
     - Transparent body + dim backdrop (so the desktop client modal view
@@ -15,7 +15,7 @@
   are no pending requests and the layout collapses to a centered
   message. ``auto_open`` is the initial state of the auto-open checkbox.
 #}
-{% set _head %}
+{% set _styles %}
   <style>
     .inbox-card {
       padding: 10px 12px;
@@ -574,8 +574,13 @@
 <Base title="Requests"
       body_class="bg-transparent text-primary font-sans antialiased"
       body_style="-webkit-app-region: no-drag;"
-      head={{ _head }}
-      scripts={{ _scripts }}>
+      scripts={{ _scripts }}
+      :bare="is_fragment">
+  {# The inbox's own CSS lives in the panel (not <head>) so it survives fragment
+     mode, where the overlay host drops the document shell; it is placed last so
+     the backdrop stays the first child (the host wires its click-outside
+     dismiss on that element). In fragment mode the host owns the backdrop
+     dismiss, so the inline onclick is full-page-only. #}
   {# Left-anchored slide-in drawer: full viewport height (including
      under the title bar -- the modal view bounds from y=0 in main.js),
      ~70% width capped at a max, dropping to ~90% on small viewports.
@@ -584,7 +589,7 @@
      screen edge. The backdrop dims the workspace strip on the right. #}
   <div id="inbox-backdrop"
        class="fixed inset-0 bg-surface-overlay flex justify-start"
-       onclick="onBackdropClick(event)">
+       {% if not is_fragment %}onclick="onBackdropClick(event)"{% endif %}>
     <div id="inbox-dialog"
          class="relative w-[90vw] lg:w-[75vw] max-w-[1100px] h-full flex flex-col bg-surface-primary border-r border-default shadow-overlay overflow-hidden">
       {# Header row. 3-column grid so the title sits in the visual
@@ -643,4 +648,5 @@
     <div class="flex-1 h-[38px] self-start"
          style="-webkit-app-region: drag;"></div>
   </div>
+  {{ _styles }}
 </Base>
