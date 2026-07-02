@@ -1,0 +1,3 @@
+Added a design spec at `specs/local-pages-in-chrome/spec.md` for making the minds desktop app's content surface host agent content only, moving all trusted local/native pages (Landing, Create, Settings, ...) onto the chrome surface.
+
+The spec documents the motivation (trust mismatch: local pages are trusted but currently constrained to the caged `content-relay-preload.js` because they share the content view with untrusted agent content; plus content-type de-mixing), the target three-surface architecture for both Electron and browser modes, a phased implementation plan, testing strategy, and open questions. No code changes yet -- this is a handoff plan for a follow-on implementation.
