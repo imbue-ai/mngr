@@ -15,6 +15,7 @@ from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
 from imbue.minds.desktop_client.templates import render_dev_styleguide_page
+from imbue.minds.desktop_client.templates import render_help_page
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
@@ -2046,3 +2047,42 @@ def test_base_emits_sentry_bootstrap_when_frontend_reporting_is_on() -> None:
     assert '<script type="application/json" id="minds-sentry-config">' in html
     assert '"environment": "staging"' in html
     assert '"dsn": "https://key@o1.ingest.us.sentry.io/2"' in html
+
+
+def test_render_help_page_fragment_omits_shell_and_scripts_and_exposes_data() -> None:
+    # ``?fragment=1`` renders only the help dialog's panel markup so the overlay
+    # host can inject it as in-page DOM: no document shell and no scripts (its JS
+    # lives in overlay_help.js). Workspace/include-logs values move onto data
+    # attributes for the module to read, and the backdrop drops its inline
+    # onclick (the host owns click-outside dismiss in the overlay).
+    fragment = render_help_page(
+        include_logs_setting=False,
+        workspace_agent_id="agent-00000000000000000000000000000001",
+        description="",
+        is_agent_report=False,
+        workspace_name="",
+        is_fragment=True,
+    )
+    assert "<!DOCTYPE" not in fragment
+    assert "<html" not in fragment
+    assert "/help/report" not in fragment  # the inline submit script is gone
+    assert 'onclick="onHelpBackdropClick' not in fragment
+    assert 'data-workspace-agent-id="agent-00000000000000000000000000000001"' in fragment
+    assert 'data-include-logs="false"' in fragment
+    # The panel content itself is still present.
+    assert 'id="help-dialog"' in fragment
+    assert 'id="help-submit"' in fragment
+
+    # The full page is unchanged: document shell, inline script, and the
+    # browser-only backdrop onclick are all still present.
+    full = render_help_page(
+        include_logs_setting=False,
+        workspace_agent_id="agent-00000000000000000000000000000001",
+        description="",
+        is_agent_report=False,
+        workspace_name="",
+        is_fragment=False,
+    )
+    assert "<!DOCTYPE" in full
+    assert "/help/report" in full
+    assert 'onclick="onHelpBackdropClick(event)"' in full

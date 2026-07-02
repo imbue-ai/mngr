@@ -626,6 +626,7 @@ def render_help_page(
     description: str = "",
     is_agent_report: bool = False,
     workspace_name: str = "",
+    is_fragment: bool = False,
 ) -> str:
     """Render the get-help modal page (report a bug; agent help disabled for now).
 
@@ -637,6 +638,10 @@ def render_help_page(
     for that agent-escalation flow: the modal then frames the pre-filled report as the agent's
     submission (titled with ``workspace_name``, when known) and hides the mode choice, since a report
     is already underway.
+
+    When ``is_fragment`` is true (``?fragment=1``), only the modal's panel markup is emitted -- no
+    document shell or scripts -- so the overlay host can fetch and inject it as in-page DOM (its JS
+    lives in overlay_help.js). The full page is still served for the browser (dev) path.
     """
     return CATALOG.render(
         "pages.Help",
@@ -645,6 +650,7 @@ def render_help_page(
         description=description,
         is_agent_report=is_agent_report,
         workspace_name=workspace_name,
+        is_fragment=is_fragment,
     )
 
 

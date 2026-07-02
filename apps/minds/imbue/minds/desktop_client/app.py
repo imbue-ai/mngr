@@ -481,6 +481,7 @@ def _handle_help_page() -> Response:
             workspace_name = get_state().backend_resolver.get_workspace_name(AgentId(workspace_agent_id)) or ""
         except ValueError:
             workspace_name = ""
+    is_fragment = request.args.get("fragment") == "1"
     return make_html_response(
         content=render_help_page(
             include_logs_setting=include_logs_setting,
@@ -488,6 +489,7 @@ def _handle_help_page() -> Response:
             description=description,
             is_agent_report=is_agent_report,
             workspace_name=workspace_name,
+            is_fragment=is_fragment,
         )
     )
 

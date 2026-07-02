@@ -1,4 +1,4 @@
-{#def include_logs_setting=false, workspace_agent_id="", description="", is_agent_report=false, workspace_name="" #}
+{#def include_logs_setting=false, workspace_agent_id="", description="", is_agent_report=false, workspace_name="", is_fragment=false #}
 {#
   Get-help modal page. Loaded into the shared modal overlay view in Electron (and
   into the content frame as a fallback in browser mode), so the body is transparent
@@ -210,11 +210,19 @@
 {% endset %}
 <Base title="Get help"
       body_class="bg-transparent text-primary font-sans antialiased"
-      scripts={{ _scripts }}>
+      scripts={{ _scripts }}
+      :bare="is_fragment">
+  {# In fragment mode the overlay host owns the backdrop click-outside dismiss
+     (see overlay.js); the full page keeps its own inline handler for the
+     browser path. workspace/include-logs data is exposed as data attributes so
+     the overlay_help.js module can read it (the full page's inline script reads
+     the Jinja values directly). #}
   <div id="help-backdrop"
        class="fixed inset-0 bg-surface-overlay flex items-center justify-center p-4"
-       onclick="onHelpBackdropClick(event)">
+       {% if not is_fragment %}onclick="onHelpBackdropClick(event)"{% endif %}>
     <div id="help-dialog"
+         data-workspace-agent-id="{{ workspace_agent_id }}"
+         data-include-logs="{{ 'true' if include_logs_setting else 'false' }}"
          class="relative w-full max-w-md max-h-[90vh] overflow-y-auto bg-surface-primary rounded-lg border border-default shadow-overlay">
       <div class="flex items-center justify-between px-4 h-[44px] border-b border-default">
         <h1 class="type-section text-primary">Get help</h1>
