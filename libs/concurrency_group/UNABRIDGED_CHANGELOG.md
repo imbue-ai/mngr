@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-01
+
+Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.
+
 ## 2026-06-22
 
 Clarified the log message emitted when a subprocess is force-terminated. The old wording ("Aborting command (via sigterm to <pid>) due to signal...") was logged identically whether the command hit its own timeout or was cancelled by a requested shutdown, which made it easy to misread a routine cancellation as a timeout. It now states the reason explicitly -- either "it exceeded its <N>s timeout" or "a shutdown was requested (shutdown_event was set)". The command's argv is still deliberately omitted (this generic runner is used by callers that pass secrets in argv), so only the pid is logged.

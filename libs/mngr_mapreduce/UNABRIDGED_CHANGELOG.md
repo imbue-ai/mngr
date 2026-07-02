@@ -2,6 +2,10 @@
 
 This file contains the full, verbatim per-PR entries for the `mngr_mapreduce` library. For the curated summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-01
+
+Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.
+
 ## 2026-06-18
 
 Reduced flakiness in `test_run_mngr_raw_returns_finished_process`. Its `_run_mngr_raw` subprocess budget was 10s, which under heavy parallel CI load left no headroom for a cold `mngr` start and intermittently raised `CliError` before the command actually finished. The budget is now 25s, under the test's existing 30s `pytest.mark.timeout` backstop. Test-only change.

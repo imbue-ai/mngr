@@ -30,6 +30,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Hardened agent process-tree teardown so a long-lived daemon launched under an agent can no longer outlive the agent and collide with a relaunch. New `reap_agent_process_tree(agent)` helper kills the agent's tmux-session pane descendants and any `MNGR_AGENT_ID`-tagged orphans that reparented to PID 1. `start_agents` reaps any stale process tree for an agent id before launching, but only when that agent isn't already running.
 - Changed: Bumped the offload version baked into the host Dockerfile from `0.9.7` to `0.9.10` to track the CI pin.
 - Changed: e2e test fixture now captures each test's docstring (verbatim tutorial block plus its crystallized scope), and rendered test-detail pages show it under a "Docstring" heading. All e2e tutorial tests migrated to the docstring-anchored format (tutorial block in a `Tutorial block:` section followed by a `Scope:` section).
+- Changed: Bumped the release Dockerfile's pinned `CLAUDE_CODE_VERSION` from `2.1.141` to `2.1.160` to match forever-claude-template's `[agent_types.claude].version`; the drift was causing agent provisioning to fail with "Claude version mismatch".
 
 ### Fixed
 

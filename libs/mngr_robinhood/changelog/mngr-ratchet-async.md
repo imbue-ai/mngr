@@ -1,1 +1,0 @@
-Added the `test_prevent_async_await` ratchet test for consistency with every other project. mngr_robinhood is intentionally exempt from the async/await cap because it is a thin wrapper around the fundamentally-async Claude Agent SDK, so its async usage is intrinsic and cannot be removed.
