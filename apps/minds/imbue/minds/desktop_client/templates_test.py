@@ -690,6 +690,32 @@ def test_render_chrome_page_shows_window_controls_on_non_mac() -> None:
     assert "close-btn" in html
 
 
+def test_chrome_shell_renders_titlebar_around_content_without_a_content_iframe() -> None:
+    # ChromeShell is the shared trusted app shell: the titlebar + browser-mode
+    # sidebar + accent/chrome.js wiring, wrapping whatever body a page puts in
+    # the content slot. Rendered standalone (a local page's body, not the
+    # content iframe) it emits the titlebar and its own scripts but NOT the
+    # #content-frame iframe -- that belongs only to pages.Chrome, which fills
+    # the slot with the agent-content surface.
+    html = CATALOG.render(
+        "ChromeShell",
+        title="Settings",
+        is_mac=True,
+        _content='<main id="local-page-body">hello</main>',
+    )
+    assert "minds-titlebar" in html
+    assert 'id="sidebar-toggle"' in html
+    assert 'id="sidebar-backdrop"' in html
+    assert "/_static/chrome.js" in html
+    # The page body passed into the slot is rendered inside the shell.
+    assert 'id="local-page-body"' in html
+    # The content iframe is Chrome.jinja's, not the shell's.
+    assert 'id="content-frame"' not in html
+    # The shell drives the page <title> and the mac traffic-light spacer.
+    assert "<title>Settings</title>" in html
+    assert 'class="w-[72px] shrink-0"' in html
+
+
 def test_render_sidebar_page_contains_workspace_list() -> None:
     html = render_sidebar_page()
     assert "sidebar-workspaces" in html
