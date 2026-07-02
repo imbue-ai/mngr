@@ -7,10 +7,16 @@ const { initSentry, captureManualReport, isLogInclusionEnabled } = require('./se
 const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 const { decideStartupRoute } = require('./startup-routing');
-// selectSurfaceForUrl / SURFACE_CONTENT / SURFACE_CHROME are also exported by
-// ./surface-routing and are consumed by the (in-progress) navigation router
-// that sends agent URLs to the content view and local pages to the chrome view.
-const { parseWorkspaceId, parseAccentSourceAgentId } = require('./surface-routing');
+// URL classification for the two content surfaces lives in ./surface-routing so
+// it can be unit-tested under plain node (main.js can't be required outside
+// Electron). navigateBundle uses selectSurfaceForUrl / SURFACE_CONTENT to send
+// agent URLs to the content view and local pages to the chrome view.
+const {
+  parseWorkspaceId,
+  parseAccentSourceAgentId,
+  selectSurfaceForUrl,
+  SURFACE_CONTENT,
+} = require('./surface-routing');
 
 // Initialize Sentry as early as possible so errors thrown during main-process
 // startup (window creation, env setup, backend spawn) are captured. The SDK is
