@@ -1,207 +1,226 @@
-// Get-help overlay module. Registers the help modal in the overlay host's
-// registry (window.MINDS_OVERLAY_MODALS) so overlay.js renders it as in-page
-// DOM: it fetches /help?...&fragment=1, injects the panel, then calls this
-// module's init(container). This ports the Help page's former inline script
-// (which still runs on the browser full page), scoped to the injected
-// container. The host owns the backdrop click-outside dismiss and main owns
-// Escape, so this module wires neither.
+// Get-help modal logic, single-sourced for both contexts (the auth.js pattern):
+//   * Electron overlay: registered in window.MINDS_OVERLAY_MODALS so overlay.js
+//     injects the ?fragment=1 markup and calls init(container). The overlay host
+//     owns the backdrop click-outside dismiss and main owns Escape.
+//   * Standalone browser page (/help in the content frame): this file auto-runs
+//     init(document) when the help DOM is present, and -- since there is no
+//     overlay host / main process -- wires its own backdrop dismiss + Escape and
+//     falls back to history.back() for close.
+//
+// ``initHelp(root)`` scopes every lookup to ``root`` and returns a teardown the
+// overlay host calls on close.
 (function () {
   window.MINDS_OVERLAY_MODALS = window.MINDS_OVERLAY_MODALS || {};
 
-  // Sticky checkbox state: persist each box's checked value across reports so a
-  // user who files several reports does not re-tick the same diagnostics.
   var STICKY_PREFIX = 'minds.help.';
   var STICKY_IDS = ['help-include-logs', 'help-app-diagnostics', 'help-workspace-details', 'help-remote-access'];
 
-  window.MINDS_OVERLAY_MODALS.help = {
-    // Full-window dim backdrop with a centered dialog (fragment paints the
-    // backdrop; the host wires click-outside dismiss for this mode).
-    positioning: 'backdrop',
+  function initHelp(root) {
+    var isElectron = !!(window.minds && window.minds.closeModal);
+    var teardownFns = [];
 
-    init: function (container) {
-      function find(selector) {
-        return container.querySelector(selector);
-      }
+    function find(selector) {
+      return root.querySelector(selector);
+    }
 
-      var dialog = find('#help-dialog');
-      var workspaceAgentId = (dialog && dialog.dataset.workspaceAgentId) || '';
-      var includeLogsSetting = !!(dialog && dialog.dataset.includeLogs === 'true');
+    var dialog = find('#help-dialog');
+    var workspaceAgentId = (dialog && dialog.dataset.workspaceAgentId) || '';
+    var includeLogsSetting = !!(dialog && dialog.dataset.includeLogs === 'true');
 
-      function restoreSticky(box) {
-        var stored = window.localStorage.getItem(STICKY_PREFIX + box.id);
-        if (stored !== null) box.checked = stored === 'true';
-      }
-      function persistSticky(box) {
-        try {
-          window.localStorage.setItem(STICKY_PREFIX + box.id, box.checked ? 'true' : 'false');
-        } catch (e) {
-          /* ignore: a full/blocked localStorage just means the value isn't sticky */
-        }
-      }
-      STICKY_IDS.forEach(function (id) {
-        var box = find('#' + id);
-        if (!box) return; // not rendered (e.g. include-logs hidden, or no workspace)
-        try { restoreSticky(box); } catch (e) { /* ignore unreadable localStorage */ }
-        box.addEventListener('change', function () { persistSticky(box); });
-      });
+    // Electron: route close through main (hides the overlay + tears this down).
+    // Standalone: the modal is the whole page, so go back.
+    function closeHelp() {
+      if (isElectron) window.minds.closeModal();
+      else window.history.back();
+    }
 
-      // Host-owned dismiss (see requestCloseModal in overlay.js): route close
-      // through main so it hides the overlay view and tears down this fragment.
-      function closeHelp() {
-        if (window.minds && window.minds.closeModal) window.minds.closeModal();
+    function restoreSticky(box) {
+      var stored = window.localStorage.getItem(STICKY_PREFIX + box.id);
+      if (stored !== null) box.checked = stored === 'true';
+    }
+    function persistSticky(box) {
+      try {
+        window.localStorage.setItem(STICKY_PREFIX + box.id, box.checked ? 'true' : 'false');
+      } catch (e) {
+        /* ignore: a full/blocked localStorage just means the value isn't sticky */
       }
-      find('#help-close-btn').addEventListener('click', closeHelp);
+    }
+    STICKY_IDS.forEach(function (id) {
+      var box = find('#' + id);
+      if (!box) return; // not rendered (e.g. include-logs hidden, or no workspace)
+      try { restoreSticky(box); } catch (e) { /* ignore unreadable localStorage */ }
+      box.addEventListener('change', function () { persistSticky(box); });
+    });
 
-      var status = find('#help-status');
-      var submit = find('#help-submit');
+    find('#help-close-btn').addEventListener('click', closeHelp);
 
-      // The two modes differ in what submit does and which options show: agent
-      // help spawns an /assist chat (the agent gathers its own context, so the
-      // report diagnostics are hidden), while report sends a bug report with the
-      // chosen diagnostics.
-      function selectedMode() {
-        var checked = find('input[name="help-mode"]:checked');
-        return checked ? checked.value : 'report';
-      }
-      function applyMode() {
-        var isAgent = selectedMode() === 'agent';
-        var reportOptions = find('#help-report-options');
-        if (reportOptions) reportOptions.classList.toggle('hidden', isAgent);
-        submit.textContent = isAgent ? 'Start agent' : 'Send report';
-      }
-      Array.prototype.forEach.call(container.querySelectorAll('input[name="help-mode"]'), function (radio) {
-        radio.addEventListener('change', applyMode);
-      });
-      applyMode();
+    var status = find('#help-status');
+    var submit = find('#help-submit');
 
-      // Agent-help swaps the whole modal body to a loading state while the
-      // request blocks (the /help/assist route waits for the chat to be created
-      // and its first message sent, ~15s).
-      function showAgentLoading() {
-        find('#help-form').classList.add('hidden');
-        find('#help-loading').classList.remove('hidden');
-      }
-      function hideAgentLoading() {
-        find('#help-loading').classList.add('hidden');
-        find('#help-form').classList.remove('hidden');
-      }
+    // The two modes differ in what submit does and which options show: agent help
+    // spawns an /assist chat (it gathers its own context, so the report
+    // diagnostics hide), while report sends a bug report with the diagnostics.
+    function selectedMode() {
+      var checked = find('input[name="help-mode"]:checked');
+      return checked ? checked.value : 'report';
+    }
+    function applyMode() {
+      var isAgent = selectedMode() === 'agent';
+      var reportOptions = find('#help-report-options');
+      if (reportOptions) reportOptions.classList.toggle('hidden', isAgent);
+      submit.textContent = isAgent ? 'Start agent' : 'Send report';
+    }
+    Array.prototype.forEach.call(root.querySelectorAll('input[name="help-mode"]'), function (radio) {
+      radio.addEventListener('change', applyMode);
+    });
+    applyMode();
 
-      function submitAgentHelp(description) {
-        submit.disabled = true;
-        showAgentLoading();
-        fetch('/help/assist', {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ description: description, workspace_agent_id: workspaceAgentId }),
-        }).then(function (resp) {
-          return resp.json().then(function (data) { return { ok: resp.ok, data: data }; });
-        }).then(function (result) {
-          if (result.ok) {
-            // Creation + first message are done and the new chat tab has already
-            // auto-opened in the workspace, so just dismiss the modal.
-            closeHelp();
-          } else {
-            hideAgentLoading();
-            submit.disabled = false;
-            status.textContent = (result.data && result.data.error) || 'Could not start an agent.';
-            status.className = 'type-helper text-danger mt-2';
-          }
-        }).catch(function () {
+    function showAgentLoading() {
+      find('#help-form').classList.add('hidden');
+      find('#help-loading').classList.remove('hidden');
+    }
+    function hideAgentLoading() {
+      find('#help-loading').classList.add('hidden');
+      find('#help-form').classList.remove('hidden');
+    }
+
+    function submitAgentHelp(description) {
+      submit.disabled = true;
+      showAgentLoading();
+      fetch('/help/assist', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ description: description, workspace_agent_id: workspaceAgentId }),
+      }).then(function (resp) {
+        return resp.json().then(function (data) { return { ok: resp.ok, data: data }; });
+      }).then(function (result) {
+        if (result.ok) {
+          closeHelp();
+        } else {
           hideAgentLoading();
           submit.disabled = false;
-          status.textContent = 'Network error starting the agent.';
+          status.textContent = (result.data && result.data.error) || 'Could not start an agent.';
           status.className = 'type-helper text-danger mt-2';
-        });
-      }
-
-      submit.addEventListener('click', function () {
-        var description = find('#help-description').value.trim();
-        if (!description) {
-          status.textContent = 'Please describe the problem first.';
-          status.className = 'type-helper text-danger mt-2';
-          return;
         }
-        if (selectedMode() === 'agent') {
-          submitAgentHelp(description);
-          return;
-        }
-        var logsBox = find('#help-include-logs');
-        var workspaceBox = find('#help-workspace-details');
-        var payload = {
-          description: description,
-          include_logs: includeLogsSetting || (logsBox ? logsBox.checked : false),
-          include_app_diagnostics: find('#help-app-diagnostics').checked,
-          include_workspace_details: workspaceBox ? workspaceBox.checked : false,
-          remote_access: find('#help-remote-access').checked,
-          workspace_agent_id: workspaceAgentId,
-        };
-        submit.disabled = true;
-        status.textContent = 'Sending...';
-        status.className = 'type-helper text-tertiary mt-2';
-        fetch('/help/report', {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        }).then(function (resp) {
-          return resp.json().then(function (data) { return { ok: resp.ok, data: data }; });
-        }).then(function (result) {
-          if (result.ok) {
-            showSent(result.data && result.data.event_id);
-          } else {
-            submit.disabled = false;
-            status.textContent = (result.data && result.data.error) || 'Could not send the report.';
-            status.className = 'type-helper text-danger mt-2';
-          }
-        }).catch(function () {
-          submit.disabled = false;
-          status.textContent = 'Network error sending the report.';
-          status.className = 'type-helper text-danger mt-2';
-        });
+      }).catch(function () {
+        hideAgentLoading();
+        submit.disabled = false;
+        status.textContent = 'Network error starting the agent.';
+        status.className = 'type-helper text-danger mt-2';
       });
+    }
 
-      // Reveal the confirmation. When Sentry returned an event id, show it with a
-      // copy button so the user can quote it; otherwise hide that row (the report
-      // was collected but Sentry was inactive, e.g. in dev).
-      function showSent(eventId) {
-        find('#help-form').classList.add('hidden');
-        find('#help-sent').classList.remove('hidden');
-        var idRow = find('#help-event-id-row');
-        var idValue = find('#help-event-id');
-        if (eventId) {
-          idValue.textContent = eventId;
-          idRow.classList.remove('hidden');
+    submit.addEventListener('click', function () {
+      var description = find('#help-description').value.trim();
+      if (!description) {
+        status.textContent = 'Please describe the problem first.';
+        status.className = 'type-helper text-danger mt-2';
+        return;
+      }
+      if (selectedMode() === 'agent') {
+        submitAgentHelp(description);
+        return;
+      }
+      var logsBox = find('#help-include-logs');
+      var workspaceBox = find('#help-workspace-details');
+      var payload = {
+        description: description,
+        include_logs: includeLogsSetting || (logsBox ? logsBox.checked : false),
+        include_app_diagnostics: find('#help-app-diagnostics').checked,
+        include_workspace_details: workspaceBox ? workspaceBox.checked : false,
+        remote_access: find('#help-remote-access').checked,
+        workspace_agent_id: workspaceAgentId,
+      };
+      submit.disabled = true;
+      status.textContent = 'Sending...';
+      status.className = 'type-helper text-tertiary mt-2';
+      fetch('/help/report', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }).then(function (resp) {
+        return resp.json().then(function (data) { return { ok: resp.ok, data: data }; });
+      }).then(function (result) {
+        if (result.ok) {
+          showSent(result.data && result.data.event_id);
         } else {
-          idRow.classList.add('hidden');
+          submit.disabled = false;
+          status.textContent = (result.data && result.data.error) || 'Could not send the report.';
+          status.className = 'type-helper text-danger mt-2';
         }
-      }
-
-      var copyBtn = find('#help-copy-id-btn');
-      copyBtn.addEventListener('click', function () {
-        var id = find('#help-event-id').textContent;
-        try {
-          if (navigator.clipboard) navigator.clipboard.writeText(id);
-          copyBtn.textContent = 'Copied';
-          setTimeout(function () { copyBtn.textContent = 'Copy'; }, 1500);
-        } catch (e) {
-          /* ignore */
-        }
+      }).catch(function () {
+        submit.disabled = false;
+        status.textContent = 'Network error sending the report.';
+        status.className = 'type-helper text-danger mt-2';
       });
+    });
 
-      find('#help-done-btn').addEventListener('click', closeHelp);
+    function showSent(eventId) {
+      find('#help-form').classList.add('hidden');
+      find('#help-sent').classList.remove('hidden');
+      var idRow = find('#help-event-id-row');
+      var idValue = find('#help-event-id');
+      if (eventId) {
+        idValue.textContent = eventId;
+        idRow.classList.remove('hidden');
+      } else {
+        idRow.classList.add('hidden');
+      }
+    }
 
-      // Wire the close button's hover tooltip (data-tooltip). The shared trigger
-      // helper scans a root on demand; the injected fragment's DOM arrives after
-      // its own initial document pass, so bind it here.
-      if (typeof window.bindTooltips === 'function') window.bindTooltips(container);
-    },
+    var copyBtn = find('#help-copy-id-btn');
+    copyBtn.addEventListener('click', function () {
+      var id = find('#help-event-id').textContent;
+      try {
+        if (navigator.clipboard) navigator.clipboard.writeText(id);
+        copyBtn.textContent = 'Copied';
+        setTimeout(function () { copyBtn.textContent = 'Copy'; }, 1500);
+      } catch (e) {
+        /* ignore */
+      }
+    });
 
-    // Listeners are on elements inside the injected container, so removing the
-    // container (host teardown) drops them. Just hide any tooltip that was
-    // showing when the modal closed.
-    destroy: function () {
+    find('#help-done-btn').addEventListener('click', closeHelp);
+
+    // Standalone (browser) affordances: Electron's overlay host owns the backdrop
+    // click-outside dismiss and main owns Escape, so wire these only when there is
+    // no host (a plain page).
+    if (!isElectron) {
+      var backdrop = find('#help-backdrop');
+      if (backdrop) {
+        backdrop.addEventListener('click', function (event) {
+          if (event.target === backdrop) closeHelp();
+        });
+      }
+      var onKeydown = function (event) { if (event.key === 'Escape') closeHelp(); };
+      document.addEventListener('keydown', onKeydown);
+      teardownFns.push(function () { document.removeEventListener('keydown', onKeydown); });
+    }
+
+    // Wire the close button's hover tooltip in the Electron overlay (the shared
+    // helper is only loaded there; it's a no-op in a plain browser).
+    if (typeof window.bindTooltips === 'function') window.bindTooltips(root);
+
+    return function teardown() {
+      teardownFns.forEach(function (fn) { try { fn(); } catch (e) { /* noop */ } });
       if (window.minds && window.minds.hideTooltip) window.minds.hideTooltip();
+    };
+  }
+
+  // Electron overlay registration.
+  var teardown = null;
+  window.MINDS_OVERLAY_MODALS.help = {
+    positioning: 'backdrop',
+    init: function (container) { teardown = initHelp(container); },
+    destroy: function () {
+      if (teardown) { try { teardown(); } catch (e) { /* noop */ } teardown = null; }
     },
   };
+
+  // Standalone browser page: the help DOM is present at load, so wire it against
+  // the document. (In the overlay host there is no help DOM at load, so this is a
+  // no-op; the host drives init via the registry above when the modal opens.)
+  if (document.getElementById('help-dialog')) initHelp(document);
 })();

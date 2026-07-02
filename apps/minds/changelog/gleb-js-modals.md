@@ -2,4 +2,4 @@ The desktop app's overlay modals (workspace menu, inbox, help, sign-in) are now 
 
 This removes a layer of iframe machinery from the overlay surface -- the per-frame IPC fan-out, the SSE priming handshake, the `nodeIntegrationInSubFrames` subframe bridge, and the front/back-buffer iframe swap. The SSE-driven modals (workspace menu and inbox) now read the live workspace list / request state from a single cache the overlay host keeps, primed on load and kept current as events arrive.
 
-Each modal page still renders as a full standalone page for the browser (dev) path; only the desktop app uses the injected fragments.
+Each modal's JavaScript is single-sourced in one module that drives both the desktop app's injected fragment and the modal's standalone full page (the browser/dev path), so there is no duplicated per-modal script.

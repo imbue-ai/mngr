@@ -2,12 +2,12 @@
 // registry so overlay.js renders it as in-page DOM: it fetches
 // /_chrome/sidebar?...&fragment=1 (the server positions the floating menu via
 // inline style from the trigger geometry in the URL) and injects the panel,
-// then calls this module's init(container). This ports the Electron sidebar
-// page's former script (static/sidebar.js still serves the browser inline menu
-// via chrome.js), scoped to the injected container and driven by the host's
-// cached SSE state (window.MINDS_OVERLAY_HOST) so the workspace list is current
-// the instant the menu opens. The host owns the backdrop click-outside dismiss
-// and main owns Escape, so this module wires neither.
+// then calls this module's init(container). It is scoped to the injected
+// container and driven by the host's cached SSE state
+// (window.MINDS_OVERLAY_HOST) so the workspace list is current the instant the
+// menu opens. The host owns the backdrop click-outside dismiss and main owns
+// Escape, so this module wires neither. (The browser shows the workspace menu
+// via chrome.js's inline menu instead, not this module.)
 (function () {
   window.MINDS_OVERLAY_MODALS = window.MINDS_OVERLAY_MODALS || {};
 

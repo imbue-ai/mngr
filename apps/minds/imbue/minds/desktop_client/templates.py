@@ -1458,7 +1458,7 @@ def render_sidebar_page(
     This page shows the workspace list and subscribes to SSE updates. In Electron,
     clicking a workspace sends an IPC message via the preload bridge to navigate
     the content WebContentsView. ``mngr_forward_origin`` is exposed via
-    ``data-mngr-forward-origin`` so sidebar.js can build the cross-origin
+    ``data-mngr-forward-origin`` so overlay_sidebar.js can build the cross-origin
     ``/goto/<agent>/`` URL the plugin serves.
 
     Position is driven entirely by the caller. The chrome view (which owns the

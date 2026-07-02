@@ -1,5 +1,5 @@
 // Workspace accent helper. The server attaches each workspace's `accent`
-// (a #rrggbb string) to the SSE workspaces payload; chrome.js / sidebar.js
+// (a #rrggbb string) to the SSE workspaces payload; chrome.js / overlay_sidebar.js
 // drop it into the --titlebar-bg CSS variable, and the titlebar derives its
 // own contrasting foreground from that color in pure CSS (see
 // `.titlebar-surface` in app.css) -- no JS contrast math. The palette lives

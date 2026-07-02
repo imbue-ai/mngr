@@ -695,12 +695,14 @@ def test_render_chrome_page_shows_window_controls_on_non_mac() -> None:
 def test_render_sidebar_page_contains_workspace_list() -> None:
     html = render_sidebar_page()
     assert "sidebar-workspaces" in html
-    # The interactivity (including the SSE EventSource fallback) now lives
-    # in the external /_static/sidebar.js file; the template should pull it in.
-    assert "/_static/sidebar.js" in html
+    # The shared workspace-row builder is loaded; the menu's interactivity is
+    # single-sourced in overlay_sidebar.js (loaded by the overlay host). This
+    # standalone full-page render is a now-unused dev artifact -- the browser uses
+    # chrome.js's inline menu.
+    assert "/_static/sidebar_workspace_row.js" in html
     # The floating-menu wrapper id. The sidebar runs inside the shared
     # modal WebContentsView, which covers the full window content area and
-    # acts as a modal: sidebar.js compares click targets against
+    # acts as a modal: overlay_sidebar.js compares click targets against
     # ``#sidebar-menu`` to distinguish clicks inside the floating panel
     # (let the menu's own handlers run) from clicks on the transparent
     # backdrop outside it (dismiss the modal). Renaming or dropping this id
@@ -710,7 +712,7 @@ def test_render_sidebar_page_contains_workspace_list() -> None:
     # Chrome.jinja (browser mode) and Sidebar.jinja (the sidebar page loaded
     # into the shared modal WebContentsView in Electron). It carries the
     # "New workspace" CTA, the "Settings" entry, and the "Manage account(s)" /
-    # "Log in" entry; the label is updated dynamically by sidebar.js from
+    # "Log in" entry; the label is updated dynamically by overlay_sidebar.js from
     # /auth/api/status.
     assert 'id="sidebar-new-workspace"' in html
     assert 'id="sidebar-settings"' in html
@@ -2075,8 +2077,8 @@ def test_render_help_page_fragment_omits_shell_and_scripts_and_exposes_data() ->
     assert 'id="help-dialog"' in fragment
     assert 'id="help-submit"' in fragment
 
-    # The full page is unchanged: document shell, inline script, and the
-    # browser-only backdrop onclick are all still present.
+    # The full page loads the single-sourced module (no inline script) and lets it
+    # own the backdrop dismiss (no inline onclick).
     full = render_help_page(
         include_logs_setting=False,
         workspace_agent_id="agent-00000000000000000000000000000001",
@@ -2086,8 +2088,9 @@ def test_render_help_page_fragment_omits_shell_and_scripts_and_exposes_data() ->
         is_fragment=False,
     )
     assert "<!DOCTYPE" in full
-    assert "/help/report" in full
-    assert 'onclick="onHelpBackdropClick(event)"' in full
+    assert "/_static/overlay_help.js" in full
+    assert "/help/report" not in full
+    assert "onHelpBackdropClick" not in full
 
 
 def test_render_sidebar_page_fragment_omits_shell_and_exposes_forward_origin() -> None:
@@ -2112,7 +2115,8 @@ def test_render_sidebar_page_fragment_omits_shell_and_exposes_forward_origin() -
     # menu left = trigger_x(10) + default offset_x(-2)
     assert "left:8px" in fragment
 
-    # The full page is unchanged: shell + the page's own scripts.
+    # The full page (a now-unused dev artifact -- the browser uses chrome.js's
+    # inline menu) no longer references the deleted overlay_sidebar.js.
     full = render_sidebar_page(
         mngr_forward_origin="http://localhost:8421",
         trigger_x=10,
@@ -2120,7 +2124,7 @@ def test_render_sidebar_page_fragment_omits_shell_and_exposes_forward_origin() -
         is_fragment=False,
     )
     assert "<!DOCTYPE" in full
-    assert "/_static/sidebar.js" in full
+    assert "/_static/sidebar.js" not in full
 
 
 def test_render_inbox_page_fragment_omits_shell_keeps_styles_and_backdrop_first() -> None:
@@ -2161,7 +2165,8 @@ def test_render_inbox_page_fragment_omits_shell_keeps_styles_and_backdrop_first(
     assert stripped[:200].find("inbox-backdrop") != -1
     assert stripped.index("inbox-backdrop") < stripped.index("<style")
 
-    # The full page is unchanged: shell, inline script, and CSS all present.
+    # The full page loads the single-sourced module (no inline script); its CSS
+    # stays.
     full = render_inbox_page(
         cards=cards,
         selected_id="evt-1",
@@ -2171,5 +2176,6 @@ def test_render_inbox_page_fragment_omits_shell_keeps_styles_and_backdrop_first(
         is_fragment=False,
     )
     assert "<!DOCTYPE" in full
-    assert "function closeInbox" in full
+    assert "/_static/overlay_inbox.js" in full
+    assert "function closeInbox" not in full
     assert ".inbox-card" in full
