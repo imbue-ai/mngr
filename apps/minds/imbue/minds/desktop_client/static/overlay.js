@@ -132,6 +132,8 @@
       try { current.entry.destroy(); } catch (e) { /* noop */ }
     }
     if (current.el && current.el.parentNode) current.el.parentNode.removeChild(current.el);
+    // Drop any tooltip that was showing over the modal (e.g. its Close button).
+    if (window.minds && window.minds.hideTooltip) window.minds.hideTooltip();
   }
 
   // Host-owned dismiss: route through main so it hides the overlay view and fans
@@ -179,6 +181,10 @@
     if (typeof entry.init === 'function') {
       try { entry.init(container); } catch (e) { /* a broken modal must not wedge the host */ }
     }
+    // tooltip_triggers.js (loaded globally by Base.jinja) only scanned the host
+    // page at load, before this fragment existed. Wire the fragment's data-tooltip
+    // elements (the Close button etc.) now that it's in the DOM.
+    if (window.bindTooltips) window.bindTooltips(container);
   }
 
   function hideModal(id) {
@@ -215,10 +221,16 @@
   function ensureTooltipEl() {
     if (tooltipEl) return tooltipEl;
     tooltipEl = document.createElement('div');
+    // Appearance comes from the shared ``.minds-tooltip`` class in app.css --
+    // the same class the in-page tooltip backend uses (see tooltip_triggers.js)
+    // so both surfaces render an identical bubble (README's "shared across
+    // files" case). Positioning is overlay-specific and set here: absolute
+    // within #overlay-root, pinned above the modal iframe via z-index.
     tooltipEl.className = 'minds-tooltip';
     tooltipEl.style.position = 'absolute';
     tooltipEl.style.left = '0';
     tooltipEl.style.top = '0';
+    tooltipEl.style.zIndex = '2147483647';
     tooltipEl.style.display = 'none';
     root.appendChild(tooltipEl);
     return tooltipEl;
@@ -226,18 +238,15 @@
 
   function showTooltip(cmd) {
     var el = ensureTooltipEl();
-    // Content: arbitrary HTML if supplied, else a plain label + optional
-    // keyboard-shortcut chip (the common, structured case).
+    // Content: arbitrary HTML if supplied, else a plain text label. The payload
+    // may carry a ``shortcut`` (a designed-for keyboard-shortcut chip), but no
+    // trigger supplies one yet and the design system has no on-ramp size for a
+    // sub-label chip, so it is not rendered; add it on-system when a real use
+    // arrives.
     if (cmd.html) {
       el.innerHTML = cmd.html;
     } else {
       el.textContent = cmd.text || '';
-      if (cmd.shortcut) {
-        var kbd = document.createElement('span');
-        kbd.className = 'minds-tooltip-shortcut';
-        kbd.textContent = cmd.shortcut;
-        el.appendChild(kbd);
-      }
     }
     // Use the real window size from main, NOT window.innerWidth. Between tooltips
     // the overlay view is hidden, and a hidden WebContentsView does not update

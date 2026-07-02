@@ -199,13 +199,11 @@
       teardownFns.push(function () { document.removeEventListener('keydown', onKeydown); });
     }
 
-    // Wire the close button's hover tooltip in the Electron overlay (the shared
-    // helper is only loaded there; it's a no-op in a plain browser).
-    if (typeof window.bindTooltips === 'function') window.bindTooltips(root);
-
+    // The close button's data-tooltip is wired by the overlay host (which calls
+    // bindTooltips on each injected fragment) or, on the standalone page, by the
+    // global tooltip_triggers.js scan from Base.jinja -- not here.
     return function teardown() {
       teardownFns.forEach(function (fn) { try { fn(); } catch (e) { /* noop */ } });
-      if (window.minds && window.minds.hideTooltip) window.minds.hideTooltip();
     };
   }
 
