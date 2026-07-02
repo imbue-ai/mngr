@@ -3,3 +3,5 @@ Titlebar buttons (Main Menu, Home, Back, Forward, Get help, Requests, and the wi
 Under the hood, the desktop client's overlay layer was unified onto a single always-warm surface that floats above both the chrome and the workspace content. The workspace menu, inbox, help, and sign-in dialogs now render on this surface (each created when opened and torn down when closed, as before), and the custom tooltips render on it too; the dialogs' appearance and behavior are unchanged.
 
 Tooltips can also be triggered from elements inside the overlay's dialogs (rendered above the open dialog) -- the inbox, help, and sign-in dialogs' close buttons now show a "Close" tooltip.
+
+The landing page's per-workspace action buttons (Start, Stop, Restart, Open in new window, Settings) now show the same custom styled tooltips, replacing their native `title=` tooltips. The landing page renders in the workspace content view, which has no bridge to the overlay surface, so it draws these tooltips in-page instead; both paths share one style so the bubbles look identical.

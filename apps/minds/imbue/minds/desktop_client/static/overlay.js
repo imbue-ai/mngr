@@ -142,19 +142,16 @@
   function ensureTooltipEl() {
     if (tooltipEl) return tooltipEl;
     tooltipEl = document.createElement('div');
-    // Styled with inline Tailwind utilities (this file is a Tailwind @source in
-    // app.css, so the classes are generated). A single-use JS-built element like
-    // this uses utilities directly; a shape shared across files would instead be
-    // an @apply recipe class (see templates/README.md). type-helper is the
-    // 12px/1.4 "captions/hints" role; the shadow token is the menus/modals/
-    // tooltips elevation; max-width and z-index are off-scale by nature.
-    tooltipEl.className =
-      'inline-flex items-center gap-1.5 max-w-[280px] py-1 px-2 rounded-md ' +
-      'bg-surface-inverse text-inverse-primary type-helper shadow-overlay ' +
-      'whitespace-normal pointer-events-none z-[2147483647]';
+    // Appearance comes from the shared ``.minds-tooltip`` class in app.css --
+    // the same class the in-page tooltip backend uses (see tooltip_triggers.js)
+    // so both surfaces render an identical bubble (README's "shared across
+    // files" case). Positioning is overlay-specific and set here: absolute
+    // within #overlay-root, pinned above the modal iframe via z-index.
+    tooltipEl.className = 'minds-tooltip';
     tooltipEl.style.position = 'absolute';
     tooltipEl.style.left = '0';
     tooltipEl.style.top = '0';
+    tooltipEl.style.zIndex = '2147483647';
     tooltipEl.style.display = 'none';
     root.appendChild(tooltipEl);
     return tooltipEl;

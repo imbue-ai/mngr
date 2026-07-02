@@ -1,41 +1,132 @@
 // Shared custom-tooltip triggers.
 //
-// Any page whose elements carry a ``data-tooltip`` label includes this -- the
-// chrome titlebar and the modal pages hosted on the overlay surface (e.g. the
-// help dialog). When running in Electron (window.minds.showTooltip present) it
-// renders a styled bubble on the overlay surface, above both chrome and content,
-// on hover (after a short delay) and keyboard focus; it hides on
-// leave / blur / click / window resize or blur. Browser mode (no overlay
-// surface) gets no tooltip.
+// Included on every page via Base.jinja. It wires hover (after a short delay)
+// and keyboard-focus tooltips onto every element carrying a ``data-tooltip``
+// label, hiding again on leave / blur / click / scroll / window resize or blur.
+// The trigger wiring is identical everywhere; only the render backend differs,
+// chosen once by environment:
 //
-// An optional ``data-tooltip-shortcut`` populates the payload's ``shortcut``
-// field -- a forward hook for a keyboard-shortcut chip. Nothing renders it yet
-// (overlay.js drops the chip; there is no on-ramp chip size in the design
-// system), so it is a no-op until a real use arrives.
+//   * Overlay backend (window.minds.showTooltip present): the chrome titlebar
+//     and the modal pages hosted on the shared overlay surface hand the label
+//     + trigger rect to main over IPC, which renders the bubble on that surface
+//     -- floating above both chrome and workspace content (see overlay.js).
+//   * In-page backend (no bridge): first-party content-view pages (e.g. the
+//     landing page's workspace-row buttons) render the bubble themselves, as a
+//     ``position: fixed`` element appended to <body> so it escapes the
+//     workspace cards' ``overflow-hidden``. The content view deliberately lacks
+//     the window.minds bridge -- it also hosts foreign, untrusted workspace
+//     content -- so it cannot reach the overlay surface; it styles the bubble
+//     with the same shared ``.minds-tooltip`` class so the look matches.
+//
+// An optional ``data-tooltip-shortcut`` populates the overlay payload's
+// ``shortcut`` field -- a forward hook for a keyboard-shortcut chip. Nothing
+// renders it yet (overlay.js drops the chip; there is no on-ramp chip size in
+// the design system), so it is a no-op until a real use arrives.
 
 (function () {
   'use strict';
-  if (!window.minds || !window.minds.showTooltip) return;
 
   var TOOLTIP_DELAY_MS = 150;
+  var TOOLTIP_MARGIN = 6; // min gap from the window edges
+  var TOOLTIP_GAP = 6; // gap between the trigger and the bubble
+
+  // Overlay backend: delegate rendering + positioning to the overlay surface
+  // (main measures/clamps and drives the view's bounds; see overlay.js).
+  function makeOverlayBackend() {
+    return {
+      show: function (el) {
+        var r = el.getBoundingClientRect();
+        var payload = {
+          rect: { x: r.left, y: r.top, width: r.width, height: r.height },
+          text: el.getAttribute('data-tooltip'),
+        };
+        var shortcut = el.getAttribute('data-tooltip-shortcut');
+        if (shortcut) payload.shortcut = shortcut;
+        window.minds.showTooltip(payload);
+      },
+      hide: function () {
+        window.minds.hideTooltip();
+      },
+    };
+  }
+
+  // In-page backend: render + position the bubble on <body> ourselves. The
+  // positioning mirrors overlay.js (centered under the trigger, flipped above
+  // when it would overflow the bottom, clamped to the viewport) so the two
+  // backends behave the same.
+  function makeInPageBackend() {
+    var bubble = null;
+    function ensureBubble() {
+      if (bubble) return bubble;
+      bubble = document.createElement('div');
+      bubble.className = 'minds-tooltip';
+      bubble.setAttribute('role', 'tooltip');
+      bubble.style.position = 'fixed';
+      bubble.style.left = '0';
+      bubble.style.top = '0';
+      bubble.style.zIndex = '2147483647';
+      bubble.style.display = 'none';
+      document.body.appendChild(bubble);
+      return bubble;
+    }
+    return {
+      show: function (el) {
+        var b = ensureBubble();
+        b.textContent = el.getAttribute('data-tooltip');
+        var vw = window.innerWidth;
+        var vh = window.innerHeight;
+        // Measure at natural width (clear any width fixed by a prior show).
+        b.style.width = '';
+        b.style.visibility = 'hidden';
+        b.style.display = 'inline-flex';
+        var w = b.offsetWidth;
+        var h = b.offsetHeight;
+        var a = el.getBoundingClientRect();
+        var tx = a.left + a.width / 2 - w / 2;
+        var ty = a.bottom + TOOLTIP_GAP;
+        if (ty + h > vh - TOOLTIP_MARGIN) {
+          var above = a.top - h - TOOLTIP_GAP;
+          if (above >= TOOLTIP_MARGIN) ty = above;
+        }
+        if (tx + w > vw - TOOLTIP_MARGIN) tx = vw - TOOLTIP_MARGIN - w;
+        if (tx < TOOLTIP_MARGIN) tx = TOOLTIP_MARGIN;
+        if (ty < TOOLTIP_MARGIN) ty = TOOLTIP_MARGIN;
+        // Fix the width so it doesn't reflow if the viewport later changes.
+        b.style.width = w + 'px';
+        b.style.left = tx + 'px';
+        b.style.top = ty + 'px';
+        b.style.visibility = 'visible';
+      },
+      hide: function () {
+        if (bubble) {
+          bubble.style.display = 'none';
+          bubble.style.visibility = 'hidden';
+        }
+      },
+    };
+  }
+
+  var backend = window.minds && window.minds.showTooltip ? makeOverlayBackend() : makeInPageBackend();
+
   var timer = null;
   var shown = false;
 
   function clearTimer() {
-    if (timer) { clearTimeout(timer); timer = null; }
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
   }
   function hide() {
     clearTimer();
-    if (shown) { window.minds.hideTooltip(); shown = false; }
+    if (shown) {
+      backend.hide();
+      shown = false;
+    }
   }
   function showFor(el) {
-    var text = el.getAttribute('data-tooltip');
-    if (!text) return;
-    var r = el.getBoundingClientRect();
-    var payload = { rect: { x: r.left, y: r.top, width: r.width, height: r.height }, text: text };
-    var shortcut = el.getAttribute('data-tooltip-shortcut');
-    if (shortcut) payload.shortcut = shortcut;
-    window.minds.showTooltip(payload);
+    if (!el.getAttribute('data-tooltip')) return;
+    backend.show(el);
     shown = true;
   }
   function schedule(el) {
@@ -62,6 +153,9 @@
       el.addEventListener('blur', hide);
     })(triggers[i]);
   }
+  // Any scroll (capture, so nested scrollers count) or window resize/blur moves
+  // the trigger out from under a shown bubble, so drop it.
+  window.addEventListener('scroll', hide, true);
   window.addEventListener('resize', hide);
   window.addEventListener('blur', hide);
 })();

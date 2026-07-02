@@ -503,6 +503,39 @@ def test_landing_page_lists_agents_when_multiple_known(tmp_path: Path) -> None:
     assert str(agent_id_2) in response.text
 
 
+def test_landing_row_buttons_have_tooltips(tmp_path: Path) -> None:
+    """Landing workspace-row action buttons carry data-tooltip labels (rendered
+    as in-page custom tooltips by tooltip_triggers.js, since the content view
+    has no overlay bridge) rather than native title= attributes, plus an
+    aria-label so these icon-only buttons keep an accessible name."""
+    agent_id = AgentId()
+    backend_resolver = StaticBackendResolver(
+        url_by_agent_and_service={str(agent_id): {"web": "http://test:9100"}},
+    )
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/")
+    assert response.status_code == 200
+    # A normal (non-shutdown-capable) row shows Restart / Open / Settings.
+    assert 'data-tooltip="Restart workspace"' in response.text
+    assert 'data-tooltip="Open in new window"' in response.text
+    assert 'data-tooltip="Settings"' in response.text
+    # No native title= tooltips remain on the row buttons.
+    assert 'title="Restart workspace"' not in response.text
+    assert 'title="Settings"' not in response.text
+    # data-tooltip is not exposed to assistive tech, so the aria-labels stay.
+    assert 'aria-label="Restart workspace"' in response.text
+    assert 'aria-label="Workspace settings"' in response.text
+    # The shared trigger script is loaded (via Base), which wires these up and
+    # -- absent the window.minds bridge -- renders them in-page.
+    assert "/_static/tooltip_triggers.js" in response.text
+
+
 def test_creating_page_returns_501_without_agent_creator(tmp_path: Path) -> None:
     """GET /creating/{id} returns 501 when no agent_creator is configured."""
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
