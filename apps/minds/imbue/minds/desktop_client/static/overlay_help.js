@@ -190,10 +190,18 @@
       });
 
       find('#help-done-btn').addEventListener('click', closeHelp);
+
+      // Wire the close button's hover tooltip (data-tooltip). The shared trigger
+      // helper scans a root on demand; the injected fragment's DOM arrives after
+      // its own initial document pass, so bind it here.
+      if (typeof window.bindTooltips === 'function') window.bindTooltips(container);
     },
 
-    // All listeners are on elements inside the injected container, so removing
-    // the container (host teardown) drops them; nothing global to undo.
-    destroy: function () {},
+    // Listeners are on elements inside the injected container, so removing the
+    // container (host teardown) drops them. Just hide any tooltip that was
+    // showing when the modal closed.
+    destroy: function () {
+      if (window.minds && window.minds.hideTooltip) window.minds.hideTooltip();
+    },
   };
 })();

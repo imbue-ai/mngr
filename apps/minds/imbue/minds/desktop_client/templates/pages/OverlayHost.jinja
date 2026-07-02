@@ -22,14 +22,16 @@
 #}
 {% set _scripts %}
 {# Per-modal overlay modules register themselves in window.MINDS_OVERLAY_MODALS
-   before overlay.js processes any show command. auth.js exposes
-   initSigninAuthForm; overlay_signin.js registers the sign-in modal;
+   before overlay.js processes any show command. tooltip_triggers.js exposes
+   window.bindTooltips (the help modal binds its close-button tooltip on open);
+   auth.js exposes initSigninAuthForm; overlay_signin.js registers the sign-in modal;
    overlay_help.js registers the help modal; overlay_sidebar.js registers the
    workspace menu (and reuses the shared workspace_accent.js + sidebar row
    builder); overlay_inbox.js registers the inbox. overlay.js defines
    window.MINDS_OVERLAY_HOST (the cached SSE state the sidebar/inbox read) and
    drives the modals, so it loads last. Each newly migrated modal adds its
    module here. #}
+<script src="/_static/tooltip_triggers.js" defer></script>
 <script src="/_static/auth.js" defer></script>
 <script src="/_static/overlay_signin.js" defer></script>
 <script src="/_static/overlay_help.js" defer></script>

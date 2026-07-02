@@ -7,10 +7,10 @@
 // here as in-page DOM driven over IPC, so opens are instant.
 //
 // IPC contract (main -> host), delivered on window.minds.onOverlayCommand:
-//   { type: 'show-modal', id, url }       -- mount a fresh modal iframe,
-//                                            destroying any previously-shown one.
-//   { type: 'hide-modal', id }            -- destroy the named modal iframe.
-//   { type: 'hide-all' }                  -- destroy every modal (close/takeover).
+//   { type: 'show-modal', id, url }       -- fetch the modal's ?fragment=1 markup
+//                                            and inject it, superseding any other.
+//   { type: 'hide-modal', id }            -- tear down the named modal.
+//   { type: 'hide-all' }                  -- tear down every modal (close/takeover).
 //   { type: 'show-tooltip', rect, text,   -- render + position a tooltip bubble
 //     shortcut?, html? }                     anchored to the trigger's rect.
 //   { type: 'hide-tooltip' }              -- hide the tooltip.
@@ -20,24 +20,19 @@
 // { mode: 'hidden' } when none); modals are full-window and main owns their
 // visibility directly (see openModal/closeModal).
 //
-// Modals are being migrated from iframes to in-page DOM (see the -- Modals --
-// section below). A migrated modal (currently sign-in) registers itself in
-// window.MINDS_OVERLAY_MODALS and is fetched as ``?fragment=1`` markup and
-// injected here -- no iframe, no per-frame IPC. The not-yet-migrated modal pages
-// (inbox / help / workspace menu) still mount as first-party same-origin
-// iframes; the overlay view sets ``nodeIntegrationInSubFrames`` so the preload
-// runs in each and exposes ``window.minds`` before the iframe's own scripts run,
-// and main fans chrome-events / current-workspace / priming out per-frame (see
-// sendToOverlayFrames in main.js), since webContents.send reaches only the top
-// frame. Both the subframe integration and the per-frame fan-out go away once
-// every modal is an in-page fragment.
+// Every modal (sign-in / help / workspace menu / inbox) renders as in-page DOM:
+// its per-modal module (overlay_signin.js, overlay_help.js, ...) registers in
+// window.MINDS_OVERLAY_MODALS, and opening one fetches its ``?fragment=1`` markup
+// and injects it here -- no iframes. The SSE-driven modals (sidebar / inbox) read
+// their state from this host's cached chrome events (window.MINDS_OVERLAY_HOST),
+// which main primes on load and keeps current via broadcastChromeEvent.
 //
 // While a modal is open the overlay view is shown full-window by main and
 // captures pointer events (Electron 40 has no per-view click-through). For
 // modals, the view's visibility/bounds are owned by main (openModal/closeModal)
-// and this manager decides what is on screen (an injected fragment or an
-// iframe); for tooltips, this manager measures the bubble and reports a small
-// rect so the rest of the window stays interactive.
+// and this manager decides which fragment is on screen; for tooltips, this
+// manager measures the bubble and reports a small rect so the rest of the window
+// stays interactive.
 
 (function () {
   'use strict';
@@ -50,7 +45,7 @@
   // SSE-driven modals (the workspace menu, the inbox) render from the same state
   // the chrome view uses -- the workspace list, request counts, the current
   // workspace. main broadcasts those streams to this always-warm host on every
-  // change (see broadcastChromeEvent / sendToOverlayFrames in main.js), so the
+  // change (see broadcastChromeEvent / sendToOverlayHost in main.js), so the
   // host subscribes ONCE and caches the latest of each. A modal's init then
   // reads the current value synchronously the instant it opens -- no per-frame
   // priming handshake -- and stays live via a subscription it drops on close.
@@ -106,22 +101,14 @@
 
   // -- Modals -----------------------------------------------------------
   //
-  // Two paths coexist during the iframe -> in-page migration:
-  //
-  //   * Fragment path (in-page DOM): a modal registered in
-  //     window.MINDS_OVERLAY_MODALS (by a per-modal module script loaded in this
-  //     host page, e.g. overlay_signin.js) is fetched as ``?fragment=1`` markup
-  //     and injected here -- no iframe. The host owns the backdrop dismiss and
-  //     calls the module's init(container) / destroy().
-  //   * Legacy iframe path: a modal NOT in the registry still mounts a fresh
-  //     iframe per open (inbox / help / workspace menu until each is migrated).
-  //     The incoming iframe stays invisible until its load paints, and the modal
-  //     it replaces stays visible until that instant, so switching is flash-free.
-  //
-  // At most one modal is shown at a time; opening one supersedes the other path.
-  var modalFrame = null; // legacy path: the currently-visible modal iframe
-  var incomingFrame = null; // legacy path: a modal iframe still loading
-  var fragmentModal = null; // fragment path: { id, el, entry } of the injected modal
+  // Every modal (sign-in / help / workspace menu / inbox) is registered in
+  // window.MINDS_OVERLAY_MODALS by a per-modal module script loaded in this host
+  // page (overlay_signin.js, overlay_help.js, overlay_sidebar.js,
+  // overlay_inbox.js). Opening one fetches its ``?fragment=1`` markup and injects
+  // it here as in-page DOM -- no iframe -- and calls the module's
+  // init(container); closing calls destroy() and removes it. At most one modal is
+  // shown at a time; opening one supersedes any other.
+  var fragmentModal = null; // { id, el, entry } of the injected modal, or null
   var fragmentToken = 0; // supersede guard for in-flight fragment fetches
 
   function modalRegistry() {
@@ -131,14 +118,10 @@
   // Supersede any in-flight fragment fetch: bump the token so a fetch started by
   // an earlier show won't mount itself when it finally resolves. Every command
   // that changes what should be on screen (a new show, a targeted hide, a
-  // hide-all) must call this, or a slow fetch can mount a modal that was already
-  // superseded or closed.
+  // hide-all) calls this, or a slow fetch could mount a modal already superseded
+  // or closed.
   function invalidateFragmentFetch() {
     fragmentToken++;
-  }
-
-  function destroyFrame(frame) {
-    if (frame && frame.parentNode) frame.parentNode.removeChild(frame);
   }
 
   function teardownFragmentModal() {
@@ -160,15 +143,9 @@
 
   function showModal(id, url) {
     var entry = modalRegistry()[id];
-    if (entry) showFragmentModal(id, url, entry);
-    else showIframeModal(id, url);
-  }
-
-  function showFragmentModal(id, url, entry) {
-    // Supersede anything currently shown (a fragment, or a still-loading iframe).
+    if (!entry) return; // unknown modal id -- nothing registered to show
+    // Supersede anything currently shown (a mounted modal or a pending fetch).
     teardownFragmentModal();
-    destroyFrame(incomingFrame);
-    incomingFrame = null;
     var separator = url.indexOf('?') === -1 ? '?' : '&';
     invalidateFragmentFetch();
     var token = fragmentToken;
@@ -183,10 +160,6 @@
   }
 
   function mountFragmentModal(id, entry, html) {
-    // Drop any legacy iframe still on screen now that the fragment is in hand
-    // (18b: only reveal once the markup is ready, so there's no empty panel).
-    destroyFrame(modalFrame);
-    modalFrame = null;
     var container = document.createElement('div');
     container.className = 'absolute inset-0';
     container.setAttribute('data-overlay-id', id);
@@ -208,82 +181,17 @@
     }
   }
 
-  function showIframeModal(id, url) {
-    // Supersede any in-flight fragment fetch (from an earlier fragment show)
-    // so it can't mount itself once this iframe modal has taken over.
-    invalidateFragmentFetch();
-    // Drop any earlier incoming frame that never became visible -- this show
-    // supersedes it, and it was never shown, so there's no flash.
-    destroyFrame(incomingFrame);
-    var frame = document.createElement('iframe');
-    // Fill the host; the hosted page paints its own backdrop and positions its
-    // own panel within the full window.
-    frame.className = 'absolute inset-0 w-full h-full';
-    frame.style.border = '0';
-    frame.style.background = 'transparent';
-    frame.style.display = 'block';
-    // Invisible until its content paints; the previously-shown modal stays up
-    // until then so the swap doesn't flash.
-    frame.style.visibility = 'hidden';
-    frame.setAttribute('data-overlay-id', id);
-    frame.addEventListener('load', function () {
-      // A fresh iframe fires a load for its initial about:blank document (on
-      // insertion, before the real page navigates in). Ignore that one and only
-      // act on the hosted page's own load -- otherwise the about:blank load would
-      // run the swap early, null out incomingFrame, and the real load would then
-      // see frame !== incomingFrame and destroy this frame.
-      var href = '';
-      try {
-        href = frame.contentWindow.location.href;
-      } catch (e) {
-        href = '';
-      }
-      if (!href || href === 'about:blank') return;
-      // Tell main the iframe is ready so it can replay the cached chrome state
-      // (workspace list / request count) into it.
-      window.minds.overlayModalLoaded(id);
-      if (frame !== incomingFrame) {
-        // Superseded by a newer show before it finished loading; discard it.
-        destroyFrame(frame);
-        return;
-      }
-      frame.style.visibility = 'visible';
-      // Swap: remove whatever this one replaced (an old iframe or a fragment).
-      destroyFrame(modalFrame);
-      teardownFragmentModal();
-      modalFrame = frame;
-      incomingFrame = null;
-    });
-    frame.src = url;
-    incomingFrame = frame;
-    root.appendChild(frame);
-  }
-
   function hideModal(id) {
-    // main only sends 'hide-all' today, but honor a targeted hide too.
-    // Invalidate any in-flight fragment fetch so a still-pending open (nothing
-    // mounted yet) can't mount itself after this hide.
+    // main only sends 'hide-all' today, but honor a targeted hide too. Invalidate
+    // any in-flight fetch so a still-pending open can't mount after this hide.
     invalidateFragmentFetch();
     if (fragmentModal && fragmentModal.id === id) teardownFragmentModal();
-    if (modalFrame && modalFrame.getAttribute('data-overlay-id') === id) {
-      destroyFrame(modalFrame);
-      modalFrame = null;
-    }
-    if (incomingFrame && incomingFrame.getAttribute('data-overlay-id') === id) {
-      destroyFrame(incomingFrame);
-      incomingFrame = null;
-    }
   }
 
   function hideAllModals() {
-    // Invalidate any in-flight fragment fetch that resolves after this close so
-    // it won't mount itself.
+    // Invalidate any in-flight fetch that resolves after this close.
     invalidateFragmentFetch();
     teardownFragmentModal();
-    destroyFrame(incomingFrame);
-    destroyFrame(modalFrame);
-    incomingFrame = null;
-    modalFrame = null;
   }
 
   // -- Tooltips ----------------------------------------------------------

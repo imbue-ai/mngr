@@ -43,22 +43,31 @@
     }, TOOLTIP_DELAY_MS);
   }
 
-  var triggers = document.querySelectorAll('[data-tooltip]');
-  for (var i = 0; i < triggers.length; i++) {
-    (function (el) {
-      el.addEventListener('mouseenter', function () { schedule(el); });
-      el.addEventListener('mouseleave', hide);
-      el.addEventListener('click', hide);
-      // Keyboard focus only -- not focus that came from a mouse click (which
-      // would flash the tooltip and then immediately hide it on the click).
-      el.addEventListener('focus', function () {
-        try {
-          if (el.matches(':focus-visible')) showFor(el);
-        } catch (e) { /* :focus-visible unsupported -- skip focus tooltips */ }
-      });
-      el.addEventListener('blur', hide);
-    })(triggers[i]);
+  // Bind hover/focus tooltip triggers within ``root``. Run once for the document
+  // (the chrome titlebar and standalone pages) and again by the overlay host for
+  // each injected modal fragment (e.g. the help dialog's close button), whose
+  // DOM arrives after this script's initial pass. Exposed as window.bindTooltips.
+  function bindTooltips(root) {
+    var triggers = root.querySelectorAll('[data-tooltip]');
+    for (var i = 0; i < triggers.length; i++) {
+      (function (el) {
+        el.addEventListener('mouseenter', function () { schedule(el); });
+        el.addEventListener('mouseleave', hide);
+        el.addEventListener('click', hide);
+        // Keyboard focus only -- not focus that came from a mouse click (which
+        // would flash the tooltip and then immediately hide it on the click).
+        el.addEventListener('focus', function () {
+          try {
+            if (el.matches(':focus-visible')) showFor(el);
+          } catch (e) { /* :focus-visible unsupported -- skip focus tooltips */ }
+        });
+        el.addEventListener('blur', hide);
+      })(triggers[i]);
+    }
   }
+  window.bindTooltips = bindTooltips;
+
+  bindTooltips(document);
   window.addEventListener('resize', hide);
   window.addEventListener('blur', hide);
 })();
