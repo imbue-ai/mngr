@@ -6,12 +6,12 @@
 - All work lands in the **forever-claude-template (FCT)** repo (edited via a `.external_worktrees/forever-claude-template` worktree, per CLAUDE.md). There are **no `apps/minds` (desktop-client) changes** — the publish UI lives in the agent's in-container web UI (`system_interface`), not the minds request-inbox.
 - Deliverables:
   - Agent-awareness: a **one-sentence** mention in the FCT `CLAUDE.md` that inspirations exist (so the agent knows the concept). It does **not** push the agent to proactively offer publishing, and does not enumerate the skills (the agent already knows them).
-  - `/publish-inspiration` skill (FCT): assembles a clean, shareable repo from the current mind (via a `launch-task` sub-agent on an isolated worktree) and pushes it to GitHub.
+  - `/publish-inspiration` skill (FCT): assembles a clean, shareable repo from the current mind (in an isolated local `git worktree` in the same container) and pushes it to GitHub.
   - `/use-inspiration` skill (FCT): merges an existing inspiration (by git URL) into the current mind and fills in its holes.
   - **system_interface publish popup** (FCT `apps/system_interface`): a small in-UI box with editable inputs (title, description, repo name, visibility, thumbnail) the user confirms before publishing — built directly into the system_interface, not as a minds request type.
   - **system_interface GitHub-login modal** (FCT `apps/system_interface`): a one-click GitHub login mirroring the existing Claude-login modal, for users without an in-VM `GH_TOKEN`.
 - Key design decisions locked during planning:
-  - The inspiration is assembled by a **`launch-task` sub-agent on its own git worktree** (`mngr/<slug>`), so the live mind is untouched during assembly. The worktree is reduced to a **clean base = the FCT version the mind was created from** (its own FCT base commit/ref — *not* a freshly fetched upstream), plus only the user-selected app/feature paths — no experimental cruft, no user data, no secrets.
+  - The inspiration is assembled in an **isolated local `git worktree` in the same container** (`mngr/<slug>`), so the live mind is untouched during assembly. (Originally planned as a `launch-task` sub-agent; live testing showed the sub-agent added minutes of boot/report/poll latency for a sub-second script with no extra isolation — see the live-testing fixes section.) The worktree is reduced to a **clean base = the FCT version the mind was created from** (its own FCT base commit/ref — *not* a freshly fetched upstream), plus only the user-selected app/feature paths — no experimental cruft, no user data, no secrets.
   - The published repo records a **simple provenance link** to the FCT version it was based on — and does **nothing else** with upstream: no fetching, no pulling, no updating. Reusing whatever FCT version the mind already had keeps inspiration creation dead simple; because the base is a real FCT tree, the inspiration works as a proper template when later used.
   - A single inspiration repo can **accumulate multiple inspirations** over time (one `inspiration-<name>.md` manifest per inspiration at the repo root); each inspiration can contain multiple apps.
   - The manifest is a **worksheet**: it records what the inspiration is, its holes/permissions (freeform prose), and how it was later adapted.
@@ -28,8 +28,8 @@
 
 - The agent (the primary mind) asks the user a few setup questions in chat: what to call the inspiration, which apps/features to include, and whether any data should be included. It does **not** enumerate specific files to the user.
 - By default, **no user data** is included — only app/UI/code — and data is included only when the user explicitly asks.
-- The agent delegates the repo **assembly** to a sub-agent via the existing **`launch-task`** skill, which `mngr create`s a worker on an isolated worktree (`mngr/<slug>`). The live mind keeps running untouched during assembly.
-- In its worktree, the worker establishes a **clean base = the FCT version the mind was created from** (resets to the mind's own FCT base commit/ref — no upstream fetch), copies in only the file/paths backing the chosen apps/features, strips secrets, and makes a single commit. A simple provenance link to that FCT version is recorded; nothing is pulled or updated from upstream.
+- The agent runs the repo **assembly** itself in a throwaway local **`git worktree`** (`mngr/<slug>`) in the same container — a fast, deterministic script, not a sub-agent. The live mind keeps running untouched during assembly.
+- In that worktree, the script establishes a **clean base = the FCT version the mind was created from** (resets to the mind's own FCT base commit/ref — no upstream fetch; the fallback is the *first-parent* root plus a bootable-template pre-check, since subtree merges create parallel near-empty roots), copies in only the file/paths backing the chosen apps/features, strips secrets, and makes a single commit. A simple provenance link to that FCT version is recorded; nothing is pulled or updated from upstream.
 - The worker generates an `inspiration-<name>.md` manifest at the repo root: YAML front-matter (title, description, thumbnail) plus a markdown body explaining what it is, its holes, and the permissions it may need (freeform prose).
 - The thumbnail is, for now, an **SVG icon the agent generates** (mock data only, never real user data); it can later be replaced with a real screenshot.
 - The worker rewrites the FCT `/welcome` stable region to be specific to the most-recently-published inspiration, runs the **boot smoke-check** (the mind boots from the clean base; selected apps need not fully function — holes are expected), and reports back. The lead proxies any mid-flight `question` gates to the user and merges the worker's branch back on `done`.
@@ -42,7 +42,7 @@
 ### Using an inspiration (`/use-inspiration`)
 
 - Two entry points:
-  1. **Template path**: a new mind is created with an inspiration repo as its template. On startup, the rewritten `/welcome` drives the adaptation. The agent defaults to adapting the **latest** inspiration; older manifests are primarily reference (likely already adapted). The agent may ask the user what they want to do.
+  1. **Template path**: a new mind is created with an inspiration repo as its template. On startup, the inspiration region of `/welcome` **takes over the whole welcome**: the agent leads with a custom message naming the inspiration (not the generic template greeting), reads the manifest in the same turn, and **immediately** asks the user how they want to adapt it. It defaults to adapting the **latest** inspiration; older manifests are primarily reference (likely already adapted).
   2. **Merge path**: an existing mind (built from a different template) runs `/use-inspiration <git-url>`. The skill `git remote add`s the inspiration and merges/subtrees it in.
 - After bringing in the inspiration, the agent reads the relevant `inspiration-<name>.md` manifest, asks the user in chat how they want to adapt it, and works through the manifest's holes interactively (e.g. swapping Slack for email).
 - Merged-in `inspiration-<name>.md` manifests stay at the repo root and accumulate alongside existing ones.
@@ -162,7 +162,7 @@ Frontend:
 
 ## Open questions
 
-- **Lead vs. worker division for popup + push.** Whether the `launch-task` worker raises the publish popup and pushes, or only assembles + smoke-checks in isolation while the lead (which owns the user conversation) raises the popup, handles GitHub login, and pushes. Leaning toward the latter; confirm.
+- ~~**Lead vs. worker division for popup + push.**~~ Resolved by live testing: there is no worker at all — the agent assembles in a local `git worktree` itself and owns the popup, GitHub login, and push (see the live-testing fixes section).
 - **Publish-popup transport.** The exact channel skill → system_interface (a `POST /api/inspiration/publish-request` vs. a watched `runtime/inspiration/*.json` file) and back (response-file polling vs. an SSE-driven `mngr message`). Mirror whatever the system_interface already standardizes on (the Claude-auth endpoints + SSE event + a polled response file).
 - **GitHub login flow.** `gh auth login --web` device flow (no PAT needed, but requires a device-code paste-back UI) vs. a raw-PAT paste (simplest, mirrors the Claude API-key path). Likely support both, default to web/device.
 - **Clean-base mechanism in the worker.** Exactly how the worker resets to the FCT version the mind was created from (the mind's FCT base commit/ref) so that only the selected paths remain — and how the selected app paths are conveyed to the worker (launch-task `source_artifacts_dir`). The reset must drop tracked-but-not-in-base files (not just untracked), so it cannot leak the mind's other committed content into the inspiration.
@@ -179,3 +179,27 @@ Frontend:
 - **Skill name.** The use/adapt skill is `/use-inspiration` (formerly `/adapt-inspiration`).
 - **Secret denylist.** Baseline is the repo's existing `.gitignore` set (`.env*`, `.runtime/`, `memory/`, etc.); the agent additionally reasons about any other secrets in the selected changes and excludes them.
 - **Thumbnail storage.** `inspiration-<name>.svg` next to the manifest, referenced by relative path in the front-matter `thumbnail` key.
+## Live-testing fixes (implemented, 2026-07-02)
+
+The feature was implemented (FCT commit `fc4e0c46`) and exercised end-to-end by a real mind (`yo-inspo`, env `dev-inspiration`). The publish worked but surfaced real defects — several diagnosed from the publishing agent's own retrospective, each root-caused with evidence and fixed in the FCT. Two fix commits: `ee8443d7` and `72b7160b`.
+
+### Round 1 (`ee8443d7`)
+
+- **GitHub-login modal could not persist a credential (`GH_TOKEN` shadowing).** `gh` gives `GH_TOKEN`/`GITHUB_TOKEN` absolute priority over its credential store, and the system_interface process inherits `GH_TOKEN` — so `gh auth login` refused to store and `gh auth status` reported the env token. Fixed by scrubbing the token env vars from every `gh` child invocation in the auth backend (parent env untouched); the skill scrubs them for its own status probe and the final push (`env -u GH_TOKEN -u GITHUB_TOKEN`).
+- **Assembly was minutes instead of seconds.** Timestamps showed the ~20-minute publish was dominated by agent-turn latency around a `launch-task` sub-agent (worker boot/read/report/poll cycles, plus a forced retry), not by the assembly script (~0.2s measured). Replaced the sub-agent with a local throwaway `git worktree` in the same container — identical isolation, none of the latency.
+- **Secret scan false positives.** The scan covered the whole assembled tree including the trusted public FCT base, whose own test fixtures hold placeholder tokens (`sk-ant-test`) — blocking every publish. Now scans only the overlaid paths, with token patterns requiring realistic key lengths.
+- **Boot smoke-check via `uv run`** rebuilt the whole project env just to parse `supervisord.conf` (slow, spurious failures). Now uses the interpreter behind the installed `supervisord` binary.
+
+### Round 2 (`72b7160b`)
+
+- **Popups never appeared (root cause of most of the thrash).** Popup events were fire-and-forget over a transient WebSocket: with no live client connected at broadcast time, the POST returned 200 but the popup went into the void, and the skill blind-polled for minutes and re-triggered serially. Backend fanout itself was proven correct by a live WS experiment. Fixed both sides: the backend now retains the pending publish request and any unresolved GitHub-auth prompt and **replays them to every newly-connecting client**, and the trigger endpoints return **`ws_client_count`** so the skill skips waiting when nobody is listening. The skill now waits one bounded ~90s window at most, then falls back to inline chat confirmation (publish) or a chat-surfaced `gh` device flow (auth) — one mechanism at a time, no serial thrash.
+- **Wrong base commit on multi-root repos.** The BASE_REF fallback used a bare root-commit lookup; subtree merges give a mind repo several parallel near-empty roots (the real repo had 4), so assembly built on a wrong root and burned a full round-trip. The fallback is now the **first-parent root**, governed by a mandatory seconds-cheap pre-check that the base tree is a bootable template (`pyproject.toml` + `supervisord.conf`), walking the first-parent chain forward when needed; `build_inspiration.sh` re-validates and exits 5 as a backstop.
+- **Welcome never took over.** A mind created from an inspiration repo led with the generic template greeting and never started adapting. The welcome skill's inspiration region now **takes over the entire welcome**: custom message naming the inspiration, same-turn manifest read, and an immediate "how do you want to adapt it?" conversation.
+- **Manifest was too thin.** The generated `inspiration-<slug>.md` is now a thorough, self-sufficient explainer — What it is / How it works / How to adapt it / Holes / Permissions it may need / Adaptation history — with clearly-marked FILL-IN blocks the publishing agent completes before the confirmation popup.
+- **`gh` device flow + scopes.** The web login's expect logic was rebuilt against gh 2.95's real PTY transcript (it previously timed out waiting for the one-time code), and it now requests the `workflow` scope up front (the template ships CI workflows, so the first push needs it); auth status surfaces token scopes with a warning when `workflow` is missing.
+- **Thumbnail ordering.** The confirmed thumbnail/manifest edits are committed before the push (previously the placeholder was pushed first and re-pushed), with a clean-`git status` pre-push check.
+
+### Known-good verification state
+
+- system_interface backend: 43 tests pass across the inspiration + github-auth suites; frontend build + 378 vitest tests pass (from the feature round).
+- The secret-leak/mis-nest safety of the clean-base reset was verified empirically against synthetic repos (tracked secrets dropped, apps land at correct paths, token-in-selected-path hard-fails before commit), as were the exit-5 base validation and the welcome-region takeover rewrite.
