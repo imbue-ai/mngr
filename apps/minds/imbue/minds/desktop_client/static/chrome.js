@@ -298,7 +298,14 @@
   }
 
   if (isElectron) {
-    if (window.minds.onWindowTitleChange) {
+    if (isLocalPage) {
+      // A local page in the chrome view IS the content: its own document.title
+      // is authoritative for the titlebar (main's window-title IPC carries the
+      // OS window title, which is generic on a non-workspace screen). Don't
+      // subscribe to the title IPC here -- it would clobber the page title.
+      var localElectronTitle = document.getElementById('page-title');
+      if (localElectronTitle) localElectronTitle.textContent = document.title || 'Minds';
+    } else if (window.minds.onWindowTitleChange) {
       window.minds.onWindowTitleChange(function (title) {
         document.getElementById('page-title').textContent = title || 'Minds';
       });

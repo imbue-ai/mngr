@@ -296,21 +296,13 @@ function detachWindowsForWorkspace(agentId) {
   for (const b of affected) {
     if (liveBundleCount - affected.length >= 1) {
       b.window.close();
-    } else {
-      b.currentWorkspaceId = null;
-      if (b.contentView && !b.contentView.webContents.isDestroyed() && backendBaseUrl) {
-        b.contentView.webContents.loadURL(backendBaseUrl + '/');
-      }
-      updateOsTitle(b);
-      // Notify the chrome renderer that this window is no longer displaying a
-      // workspace, so its recovery-redirect lock (`currentTitleAgentId`)
-      // resets. The did-navigate handler that fires after the loadURL above
-      // would NOT send this IPC: its diff-guard (`bundle.currentWorkspaceId !==
-      // newAgentId`) sees null !== null and skips. The titlebar accent is
-      // handled separately -- the workspace-destroyed handler clears it
-      // explicitly and the loadURL('/') above re-derives it via its own
-      // navigation -- so the bar falls back to the neutral chrome regardless.
-      sendCurrentWorkspaceToBundleViews(b);
+    } else if (backendBaseUrl) {
+      // The window's workspace is gone: route it back to Home. Home is a local
+      // page, so navigateBundle renders it in the chrome view and hides the
+      // (agent) content view, clears currentWorkspaceId + notifies the chrome
+      // renderer -- releasing its recovery-redirect lock -- and drops the
+      // titlebar accent to the neutral chrome.
+      navigateBundle(b, backendBaseUrl + '/');
     }
   }
 }
@@ -437,6 +429,11 @@ function createBundleWebContentsViews(win) {
   contentView.setBackgroundColor('#ffffff');
   win.contentView.addChildView(chromeView);
   win.contentView.addChildView(contentView);
+  // The content view hosts agent content ONLY, and is shown only while the
+  // current screen is an agent path (navigateBundle toggles it). It is created
+  // hidden so a window that opens on a trusted local page (Home, Create, ...)
+  // shows just the chrome view's own titlebar + page, with no empty agent card.
+  contentView.setVisible(false);
 
   // Auto-open DevTools on both views when MINDS_OPEN_DEVTOOLS=1 is set.
   // The built-in cmd+opt+I shortcut crashes on BaseWindow + WebContentsViews
@@ -584,6 +581,31 @@ function createBundle() {
     primeViewWithCachedChromeState(bundle, chromeView.webContents);
   });
 
+  // A trusted local page renders in the chrome view itself, so the chrome view's
+  // OWN navigation is what drives the titlebar accent + the restored-URL
+  // bookkeeping (mirroring onContentNavigate, which now handles only agent
+  // content). The /_chrome agent-wrapper is skipped: on an agent path the accent
+  // + current-workspace come from the content view's did-navigate, and a wrapper
+  // nav must not clobber them (the accent race). A local page never displays a
+  // workspace, so it clears currentWorkspaceId (releasing the recovery-redirect
+  // lock) while still tinting for the wider workspace-scoped screens.
+  const onChromeNavigate = (url) => {
+    if (bundle.isErrorState) return;
+    let pathname = null;
+    try { pathname = new URL(url).pathname; } catch { return; }
+    if (pathname === '/_chrome') return;
+    bundle.currentContentUrl = url;
+    bundle.preErrorUrl = url;
+    if (bundle.currentWorkspaceId !== null) {
+      bundle.currentWorkspaceId = null;
+      sendCurrentWorkspaceToBundleViews(bundle);
+    }
+    updateBundleAccentAgentId(bundle, parseAccentSourceAgentId(url));
+    updateOsTitle(bundle);
+  };
+  chromeView.webContents.on('did-navigate', (_e, url) => onChromeNavigate(url));
+  chromeView.webContents.on('did-navigate-in-page', (_e, url) => onChromeNavigate(url));
+
   wireContentViewEvents(bundle, contentView);
   registerShortcutsFor(bundle, chromeView.webContents);
   registerShortcutsFor(bundle, contentView.webContents);
@@ -603,6 +625,10 @@ function wireContentViewEvents(bundle, contentView) {
   });
 
   const onContentNavigate = (url) => {
+    // Ignore the about:blank the content view is parked on while hidden (see
+    // hideBundleContentView): it is not real content and must not overwrite the
+    // window's current URL / accent / current-workspace.
+    if (!url || url === 'about:blank') return;
     if (!bundle.isErrorState) {
       bundle.currentContentUrl = url;
       bundle.preErrorUrl = url;
@@ -1053,32 +1079,83 @@ function sendCurrentWorkspaceToBundleViews(bundle) {
 
 // -- Window opening / focusing --
 
-function loadUrlIntoBundleContentView(bundle, url) {
-  // Stamp the intended workspace synchronously so subsequent
-  // findBundleForWorkspace lookups see this bundle as occupying the workspace
-  // BEFORE its content view has fired did-navigate. Otherwise a second
-  // openOrFocusWorkspace / landing-click / notification-click arriving during
-  // the load window wouldn't see the pending bundle and would spawn a duplicate.
-  // Applies to every content-view loadURL aimed at a workspace URL, including
-  // session restore into the initial bundle.
-  if (!bundle) return;
-  const intendedAgentId = parseWorkspaceId(url);
-  if (intendedAgentId) {
-    bundle.currentWorkspaceId = intendedAgentId;
+// Show the content view (the agent surface) and re-apply its inset bounds.
+function showBundleContentView(bundle) {
+  if (!bundle || !bundle.contentView || bundle.contentView.webContents.isDestroyed()) return;
+  bundle.contentView.setVisible(true);
+  updateBundleBounds(bundle);
+}
+
+// Hide the content view when leaving agent content, and release the agent
+// page's renderer by parking it on about:blank -- so no foreign workspace stays
+// resident/running behind a trusted local page. The view object itself is kept
+// (recreating it would have to re-wire events + re-assert z-order under the
+// modal view, which is error-prone): this reclaims the heavy renderer while
+// leaving a cheap idle view to reveal on the next agent navigation.
+function hideBundleContentView(bundle) {
+  if (!bundle || !bundle.contentView || bundle.contentView.webContents.isDestroyed()) return;
+  bundle.contentView.setVisible(false);
+  try {
+    bundle.contentView.webContents.loadURL('about:blank');
+  } catch { /* noop */ }
+}
+
+// Ensure the chrome view is on the agent-wrapper (/_chrome) -- the titlebar with
+// an empty content region that the content view floats over on an agent path.
+// Only (re)load it when it isn't already there, so an agent navigation doesn't
+// reload the wrapper (a spurious /_chrome chrome did-navigate would race the
+// content view's accent -- see onChromeNavigate).
+function ensureBundleChromeWrapper(bundle) {
+  if (!bundle || !bundle.chromeView || bundle.chromeView.webContents.isDestroyed() || !backendBaseUrl) return;
+  let pathname = null;
+  try { pathname = new URL(bundle.chromeView.webContents.getURL()).pathname; } catch { pathname = null; }
+  if (pathname !== '/_chrome') {
+    bundle.chromeView.webContents.loadURL(backendBaseUrl + '/_chrome');
+  }
+}
+
+// Route a navigation to the correct surface. Untrusted agent content
+// (agent-<id>.localhost / /goto/<id>/) goes to the content view (shown, floating
+// over the /_chrome wrapper); every trusted local page goes to the chrome view,
+// which renders the titlebar + the page body itself (content view hidden). The
+// caller passes an ABSOLUTE url. State (currentWorkspaceId for uniqueness /
+// recovery-redirect, the accent source, and currentContentUrl/preErrorUrl for
+// session restore) is stamped optimistically here and authoritatively re-applied
+// by the destination surface's did-navigate handler (onContentNavigate /
+// onChromeNavigate). Stamping currentWorkspaceId synchronously also lets a
+// concurrent findBundleForWorkspace see this bundle occupying the workspace
+// before its content view fires did-navigate (avoids a duplicate window).
+function navigateBundle(bundle, url) {
+  if (!bundle || !url) return;
+  if (selectSurfaceForUrl(url) === SURFACE_CONTENT) {
+    bundle.currentWorkspaceId = parseWorkspaceId(url);
     bundle.currentContentUrl = url;
     bundle.preErrorUrl = url;
     updateOsTitle(bundle);
     sendCurrentWorkspaceToBundleViews(bundle);
-  }
-  // Stamp the accent source from the URL (the wider
-  // ``parseAccentSourceAgentId`` set), so workspace-scoped settings / sharing
-  // routes -- and restored windows -- paint the bar before the first
-  // did-navigate lands (no neutral flash). A null result (a blank Home window,
-  // say) clears the accent to the neutral chrome; passed through
-  // unconditionally, matching ``onContentNavigate``.
-  updateBundleAccentAgentId(bundle, parseAccentSourceAgentId(url));
-  if (bundle.contentView && !bundle.contentView.webContents.isDestroyed() && url) {
-    bundle.contentView.webContents.loadURL(url);
+    updateBundleAccentAgentId(bundle, parseAccentSourceAgentId(url));
+    ensureBundleChromeWrapper(bundle);
+    showBundleContentView(bundle);
+    if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
+      bundle.contentView.webContents.loadURL(url);
+    }
+  } else {
+    // Trusted local page: the chrome view IS the content. A local page never
+    // "displays" a workspace, so clear currentWorkspaceId (releasing the
+    // recovery-redirect lock); the accent still tracks the wider
+    // workspace-scoped screens via parseAccentSourceAgentId.
+    bundle.currentContentUrl = url;
+    bundle.preErrorUrl = url;
+    if (bundle.currentWorkspaceId !== null) {
+      bundle.currentWorkspaceId = null;
+      sendCurrentWorkspaceToBundleViews(bundle);
+    }
+    updateOsTitle(bundle);
+    updateBundleAccentAgentId(bundle, parseAccentSourceAgentId(url));
+    hideBundleContentView(bundle);
+    if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+      bundle.chromeView.webContents.loadURL(url);
+    }
   }
 }
 
@@ -1097,10 +1174,10 @@ function openNewWindow(url, { showInactive = false } = {}) {
   if (showInactive) bundle.showInactiveOnFirstShow = true;
   bundle.isLoadingState = false;
   updateBundleBounds(bundle);
-  if (bundle.chromeView && backendBaseUrl) {
-    bundle.chromeView.webContents.loadURL(backendBaseUrl + '/_chrome');
-  }
-  loadUrlIntoBundleContentView(bundle, url);
+  // navigateBundle picks the surface: an agent url loads the /_chrome wrapper
+  // into the chrome view + the workspace into the (shown) content view; a local
+  // url loads the page straight into the chrome view (content view stays hidden).
+  navigateBundle(bundle, url);
   return bundle;
 }
 
@@ -1177,6 +1254,10 @@ function prepareAllWindowsForRetry() {
       contentView.setBackgroundColor('#ffffff');
       bundle.contentView = contentView;
       bundle.window.contentView.addChildView(contentView);
+      // Rebuilt hidden, like the initial content view: reloadAllWindowsAfterRetry
+      // routes the pre-error URL through navigateBundle, which shows it only if
+      // it is agent content.
+      contentView.setVisible(false);
       registerShortcutsFor(bundle, contentView.webContents);
       wireContentViewEvents(bundle, contentView);
     }
@@ -1195,13 +1276,11 @@ function reloadAllWindowsAfterRetry() {
     bundle.isErrorState = false;
     bundle.isLoadingState = false;
     updateBundleBounds(bundle);
-    if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed() && backendBaseUrl) {
-      bundle.chromeView.webContents.loadURL(backendBaseUrl + '/_chrome');
-    }
-    if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
-      const target = bundle.preErrorUrl || (backendBaseUrl ? backendBaseUrl + '/' : null);
-      if (target) bundle.contentView.webContents.loadURL(target);
-    }
+    // Route the pre-error URL back to its surface: navigateBundle loads the
+    // /_chrome wrapper + shows the content view for an agent URL, or renders a
+    // local page straight in the chrome view (content view stays hidden).
+    const target = bundle.preErrorUrl || (backendBaseUrl ? backendBaseUrl + '/' : null);
+    if (target) navigateBundle(bundle, target);
   }
 }
 
@@ -2675,9 +2754,9 @@ async function startBackendWithRetry() {
       });
 
       const loadInitialContent = (relativePath) => {
-        if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
-          initialBundle.contentView.webContents.loadURL(backendBaseUrl + relativePath);
-        }
+        // /welcome and / are local pages -> navigateBundle renders them in the
+        // chrome view (the /_chrome preloaded above is replaced), content hidden.
+        navigateBundle(initialBundle, backendBaseUrl + relativePath);
       };
 
       if (startupRoute === 'welcome') {
@@ -2690,11 +2769,12 @@ async function startBackendWithRetry() {
       } else {
         // Restore saved windows with their positions and sizes. Each window's
         // titlebar accent is re-derived from its restored content URL by
-        // ``loadUrlIntoBundleContentView`` (which ``openNewWindow`` calls too),
-        // so no separately-persisted accent is needed.
+        // ``navigateBundle`` (which ``openNewWindow`` calls too), and each URL is
+        // routed to its surface (agent -> content view, local -> chrome view), so
+        // no separately-persisted accent is needed.
         const [first, ...rest] = restorable;
         restoreWindowBounds(initialBundle, first);
-        loadUrlIntoBundleContentView(initialBundle, toRestoredContentUrl(first));
+        navigateBundle(initialBundle, toRestoredContentUrl(first));
         // Open the lesser-MRU windows without stealing focus, so the
         // MRU-zero window (already focused as initialBundle) stays focused
         // after restore completes.
@@ -2764,9 +2844,9 @@ function handleNotification(event) {
       openOrFocusWorkspace(agentId, absolute);
     } else {
       const mru = getMostRecentWindow();
-      if (mru && mru.contentView && !mru.contentView.webContents.isDestroyed()) {
+      if (mru) {
         focusBundle(mru);
-        mru.contentView.webContents.loadURL(absolute);
+        navigateBundle(mru, absolute);
       }
     }
   });
@@ -2823,10 +2903,10 @@ function handleAuthEvent(event) {
     const mru = getMostRecentWindow();
     if (!mru) return;
     focusBundle(mru);
-    if (mru.contentView && !mru.contentView.webContents.isDestroyed() && backendBaseUrl) {
+    if (backendBaseUrl) {
       const authUrl = `${backendBaseUrl}/auth/login?message=` +
         encodeURIComponent('You need to sign in to Imbue in order to share');
-      mru.contentView.webContents.loadURL(authUrl);
+      navigateBundle(mru, authUrl);
     }
   }
 }
@@ -2836,9 +2916,9 @@ function handleAuthEvent(event) {
 ipcMain.on('go-home', (event) => {
   const bundle = getBundleFromEvent(event);
   if (!bundle || !backendBaseUrl) return;
-  if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
-    bundle.contentView.webContents.loadURL(backendBaseUrl + '/');
-  }
+  // Home is a local page: navigateBundle renders it in the chrome view and hides
+  // the agent content view.
+  navigateBundle(bundle, backendBaseUrl + '/');
 });
 
 ipcMain.on('navigate-content', (event, url) => {
@@ -2856,25 +2936,29 @@ ipcMain.on('navigate-content', (event, url) => {
     }
   }
 
-  // Nobody is on this workspace (or it's a non-workspace URL): navigate sender
-  if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
-    bundle.contentView.webContents.loadURL(absolute);
-  }
+  // Nobody is on this workspace (or it's a non-workspace URL): navigate sender to
+  // the right surface -- agent content to the content view, a trusted local page
+  // to the chrome view.
+  navigateBundle(bundle, absolute);
   closeModal(bundle);
 });
 
+// Back/forward act on whichever surface is currently showing: the content view
+// while it displays agent content (currentWorkspaceId set), else the chrome view
+// (which navigates full-page among trusted local pages). Back/forward is a
+// safety-net affordance, not load-bearing -- real navigation is always explicit.
+function surfaceViewForHistory(bundle) {
+  return bundle && bundle.currentWorkspaceId ? bundle.contentView : (bundle ? bundle.chromeView : null);
+}
+
 ipcMain.on('content-go-back', (event) => {
-  const bundle = getBundleFromEvent(event);
-  if (bundle && bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
-    bundle.contentView.webContents.goBack();
-  }
+  const view = surfaceViewForHistory(getBundleFromEvent(event));
+  if (view && !view.webContents.isDestroyed()) view.webContents.goBack();
 });
 
 ipcMain.on('content-go-forward', (event) => {
-  const bundle = getBundleFromEvent(event);
-  if (bundle && bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
-    bundle.contentView.webContents.goForward();
-  }
+  const view = surfaceViewForHistory(getBundleFromEvent(event));
+  if (view && !view.webContents.isDestroyed()) view.webContents.goForward();
 });
 
 ipcMain.on('toggle-sidebar', (event, anchor) => {
@@ -3045,20 +3129,21 @@ ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
     template.push({ type: 'separator' });
   }
   const goToRecoveryView = () => {
-    if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
-      // The restart POST has already moved the health tracker to RESTARTING,
-      // so the recovery page renders its "Restarting…" progress state and
-      // auto-refreshes itself until the workspace is healthy again, then
-      // navigates back to ``workspaceUrl``. Reloading the workspace URL directly would
-      // instead race the restart: the container is still up at dispatch
-      // time, so the reload would just show the pre-restart workspace.
-      bundle.contentView.webContents.loadURL(
-        toAbsoluteUrl(
-          '/agents/' + encodeURIComponent(agentId)
-          + '/recovery?return_to=' + encodeURIComponent(workspaceUrl || ''),
-        ),
-      );
-    }
+    // The restart POST has already moved the health tracker to RESTARTING, so the
+    // recovery page renders its "Restarting…" progress state and auto-refreshes
+    // until the workspace is healthy again, then navigates back to ``workspaceUrl``.
+    // Reloading the workspace URL directly would instead race the restart: the
+    // container is still up at dispatch time, so the reload would just show the
+    // pre-restart workspace. The recovery page is a trusted local screen (a
+    // workspace-scoped path, not agent content), so navigateBundle renders it in
+    // the chrome view and hides the stuck agent's content view.
+    navigateBundle(
+      bundle,
+      toAbsoluteUrl(
+        '/agents/' + encodeURIComponent(agentId)
+        + '/recovery?return_to=' + encodeURIComponent(workspaceUrl || ''),
+      ),
+    );
   };
   template.push({
     label: 'Restart system interface',

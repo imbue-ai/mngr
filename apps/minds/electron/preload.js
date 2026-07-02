@@ -74,6 +74,18 @@ contextBridge.exposeInMainWorld('minds', {
   // absolute path, or null if the user cancelled.
   showFilePicker: (options) => ipcRenderer.invoke('show-file-picker', options),
 
+  // Landing-page Stop button: ask the main process to show a native
+  // confirmation dialog and (on confirm) issue the host stop itself. Reachable
+  // directly now that the Landing page renders on the trusted chrome surface
+  // (it previously routed through the content-view relay). Main re-validates the
+  // agent id.
+  confirmStopMind: (agentId, name) => ipcRenderer.send('confirm-stop-mind', agentId, name),
+
+  // Create-screen sign-in: open the shared modal overlay loaded with the
+  // sign-in page. Reachable directly now that the Create page renders on the
+  // trusted chrome surface (previously via the content-view relay).
+  openSigninModal: () => ipcRenderer.send('open-signin-modal'),
+
   // Multi-window workspace actions
   openWorkspaceInNewWindow: (agentId) =>
     ipcRenderer.send('open-workspace-in-new-window', agentId),
