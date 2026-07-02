@@ -2,7 +2,7 @@ Migrated the GitHub Actions workflows off GitHub-stored secrets and onto HashiCo
 
 - CI test/TMR jobs (`ci.yml`, `vet.yml`, `release-tests.yml`, `tmr.yml`, `tmr-reintegrate.yml`) now fetch the Anthropic key, imbue Modal workspace token (both id and secret), and the TMR S3 credentials from Vault under `mngr/ci/*`, using a new repo-bound `mngr_ci_gh` role. The `MODAL_TOKEN_ID` repo variable and the `ANTHROPIC_API_KEY` / `MODAL_TOKEN_SECRET` / `AWS_*` Actions secrets are no longer used.
 
-- The minds CI-env jobs in `ci.yml` now read the minds-dev Modal token from Vault (`minds/ci/modal/*`) via their existing Vault login, replacing the `MINDS_DEV_MODAL_TOKEN_*` variable/secret.
+- The minds CI-env jobs in `ci.yml` now read the minds-dev Modal token from Vault (`minds/ci/MODAL_TOKEN_ID` + `MODAL_TOKEN_SECRET`) via their existing Vault login, replacing the `MINDS_DEV_MODAL_TOKEN_*` variable/secret.
 
 - The `minds-launch-to-msg.yml` build job fetches its ToDesktop signing credentials from a separate, environment-gated minds release path (`minds/release/*`, role `minds_release_gh`, GitHub Environment `minds-release`); its launch and Slack-notify jobs read the Anthropic key and Slack webhook from the monorepo-wide `mngr/ci/*` CI-tooling bucket.
 

@@ -98,8 +98,8 @@ jobs:
           role: mngr_ci_gh
           secrets: |
             mngr/ci/ANTHROPIC_API_KEY
-            mngr/ci/modal/MODAL_TOKEN_ID
-            mngr/ci/modal/MODAL_TOKEN_SECRET
+            mngr/ci/MODAL_TOKEN_ID
+            mngr/ci/MODAL_TOKEN_SECRET
 
       # AWS creds enable mirroring the HTML report to
       # s3://int8-shared-internal/tmr-reports/. Optional: continue-on-error so a
@@ -112,8 +112,8 @@ jobs:
         with:
           role: mngr_ci_gh
           secrets: |
-            mngr/ci/aws/AWS_ACCESS_KEY_ID
-            mngr/ci/aws/AWS_SECRET_ACCESS_KEY
+            mngr/ci/AWS_ACCESS_KEY_ID
+            mngr/ci/AWS_SECRET_ACCESS_KEY
 
       - name: Run TMR orchestrator
         env:

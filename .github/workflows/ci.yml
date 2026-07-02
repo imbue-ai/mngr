@@ -76,8 +76,8 @@ jobs:
         with:
           role: mngr_ci_gh
           secrets: |
-            mngr/ci/modal/MODAL_TOKEN_ID
-            mngr/ci/modal/MODAL_TOKEN_SECRET
+            mngr/ci/MODAL_TOKEN_ID
+            mngr/ci/MODAL_TOKEN_SECRET
 
       # Default shallow single-ref checkout, then deepen only THIS ref's
       # history in the next step. offload needs the full ancestry of HEAD
@@ -261,8 +261,8 @@ jobs:
         with:
           role: mngr_ci_gh
           secrets: |
-            mngr/ci/modal/MODAL_TOKEN_ID
-            mngr/ci/modal/MODAL_TOKEN_SECRET
+            mngr/ci/MODAL_TOKEN_ID
+            mngr/ci/MODAL_TOKEN_SECRET
 
       - uses: actions/checkout@v6
 
@@ -313,8 +313,8 @@ jobs:
         with:
           role: mngr_ci_gh
           secrets: |
-            mngr/ci/modal/MODAL_TOKEN_ID
-            mngr/ci/modal/MODAL_TOKEN_SECRET
+            mngr/ci/MODAL_TOKEN_ID
+            mngr/ci/MODAL_TOKEN_SECRET
 
       # Default shallow single-ref checkout, then deepen only THIS ref's
       # history in the next step. offload needs the full ancestry of HEAD
@@ -496,8 +496,8 @@ jobs:
         with:
           role: mngr_ci_gh
           secrets: |
-            mngr/ci/modal/MODAL_TOKEN_ID
-            mngr/ci/modal/MODAL_TOKEN_SECRET
+            mngr/ci/MODAL_TOKEN_ID
+            mngr/ci/MODAL_TOKEN_SECRET
 
       # The snapshot script rsyncs the checked-out working tree into the
       # Modal image (it excludes .git), so a default shallow single-ref
@@ -609,8 +609,8 @@ jobs:
           # export it for the modal-profile + deploy steps below, reusing the
           # token just minted (the vault CLI reads VAULT_TOKEN from the env).
           export VAULT_TOKEN
-          MODAL_TOKEN_ID=$(vault kv get -field=value -mount=secrets minds/ci/modal/MODAL_TOKEN_ID)
-          MODAL_TOKEN_SECRET=$(vault kv get -field=value -mount=secrets minds/ci/modal/MODAL_TOKEN_SECRET)
+          MODAL_TOKEN_ID=$(vault kv get -field=value -mount=secrets minds/ci/MODAL_TOKEN_ID)
+          MODAL_TOKEN_SECRET=$(vault kv get -field=value -mount=secrets minds/ci/MODAL_TOKEN_SECRET)
           echo "::add-mask::$MODAL_TOKEN_ID"
           echo "::add-mask::$MODAL_TOKEN_SECRET"
           printf 'MODAL_TOKEN_ID<<__EOF__\n%s\n__EOF__\n' "$MODAL_TOKEN_ID" >> "$GITHUB_ENV"
@@ -690,8 +690,8 @@ jobs:
           # export it for the modal-profile + deploy steps below, reusing the
           # token just minted (the vault CLI reads VAULT_TOKEN from the env).
           export VAULT_TOKEN
-          MODAL_TOKEN_ID=$(vault kv get -field=value -mount=secrets minds/ci/modal/MODAL_TOKEN_ID)
-          MODAL_TOKEN_SECRET=$(vault kv get -field=value -mount=secrets minds/ci/modal/MODAL_TOKEN_SECRET)
+          MODAL_TOKEN_ID=$(vault kv get -field=value -mount=secrets minds/ci/MODAL_TOKEN_ID)
+          MODAL_TOKEN_SECRET=$(vault kv get -field=value -mount=secrets minds/ci/MODAL_TOKEN_SECRET)
           echo "::add-mask::$MODAL_TOKEN_ID"
           echo "::add-mask::$MODAL_TOKEN_SECRET"
           printf 'MODAL_TOKEN_ID<<__EOF__\n%s\n__EOF__\n' "$MODAL_TOKEN_ID" >> "$GITHUB_ENV"
@@ -753,16 +753,17 @@ jobs:
       # The Anthropic key (for live checks) is always needed; masked in the logs
       # and forwarded into the offload sandbox by the just recipe below. The
       # imbue Modal workspace token (id + secret) is fetched here too -- the
-      # minds_ci_test_gh role also reads mngr/ci/modal/* (shared with the mngr
-      # CI jobs) -- and exported as MODAL_TOKEN_ID / MODAL_TOKEN_SECRET.
+      # minds_ci_test_gh role also reads mngr/ci/MODAL_TOKEN_ID and
+      # mngr/ci/MODAL_TOKEN_SECRET (shared with the mngr CI jobs) -- and exported
+      # as MODAL_TOKEN_ID / MODAL_TOKEN_SECRET.
       - name: Fetch Anthropic key and Modal credentials from Vault
         uses: imbue-ai/use-vault-secrets@2375c28b61513dadebebdce845c109a01777a197
         with:
           role: minds_ci_test_gh
           secrets: |
             minds/ci/litellm/ANTHROPIC_API_KEY
-            mngr/ci/modal/MODAL_TOKEN_ID
-            mngr/ci/modal/MODAL_TOKEN_SECRET
+            mngr/ci/MODAL_TOKEN_ID
+            mngr/ci/MODAL_TOKEN_SECRET
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -926,8 +927,8 @@ jobs:
           # export it for the modal-profile + deploy steps below, reusing the
           # token just minted (the vault CLI reads VAULT_TOKEN from the env).
           export VAULT_TOKEN
-          MODAL_TOKEN_ID=$(vault kv get -field=value -mount=secrets minds/ci/modal/MODAL_TOKEN_ID)
-          MODAL_TOKEN_SECRET=$(vault kv get -field=value -mount=secrets minds/ci/modal/MODAL_TOKEN_SECRET)
+          MODAL_TOKEN_ID=$(vault kv get -field=value -mount=secrets minds/ci/MODAL_TOKEN_ID)
+          MODAL_TOKEN_SECRET=$(vault kv get -field=value -mount=secrets minds/ci/MODAL_TOKEN_SECRET)
           echo "::add-mask::$MODAL_TOKEN_ID"
           echo "::add-mask::$MODAL_TOKEN_SECRET"
           printf 'MODAL_TOKEN_ID<<__EOF__\n%s\n__EOF__\n' "$MODAL_TOKEN_ID" >> "$GITHUB_ENV"
@@ -1005,8 +1006,8 @@ jobs:
           # export it for the modal-profile + deploy steps below, reusing the
           # token just minted (the vault CLI reads VAULT_TOKEN from the env).
           export VAULT_TOKEN
-          MODAL_TOKEN_ID=$(vault kv get -field=value -mount=secrets minds/ci/modal/MODAL_TOKEN_ID)
-          MODAL_TOKEN_SECRET=$(vault kv get -field=value -mount=secrets minds/ci/modal/MODAL_TOKEN_SECRET)
+          MODAL_TOKEN_ID=$(vault kv get -field=value -mount=secrets minds/ci/MODAL_TOKEN_ID)
+          MODAL_TOKEN_SECRET=$(vault kv get -field=value -mount=secrets minds/ci/MODAL_TOKEN_SECRET)
           echo "::add-mask::$MODAL_TOKEN_ID"
           echo "::add-mask::$MODAL_TOKEN_SECRET"
           printf 'MODAL_TOKEN_ID<<__EOF__\n%s\n__EOF__\n' "$MODAL_TOKEN_ID" >> "$GITHUB_ENV"

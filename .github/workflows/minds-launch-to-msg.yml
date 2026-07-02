@@ -202,8 +202,8 @@ jobs:
         with:
           role: minds_release_gh
           secrets: |
-            minds/release/todesktop/TODESKTOP_ACCESS_TOKEN
-            minds/release/todesktop/TODESKTOP_EMAIL
+            minds/release/TODESKTOP_ACCESS_TOKEN
+            minds/release/TODESKTOP_EMAIL
       - name: check ToDesktop secrets
         run: |
           missing=0
@@ -216,7 +216,7 @@ jobs:
             missing=1
           fi
           if (( missing )); then
-            echo "Add both to Vault under secrets/minds/release/todesktop/ (see the use-vault-secrets step above)."
+            echo "Add both to Vault under secrets/minds/release/ (see the use-vault-secrets step above)."
             exit 1
           fi
           echo "TODESKTOP_ACCESS_TOKEN length=${#TODESKTOP_ACCESS_TOKEN}, TODESKTOP_EMAIL length=${#TODESKTOP_EMAIL}"

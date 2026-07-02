@@ -87,8 +87,8 @@ jobs:
           role: mngr_ci_gh
           secrets: |
             mngr/ci/ANTHROPIC_API_KEY
-            mngr/ci/modal/MODAL_TOKEN_ID
-            mngr/ci/modal/MODAL_TOKEN_SECRET
+            mngr/ci/MODAL_TOKEN_ID
+            mngr/ci/MODAL_TOKEN_SECRET
       - uses: actions/checkout@v6
 
       - name: Set up Python
