@@ -46,8 +46,8 @@
   };
 
   // Standalone browser page: auth.js already auto-ran the form, so only add the
-  // modal's nav hooks + its own backdrop dismiss (no overlay host to own it). No
-  // help in the overlay host: the backdrop isn't present at host load.
+  // modal's nav hooks + its own backdrop dismiss (no overlay host to own it).
+  // No-op in the overlay host: the backdrop isn't present at host load.
   var backdrop = document.getElementById('signin-modal-backdrop');
   if (backdrop) {
     setAuthNavHooks();
