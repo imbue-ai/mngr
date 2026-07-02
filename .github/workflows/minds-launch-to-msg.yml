@@ -161,7 +161,7 @@ jobs:
   build:
     needs: [check_should_run]
     if: needs.check_should_run.outputs.should_run == 'true'
-    # Gated behind the `minds-release` GitHub Environment: the mngr_release_gh
+    # Gated behind the `minds-release` GitHub Environment: the minds_release_gh
     # Vault role that mints the ToDesktop credentials binds on this environment
     # claim, so only a job that declares it can fetch them. The environment must
     # exist in the repo settings with NO required reviewers, so the nightly
@@ -193,17 +193,17 @@ jobs:
     steps:
       # ToDesktop signing/publishing credentials from Vault (migrated off the
       # TODESKTOP_ACCESS_TOKEN / TODESKTOP_EMAIL GitHub Actions secrets). These
-      # are release credentials, so they live under mngr/release/* behind the
-      # mngr_release_gh role's environment gate, not the ordinary CI role.
-      # NOTE: this self-hosted macOS runner must have curl + jq on PATH, which
-      # the use-vault-secrets action shells out to.
+      # publish the minds desktop client, so they live under minds/release/*
+      # behind the minds_release_gh role's environment gate, not the ordinary CI
+      # role. NOTE: this self-hosted macOS runner must have curl + jq on PATH,
+      # which the use-vault-secrets action shells out to.
       - name: Fetch ToDesktop credentials from Vault
         uses: imbue-ai/use-vault-secrets@2375c28b61513dadebebdce845c109a01777a197
         with:
-          role: mngr_release_gh
+          role: minds_release_gh
           secrets: |
-            mngr/release/todesktop/TODESKTOP_ACCESS_TOKEN
-            mngr/release/todesktop/TODESKTOP_EMAIL
+            minds/release/todesktop/TODESKTOP_ACCESS_TOKEN
+            minds/release/todesktop/TODESKTOP_EMAIL
       - name: check ToDesktop secrets
         run: |
           missing=0
@@ -216,7 +216,7 @@ jobs:
             missing=1
           fi
           if (( missing )); then
-            echo "Add both to Vault under secrets/mngr/release/todesktop/ (see the use-vault-secrets step above)."
+            echo "Add both to Vault under secrets/minds/release/todesktop/ (see the use-vault-secrets step above)."
             exit 1
           fi
           echo "TODESKTOP_ACCESS_TOKEN length=${#TODESKTOP_ACCESS_TOKEN}, TODESKTOP_EMAIL length=${#TODESKTOP_EMAIL}"

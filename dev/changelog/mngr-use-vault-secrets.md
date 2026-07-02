@@ -4,7 +4,7 @@ Migrated the GitHub Actions workflows off GitHub-stored secrets and onto HashiCo
 
 - The minds CI-env jobs in `ci.yml` now read the minds-dev Modal token from Vault (`minds/ci/modal/*`) via their existing Vault login, replacing the `MINDS_DEV_MODAL_TOKEN_*` variable/secret.
 
-- The `minds-launch-to-msg.yml` build job fetches its ToDesktop signing credentials from a separate, environment-gated release path (`mngr/release/*`, role `mngr_release_gh`, GitHub Environment `minds-release`); its launch and Slack-notify jobs read the Anthropic key and Slack webhook from `mngr/ci/*`.
+- The `minds-launch-to-msg.yml` build job fetches its ToDesktop signing credentials from a separate, environment-gated minds release path (`minds/release/*`, role `minds_release_gh`, GitHub Environment `minds-release`); its launch and Slack-notify jobs read the Anthropic key and Slack webhook from the monorepo-wide `mngr/ci/*` CI-tooling bucket.
 
 - The automatic per-run `GITHUB_TOKEN` (used for same-repo `git push` / `gh` calls and check-run reporting) is intentionally left as-is -- it is not a stored secret and cannot meaningfully live in Vault.
 
