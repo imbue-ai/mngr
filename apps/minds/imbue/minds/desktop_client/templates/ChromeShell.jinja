@@ -1,0 +1,112 @@
+{#def title="Minds", is_mac=False, is_authenticated=False, mngr_forward_origin="", body_class="font-sans antialiased", body_style="background-color: var(--titlebar-bg, var(--c-surface-primary));", head="", scripts="" #}
+{#
+  Shared trusted app shell: the fixed titlebar + browser-mode floating sidebar
+  + accent / chrome.js wiring, wrapping a page body passed in the content slot.
+
+  This is the trusted app chrome. It is used by pages.Chrome (which fills the
+  slot with the content iframe -- the agent-content surface in browser mode) and
+  by the trusted local/native pages (which fill it with their own body). Pulling
+  the shell into one component lets a single edit re-skin every trusted surface.
+
+  is_mac controls macOS-specific styling (traffic-light spacer, hidden window
+  controls). mngr_forward_origin is exposed to page-level JS via a body data
+  attribute so chrome.js can build workspace links that target the plugin's port
+  directly. In Electron mode the browser-mode sidebar block is hidden via JS; the
+  content is a separate WebContentsView and window.minds exposes IPC adapters.
+
+  head / scripts let a page append its own head tags / script tags; they are
+  emitted after the shell's own (workspace_accent.js, sidebar_workspace_row.js,
+  chrome.js). body_class / body_style default to the neutral chrome surface (the
+  body background tracks --titlebar-bg so an active workspace accent bleeds
+  through the content surface's rounded corners); a page may override either.
+#}
+{% set _head %}
+<style>
+  /* Things that can't easily be expressed as Tailwind utilities. */
+  html, body { height: 100%; overflow: hidden; }
+  #minds-titlebar { -webkit-app-region: drag; }
+  #minds-titlebar button { -webkit-app-region: no-drag; }
+  /* When the inbox modal (or any modal hosted in the main process's
+     modalView) is open, drop the titlebar's app-region: drag. macOS
+     unions drag regions across all views in a window, so without this
+     the titlebar's drag swallows clicks intended for the modal's
+     interior in the y=0..TITLEBAR strip. The main process sends
+     `modal-state-changed` over IPC and chrome.js toggles the
+     ``modal-open`` body class accordingly. */
+  body.modal-open #minds-titlebar { -webkit-app-region: no-drag; }
+</style>
+{{ head }}
+{% endset %}
+{% set _body_attrs %}data-is-mac="{{ 'true' if is_mac else 'false' }}" data-is-authenticated="{{ 'true' if is_authenticated else 'false' }}" data-mngr-forward-origin="{{ mngr_forward_origin }}"{% endset %}
+{% set _scripts %}
+<script src="/_static/workspace_accent.js" defer></script>
+<script src="/_static/sidebar_workspace_row.js" defer></script>
+<script src="/_static/chrome.js" defer></script>
+{{ scripts }}
+{% endset %}
+<Base :title="title"
+      :body_class="body_class"
+      :body_style="body_style"
+      head={{ _head }}
+      body_attrs={{ _body_attrs }}
+      scripts={{ _scripts }}>
+  {# Three flex sections sized 1 / 2 / 1 so the page title always sits in the
+     screen's exact center, regardless of how wide each side's controls are.
+     Centering holds only while the left and right ``flex-1`` sections stay
+     equal width, so macOS reserves the traffic-light strip with a fixed
+     spacer div -- NOT a left padding. With ``box-sizing: border-box`` a left
+     padding clamps the section's flex base size up to that padding, making the
+     left section 72px wider than the right and shoving the title ~36px
+     off-center to the right. A ``shrink-0`` spacer instead lives inside the
+     section, which ``min-w-0`` lets shrink to its 1/4 flex share, so both
+     sides keep equal width and the center stays truly centered. Non-mac draws
+     its own min/max/close at the right. #}
+  <div id="minds-titlebar"
+       style="background-color: var(--titlebar-bg, var(--c-surface-primary));"
+       class="fixed top-0 left-0 right-0 h-[38px] flex items-center select-none z-[100] px-1">
+    <div class="flex-1 flex items-center gap-0.5 min-w-0">
+      {% if is_mac %}<div class="w-[72px] shrink-0" aria-hidden="true"></div>{% endif %}
+      <TitlebarButton id="sidebar-toggle" title="Workspaces"><Icon16 name="menu" /></TitlebarButton>
+      <TitlebarButton id="home-btn" title="Home"><Icon16 name="home" /></TitlebarButton>
+      <TitlebarButton id="back-btn" title="Back"><Icon16 name="chevron-left" /></TitlebarButton>
+      <TitlebarButton id="forward-btn" title="Forward"><Icon16 name="chevron-right" /></TitlebarButton>
+    </div>
+    <div class="flex-[2] flex items-center justify-center px-2 min-w-0">
+      <span id="page-title" class="text-primary type-label whitespace-nowrap overflow-hidden text-ellipsis">Minds</span>
+    </div>
+    <div class="flex-1 flex items-center justify-end min-w-0">
+      <TitlebarButton id="help-toggle" title="Get help"><Icon16 name="help-circle" /></TitlebarButton>
+      <TitlebarButton id="requests-toggle" title="Requests" extra="gap-[3px]">
+        <Icon16 name="inbox" />
+        <Badge :count="0" id="requests-badge" hidden />
+      </TitlebarButton>
+      <div class="flex {% if is_mac %}hidden{% endif %}">
+        <TitlebarButton variant="control" id="min-btn" title="Minimize"><Icon12 name="minimize" /></TitlebarButton>
+        <TitlebarButton variant="control" id="max-btn" title="Maximize"><Icon12 name="maximize" /></TitlebarButton>
+        <TitlebarButton variant="control" tone="danger" id="close-btn" title="Close"><Icon12 name="close" /></TitlebarButton>
+      </div>
+    </div>
+  </div>
+
+  {# Browser-mode floating sidebar: full-screen transparent backdrop
+     (#sidebar-backdrop) with a floating dark menu (#sidebar-menu)
+     positioned at toggle time by chrome.js using the sidebar-toggle
+     button's getBoundingClientRect + a caller-chosen offset. Clicks on
+     the backdrop and Escape close the menu (handled by chrome.js). In
+     Electron this whole block is hidden via JS; the sidebar page
+     (Sidebar.jinja) is loaded into the shared modal WebContentsView and
+     uses the same #sidebar-backdrop / #sidebar-menu shape with the
+     /_static/sidebar.js renderer. Both modes share the position model:
+     menu.top-left = trigger.bottom-left + offset, with a uniform 4px panel
+     pad (p-1) and 2px between entries (gap-0.5); each row adds its own
+     px-2 for the hover highlight's inset. #}
+  <div id="sidebar-backdrop" class="fixed inset-0 z-50 hidden">
+    <div id="sidebar-menu"
+         class="dark absolute w-[280px] flex flex-col gap-0.5 p-1 rounded-lg border border-subtle bg-surface-primary shadow-overlay overflow-hidden">
+      <div id="sidebar-workspaces" class="flex flex-col gap-0.5"></div>
+      <SidebarBottom />
+    </div>
+  </div>
+
+  {{ content }}
+</Base>
