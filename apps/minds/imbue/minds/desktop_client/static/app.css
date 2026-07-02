@@ -389,10 +389,12 @@ html {
  * JS; this class is appearance only. ``type-helper`` is the 12px/1.4 hints
  * role and ``shadow-overlay`` the menus/modals/tooltips elevation; the
  * max-width + whitespace/pointer-events keep it a compact, non-interactive
- * label.
+ * label. The max-width is generous enough that short button labels (e.g.
+ * "Open in new window") stay on one line; ``text-center`` centers the lines
+ * when a longer label does wrap.
  */
 .minds-tooltip {
-  @apply inline-flex items-center gap-1.5 max-w-[280px] py-1 px-2 rounded-md bg-surface-inverse text-inverse-primary type-helper shadow-overlay whitespace-normal pointer-events-none;
+  @apply inline-flex items-center gap-1.5 max-w-[320px] py-1 px-2 rounded-md bg-surface-inverse text-inverse-primary type-helper shadow-overlay whitespace-normal text-center pointer-events-none;
 }
 
 /*

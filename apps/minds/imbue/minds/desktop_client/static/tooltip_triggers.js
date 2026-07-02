@@ -26,7 +26,7 @@
 (function () {
   'use strict';
 
-  var TOOLTIP_DELAY_MS = 150;
+  var TOOLTIP_DELAY_MS = 250; // hover-intent delay before a tooltip appears
   var TOOLTIP_MARGIN = 6; // min gap from the window edges
   var TOOLTIP_GAP = 6; // gap between the trigger and the bubble
 
