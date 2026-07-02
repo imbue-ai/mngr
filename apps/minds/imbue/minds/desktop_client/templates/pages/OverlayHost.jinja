@@ -26,15 +26,17 @@
    initSigninAuthForm; overlay_signin.js registers the sign-in modal;
    overlay_help.js registers the help modal; overlay_sidebar.js registers the
    workspace menu (and reuses the shared workspace_accent.js + sidebar row
-   builder). overlay.js defines window.MINDS_OVERLAY_HOST (the cached SSE state
-   the sidebar/inbox read) and drives the modals, so it loads last. Each newly
-   migrated modal adds its module here. #}
+   builder); overlay_inbox.js registers the inbox. overlay.js defines
+   window.MINDS_OVERLAY_HOST (the cached SSE state the sidebar/inbox read) and
+   drives the modals, so it loads last. Each newly migrated modal adds its
+   module here. #}
 <script src="/_static/auth.js" defer></script>
 <script src="/_static/overlay_signin.js" defer></script>
 <script src="/_static/overlay_help.js" defer></script>
 <script src="/_static/workspace_accent.js" defer></script>
 <script src="/_static/sidebar_workspace_row.js" defer></script>
 <script src="/_static/overlay_sidebar.js" defer></script>
+<script src="/_static/overlay_inbox.js" defer></script>
 <script src="/_static/overlay.js" defer></script>
 {% endset %}
 <Base title="Minds"

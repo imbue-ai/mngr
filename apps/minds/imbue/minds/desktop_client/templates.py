@@ -685,6 +685,7 @@ def render_inbox_page(
     detail_html: str = "",
     is_empty: bool = False,
     auto_open: bool = True,
+    is_fragment: bool = False,
 ) -> str:
     """Render the full inbox modal page served by ``GET /inbox``.
 
@@ -703,6 +704,7 @@ def render_inbox_page(
         detail_html=detail_html,
         is_empty=is_empty,
         auto_open=auto_open,
+        is_fragment=is_fragment,
     )
 
 

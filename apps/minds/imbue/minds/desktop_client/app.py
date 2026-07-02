@@ -1896,6 +1896,7 @@ def _handle_inbox_page() -> Response:
             detail_html=detail_html,
             is_empty=len(cards) == 0,
             auto_open=auto_open,
+            is_fragment=request.args.get("fragment") == "1",
         )
     )
 
