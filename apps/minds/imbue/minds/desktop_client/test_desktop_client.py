@@ -731,11 +731,11 @@ def test_chrome_titlebar_buttons_have_tooltips(tmp_path: Path) -> None:
 
     response = client.get("/_chrome")
     assert response.status_code == 200
-    assert 'data-tooltip="Workspaces"' in response.text
+    assert 'data-tooltip="Main Menu"' in response.text
     assert 'data-tooltip="Get help"' in response.text
     # data-tooltip is not exposed to assistive tech, so each icon-only titlebar
     # button also needs an aria-label to keep an accessible name.
-    assert 'aria-label="Workspaces"' in response.text
+    assert 'aria-label="Main Menu"' in response.text
     assert 'aria-label="Get help"' in response.text
 
 
@@ -1091,6 +1091,26 @@ def test_auth_signin_modal_page_renders_overlay_with_auth_form(tmp_path: Path) -
     assert 'id="signin-modal-backdrop"' in response.text
     assert 'id="signin-form"' in response.text
     assert "run your workspace on Imbue Cloud" in response.text
+
+
+def test_signin_modal_close_button_has_tooltip(tmp_path: Path) -> None:
+    """The sign-in modal's close button (DialogCloseButton) carries a Close tooltip,
+    wired by the shared trigger script on the overlay surface."""
+    client = _create_test_client_with_auth_routes(tmp_path)
+    response = client.get("/auth/signin-modal")
+    assert response.status_code == 200
+    assert 'data-tooltip="Close"' in response.text
+    assert "/_static/tooltip_triggers.js" in response.text
+
+
+def test_inbox_close_button_has_tooltip(tmp_path: Path) -> None:
+    """The inbox modal's close button carries a Close tooltip on the overlay surface."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.get("/inbox")
+    assert response.status_code == 200
+    assert 'data-tooltip="Close"' in response.text
+    assert "/_static/tooltip_triggers.js" in response.text
 
 
 def test_auth_page_ignores_unsafe_return_to(tmp_path: Path) -> None:

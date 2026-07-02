@@ -52,5 +52,10 @@
 <body class="{{ body_class }}" style="{{ body_style }}" {{ body_attrs }}>
   {{ content }}
   {{ scripts }}
+  {# Custom tooltips for any element carrying ``data-tooltip``. Wires up only
+     where the ``window.minds`` bridge exists (the chrome titlebar + the overlay
+     modal pages); a safe no-op on content-view pages that lack it. See
+     templates/README.md's "CSS classes for JS-rendered surfaces" note. #}
+  <script src="/_static/tooltip_triggers.js" defer></script>
 </body>
 </html>
