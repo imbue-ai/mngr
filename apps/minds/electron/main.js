@@ -692,11 +692,11 @@ function wireContentViewEvents(bundle, contentView) {
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
       bundle.chromeView.webContents.send('content-url-changed', url);
     }
-    // The sidebar (hosted in an overlay iframe) refreshes its
+    // The sidebar (rendered as in-page DOM in the overlay host) refreshes its
     // "Manage account(s)" / "Log in" label on every content URL change so
     // a sign-in / sign-out performed in the workspace iframe propagates
-    // to the menu the next time the user opens it. Sent per-frame so it
-    // reaches the iframe; inbox doesn't subscribe so it's a no-op there.
+    // to the menu the next time the user opens it. Sent to the overlay host;
+    // inbox doesn't subscribe so it's a no-op there.
     sendToOverlayHost(bundle, 'content-url-changed', url);
   };
 
@@ -1076,7 +1076,8 @@ function closeModal(bundle) {
     } catch { /* noop */ }
   }
   // Tell the warm overlay host to hide its overlays. The host page itself stays
-  // loaded (warm) so the next open is instant; only the hosted iframes hide.
+  // loaded (warm) so the next open is instant; only the injected modal fragments
+  // are torn down.
   sendOverlayCommand(bundle, { type: 'hide-all' });
   if (bundle.inboxListReloadTimer) {
     clearTimeout(bundle.inboxListReloadTimer);
@@ -1187,7 +1188,7 @@ function scheduleInboxListRefresh(bundle, evt) {
     if (!bundle || bundle.window.isDestroyed()) return;
     if (!bundle.modalView || !bundle.modalVisible) return;
     if (bundle.modalView.webContents.isDestroyed()) return;
-    // Per-frame so the event reaches the inbox iframe, not just the host frame.
+    // Deliver to the overlay host, where the inbox reads it from the cache.
     sendToOverlayHost(bundle, 'chrome-event', evt);
   }, INBOX_LIST_REFRESH_DEBOUNCE_MS);
 }
@@ -1204,7 +1205,7 @@ function sendCurrentWorkspaceToBundleViews(bundle) {
   if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
     bundle.chromeView.webContents.send('current-workspace-changed', bundle.currentWorkspaceId);
   }
-  // The sidebar/inbox run in overlay iframes, so fan out per-frame.
+  // The sidebar/inbox render in the overlay host, so send it there directly.
   sendToOverlayHost(bundle, 'current-workspace-changed', bundle.currentWorkspaceId);
 }
 
@@ -1804,10 +1805,10 @@ function handleChromeSSEEvent(evt) {
 function broadcastChromeEvent(evt) {
   for (const b of bundles) {
     if (b.window.isDestroyed()) continue;
-    // Push to the chrome titlebar and to the overlay's iframes (sidebar, inbox).
-    // The inbox shell uses these events too (e.g. ``requests`` count); the
+    // Push to the chrome titlebar and to the overlay host (sidebar, inbox).
+    // The inbox uses these events too (e.g. ``requests`` count); the
     // sidebar uses ``workspaces`` / ``auth_status`` to render its list. The
-    // overlay's hosted pages live in iframes, so fan out per-frame.
+    // overlay's modals render as in-page DOM in the host, so send it there.
     if (b.chromeView && !b.chromeView.webContents.isDestroyed()) {
       try {
         b.chromeView.webContents.send('chrome-event', evt);
@@ -3142,7 +3143,7 @@ ipcMain.on('close-modal', (event) => {
 // bubble and reports a small rect so the overlay view shrinks to it (the rest of
 // the window stays interactive). When a modal IS open the overlay view is already
 // full-window and capturing, so ``inModal`` tells the host to render the bubble
-// in-page above the modal iframe (above everything via z-index) without a bounds
+// in-page above the modal (above everything via z-index) without a bounds
 // change. Titlebar tooltips can't fire while a modal is open (the modal covers
 // the titlebar), so this only enables modal-internal tooltips.
 ipcMain.on('show-tooltip', (event, payload) => {
