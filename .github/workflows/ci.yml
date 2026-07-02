@@ -751,17 +751,25 @@ jobs:
       - uses: actions/checkout@v6
 
       # The Anthropic key (for live checks) is always needed; masked in the logs
-      # and forwarded into the offload sandbox by the just recipe below. The
-      # imbue Modal workspace token (id + secret) is fetched here too -- the
-      # minds_ci_test_gh role also reads mngr/ci/MODAL_TOKEN_ID and
-      # mngr/ci/MODAL_TOKEN_SECRET (shared with the mngr CI jobs) -- and exported
-      # as MODAL_TOKEN_ID / MODAL_TOKEN_SECRET.
-      - name: Fetch Anthropic key and Modal credentials from Vault
+      # and forwarded into the offload sandbox by the just recipe below. Read via
+      # the minds-scoped minds_ci_test_gh role.
+      - name: Fetch Anthropic key from Vault
         uses: imbue-ai/use-vault-secrets@2375c28b61513dadebebdce845c109a01777a197
         with:
           role: minds_ci_test_gh
           secrets: |
             minds/ci/litellm/ANTHROPIC_API_KEY
+
+      # The imbue Modal workspace token (id + secret) is fetched via the
+      # monorepo-wide mngr_ci_gh role, not minds_ci_test_gh: this job's
+      # minds-ci-test environment claim still satisfies mngr_ci_gh's
+      # repository-only binding, so minds_ci_test_gh stays scoped to minds/ci.
+      # Exported as MODAL_TOKEN_ID / MODAL_TOKEN_SECRET.
+      - name: Fetch Modal credentials from Vault
+        uses: imbue-ai/use-vault-secrets@2375c28b61513dadebebdce845c109a01777a197
+        with:
+          role: mngr_ci_gh
+          secrets: |
             mngr/ci/MODAL_TOKEN_ID
             mngr/ci/MODAL_TOKEN_SECRET
 
