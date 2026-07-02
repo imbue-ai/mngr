@@ -1,1 +1,0 @@
-Bumped the release Dockerfile's `CLAUDE_CODE_VERSION` from `2.1.141` to `2.1.160` to match the pin in forever-claude-template's `.mngr/settings.toml` (`[agent_types.claude].version`). The two had drifted, which the `test_claude_code_version_matches_forever_claude_template_pin` release test flags because a mismatch makes agent provisioning fail with "Claude version mismatch".

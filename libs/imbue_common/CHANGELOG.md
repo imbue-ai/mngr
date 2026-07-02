@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Shared `PREVENT_ASYNC_AWAIT` ratchet rule (`common_ratchets.py`) and `check_async_await` wrapper (`standard_ratchet_checks.py`) that power a per-project `test_prevent_async_await` ratchet freezing `async def` / `await` usage across the monorepo.
+
 ### Changed
 
 - Changed: `find_bash_scripts_without_strict_mode` (the helper behind the repo-wide bash strict-mode ratchet) now skips `*.sh` files under `.minds/template/`. Those are declarative secret-schema templates sourced by the deploy tooling, not runnable scripts, so `set -euo pipefail` is meaningless for them.
