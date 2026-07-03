@@ -28,10 +28,9 @@
     // The remote (Imbue Cloud) preset needs an Imbue account. When a signed-out
     // user presses "Create" with it selected, open the shared sign-in modal in
     // the desktop client's overlay layer (covering the whole window, title bar
-    // included) via an allowlisted postMessage relayed to the Electron main
-    // process. In the browser (no shell) navigate to the standalone sign-in
-    // page instead.
-    var isElectronShell = navigator.userAgent.indexOf('Electron') !== -1;
+    // included) via the shell bridge -- the create page is a trusted local page
+    // on the chrome surface. In the browser (no shell) navigate to the
+    // standalone sign-in page instead.
 
     var form = document.getElementById('create-form');
     var simpleView = document.getElementById('simple-view');
@@ -130,12 +129,8 @@
         // Trusted local page on the chrome surface: open the shared modal
         // overlay (loaded with /auth/signin-modal) via the shell bridge.
         window.minds.openSigninModal();
-      } else if (isElectronShell) {
-        // Transitional fallback while this page may still render in the caged
-        // content view (no window.minds): relay to the main process
-        // (content-relay-preload.js), which opens the same modal overlay.
-        window.postMessage({ type: 'minds:open-signin-modal' }, '*');
       } else {
+        // Plain browser: navigate to the standalone sign-in page.
         window.location.href = '/auth/signin-modal';
       }
     }

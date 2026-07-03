@@ -255,16 +255,19 @@ def test_render_create_form_shows_preset_cards() -> None:
     assert "Advanced Configuration" in html
 
 
-def test_render_create_form_opens_signin_modal_via_overlay_relay() -> None:
+def test_render_create_form_opens_signin_modal_via_shell_bridge() -> None:
     # Choosing Imbue Cloud while signed out opens the sign-in modal in the
     # desktop client's shared overlay layer (so it covers the title bar), not an
     # in-page dialog. The create page therefore no longer embeds the auth form
-    # or loads auth.js itself; it asks the Electron main process to open the
-    # /auth/signin-modal page via an allowlisted postMessage relay (falling back
-    # to navigating there directly in the browser).
+    # or loads auth.js itself. Now a trusted local page on the chrome surface, it
+    # calls the ``window.minds.openSigninModal`` shell bridge directly (the caged
+    # content-view relay is gone), falling back to navigating to
+    # /auth/signin-modal in the browser.
     html = render_create_form(accounts=[])
-    assert "minds:open-signin-modal" in html
+    assert "window.minds.openSigninModal" in html
     assert "/auth/signin-modal" in html
+    # The stale content-view relay postMessage must not linger.
+    assert "minds:open-signin-modal" not in html
     # The auth form + its script now live in the overlay page, not here.
     assert 'id="signin-modal"' not in html
     assert 'id="signin-form"' not in html

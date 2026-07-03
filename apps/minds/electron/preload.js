@@ -86,6 +86,15 @@ contextBridge.exposeInMainWorld('minds', {
   // trusted chrome surface (previously via the content-view relay).
   openSigninModal: () => ipcRenderer.send('open-signin-modal'),
 
+  // Workspace-settings color picker: paint this window's titlebar optimistically
+  // with the just-picked accent so the user sees it immediately, without waiting
+  // for the PATCH -> mngr label subprocess -> SSE round-trip. Reachable directly
+  // now that the settings page renders on the trusted chrome surface (previously
+  // via the content-view relay). Main re-validates the agent id + accent shape
+  // and only repaints the sending bundle's chrome view.
+  previewWorkspaceAccent: (agentId, accent) =>
+    ipcRenderer.send('preview-workspace-accent', agentId, accent),
+
   // Multi-window workspace actions
   openWorkspaceInNewWindow: (agentId) =>
     ipcRenderer.send('open-workspace-in-new-window', agentId),

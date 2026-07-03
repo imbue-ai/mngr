@@ -626,6 +626,20 @@ function createBundle() {
   return bundle;
 }
 
+// Whether a URL is served from the trusted minds backend's bare origin
+// (``http://localhost:<backendPort>``) -- i.e. a trusted local/native page, as
+// opposed to an agent subdomain (``agent-<id>.localhost``), the ``/goto`` plugin
+// origin (a different port), or an external site. Used by the content view's
+// navigation guard to keep trusted pages off the untrusted content surface.
+function isBackendOriginUrl(url) {
+  if (!backendBaseUrl || !url) return false;
+  try {
+    return new URL(url).origin === new URL(backendBaseUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
 function wireContentViewEvents(bundle, contentView) {
   // Forward content view nav events to the bundle's chrome view and update state.
   // Called from both createBundle and prepareAllWindowsForRetry (which rebuilds
@@ -680,17 +694,33 @@ function wireContentViewEvents(bundle, contentView) {
   contentView.webContents.on('did-navigate', (_e, url) => onContentNavigate(url));
   contentView.webContents.on('did-navigate-in-page', (_e, url) => onContentNavigate(url));
 
-  // Enforce workspace uniqueness at the Electron level so it applies to EVERY
-  // path that can drive the content view to a /forwarding/X/ URL (landing-page
-  // row clicks, in-page anchors, pushState, etc.), not just sidebar-driven
-  // navigate-content IPC.
   contentView.webContents.on('will-navigate', (event, url) => {
     const targetAgentId = parseWorkspaceId(url);
-    if (!targetAgentId) return;
-    const existing = findBundleForWorkspace(targetAgentId);
-    if (!existing || existing === bundle) return;
-    event.preventDefault();
-    focusBundle(existing);
+    if (targetAgentId) {
+      // Agent URL: enforce workspace uniqueness at the Electron level so it
+      // applies to EVERY in-page path that can drive the content view to a
+      // workspace (landing-page row clicks, in-page anchors, pushState, ...),
+      // not just sidebar-driven navigate-content IPC. Focus the existing window
+      // rather than duplicating the workspace.
+      const existing = findBundleForWorkspace(targetAgentId);
+      if (existing && existing !== bundle) {
+        event.preventDefault();
+        focusBundle(existing);
+      }
+      return;
+    }
+    // Non-agent URL. Defense in depth: the content view hosts ONLY foreign agent
+    // content (the ``agent-<id>.localhost`` subdomain / the ``/goto/`` auth
+    // bridge). It must never navigate to a trusted minds page served from the
+    // bare backend origin -- those render on the chrome surface with the full
+    // preload bridge. Block any in-page attempt to load one here (e.g. a
+    // compromised agent page trying to surface a trusted screen inside the
+    // untrusted surface). External origins and the /goto plugin origin (a
+    // different port) are left alone; they are handled elsewhere.
+    if (isBackendOriginUrl(url)) {
+      event.preventDefault();
+      console.warn('[content-guard] Blocked a trusted backend-origin navigation in the content view:', url);
+    }
   });
 
   // Workspace pages (with live websockets) often attach `beforeunload`
@@ -2380,59 +2410,18 @@ if (!gotLock) {
   app.whenReady().then(onReady);
 }
 
-// -- Content partition cookie sync --
-// Auth happens in the contentView (which uses CONTENT_PARTITION). The main
-// process SSE and chrome/sidebar views use the default session. We sync
-// minds_session cookies from the content partition to the default session
-// so that chrome-level auth checks work.
-
-function setupContentPartitionCookieSync() {
-  const contentSession = session.fromPartition(CONTENT_PARTITION);
-  contentSession.cookies.on('changed', (_event, cookie, _cause, removed) => {
-    if (cookie.name !== 'minds_session' || removed) return;
-    const domain = (cookie.domain || 'localhost').replace(/^\./, '');
-    const url = `http://${domain}`;
-    session.defaultSession.cookies.set({
-      url,
-      name: cookie.name,
-      value: cookie.value,
-      httpOnly: cookie.httpOnly,
-      path: cookie.path || '/',
-      sameSite: cookie.sameSite || 'lax',
-    }).then(() => {
-      kickChromeSSEReconnect();
-    }).catch((err) => {
-      console.warn('[cookie-sync] Failed to sync cookie to default session:', err);
-    });
-  });
-}
-
-async function syncContentCookiesToDefaultSession() {
-  const contentSession = session.fromPartition(CONTENT_PARTITION);
-  let cookies;
-  try {
-    cookies = await contentSession.cookies.get({ name: 'minds_session' });
-  } catch (err) {
-    console.warn('[cookie-sync] Failed to read cookies from content partition:', err);
-    return;
-  }
-  for (const cookie of cookies) {
-    const domain = (cookie.domain || 'localhost').replace(/^\./, '');
-    const url = `http://${domain}`;
-    try {
-      await session.defaultSession.cookies.set({
-        url,
-        name: cookie.name,
-        value: cookie.value,
-        httpOnly: cookie.httpOnly,
-        path: cookie.path || '/',
-        sameSite: cookie.sameSite || 'lax',
-      });
-    } catch (err) {
-      console.warn('[cookie-sync] Failed to sync cookie to default session:', err);
-    }
-  }
-}
+// -- Content partition auth cookie --
+// Trusted auth now happens on the DEFAULT session: the login page and the
+// sign-in modal render on the chrome/modal surfaces (default session), and the
+// startup one-time-code exchange hits /authenticate over net.request (default
+// session too). The content view (CONTENT_PARTITION) hosts only foreign agent
+// content and never originates the auth cookie, so the old content->default
+// minds_session watcher is gone. Only the opposite direction remains -- pushing
+// the authenticated minds_session default->content so the /goto forwarding
+// bridge is authenticated -- and it happens inline in the startup flow (see the
+// /authenticate handler below, which also kicks the chrome SSE to reconnect
+// authenticated) and, for the plugin's own session cookie,
+// in handleMngrForwardStarted.
 
 async function onReady() {
   // Send external links to the user's default browser for every WebContents
@@ -2445,8 +2434,6 @@ async function onReady() {
   });
   installApplicationMenu();
   installDockMenu();
-  setupContentPartitionCookieSync();
-  await syncContentCookiesToDefaultSession();
 
   initialBundle = createBundle();
   // Apply saved bounds before the loading screen renders so the window doesn't
@@ -2706,6 +2693,13 @@ async function startBackendWithRetry() {
                 });
               }
               console.log('[startup] Cookie synced to content partition');
+              // The chrome SSE loop started (unauthenticated) before this
+              // exchange; now that the default session holds the authenticated
+              // minds_session, kick it to reconnect authenticated right away
+              // instead of waiting for its natural reconnect backoff. This
+              // preserves the reconnect the removed content->default cookie
+              // watcher used to trigger.
+              kickChromeSSEReconnect();
             } catch (err) {
               console.warn('[startup] Failed to sync cookie to content partition:', err);
             }
@@ -3027,8 +3021,10 @@ ipcMain.handle('get-log-inclusion-setting', () => {
 ipcMain.on('open-workspace-in-new-window', (event, agentId) => {
   if (!agentId) return;
   openOrFocusWorkspace(agentId, workspaceUrlForAgent(agentId));
-  // The sidebar is the sender for both the hover-icon click and the native
-  // context-menu "Open in new window" item; close it now that the action is done.
+  // Senders: the sidebar (hover-icon click + native context-menu "Open in new
+  // window") and the Landing page's per-row open-in-new button, both on the
+  // chrome surface. Close any open modal (the sidebar) now that the action is
+  // done; a no-op when the Landing page is the sender (no modal open).
   const bundle = getBundleFromEvent(event);
   if (bundle) closeModal(bundle);
 });
@@ -3064,11 +3060,10 @@ ipcMain.on('open-help', (event, agentId) => {
   openHelp(getBundleFromEvent(event), scopedAgentId);
 });
 
-// Open the sign-in modal in the shared overlay on behalf of the (otherwise
-// unprivileged) workspace content view -- the create screen posts an
-// allowlisted `minds:open-signin-modal` when a signed-out user presses
-// "Create" with the Imbue Cloud preset selected. No payload to validate; the
-// URL is a fixed server route.
+// Open the sign-in modal in the shared overlay. The create screen -- a trusted
+// local page on the chrome surface -- calls the `openSigninModal` bridge when a
+// signed-out user presses "Create" with the Imbue Cloud preset selected. No
+// payload to validate; the URL is a fixed server route.
 ipcMain.on('open-signin-modal', (event) => {
   const sender = getBundleFromEvent(event);
   if (sender) openSigninModal(sender);
@@ -3083,10 +3078,10 @@ ipcMain.on('close-modal', (event) => {
 // without waiting for the PATCH -> mngr label subprocess -> SSE
 // round-trip. The actual persistence still goes through the
 // PATCH /api/v1/workspaces/<id> endpoint (color field); this just
-// shortcuts the local-window UI feedback. Only content-relay-preload.js can emit
-// this channel, and it validates the agent id + accent shape there;
-// we re-validate here defensively and only forward to the *sending
-// bundle's* chrome view so a stray sender can't paint another
+// shortcuts the local-window UI feedback. The settings page -- a trusted local
+// page on the chrome surface -- calls the `previewWorkspaceAccent` bridge; we
+// re-validate the agent id + accent shape here defensively and only forward to
+// the *sending bundle's* chrome view so a stray sender can't paint another
 // window's titlebar.
 ipcMain.on('preview-workspace-accent', (event, agentId, accent) => {
   if (typeof agentId !== 'string' || !/^agent-[a-f0-9]{1,64}$/i.test(agentId)) return;
