@@ -26,7 +26,7 @@
 (function () {
   'use strict';
 
-  var TOOLTIP_DELAY_MS = 150;
+  var TOOLTIP_DELAY_MS = 250; // hover-intent delay before a tooltip appears
   var TOOLTIP_MARGIN = 6; // min gap from the window edges
   var TOOLTIP_GAP = 6; // gap between the trigger and the bubble
 
@@ -85,8 +85,14 @@
         b.style.top = '0';
         b.style.visibility = 'hidden';
         b.style.display = 'inline-flex';
-        var w = b.offsetWidth;
-        var h = b.offsetHeight;
+        // Measure the fractional border-box size via getBoundingClientRect, NOT
+        // the integer offsetWidth/Height. offsetWidth rounds the shrink-to-fit
+        // width DOWN (e.g. 132.4 -> 132); fixing the width to that rounded value
+        // then leaves the content a fraction short and wraps the last word. Ceil
+        // so the fixed width is always >= the true content width.
+        var m = b.getBoundingClientRect();
+        var w = Math.ceil(m.width);
+        var h = Math.ceil(m.height);
         var a = el.getBoundingClientRect();
         var tx = a.left + a.width / 2 - w / 2;
         var ty = a.bottom + TOOLTIP_GAP;

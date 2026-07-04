@@ -264,8 +264,14 @@
     el.style.top = '0';
     el.style.visibility = 'hidden';
     el.style.display = 'inline-flex';
-    var w = el.offsetWidth;
-    var h = el.offsetHeight;
+    // Fractional border-box size (getBoundingClientRect), ceil'd -- NOT the
+    // integer offsetWidth/Height. offsetWidth rounds the shrink-to-fit width
+    // DOWN (e.g. 132.4 -> 132); fixing the width to that rounded value then
+    // leaves the content a fraction short and wraps the last word. Ceil so the
+    // fixed width (and the reported view-bounds rect) always covers the content.
+    var m = el.getBoundingClientRect();
+    var w = Math.ceil(m.width);
+    var h = Math.ceil(m.height);
     root.style.width = '';
     root.style.height = '';
     var a = cmd.rect || { x: 0, y: 0, width: 0, height: 0 };
