@@ -525,6 +525,7 @@ def _handle_help_page() -> Response:
             workspace_name = get_state().backend_resolver.get_workspace_name(AgentId(workspace_agent_id)) or ""
         except ValueError:
             workspace_name = ""
+    is_fragment = request.args.get("fragment") == "1"
     return make_html_response(
         content=render_help_page(
             include_logs_setting=include_logs_setting,
@@ -532,6 +533,7 @@ def _handle_help_page() -> Response:
             description=description,
             is_agent_report=is_agent_report,
             workspace_name=workspace_name,
+            is_fragment=is_fragment,
         )
     )
 
@@ -975,6 +977,7 @@ def _handle_chrome_sidebar() -> Response:
         trigger_h=_int_query_param("trigger_h", 38),
         offset_x=_int_query_param("offset_x", -2),
         offset_y=_int_query_param("offset_y", 2),
+        is_fragment=request.args.get("fragment") == "1",
     )
     return make_html_response(content=html)
 
@@ -1934,6 +1937,7 @@ def _handle_inbox_page() -> Response:
             detail_html=detail_html,
             is_empty=len(cards) == 0,
             auto_open=auto_open,
+            is_fragment=request.args.get("fragment") == "1",
         )
     )
 

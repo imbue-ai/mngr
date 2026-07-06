@@ -42,7 +42,7 @@
 })();
 
 // "Sidebar items" sample rows. Rendered through the same
-// window.mindsSidebarRow.buildRow the live menu uses (static/sidebar.js +
+// window.mindsSidebarRow.buildRow the live menu uses (static/overlay_sidebar.js +
 // static/chrome.js), so the catalog can't drift from production. We pass
 // explicit accents so the samples don't depend on the async accent lookup,
 // and withOpenNew:true to show the richest (Electron) treatment. No event

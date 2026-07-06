@@ -34,13 +34,13 @@
   // (main measures/clamps and drives the view's bounds; see overlay.js).
   function makeOverlayBackend() {
     return {
-      show: function (el) {
-        var r = el.getBoundingClientRect();
+      show: function (trigger) {
+        var rect = trigger.getBoundingClientRect();
         var payload = {
-          rect: { x: r.left, y: r.top, width: r.width, height: r.height },
-          text: el.getAttribute('data-tooltip'),
+          rect: { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
+          text: trigger.getAttribute('data-tooltip'),
         };
-        var shortcut = el.getAttribute('data-tooltip-shortcut');
+        var shortcut = trigger.getAttribute('data-tooltip-shortcut');
         if (shortcut) payload.shortcut = shortcut;
         window.minds.showTooltip(payload);
       },
@@ -70,44 +70,44 @@
       return bubble;
     }
     return {
-      show: function (el) {
-        var b = ensureBubble();
-        b.textContent = el.getAttribute('data-tooltip');
-        var vw = window.innerWidth;
-        var vh = window.innerHeight;
+      show: function (trigger) {
+        ensureBubble();
+        bubble.textContent = trigger.getAttribute('data-tooltip');
+        var viewportWidth = window.innerWidth;
+        var viewportHeight = window.innerHeight;
         // Measure at natural width (clear any width fixed by a prior show). Also
         // reset left/top to 0 first: the bubble is position:fixed, so a stale
         // large left from a prior show would cap its shrink-to-fit width at
-        // (viewport - left) and wrap the label, mis-measuring w/h (overlay.js
-        // resets the same way before measuring).
-        b.style.width = '';
-        b.style.left = '0';
-        b.style.top = '0';
-        b.style.visibility = 'hidden';
-        b.style.display = 'inline-flex';
+        // (viewport - left) and wrap the label, mis-measuring width/height
+        // (overlay.js resets the same way before measuring).
+        bubble.style.width = '';
+        bubble.style.left = '0';
+        bubble.style.top = '0';
+        bubble.style.visibility = 'hidden';
+        bubble.style.display = 'inline-flex';
         // Measure the fractional border-box size via getBoundingClientRect, NOT
         // the integer offsetWidth/Height. offsetWidth rounds the shrink-to-fit
         // width DOWN (e.g. 132.4 -> 132); fixing the width to that rounded value
         // then leaves the content a fraction short and wraps the last word. Ceil
         // so the fixed width is always >= the true content width.
-        var m = b.getBoundingClientRect();
-        var w = Math.ceil(m.width);
-        var h = Math.ceil(m.height);
-        var a = el.getBoundingClientRect();
-        var tx = a.left + a.width / 2 - w / 2;
-        var ty = a.bottom + TOOLTIP_GAP;
-        if (ty + h > vh - TOOLTIP_MARGIN) {
-          var above = a.top - h - TOOLTIP_GAP;
-          if (above >= TOOLTIP_MARGIN) ty = above;
+        var measuredRect = bubble.getBoundingClientRect();
+        var width = Math.ceil(measuredRect.width);
+        var height = Math.ceil(measuredRect.height);
+        var anchorRect = trigger.getBoundingClientRect();
+        var bubbleX = anchorRect.left + anchorRect.width / 2 - width / 2;
+        var bubbleY = anchorRect.bottom + TOOLTIP_GAP;
+        if (bubbleY + height > viewportHeight - TOOLTIP_MARGIN) {
+          var above = anchorRect.top - height - TOOLTIP_GAP;
+          if (above >= TOOLTIP_MARGIN) bubbleY = above;
         }
-        if (tx + w > vw - TOOLTIP_MARGIN) tx = vw - TOOLTIP_MARGIN - w;
-        if (tx < TOOLTIP_MARGIN) tx = TOOLTIP_MARGIN;
-        if (ty < TOOLTIP_MARGIN) ty = TOOLTIP_MARGIN;
+        if (bubbleX + width > viewportWidth - TOOLTIP_MARGIN) bubbleX = viewportWidth - TOOLTIP_MARGIN - width;
+        if (bubbleX < TOOLTIP_MARGIN) bubbleX = TOOLTIP_MARGIN;
+        if (bubbleY < TOOLTIP_MARGIN) bubbleY = TOOLTIP_MARGIN;
         // Fix the width so it doesn't reflow if the viewport later changes.
-        b.style.width = w + 'px';
-        b.style.left = tx + 'px';
-        b.style.top = ty + 'px';
-        b.style.visibility = 'visible';
+        bubble.style.width = width + 'px';
+        bubble.style.left = bubbleX + 'px';
+        bubble.style.top = bubbleY + 'px';
+        bubble.style.visibility = 'visible';
       },
       hide: function () {
         if (bubble) {
@@ -136,35 +136,45 @@
       shown = false;
     }
   }
-  function showFor(el) {
-    if (!el.getAttribute('data-tooltip')) return;
-    backend.show(el);
+  function showFor(trigger) {
+    if (!trigger.getAttribute('data-tooltip')) return;
+    backend.show(trigger);
     shown = true;
   }
-  function schedule(el) {
+  function schedule(trigger) {
     clearTimer();
     timer = setTimeout(function () {
       timer = null;
-      showFor(el);
+      showFor(trigger);
     }, TOOLTIP_DELAY_MS);
   }
 
-  var triggers = document.querySelectorAll('[data-tooltip]');
-  for (var i = 0; i < triggers.length; i++) {
-    (function (el) {
-      el.addEventListener('mouseenter', function () { schedule(el); });
-      el.addEventListener('mouseleave', hide);
-      el.addEventListener('click', hide);
-      // Keyboard focus only -- not focus that came from a mouse click (which
-      // would flash the tooltip and then immediately hide it on the click).
-      el.addEventListener('focus', function () {
-        try {
-          if (el.matches(':focus-visible')) showFor(el);
-        } catch (e) { /* :focus-visible unsupported -- skip focus tooltips */ }
-      });
-      el.addEventListener('blur', hide);
-    })(triggers[i]);
+  // Bind hover/focus tooltip triggers within ``root``. Run once for the document
+  // (the chrome titlebar and standalone pages, via the Base.jinja include) and
+  // again by the overlay host for each injected modal fragment (whose Close
+  // button + other data-tooltip elements arrive after this initial pass). Exposed
+  // as window.bindTooltips.
+  function bindTooltips(root) {
+    var triggers = root.querySelectorAll('[data-tooltip]');
+    for (var index = 0; index < triggers.length; index++) {
+      (function (trigger) {
+        trigger.addEventListener('mouseenter', function () { schedule(trigger); });
+        trigger.addEventListener('mouseleave', hide);
+        trigger.addEventListener('click', hide);
+        // Keyboard focus only -- not focus that came from a mouse click (which
+        // would flash the tooltip and then immediately hide it on the click).
+        trigger.addEventListener('focus', function () {
+          try {
+            if (trigger.matches(':focus-visible')) showFor(trigger);
+          } catch (error) { /* :focus-visible unsupported -- skip focus tooltips */ }
+        });
+        trigger.addEventListener('blur', hide);
+      })(triggers[index]);
+    }
   }
+  window.bindTooltips = bindTooltips;
+
+  bindTooltips(document);
   // Any scroll (capture, so nested scrollers count) or window resize/blur moves
   // the trigger out from under a shown bubble, so drop it.
   window.addEventListener('scroll', hide, true);

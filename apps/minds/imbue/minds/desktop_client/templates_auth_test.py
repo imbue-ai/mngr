@@ -49,19 +49,19 @@ def test_render_auth_page_includes_toggle_links() -> None:
 
 
 def test_render_signin_modal_page_embeds_auth_form_in_overlay() -> None:
-    # The sign-in modal page is loaded into the shared modal WebContentsView (the
-    # overlay layer that also hosts the inbox), so it is a full transparent-body
-    # page with a dim backdrop wrapping the shared auth form. It loads auth.js and
-    # routes post-auth navigations to the create screen via the auth-nav hooks.
+    # A full transparent-body page with a dim backdrop wrapping the shared auth
+    # form. It loads auth.js (form logic) and overlay_signin.js (the post-auth nav
+    # hooks + backdrop dismiss), which single-source both the Electron overlay
+    # fragment and this standalone page.
     html = render_signin_modal_page()
     assert 'id="signin-modal-backdrop"' in html
     assert "bg-transparent" in html
     assert 'id="signin-form"' in html
     assert 'id="signup-form"' in html
     assert "/_static/auth.js" in html
-    assert "MINDS_AUTH_NAV" in html
-    assert "/create" in html
-    # Close affordance (the shared DialogCloseButton wired to the dismiss hook).
+    assert "/_static/overlay_signin.js" in html
+    # Close affordance (the shared DialogCloseButton wired to the dismiss hook the
+    # module defines).
     assert "dismissSigninModal()" in html
 
 
@@ -71,6 +71,24 @@ def test_render_signin_modal_page_shows_imbue_cloud_intro() -> None:
     html = render_signin_modal_page()
     assert "run your workspace on Imbue Cloud" in html
     assert "run it directly on your computer" in html
+
+
+def test_render_signin_modal_page_fragment_omits_document_shell_and_scripts() -> None:
+    # ``?fragment=1`` renders only the modal's panel markup so the overlay host
+    # can inject it as in-page DOM: no document shell (doctype/html/head) and no
+    # scripts (the per-modal JS is loaded once in the host, not in the fragment).
+    # The full page still carries both for the browser (dev) path.
+    fragment = render_signin_modal_page(is_fragment=True)
+    assert "<!DOCTYPE" not in fragment
+    assert "<html" not in fragment
+    assert "/_static/auth.js" not in fragment
+    # The panel content itself is still present (this is the same auth form).
+    assert 'id="signin-modal-backdrop"' in fragment
+    assert 'id="signin-form"' in fragment
+    # The full-page render is unchanged and still includes the shell + scripts.
+    full = render_signin_modal_page(is_fragment=False)
+    assert "<!DOCTYPE" in full
+    assert "/_static/auth.js" in full
 
 
 def test_render_check_email_page() -> None:

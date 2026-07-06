@@ -104,7 +104,7 @@
     }
   }
   function closeSidebar() {
-    if (isElectron) return;  // Electron sidebar.js handles its own dismissal.
+    if (isElectron) return;  // Electron overlay_sidebar.js handles its own dismissal.
     if (!sidebarOpen) return;
     sidebarOpen = false;
     hideSidebarPanel();
@@ -299,7 +299,7 @@
     // The account row that refreshAuthStatus would update lives inside the
     // inline #sidebar-backdrop, which is display:none in Electron mode --
     // the visible copy renders inside the shared modal WebContentsView when
-    // it is loaded with /_chrome/sidebar, and the sidebar.js running there
+    // it is loaded with /_chrome/sidebar, and the overlay_sidebar.js running there
     // subscribes to its own content-url-changed IPC and re-fetches
     // /auth/api/status. So we don't subscribe to onContentURLChange here in
     // Electron mode; doing so would fire the fetch on every nav for no
@@ -362,7 +362,7 @@
   //
   // Browser mode renders the floating sidebar inline (this script owns it),
   // so we also keep the "Manage account(s)" / "Log in" label up-to-date here
-  // by toggling the same DOM the Electron sidebar.js uses. In Electron mode
+  // by toggling the same DOM the Electron overlay_sidebar.js uses. In Electron mode
   // the sidebar lives in its own WebContentsView with its own copy of this
   // logic; the writes below land on the inline #sidebar-account, which
   // lives inside the display:none #sidebar-backdrop and so isn't

@@ -692,12 +692,12 @@ function wireContentViewEvents(bundle, contentView) {
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
       bundle.chromeView.webContents.send('content-url-changed', url);
     }
-    // The sidebar (hosted in an overlay iframe) refreshes its
+    // The sidebar (rendered as in-page DOM in the overlay host) refreshes its
     // "Manage account(s)" / "Log in" label on every content URL change so
     // a sign-in / sign-out performed in the workspace iframe propagates
-    // to the menu the next time the user opens it. Sent per-frame so it
-    // reaches the iframe; inbox doesn't subscribe so it's a no-op there.
-    sendToOverlayFrames(bundle, 'content-url-changed', url);
+    // to the menu the next time the user opens it. Sent to the overlay host;
+    // inbox doesn't subscribe so it's a no-op there.
+    sendToOverlayHost(bundle, 'content-url-changed', url);
   };
 
   contentView.webContents.on('did-navigate', (_e, url) => onContentNavigate(url));
@@ -892,13 +892,11 @@ function toggleSidebar(bundle, anchor) {
 // The overlay surface is a single always-warm WebContentsView (``modalView``)
 // that main loads ONCE with /_chrome/overlay at window creation and keeps
 // mounted for the window's life. Every overlay -- the workspace menu, inbox,
-// help, and sign-in modals -- is hosted there as a mount-on-demand iframe
-// (created when opened, destroyed when closed) driven over IPC, so the surface
-// stays warm without loading a fresh page into this view on every open. The
-// hosted pages are first-party and same-origin, so ``nodeIntegrationInSubFrames`` runs
-// the preload in each iframe and exposes the same ``window.minds`` bridge their
-// existing code already calls; navigation is locked to the backend origin (see
-// createBundleOverlayView) so no foreign page can ever inherit that bridge.
+// help, and sign-in modals -- renders there as in-page DOM: the host
+// (overlay.js) fetches the modal's ``?fragment=1`` markup and injects it, driven
+// over IPC, so opening never costs a page load. The host holds the window.minds
+// bridge, so navigation is locked to the backend origin (see
+// createBundleOverlayView) to keep any foreign page from inheriting it.
 //
 // Electron 40 has no per-view click-through, so while a modal is open the view
 // is shown full-window and captures pointer events exactly as the old modal
@@ -919,24 +917,15 @@ function overlayIdForUrl(url) {
   return null;
 }
 
-// Push an IPC payload to EVERY frame of the overlay view (the host page plus
-// each hosted modal iframe). ``webContents.send`` reaches only the top frame, so
-// per-frame ``frame.send`` is required to deliver chrome-events / current-
-// workspace / priming into the iframes where the sidebar and inbox actually run.
-function sendToOverlayFrames(bundle, channel, payload) {
+// Push an IPC payload to the always-warm overlay host page. Modals now render as
+// in-page DOM in this single top frame (no overlay iframes), so a plain
+// ``webContents.send`` reaches the sidebar / inbox / tooltip code directly.
+function sendToOverlayHost(bundle, channel, payload) {
   const view = bundle && bundle.modalView;
   if (!view || view.webContents.isDestroyed()) return;
-  let frames;
   try {
-    frames = view.webContents.mainFrame.framesInSubtree;
-  } catch {
-    return;
-  }
-  for (const frame of frames) {
-    try {
-      frame.send(channel, payload);
-    } catch { /* noop */ }
-  }
+    view.webContents.send(channel, payload);
+  } catch { /* noop */ }
 }
 
 function loadOverlayHost(bundle) {
@@ -958,28 +947,29 @@ function sendOverlayCommand(bundle, cmd) {
   } catch { /* noop */ }
 }
 
-// Replay the cached chrome state into the overlay's iframes. The hosted sidebar
-// renders its workspace list from the SSE-driven ``workspaces`` event and the
-// inbox keys off ``requests``; an iframe that just (re)loaded must be handed the
-// current state immediately rather than waiting for the next SSE push. Mirrors
-// primeViewWithCachedChromeState, but fans out per-frame (see sendToOverlayFrames).
-function primeOverlayFrames(bundle) {
+// Prime the overlay host's chrome-state cache when it (re)loads. The host caches
+// the latest ``workspaces`` / ``requests`` / auth / current-workspace so a modal
+// opened right after load (the SSE-driven sidebar / inbox) renders current data
+// without waiting for the next SSE push; subsequent changes arrive via
+// broadcastChromeEvent. Mirrors primeViewWithCachedChromeState for the chrome
+// view.
+function primeOverlayHost(bundle) {
   if (latestChromeState.workspaces !== null) {
-    sendToOverlayFrames(bundle, 'chrome-event', { type: 'workspaces', workspaces: latestChromeState.workspaces });
+    sendToOverlayHost(bundle, 'chrome-event', { type: 'workspaces', workspaces: latestChromeState.workspaces });
   }
   if (latestChromeState.authStatus) {
-    sendToOverlayFrames(bundle, 'chrome-event', latestChromeState.authStatus);
+    sendToOverlayHost(bundle, 'chrome-event', latestChromeState.authStatus);
   }
-  sendToOverlayFrames(bundle, 'chrome-event', {
+  sendToOverlayHost(bundle, 'chrome-event', {
     type: 'requests',
     count: latestChromeState.requestCount,
     request_ids: latestChromeState.requestIds,
   });
   for (const [agentId, status] of systemInterfaceStatusByAgent) {
     if (!status || status === 'healthy') continue;
-    sendToOverlayFrames(bundle, 'chrome-event', { type: 'system_interface_status', agent_id: agentId, status });
+    sendToOverlayHost(bundle, 'chrome-event', { type: 'system_interface_status', agent_id: agentId, status });
   }
-  sendToOverlayFrames(bundle, 'current-workspace-changed', bundle.currentWorkspaceId);
+  sendToOverlayHost(bundle, 'current-workspace-changed', bundle.currentWorkspaceId);
 }
 
 // Create the per-bundle overlay view and load the warm host page. Called once
@@ -990,12 +980,6 @@ function createBundleOverlayView(bundle) {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      // The hosted modals run as same-origin iframes inside the host page; this
-      // runs the preload in each so their existing window.minds.*() calls and
-      // onChromeEvent subscriptions work unchanged. Safe because the only frames
-      // here are first-party pages from our own backend, and the navigation
-      // guards below keep it that way.
-      nodeIntegrationInSubFrames: true,
     },
   });
   // Transparent so each hosted overlay's own dim backdrop reveals the workspace
@@ -1016,25 +1000,22 @@ function createBundleOverlayView(bundle) {
       closeModal(bundle);
     }
   });
-  // Lock the overlay view to the backend origin. ``nodeIntegrationInSubFrames``
-  // hands the window.minds bridge to every frame here, so a foreign page must
-  // never be allowed to load in this view or any of its iframes.
+  // Lock the overlay host to the backend origin: it holds the window.minds
+  // bridge, so a foreign page must never be allowed to load in this view.
   const isAllowedOverlayUrl = (url) =>
     url === 'about:blank' || (backendBaseUrl && url.startsWith(backendBaseUrl));
   modal.webContents.on('will-navigate', (event, url) => {
     if (!isAllowedOverlayUrl(url)) event.preventDefault();
   });
-  modal.webContents.on('will-frame-navigate', (event) => {
-    if (!isAllowedOverlayUrl(event.url)) event.preventDefault();
-  });
   modal.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  // Replay the latest show command once the host page is ready, in case an
-  // overlay was opened before the host finished loading (Electron drops
-  // listener-less IPC). Hosted iframes are primed when they signal
-  // overlay-modal-loaded, not here.
+  // Prime the host's chrome-state cache and replay the latest show command once
+  // the host page is ready: the SSE-driven sidebar / inbox read the cache the
+  // instant they open, and a show issued before load would otherwise be lost
+  // (Electron drops listener-less IPC).
   modal.webContents.on('did-finish-load', () => {
     if (modal.webContents.isDestroyed()) return;
     if (modal.webContents.getURL() === 'about:blank') return;
+    primeOverlayHost(bundle);
     if (bundle.pendingOverlayCommand) {
       try {
         modal.webContents.send('overlay-command', bundle.pendingOverlayCommand);
@@ -1095,7 +1076,8 @@ function closeModal(bundle) {
     } catch { /* noop */ }
   }
   // Tell the warm overlay host to hide its overlays. The host page itself stays
-  // loaded (warm) so the next open is instant; only the hosted iframes hide.
+  // loaded (warm) so the next open is instant; only the injected modal fragments
+  // are torn down.
   sendOverlayCommand(bundle, { type: 'hide-all' });
   if (bundle.inboxListReloadTimer) {
     clearTimeout(bundle.inboxListReloadTimer);
@@ -1206,8 +1188,8 @@ function scheduleInboxListRefresh(bundle, evt) {
     if (!bundle || bundle.window.isDestroyed()) return;
     if (!bundle.modalView || !bundle.modalVisible) return;
     if (bundle.modalView.webContents.isDestroyed()) return;
-    // Per-frame so the event reaches the inbox iframe, not just the host frame.
-    sendToOverlayFrames(bundle, 'chrome-event', evt);
+    // Deliver to the overlay host, where the inbox reads it from the cache.
+    sendToOverlayHost(bundle, 'chrome-event', evt);
   }, INBOX_LIST_REFRESH_DEBOUNCE_MS);
 }
 
@@ -1223,8 +1205,8 @@ function sendCurrentWorkspaceToBundleViews(bundle) {
   if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
     bundle.chromeView.webContents.send('current-workspace-changed', bundle.currentWorkspaceId);
   }
-  // The sidebar/inbox run in overlay iframes, so fan out per-frame.
-  sendToOverlayFrames(bundle, 'current-workspace-changed', bundle.currentWorkspaceId);
+  // The sidebar/inbox render in the overlay host, so send it there directly.
+  sendToOverlayHost(bundle, 'current-workspace-changed', bundle.currentWorkspaceId);
 }
 
 // -- Window opening / focusing --
@@ -1823,16 +1805,16 @@ function handleChromeSSEEvent(evt) {
 function broadcastChromeEvent(evt) {
   for (const b of bundles) {
     if (b.window.isDestroyed()) continue;
-    // Push to the chrome titlebar and to the overlay's iframes (sidebar, inbox).
-    // The inbox shell uses these events too (e.g. ``requests`` count); the
+    // Push to the chrome titlebar and to the overlay host (sidebar, inbox).
+    // The inbox uses these events too (e.g. ``requests`` count); the
     // sidebar uses ``workspaces`` / ``auth_status`` to render its list. The
-    // overlay's hosted pages live in iframes, so fan out per-frame.
+    // overlay's modals render as in-page DOM in the host, so send it there.
     if (b.chromeView && !b.chromeView.webContents.isDestroyed()) {
       try {
         b.chromeView.webContents.send('chrome-event', evt);
       } catch { /* noop */ }
     }
-    sendToOverlayFrames(b, 'chrome-event', evt);
+    sendToOverlayHost(b, 'chrome-event', evt);
   }
 }
 
@@ -3168,24 +3150,13 @@ ipcMain.on('close-modal', (event) => {
   closeModal(getBundleFromEvent(event));
 });
 
-// The overlay host fires this once a hosted modal iframe (workspace menu /
-// inbox / ...) has loaded and registered its window.minds listeners. We replay
-// the cached chrome state into the overlay's frames so the just-loaded iframe
-// paints its workspace list / request count immediately instead of waiting for
-// the next SSE push. (Pre-migration, this priming happened on the modal view's
-// own did-finish-load; now each hosted iframe signals when it's ready.)
-ipcMain.on('overlay-modal-loaded', (event) => {
-  const bundle = getBundleFromEvent(event);
-  if (bundle) primeOverlayFrames(bundle);
-});
-
 // Custom tooltip: a trigger (a titlebar button in the chrome view, or an element
 // in a hosted modal page like the help dialog) sends its rect + label; forward
 // it to the overlay host to render. When NO modal is open the host measures the
 // bubble and reports a small rect so the overlay view shrinks to it (the rest of
 // the window stays interactive). When a modal IS open the overlay view is already
 // full-window and capturing, so ``inModal`` tells the host to render the bubble
-// in-page above the modal iframe (above everything via z-index) without a bounds
+// in-page above the modal (above everything via z-index) without a bounds
 // change. Titlebar tooltips can't fire while a modal is open (the modal covers
 // the titlebar), so this only enables modal-internal tooltips.
 ipcMain.on('show-tooltip', (event, payload) => {
@@ -3367,9 +3338,9 @@ ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
   });
   const menu = Menu.buildFromTemplate(template);
   // The sidebar runs inside modalView, which covers the full window content
-  // area (x: 0, y: 0). e.clientX / e.clientY from sidebar.js's contextmenu
-  // handler are therefore already in window-content coordinates, which is
-  // what menu.popup({ window, x, y }) expects -- no offset needed.
+  // area (x: 0, y: 0). e.clientX / e.clientY from overlay_sidebar.js's
+  // contextmenu handler are therefore already in window-content coordinates,
+  // which is what menu.popup({ window, x, y }) expects -- no offset needed.
   const px = Math.round(x || 0);
   const py = Math.round(y || 0);
   menu.popup({ window: bundle.window, x: px, y: py });

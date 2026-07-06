@@ -15,6 +15,8 @@ from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
 from imbue.minds.desktop_client.templates import render_dev_styleguide_page
+from imbue.minds.desktop_client.templates import render_help_page
+from imbue.minds.desktop_client.templates import render_inbox_page
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
@@ -693,12 +695,14 @@ def test_render_chrome_page_shows_window_controls_on_non_mac() -> None:
 def test_render_sidebar_page_contains_workspace_list() -> None:
     html = render_sidebar_page()
     assert "sidebar-workspaces" in html
-    # The interactivity (including the SSE EventSource fallback) now lives
-    # in the external /_static/sidebar.js file; the template should pull it in.
-    assert "/_static/sidebar.js" in html
+    # The shared workspace-row builder is loaded; the menu's interactivity is
+    # single-sourced in overlay_sidebar.js (loaded by the overlay host). This
+    # standalone full-page render is a now-unused dev artifact -- the browser uses
+    # chrome.js's inline menu.
+    assert "/_static/sidebar_workspace_row.js" in html
     # The floating-menu wrapper id. The sidebar runs inside the shared
     # modal WebContentsView, which covers the full window content area and
-    # acts as a modal: sidebar.js compares click targets against
+    # acts as a modal: overlay_sidebar.js compares click targets against
     # ``#sidebar-menu`` to distinguish clicks inside the floating panel
     # (let the menu's own handlers run) from clicks on the transparent
     # backdrop outside it (dismiss the modal). Renaming or dropping this id
@@ -708,7 +712,7 @@ def test_render_sidebar_page_contains_workspace_list() -> None:
     # Chrome.jinja (browser mode) and Sidebar.jinja (the sidebar page loaded
     # into the shared modal WebContentsView in Electron). It carries the
     # "New workspace" CTA, the "Settings" entry, and the "Manage account(s)" /
-    # "Log in" entry; the label is updated dynamically by sidebar.js from
+    # "Log in" entry; the label is updated dynamically by overlay_sidebar.js from
     # /auth/api/status.
     assert 'id="sidebar-new-workspace"' in html
     assert 'id="sidebar-settings"' in html
@@ -2046,3 +2050,132 @@ def test_base_emits_sentry_bootstrap_when_frontend_reporting_is_on() -> None:
     assert '<script type="application/json" id="minds-sentry-config">' in html
     assert '"environment": "staging"' in html
     assert '"dsn": "https://key@o1.ingest.us.sentry.io/2"' in html
+
+
+def test_render_help_page_fragment_omits_shell_and_scripts_and_exposes_data() -> None:
+    # ``?fragment=1`` renders only the help dialog's panel markup so the overlay
+    # host can inject it as in-page DOM: no document shell and no scripts (its JS
+    # lives in overlay_help.js). Workspace/include-logs values move onto data
+    # attributes for the module to read, and the backdrop drops its inline
+    # onclick (the host owns click-outside dismiss in the overlay).
+    fragment = render_help_page(
+        include_logs_setting=False,
+        workspace_agent_id="agent-00000000000000000000000000000001",
+        description="",
+        is_agent_report=False,
+        workspace_name="",
+        is_fragment=True,
+    )
+    assert "<!DOCTYPE" not in fragment
+    assert "<html" not in fragment
+    # the inline submit script is gone from the fragment
+    assert "/help/report" not in fragment
+    assert 'onclick="onHelpBackdropClick' not in fragment
+    assert 'data-workspace-agent-id="agent-00000000000000000000000000000001"' in fragment
+    assert 'data-include-logs="false"' in fragment
+    # The panel content itself is still present.
+    assert 'id="help-dialog"' in fragment
+    assert 'id="help-submit"' in fragment
+
+    # The full page loads the single-sourced module (no inline script) and lets it
+    # own the backdrop dismiss (no inline onclick).
+    full = render_help_page(
+        include_logs_setting=False,
+        workspace_agent_id="agent-00000000000000000000000000000001",
+        description="",
+        is_agent_report=False,
+        workspace_name="",
+        is_fragment=False,
+    )
+    assert "<!DOCTYPE" in full
+    assert "/_static/overlay_help.js" in full
+    assert "/help/report" not in full
+    assert "onHelpBackdropClick" not in full
+
+
+def test_render_sidebar_page_fragment_omits_shell_and_exposes_forward_origin() -> None:
+    # ``?fragment=1`` renders only the workspace-menu panel so the overlay host
+    # can inject it: no document shell and no scripts (its JS lives in
+    # overlay_sidebar.js). The server still positions the menu via inline style
+    # from the trigger geometry, and mngr_forward_origin moves onto a data
+    # attribute on the backdrop (the full page also sets it on <body>).
+    fragment = render_sidebar_page(
+        mngr_forward_origin="http://localhost:8421",
+        trigger_x=10,
+        trigger_y=38,
+        is_fragment=True,
+    )
+    assert "<!DOCTYPE" not in fragment
+    assert "<html" not in fragment
+    assert "/_static/sidebar.js" not in fragment
+    assert 'data-mngr-forward-origin="http://localhost:8421"' in fragment
+    # The panel content + its server-rendered position are still present.
+    assert 'id="sidebar-backdrop"' in fragment
+    assert 'id="sidebar-workspaces"' in fragment
+    # menu left = trigger_x(10) + default offset_x(-2)
+    assert "left:8px" in fragment
+
+    # The full page (a now-unused dev artifact -- the browser uses chrome.js's
+    # inline menu) no longer references the deleted overlay_sidebar.js.
+    full = render_sidebar_page(
+        mngr_forward_origin="http://localhost:8421",
+        trigger_x=10,
+        trigger_y=38,
+        is_fragment=False,
+    )
+    assert "<!DOCTYPE" in full
+    assert "/_static/sidebar.js" not in full
+
+
+def test_render_inbox_page_fragment_omits_shell_keeps_styles_and_backdrop_first() -> None:
+    # ``?fragment=1`` renders only the inbox panel for host injection: no
+    # document shell and no inline script (its JS lives in overlay_inbox.js).
+    # The inbox's own <style> moves into the panel (it would otherwise be lost
+    # with the dropped <head>), placed LAST so the backdrop stays the first
+    # element -- the host wires click-outside dismiss on that first child. The
+    # backdrop's inline onclick is full-page-only (the host owns dismiss).
+    cards = [
+        {
+            "id": "evt-1",
+            "kind_label": "PERMISSION",
+            "ws_name": "ws",
+            "display_name": "Do a thing",
+            "accent": "#94a3b8",
+        }
+    ]
+    fragment = render_inbox_page(
+        cards=cards,
+        selected_id="evt-1",
+        detail_html="",
+        is_empty=False,
+        auto_open=True,
+        is_fragment=True,
+    )
+    assert "<!DOCTYPE" not in fragment
+    assert "<html" not in fragment
+    assert "function closeInbox" not in fragment
+    assert 'onclick="onBackdropClick' not in fragment
+    # Panel + its CSS are present; the close button still calls the (module-set)
+    # window.closeInbox handler.
+    assert 'id="inbox-backdrop"' in fragment
+    assert ".inbox-card" in fragment
+    assert 'onclick="closeInbox()"' in fragment
+    # The backdrop is the first element in the fragment (host dismiss target).
+    stripped = fragment.strip()
+    assert stripped[:200].find("inbox-backdrop") != -1
+    assert stripped.index("inbox-backdrop") < stripped.index("<style")
+
+    # The full page loads the single-sourced module (no inline script); its CSS
+    # stays.
+    full = render_inbox_page(
+        cards=cards,
+        selected_id="evt-1",
+        detail_html="",
+        is_empty=False,
+        auto_open=True,
+        is_fragment=False,
+    )
+    assert "<!DOCTYPE" in full
+    assert "/_static/overlay_inbox.js" in full
+    assert "function closeInbox" not in full
+    assert ".inbox-card" in full

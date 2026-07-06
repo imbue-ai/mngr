@@ -649,6 +649,7 @@ def render_help_page(
     description: str = "",
     is_agent_report: bool = False,
     workspace_name: str = "",
+    is_fragment: bool = False,
 ) -> str:
     """Render the get-help modal page (report a bug; agent help disabled for now).
 
@@ -660,6 +661,10 @@ def render_help_page(
     for that agent-escalation flow: the modal then frames the pre-filled report as the agent's
     submission (titled with ``workspace_name``, when known) and hides the mode choice, since a report
     is already underway.
+
+    When ``is_fragment`` is true (``?fragment=1``), only the modal's panel markup is emitted -- no
+    document shell or scripts -- so the overlay host can fetch and inject it as in-page DOM (its JS
+    lives in overlay_help.js). The full page is still served for the browser (dev) path.
     """
     return CATALOG.render(
         "pages.Help",
@@ -668,6 +673,7 @@ def render_help_page(
         description=description,
         is_agent_report=is_agent_report,
         workspace_name=workspace_name,
+        is_fragment=is_fragment,
     )
 
 
@@ -702,6 +708,7 @@ def render_inbox_page(
     detail_html: str = "",
     is_empty: bool = False,
     auto_open: bool = True,
+    is_fragment: bool = False,
 ) -> str:
     """Render the full inbox modal page served by ``GET /inbox``.
 
@@ -720,6 +727,7 @@ def render_inbox_page(
         detail_html=detail_html,
         is_empty=is_empty,
         auto_open=auto_open,
+        is_fragment=is_fragment,
     )
 
 
@@ -1466,13 +1474,14 @@ def render_sidebar_page(
     trigger_h: int = 38,
     offset_x: int = -2,
     offset_y: int = 2,
+    is_fragment: bool = False,
 ) -> str:
     """Render the standalone sidebar page loaded into the shared modal WebContentsView.
 
     This page shows the workspace list and subscribes to SSE updates. In Electron,
     clicking a workspace sends an IPC message via the preload bridge to navigate
     the content WebContentsView. ``mngr_forward_origin`` is exposed via
-    ``data-mngr-forward-origin`` so sidebar.js can build the cross-origin
+    ``data-mngr-forward-origin`` so overlay_sidebar.js can build the cross-origin
     ``/goto/<agent>/`` URL the plugin serves.
 
     Position is driven entirely by the caller. The chrome view (which owns the
@@ -1493,6 +1502,7 @@ def render_sidebar_page(
         trigger_h=trigger_h,
         offset_x=offset_x,
         offset_y=offset_y,
+        is_fragment=is_fragment,
     )
 
 

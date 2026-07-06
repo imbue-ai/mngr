@@ -377,11 +377,12 @@ def test_inbox_page_renders_as_modal(tmp_path: Path) -> None:
     assert 'id="inbox-close-btn"' in body
     # The transparent body lets the overlay reveal the workspace behind it.
     assert "bg-transparent" in body
-    # Dismissal prefers the Electron modal host over a home navigation.
-    assert "window.minds.closeModal" in body
-    # Backdrop click and Escape are wired to the same dismissal helper.
-    assert "onBackdropClick" in body
-    assert 'e.key === "Escape"' in body
+    # Dismissal + form logic is single-sourced in overlay_inbox.js (loaded here):
+    # it prefers window.minds.closeModal, falls back to a home navigation, and
+    # wires backdrop-click + Escape when standalone. The close button calls the
+    # module's window.closeInbox handler.
+    assert "/_static/overlay_inbox.js" in body
+    assert 'onclick="closeInbox()"' in body
 
 
 def test_inbox_page_hides_requests_whose_host_cannot_be_resolved(tmp_path: Path) -> None:

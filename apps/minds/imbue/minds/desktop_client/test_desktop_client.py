@@ -783,8 +783,9 @@ def test_chrome_sidebar_page_renders(tmp_path: Path) -> None:
     response = client.get("/_chrome/sidebar")
     assert response.status_code == 200
     assert "sidebar-workspaces" in response.text
-    # Interactivity including the SSE fallback has moved to the external JS.
-    assert "/_static/sidebar.js" in response.text
+    # The workspace-row builder is pulled in; the menu's controller lives in
+    # overlay_sidebar.js (loaded by the overlay host, not this dev-only full page).
+    assert "/_static/sidebar_workspace_row.js" in response.text
 
 
 def test_chrome_overlay_page_renders(tmp_path: Path) -> None:
@@ -1485,25 +1486,19 @@ def test_inbox_auto_open_checkbox_reflects_config(tmp_path: Path) -> None:
     assert "checked" not in body[tag_start:tag_end]
 
 
-def test_inbox_shell_reapplies_selection_after_list_refresh(tmp_path: Path) -> None:
-    """The inbox shell JS re-applies the highlight after an SSE-driven list refresh.
+def test_inbox_shell_reapplies_selection_after_list_refresh() -> None:
+    """Regression guard: overlay_inbox.js re-applies the highlight after an
+    SSE-driven list refresh.
 
-    Regression guard: ``/inbox/list`` is selection-agnostic and always
-    renders with ``selected_id=""``. When an SSE ``requests`` event arrives
-    and ``fetchListFragment()`` rebuilds the list innerHTML, the previously
-    highlighted card loses its ``.is-selected`` class. If the selection is
-    still in the new pending set, the shell must call
-    ``setSelectedCard(currentId)`` to restore the highlight; otherwise the
-    user sees their selection visibly disappear despite not changing it.
+    ``/inbox/list`` is selection-agnostic and always renders with
+    ``selected_id=""``. When a ``requests`` event rebuilds the list innerHTML,
+    the previously highlighted card loses its ``.is-selected`` class. If the
+    selection is still in the new pending set, the module must call
+    ``setSelectedCard(currentId)`` to restore the highlight; otherwise the user
+    sees their selection visibly disappear despite not changing it.
     """
-    client, auth_store = _create_test_client_with_stores(tmp_path)
-    _authenticate_client(client, auth_store)
-    response = client.get("/inbox")
-    assert response.status_code == 200
-    body = response.text
-    # The SSE handler must call setSelectedCard(currentId) in the
-    # "selection still pending" branch.
-    assert "setSelectedCard(currentId)" in body
+    module = (Path(__file__).parent / "static" / "overlay_inbox.js").read_text()
+    assert "setSelectedCard(currentId)" in module
 
 
 def test_old_requests_panel_route_removed(tmp_path: Path) -> None:
@@ -1699,13 +1694,14 @@ def test_help_page_renders_report_option(tmp_path: Path) -> None:
 
 
 def test_help_page_close_button_has_tooltip(tmp_path: Path) -> None:
-    """The help dialog's close button carries a custom tooltip wired by the shared
-    trigger script (modal pages can render tooltips on the overlay surface too)."""
+    """The help dialog's close button carries a custom tooltip; in the Electron
+    overlay it renders on the overlay surface -- the host loads the shared trigger
+    script and overlay_help.js binds it on open."""
     client, _ = _create_test_client_with_stores(tmp_path)
-    response = client.get("/help")
-    assert response.status_code == 200
-    assert 'data-tooltip="Close"' in response.text
-    assert "/_static/tooltip_triggers.js" in response.text
+    assert 'data-tooltip="Close"' in client.get("/help").text
+    overlay = client.get("/_chrome/overlay").text
+    assert "/_static/tooltip_triggers.js" in overlay
+    assert "/_static/overlay_help.js" in overlay
 
 
 def test_help_page_enables_agent_option_in_a_workspace(tmp_path: Path) -> None:
