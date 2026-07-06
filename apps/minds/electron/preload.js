@@ -69,6 +69,29 @@ contextBridge.exposeInMainWorld('minds', {
   // Modal overlay close (used by the inbox shell and any one-off dialogs)
   closeModal: () => ipcRenderer.send('close-modal'),
 
+  // Overlay surface (the always-warm modal WebContentsView host page,
+  // /_chrome/overlay). The overlay manager (/_static/overlay.js) receives
+  // show/hide commands from main via ``onOverlayCommand`` and reports the
+  // overlay view's required bounds back via ``overlaySetBounds`` so main can
+  // size the view (Electron has no per-view click-through; bounds are the only
+  // lever). ``spec`` is { mode: 'hidden' } |
+  // { mode: 'rect', rect: {x, y, width, height} }.
+  onOverlayCommand: (callback) => {
+    ipcRenderer.on('overlay-command', (_event, cmd) => callback(cmd));
+  },
+  overlaySetBounds: (spec) => ipcRenderer.send('overlay-set-bounds', spec),
+  // Fired by the overlay host once a hosted modal iframe has loaded, so main can
+  // replay the cached chrome state into that frame (the sidebar's workspace list,
+  // the inbox's request count) without waiting for the next SSE push.
+  overlayModalLoaded: (id) => ipcRenderer.send('overlay-modal-loaded', id),
+
+  // Custom titlebar tooltips. The chrome view computes a trigger's
+  // viewport-relative rect and its label, and main forwards it to the overlay
+  // host to render above both chrome and content. ``payload`` is
+  // { rect: {x, y, width, height}, text, shortcut?, html? }.
+  showTooltip: (payload) => ipcRenderer.send('show-tooltip', payload),
+  hideTooltip: () => ipcRenderer.send('hide-tooltip'),
+
   // Native file/directory picker used by the file-sharing permission
   // dialog so the user can pick the path to share instead of typing it.
   // ``options.mode`` is 'file' or 'directory'; ``options.defaultPath``
