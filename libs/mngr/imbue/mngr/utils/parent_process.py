@@ -2,6 +2,7 @@ import os
 import signal
 import threading
 from typing import Final
+from uuid import uuid4
 
 from loguru import logger
 
@@ -9,6 +10,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroupState
 
 _PARENT_POLL_INTERVAL_SECONDS: Final[float] = 3.0
+_PS_TIMEOUT_SECONDS: Final[float] = 5.0
 
 
 def _poll_parent_pid_until_changed(
@@ -55,25 +57,79 @@ def start_parent_death_watcher(concurrency_group: ConcurrencyGroup) -> None:
     )
 
 
-def _read_grandparent_pid() -> int | None:
-    """Return the grandparent process's PID by reading ``/proc/<ppid>/status``.
+def _read_ppid_via_proc(pid: int) -> int | None:
+    """Return the parent PID of ``pid`` by reading ``/proc/<pid>/status``.
 
-    Returns ``None`` when the parent's status can't be read (e.g. the parent
-    already exited, or we're on a platform without /proc) or when the parent
-    has no real grandparent (PPid == 1, i.e. already orphaned to init).
+    Returns ``None`` when the status can't be read -- either because the
+    process already exited or because we're on a platform without ``/proc``
+    (e.g. macOS, where ``open`` raises ``OSError``).
+    """
+    try:
+        with open(f"/proc/{pid}/status") as status_file:
+            for line in status_file:
+                if line.startswith("PPid:"):
+                    return int(line.split()[1])
+    except OSError:
+        return None
+    return None
+
+
+def _read_ppid_via_ps(pid: int, concurrency_group: ConcurrencyGroup | None = None) -> int | None:
+    """Return the parent PID of ``pid`` using ``ps``, or ``None`` if unknown.
+
+    This is the cross-platform fallback for platforms without ``/proc`` -- most
+    importantly macOS, where the grandparent-death watcher would otherwise never
+    arm. ``ps -o ppid= -p <pid>`` prints just the parent PID (the ``=`` suppresses
+    the header). Returns ``None`` when the process is gone, ``ps`` is unavailable
+    or times out, or the output can't be parsed as an integer.
+
+    The ``ps`` subprocess is spawned through a ``ConcurrencyGroup`` so it is
+    tracked and reaped like every other child. Callers that already own a group
+    (the grandparent-death watcher) pass it in; a short-lived group is created
+    otherwise.
+    """
+    if concurrency_group is None:
+        with ConcurrencyGroup(name=f"read-ppid-via-ps-{uuid4().hex}") as owned_group:
+            return _read_ppid_via_ps(pid, owned_group)
+    try:
+        result = concurrency_group.run_process_to_completion(
+            ["ps", "-o", "ppid=", "-p", str(pid)],
+            timeout=_PS_TIMEOUT_SECONDS,
+            is_checked_after=False,
+        )
+    except (FileNotFoundError, OSError):
+        return None
+    if result.is_timed_out or result.returncode != 0:
+        return None
+    output = result.stdout.strip()
+    if not output:
+        return None
+    try:
+        return int(output)
+    except ValueError:
+        return None
+
+
+def _read_grandparent_pid(concurrency_group: ConcurrencyGroup | None = None) -> int | None:
+    """Return the grandparent process's PID, or ``None``.
+
+    Resolves the parent of ``os.getppid()`` -- reading ``/proc`` where it exists
+    (Linux) and falling back to ``ps`` on platforms without it (macOS). Returns
+    ``None`` when the parent already exited, no grandparent can be resolved, or
+    the parent has no real grandparent (PPid <= 1, i.e. already orphaned to init).
+
+    ``concurrency_group`` is threaded down to the ``ps`` fallback so the spawned
+    process is tracked; it is optional so the helper stays callable standalone.
     """
     parent_pid = os.getppid()
     if parent_pid <= 1:
         return None
-    try:
-        with open(f"/proc/{parent_pid}/status") as status_file:
-            for line in status_file:
-                if line.startswith("PPid:"):
-                    grandparent_pid = int(line.split()[1])
-                    return grandparent_pid if grandparent_pid > 1 else None
-    except OSError:
+    grandparent_pid = _read_ppid_via_proc(parent_pid)
+    if grandparent_pid is None:
+        grandparent_pid = _read_ppid_via_ps(parent_pid, concurrency_group)
+    if grandparent_pid is None or grandparent_pid <= 1:
         return None
-    return None
+    return grandparent_pid
 
 
 def _poll_grandparent_until_dead(
@@ -119,7 +175,7 @@ def start_grandparent_death_watcher(concurrency_group: ConcurrencyGroup) -> None
     grandparent disappears. No-op when no grandparent can be resolved
     (parent is init, or ``/proc`` is unavailable).
     """
-    grandparent_pid = _read_grandparent_pid()
+    grandparent_pid = _read_grandparent_pid(concurrency_group)
     if grandparent_pid is None:
         logger.debug("Grandparent death watcher: no resolvable grandparent; skipping")
         return
