@@ -9,3 +9,5 @@ The `minds-launch-to-msg.yml` inputs (`commit_sha` for mngr, `template_ref` for 
 - The `launch_to_msg` job's FCT resolve step no longer re-resolves; it reports the frozen pin.
 
 The slack message and step summaries keep the `ref (sha)` format; those SHAs are now guaranteed to be exactly what was built and run. Caveats documented in the input descriptions: SHAs must be full 40-hex and reachable from some ref, and FCT-SHA creates need a binary built from mngr `02bb71b44` (2026-06-11) or later.
+
+Also cleaned up the workflow file (net -135 lines): compressed history-narrating comments to current-state facts, deduplicated the mngr/FCT ref resolution into a single `resolve_ref` function, looped the ToDesktop secrets check, and replaced the hardcoded screenshot-prefix list in the summary manifest with a sorted glob (unknown prefixes now appear instead of being silently dropped).
