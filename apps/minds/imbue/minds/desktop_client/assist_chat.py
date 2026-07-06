@@ -46,7 +46,6 @@ def generate_assist_chat_name() -> str:
 
 def build_assist_chat_mngr_args(
     workspace_agent_id: AgentId,
-    workspace_name: str | None,
     description: str,
     chat_name: str,
 ) -> list[str]:
@@ -56,6 +55,10 @@ def build_assist_chat_mngr_args(
     workspace agent by id (a bare id is a valid agent address), whose single COMMAND
     argument is an inner ``mngr create`` shell string. The inner string is built with
     ``shlex.join`` so the free-text ``--message`` value is safely quoted.
+
+    The chat is grouped with its workspace by living in the same host/container
+    (it is created via ``exec`` into the workspace agent); no grouping label is
+    needed.
     """
     inner_parts = [
         _CONTAINER_MNGR_BINARY,
@@ -69,10 +72,6 @@ def build_assist_chat_mngr_args(
         "--label",
         f"{ASSIST_CHAT_LABEL}=true",
     ]
-    # Group the chat with its workspace (the same ``workspace=<host_name>`` label
-    # the workspace's own agents carry) when we can resolve the name.
-    if workspace_name:
-        inner_parts += ["--label", f"workspace={workspace_name}"]
     inner_parts += ["--message", f"/assist {description}"]
     inner_command = shlex.join(inner_parts)
     return ["exec", "--agent", str(workspace_agent_id), inner_command]
@@ -81,7 +80,6 @@ def build_assist_chat_mngr_args(
 def spawn_assist_chat(
     mngr_caller: MngrCaller,
     workspace_agent_id: AgentId,
-    workspace_name: str | None,
     description: str,
     chat_name: str | None = None,
 ) -> bool:
@@ -97,7 +95,6 @@ def spawn_assist_chat(
     resolved_chat_name = chat_name if chat_name is not None else generate_assist_chat_name()
     args = build_assist_chat_mngr_args(
         workspace_agent_id=workspace_agent_id,
-        workspace_name=workspace_name,
         description=description,
         chat_name=resolved_chat_name,
     )

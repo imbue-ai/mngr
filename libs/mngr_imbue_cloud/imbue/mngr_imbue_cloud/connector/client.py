@@ -346,6 +346,26 @@ class ImbueCloudConnectorClient(MutableModel):
             f"release of host {host_db_id} returned {response.status_code}: {response.text[:200]}"
         )
 
+    def rename_host(self, access_token: SecretStr, host_db_id: str, host_name: str) -> None:
+        """Rename a leased host (update its mutable ``host_name``). Raises ``ImbueCloudConnectorError`` on any failure.
+
+        The lease's ``host_db_id`` is the durable identity; only the friendly
+        name changes. Reachable whether or not the leased container is running,
+        since the connector owns the name.
+        """
+        try:
+            response = httpx.post(
+                self._url(f"/hosts/{host_db_id}/rename"),
+                headers=self._bearer(access_token),
+                json={"host_name": host_name},
+                timeout=self.timeout_seconds,
+            )
+        except httpx.HTTPError as exc:
+            raise ImbueCloudConnectorError(
+                f"rename request for host {host_db_id} could not reach the connector: {exc}"
+            ) from exc
+        self._check(response, ImbueCloudConnectorError)
+
     def list_hosts(self, access_token: SecretStr) -> list[LeasedHostInfo]:
         response = httpx.get(
             self._url("/hosts"),

@@ -1823,6 +1823,81 @@ def test_lease_host_rejects_invalid_host_name(monkeypatch: pytest.MonkeyPatch) -
     assert backend.pool_rows[0].status == "available"
 
 
+def test_rename_host_succeeds_for_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST /hosts/{id}/rename updates the mutable host_name for the owning user."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_leased_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000051"), version="v0.1.0", leased_to_user=_ADMIN_STUB_USERNAME
+    )
+    resp = client.post(
+        "/hosts/00000000-0000-0000-0000-000000000051/rename",
+        json={"host_name": "renamed-host"},
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["host_name"] == "renamed-host"
+    assert backend.pool_rows[0].host_name == "renamed-host"
+
+
+def test_rename_host_rejects_invalid_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST /hosts/{id}/rename rejects a host_name that fails the SafeName regex (422)."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_leased_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000052"), version="v0.1.0", leased_to_user=_ADMIN_STUB_USERNAME
+    )
+    original_name = backend.pool_rows[0].host_name
+    resp = client.post(
+        "/hosts/00000000-0000-0000-0000-000000000052/rename",
+        json={"host_name": "bad.name"},
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 422
+    # The name is unchanged since validation rejected the request before the UPDATE.
+    assert backend.pool_rows[0].host_name == original_name
+
+
+def test_rename_host_404_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST /hosts/{id}/rename returns 404 when no such host row exists."""
+    client, _backend = _make_pool_test_client(monkeypatch)
+    resp = client.post(
+        "/hosts/00000000-0000-0000-0000-0000000000ff/rename",
+        json={"host_name": "whatever"},
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 404
+
+
+def test_rename_host_403_for_non_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST /hosts/{id}/rename returns 403 when the host is leased by another user."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_leased_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000053"), version="v0.1.0", leased_to_user="someone-else"
+    )
+    resp = client.post(
+        "/hosts/00000000-0000-0000-0000-000000000053/rename",
+        json={"host_name": "renamed-host"},
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 403
+    assert backend.pool_rows[0].host_name != "renamed-host"
+
+
+def test_rename_host_404_when_not_leased(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST /hosts/{id}/rename returns 404 when the requester owns the row but it is not leased."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_removing_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000054"), version="v0.1.0", leased_to_user=_ADMIN_STUB_USERNAME
+    )
+    resp = client.post(
+        "/hosts/00000000-0000-0000-0000-000000000054/rename",
+        json={"host_name": "renamed-host"},
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 404
+    assert backend.pool_rows[0].host_name != "renamed-host"
+
+
 def test_release_host_succeeds_for_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     """POST /hosts/{id}/release destroys the slice's lima VM and drops the row."""
     client, backend = _make_pool_test_client(monkeypatch)

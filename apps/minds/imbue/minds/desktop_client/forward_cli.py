@@ -86,7 +86,7 @@ class ForwardSubprocessConfig(FrozenModel):
 
     service: str = Field(default="system_interface", description="Service name to forward")
     agent_include: tuple[str, ...] = Field(
-        default=("has(agent.labels.workspace) && has(agent.labels.is_primary)",),
+        default=("has(agent.labels.is_primary)",),
         description="CEL include filters passed to --agent-include",
     )
     reverse_specs: tuple[str, ...] = Field(
@@ -397,11 +397,16 @@ class EnvelopeStreamConsumer(MutableModel):
             if str(agent.host_id) in ssh_by_host_id
         }
         host_state_by_host_id = {str(host.host_id): host.host_state for host in hosts if host.host_state is not None}
+        # Capture every known host's normalized name (regardless of whether its state
+        # is known) so the resolver's display-name fallback and host-name collision
+        # checks have it.
+        host_name_by_host_id = {str(host.host_id): str(host.host_name) for host in hosts}
         return ParsedAgentsResult(
             agent_ids=tuple(agent.agent_id for agent in agents),
             discovered_agents=tuple(agents),
             ssh_info_by_agent_id=ssh_info_by_agent_id,
             host_state_by_host_id=host_state_by_host_id,
+            host_name_by_host_id=host_name_by_host_id,
         )
 
     def _push_agents_view(self) -> None:

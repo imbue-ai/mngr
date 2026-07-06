@@ -39,6 +39,11 @@ REQUESTS_EVENT_SOURCE_NAME: Final[str] = "requests"
 # is the ``AgentName``-typed form built from it.
 SYSTEM_SERVICES_AGENT_NAME: Final[str] = "system-services"
 
+# Agent label that holds the workspace's arbitrary human-readable display name.
+# It lives on the ``system-services`` (primary) agent. The host's normalized
+# slug name lives on the host itself, not in a label.
+WORKSPACE_DISPLAY_NAME_LABEL: Final[str] = "workspace_display_name"
+
 
 class AgentDisplayInfo(FrozenModel):
     """Display-oriented information about an agent for UI rendering."""
@@ -84,7 +89,7 @@ class BackendResolverInterface(MutableModel, ABC):
         """Return all known agent IDs."""
 
     def list_known_workspace_ids(self) -> tuple[AgentId, ...]:
-        """Return agent IDs that have the workspace=true label.
+        """Return agent IDs that are primary workspace agents (the ``is_primary`` label).
 
         Default implementation returns all known agent IDs (no filtering).
         Subclasses with access to agent labels should override this.
@@ -169,10 +174,18 @@ class BackendResolverInterface(MutableModel, ABC):
         return None
 
     def get_workspace_name(self, agent_id: AgentId) -> str | None:
-        """Return the workspace label value for an agent, or None.
+        """Return the workspace's human-readable display name, or None.
 
         Default implementation returns None.
         Subclasses with access to agent labels should override this.
+        """
+        return None
+
+    def get_host_name(self, agent_id: AgentId) -> str | None:
+        """Return the normalized host name (slug) of the agent's host, or None.
+
+        Default implementation returns None. Subclasses fed by discovery
+        should override this. Used for per-provider host-name collision checks.
         """
         return None
 
@@ -291,6 +304,10 @@ class ParsedAgentsResult(FrozenModel):
         default_factory=dict,
         description="Host lifecycle state keyed by host ID string, for hosts whose state is known",
     )
+    host_name_by_host_id: Mapping[str, str] = Field(
+        default_factory=dict,
+        description="Normalized host name (slug) keyed by host ID string, for hosts whose name is known",
+    )
 
 
 def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
@@ -311,6 +328,7 @@ def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
     agent_ids: list[AgentId] = []
     ssh_info_by_id: dict[str, RemoteSSHInfo] = {}
     host_state_by_host_id: dict[str, HostState] = {}
+    host_name_by_host_id: dict[str, str] = {}
 
     for agent in agents:
         agent_id_str = agent.get("id")
@@ -329,6 +347,10 @@ def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
                 host_state_by_host_id[host_id_value] = HostState(state_value)
             except ValueError:
                 logger.warning("Unknown host state {!r} for host {}", state_value, host_id_value)
+
+        name_value = host.get("name")
+        if isinstance(host_id_value, str) and isinstance(name_value, str):
+            host_name_by_host_id[host_id_value] = name_value
 
         ssh = host.get("ssh")
         if ssh is None:
@@ -349,6 +371,7 @@ def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
         agent_ids=tuple(agent_ids),
         ssh_info_by_agent_id=ssh_info_by_id,
         host_state_by_host_id=host_state_by_host_id,
+        host_name_by_host_id=host_name_by_host_id,
     )
 
 
@@ -798,14 +821,13 @@ class MngrCliBackendResolver(BackendResolverInterface):
     def list_known_workspace_ids(self) -> tuple[AgentId, ...]:
         """Return agent IDs that are primary workspace agents.
 
-        Filters for agents with both ``workspace`` and ``is_primary`` labels.
-        Includes workspaces on DESTROYED hosts; see the interface docstring.
+        Filters for agents with the ``is_primary`` label (the per-host
+        services agent that identifies a workspace). Includes workspaces on
+        DESTROYED hosts; see the interface docstring.
         """
         with self._lock:
             return tuple(
-                agent.agent_id
-                for agent in self._agents_result.discovered_agents
-                if "workspace" in agent.labels and "is_primary" in agent.labels
+                agent.agent_id for agent in self._agents_result.discovered_agents if "is_primary" in agent.labels
             )
 
     def list_active_workspace_ids(self) -> tuple[AgentId, ...]:
@@ -822,27 +844,24 @@ class MngrCliBackendResolver(BackendResolverInterface):
             return tuple(
                 agent.agent_id
                 for agent in self._agents_result.discovered_agents
-                if "workspace" in agent.labels
-                and "is_primary" in agent.labels
+                if "is_primary" in agent.labels
                 and host_state_by_host_id.get(str(agent.host_id)) is not HostState.DESTROYED
             )
 
     def list_restorable_workspace_ids(self) -> tuple[AgentId, ...]:
         """Union of live primary-workspace agents and last-good workspace agents.
 
-        The live set is the ``workspace`` + ``is_primary`` agents in the current
-        snapshot (host state aside -- a restore view declines to drop on absence,
-        not on DESTROYED). The last-good set is the persisted topology's
-        system-services agents (the minds' primary agents, which carry those
-        labels live). Unioning them means a workspace that exists but hasn't been
+        The live set is the ``is_primary`` agents in the current snapshot (host
+        state aside -- a restore view declines to drop on absence, not on
+        DESTROYED). The last-good set is the persisted topology's
+        system-services agents (the minds' primary agents, which carry that
+        label live). Unioning them means a workspace that exists but hasn't been
         re-discovered this session yet -- a slow provider on cold start -- stays
         recognized, so its window isn't dropped before discovery catches up.
         """
         with self._lock:
             ids: set[AgentId] = {
-                agent.agent_id
-                for agent in self._agents_result.discovered_agents
-                if "workspace" in agent.labels and "is_primary" in agent.labels
+                agent.agent_id for agent in self._agents_result.discovered_agents if "is_primary" in agent.labels
             }
             for records in self._last_good_agents_by_host.values():
                 for record in records:
@@ -888,11 +907,35 @@ class MngrCliBackendResolver(BackendResolverInterface):
             self._fire_on_change()
 
     def get_workspace_name(self, agent_id: AgentId) -> str | None:
-        """Return the workspace label value for an agent, or None."""
+        """Return the workspace's human-readable display name, or None.
+
+        Reads the ``workspace_display_name`` label, falling back to the host
+        name for legacy workspaces created before the display label existed.
+        The host name (the normalized slug) is the canonical name; only the
+        display label may diverge from it.
+        """
         with self._lock:
             for agent in self._agents_result.discovered_agents:
                 if agent.agent_id == agent_id:
-                    return agent.labels.get("workspace")
+                    display_name = agent.labels.get(WORKSPACE_DISPLAY_NAME_LABEL)
+                    if display_name:
+                        return display_name
+                    # Backwards-compat fallback for workspaces created before the
+                    # display label existed. Removable ~Sept 2026.
+                    return self._agents_result.host_name_by_host_id.get(str(agent.host_id))
+            return None
+
+    def get_host_name(self, agent_id: AgentId) -> str | None:
+        """Return the normalized host name (slug) of the agent's host, or None.
+
+        This is the canonical, per-provider-unique name used for collision
+        checks -- distinct from the human-readable display name returned by
+        :meth:`get_workspace_name`.
+        """
+        with self._lock:
+            for agent in self._agents_result.discovered_agents:
+                if agent.agent_id == agent_id:
+                    return self._agents_result.host_name_by_host_id.get(str(agent.host_id))
             return None
 
     def get_agent_label(self, agent_id: AgentId, label_key: str) -> str | None:

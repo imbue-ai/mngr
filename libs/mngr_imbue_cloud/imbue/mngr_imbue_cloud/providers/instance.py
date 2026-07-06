@@ -1992,7 +1992,27 @@ class ImbueCloudProvider(BaseProviderInstance):
         host: HostInterface | HostId,
         name: HostName,
     ) -> Host:
-        raise NotImplementedError("imbue_cloud does not support renaming hosts (the host_id is fixed by the lease)")
+        """Rename a leased host by updating its mutable ``host_name`` in the connector.
+
+        The lease's ``host_db_id`` remains the durable identity; only the
+        friendly name changes. The connector owns the name, so this works
+        whether or not the leased container is currently running.
+        """
+        host_id = host.id if isinstance(host, HostInterface) else host
+        lease = self._find_leased(host_id)
+        if lease is None:
+            raise HostNotFoundError(self.name, host_id)
+
+        account = self._require_account()
+        token = self._get_access_token(account)
+        self.client.rename_host(token, str(lease.host_db_id), str(name))
+
+        # The connector DB is authoritative for discovery (host_name comes from
+        # the lease listing), so drop the cache and build the host from the
+        # locally-updated lease to avoid an extra round-trip.
+        updated_lease = lease.model_copy_update(to_update(lease.field_ref().host_name, str(name)))
+        self.reset_caches()
+        return self._build_host_object(updated_lease, adopt_pre_baked_agent=False)
 
     # ------------------------------------------------------------------
     # pyinfra connector lookup

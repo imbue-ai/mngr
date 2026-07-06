@@ -124,10 +124,25 @@ def short_tmp_path() -> Iterator[Path]:
         yield Path(d)
 
 
-def make_agents_json(*agent_ids: AgentId, labels: dict[str, str] | None = None) -> str:
-    """Build a JSON string matching `mngr list --format json` output for the given agent IDs."""
-    effective_labels = labels if labels is not None else {"workspace": "true", "is_primary": "true"}
-    return json.dumps({"agents": [{"id": str(agent_id), "labels": effective_labels} for agent_id in agent_ids]})
+_FIXED_TEST_HOST_ID: str = "host-00000000000000000000000000000000"
+
+
+def make_agents_json(*agent_ids: AgentId, labels: dict[str, str] | None = None, host_name: str | None = None) -> str:
+    """Build a JSON string matching `mngr list --format json` output for the given agent IDs.
+
+    When ``host_name`` is given, each agent carries a ``host`` object with that
+    name so the resolver's ``host_name_by_host_id`` (the canonical host-name
+    source) is populated, mirroring real discovery output.
+    """
+    effective_labels = labels if labels is not None else {"is_primary": "true"}
+
+    def _agent(agent_id: AgentId) -> dict[str, object]:
+        entry: dict[str, object] = {"id": str(agent_id), "labels": effective_labels}
+        if host_name is not None:
+            entry["host"] = {"id": _FIXED_TEST_HOST_ID, "name": host_name}
+        return entry
+
+    return json.dumps({"agents": [_agent(agent_id) for agent_id in agent_ids]})
 
 
 def make_service_log(service: str, url: str) -> str:
@@ -193,6 +208,7 @@ def make_resolver_with_data(
                 agent_ids=parsed.agent_ids,
                 discovered_agents=discovered,
                 ssh_info_by_agent_id=parsed.ssh_info_by_agent_id,
+                host_name_by_host_id=parsed.host_name_by_host_id,
             )
         )
 
