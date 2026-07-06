@@ -171,10 +171,7 @@ function waitForPortFree(port, timeoutMs = 6000, intervalMs = 200) {
 
 /**
  * Log the bundled git version once at backend start, for supportability.
- *
- * Runs the payload's git non-blocking; a failure here never blocks or aborts
- * startup (the backend spawn does not depend on it), so we downgrade any error
- * to a warning. See specs/minds-managed-git/concise.md.
+ * Failures are downgraded to a warning and never block startup.
  */
 function logBundledGitVersion(gitRoot) {
   execFile(paths.getGitPath(), ['--version'], (err, stdout) => {

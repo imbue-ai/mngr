@@ -190,8 +190,7 @@ function verifyChecksum(buffer, filename) {
 
 /**
  * Like verifyChecksum, but the expected hash is supplied explicitly (e.g. from
- * git-manifest.json) rather than looked up in EXPECTED_SHA256. Throws in the
- * same style if the hash doesn't match.
+ * git-manifest.json) rather than looked up in EXPECTED_SHA256.
  */
 function verifyExpectedChecksum(buffer, filename, expected) {
   const actual = crypto.createHash('sha256').update(buffer).digest('hex');
@@ -405,8 +404,7 @@ async function downloadGit(resourcesDir, { platform, arch }) {
   }
   fs.chmodSync(destGit, 0o755);
 
-  // Marker so ensure-binaries.js can replace a stale (pre-manifest or
-  // wrong-tag) payload on dev machines.
+  // Marker so ensure-binaries.js can replace a stale payload on dev machines.
   fs.writeFileSync(path.join(gitDir, '.dugite-tag'), manifest.dugiteNativeTag + '\n');
   writeGitNotice(gitDir, manifest);
   fs.copyFileSync(path.join(__dirname, 'assets', 'git-COPYING'), path.join(gitDir, 'COPYING'));

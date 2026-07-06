@@ -30,9 +30,9 @@ const REQUIRED = [
 const missing = REQUIRED.filter((p) => !fs.existsSync(p));
 
 // The bundled git payload is pinned by scripts/git-manifest.json. A dev machine
-// carrying a stale payload (pre-manifest, or a superseded dugite-native tag)
-// passes the existence check above but must still be replaced, so treat a
-// missing or mismatched .dugite-tag marker as a missing binary.
+// carrying a stale payload passes the existence check above but must still be
+// replaced, so treat a missing or mismatched .dugite-tag marker as a missing
+// binary.
 const gitDir = path.join(RESOURCES, 'git');
 const gitTagMarker = path.join(gitDir, '.dugite-tag');
 const expectedGitTag = JSON.parse(

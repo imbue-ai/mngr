@@ -36,10 +36,8 @@ function getGitBinDir() {
 }
 
 /**
- * Root of the bundled git payload (``resources/git``), whose subdirs back
- * the git environment contract (GIT_EXEC_PATH, GIT_TEMPLATE_DIR, etc.). The
- * dugite-native payload is built with an empty prefix, so these must be
- * exported explicitly -- see specs/minds-managed-git/concise.md.
+ * Root of the bundled git payload (``resources/git``), whose subdirs back the
+ * git environment contract backend.js exports (see specs/minds-managed-git/concise.md).
  */
 function getGitRootDir() {
   return path.dirname(getGitBinDir());
