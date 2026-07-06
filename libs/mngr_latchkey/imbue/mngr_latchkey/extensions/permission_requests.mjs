@@ -244,12 +244,19 @@ function loadWorkspacePermissions() {
 }
 
 const WORKSPACE_PERMISSIONS = loadWorkspacePermissions();
-const MINDS_WORKSPACES_SCOPE = WORKSPACE_PERMISSIONS.scope;
-const MINDS_WORKSPACES_GATEWAY_SELF_HOST = WORKSPACE_PERMISSIONS.gatewaySelfHost;
 const MINDS_WORKSPACES_PATH_PREFIX = WORKSPACE_PERMISSIONS.pathPrefix;
 const MINDS_WORKSPACES_SCOPE_PATTERN = WORKSPACE_PERMISSIONS.scopePattern;
 const WORKSPACE_VERB_DEFS = WORKSPACE_PERMISSIONS.verbDefs;
 const VALID_WORKSPACE_VERBS = new Set(Object.keys(WORKSPACE_VERB_DEFS));
+
+// The cross-workspace verbs attach as permissions on the pre-existing domain-only
+// ``latchkey-self`` scope from the agent baseline -- exactly like file-sharing and
+// accounts -- rather than minting a second same-domain scope. Each verb permission
+// schema pins the full ``/minds-api-proxy/api/v1/workspaces...`` path, so the scope
+// only needs to gate the gateway-self domain (which ``latchkey-self`` already does).
+// Keeping a single gateway-self scope means rule order is irrelevant: detent takes
+// the first rule whose scope matches as authoritative, and there is only ever one.
+const WORKSPACE_GRANT_SCOPE_NAME = 'latchkey-self';
 
 // Detent's catch-all permission schema. The ``services.json``
 // catalog never lists it explicitly (every scope implicitly
@@ -286,19 +293,6 @@ const FILE_SHARING_PERMISSION_PREFIX = 'minds-file-server-';
 const ACCOUNTS_PROXY_PATH_PREFIX = '/minds-api-proxy/api/v1/accounts';
 const ACCOUNTS_SCOPE_NAME = 'latchkey-self';
 const ACCOUNTS_PERMISSION_NAME = 'minds-accounts-read';
-
-// The agent baseline's ``latchkey-self`` scope is *domain-only*: its schema
-// matches every request whose ``domain`` is ``latchkey-self.invalid`` with no
-// path constraint, so it matches the whole gateway-self surface. detent
-// evaluates a permissions file's rules in order and treats the FIRST rule whose
-// *scope* matches as authoritative -- it allows when one of that rule's
-// permissions matches and otherwise rejects outright, without falling through to
-// later rules. A narrower same-domain scope (e.g. ``minds-workspaces``) must
-// therefore be ordered BEFORE ``latchkey-self``; if it lands after, the
-// domain-only catch-all matches first, finds none of its own permissions cover
-// the request, and vetoes it -- even though the later rule would have granted
-// it. ``mergeRules`` keeps this scope last for exactly that reason.
-const GATEWAY_SELF_CATCHALL_SCOPE_NAME = 'latchkey-self';
 
 // Access modes the agent can request for a file. ``READ`` grants the
 // non-mutating WebDAV verbs only; ``WRITE`` is a superset that also
@@ -1128,19 +1122,6 @@ function computeAccountsEffect() {
 }
 
 /**
- * Build the ``minds-workspaces`` scope schema (domain + path-prefix gate).
- */
-function workspaceScopeSchema() {
-  return {
-    properties: {
-      domain: { const: MINDS_WORKSPACES_GATEWAY_SELF_HOST },
-      path: { type: 'string', pattern: MINDS_WORKSPACES_SCOPE_PATTERN },
-    },
-    required: ['domain', 'path'],
-  };
-}
-
-/**
  * Build the JSON-Schema ``method`` property for a verb. A single method string
  * becomes ``{const: <method>}``; an array of methods becomes ``{enum: [...]}``
  * so a verb that matches more than one HTTP method admits any of them.
@@ -1196,8 +1177,9 @@ function workspaceNonTargetedVerbSchema(def) {
 
 /**
  * Compute the ``effect`` for a ``workspace`` request: a self-contained patch
- * (scope + verb schemas + the grant rule) that approving the request splices
- * into the target permissions.json, exactly like the file-sharing effect.
+ * (the per-verb permission schemas + a grant rule attaching those permissions
+ * to the ``latchkey-self`` scope) that approving the request splices into the
+ * target permissions.json, exactly like the file-sharing effect.
  *
  * For each requested verb:
  *  * non-targeted verbs (read / create) emit a broad schema keyed by the verb
@@ -1210,13 +1192,15 @@ function workspaceNonTargetedVerbSchema(def) {
  *
  * Each new selected target is a distinct, uniquely-named schema, so the
  * approve handler's schema-by-name merge accumulates targets without an
- * ``anyOf`` (re-approving the same target is an idempotent overwrite). The
- * scope schema is emitted on every effect and merged by name (idempotent), so
- * a host file that has never seen the scope gets it with the first grant -- no
- * baseline entry or startup migration required.
+ * ``anyOf`` (re-approving the same target is an idempotent overwrite). No scope
+ * schema is emitted: the verbs attach to the domain-only ``latchkey-self`` scope
+ * the agent baseline already declares (like file-sharing and accounts), so a
+ * host file that has never seen a workspace grant gets the permissions unioned
+ * onto that scope with the first grant -- no scope schema, no rule ordering, and
+ * no baseline entry required.
  */
 function computeWorkspaceEffect(permissions, targetWorkspaceId) {
-  const schemas = { [MINDS_WORKSPACES_SCOPE]: workspaceScopeSchema() };
+  const schemas = {};
   const grantedNames = [];
   for (const verb of permissions) {
     const def = WORKSPACE_VERB_DEFS[verb];
@@ -1238,7 +1222,7 @@ function computeWorkspaceEffect(permissions, targetWorkspaceId) {
   }
   return {
     schemas,
-    rules: [{ [MINDS_WORKSPACES_SCOPE]: grantedNames }],
+    rules: [{ [WORKSPACE_GRANT_SCOPE_NAME]: grantedNames }],
   };
 }
 
@@ -1708,15 +1692,6 @@ function mergeRules(existingRules, effectRules) {
       }
     }
     rules[existingIndex] = { [scopeKey]: merged };
-  }
-  // Keep the domain-only ``latchkey-self`` catch-all last so any narrower
-  // same-domain scope just appended above it (e.g. ``minds-workspaces``) is
-  // evaluated first. See ``GATEWAY_SELF_CATCHALL_SCOPE_NAME`` for why detent's
-  // first-matching-scope-wins evaluation makes this ordering load-bearing.
-  const catchAllIndex = rules.findIndex((rule) => ruleKeyOf(rule) === GATEWAY_SELF_CATCHALL_SCOPE_NAME);
-  if (catchAllIndex !== -1 && catchAllIndex !== rules.length - 1) {
-    const [catchAllRule] = rules.splice(catchAllIndex, 1);
-    rules.push(catchAllRule);
   }
   return rules;
 }

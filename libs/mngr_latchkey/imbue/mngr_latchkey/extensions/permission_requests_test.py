@@ -57,6 +57,11 @@ _POLL_INTERVAL_SECONDS: Final[float] = 0.02
 _FILE_SHARING_SCOPE_NAME: Final[str] = "latchkey-self"
 _FILE_SHARING_PROXY_PATH_PREFIX: Final[str] = "/minds-api-proxy/api/v1/files"
 _FILE_SHARING_PERMISSION_PREFIX: Final[str] = "minds-file-server-"
+
+# The cross-workspace verbs also attach to the pre-existing ``latchkey-self``
+# scope (like file-sharing and accounts): the grant rule is keyed here, and no
+# ``minds-workspaces`` scope schema is minted.
+_WORKSPACE_GRANT_SCOPE_NAME: Final[str] = "latchkey-self"
 _FILE_SHARING_READ_METHODS: Final[tuple[str, ...]] = (
     "GET",
     "HEAD",
@@ -658,16 +663,14 @@ def test_post_creates_workspace_request_with_target_and_effect(
         "target_workspace_id": target_id,
     }
     assert parsed["target"] == str(permissions_config_path)
-    # The effect is a self-contained patch (scope schema + a uniquely-named
-    # per-target verb schema + the grant rule), applied via /approve like
-    # file-sharing -- not an informational rules-only stub.
+    # The effect is a self-contained patch (a uniquely-named per-target verb
+    # schema + a grant rule attaching it to the ``latchkey-self`` scope), applied
+    # via /approve like file-sharing -- not an informational rules-only stub. No
+    # ``minds-workspaces`` scope schema is minted.
     effect = parsed["effect"]
     per_target_name = f"minds-workspaces-destroy-{target_id}"
-    assert effect["rules"] == [{MINDS_WORKSPACES_SCOPE: [per_target_name]}]
-    assert set(effect["schemas"].keys()) == {MINDS_WORKSPACES_SCOPE, per_target_name}
-    # The scope gate constrains domain + path prefix.
-    scope_schema = effect["schemas"][MINDS_WORKSPACES_SCOPE]
-    assert scope_schema["properties"]["domain"] == {"const": "latchkey-self.invalid"}
+    assert effect["rules"] == [{_WORKSPACE_GRANT_SCOPE_NAME: [per_target_name]}]
+    assert set(effect["schemas"].keys()) == {per_target_name}
     # The per-target schema pins the single target's destroy path.
     perm_schema = effect["schemas"][per_target_name]
     assert perm_schema["properties"]["method"] == {"const": "POST"}
@@ -698,7 +701,7 @@ def test_post_creates_workspace_request_all_workspaces_uses_wildcard(
     effect = json.loads(body)["effect"]
     # With no target, the targeted verb is keyed by the plain verb name and its
     # path uses the ``[^/]+`` id wildcard (an "all workspaces" grant).
-    assert effect["rules"] == [{MINDS_WORKSPACES_SCOPE: ["minds-workspaces-ssh"]}]
+    assert effect["rules"] == [{_WORKSPACE_GRANT_SCOPE_NAME: ["minds-workspaces-ssh"]}]
     ssh_schema = effect["schemas"]["minds-workspaces-ssh"]
     path_pattern = re.compile(ssh_schema["properties"]["path"]["pattern"])
     prefix = "/minds-api-proxy/api/v1/workspaces"
@@ -783,9 +786,9 @@ def test_approve_workspace_override_recomputes_and_accumulates(
     name_b = f"minds-workspaces-destroy-{target_b}"
     assert name_a in applied["schemas"]
     assert name_b in applied["schemas"]
-    rule = next(r for r in applied["rules"] if list(r.keys()) == [MINDS_WORKSPACES_SCOPE])
-    assert name_a in rule[MINDS_WORKSPACES_SCOPE]
-    assert name_b in rule[MINDS_WORKSPACES_SCOPE]
+    rule = next(r for r in applied["rules"] if list(r.keys()) == [_WORKSPACE_GRANT_SCOPE_NAME])
+    assert name_a in rule[_WORKSPACE_GRANT_SCOPE_NAME]
+    assert name_b in rule[_WORKSPACE_GRANT_SCOPE_NAME]
 
 
 def test_approve_workspace_all_override_grants_broadly(
@@ -818,29 +821,24 @@ def test_approve_workspace_all_override_grants_broadly(
     assert f"minds-workspaces-destroy-{target}" not in applied["schemas"]
 
 
-def test_approve_workspace_grant_keeps_catchall_last_so_grant_is_reachable(
+def test_approve_workspace_grant_folds_into_latchkey_self_on_real_baseline(
     node_extension: tuple[str, Path, Path],
 ) -> None:
-    """A workspace grant approved on top of the real agent baseline is ordered before
-    the domain-only ``latchkey-self`` catch-all.
+    """A workspace grant approved on top of the real agent baseline lands on ``latchkey-self``.
 
-    The baseline's ``latchkey-self`` scope matches every gateway-self request on
-    ``domain`` alone. detent treats the first rule whose scope matches as
-    authoritative -- it rejects outright if that rule's permissions do not cover
-    the request, without consulting later rules. So if the ``minds-workspaces``
-    grant were appended *after* ``latchkey-self`` (as it was before this fix), the
-    catch-all would match first and veto every ``/workspaces`` request even though
-    the grant covers it. The approve merge must keep ``latchkey-self`` last. Rule
-    order is exactly what determines detent's verdict, so asserting the order is
-    asserting the proxy call would be allowed.
+    The verbs attach as permissions on the single domain-only ``latchkey-self``
+    scope the baseline already declares (like file-sharing and accounts), so no
+    second gateway-self rule and no ``minds-workspaces`` scope schema appear.
+    Because there is only ever one gateway-self rule, detent's
+    first-matching-scope-wins evaluation reaches the grant regardless of order.
 
     Unlike the other approve tests, this one seeds the target file with the real
-    baseline first (the others start empty, where ``minds-workspaces`` is the only
-    rule and so is never shadowed -- which is why they did not catch this).
+    baseline first, so the fold onto the pre-existing ``latchkey-self`` rule is
+    exercised (the others start empty).
     """
     base_url, _latchkey_directory, permissions_config_path = node_extension
     # Seed the exact per-host baseline a live host has: the per-agent gate followed
-    # by the domain-only ``latchkey-self`` catch-all.
+    # by the domain-only ``latchkey-self`` rule.
     permissions_config_path.write_text(json.dumps(_AGENT_BASELINE_PERMISSIONS.model_dump()))
 
     status, body = _post_json(
@@ -869,11 +867,15 @@ def test_approve_workspace_grant_keeps_catchall_last_so_grant_is_reachable(
 
     applied = json.loads(permissions_config_path.read_text())
     rule_keys = [next(iter(rule.keys())) for rule in applied["rules"]]
-    # The domain-only catch-all must remain last, with the workspace grant before it.
-    assert rule_keys[-1] == "latchkey-self"
-    assert rule_keys.index(MINDS_WORKSPACES_SCOPE) < rule_keys.index("latchkey-self")
-    workspace_rule = next(rule for rule in applied["rules"] if MINDS_WORKSPACES_SCOPE in rule)
-    assert set(workspace_rule[MINDS_WORKSPACES_SCOPE]) == {"minds-workspaces-read", "minds-workspaces-create"}
+    # The grant folds onto the single ``latchkey-self`` rule: no ``minds-workspaces``
+    # rule, and no duplicate gateway-self rule was introduced.
+    assert MINDS_WORKSPACES_SCOPE not in rule_keys
+    assert rule_keys.count(_WORKSPACE_GRANT_SCOPE_NAME) == 1
+    latchkey_self_rule = next(rule for rule in applied["rules"] if _WORKSPACE_GRANT_SCOPE_NAME in rule)
+    granted = latchkey_self_rule[_WORKSPACE_GRANT_SCOPE_NAME]
+    assert {"minds-workspaces-read", "minds-workspaces-create"}.issubset(set(granted))
+    # No ``minds-workspaces`` scope schema is emitted.
+    assert MINDS_WORKSPACES_SCOPE not in applied["schemas"]
 
 
 def test_approve_workspace_rejects_unknown_verb_in_override(

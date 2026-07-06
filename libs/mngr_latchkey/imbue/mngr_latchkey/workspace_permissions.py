@@ -78,6 +78,8 @@ class _WorkspacePermissionsCatalog(FrozenModel):
     """Parsed view of the shared verb-catalog data file."""
 
     scope: str = Field(description="Detent scope schema name for the cross-workspace API.")
+    gateway_self_host: str = Field(description="Synthetic gateway-self ``domain`` the verb requests carry.")
+    path_prefix: str = Field(description="Inbound path prefix every cross-workspace request lives under.")
     verbs: tuple[WorkspaceVerb, ...] = Field(description="The grantable verbs, in dialog order.")
 
 
@@ -96,9 +98,19 @@ def _load_catalog() -> _WorkspacePermissionsCatalog:
     if not isinstance(parsed, dict):
         raise WorkspacePermissionsError(f"{_WORKSPACE_PERMISSIONS_FILENAME} top-level value must be a JSON object.")
     scope = parsed.get("scope")
+    gateway_self_host = parsed.get("gateway_self_host")
+    path_prefix = parsed.get("path_prefix")
     raw_verbs = parsed.get("verbs")
     if not isinstance(scope, str) or not scope:
         raise WorkspacePermissionsError(f"{_WORKSPACE_PERMISSIONS_FILENAME}: 'scope' must be a non-empty string.")
+    if not isinstance(gateway_self_host, str) or not gateway_self_host:
+        raise WorkspacePermissionsError(
+            f"{_WORKSPACE_PERMISSIONS_FILENAME}: 'gateway_self_host' must be a non-empty string."
+        )
+    if not isinstance(path_prefix, str) or not path_prefix:
+        raise WorkspacePermissionsError(
+            f"{_WORKSPACE_PERMISSIONS_FILENAME}: 'path_prefix' must be a non-empty string."
+        )
     if not isinstance(raw_verbs, list) or not raw_verbs:
         raise WorkspacePermissionsError(f"{_WORKSPACE_PERMISSIONS_FILENAME}: 'verbs' must be a non-empty array.")
     verbs: list[WorkspaceVerb] = []
@@ -118,7 +130,12 @@ def _load_catalog() -> _WorkspacePermissionsCatalog:
                 is_targeted=path["kind"] == "targeted",
             )
         )
-    return _WorkspacePermissionsCatalog(scope=scope, verbs=tuple(verbs))
+    return _WorkspacePermissionsCatalog(
+        scope=scope,
+        gateway_self_host=gateway_self_host,
+        path_prefix=path_prefix,
+        verbs=tuple(verbs),
+    )
 
 
 def _require_str(entry: Mapping[str, object], field: str) -> str:
@@ -135,10 +152,19 @@ def _require_str(entry: Mapping[str, object], field: str) -> str:
 # packaging bug and surfaces immediately as :class:`WorkspacePermissionsError`.
 _CATALOG: Final[_WorkspacePermissionsCatalog] = _load_catalog()
 
-# Detent scope schema for the cross-workspace API. Appears as the rule key in a
-# per-host ``latchkey_permissions.json`` (``{"minds-workspaces": [...]}``) and as
-# the ``scope`` a workspace permission request is filed under.
+# Semantic identifier for the cross-workspace API. Used as the response-event
+# label that tags a workspace grant/deny and as the shared prefix of every verb
+# permission name (``minds-workspaces-<verb>``). It is NOT the detent scope the
+# grant attaches to: the verb permissions are unioned onto the domain-only
+# ``latchkey-self`` scope (like file-sharing and accounts), so the on-disk rule
+# key is ``latchkey-self``, not this value.
 MINDS_WORKSPACES_SCOPE: Final[str] = _CATALOG.scope
+
+# Synthetic gateway-self ``domain`` every cross-workspace request carries, and the
+# inbound path prefix they all live under. Used by the data-format migration to
+# reconstruct the legacy ``minds-workspaces`` scope schema on a downgrade.
+MINDS_WORKSPACES_GATEWAY_SELF_HOST: Final[str] = _CATALOG.gateway_self_host
+MINDS_WORKSPACES_PATH_PREFIX: Final[str] = _CATALOG.path_prefix
 
 # The grantable verbs, in the order the dialog presents them.
 WORKSPACE_VERBS: Final[tuple[WorkspaceVerb, ...]] = _CATALOG.verbs
