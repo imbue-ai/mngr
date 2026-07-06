@@ -7,10 +7,12 @@
  *
  * uv:  SHA256-verified download from astral-sh/uv releases.
  * git:
- *   macOS:   real binary via `xcrun --find git`, plus libexec/git-core
- *            helpers and templates. `/usr/bin/git` is an xcode-select shim
- *            that SIGKILLs at runtime once re-signed by ToDesktop.
- *   Linux:   copy from `which git`.
+ *   macOS/Linux: SHA256-verified dugite-native tarball (GitHub Desktop's
+ *            relocatable git distribution), pinned by git-manifest.json and
+ *            extracted flat into resources/git/. The self-contained payload
+ *            bakes in an empty prefix, so the runtime must export
+ *            GIT_EXEC_PATH/GIT_TEMPLATE_DIR/GIT_CONFIG_SYSTEM (+GIT_SSL_CAINFO
+ *            on Linux); see specs/minds-managed-git/concise.md.
  *   Windows: SHA256-verified MinGit download from git-for-windows releases.
  */
 
@@ -25,6 +27,9 @@ const UV_VERSION = '0.11.15';
 const GIT_FOR_WINDOWS_VERSION = '2.49.0';
 const GIT_FOR_WINDOWS_TAG = `v${GIT_FOR_WINDOWS_VERSION}.windows.1`;
 const RESTIC_VERSION = '0.18.1';
+// Pinned dugite-native git payload (macOS/Linux). Single source of truth for
+// the tag, version, per-target asset names, and SHA256 hashes.
+const GIT_MANIFEST_PATH = path.join(__dirname, 'git-manifest.json');
 // desync: content-defined-chunking client used to fetch the pre-baked Lima image
 // (issue #2306). Only bundled on macOS/Linux (the Lima launch mode's platforms).
 const DESYNC_VERSION = '1.0.3';
@@ -183,6 +188,22 @@ function verifyChecksum(buffer, filename) {
   console.log(`[download-binaries] ${filename} SHA256 OK`);
 }
 
+/**
+ * Like verifyChecksum, but the expected hash is supplied explicitly (e.g. from
+ * git-manifest.json) rather than looked up in EXPECTED_SHA256. Throws in the
+ * same style if the hash doesn't match.
+ */
+function verifyExpectedChecksum(buffer, filename, expected) {
+  const actual = crypto.createHash('sha256').update(buffer).digest('hex');
+  if (actual !== expected) {
+    throw new Error(
+      `SHA256 mismatch for ${filename}:\n  expected ${expected}\n  got      ${actual}\n` +
+      `Refusing to install possibly-tampered binary.`,
+    );
+  }
+  console.log(`[download-binaries] ${filename} SHA256 OK`);
+}
+
 async function downloadUv(resourcesDir, { platform, arch }) {
   const uvDir = path.join(resourcesDir, 'uv');
   if (fs.existsSync(uvDir)) fs.rmSync(uvDir, { recursive: true });
@@ -297,46 +318,36 @@ async function downloadDesync(resourcesDir, { platform, arch }) {
   console.log(`[download-binaries] desync installed at ${desyncBinary}`);
 }
 
+// Maps (platform, arch) as produced by getPlatformArch() to the manifest
+// target key. win32 stays on the MinGit path below and is intentionally absent.
+const GIT_MANIFEST_TARGET_BY_PLATFORM_ARCH = {
+  'darwin/aarch64': 'darwin-arm64',
+  'darwin/x86_64': 'darwin-x64',
+  'linux/x86_64': 'linux-x64',
+  'linux/aarch64': 'linux-arm64',
+};
+
 /**
- * Recursively copy Apple's git libexec tree into destDir, dereferencing
- * symlinks into real file copies.
- *
- * Symlinks pointing back at the main `git` binary (Apple's ~100 argv[0]
- * shims like git-add, git-commit) are skipped -- the invoked-as-subcommand
- * dispatch they enable is unused here, and dereferencing each would add
- * ~7.6 MB per shim. Other symlinks must be dereferenced because Apple's
- * targets are absolute paths into Xcode that break on any machine without
- * Xcode at that exact path, and ToDesktop's Windows packager rejects
- * absolute macOS symlinks.
+ * Write resources/git/NOTICE recording the provenance and licenses of the
+ * dugite-native payload, generated from the manifest.
  */
-function copyGitCoreDereferencingSymlinks(srcDir, destDir) {
-  for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
-    const srcPath = path.join(srcDir, entry.name);
-    const destPath = path.join(destDir, entry.name);
-    if (entry.isSymbolicLink()) {
-      const realTarget = fs.realpathSync(srcPath);
-      if (path.basename(realTarget) === 'git') {
-        continue; // skip argv[0] shims pointing at the main binary
-      }
-      const realStats = fs.statSync(realTarget);
-      if (realStats.isDirectory()) {
-        fs.mkdirSync(destPath, { recursive: true });
-        copyGitCoreDereferencingSymlinks(realTarget, destPath);
-      } else {
-        fs.copyFileSync(realTarget, destPath);
-        fs.chmodSync(destPath, realStats.mode);
-      }
-    } else if (entry.isDirectory()) {
-      fs.mkdirSync(destPath, { recursive: true });
-      copyGitCoreDereferencingSymlinks(srcPath, destPath);
-    } else if (entry.isFile()) {
-      fs.copyFileSync(srcPath, destPath);
-      fs.chmodSync(destPath, fs.statSync(srcPath).mode);
-    }
-  }
+function writeGitNotice(gitDir, manifest) {
+  const releaseUrl = `https://github.com/desktop/dugite-native/releases/tag/${manifest.dugiteNativeTag}`;
+  const gitSourceUrl = `https://github.com/git/git/tree/v${manifest.gitVersion}`;
+  const notice =
+    `This directory contains the dugite-native ${manifest.dugiteNativeTag} payload\n` +
+    `(${releaseUrl}), a relocatable git distribution embedded in this app.\n` +
+    `\n` +
+    `It bundles:\n` +
+    `- git ${manifest.gitVersion} (GPLv2; source ${gitSourceUrl}; license text in\n` +
+    `  the adjacent COPYING file)\n` +
+    `- git-credential-manager (MIT)\n` +
+    `- git-lfs (MIT)\n` +
+    `- on Linux, a bundled CA certificate store (ssl/cacert.pem)\n`;
+  fs.writeFileSync(path.join(gitDir, 'NOTICE'), notice);
 }
 
-async function downloadGit(resourcesDir, { platform }) {
+async function downloadGit(resourcesDir, { platform, arch }) {
   const gitDir = path.join(resourcesDir, 'git');
   if (fs.existsSync(gitDir)) fs.rmSync(gitDir, { recursive: true });
   const binDir = path.join(gitDir, 'bin');
@@ -361,63 +372,46 @@ async function downloadGit(resourcesDir, { platform }) {
     fs.copyFileSync(gitExe, path.join(binDir, 'git.exe'));
     fs.copyFileSync(gitExe, path.join(binDir, 'git'));
     console.log(`[download-binaries] git installed at ${path.join(binDir, 'git.exe')}`);
-  } else if (platform === 'darwin') {
-    // git invokes `git-remote-https` and friends from <prefix>/libexec/git-core/
-    // via relative-to-binary lookup, and reads default templates from
-    // <prefix>/share/git-core/templates/. Copy the binary, the libexec
-    // helpers, and the templates so the bundled git is self-contained.
-    let resolvedGit;
-    try {
-      resolvedGit = execSync('xcrun --find git', { encoding: 'utf-8' }).trim();
-    } catch (err) {
-      throw new Error(
-        'git not resolvable via `xcrun --find git`. Install Xcode Command ' +
-        `Line Tools (\`xcode-select --install\`) and retry. Underlying error: ${err.message}`,
-        { cause: err },
-      );
-    }
-    if (!resolvedGit || !fs.existsSync(resolvedGit)) {
-      throw new Error(`xcrun returned a git path that does not exist: ${resolvedGit}`);
-    }
-    const gitPrefix = path.dirname(path.dirname(resolvedGit));
-    const srcExecPath = path.join(gitPrefix, 'libexec', 'git-core');
-    const srcTemplates = path.join(gitPrefix, 'share', 'git-core', 'templates');
-    if (!fs.existsSync(srcExecPath)) {
-      throw new Error(`git exec-path not found at ${srcExecPath}`);
-    }
-
-    const destGit = path.join(binDir, 'git');
-    fs.copyFileSync(resolvedGit, destGit);
-    fs.chmodSync(destGit, 0o755);
-
-    const destExecPath = path.join(gitDir, 'libexec', 'git-core');
-    fs.mkdirSync(destExecPath, { recursive: true });
-    copyGitCoreDereferencingSymlinks(srcExecPath, destExecPath);
-
-    if (fs.existsSync(srcTemplates)) {
-      const destTemplates = path.join(gitDir, 'share', 'git-core', 'templates');
-      fs.mkdirSync(path.dirname(destTemplates), { recursive: true });
-      fs.cpSync(srcTemplates, destTemplates, { recursive: true, dereference: true });
-    }
-
-    console.log(`[download-binaries] git copied from ${gitPrefix} to ${gitDir}`);
-  } else {
-    // Linux: copy the system git binary (no shim indirection).
-    let systemGit;
-    try {
-      systemGit = execSync('which git', { encoding: 'utf-8' }).trim();
-    } catch (err) {
-      throw new Error(
-        'git not found on system -- install git first. ' +
-        `Underlying error: ${err.message}`,
-        { cause: err },
-      );
-    }
-    const destGit = path.join(binDir, 'git');
-    fs.copyFileSync(systemGit, destGit);
-    fs.chmodSync(destGit, 0o755);
-    console.log(`[download-binaries] git copied from ${systemGit} to ${destGit}`);
+    return;
   }
+
+  // macOS/Linux: SHA256-verified dugite-native tarball, pinned by the manifest.
+  const manifest = JSON.parse(fs.readFileSync(GIT_MANIFEST_PATH, 'utf-8'));
+  const targetKey = GIT_MANIFEST_TARGET_BY_PLATFORM_ARCH[`${platform}/${arch}`];
+  const target = targetKey && manifest.targets[targetKey];
+  if (!target) {
+    throw new Error(
+      `No dugite-native manifest entry for ${platform}/${arch}. ` +
+      `Add one to ${GIT_MANIFEST_PATH} before distributing this binary.`,
+    );
+  }
+
+  const url = `https://github.com/desktop/dugite-native/releases/download/${manifest.dugiteNativeTag}/${target.asset}`;
+  console.log(`[download-binaries] Downloading git (dugite-native) from ${url}...`);
+  const archive = await download(url);
+  verifyExpectedChecksum(archive, target.asset, target.sha256);
+
+  // The dugite-native tarball is rooted flat (bin/, etc/, libexec/, share/,
+  // and ssl/ on Linux at the archive root), so extract WITHOUT
+  // --strip-components, unlike the uv/lima archives.
+  const tarPath = path.join(gitDir, 'git.tar.gz');
+  fs.writeFileSync(tarPath, archive);
+  execSync(`tar xzf "${tarPath}" -C "${gitDir}"`, { stdio: 'inherit' });
+  fs.unlinkSync(tarPath);
+
+  const destGit = path.join(binDir, 'git');
+  if (!fs.existsSync(destGit)) {
+    throw new Error(`git binary not found at ${destGit} after extraction`);
+  }
+  fs.chmodSync(destGit, 0o755);
+
+  // Marker so ensure-binaries.js can replace a stale (pre-manifest or
+  // wrong-tag) payload on dev machines.
+  fs.writeFileSync(path.join(gitDir, '.dugite-tag'), manifest.dugiteNativeTag + '\n');
+  writeGitNotice(gitDir, manifest);
+  fs.copyFileSync(path.join(__dirname, 'assets', 'git-COPYING'), path.join(gitDir, 'COPYING'));
+
+  console.log(`[download-binaries] git installed at ${destGit} (dugite-native ${manifest.dugiteNativeTag})`);
 }
 
 /**
@@ -436,7 +430,7 @@ async function downloadBinaries(resourcesDir) {
 
   await Promise.all([
     downloadUv(resourcesDir, { platform, arch }),
-    downloadGit(resourcesDir, { platform }),
+    downloadGit(resourcesDir, { platform, arch }),
     downloadRestic(resourcesDir, { platform, arch }),
     downloadDesync(resourcesDir, { platform, arch }),
   ]);

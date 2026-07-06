@@ -603,7 +603,7 @@ async function main() {
   await Promise.all([
     downloadUv(RESOURCES_DIR, { platform, arch }),
     downloadLima({ platform, arch }),
-    downloadGit(RESOURCES_DIR, { platform }),
+    downloadGit(RESOURCES_DIR, { platform, arch }),
     downloadRestic(RESOURCES_DIR, { platform, arch }),
   ]);
 
