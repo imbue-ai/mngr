@@ -44,6 +44,10 @@ build_inputs = [
     "uv.lock",
     "libs/*/pyproject.toml",
     "apps/*/pyproject.toml",
+    # The Dockerfile pre-fetches the dugite-native git payload pinned by this
+    # manifest into the image (sandboxes have no network), so a git bump must
+    # rebuild the checkpoint image for apps/minds/test_bundled_git.py.
+    "apps/minds/scripts/git-manifest.json",
 ]
 
 [framework]
