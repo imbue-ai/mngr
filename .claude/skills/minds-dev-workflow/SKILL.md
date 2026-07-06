@@ -44,10 +44,7 @@ cd apps/minds && pnpm install && cd ../..
 # 2. (Once) Stand up an FCT worktree at .external_worktrees/forever-claude-template/
 #    on a branch named after your current mngr branch (so template-side
 #    edits stay parallel-named). Required by `just minds-start`.
-git -C ~/project/forever-claude-template worktree add \
-    -b "$(git rev-parse --abbrev-ref HEAD)" \
-    "$PWD/.external_worktrees/forever-claude-template" \
-    origin/main   # base branch/tag; origin/main is the safe default
+just fct-worktree   # clones fct on the current mngr branch; set FCT_DIR to speed it up
 
 # 3. (Once) Bootstrap your personal dev env. Pick a name like
 #    "dev-<your-user>" (convention; the DevEnvName validator requires the
@@ -158,7 +155,7 @@ Slice bakes (`minds pool create`, `just bake-slice-{dev,prod}`) read secrets fro
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `MINDS_WORKSPACE_GIT_URL` | Template repo path/URL for the create-form | `<repo>/.external_worktrees/forever-claude-template/` if it exists, else `~/project/forever-claude-template` |
+| `MINDS_WORKSPACE_GIT_URL` | Template repo path/URL for the create-form | `<repo>/.external_worktrees/forever-claude-template/` if it exists (create it with `just fct-worktree`), else `$FCT_DIR` / `~/project/forever-claude-template` |
 | `MINDS_WORKSPACE_BRANCH` | Default git branch for the template | The FCT path's current branch (matches your mngr branch when you set up the worktree on a parallel-named branch) |
 
 The desktop client reads these in `apps/minds/imbue/minds/desktop_client/templates.py`.
@@ -211,8 +208,12 @@ If a recipe is broken or you want to run something the recipes don't cover, here
 
 ### Create the FCT worktree by hand
 
+Normally `just fct-worktree` does this for you (clones fct into
+`.external_worktrees/forever-claude-template` on the current mngr branch). To do it
+by hand from your own fct clone instead:
+
 ```bash
-cd ~/project/forever-claude-template
+cd "${FCT_DIR:-~/project/forever-claude-template}"
 git worktree add /path/to/mngr/worktree/.external_worktrees/forever-claude-template -b <branch-name> origin/main
 ```
 

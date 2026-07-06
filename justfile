@@ -290,6 +290,16 @@ minds-test-electron-flow *args: minds-css
 minds-css:
   bash -c '. apps/minds/scripts/select_node_version.sh && cd apps/minds && pnpm run build:css'
 
+# Stand up (or reuse) an independent forever-claude-template ("fct") checkout
+# nested in the current mngr checkout at .external_worktrees/forever-claude-template
+# -- the CLAUDE.md convention for developing fct alongside mngr. Defaults the fct
+# branch to the current mngr branch; override with a positional arg. It is a full
+# clone (survives deletion of any other clone/cache) and needs no configuration.
+# Set FCT_DIR (gitignored apps/minds/.env or your shell) to a local fct clone to
+# make the clone fast -- purely a speed hint, no lasting dependency is created.
+fct-worktree branch="" base="origin/main":
+    bash scripts/fct_worktree.sh "{{branch}}" "{{base}}"
+
 # Sync vendor/mngr in forever-claude-template to this repo's HEAD and commit
 # in FCT. The FCT checkout path comes from the positional arg, else FCT_DIR read
 # from a gitignored apps/minds/.env (minds-scoped per-user config -- see
@@ -368,8 +378,7 @@ deploy *args:
 # "branch":
 #   MINDS_WORKSPACE_GIT_URL = .external_worktrees/forever-claude-template/
 #       (REQUIRED -- recipe fails if missing; create the worktree with
-#       `git -C ~/project/forever-claude-template worktree add` before
-#       running minds-start).
+#       `just fct-worktree` before running minds-start).
 #   MINDS_WORKSPACE_BRANCH  = the FCT worktree's current branch.
 # The workspace name is never prefilled: the create form generates a `mind-N`
 # name -- matching a shipped binary -- unless you type one into the form's
@@ -441,8 +450,8 @@ minds-start branch="" fct="":
     fi
     if [ ! -e "$fct_wt/.git" ]; then
         echo "error: no FCT worktree at $fct_wt" >&2
-        echo "       run \`git -C ~/project/forever-claude-template worktree add -b <branch> $fct_wt <base>\`" >&2
-        echo "       (e.g. base = origin/main) before re-running minds-start." >&2
+        echo "       run \`just fct-worktree\` to create it (or pass a custom fct path)," >&2
+        echo "       then re-run minds-start." >&2
         exit 2
     fi
     vendor_mngr="$fct_wt/vendor/mngr"
@@ -828,7 +837,7 @@ create-new-mind-repo repo_name parent_dir="$HOME/project":
     set -ueo pipefail
     repo="{{repo_name}}"
     parent="{{parent_dir}}"
-    fct="$HOME/project/forever-claude-template"
+    fct="${FCT_DIR:-$HOME/project/forever-claude-template}"
 
     if ! command -v gh >/dev/null 2>&1; then
         echo "error: gh CLI not found on PATH" >&2; exit 2
@@ -955,7 +964,7 @@ create-new-mind-repo repo_name parent_dir="$HOME/project":
 # slots and is not region-filtered today, so the box must have a free slot.
 
 # Dev slice bake from a working tree (identity = its origin remote + current branch).
-bake-slice-dev region workspace_dir="$HOME/project/forever-claude-template" count="1" *extra_args:
+bake-slice-dev region workspace_dir=env_var_or_default('FCT_DIR', env_var('HOME') / 'project/forever-claude-template') count="1" *extra_args:
     uv run minds pool create \
         --count "{{count}}" \
         --region "{{region}}" \

@@ -1,0 +1,1 @@
+`propagate_changes` now tells you to create a missing FCT worktree with `just fct-worktree` rather than a hardcoded `cd ~/project/forever-claude-template && git worktree add ...`. The `bake-slice-dev` default workspace dir (documented in `docs/host-pool-setup.md`) now honors `$FCT_DIR`, falling back to `~/project/forever-claude-template`.

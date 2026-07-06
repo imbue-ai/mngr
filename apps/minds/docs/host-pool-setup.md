@@ -182,7 +182,7 @@ datacenter code.
 The `--attributes` JSON only *labels* the row for lease matching -- it does NOT
 select the baked version. **The baked version comes entirely from the bake
 source:** `--from-tag <tag>` (production; clones the FCT remote at an exact tag)
-or `--workspace-dir <dir>` (dev; a working tree, default
+or `--workspace-dir <dir>` (dev; a working tree, default `$FCT_DIR` if set, else
 `~/project/forever-claude-template`). The minds desktop client always sends
 `repo_branch_or_tag` in its lease request (the resolved FCT branch in dev, or the
 latest semver tag in production), so that key must be present on every row that
