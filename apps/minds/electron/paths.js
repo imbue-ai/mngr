@@ -35,6 +35,16 @@ function getGitBinDir() {
   return path.dirname(getGitPath());
 }
 
+/**
+ * Root of the bundled git payload (``resources/git``), whose subdirs back
+ * the git environment contract (GIT_EXEC_PATH, GIT_TEMPLATE_DIR, etc.). The
+ * dugite-native payload is built with an empty prefix, so these must be
+ * exported explicitly -- see specs/minds-managed-git/concise.md.
+ */
+function getGitRootDir() {
+  return path.dirname(getGitBinDir());
+}
+
 function getLimaPath() {
   return path.join(getResourcesDir(), 'lima', 'bin', 'limactl');
 }
@@ -234,6 +244,7 @@ module.exports = {
   getUvBinDir,
   getGitPath,
   getGitBinDir,
+  getGitRootDir,
   getLimaPath,
   getLimaBinDir,
   getDesyncPath,
