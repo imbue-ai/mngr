@@ -1004,7 +1004,7 @@ def test_build_start_agent_shell_command_includes_onboarding_hook(
 
     assert "set-hook" in result
     assert "display-popup" in result
-    assert "client-attached" in result
+    assert "client-attached[99]" in result
 
 
 def test_build_start_agent_shell_command_no_onboarding_hook_by_default(
@@ -1012,13 +1012,50 @@ def test_build_start_agent_shell_command_no_onboarding_hook_by_default(
     temp_host_dir: Path,
     temp_work_dir: Path,
 ) -> None:
-    """When onboarding_text is None (default), no hook or popup should appear."""
+    """When onboarding_text is None (default), the onboarding popup hook should not appear.
+
+    The persistent SIGWINCH repaint hook (client-attached[98]) is always set, so only
+    the onboarding popup and its [99] slot should be absent here.
+    """
     agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
     result = _build_command_with_defaults(agent, temp_host_dir)
 
-    assert "set-hook" not in result
     assert "display-popup" not in result
-    assert "client-attached" not in result
+    assert "client-attached[99]" not in result
+
+
+def test_build_start_agent_shell_command_includes_sigwinch_hook(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """A persistent client-attached SIGWINCH repaint hook is always set, even with no
+    onboarding text, so every attach (not just `mngr connect`) repaints the agent."""
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    result = _build_command_with_defaults(agent, temp_host_dir)
+
+    # Persistent hook in slot [98] (distinct from the one-shot onboarding [99]),
+    # running the shipped script via run-shell -b against this session's window.
+    assert "set-hook" in result
+    assert "client-attached[98]" in result
+    assert "run-shell -b" in result
+    assert "commands/sigwinch_panes.sh" in result
+    # It must be persistent: no self-removal (set-hook -u) like the onboarding hook has.
+    assert "set-hook -u -t" not in result
+
+
+def test_build_start_agent_shell_command_sigwinch_hook_targets_named_window(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """The SIGWINCH hook passes the primary window name to the script (not the literal
+    :0 index), so the manual-pin guard holds regardless of the user's tmux base-index."""
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    result = _build_command_with_defaults(agent, temp_host_dir, primary_window_name="primary")
+
+    assert "sigwinch_panes.sh" in result
+    assert f"mngr-{agent.name} primary" in result
 
 
 # =========================================================================
@@ -1053,7 +1090,7 @@ def test_build_start_agent_shell_command_includes_onboarding_hook_tmux_user(
 
     assert "set-hook" in result
     assert "display-popup" in result
-    assert "client-attached" in result
+    assert "client-attached[99]" in result
 
 
 # =========================================================================
