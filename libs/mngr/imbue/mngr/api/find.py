@@ -372,9 +372,7 @@ def ensure_agent_started(agent: AgentInterface, host: OnlineHostInterface, is_st
     ):
         if is_start_desired:
             if lifecycle_state == AgentLifecycleState.DONE:
-                logger.info(
-                    "Agent {} is DONE with a lingering tmux session; stopping it before restart", agent.name
-                )
+                logger.info("Agent {} is DONE with a lingering tmux session; stopping it before restart", agent.name)
                 host.stop_agents([agent.id])
             logger.info("Agent {} is stopped, starting it", agent.name)
             agent.wait_for_ready_signal(

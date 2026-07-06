@@ -10,6 +10,7 @@ from imbue.mngr.api.message import send_message_to_agents
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
@@ -240,8 +241,9 @@ def test_send_message_to_agents_revives_done_agent_when_start_desired(
     # so the agent reports DONE rather than STOPPED.
     session_name = temp_mngr_ctx.config.agent_session_name(agent.name)
     window_name = temp_mngr_ctx.config.tmux.primary_window_name
+    window_target = TmuxWindowTarget(session_name=session_name, window=window_name)
     host.execute_idempotent_command(
-        f"tmux send-keys -t '{session_name}:{window_name}' C-c",
+        f"tmux send-keys -t {window_target.as_shell_arg()} C-c",
         timeout_seconds=5.0,
     )
     wait_for(
