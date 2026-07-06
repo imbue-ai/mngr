@@ -16,6 +16,7 @@ from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -182,6 +183,8 @@ def test_discover_agents_returns_refs_from_provider(
     # Verify certified_data is populated with full agent data
     assert refs[0].certified_data == agent_data_1
     assert refs[0].agent_type == "claude"
+    # An offline host cannot have running agent processes
+    assert refs[0].state == AgentLifecycleState.STOPPED
 
     assert refs[1].agent_id == agent_id_2
     assert refs[1].agent_name == AgentName("other-agent")
@@ -375,7 +378,7 @@ def test_validate_and_create_discovered_agent_creates_valid_ref() -> None:
         "type": "claude",
     }
 
-    ref = validate_and_create_discovered_agent(agent_data, host_id, provider_name)
+    ref = validate_and_create_discovered_agent(agent_data, host_id, provider_name, AgentLifecycleState.STOPPED)
 
     assert ref is not None
     assert ref.agent_id == agent_id
@@ -384,13 +387,14 @@ def test_validate_and_create_discovered_agent_creates_valid_ref() -> None:
     assert ref.provider_name == provider_name
     assert ref.certified_data == agent_data
     assert ref.agent_type == "claude"
+    assert ref.state == AgentLifecycleState.STOPPED
 
 
 @pytest.mark.allow_warnings(match=r"^Skipping malformed agent record for host")
 def test_validate_and_create_discovered_agent_returns_none_for_missing_id() -> None:
     host_id = HostId.generate()
     agent_data = {"name": "my-agent"}
-    ref = validate_and_create_discovered_agent(agent_data, host_id, ProviderInstanceName("p"))
+    ref = validate_and_create_discovered_agent(agent_data, host_id, ProviderInstanceName("p"), AgentLifecycleState.STOPPED)
     assert ref is None
 
 
@@ -398,7 +402,7 @@ def test_validate_and_create_discovered_agent_returns_none_for_missing_id() -> N
 def test_validate_and_create_discovered_agent_returns_none_for_invalid_id() -> None:
     host_id = HostId.generate()
     agent_data = {"id": "not-a-valid-id", "name": "my-agent"}
-    ref = validate_and_create_discovered_agent(agent_data, host_id, ProviderInstanceName("p"))
+    ref = validate_and_create_discovered_agent(agent_data, host_id, ProviderInstanceName("p"), AgentLifecycleState.STOPPED)
     assert ref is None
 
 
@@ -407,7 +411,7 @@ def test_validate_and_create_discovered_agent_returns_none_for_missing_name() ->
     host_id = HostId.generate()
     agent_id = AgentId.generate()
     agent_data = {"id": str(agent_id)}
-    ref = validate_and_create_discovered_agent(agent_data, host_id, ProviderInstanceName("p"))
+    ref = validate_and_create_discovered_agent(agent_data, host_id, ProviderInstanceName("p"), AgentLifecycleState.STOPPED)
     assert ref is None
 
 

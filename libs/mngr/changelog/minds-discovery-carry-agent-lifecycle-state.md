@@ -1,1 +1,7 @@
-`DiscoveredAgent` now carries an optional `state` (the agent's live lifecycle state) when it is built from a full listing, which already computes `get_lifecycle_state` for every agent. It is populated by `discovered_agent_from_agent_details` and is `None` for an agent discovered offline / from `data.json` alone. This lets discovery-stream consumers (e.g. the minds system interface) reflect whether an agent's process is actually running -- previously the state was computed during the listing and then dropped, so consumers of the discovery events could not distinguish a stopped agent from a running one without re-listing.
+`DiscoveredAgent` now always carries the agent's lifecycle state, and the discovery event stream always reports a real one.
+
+- Full-listing snapshots carry the state the listing already computed (previously it was dropped during conversion, so `mngr observe` consumers could not tell a stopped agent from a running one without re-listing).
+
+- Incremental `agent_discovered` events (create/start/stop/archive/cleanup/rename) now probe each agent's liveness before emitting, instead of reporting no state. Consumers such as the minds system interface no longer need to guess "running" for a just-surfaced agent -- which also fixes the window where a just-stopped agent read as running until the next snapshot.
+
+- The `state` field is non-optional: references built without a probe read `UNKNOWN` (offline hosts read `STOPPED`, since a down host cannot have a running agent process). Discovery-event lines written by older versions (missing or null `state`) still parse, reading as `UNKNOWN`.

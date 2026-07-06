@@ -30,6 +30,7 @@ from imbue.mngr.api.discovery_events import discovered_host_from_agent_details
 from imbue.mngr.api.discovery_events import emit_agent_destroyed
 from imbue.mngr.api.discovery_events import emit_agent_discovered
 from imbue.mngr.api.discovery_events import emit_discovery_error_event
+from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
 from imbue.mngr.api.discovery_events import emit_host_destroyed
 from imbue.mngr.api.discovery_events import emit_host_discovered
 from imbue.mngr.api.discovery_events import emit_host_ssh_info
@@ -50,8 +51,10 @@ from imbue.mngr.api.discovery_events import write_full_discovery_snapshot
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.cli.testing import create_test_agent_state
 from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import DiscoverySchemaChangedError
+from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
@@ -233,16 +236,88 @@ def test_discovered_agent_lifecycle_state_survives_event_json_roundtrip() -> Non
     assert parsed.agent.state == AgentLifecycleState.DONE
 
 
-def test_discovered_agent_state_defaults_to_none_when_not_provided() -> None:
-    """A DiscoveredAgent built from data.json alone (offline discovery) has no
-    live state; the field defaults to None rather than implying running."""
+def test_discovered_agent_state_defaults_to_unknown_when_not_provided() -> None:
+    """A DiscoveredAgent built without a liveness probe has no live state; the
+    field defaults to UNKNOWN rather than implying running or stopped."""
     agent = DiscoveredAgent(
         host_id=HostId.generate(),
         agent_id=AgentId.generate(),
-        agent_name=AgentName("offline-agent"),
+        agent_name=AgentName("unprobed-agent"),
         provider_name=ProviderInstanceName("local"),
     )
-    assert agent.state is None
+    assert agent.state == AgentLifecycleState.UNKNOWN
+
+
+def test_agent_discovery_event_parses_lines_without_state() -> None:
+    """A discovery-event line with no ``state`` on its agent must parse, reading
+    as UNKNOWN."""
+    legacy = {
+        "type": DiscoveryEventType.AGENT_DISCOVERED.value,
+        "timestamp": "2026-05-21T00:00:00.000000000Z",
+        "event_id": "evt-legacy-agent",
+        "source": "mngr/discovery",
+        "agent": {
+            "host_id": str(HostId.generate()),
+            "agent_id": str(AgentId.generate()),
+            "agent_name": "legacy-agent",
+            "provider_name": "local",
+            "certified_data": {},
+        },
+    }
+    parsed = parse_discovery_event_line(json.dumps(legacy))
+    assert isinstance(parsed, AgentDiscoveryEvent)
+    assert parsed.agent.state == AgentLifecycleState.UNKNOWN
+
+
+def test_agent_discovery_event_parses_lines_with_null_state() -> None:
+    """A discovery-event line with an explicit null ``state`` on its agent must
+    parse, reading as UNKNOWN."""
+    legacy = {
+        "type": DiscoveryEventType.AGENT_DISCOVERED.value,
+        "timestamp": "2026-05-21T00:00:00.000000000Z",
+        "event_id": "evt-null-state",
+        "source": "mngr/discovery",
+        "agent": {
+            "host_id": str(HostId.generate()),
+            "agent_id": str(AgentId.generate()),
+            "agent_name": "null-state-agent",
+            "provider_name": "local",
+            "certified_data": {},
+            "state": None,
+        },
+    }
+    parsed = parse_discovery_event_line(json.dumps(legacy))
+    assert isinstance(parsed, AgentDiscoveryEvent)
+    assert parsed.agent.state == AgentLifecycleState.UNKNOWN
+
+
+@pytest.mark.tmux
+def test_emit_discovery_events_for_host_emits_probed_lifecycle_state(
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    local_provider: LocalProviderInstance,
+) -> None:
+    """Incremental agent_discovered events must carry a probed lifecycle state.
+
+    discover_agents() alone reads only data.json (state UNKNOWN); the emit path
+    is responsible for probing so stream consumers see real liveness. An agent
+    that exists but was never started must therefore be emitted as STOPPED, not
+    UNKNOWN.
+    """
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+    agent = create_test_agent_state(host, tmp_path, "emit-state-agent")
+
+    emit_discovery_events_for_host(temp_mngr_ctx.config, host)
+
+    events_path = get_discovery_events_path(temp_mngr_ctx.config)
+    emitted_states: list[AgentLifecycleState] = []
+    with open(events_path) as f:
+        for line in f:
+            event = parse_discovery_event_line(line)
+            if isinstance(event, AgentDiscoveryEvent) and event.agent.agent_id == agent.id:
+                emitted_states.append(event.agent.state)
+    assert emitted_states == [AgentLifecycleState.STOPPED]
 
 
 def test_discovered_host_from_agent_details_preserves_key_fields() -> None:

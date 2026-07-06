@@ -91,6 +91,7 @@ from imbue.mngr.interfaces.host import PROVISIONING_FIELD_MAP
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import DiscoveredAgent
@@ -1296,7 +1297,11 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                             "Could not load agent reference from {} because json was invalid: {}", data_path, e
                         )
                         continue
-                    ref = self._validate_and_create_discovered_agent(data)
+                    # This path deliberately reads only data.json (no liveness probe),
+                    # so the honest state is UNKNOWN: present per persisted records,
+                    # liveness not checked. Callers that need real states probe
+                    # separately (e.g. emit_discovery_events_for_host).
+                    ref = self._validate_and_create_discovered_agent(data, AgentLifecycleState.UNKNOWN)
                     if ref is not None:
                         agent_refs.append(ref)
 
@@ -2762,12 +2767,20 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             self.write_file(data_path, json.dumps(updated, indent=2).encode(), is_atomic=True)
             self.save_agent_data(agent_id, updated)
 
+            # The returned ref is emitted onto the discovery event stream (see
+            # cli/rename.py), so it must carry a real lifecycle state -- probe it.
+            # An agent whose type can no longer be loaded cannot be probed; report
+            # UNKNOWN rather than guessing.
+            renamed_agent = self._load_agent_from_dir(agent_state_dir)
+            state = renamed_agent.get_lifecycle_state() if renamed_agent is not None else AgentLifecycleState.UNKNOWN
+
             return DiscoveredAgent(
                 host_id=self.id,
                 agent_id=agent_id,
                 agent_name=new_name,
                 provider_name=self.provider_instance.name,
                 certified_data=updated,
+                state=state,
             )
 
     def destroy_agent(self, agent: AgentInterface) -> None:
