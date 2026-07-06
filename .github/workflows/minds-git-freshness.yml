@@ -1,0 +1,117 @@
+name: minds git freshness
+
+# Weekly check that the bundled git payload for the minds desktop app is not
+# behind upstream. The pinned dugite-native tag lives in
+# apps/minds/scripts/git-manifest.json (.dugiteNativeTag); dugite-native cuts a
+# release within days of an upstream git security release, so nagging on what is
+# actually pinnable is the actionable signal (see specs/minds-managed-git/concise.md).
+#
+# Each run compares the pinned tag against dugite-native's latest release and
+# reconciles a single tracking issue identified purely by its title
+# "minds: bundled git pin is behind dugite-native":
+#   - pin behind latest  -> create the issue, or update its body if it exists.
+#   - pin current        -> close the issue if open; otherwise no-op.
+#
+# The issue is matched by exact title only (no label dependency) so the workflow
+# never needs a label to be provisioned first. The runbook for acting on a nag
+# lives in apps/minds/docs/desktop-app.md.
+
+on:
+  # 16:00 UTC = 09:00 PDT / 08:00 PST. GitHub Actions cron has no timezone
+  # support, so this stays on UTC year-round. The schedule only fires from the
+  # default branch, so this file must be merged to main to activate.
+  schedule:
+    - cron: '0 16 * * 1'  # Mondays, 16:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ISSUE_TITLE: "minds: bundled git pin is behind dugite-native"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Compare pinned git tag against dugite-native latest
+        run: |
+          set -euo pipefail
+
+          manifest="apps/minds/scripts/git-manifest.json"
+          pinned=$(jq -r '.dugiteNativeTag' "$manifest")
+          if [ -z "$pinned" ] || [ "$pinned" = "null" ]; then
+            echo "Could not read .dugiteNativeTag from $manifest" >&2
+            exit 1
+          fi
+          echo "Pinned dugite-native tag: $pinned"
+
+          # Fetch the latest release once; extract the fields we need with jq so
+          # the release body never touches the shell (write it to a file and use
+          # --body-file below to avoid any injection hazard).
+          release_json=$(mktemp)
+          gh api repos/desktop/dugite-native/releases/latest > "$release_json"
+          latest=$(jq -r '.tag_name' "$release_json")
+          latest_url=$(jq -r '.html_url' "$release_json")
+          if [ -z "$latest" ] || [ "$latest" = "null" ]; then
+            echo "Could not read latest release tag from dugite-native" >&2
+            exit 1
+          fi
+          echo "Latest dugite-native tag: $latest ($latest_url)"
+
+          # Locate the tracking issue purely by exact title. Search can return
+          # partial-title matches, so filter to an exact equality in jq.
+          matches=$(gh issue list \
+            --state open \
+            --search "in:title \"$ISSUE_TITLE\"" \
+            --json number,title \
+            --jq "[.[] | select(.title == \"$ISSUE_TITLE\") | .number]")
+          issue_number=$(echo "$matches" | jq -r '.[0] // empty')
+          extra_matches=$(echo "$matches" | jq -r '.[1:] | join(", ")')
+          if [ -n "$extra_matches" ]; then
+            echo "WARNING: multiple issues match the tracking title; operating on #$issue_number and ignoring: $extra_matches" >&2
+          fi
+
+          if [ "$pinned" = "$latest" ]; then
+            echo "Pin is current."
+            if [ -n "$issue_number" ]; then
+              echo "Closing stale nag issue #$issue_number."
+              gh issue close "$issue_number" \
+                --comment "pin $pinned is current"
+            else
+              echo "No open nag issue to close."
+            fi
+            exit 0
+          fi
+
+          echo "Pin $pinned is behind latest $latest."
+
+          # Build the issue body in a file: pinned tag, latest tag + URL, a
+          # truncated excerpt of the release notes (first ~40 lines), and
+          # pointers to the runbook and design spec.
+          notes_excerpt=$(mktemp)
+          jq -r '.body // ""' "$release_json" | head -n 40 > "$notes_excerpt"
+
+          body_file=$(mktemp)
+          {
+            printf '%s\n\n' "The bundled git payload for the minds desktop app is behind upstream."
+            printf '%s\n' "- Pinned dugite-native tag: \`$pinned\`"
+            printf '%s\n\n' "- Latest dugite-native tag: [\`$latest\`]($latest_url)"
+            printf '%s\n\n' "### Latest release notes (excerpt)"
+            printf '```\n'
+            cat "$notes_excerpt"
+            printf '\n```\n\n'
+            printf '%s\n' "To update, follow the runbook in \`apps/minds/docs/desktop-app.md\` and see the design spec \`specs/minds-managed-git/concise.md\`."
+          } > "$body_file"
+
+          if [ -n "$issue_number" ]; then
+            echo "Updating existing nag issue #$issue_number."
+            gh issue edit "$issue_number" --body-file "$body_file"
+          else
+            echo "Creating nag issue."
+            gh issue create --title "$ISSUE_TITLE" --body-file "$body_file"
+          fi
