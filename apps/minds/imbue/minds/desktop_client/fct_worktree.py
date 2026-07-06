@@ -190,8 +190,29 @@ def materialize_paired_fct_worktree(
         mngr_branch,
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
+    # Disable auto-gc / auto-maintenance in the clone (``--config`` persists into the
+    # new repo). The later ``add -A`` + ``commit`` + ``fetch`` steps would otherwise
+    # trip git's automatic maintenance, which runs detached in the background
+    # (``gc.autoDetach`` defaults to true) and rewrites ``.git`` (e.g. ``update-server-info``
+    # regenerates ``.git/info/refs``). The snapshot build uploads this worktree with its
+    # live ``.git`` via Modal's ``add_local_dir``, so a background rewrite mid-upload aborts
+    # the build with "was modified during build process". This tree is a throwaway baked
+    # into a one-shot e2e image, so it never needs gc/packing.
     subprocess.run(
-        ["git", "clone", "--depth", "1", "--branch", fct_ref, _FCT_REMOTE, str(destination)],
+        [
+            "git",
+            "clone",
+            "--depth",
+            "1",
+            "--config",
+            "gc.auto=0",
+            "--config",
+            "maintenance.auto=false",
+            "--branch",
+            fct_ref,
+            _FCT_REMOTE,
+            str(destination),
+        ],
         check=True,
         capture_output=True,
         text=True,
