@@ -30,6 +30,7 @@ from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
@@ -1061,7 +1062,11 @@ class OfflineCapableVpsProvider(VpsProvider):
             # only thing skipped per-instance).
             agent_refs: list[DiscoveredAgent] = []
             for agent_data in self._offline_agent_dicts_for(host_ref.host_id, instance):
-                ref = validate_and_create_discovered_agent(agent_data, host_ref.host_id, self.name)
+                # This host is offline (guarded by _is_instance_offline above), so no
+                # agent process can be running -- report STOPPED.
+                ref = validate_and_create_discovered_agent(
+                    agent_data, host_ref.host_id, self.name, AgentLifecycleState.STOPPED
+                )
                 if ref is not None:
                     agent_refs.append(ref)
             result[host_ref] = agent_refs
