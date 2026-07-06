@@ -146,10 +146,11 @@ const VALID_AGENT_ID_PATTERN = /^agent-[0-9a-fA-F]{32}$/;
 const REQUEST_TYPE_PREDEFINED = 'predefined';
 const REQUEST_TYPE_FILE_SHARING = 'file-sharing';
 // ``workspace`` grants access to the minds cross-workspace management API
-// (``/api/v1/workspaces/...``) under the ``minds-workspaces`` detent scope. The
-// payload names the verbs the agent wants and, for verbs that act on a specific
-// workspace, the target workspace id. The grant effect is computed here and
-// applied via ``/approve`` like file-sharing.
+// (``/api/v1/workspaces/...``) by unioning per-verb permissions onto the
+// pre-existing ``latchkey-self`` scope (like file-sharing and accounts; no
+// dedicated scope is minted). The payload names the verbs the agent wants and,
+// for verbs that act on a specific workspace, the target workspace id. The grant
+// effect is computed here and applied via ``/approve`` like file-sharing.
 const REQUEST_TYPE_WORKSPACE = 'workspace';
 // ``accounts`` grants the agent read access to ``GET /api/v1/accounts`` (the list
 // of signed-in accounts, so it can discover an account id/email to associate a
@@ -193,11 +194,9 @@ function loadWorkspacePermissions() {
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new Error(`${WORKSPACE_PERMISSIONS_FILE} top-level value must be a JSON object.`);
   }
-  const { scope, gateway_self_host: gatewaySelfHost, path_prefix: pathPrefix, verbs } = parsed;
-  for (const [key, value] of [['scope', scope], ['gateway_self_host', gatewaySelfHost], ['path_prefix', pathPrefix]]) {
-    if (typeof value !== 'string' || value.length === 0) {
-      throw new Error(`${WORKSPACE_PERMISSIONS_FILE}: '${key}' must be a non-empty string.`);
-    }
+  const { path_prefix: pathPrefix, verbs } = parsed;
+  if (typeof pathPrefix !== 'string' || pathPrefix.length === 0) {
+    throw new Error(`${WORKSPACE_PERMISSIONS_FILE}: 'path_prefix' must be a non-empty string.`);
   }
   if (!Array.isArray(verbs) || verbs.length === 0) {
     throw new Error(`${WORKSPACE_PERMISSIONS_FILE}: 'verbs' must be a non-empty array.`);
@@ -235,8 +234,6 @@ function loadWorkspacePermissions() {
     };
   }
   return {
-    scope,
-    gatewaySelfHost,
     pathPrefix,
     scopePattern: `^${pathPrefix}(/|$)`,
     verbDefs,
