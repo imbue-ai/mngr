@@ -985,6 +985,25 @@ add-paid-email email:
 list-pool-hosts:
     uv run minds pool list
 
+# List the bare-metal SERVERS (boxes) for the activated minds env (read-only) --
+# what you pick a `--server-id` from when baking a slice. Slices are carved onto a
+# box that is `ready` with a free slot. There is no `minds pool` subcommand for
+# this, so we forward to `mngr imbue_cloud admin server list`, resolving the tier's
+# host_pool DSN the same way `minds pool list` does (from Vault for staging /
+# production; from the per-env secrets.toml for dev / ci) and passing it via the
+# MINDS_HOST_POOL_DSN env var so the DSN never lands in argv. Activate a minds env
+# first (`eval "$(uv run minds env activate <name>)"`) and `vault login -method=oidc`.
+# Extra flags forward to the admin command.
+list-pool-servers *extra_args:
+    #!/bin/bash
+    set -ueo pipefail
+    # Reuse minds' own resolver: returns the Vault DSN for staging/production and
+    # empty for dev/ci (where the admin CLI auto-resolves it from secrets.toml).
+    # require_activated_env_name() exits with a clear error if no env is activated.
+    dsn="$(uv run python -c 'from imbue.minds.cli._activated_env import require_activated_env_name; from imbue.minds.cli.pool import resolve_host_pool_dsn; print(resolve_host_pool_dsn(require_activated_env_name(), None) or "")')"
+    if [ -n "$dsn" ]; then export MINDS_HOST_POOL_DSN="$dsn"; fi
+    uv run mngr imbue_cloud admin server list {{extra_args}}
+
 # One-time host-key backfill for the activated minds env. Keyscans every
 # pre-existing pool host + bare-metal box whose recorded sshd host key columns
 # are still null and records them, so rows baked before host-key pinning become
