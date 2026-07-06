@@ -16,9 +16,8 @@ from imbue.imbue_common.frozen_model import FrozenModel
 
 EXTRAS_UPLOADED_FILES_KEY = "uploaded_files"
 
-PRODUCTION_UPLOADS_BUCKET = "traceback-uploads-production"
-STAGING_UPLOADS_BUCKET = "traceback-uploads-staging"
-
+# The specific S3 bucket name (and the environment -> bucket mapping) is project-specific
+# config supplied by the caller; this library only takes a concrete bucket name.
 DEFAULT_REGION = "us-west-2"
 # rather arbitrary but better to err on the side of caution when going from the current unbounded
 MAXIMUM_QUEUED_S3_UPLOADS = 50
@@ -143,17 +142,13 @@ class _S3Uploader(FrozenModel):
 _S3_UPLOADER: _S3Uploader | None = None
 
 
-def setup_s3_uploads(is_production: bool = False) -> None:
-    """Set up S3 upload settings."""
+def setup_s3_uploads(bucket: str, region: str = DEFAULT_REGION) -> None:
+    """Set up S3 upload settings for the given bucket."""
     global _S3_UPLOADER
     if _S3_UPLOADER is not None:
         logger.debug("S3 upload settings already initialized, skipping setup")
         return
-    if is_production:
-        bucket_name = PRODUCTION_UPLOADS_BUCKET
-    else:
-        bucket_name = STAGING_UPLOADS_BUCKET
-    _S3_UPLOADER = _S3Uploader(bucket=bucket_name, region=DEFAULT_REGION)
+    _S3_UPLOADER = _S3Uploader(bucket=bucket, region=region)
 
 
 def get_s3_upload_key(key_prefix: str, key_suffix: str) -> str:

@@ -36,7 +36,7 @@ def existing_workspace_host_names(backend_resolver: BackendResolverInterface) ->
     """
     names: set[str] = set()
     for aid in backend_resolver.list_known_workspace_ids():
-        name = backend_resolver.get_workspace_name(aid)
+        name = backend_resolver.get_host_name(aid)
         if name is not None:
             names.add(name)
     return names
@@ -57,7 +57,7 @@ def taken_host_names_on_provider(backend_resolver: BackendResolverInterface, pro
         info = backend_resolver.get_agent_display_info(agent_id)
         if info is None or info.provider_name != provider_instance_name:
             continue
-        name = backend_resolver.get_workspace_name(agent_id)
+        name = backend_resolver.get_host_name(agent_id)
         if name is not None:
             taken.add(name.casefold())
     return taken

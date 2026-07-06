@@ -454,6 +454,11 @@ _KILL_BENIGN_STDERR_SUBSTRINGS: Final[tuple[str, ...]] = ("no such process",)
 _DEFAULT_TMUX_WIDTH: Final[int] = 200
 _DEFAULT_TMUX_HEIGHT: Final[int] = 50
 
+# Resource script (shipped under mngr/resources/) that sends SIGWINCH to an agent's
+# pane processes so they repaint after a client attaches. Installed at host level and
+# invoked by the per-session tmux client-attached hook (see _build_start_agent_shell_command).
+_SIGWINCH_PANES_SCRIPT_NAME: Final[str] = "sigwinch_panes.sh"
+
 
 class Host(OuterHost, BaseHost, OnlineHostInterface):
     """Host implementation that proxies operations through a pyinfra connector.
@@ -703,14 +708,20 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         result = self.execute_idempotent_command(f"test -d '{str(path)}'")
         return result.success
 
-    def _list_directory(self, path: Path) -> list[str]:
-        """List files in a directory on the host."""
+    def _list_directory(self, path: Path, timeout_seconds: float | None = None) -> list[str]:
+        """List files in a directory on the host.
+
+        When ``timeout_seconds`` is set, the remote ``ls`` self-terminates on a
+        stall (surfacing as ``HostConnectionError`` after transient retries)
+        rather than blocking forever. Used by the per-host-bounded discovery read;
+        other callers leave it ``None`` (unbounded, prior behavior).
+        """
         if self.is_local:
             try:
                 return list(entry.name for entry in path.iterdir())
             except (FileNotFoundError, OSError):
                 return []
-        result = self.execute_idempotent_command(f"ls -1 '{str(path)}' 2>/dev/null")
+        result = self.execute_idempotent_command(f"ls -1 '{str(path)}' 2>/dev/null", timeout_seconds=timeout_seconds)
         if result.success and result.stdout.strip():
             return result.stdout.strip().split("\n")
         return []
@@ -1258,7 +1269,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         logger.trace("Loaded {} agent(s) from host {}", len(agents), self.id)
         return agents
 
-    def discover_agents(self) -> list[DiscoveredAgent]:
+    def discover_agents(self, timeout_seconds: float | None = None) -> list[DiscoveredAgent]:
         """Get lightweight references to all agents on this host.
 
         This method reads only the data.json files for each agent, avoiding the
@@ -1267,13 +1278,20 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
         Note that we override the base method in order to read more directly from the host,
         since that data is more likely to be up-to-date.
+
+        When ``timeout_seconds`` is set (the per-host-bounded discovery path), each
+        remote SSH read (the directory listing and every ``data.json`` read) is
+        bounded by that wall-clock so a wedged host self-terminates its reads
+        rather than leaving the discovery thread running forever. The bound is
+        per-command, so a host with N agents can take up to ~N x the timeout; the
+        outer per-host wall-clock wait remains the overall guarantee.
         """
         with log_span("Loading all agents from host {}", self.id):
             agents_dir = get_agents_root_dir(self.host_dir)
 
             with log_span("Listing agent dir for host {}", self.id):
                 try:
-                    dir_listing = self._list_directory(agents_dir)
+                    dir_listing = self._list_directory(agents_dir, timeout_seconds=timeout_seconds)
                 except FileNotFoundError:
                     logger.trace("Failed to find agents directory for host {}", self.id)
                     return []
@@ -1284,7 +1302,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     agent_dir = agents_dir / dir_name
                     data_path = agent_dir / "data.json"
                     try:
-                        content = self.read_text_file(data_path)
+                        if timeout_seconds is not None:
+                            content = self.read_text_file_within_timeout(data_path, timeout_seconds)
+                        else:
+                            content = self.read_text_file(data_path)
                     except FileNotFoundError:
                         if not self._is_directory(agent_dir):
                             logger.warning("Could not load agent reference from {}", data_path)
@@ -2633,7 +2654,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     )
 
     def _ensure_shared_shell_libs(self, agent: AgentInterface) -> None:
-        """Write the shared shell libraries to host-level and agent-level commands dirs.
+        """Write the shared shell libraries (and the SIGWINCH repaint script) to the host.
 
         These libraries are sourced by mngr bash scripts and must exist on both
         levels so host-level (``activity_watcher.sh``) and agent-level
@@ -2662,6 +2683,17 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             content_bytes = importlib.resources.files(mngr_resources).joinpath(name).read_text().encode()
             self.write_file(host_commands / name, content_bytes, mode="0755")
             self.write_file(agent_commands / name, content_bytes, mode="0755")
+
+        # Install the post-attach SIGWINCH repaint script at host level only. Unlike
+        # the libs above it is executed directly (by the per-session tmux
+        # client-attached hook), not sourced, and the hook references the host-level
+        # commands dir -- so no agent-level copy is needed.
+        install_packaged_script_on_host(
+            self,
+            module=mngr_resources,
+            filename=_SIGWINCH_PANES_SCRIPT_NAME,
+            dest=host_commands / _SIGWINCH_PANES_SCRIPT_NAME,
+        )
 
     def _execute_agent_file_transfers(
         self,
@@ -3666,6 +3698,23 @@ def _build_start_agent_shell_command(
     )
     steps.append("bash -c " + shlex.quote(save_user_shell_script))
     steps.append(f"tmux set-option -t {quoted_exact_agent_window} default-command {shlex.quote(env_shell_cmd)}")
+
+    # Set a persistent client-attached hook that repaints the agent on every attach
+    # (a plain `tmux attach`, the ttyd terminal, a web-shell, or `mngr connect`) by
+    # sending SIGWINCH to the pane processes. It runs the shipped sigwinch_panes.sh
+    # (installed at host level during provisioning); keeping the pipeline in a script
+    # avoids nesting tmux format tokens (pane-pid/window-index lookups) inside the
+    # hook string, which tmux would otherwise expand. `run-shell -b` backgrounds it so
+    # the attach is never blocked, and the script delays before signaling so the window
+    # has resized to the new client first. This uses a distinct hook slot ([98]) from
+    # the onboarding hook ([99]) and, unlike that one-shot hook, is persistent (no
+    # `set-hook -u` self-removal).
+    sigwinch_script_path = host_dir / "commands" / _SIGWINCH_PANES_SCRIPT_NAME
+    sigwinch_inner_command = shlex.join(["bash", str(sigwinch_script_path), session_name, primary_window_name])
+    sigwinch_hook_value = f'run-shell -b "{sigwinch_inner_command}"'
+    steps.append(
+        f"tmux set-hook -t {quoted_exact_agent_window} client-attached[98] {shlex.quote(sigwinch_hook_value)}"
+    )
 
     # Set a one-shot client-attached hook that shows the onboarding popup
     # when the user first attaches to this tmux session. This must happen

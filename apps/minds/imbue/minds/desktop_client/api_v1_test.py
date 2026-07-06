@@ -92,6 +92,7 @@ class _RecordingAgentCreator(AgentCreator):
         self,
         repo_source: str,
         host_name: str = "",
+        display_name: str = "",
         branch: str = "",
         launch_mode: LaunchMode = LaunchMode.DOCKER,
         ai_provider: AIProvider = AIProvider.SUBSCRIPTION,
@@ -107,6 +108,7 @@ class _RecordingAgentCreator(AgentCreator):
         self._last_call = {
             "repo_source": repo_source,
             "host_name": host_name,
+            "display_name": display_name,
             "branch": branch,
             "launch_mode": launch_mode,
             "ai_provider": ai_provider,
@@ -426,14 +428,15 @@ def test_create_workspace_invalid_host_name_returns_field_error(
     root_concurrency_group: ConcurrencyGroup,
     notification_dispatcher: NotificationDispatcher,
 ) -> None:
-    # A submitted name that fails HostName validation surfaces as a 400 keyed to
-    # the host_name field (rather than a deferred FAILED on the creating page).
+    # A submitted name that normalizes to an empty slug (here all punctuation)
+    # surfaces as a 400 keyed to the host_name field (rather than a deferred
+    # FAILED on the creating page).
     client = _client_with_agent_creator(tmp_path, root_concurrency_group, notification_dispatcher)
 
     response = client.post(
         "/api/v1/workspaces",
         headers=_auth_header(),
-        json={"git_url": "https://example/repo", "host_name": "bad.name"},
+        json={"git_url": "https://example/repo", "host_name": "!!!"},
     )
 
     assert response.status_code == 400
@@ -449,7 +452,7 @@ def test_create_workspace_auto_names_next_workspace_when_host_name_omitted(
     # next free ``workspace-N`` (workspace-2) before handing off to the creator.
     existing_id = AgentId()
     resolver = make_resolver_with_data(
-        make_agents_json(existing_id, labels={"workspace": "workspace-1", "is_primary": "true"}),
+        make_agents_json(existing_id, labels={"is_primary": "true"}, host_name="workspace-1"),
     )
     creator = _make_recording_creator(tmp_path, root_concurrency_group, notification_dispatcher)
     client = _client_with_agent_creator(
