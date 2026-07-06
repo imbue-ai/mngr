@@ -30,6 +30,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.data_types import LeasedHostInfo
 from imbue.mngr_imbue_cloud.errors import FastPathUnavailableError
@@ -350,6 +351,23 @@ def _index_of(commands: list[str], substring: str) -> int:
         if substring in command:
             return index
     raise AssertionError(f"no recorded command contains {substring!r}; recorded={commands}")
+
+
+def test_get_container_loopback_ssh_port_returns_in_vm_publish_port_not_lease_connect_port() -> None:
+    """The reverse-tunnel publish port must be the fixed in-VM port, not the box-forwarded connect port.
+
+    The VPS-resident latchkey gateway reverse-tunnels into the container from the
+    *outer host's* loopback, where the container's sshd is published on the fixed
+    ``config.container_ssh_port`` -- not on the lease's ``container_ssh_port``,
+    which for a slice is a distinct box-forwarded port a remote client uses.
+    """
+    config = ImbueCloudProviderConfig.model_construct(container_ssh_port=2222)
+    provider = ImbueCloudProvider.model_construct(name=ProviderInstanceName("imbue-cloud-test"), config=config)
+    # A slice's external/connect port differs from the in-VM publish port; the
+    # provider must surface the publish port regardless.
+    slice_connect_port = 22005
+    assert slice_connect_port != config.container_ssh_port
+    assert provider.get_container_loopback_ssh_port(HostId.generate()) == config.container_ssh_port
 
 
 def test_get_host_returns_offline_host_when_container_stopped(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:

@@ -1870,6 +1870,15 @@ class ImbueCloudProvider(BaseProviderInstance):
             raise HostNotFoundError(self.name, host_id)
         return f"outer:{self.name}:{leased.vps_address}"
 
+    def get_container_loopback_ssh_port(self, host_id: HostId) -> int | None:
+        # The container is always published inside the VPS/VM on the fixed
+        # ``config.container_ssh_port``; an external client reaches it at the
+        # lease's ``container_ssh_port`` (equal for an OVH VPS, but a distinct
+        # box-forwarded port for a slice). A service running *on the outer host*
+        # (the VPS-resident latchkey gateway) must reverse-tunnel into the
+        # container on the fixed publish port, not the external one.
+        return self.config.container_ssh_port
+
     @contextmanager
     def outer_host_for(self, host_id: HostId) -> Iterator[OuterHostInterface | None]:
         """Open the outer host (the leased VPS itself, root@vps_address:ssh_port).
