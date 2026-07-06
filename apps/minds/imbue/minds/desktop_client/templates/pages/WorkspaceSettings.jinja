@@ -138,7 +138,7 @@
                  autocomplete="off"
                  aria-label="Workspace name"
                  {% if is_stale %}disabled{% endif %}>
-          <Button variant="secondary" id="rename-save-btn" {{ "disabled" if is_stale else "" }}>Save</Button>
+          <Button variant="secondary" id="rename-save-btn" :disabled="is_stale">Save</Button>
           <span id="rename-saving-badge" class="hidden type-section text-secondary">Saving...</span>
         </div>
         <p id="rename-error" class="hidden type-body text-important mt-2" role="alert"></p>
