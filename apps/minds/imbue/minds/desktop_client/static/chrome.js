@@ -140,6 +140,16 @@
   // must never write to ``currentTitleAgentId`` or trigger recovery, or a
   // stuck agent in another window will hijack this window's content view.
   var currentTitleAgentId = null;
+  // Whether the displayed workspace's content is actually reachable (a real
+  // workspace) rather than the "Loading workspace" proxy loader that
+  // mngr_forward serves at the workspace URL while the backend is unreachable.
+  // Pushed by main.js over ``current-workspace-changed`` (from the content
+  // view's HTTP status) so the get-help modal keeps "have an agent help"
+  // disabled while a workspace is loading/stuck -- a state the health-tracker
+  // ``systemInterfaceStatusByAgent`` signal doesn't cover during startup. In
+  // browser mode there is no such signal (the content frame is cross-origin), so
+  // it defaults to true there, leaving that mode's behavior unchanged.
+  var currentWorkspaceContentReady = !isElectron;
   // Per-agent {accent} map populated from each SSE ``workspaces`` payload.
   // ``applyTitleAccent`` reads from this cache so accent application is
   // synchronous.
@@ -311,7 +321,8 @@
     // while the content view is ACTUALLY displaying that workspace, and null on
     // every other screen (including the workspace's own settings / sharing
     // screens). It drives the recovery-redirect lock ONLY -- not the accent.
-    window.minds.onCurrentWorkspaceChanged(function (agentId) {
+    window.minds.onCurrentWorkspaceChanged(function (agentId, contentReady) {
+      currentWorkspaceContentReady = !!contentReady;
       setDisplayedWorkspaceAgentId(agentId || null);
     });
     // The titlebar accent is a pure function of the current screen, pushed by
@@ -406,10 +417,12 @@
     var aid = currentTitleAgentId || '';
     // Agent-help spawns an /assist chat *inside* the displayed workspace, so it is only usable when
     // that workspace is actually reachable: on a loading/stuck workspace the new chat couldn't be
-    // seen or reached (and the spawn would fail). Gate the option on health -- a truthy
-    // systemInterfaceStatusByAgent entry means stuck/restarting -- while still passing the workspace
-    // id so a bug report stays scoped to it even when it's down.
-    var assistAvailable = !!aid && !systemInterfaceStatusByAgent[aid];
+    // seen or reached (and the spawn would fail). Gate the option on BOTH signals -- a truthy
+    // systemInterfaceStatusByAgent entry means stuck/restarting, and currentWorkspaceContentReady is
+    // false while the content view shows the "Loading workspace" proxy loader (which the stuck signal
+    // doesn't cover during startup) -- while still passing the workspace id so a bug report stays
+    // scoped to it even when it's down.
+    var assistAvailable = !!aid && !systemInterfaceStatusByAgent[aid] && currentWorkspaceContentReady;
     if (isElectron) {
       window.minds.toggleHelp(aid, assistAvailable);
     } else {

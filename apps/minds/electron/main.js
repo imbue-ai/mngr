@@ -560,6 +560,15 @@ function createBundle() {
     inboxListReloadTimer: null,
     currentContentUrl: null,
     currentWorkspaceId: null,
+    // Whether the content view is currently displaying a REACHABLE workspace
+    // rather than the "Loading workspace" proxy loader. The mngr_forward proxy
+    // serves that loader (HTTP 503) at the workspace's own URL while the backend
+    // is still unreachable, so ``currentWorkspaceId`` alone can't tell a loaded
+    // workspace from one that's merely loading (or stopped). Tracked from the
+    // content view's ``did-navigate`` HTTP status and forwarded to the chrome so
+    // the get-help modal only offers "have an agent help" when the workspace can
+    // actually host a chat. False until a non-loader navigation confirms it.
+    contentWorkspaceReady: false,
     // ``currentAccentAgentId`` is the accent source of THIS window's current
     // screen -- the workspace id whose color tints the titlebar -- kept as a
     // tiny piece of per-window state only so the chrome renderer (a separate
@@ -613,14 +622,26 @@ function wireContentViewEvents(bundle, contentView) {
     }
   });
 
-  const onContentNavigate = (url) => {
+  const onContentNavigate = (url, httpResponseCode) => {
     if (!bundle.isErrorState) {
       bundle.currentContentUrl = url;
       bundle.preErrorUrl = url;
     }
     const newAgentId = parseWorkspaceId(url);
-    if (bundle.currentWorkspaceId !== newAgentId) {
+    // Recompute workspace reachability from the HTTP status. The mngr_forward
+    // proxy serves its "Loading workspace" loader as HTTP 503 at the workspace's
+    // own URL while the backend is unreachable, so a non-success status on a
+    // workspace URL means "still loading / not reachable" (a loaded workspace
+    // answers 200). Only a full navigation carries a status; ``did-navigate-in-page``
+    // (anchors, pushState) passes undefined, and since it doesn't reload the
+    // document we keep the prior readiness in that case.
+    let newContentReady = bundle.contentWorkspaceReady;
+    if (httpResponseCode !== undefined) {
+      newContentReady = !!newAgentId && httpResponseCode < 400;
+    }
+    if (bundle.currentWorkspaceId !== newAgentId || bundle.contentWorkspaceReady !== newContentReady) {
       bundle.currentWorkspaceId = newAgentId;
+      bundle.contentWorkspaceReady = newContentReady;
       sendCurrentWorkspaceToBundleViews(bundle);
     }
     // Tint the titlebar with the workspace's accent on any
@@ -650,7 +671,7 @@ function wireContentViewEvents(bundle, contentView) {
     }
   };
 
-  contentView.webContents.on('did-navigate', (_e, url) => onContentNavigate(url));
+  contentView.webContents.on('did-navigate', (_e, url, httpResponseCode) => onContentNavigate(url, httpResponseCode));
   contentView.webContents.on('did-navigate-in-page', (_e, url) => onContentNavigate(url));
 
   // Enforce workspace uniqueness at the Electron level so it applies to EVERY
@@ -1062,7 +1083,7 @@ function sendCurrentWorkspaceToBundleViews(bundle) {
   // when the chrome view (re)loads.
   for (const view of [bundle.chromeView, bundle.modalView]) {
     if (!view || view.webContents.isDestroyed()) continue;
-    view.webContents.send('current-workspace-changed', bundle.currentWorkspaceId);
+    view.webContents.send('current-workspace-changed', bundle.currentWorkspaceId, bundle.contentWorkspaceReady);
   }
 }
 
@@ -1080,6 +1101,11 @@ function loadUrlIntoBundleContentView(bundle, url) {
   const intendedAgentId = parseWorkspaceId(url);
   if (intendedAgentId) {
     bundle.currentWorkspaceId = intendedAgentId;
+    // We're only starting the navigation; the workspace isn't confirmed
+    // reachable until ``did-navigate`` lands a non-loader status, so clear
+    // readiness now to avoid a stale "reachable" carrying over from the
+    // previously-displayed workspace during the load.
+    bundle.contentWorkspaceReady = false;
     bundle.currentContentUrl = url;
     bundle.preErrorUrl = url;
     updateOsTitle(bundle);

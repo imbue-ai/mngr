@@ -83,8 +83,11 @@ contextBridge.exposeInMainWorld('minds', {
     ipcRenderer.send('navigate-to-request', agentId, eventId),
   showWorkspaceContextMenu: (agentId, x, y) =>
     ipcRenderer.send('show-workspace-context-menu', agentId, x, y),
+  // ``contentReady`` is whether the content view is showing a reachable
+  // workspace (vs the mngr_forward "Loading workspace" 503 loader), so the
+  // titlebar can keep the "have an agent help" option disabled while loading.
   onCurrentWorkspaceChanged: (callback) => {
-    ipcRenderer.on('current-workspace-changed', (_event, agentId) => callback(agentId));
+    ipcRenderer.on('current-workspace-changed', (_event, agentId, contentReady) => callback(agentId, contentReady));
   },
 
   // The accent source for THIS window's current screen: the workspace id on
