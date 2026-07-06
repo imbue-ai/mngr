@@ -151,6 +151,17 @@ class BackendResolverInterface(MutableModel, ABC):
         Default implementation is a no-op.
         """
 
+    def set_workspace_name_override(self, agent_id: AgentId, display_name: str, host_name: str | None) -> None:
+        """Optimistically override a workspace's name until discovery confirms it.
+
+        Lets a UI-initiated rename flip :meth:`get_workspace_name` (and
+        :meth:`get_host_name` when the slug changed) immediately, instead of
+        waiting for the next discovery snapshot to re-read the renamed labels.
+        The override is dropped once discovery agrees with it or a short TTL
+        elapses. ``host_name`` is None for a display-only rename (unchanged slug).
+        Default implementation is a no-op.
+        """
+
     @abstractmethod
     def list_services_for_agent(self, agent_id: AgentId) -> tuple[ServiceName, ...]:
         """Return all known service names for an agent, sorted alphabetically."""
@@ -543,6 +554,21 @@ class _HostStateOverride(FrozenModel):
     set_at_monotonic: float = Field(description="time.monotonic() when the override was set, for TTL expiry")
 
 
+_WORKSPACE_NAME_OVERRIDE_TTL_SECONDS: Final[float] = 90.0
+
+
+class _WorkspaceNameOverride(FrozenModel):
+    """A short-lived optimistic workspace name set by a UI-initiated rename."""
+
+    display_name: str = Field(
+        description="The optimistic human-readable display name to report until discovery confirms it"
+    )
+    host_name: str | None = Field(
+        description="The optimistic normalized host-name slug, or None when only the display name changed"
+    )
+    set_at_monotonic: float = Field(description="time.monotonic() when the override was set, for TTL expiry")
+
+
 class MngrCliBackendResolver(BackendResolverInterface):
     """Resolves backend URLs from continuously-updated state.
 
@@ -589,6 +615,10 @@ class MngrCliBackendResolver(BackendResolverInterface):
     # transition the user just triggered -- never DESTROYED -- so it cannot affect
     # the DESTROYED-only filtering in ``list_active_workspace_ids``.
     _host_state_override_by_host_id: dict[str, _HostStateOverride] = PrivateAttr(default_factory=dict)
+    # agent_id_str -> a short-lived optimistic workspace name set by a UI-initiated
+    # rename, masking discovery in ``get_workspace_name`` / ``get_host_name`` until
+    # discovery re-reads the renamed labels (or the TTL elapses). Guarded by _lock.
+    _workspace_name_override_by_agent_id: dict[str, _WorkspaceNameOverride] = PrivateAttr(default_factory=dict)
     # host_id_str -> the agents last completely enumerated on that host (the
     # in-memory image of the persisted last-good topology). Updated under
     # _lock by update_agents; read by get_system_services_agent_id as the
@@ -672,6 +702,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
             self._agents_result = result
             self._initial_discovery_done = True
             self._sweep_host_state_overrides_locked(result.host_state_by_host_id)
+            self._sweep_workspace_name_overrides_locked()
             if self._merge_last_good_topology_locked(result.discovered_agents) and path is not None:
                 topology_to_write = _LastGoodAgentTopology(agents_by_host=dict(self._last_good_agents_by_host))
         if path is not None and topology_to_write is not None:
@@ -695,6 +726,28 @@ class MngrCliBackendResolver(BackendResolverInterface):
                 or (now - override.set_at_monotonic) > _HOST_STATE_OVERRIDE_TTL_SECONDS
             ):
                 del self._host_state_override_by_host_id[host_id_str]
+
+    def _sweep_workspace_name_overrides_locked(self) -> None:
+        """Drop name overrides that the current snapshot has confirmed or that have expired.
+
+        Reads ``self._agents_result`` (already replaced with the fresh snapshot by
+        the caller), so an override is dropped once discovery reports the same
+        display name (and host name, if the slug changed). Keeps the map bounded to
+        genuinely-still-pending renames without firing on-change itself -- the
+        surrounding ``update_agents`` already fires once. Must hold ``self._lock``.
+        """
+        now = time.monotonic()
+        for agent_id_str in tuple(self._workspace_name_override_by_agent_id):
+            override = self._workspace_name_override_by_agent_id[agent_id_str]
+            agent_id = AgentId(agent_id_str)
+            display_agrees = self._discovery_workspace_display_name_locked(agent_id) == override.display_name
+            host_agrees = (
+                override.host_name is None or self._discovery_host_name_locked(agent_id) == override.host_name
+            )
+            if (display_agrees and host_agrees) or (
+                now - override.set_at_monotonic
+            ) > _WORKSPACE_NAME_OVERRIDE_TTL_SECONDS:
+                del self._workspace_name_override_by_agent_id[agent_id_str]
 
     def _merge_last_good_topology_locked(self, agents: tuple[DiscoveredAgent, ...]) -> bool:
         """Fold a fresh discovery snapshot into the last-good per-host topology.
@@ -906,37 +959,74 @@ class MngrCliBackendResolver(BackendResolverInterface):
         if existed:
             self._fire_on_change()
 
+    def set_workspace_name_override(self, agent_id: AgentId, display_name: str, host_name: str | None) -> None:
+        """Optimistically override ``agent_id``'s workspace name until discovery confirms it; fires on-change."""
+        with self._lock:
+            self._workspace_name_override_by_agent_id[str(agent_id)] = _WorkspaceNameOverride(
+                display_name=display_name, host_name=host_name, set_at_monotonic=time.monotonic()
+            )
+        self._fire_on_change()
+
+    def _fresh_workspace_name_override_locked(self, agent_id_str: str) -> _WorkspaceNameOverride | None:
+        """Return the still-fresh name override for an agent, dropping it if its TTL has elapsed. Must hold self._lock."""
+        override = self._workspace_name_override_by_agent_id.get(agent_id_str)
+        if override is None:
+            return None
+        if (time.monotonic() - override.set_at_monotonic) > _WORKSPACE_NAME_OVERRIDE_TTL_SECONDS:
+            del self._workspace_name_override_by_agent_id[agent_id_str]
+            return None
+        return override
+
     def get_workspace_name(self, agent_id: AgentId) -> str | None:
         """Return the workspace's human-readable display name, or None.
 
-        Reads the ``workspace_display_name`` label, falling back to the host
-        name for legacy workspaces created before the display label existed.
+        Prefers a fresh optimistic override (set by a UI-initiated rename) over
+        discovery so a just-renamed workspace shows its new name immediately.
+        Otherwise reads the ``workspace_display_name`` label, falling back to the
+        host name for legacy workspaces created before the display label existed.
         The host name (the normalized slug) is the canonical name; only the
         display label may diverge from it.
         """
         with self._lock:
-            for agent in self._agents_result.discovered_agents:
-                if agent.agent_id == agent_id:
-                    display_name = agent.labels.get(WORKSPACE_DISPLAY_NAME_LABEL)
-                    if display_name:
-                        return display_name
-                    # Backwards-compat fallback for workspaces created before the
-                    # display label existed. Removable ~Sept 2026.
-                    return self._agents_result.host_name_by_host_id.get(str(agent.host_id))
-            return None
+            discovery_name = self._discovery_workspace_display_name_locked(agent_id)
+            override = self._fresh_workspace_name_override_locked(str(agent_id))
+            if override is None or discovery_name == override.display_name:
+                return discovery_name
+            return override.display_name
+
+    def _discovery_workspace_display_name_locked(self, agent_id: AgentId) -> str | None:
+        """Return the display name from the discovery snapshot alone (ignoring any override). Must hold self._lock."""
+        for agent in self._agents_result.discovered_agents:
+            if agent.agent_id == agent_id:
+                display_name = agent.labels.get(WORKSPACE_DISPLAY_NAME_LABEL)
+                if display_name:
+                    return display_name
+                # Backwards-compat fallback for workspaces created before the
+                # display label existed. Removable ~Sept 2026.
+                return self._agents_result.host_name_by_host_id.get(str(agent.host_id))
+        return None
 
     def get_host_name(self, agent_id: AgentId) -> str | None:
         """Return the normalized host name (slug) of the agent's host, or None.
 
-        This is the canonical, per-provider-unique name used for collision
-        checks -- distinct from the human-readable display name returned by
-        :meth:`get_workspace_name`.
+        Prefers a fresh optimistic override (set by a UI-initiated rename that
+        changed the slug) over discovery. This is the canonical, per-provider-
+        unique name used for collision checks -- distinct from the human-readable
+        display name returned by :meth:`get_workspace_name`.
         """
         with self._lock:
-            for agent in self._agents_result.discovered_agents:
-                if agent.agent_id == agent_id:
-                    return self._agents_result.host_name_by_host_id.get(str(agent.host_id))
-            return None
+            discovery_host_name = self._discovery_host_name_locked(agent_id)
+            override = self._fresh_workspace_name_override_locked(str(agent_id))
+            if override is None or override.host_name is None or discovery_host_name == override.host_name:
+                return discovery_host_name
+            return override.host_name
+
+    def _discovery_host_name_locked(self, agent_id: AgentId) -> str | None:
+        """Return the host name from the discovery snapshot alone (ignoring any override). Must hold self._lock."""
+        for agent in self._agents_result.discovered_agents:
+            if agent.agent_id == agent_id:
+                return self._agents_result.host_name_by_host_id.get(str(agent.host_id))
+        return None
 
     def get_agent_label(self, agent_id: AgentId, label_key: str) -> str | None:
         """Return the value of an arbitrary mngr label for an agent, or None."""

@@ -645,14 +645,25 @@ def _handle_workspace_stop(agent_id: str) -> WorkspaceLifecycleResponse | Respon
     return _perform_workspace_lifecycle(agent_id, "stop")
 
 
-def _apply_workspace_display_label(agent_id: AgentId, display_name: str, parent_cg: ConcurrencyGroup) -> Response:
-    """Write the workspace's human-readable display label, returning the API response."""
+def _apply_workspace_display_label(
+    agent_id: AgentId, display_name: str, host_name_slug: str | None, parent_cg: ConcurrencyGroup
+) -> Response:
+    """Write the workspace's human-readable display label, returning the API response.
+
+    ``host_name_slug`` is the workspace's new normalized host name when the rename
+    also renamed the host (a slug change), or None for a display-only rename.
+    """
     returncode, _stdout, stderr = _run_mngr_blocking(
         [get_state().mngr_binary, "label", str(agent_id), "--label", f"{WORKSPACE_DISPLAY_NAME_LABEL}={display_name}"],
         parent_cg,
     )
     if returncode != 0:
         return _json_error(f"Failed to update workspace name: {stderr.strip()[:200]}", 502)
+    # Optimistically reflect the just-persisted name in the discovery-fed resolver
+    # cache so an immediate settings reload renders the new name instead of the stale
+    # one; discovery re-reads the label on its next snapshot and reconciles (or
+    # expires) the override.
+    get_state().backend_resolver.set_workspace_name_override(agent_id, display_name, host_name_slug)
     return _json_response({"agent_id": str(agent_id), "name": display_name})
 
 
@@ -688,7 +699,7 @@ def _handle_workspace_rename(agent_id: str) -> Response:
     # Display-only rename: the slug is unchanged, so just rewrite the label
     # (no host rename needed -- works on every provider, online or offline).
     if current_host_name is not None and new_slug.casefold() == current_host_name.casefold():
-        return _apply_workspace_display_label(parsed_id, raw_name, parent_cg)
+        return _apply_workspace_display_label(parsed_id, raw_name, None, parent_cg)
 
     # Reject a slug that collides with another active workspace on the same provider.
     info = backend_resolver.get_agent_display_info(parsed_id)
@@ -706,7 +717,7 @@ def _handle_workspace_rename(agent_id: str) -> Response:
     )
     if returncode != 0:
         return _json_error(f"Failed to rename workspace host: {stderr.strip()[:200]}", 502)
-    return _apply_workspace_display_label(parsed_id, raw_name, parent_cg)
+    return _apply_workspace_display_label(parsed_id, raw_name, str(new_slug), parent_cg)
 
 
 # -- Workspace recovery routes (health probe + restart) --
