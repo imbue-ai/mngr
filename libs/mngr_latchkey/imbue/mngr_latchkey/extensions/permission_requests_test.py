@@ -35,7 +35,6 @@ import pytest
 
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_latchkey.agent_setup import _AGENT_BASELINE_PERMISSIONS
-from imbue.mngr_latchkey.workspace_permissions import MINDS_WORKSPACES_SCOPE
 from imbue.mngr_latchkey.workspace_permissions import WORKSPACE_VERBS
 
 _NODE_BINARY: Final[str | None] = shutil.which("node")
@@ -60,8 +59,10 @@ _FILE_SHARING_PERMISSION_PREFIX: Final[str] = "minds-file-server-"
 
 # The cross-workspace verbs also attach to the pre-existing ``latchkey-self``
 # scope (like file-sharing and accounts): the grant rule is keyed here, and no
-# ``minds-workspaces`` scope schema is minted.
+# ``minds-workspaces`` scope schema is minted. ``_LEGACY_WORKSPACES_SCOPE_NAME``
+# is the scope an older build used and that must no longer appear on disk.
 _WORKSPACE_GRANT_SCOPE_NAME: Final[str] = "latchkey-self"
+_LEGACY_WORKSPACES_SCOPE_NAME: Final[str] = "minds-workspaces"
 _FILE_SHARING_READ_METHODS: Final[tuple[str, ...]] = (
     "GET",
     "HEAD",
@@ -869,13 +870,13 @@ def test_approve_workspace_grant_folds_into_latchkey_self_on_real_baseline(
     rule_keys = [next(iter(rule.keys())) for rule in applied["rules"]]
     # The grant folds onto the single ``latchkey-self`` rule: no ``minds-workspaces``
     # rule, and no duplicate gateway-self rule was introduced.
-    assert MINDS_WORKSPACES_SCOPE not in rule_keys
+    assert _LEGACY_WORKSPACES_SCOPE_NAME not in rule_keys
     assert rule_keys.count(_WORKSPACE_GRANT_SCOPE_NAME) == 1
     latchkey_self_rule = next(rule for rule in applied["rules"] if _WORKSPACE_GRANT_SCOPE_NAME in rule)
     granted = latchkey_self_rule[_WORKSPACE_GRANT_SCOPE_NAME]
     assert {"minds-workspaces-read", "minds-workspaces-create"}.issubset(set(granted))
     # No ``minds-workspaces`` scope schema is emitted.
-    assert MINDS_WORKSPACES_SCOPE not in applied["schemas"]
+    assert _LEGACY_WORKSPACES_SCOPE_NAME not in applied["schemas"]
 
 
 def test_approve_workspace_rejects_unknown_verb_in_override(

@@ -31,12 +31,19 @@ from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import list_host_permissions_paths
 from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import save_permissions
-from imbue.mngr_latchkey.workspace_permissions import MINDS_WORKSPACES_GATEWAY_SELF_HOST
-from imbue.mngr_latchkey.workspace_permissions import MINDS_WORKSPACES_PATH_PREFIX
-from imbue.mngr_latchkey.workspace_permissions import MINDS_WORKSPACES_SCOPE
 
 # Type of the pure per-file transform each migration direction dispatches to.
 _ConfigTransform = Callable[[LatchkeyPermissionsConfig], LatchkeyPermissionsConfig]
+
+# Frozen snapshot of the pre-migration on-disk format. These are intentionally
+# hardcoded here rather than imported from the live workspace catalog: a
+# migration must reproduce the exact historical shape it converts to/from, so it
+# must not drift if the catalog's values ever change. ``_LEGACY_WORKSPACES_SCOPE``
+# is the detent scope key + schema name the old build used; the gateway-self host
+# and path prefix reconstruct that scope schema's ``domain``/``path`` gate.
+_LEGACY_WORKSPACES_SCOPE: Final[str] = "minds-workspaces"
+_LEGACY_GATEWAY_SELF_HOST: Final[str] = "latchkey-self.invalid"
+_LEGACY_WORKSPACES_PATH_PREFIX: Final[str] = "/minds-api-proxy/api/v1/workspaces"
 
 # The detent scope the cross-workspace verbs attach to in the new format. Defined
 # locally (rather than imported from ``agent_setup``) to keep the migration layer
@@ -48,7 +55,7 @@ _SCOPE_LATCHKEY_SELF: Final[str] = "latchkey-self"
 # ``minds-workspaces-read`` and per-target names like
 # ``minds-workspaces-destroy-<id>``). Used to recognize which permissions on the
 # ``latchkey-self`` rule belong to the workspace API when reverting.
-_WORKSPACE_PERMISSION_PREFIX: Final[str] = f"{MINDS_WORKSPACES_SCOPE}-"
+_WORKSPACE_PERMISSION_PREFIX: Final[str] = f"{_LEGACY_WORKSPACES_SCOPE}-"
 
 
 @pure
@@ -71,8 +78,8 @@ def fold_workspace_scope_into_latchkey_self(config: LatchkeyPermissionsConfig) -
     workspace_permissions: tuple[str, ...] = tuple(
         permission
         for rule in config.rules
-        if MINDS_WORKSPACES_SCOPE in rule
-        for permission in rule[MINDS_WORKSPACES_SCOPE]
+        if _LEGACY_WORKSPACES_SCOPE in rule
+        for permission in rule[_LEGACY_WORKSPACES_SCOPE]
     )
     if not workspace_permissions:
         return config
@@ -82,7 +89,7 @@ def fold_workspace_scope_into_latchkey_self(config: LatchkeyPermissionsConfig) -
     rebuilt_rules: list[dict[str, list[str]]] = []
     is_latchkey_self_seen = False
     for rule in config.rules:
-        if MINDS_WORKSPACES_SCOPE in rule:
+        if _LEGACY_WORKSPACES_SCOPE in rule:
             continue
         if _SCOPE_LATCHKEY_SELF in rule:
             is_latchkey_self_seen = True
@@ -95,7 +102,7 @@ def fold_workspace_scope_into_latchkey_self(config: LatchkeyPermissionsConfig) -
 
     # Drop the now-defunct ``minds-workspaces`` scope schema; the per-verb
     # permission schemas (keyed by verb name) stay, still referenced above.
-    rebuilt_schemas = {name: schema for name, schema in config.schemas.items() if name != MINDS_WORKSPACES_SCOPE}
+    rebuilt_schemas = {name: schema for name, schema in config.schemas.items() if name != _LEGACY_WORKSPACES_SCOPE}
     return LatchkeyPermissionsConfig(rules=tuple(rebuilt_rules), schemas=rebuilt_schemas)
 
 
@@ -104,8 +111,8 @@ def _build_minds_workspaces_scope_schema() -> dict[str, JsonValue]:
     """Reconstruct the legacy ``minds-workspaces`` scope schema (domain + path-prefix gate)."""
     return {
         "properties": {
-            "domain": {"const": MINDS_WORKSPACES_GATEWAY_SELF_HOST},
-            "path": {"type": "string", "pattern": f"^{MINDS_WORKSPACES_PATH_PREFIX}(/|$)"},
+            "domain": {"const": _LEGACY_GATEWAY_SELF_HOST},
+            "path": {"type": "string", "pattern": f"^{_LEGACY_WORKSPACES_PATH_PREFIX}(/|$)"},
         },
         "required": ["domain", "path"],
     }
@@ -135,13 +142,13 @@ def split_workspace_scope_out_of_latchkey_self(config: LatchkeyPermissionsConfig
     for rule in config.rules:
         if _SCOPE_LATCHKEY_SELF in rule:
             remaining = [p for p in rule[_SCOPE_LATCHKEY_SELF] if not p.startswith(_WORKSPACE_PERMISSION_PREFIX)]
-            rebuilt_rules.append({MINDS_WORKSPACES_SCOPE: list(workspace_permissions)})
+            rebuilt_rules.append({_LEGACY_WORKSPACES_SCOPE: list(workspace_permissions)})
             rebuilt_rules.append({_SCOPE_LATCHKEY_SELF: remaining})
         else:
             rebuilt_rules.append(dict(rule))
 
     rebuilt_schemas: dict[str, JsonValue] = dict(config.schemas)
-    rebuilt_schemas[MINDS_WORKSPACES_SCOPE] = _build_minds_workspaces_scope_schema()
+    rebuilt_schemas[_LEGACY_WORKSPACES_SCOPE] = _build_minds_workspaces_scope_schema()
     return LatchkeyPermissionsConfig(rules=tuple(rebuilt_rules), schemas=rebuilt_schemas)
 
 
