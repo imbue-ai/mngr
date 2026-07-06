@@ -1,4 +1,4 @@
-const { BaseWindow, WebContentsView, Menu, Notification, clipboard, dialog, ipcMain, net, shell, app, session, screen } = require('electron');
+const { BaseWindow, WebContentsView, Menu, Notification, clipboard, dialog, ipcMain, net, shell, app, session, screen, nativeImage } = require('electron');
 const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
@@ -2524,6 +2524,7 @@ async function onReady() {
   });
   installApplicationMenu();
   installDockMenu();
+  installDevDockIcon();
   setupContentPartitionCookieSync();
   await syncContentCookiesToDefaultSession();
 
@@ -2692,6 +2693,18 @@ function installDockMenu() {
       click: () => openHomeInNewWindow(),
     },
   ]));
+}
+
+// In dev (unpackaged) runs the macOS dock shows the generic Electron icon,
+// which is indistinguishable from any other Electron app and from a packaged
+// Minds. Override it with the "dev"-labeled variant so a running dev build is
+// obvious in the dock. Packaged builds get their icon from the bundled .icns
+// (see todesktop.js) and must not be overridden here. BrowserWindow's `icon`
+// option is ignored for the macOS dock, so app.dock.setIcon is the only path.
+function installDevDockIcon() {
+  if (app.isPackaged || !isMac || !app.dock) return;
+  const devIcon = nativeImage.createFromPath(path.join(__dirname, 'assets', 'icon-dev.png'));
+  if (!devIcon.isEmpty()) app.dock.setIcon(devIcon);
 }
 
 async function runStartupSequence(bundle) {
