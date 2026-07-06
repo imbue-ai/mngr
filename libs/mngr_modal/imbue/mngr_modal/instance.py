@@ -2000,22 +2000,15 @@ log "=== Shutdown script completed ==="
                     "Cannot restart. Create a new host instead."
                 )
 
-            # Auto-select the most recent snapshot, skipping the bare "initial" one
-            # (captured right after provisioning, before the agent ran): auto-restoring
-            # it would spin a sandbox with no agent. An explicit snapshot_id can still
-            # name the initial snapshot.
-            resumable_snapshots = sorted(
-                (snap for snap in host_record.certified_host_data.snapshots if snap.name != "initial"),
-                key=lambda snap: snap.created_at,
-                reverse=True,
+            # Use the most recent snapshot (sorted by created_at descending). The
+            # initial snapshot (taken after agent creation, so it carries the agent)
+            # is a valid restore point; a graceful stop/pause leaves a newer one that
+            # is used in preference.
+            sorted_snapshots = sorted(
+                host_record.certified_host_data.snapshots, key=lambda s: s.created_at, reverse=True
             )
-            if not resumable_snapshots:
-                raise NoSnapshotsModalMngrError(
-                    f"Modal sandbox {host_id} has only its initial snapshot and no resumable "
-                    "state. Create a new host instead."
-                )
-            snapshot_id = SnapshotId(resumable_snapshots[0].id)
-            logger.info("Using most recent resumable snapshot for restart", snapshot_id=str(snapshot_id))
+            snapshot_id = SnapshotId(sorted_snapshots[0].id)
+            logger.info("Using most recent snapshot for restart", snapshot_id=str(snapshot_id))
 
         # Load host record from volume
         if host_record is None:
@@ -2085,11 +2078,15 @@ log "=== Shutdown script completed ==="
         # Invalidate any cached OfflineHost so we return the new online Host
         self._uncache_host(host_id)
 
-        # Clear stop_reason so a now-running host is no longer derived as PAUSED/STOPPED.
-        # Otherwise a host resumed here and then hard-killed would be mis-derived as
-        # PAUSED/STOPPED (never GC'd, wrongly shows a Resume control) instead of CRASHED.
-        # The setup helper below persists this cleared data to both the host record and
-        # the host's data.json, mirroring what mngr_lima does on restart.
+        # Clear stop_reason on resume. When a sandbox is shut down, the shutdown path
+        # persists stop_reason into the host record -- PAUSED for a graceful idle/timeout
+        # shutdown (activity_watcher.sh -> shutdown.sh), STOPPED for an explicit
+        # ``mngr stop``. We are now booting a fresh sandbox from that record's snapshot,
+        # so the host is running again and that stale reason must be cleared: otherwise
+        # state derivation keeps reporting the host as PAUSED/STOPPED, and if it later
+        # hard-crashes it is mis-derived as PAUSED/STOPPED (never GC'd, wrongly offering a
+        # Resume control) instead of CRASHED. The setup helper below persists this cleared
+        # data to both the host record and the host's data.json, mirroring mngr_lima's restart.
         restored_host_data = host_record.certified_host_data.model_copy_update(
             to_update(host_record.certified_host_data.field_ref().stop_reason, None),
         )

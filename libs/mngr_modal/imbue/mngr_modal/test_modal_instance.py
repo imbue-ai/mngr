@@ -433,59 +433,6 @@ def test_get_host_by_name_not_found_raises_error(real_modal_provider: ModalProvi
 
 @pytest.mark.acceptance
 @pytest.mark.timeout(300)
-def test_auto_restart_after_hard_kill_with_only_initial_snapshot_is_refused(
-    initial_snapshot_provider: ModalProviderInstance,
-) -> None:
-    """Auto-restart is refused when the only snapshot is the bare "initial" one.
-
-    is_snapshotted_after_create=True, then a hard kill (terminate the sandbox
-    without a graceful stop) leaves only the "initial" snapshot. Auto-restarting
-    from it would produce a sandbox with no agent -- an agent-less, billing
-    orphan -- so start_host (no snapshot_id) raises NoSnapshotsModalMngrError.
-    An explicit snapshot_id can still restore the initial snapshot.
-    """
-    host = None
-    restarted_host = None
-    try:
-        host = initial_snapshot_provider.create_host(HostName("test-host"))
-        host_id = host.id
-        host_name = HostName("test-host")
-
-        # we have to manually trigger the on_agent_created hook to create the initial snapshot (this is normally done automatically during the api::create_host call as a plugin callback)
-        initial_snapshot_provider.on_agent_created(_UNUSED_AGENT, host)
-
-        # Verify initial snapshot was created
-        snapshots = initial_snapshot_provider.list_snapshots(host)
-        assert len(snapshots) == 1
-        assert snapshots[0].name == "initial"
-        initial_snapshot_id = snapshots[0].id
-
-        # Hard kill: directly terminate the sandbox without using stop_host
-        sandbox = initial_snapshot_provider._find_sandbox_by_host_id(host_id)
-        assert sandbox is not None
-        sandbox.terminate()
-        initial_snapshot_provider._uncache_sandbox(host_id, host_name)
-
-        # Auto-restart must refuse the bare initial-only snapshot (no resumable state).
-        with pytest.raises(NoSnapshotsModalMngrError):
-            initial_snapshot_provider.start_host(host_id)
-
-        # But an explicit snapshot_id can still restore the initial snapshot.
-        restarted_host = initial_snapshot_provider.start_host(host_id, snapshot_id=initial_snapshot_id)
-        assert restarted_host.id == host_id
-        result = restarted_host.execute_idempotent_command("echo 'restored from initial'")
-        assert result.success
-        assert "restored from initial" in result.stdout
-
-    finally:
-        if restarted_host:
-            initial_snapshot_provider.destroy_host(restarted_host)
-        elif host:
-            initial_snapshot_provider.destroy_host(host)
-        else:
-            pass
-
-
 @pytest.mark.acceptance
 @pytest.mark.timeout(300)
 def test_restart_after_graceful_stop_without_initial_snapshot(
