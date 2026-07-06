@@ -109,9 +109,18 @@ def test_lifecycle_running_when_descendant_matches() -> None:
     assert determine_lifecycle_state("0|bash|123", True, "claude", ps_output) == AgentLifecycleState.RUNNING
 
 
-def test_lifecycle_replaced_when_non_shell_descendant() -> None:
+def test_lifecycle_done_when_non_shell_descendant_but_foreground_is_shell_known_type() -> None:
+    """A known-type agent whose process is gone but whose pane has dropped to a shell
+    prompt is DONE, even with a non-shell descendant still running.
+
+    Every real claude agent keeps mngr's own in-pane helpers (transcript streamers,
+    background-task script -- each a `sleep` loop) running as descendants. After the
+    agent process is killed (ctrl-c / crash / OOM shed) those linger, so a non-shell
+    descendant must NOT be read as "replaced by another program" when the foreground
+    is a shell. Only a non-shell *foreground* means a real replacement.
+    """
     ps_output = "200 123 python3\n"
-    assert determine_lifecycle_state("0|bash|123", True, "claude", ps_output) == AgentLifecycleState.REPLACED
+    assert determine_lifecycle_state("0|bash|123", True, "claude", ps_output) == AgentLifecycleState.DONE
 
 
 def test_lifecycle_done_when_shell_only() -> None:
@@ -164,11 +173,13 @@ def test_lifecycle_running_unknown_when_pane_pid_not_in_ps_and_unknown_type() ->
     )
 
 
-def test_lifecycle_replaced_when_non_shell_descendant_and_known_type() -> None:
-    """Verify that known types still get REPLACED (not RUNNING_UNKNOWN_AGENT_TYPE)."""
-    ps_output = "200 123 python3\n"
+def test_lifecycle_replaced_when_non_shell_foreground_and_known_type() -> None:
+    """A known-type agent with a non-shell process in the *foreground* (pane comm is
+    not a shell) is genuinely REPLACED -- distinct from a non-shell *descendant* under
+    a shell prompt, which is DONE (see the test above)."""
+    ps_output = "123 1 python3\n"
     assert (
-        determine_lifecycle_state("0|bash|123", True, "claude", ps_output, is_agent_type_known=True)
+        determine_lifecycle_state("0|python3|123", True, "claude", ps_output, is_agent_type_known=True)
         == AgentLifecycleState.REPLACED
     )
 

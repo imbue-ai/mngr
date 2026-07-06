@@ -394,15 +394,27 @@ def determine_lifecycle_state(
         AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE if not is_agent_type_known else AgentLifecycleState.REPLACED
     )
 
-    # Check for non-shell descendant processes
-    non_shell_processes = [p for p in descendant_names if p not in SHELL_COMMANDS]
-    if non_shell_processes:
-        return replaced_state
+    # A non-shell descendant means *something* other than a shell is running under
+    # the pane. Only treat that as "replaced" when the agent type is UNKNOWN: there
+    # we don't know the agent's process name, so the descendant might actually be the
+    # agent running under a name we don't recognize (-> RUNNING_UNKNOWN_AGENT_TYPE).
+    #
+    # For a KNOWN type the agent's process was checked above and is definitively
+    # absent, so a non-shell descendant is an auxiliary/background process -- e.g.
+    # mngr's own in-pane helpers (the transcript streamers and background-task
+    # script, each running a `sleep` loop), which persist after the agent process is
+    # killed. Those must NOT mask the fact that the pane has dropped back to a shell
+    # prompt (agent exited == DONE). A genuine replacement runs in the *foreground*,
+    # which the shell check below detects via pane_current_command.
+    if not is_agent_type_known:
+        non_shell_processes = [p for p in descendant_names if p not in SHELL_COMMANDS]
+        if non_shell_processes:
+            return replaced_state
 
-    # Agent is not running. Determine DONE vs REPLACED by checking whether
-    # the pane process is a shell (agent exited normally) or something else
-    # (agent was replaced by another program). Use ps as authoritative source
-    # since tmux may report a stale modified title.
+    # Agent is not running. Determine DONE vs REPLACED by checking whether the pane's
+    # foreground is a shell (agent exited to a prompt -> DONE) or another program
+    # (-> REPLACED). Use ps's pane comm as an authoritative cross-check, since tmux
+    # may report a stale modified title (e.g. Claude Code's version string).
     pane_comm = comm_by_pid.get(pane_pid)
     if current_command in SHELL_COMMANDS or (pane_comm is not None and pane_comm in SHELL_COMMANDS):
         return AgentLifecycleState.DONE
