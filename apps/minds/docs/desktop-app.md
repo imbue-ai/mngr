@@ -101,10 +101,20 @@ The CLI separates two channels, following the same conventions as mngr:
 The desktop app bundles platform-specific binaries so users need zero prerequisites:
 
 - **uv**: Downloads Python, creates venvs, installs packages. Downloaded from GitHub releases during `pnpm build`.
-- **git**: Required for agent creation (cloning repos). Currently copied from the build machine; a statically-linked distribution should be used for production.
+- **git**: Required for agent creation (cloning repos). A pinned, SHA256-verified [dugite-native](https://github.com/desktop/dugite-native) payload -- the relocatable git distribution GitHub Desktop builds for embedding in Electron apps -- downloaded during `pnpm build` (and re-run by ToDesktop's `beforeInstall` hook on the build server) per `apps/minds/scripts/git-manifest.json`. It is self-contained: the `git` binary plus its `libexec/git-core/` helpers, `share/git-core/templates/`, a system `etc/gitconfig`, and (on Linux) an `ssl/cacert.pem` CA bundle. Because the payload binaries bake in an empty prefix, the backend child environment must -- and does -- set `GIT_EXEC_PATH`, `GIT_TEMPLATE_DIR`, and `GIT_CONFIG_SYSTEM` (plus `GIT_SSL_CAINFO` on Linux); a bare `PATH` prepend is not sufficient. See [specs/minds-managed-git/concise.md](../../../specs/minds-managed-git/concise.md).
 - **lima**: Required for the Lima launch mode (running agents in Linux VMs). Downloaded from GitHub releases during `pnpm build`. Self-contained on macOS Apple Silicon via Lima's `vz` backend; macOS Intel and Linux still require QEMU on the host machine.
 
 All three are placed in the `resources/` directory (outside the asar archive) and added to `PATH` in the child process environment.
+
+### Updating the bundled git
+
+git tracks upstream security releases, so the pinned dugite-native payload needs periodic bumping. A weekly CI workflow opens (or updates) a tracking issue when the pin falls behind dugite-native's latest release. To update:
+
+1. Pick the new dugite-native tag from the freshness tracking issue.
+2. Update `apps/minds/scripts/git-manifest.json`: the `dugiteNativeTag`, the `gitVersion`, all five asset names (each embeds a dugite-native commit short-SHA, so record them verbatim), and each target's hash taken from the release's `.sha256` companion asset.
+3. Independently download each tarball and recompute its SHA256, then compare against the values you just recorded (pinning defends against future substitution, not against copying a wrong value in).
+4. Run the bundled-git acceptance test locally on a mac; CI covers linux-x64.
+5. Ship through the normal release process; the freshness workflow closes the tracking issue on its next run.
 
 ## Data directory
 
@@ -232,7 +242,7 @@ pnpm build                        # Prepare resources
 pnpm exec todesktop build         # Upload to ToDesktop for native builds
 ```
 
-ToDesktop builds the macOS arm64 native installer (.zip / .dmg), handles code signing, notarization, and auto-update infrastructure. Linux + Windows targets are not currently wired up: `todesktop.js` ships only a `mac:` block, and the release pipeline (`minds-launch-to-msg.yml`) builds and verifies macOS only. The host scripts (`download-binaries.js`, `build.js`) have skeletons for Linux x86_64 and a few Linux native modules ship prebuilds via pnpm, but a packaged Linux install would still need a `linux:` ToDesktop block and a properly bundled git layout (the current `cp $(which git)` skips `libexec/git-core/`).
+ToDesktop builds the macOS arm64 native installer (.zip / .dmg), handles code signing, notarization, and auto-update infrastructure. Linux + Windows targets are not currently wired up: `todesktop.js` ships only a `mac:` block, and the release pipeline (`minds-launch-to-msg.yml`) builds and verifies macOS only. The host scripts (`download-binaries.js`, `build.js`) have skeletons for Linux x86_64 and a few Linux native modules ship prebuilds via pnpm; git for Linux is already the complete dugite-native manifest payload (continuously proven by the bundled-git acceptance test on Linux in CI), so the only remaining gap for a packaged Linux install is a `linux:` ToDesktop block.
 
 The build script (`scripts/build.js`) builds a wheel for every workspace package into `resources/wheels/`, rewrites `[tool.uv.sources]` in the staged `resources/pyproject/pyproject.toml` to point each workspace package at its bundled wheel, then runs `uv lock` in-place to regenerate `resources/pyproject/uv.lock` against the rewritten pyproject. The regenerated lockfile is what ships in the app bundle; the dev-time `electron/pyproject/uv.lock` is not committed.
 
@@ -266,6 +276,8 @@ apps/minds/
       pyproject.toml        # Standalone: declares minds dependency
       uv.lock               # Pinned lockfile for reproducible installs
   scripts/
-    build.js                # Downloads uv/git/lima, copies pyproject to resources/
+    build.js                # Build orchestrator: downloads binaries, builds wheels, stages resources/
+    download-binaries.js    # Pinned, hash-verified binary downloads (uv, git, restic, desync)
+    git-manifest.json       # Pinned dugite-native git payload: tag, version, per-target hashes
   resources/                # (gitignored) Built artifacts for packaging
 ```
