@@ -1,4 +1,4 @@
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
 const net = require('net');
 const fs = require('fs');
 const path = require('path');
@@ -170,6 +170,23 @@ function waitForPortFree(port, timeoutMs = 6000, intervalMs = 200) {
 }
 
 /**
+ * Log the bundled git version once at backend start, for supportability.
+ *
+ * Runs the payload's git non-blocking; a failure here never blocks or aborts
+ * startup (the backend spawn does not depend on it), so we downgrade any error
+ * to a warning. See specs/minds-managed-git/concise.md.
+ */
+function logBundledGitVersion(gitRoot) {
+  execFile(paths.getGitPath(), ['--version'], (err, stdout) => {
+    if (err) {
+      console.warn(`[backend] could not run bundled git: ${err.message}`);
+      return;
+    }
+    console.log(`[backend] bundled git: ${stdout.trim()} (${gitRoot})`);
+  });
+}
+
+/**
  * Spawn the Python backend and wait for the login URL.
  *
  * The backend emits structured JSONL events to stdout (via --format jsonl)
@@ -225,6 +242,25 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       const bundledClientConfig = paths.getBundledClientConfigPath();
       const configFileArgs = bundledClientConfig ? ['--config-file', bundledClientConfig] : [];
 
+      // The bundled dugite-native git is built with an empty prefix, so
+      // prepending its bin dir to PATH is not enough: git --exec-path would
+      // resolve to //libexec/git-core and `git clone https://...` would fail
+      // with "'remote-https' is not a git command". Export the payload's real
+      // locations so helper dispatch, templates, and TLS work in both dev and
+      // packaged modes. See specs/minds-managed-git/concise.md.
+      const gitRoot = paths.getGitRootDir();
+      const gitEnv = {
+        GIT_EXEC_PATH: path.join(gitRoot, 'libexec', 'git-core'),
+        GIT_TEMPLATE_DIR: path.join(gitRoot, 'share', 'git-core', 'templates'),
+        GIT_CONFIG_SYSTEM: path.join(gitRoot, 'etc', 'gitconfig'),
+      };
+      // The Linux payload does not use the system trust store; macOS links the
+      // system libcurl and must NOT get this override.
+      if (process.platform === 'linux') {
+        gitEnv.GIT_SSL_CAINFO = path.join(gitRoot, 'ssl', 'cacert.pem');
+      }
+      logBundledGitVersion(gitRoot);
+
       if (paths.isDev()) {
         // Dev mode: use system uv with the monorepo workspace venv
         uvBin = 'uv';
@@ -241,6 +277,10 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         cwd = paths.getMonorepoRoot();
         env = {
           ...process.env,
+          ...gitEnv,
+          // Pair the bundled git binary with gitEnv in dev too: a system git
+          // running against the payload's exec-path would be version-skewed.
+          PATH: `${paths.getGitBinDir()}:${process.env.PATH || ''}`,
           MINDS_ELECTRON: '1',
           MINDS_ROOT_NAME: mindsRootName,
           MNGR_HOST_DIR: mngrHostDir,
@@ -302,6 +342,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           : systemPath;
         env = {
           ...process.env,
+          ...gitEnv,
           PATH: `${uvBinDir}:${gitBinDir}:${limaBinDir}:${desyncBinDir}:${augmentedSystemPath}`,
           UV_CACHE_DIR: uvCacheDir,
           UV_PYTHON_INSTALL_DIR: uvPythonDir,
