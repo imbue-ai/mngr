@@ -3,17 +3,22 @@ from pathlib import Path
 
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.migrations.fold_workspace_scope_into_latchkey_self import FoldWorkspaceScopeIntoLatchkeySelf
+from imbue.mngr_latchkey.migrations.fold_workspace_scope_into_latchkey_self import _PermissionsFile
 from imbue.mngr_latchkey.migrations.fold_workspace_scope_into_latchkey_self import (
     fold_workspace_scope_into_latchkey_self,
 )
 from imbue.mngr_latchkey.migrations.fold_workspace_scope_into_latchkey_self import (
     split_workspace_scope_out_of_latchkey_self,
 )
-from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import permissions_path_for_host
-from imbue.mngr_latchkey.store import save_permissions
 
-_LEGACY_CONFIG = LatchkeyPermissionsConfig(
+
+def _write_permissions_file(path: Path, config: _PermissionsFile) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(config.model_dump_json())
+
+
+_LEGACY_CONFIG = _PermissionsFile(
     rules=(
         {"minds-api-proxy-per-agent-unauthorized": []},
         {"minds-workspaces": ["minds-workspaces-read", "minds-workspaces-destroy-ws1"]},
@@ -54,7 +59,7 @@ def test_fold_is_noop_when_no_workspace_rule_present() -> None:
 
 
 def test_fold_creates_latchkey_self_rule_when_absent() -> None:
-    config = LatchkeyPermissionsConfig(rules=({"minds-workspaces": ["minds-workspaces-read"]},), schemas={})
+    config = _PermissionsFile(rules=({"minds-workspaces": ["minds-workspaces-read"]},), schemas={})
     folded = fold_workspace_scope_into_latchkey_self(config)
     assert folded.rules == ({"latchkey-self": ["minds-workspaces-read"]},)
 
@@ -80,7 +85,7 @@ def test_split_moves_workspace_permissions_back_and_reconstructs_scope_schema() 
 
 
 def test_split_is_noop_when_no_workspace_permissions_on_latchkey_self() -> None:
-    config = LatchkeyPermissionsConfig(
+    config = _PermissionsFile(
         rules=({"latchkey-self": ["latchkey-self-read-self-permissions"]},),
         schemas={},
     )
@@ -98,8 +103,8 @@ def test_fold_then_split_preserves_workspace_permission_set() -> None:
 def test_apply_up_rewrites_every_host_file(tmp_path: Path) -> None:
     host_a = HostId.generate()
     host_b = HostId.generate()
-    save_permissions(permissions_path_for_host(tmp_path, host_a), _LEGACY_CONFIG)
-    save_permissions(permissions_path_for_host(tmp_path, host_b), _LEGACY_CONFIG)
+    _write_permissions_file(permissions_path_for_host(tmp_path, host_a), _LEGACY_CONFIG)
+    _write_permissions_file(permissions_path_for_host(tmp_path, host_b), _LEGACY_CONFIG)
 
     FoldWorkspaceScopeIntoLatchkeySelf(version=1).apply_up(tmp_path)
 
@@ -112,7 +117,7 @@ def test_apply_up_rewrites_every_host_file(tmp_path: Path) -> None:
 
 def test_apply_up_then_down_restores_two_scope_layout(tmp_path: Path) -> None:
     host_id = HostId.generate()
-    save_permissions(permissions_path_for_host(tmp_path, host_id), _LEGACY_CONFIG)
+    _write_permissions_file(permissions_path_for_host(tmp_path, host_id), _LEGACY_CONFIG)
     migration = FoldWorkspaceScopeIntoLatchkeySelf(version=1)
 
     migration.apply_up(tmp_path)

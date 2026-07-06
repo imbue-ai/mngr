@@ -16,24 +16,30 @@ scope schema; ``apply_down`` reverses it, moving the workspace verb permissions
 back into a dedicated ``minds-workspaces`` rule and reconstructing its scope
 schema. The per-verb permission schemas (keyed by verb name) are untouched in
 both directions -- only which scope rule references them changes.
+
+Everything the migration needs -- the permissions-file model, the read/write, and
+the per-host file walk -- is a small frozen copy local to this module rather than
+an import from :mod:`imbue.mngr_latchkey.store`. A migration is a historical
+artifact: pinning it to its own copies means it keeps performing the exact same
+rewrite even if the live store model, its serialization, or the on-disk layout
+later changes (such a change would ship as its own, later migration).
 """
 
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Final
 
 from loguru import logger
+from pydantic import ConfigDict
+from pydantic import Field
 from pydantic import JsonValue
+from pydantic import ValidationError
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr_latchkey.migrations.interface import DataFormatMigration
-from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
-from imbue.mngr_latchkey.store import list_host_permissions_paths
-from imbue.mngr_latchkey.store import load_permissions
-from imbue.mngr_latchkey.store import save_permissions
-
-# Type of the pure per-file transform each migration direction dispatches to.
-_ConfigTransform = Callable[[LatchkeyPermissionsConfig], LatchkeyPermissionsConfig]
+from imbue.mngr_latchkey.migrations.interface import LatchkeyMigrationError
 
 # Frozen snapshot of the pre-migration on-disk format. These are intentionally
 # hardcoded here rather than imported from the live workspace catalog: a
@@ -45,10 +51,7 @@ _LEGACY_WORKSPACES_SCOPE: Final[str] = "minds-workspaces"
 _LEGACY_GATEWAY_SELF_HOST: Final[str] = "latchkey-self.invalid"
 _LEGACY_WORKSPACES_PATH_PREFIX: Final[str] = "/minds-api-proxy/api/v1/workspaces"
 
-# The detent scope the cross-workspace verbs attach to in the new format. Defined
-# locally (rather than imported from ``agent_setup``) to keep the migration layer
-# free of any dependency on the agent-setup module, which itself imports ``core``
-# -- ``core`` runs this migration, so importing it here would form a cycle.
+# The detent scope the cross-workspace verbs attach to in the new format.
 _SCOPE_LATCHKEY_SELF: Final[str] = "latchkey-self"
 
 # Shared prefix of every cross-workspace verb permission name (base verbs like
@@ -56,6 +59,32 @@ _SCOPE_LATCHKEY_SELF: Final[str] = "latchkey-self"
 # ``minds-workspaces-destroy-<id>``). Used to recognize which permissions on the
 # ``latchkey-self`` rule belong to the workspace API when reverting.
 _WORKSPACE_PERMISSION_PREFIX: Final[str] = f"{_LEGACY_WORKSPACES_SCOPE}-"
+
+# The per-host on-disk layout this migration walks. A frozen copy of the store's
+# private layout constants so the migration does not ride on the live values.
+_HOSTS_DIR_NAME: Final[str] = "hosts"
+_PERMISSIONS_FILENAME: Final[str] = "latchkey_permissions.json"
+
+
+class _PermissionsFile(FrozenModel):
+    """Migration-local, frozen view of a permissions file.
+
+    A deliberately independent copy of the parts this migration reads and rewrites
+    (the ``rules`` array and ``schemas`` object), so the migration keeps producing
+    the same historical transform even if ``store.LatchkeyPermissionsConfig`` later
+    changes. Unrecognized top-level keys are dropped on load (matching the store's
+    own save behavior); nothing minds writes to these files lives outside the two
+    modeled sections.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    rules: tuple[dict[str, list[str]], ...] = Field(default_factory=tuple)
+    schemas: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+# Type of the pure per-file transform each migration direction dispatches to.
+_ConfigTransform = Callable[[_PermissionsFile], _PermissionsFile]
 
 
 @pure
@@ -69,7 +98,7 @@ def _union_preserving_order(existing: tuple[str, ...], added: tuple[str, ...]) -
 
 
 @pure
-def fold_workspace_scope_into_latchkey_self(config: LatchkeyPermissionsConfig) -> LatchkeyPermissionsConfig:
+def fold_workspace_scope_into_latchkey_self(config: _PermissionsFile) -> _PermissionsFile:
     """Union any ``minds-workspaces`` rule's permissions onto ``latchkey-self`` and drop the scope.
 
     A no-op (returns an equal config) when the file has no ``minds-workspaces``
@@ -103,7 +132,7 @@ def fold_workspace_scope_into_latchkey_self(config: LatchkeyPermissionsConfig) -
     # Drop the now-defunct ``minds-workspaces`` scope schema; the per-verb
     # permission schemas (keyed by verb name) stay, still referenced above.
     rebuilt_schemas = {name: schema for name, schema in config.schemas.items() if name != _LEGACY_WORKSPACES_SCOPE}
-    return LatchkeyPermissionsConfig(rules=tuple(rebuilt_rules), schemas=rebuilt_schemas)
+    return _PermissionsFile(rules=tuple(rebuilt_rules), schemas=rebuilt_schemas)
 
 
 @pure
@@ -119,7 +148,7 @@ def _build_minds_workspaces_scope_schema() -> dict[str, JsonValue]:
 
 
 @pure
-def split_workspace_scope_out_of_latchkey_self(config: LatchkeyPermissionsConfig) -> LatchkeyPermissionsConfig:
+def split_workspace_scope_out_of_latchkey_self(config: _PermissionsFile) -> _PermissionsFile:
     """Move the workspace verb permissions off ``latchkey-self`` into a ``minds-workspaces`` rule.
 
     The inverse of :func:`fold_workspace_scope_into_latchkey_self`. A no-op when
@@ -149,7 +178,40 @@ def split_workspace_scope_out_of_latchkey_self(config: LatchkeyPermissionsConfig
 
     rebuilt_schemas: dict[str, JsonValue] = dict(config.schemas)
     rebuilt_schemas[_LEGACY_WORKSPACES_SCOPE] = _build_minds_workspaces_scope_schema()
-    return LatchkeyPermissionsConfig(rules=tuple(rebuilt_rules), schemas=rebuilt_schemas)
+    return _PermissionsFile(rules=tuple(rebuilt_rules), schemas=rebuilt_schemas)
+
+
+def _iter_host_permission_files(plugin_data_dir: Path) -> list[Path]:
+    """Return every existing per-host ``latchkey_permissions.json`` under ``plugin_data_dir``."""
+    hosts_root = plugin_data_dir / _HOSTS_DIR_NAME
+    if not hosts_root.is_dir():
+        return []
+    paths = [
+        host_dir / _PERMISSIONS_FILENAME
+        for host_dir in hosts_root.iterdir()
+        if host_dir.is_dir() and (host_dir / _PERMISSIONS_FILENAME).is_file()
+    ]
+    return sorted(paths)
+
+
+def _read_permissions_file(path: Path) -> _PermissionsFile:
+    """Parse a permissions file into the migration-local model."""
+    try:
+        raw = path.read_text()
+    except OSError as e:
+        raise LatchkeyMigrationError(f"Failed to read permissions file {path} during migration: {e}") from e
+    try:
+        return _PermissionsFile.model_validate_json(raw)
+    except ValidationError as e:
+        raise LatchkeyMigrationError(f"Permissions file {path} is malformed; cannot migrate it: {e}") from e
+
+
+def _write_permissions_file(path: Path, config: _PermissionsFile) -> None:
+    """Atomically rewrite a permissions file (mode 0600), mirroring the store's write."""
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(config.model_dump_json(indent=2))
+    tmp_path.chmod(0o600)
+    os.replace(tmp_path, path)
 
 
 class FoldWorkspaceScopeIntoLatchkeySelf(DataFormatMigration):
@@ -166,9 +228,9 @@ class FoldWorkspaceScopeIntoLatchkeySelf(DataFormatMigration):
         plugin_data_dir: Path,
         transform: _ConfigTransform,
     ) -> None:
-        for path in list_host_permissions_paths(plugin_data_dir):
-            config = load_permissions(path)
+        for path in _iter_host_permission_files(plugin_data_dir):
+            config = _read_permissions_file(path)
             transformed = transform(config)
             if transformed != config:
                 logger.debug("Migrating permissions file {} for data-format change", path)
-                save_permissions(path, transformed)
+                _write_permissions_file(path, transformed)
