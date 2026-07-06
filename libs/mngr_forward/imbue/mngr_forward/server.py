@@ -450,11 +450,44 @@ def _emit_backend_failure(
         logger.trace("Could not emit system_interface_backend_failure envelope for {}: {}", agent_id, e)
 
 
-# The proxy loader: the canonical "Loading workspace" page with a 1s meta
-# refresh so it re-attempts the workspace until the backend answers. A
-# downstream consumer can reuse ``render_loading_page`` so its own loading
-# page renders identically.
-_SERVICE_UNAVAILABLE_HTML = render_loading_page(head_extra='    <meta http-equiv="refresh" content="1">\n')
+# The proxy loader: the canonical "Loading workspace" page that re-attempts the
+# workspace until the backend answers. A downstream consumer can reuse
+# ``render_loading_page`` so its own loading page renders identically.
+#
+# It polls in the background (fetch) rather than full-reloading via a
+# ``<meta http-equiv="refresh">``. A full-page reload of this view steals OS
+# focus from any sibling Electron WebContentsView overlaying it -- e.g. the
+# minds bug-report modal -- on every tick, which makes the overlay's inputs
+# impossible to type into (the text already entered survives, but the textarea
+# loses focus each second). Electron has no per-view focus-on-navigation /
+# focusable control for WebContentsView to opt out of this; see
+# https://github.com/electron/electron/issues/42578. Polling leaves the page
+# (and so the focused overlay) untouched while waiting and only navigates once
+# the workspace is actually reachable -- which also keeps the spinner smooth.
+_LOADING_POLL_SCRIPT: Final[str] = """\
+    <script>
+      (function () {
+        var INTERVAL_MS = 1000;
+        function poll() {
+          fetch(window.location.href, { credentials: 'same-origin', redirect: 'manual', cache: 'no-store' })
+            .then(function (resp) {
+              // 503 is this loader (the backend is still unreachable): keep
+              // waiting. Any other status -- or an opaque redirect -- means the
+              // workspace is answering, so navigate to render it for real.
+              if (resp.status === 503) {
+                setTimeout(poll, INTERVAL_MS);
+              } else {
+                window.location.reload();
+              }
+            }, function () {
+              setTimeout(poll, INTERVAL_MS);
+            });
+        }
+        setTimeout(poll, INTERVAL_MS);
+      })();
+    </script>
+"""
+_SERVICE_UNAVAILABLE_HTML = render_loading_page(body_extra=_LOADING_POLL_SCRIPT)
 
 
 def _service_unavailable_response(request: Request) -> Response:
@@ -465,7 +498,8 @@ def _service_unavailable_response(request: Request) -> Response:
     separation keeps the plugin origin-agnostic: it does not need to know
     where any consumer is listening. For browsers that hit the plugin
     directly (including users landing here mid-restart), we serve a styled
-    auto-refreshing loader so the experience is not a blank flash.
+    loading page that polls the workspace in the background and reloads once
+    it answers, so the experience is not a blank flash.
     """
     accepts_html = "text/html" in request.headers.get("accept", "")
     if accepts_html:

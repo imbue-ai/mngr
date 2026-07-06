@@ -7,6 +7,7 @@ const { initSentry, captureManualReport, isLogInclusionEnabled } = require('./se
 const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 const { decideStartupRoute } = require('./startup-routing');
+const { computeBundleViewBounds } = require('./view-layout');
 
 // Initialize Sentry as early as possible so errors thrown during main-process
 // startup (window creation, env setup, backend spawn) are captured. The SDK is
@@ -360,75 +361,48 @@ function updateBundleBounds(bundle) {
   if (!bundle || bundle.window.isDestroyed()) return;
   const { width, height } = bundle.window.getContentBounds();
 
+  // The per-view bounds math -- the takeover collapse, the error-state modal
+  // overlay (so the "Report a bug" /help modal is visible over the error
+  // screen), and the normal inset/accent layout -- lives in
+  // computeBundleViewBounds so it can be unit-tested under plain node. Apply
+  // each result only to the views that currently exist: in the takeover states
+  // the content/modal views are usually already torn down, and during a quit a
+  // present-but-hidden modal is sized to 0x0 (it stays setVisible(false)
+  // regardless). The chrome view fills the window in every regime; in the
+  // normal layout it paints the workspace accent in the inset frame + rounded
+  // corner cutouts the content view leaves, and the modal overlays the whole
+  // window (its own transparent dim backdrop shows the content behind it).
+  const bounds = computeBundleViewBounds({
+    isErrorState: bundle.isErrorState,
+    isLoadingState: bundle.isLoadingState,
+    isQuittingState: bundle.isQuittingState,
+    modalVisible: bundle.modalVisible,
+    width,
+    height,
+    titlebarHeight: TITLEBAR_HEIGHT,
+    contentInset: CONTENT_INSET,
+  });
+  // A takeover collapses the overlay view out from under any showing tooltip, so
+  // drop the flag that says the tooltip owns the view's bounds. Otherwise the
+  // modal-bounds gate below would keep skipping the full-window restore after
+  // recovery and leave the overlay surface stuck at 0x0.
   if (bundle.isErrorState || bundle.isLoadingState || bundle.isQuittingState) {
-    // The chrome view takes over the whole window; every other view collapses
-    // to zero so the takeover screen (shell.html) is the only thing visible.
-    // For loading/error the auxiliary views are already absent, so the loop is
-    // a no-op there; the quitting flip leaves them present-but-hidden, so this
-    // guarantees none of them peek out from behind the full-window chrome view.
-    if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
-      bundle.chromeView.setBounds({ x: 0, y: 0, width, height });
-    }
-    // A takeover collapses the overlay view out from under any showing tooltip,
-    // so drop the flag that says the tooltip owns the view's bounds. Otherwise
-    // the gate below would keep skipping the full-window restore after recovery
-    // and leave the overlay surface stuck at 0x0.
     bundle.tooltipVisible = false;
-    for (const view of [bundle.contentView, bundle.modalView]) {
-      if (view && !view.webContents.isDestroyed()) {
-        view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
-      }
-    }
-    return;
   }
-
   if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
-    // The chromeView covers the entire window. Its body background is
-    // ``var(--titlebar-bg)``, so wherever the contentView doesn't paint
-    // (the ``CONTENT_INSET``-wide frame around three sides and the
-    // rounded-corner cutouts at all four corners of the contentView),
-    // the chromeView fills in with the current workspace's accent
-    // color. This mirrors browser mode where the iframe sits inside a
-    // matching body inset that paints the same accent color.
-    bundle.chromeView.setBounds({ x: 0, y: 0, width, height });
+    bundle.chromeView.setBounds(bounds.chrome);
   }
   if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
-    // Inset the contentView by ``CONTENT_INSET`` on left, right, and
-    // bottom (top is flush with the titlebar's bottom edge). That gap
-    // plus ``setBorderRadius(CONTENT_CORNER_RADIUS)`` (applied in
-    // ``createBundleWebContentsViews``) together create the "tucks
-    // under a rounded inset frame" look without needing per-corner
-    // control: all four corners of the contentView are visibly rounded
-    // and the cutouts reveal accent color (the chromeView below),
-    // independent of whatever background the workspace content paints.
-    bundle.contentView.setBounds({
-      x: CONTENT_INSET,
-      y: TITLEBAR_HEIGHT,
-      width: width - CONTENT_INSET * 2,
-      height: height - TITLEBAR_HEIGHT - CONTENT_INSET,
-    });
+    bundle.contentView.setBounds(bounds.content);
   }
-  // The modal overlays the entire window (including the title bar) so
-  // the inbox drawer reads as a top-level panel rather than something
-  // nested under the chrome. On macOS the OS-level traffic-light
-  // buttons stay visible (they're floating overlays the system draws);
-  // the in-content window controls used on Windows/Linux are hidden
-  // while the modal is open and reappear on close. The view is
-  // transparent, so the dialog's own dim backdrop shows the workspace
-  // behind it.
   if (bundle.modalView && !bundle.modalView.webContents.isDestroyed()) {
     // While a tooltip is showing (and no modal is open), the overlay manager
     // owns the view's bounds (it's shrunk to the tooltip's rect); leave them so
     // a resize doesn't snap it back to full-window. Tooltips dismiss on resize,
-    // which restores the full-window bounds. Otherwise the overlay view spans
-    // the whole window (hidden when idle, captured/visible when a modal opens).
+    // which restores the full-window bounds. Otherwise apply the computed bounds
+    // (full window normally / when a modal is open, collapsed during a takeover).
     if (!(bundle.tooltipVisible && !bundle.modalVisible)) {
-      bundle.modalView.setBounds({
-        x: 0,
-        y: 0,
-        width,
-        height,
-      });
+      bundle.modalView.setBounds(bounds.modal);
     }
   }
 }
@@ -607,6 +581,15 @@ function createBundle() {
     inboxListReloadTimer: null,
     currentContentUrl: null,
     currentWorkspaceId: null,
+    // Whether the content view is currently displaying a REACHABLE workspace
+    // rather than the "Loading workspace" proxy loader. The mngr_forward proxy
+    // serves that loader (HTTP 503) at the workspace's own URL while the backend
+    // is still unreachable, so ``currentWorkspaceId`` alone can't tell a loaded
+    // workspace from one that's merely loading (or stopped). Tracked from the
+    // content view's ``did-navigate`` HTTP status and forwarded to the chrome so
+    // the get-help modal only offers "have an agent help" when the workspace can
+    // actually host a chat. False until a non-loader navigation confirms it.
+    contentWorkspaceReady: false,
     // ``currentAccentAgentId`` is the accent source of THIS window's current
     // screen -- the workspace id whose color tints the titlebar -- kept as a
     // tiny piece of per-window state only so the chrome renderer (a separate
@@ -665,14 +648,26 @@ function wireContentViewEvents(bundle, contentView) {
     }
   });
 
-  const onContentNavigate = (url) => {
+  const onContentNavigate = (url, httpResponseCode) => {
     if (!bundle.isErrorState) {
       bundle.currentContentUrl = url;
       bundle.preErrorUrl = url;
     }
     const newAgentId = parseWorkspaceId(url);
-    if (bundle.currentWorkspaceId !== newAgentId) {
+    // Recompute workspace reachability from the HTTP status. The mngr_forward
+    // proxy serves its "Loading workspace" loader as HTTP 503 at the workspace's
+    // own URL while the backend is unreachable, so a non-success status on a
+    // workspace URL means "still loading / not reachable" (a loaded workspace
+    // answers 200). Only a full navigation carries a status; ``did-navigate-in-page``
+    // (anchors, pushState) passes undefined, and since it doesn't reload the
+    // document we keep the prior readiness in that case.
+    let newContentReady = bundle.contentWorkspaceReady;
+    if (httpResponseCode !== undefined) {
+      newContentReady = !!newAgentId && httpResponseCode < 400;
+    }
+    if (bundle.currentWorkspaceId !== newAgentId || bundle.contentWorkspaceReady !== newContentReady) {
       bundle.currentWorkspaceId = newAgentId;
+      bundle.contentWorkspaceReady = newContentReady;
       sendCurrentWorkspaceToBundleViews(bundle);
     }
     // Tint the titlebar with the workspace's accent on any
@@ -700,7 +695,7 @@ function wireContentViewEvents(bundle, contentView) {
     sendToOverlayFrames(bundle, 'content-url-changed', url);
   };
 
-  contentView.webContents.on('did-navigate', (_e, url) => onContentNavigate(url));
+  contentView.webContents.on('did-navigate', (_e, url, httpResponseCode) => onContentNavigate(url, httpResponseCode));
   contentView.webContents.on('did-navigate-in-page', (_e, url) => onContentNavigate(url));
 
   // Enforce workspace uniqueness at the Electron level so it applies to EVERY
@@ -1153,10 +1148,14 @@ function toggleInbox(bundle) {
 // currently-displayed workspace, or falsy on a general screen) is forwarded as a
 // ?workspace= query so the help page can scope its bug report to that workspace.
 
-function helpUrlFor(agentId, description) {
+function helpUrlFor(agentId, description, assistAvailable) {
   if (!backendBaseUrl) return null;
   const params = new URLSearchParams();
   if (agentId) params.set('workspace', agentId);
+  // ``assist=1`` enables the "have an agent help" option; the titlebar sets it only when the
+  // displayed workspace is healthy (chrome.js), so it stays off for the recovery / agent-escalation
+  // open-help paths that don't pass it. The workspace id is still sent for report scoping.
+  if (assistAvailable) params.set('assist', '1');
   // A description is only ever passed by the open_help (agent-escalation) flow; the
   // titlebar button opens /help with none. So a present description marks this as an
   // agent-submitted report, which the /help page frames differently (agent wording,
@@ -1179,17 +1178,17 @@ function isHelpModalOpen(bundle) {
   }
 }
 
-function openHelp(bundle, agentId, description) {
+function openHelp(bundle, agentId, description, assistAvailable) {
   if (!bundle || bundle.window.isDestroyed()) return;
-  const url = helpUrlFor(agentId, description);
+  const url = helpUrlFor(agentId, description, assistAvailable);
   if (!url) return;
   openModal(bundle, url);
 }
 
-function toggleHelp(bundle, agentId) {
+function toggleHelp(bundle, agentId, assistAvailable) {
   if (!bundle || bundle.window.isDestroyed()) return;
   if (isHelpModalOpen(bundle)) closeModal(bundle);
-  else openHelp(bundle, agentId);
+  else openHelp(bundle, agentId, undefined, assistAvailable);
 }
 
 // Coalesce rapid SSE-triggered chrome-event posts so the inbox shell
@@ -1221,7 +1220,7 @@ function sendCurrentWorkspaceToBundleViews(bundle) {
   // navigation handlers off ``parseAccentSourceAgentId(url)`` and re-primed
   // when the chrome view (re)loads.
   if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
-    bundle.chromeView.webContents.send('current-workspace-changed', bundle.currentWorkspaceId);
+    bundle.chromeView.webContents.send('current-workspace-changed', bundle.currentWorkspaceId, bundle.contentWorkspaceReady);
   }
   // The sidebar/inbox run in overlay iframes, so fan out per-frame.
   sendToOverlayFrames(bundle, 'current-workspace-changed', bundle.currentWorkspaceId);
@@ -1241,6 +1240,11 @@ function loadUrlIntoBundleContentView(bundle, url) {
   const intendedAgentId = parseWorkspaceId(url);
   if (intendedAgentId) {
     bundle.currentWorkspaceId = intendedAgentId;
+    // We're only starting the navigation; the workspace isn't confirmed
+    // reachable until ``did-navigate`` lands a non-loader status, so clear
+    // readiness now to avoid a stale "reachable" carrying over from the
+    // previously-displayed workspace during the load.
+    bundle.contentWorkspaceReady = false;
     bundle.currentContentUrl = url;
     bundle.preErrorUrl = url;
     updateOsTitle(bundle);
@@ -3077,8 +3081,8 @@ ipcMain.on('toggle-inbox', (event) => {
   toggleInbox(getBundleFromEvent(event));
 });
 
-ipcMain.on('toggle-help', (event, agentId) => {
-  toggleHelp(getBundleFromEvent(event), agentId);
+ipcMain.on('toggle-help', (event, agentId, assistAvailable) => {
+  toggleHelp(getBundleFromEvent(event), agentId, assistAvailable);
 });
 
 // One-shot bug report from the full-app error takeover (shell.html), used when the
