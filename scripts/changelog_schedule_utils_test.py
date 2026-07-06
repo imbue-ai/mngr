@@ -10,6 +10,7 @@ from scripts.changelog_schedule_utils import MNGR_ROOT_NAME
 from scripts.changelog_schedule_utils import ModalCommandError
 from scripts.changelog_schedule_utils import ModalSchemaError
 from scripts.changelog_schedule_utils import PROVIDER
+from scripts.changelog_schedule_utils import USER_ID
 from scripts.changelog_schedule_utils import _ENABLED_PLUGINS
 from scripts.changelog_schedule_utils import disable_plugin_args
 from scripts.changelog_schedule_utils import stop_all_apps_in_changelog_envs
@@ -170,6 +171,31 @@ def test_cli_print_provider_matches_constant() -> None:
         timeout=30,
     )
     assert result.stdout.strip() == PROVIDER
+
+
+def test_user_id_is_pinned_lowercase_hex() -> None:
+    """The user_id names the schedule's Modal environment; it must be a stable
+    32-char lowercase-hex UUID (the format mngr's uuid4().hex generates), since
+    a malformed value would silently produce a different environment name.
+    """
+    assert len(USER_ID) == 32
+    assert all(c in "0123456789abcdef" for c in USER_ID)
+
+
+def test_cli_print_user_id_matches_constant() -> None:
+    """The CLI flag is the integration point with changelog_deploy.sh and the
+    changelog-trigger justfile recipe (both export it as MNGR_USER_ID to pin the
+    Modal environment); its output must match the in-process constant so the
+    deploy and the on-demand trigger can't drift onto different environments.
+    """
+    result = subprocess.run(
+        [sys.executable, str(_SCRIPT_PATH), "--print-user-id"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    assert result.stdout.strip() == USER_ID
 
 
 def test_cli_without_action_errors_and_mentions_flag() -> None:

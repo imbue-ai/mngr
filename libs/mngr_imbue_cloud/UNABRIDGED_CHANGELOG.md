@@ -4,6 +4,38 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-01
+
+Removed the legacy OVH-VPS pool-host backend from `mngr imbue_cloud admin pool`. Pool hosts are now exclusively bare-metal slices (lima VMs carved on our bare-metal boxes).
+
+- `admin pool create` is slice-only: the `--backend` flag and the OVH-VPS-only flags (`--tag`, `--management-public-key-file`, `--no-recycle`) are gone, and `--server-id` (the bare-metal box to bake onto) is required.
+
+- `admin pool destroy` always tears down the slice's lima VM before dropping the row (the OVH-VPS cancel path is removed); `--skip-vps-cancel` still skips teardown when the VM is already gone.
+
+- Dropped the `backend_kind` discriminator (CLI/value/column) — there is only one backend now.
+
+OVH as the bare-metal-box supplier is unchanged: box ordering, OVH catalog pricing, region/datacenter validation, and the `bare_metal_servers` records all remain.
+
+Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.
+
+## 2026-06-28
+
+Accelerated imbue_cloud bare-metal slice bakes by building the forever-claude-template (FCT) image once per box instead of once per slice.
+
+The first production (`--from-tag`) slice baked on a box builds the FCT image, bakes Playwright/Chromium into it, and saves it to a box-local tar; every subsequent slice on that box `docker load`s that tar instead of rebuilding from the Dockerfile. This removes the per-slice 10-20 minute image build and the per-slice ~900s first-boot Playwright install for all but the first slice.
+
+The image is transferred entirely over the box's own loopback (no external bandwidth, nothing left reachable from a leased slice), using a unique ephemeral SSH key per transfer that is destroyed afterward. Dev (`--workspace-dir`) bakes are unchanged and always build from the Dockerfile.
+
+Adds bounded transient-transport retry to the connector HTTP client's tunnel operations. The connector is a scale-to-zero Modal app, so a call that hits a cold/scaling instance can fail at the transport layer (DNS "name or service not known", connection reset, connect timeout) before any HTTP response -- previously surfacing as a raw httpx traceback and a non-zero exit. The tunnel client methods now route through a shared `_send` helper that retries `httpx.TransportError` with bounded exponential backoff (idempotent GET/PUT/DELETE and upsert-style POSTs retry on any transport error; the non-idempotent lease/create POSTs retry only on connect-phase errors, where the request never reached the server, to avoid double-allocation) and, on terminal failure, raises a clean domain error (`ImbueCloud*Error`) carrying a concise message instead of the raw traceback. HTTP status errors (4xx/5xx) flow through the existing `_check` handling unchanged and are never retried. This fixes the intermittent `502 tunnels list failed` an agent hit when toggling workspace sharing through the minds API.
+
+Fixed the per-box FCT image seed: the cloud-side Playwright/Chromium bake now invokes `uv run python -m playwright install` instead of the `playwright` console script.
+
+The FCT image builds its uv venv at `/mngr/code` and then relocates the workspace to `/docker_build_code`. A uv venv is path-bound -- its console-script shebangs hardcode the original `/mngr/code/.venv/bin/python` -- so running the `playwright` script from the relocated path failed the seed with `Failed to spawn: playwright`, which left every production (`--from-tag`) slice bake unable to produce the box tar. Invoking via `python -m` goes through the venv's relocatable interpreter symlink and succeeds.
+
+## 2026-06-26
+
+`mngr imbue_cloud admin server setup` now retries the OVH OS reinstall when OVH transiently fails its OS-compatibility lookup for a valid template (the `"retrieving compatibility details"` error), instead of aborting the whole setup. The kickoff POST is retried for up to 5 minutes (15s interval); the generated SSH host key is created once and reused across attempts so the pinned host key stays stable. Any non-transient OVH error still propagates immediately.
+
 ## 2026-06-24
 
 `mngr imbue_cloud admin pool create` now validates `--region` against the known lease regions (`US-EAST-VA`, `US-WEST-OR`) and fails fast with a clear error if given anything else -- most importantly a raw OVH datacenter code (e.g. `vin`, which `admin server list` prints). Previously the region was accepted as a free-form string and stamped verbatim onto the `pool_hosts` row; a datacenter code there made the host permanently unleasable, because the connector's lease-time region filter is an exact, never-relaxed string match against the lease label the create form requests.

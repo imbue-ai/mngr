@@ -4,6 +4,16 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-01
+
+Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.
+
+## 2026-06-26
+
+Added scope docstrings to this package's release tests so the TMR (test
+map-reduce) harness can anchor each test's intended scope on its docstring
+rather than on a tutorial block. Docstring-only; no test logic changed.
+
 ## 2026-06-22
 
 An unauthenticated OVH provider now errors instead of silently reporting zero agents.

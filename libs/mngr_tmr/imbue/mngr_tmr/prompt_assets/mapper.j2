@@ -1,5 +1,16 @@
 Run the test with: {{ run_cmd }}
 
+# The docstring is the contract
+
+This test's docstring defines its scope: exactly what the test is meant to
+verify. Your job is to make the test pass and make it verify exactly that scope
+-- no more, no less. The docstring is authoritative: do NOT re-derive the
+intended scope from the commands or the implementation. Read the docstring and
+take it as given.
+
+The docstring is READ-ONLY. Never edit it (the one narrow exception is in
+"# Correcting an outdated tutorial block" below).
+
 # If the test fails
 
 You can record multiple kinds of changes -- they are not mutually exclusive (one
@@ -12,94 +23,63 @@ Each change has a status: "SUCCEEDED" if the fix worked, "FAILED" if you tried
 but could not complete it, or "BLOCKED" if the issue needs larger intervention
 beyond this task. If you cannot determine what is wrong, report no changes.
 
+When deciding whether to fix the test or the implementation, the docstring is the
+arbiter: the correct behavior is whatever the docstring's scope says it should
+be. If the implementation diverges from the documented scope, fix the
+implementation; if the test asserts something outside the documented scope, fix
+the test.
+
 # If the test succeeds - or after you fixed a failing test
 
-A test should match the tutorial block it corresponds to as closely as possible.
-That fixes the test's natural size. A passing test already at that size needs no
-change: leaving the changes object empty is a correct, good outcome, NOT a
-failure. Do not add assertions or steps merely to be thorough -- thoroughness
-with nothing to verify is just brittleness.
+Make the test verify exactly its docstring scope -- check it in BOTH directions:
 
-Bring the test to its natural size by checking it in BOTH directions:
+- Coverage (forward): is everything the scope calls for actually verified? If the
+  scope says to observe a real effect (e.g. that an agent is running in a given
+  directory, not merely that the command exited 0), the test must observe it. Add
+  any missing verification the scope requires.
 
-- Forward (coverage): is everything that should be verified actually verified?
-  Two sources drive this:
+- Trace (backward): does every assertion trace back to the scope? An assertion
+  that verifies something the scope does not mention is gold-plating: it adds
+  brittleness without verifying documented behavior. REMOVE it.
 
-  1. What the tutorial block explicitly mentions. This is a hard requirement.
-     Observe the real effect the way a human would when debugging interactively
-     (files, git status, command output). If the block creates an agent in a
-     directory, verify it is running there (e.g. `mngr exec $agent pwd`), not
-     merely that the command exited 0.
-
-  2. What effect the command itself implies, even when the block does not spell
-     it out:
-     - Command level: running `mngr foo` must do *something* -- either a
-       real-world side effect you can observe, or something in its output. Do
-       just enough verification to show that effect exists. Golden rule: the
-       assertion should pass for this particular command, but FAIL if the command
-       were not run, or were replaced by a no-op.
-     - Flag level: `mngr foo ... --bar=lorem` must do something *different* from
-       the same command without `--bar=lorem`. Verify that difference, by the
-       same golden rule.
-     - Occasionally you want to verify the *absence* of an effect: establish a
-       baseline before the command and check it has not moved afterwards (e.g. a
-       file that did not exist still does not). This can be genuinely tricky --
-       do not spend too much effort on it when it is.
-
-- Backward (trace): does every assertion trace back to one of those two sources
-  -- a tutorial claim, or a command/flag effect? An assertion that serves neither
-  is gold-plating: it adds brittleness without verifying documented or implied
-  behavior. REMOVE it. This matters most on simple commands (e.g. help/flag
-  output): that the command succeeds and its output shows the key effect is
-  enough; do not accumulate assertions on incidental wording.
+A test that already verifies exactly its scope needs no change: leaving the
+changes object empty is a correct, good outcome, NOT a failure. Do not add
+assertions merely to be thorough -- the scope fixes what "thorough" means here.
 
 Removing or simplifying an over-fitted assertion is a real improvement, exactly
 as valuable as adding a missing one -- both are recorded under "IMPROVE_TEST".
 
 You may add a separate pytest function for an unhappy/error path when the
-command's documented behavior includes that failure mode (two functions may
-share one block). Only do so when the error behavior is part of what the block
-demonstrates -- not to manufacture extra coverage.
+docstring's scope includes that failure mode. Only do so when the scope calls for
+it -- not to manufacture extra coverage.
 
 If you make improvements (adding, removing, or restructuring), record a change
 under the key "IMPROVE_TEST". If an improvement needs a larger-scale
 intervention, use status "BLOCKED". If the test already verifies exactly its
-block's claims, leave the changes object empty.
+scope, leave the changes object empty.
 
-# Guidelines for test quality
+# Correcting an outdated tutorial block
 
-When writing or improving tests, follow these principles:
+Some tests are anchored to a documentation tutorial: their docstring begins with
+a "Tutorial block:" section holding a shell snippet verbatim, kept in sync with
+libs/mngr/imbue/mngr/resources/mega_tutorial.sh. This block is the ONLY part of
+any docstring you may edit, and only in one case: the block is genuinely wrong or
+outdated relative to how the command actually behaves now.
 
-**Run the actual commands from the script block.** The test must run commands that
-match the script block as closely as possible. For example, if the script block
-demonstrates `mngr create --foo`, the test must run `mngr create --foo` (with
-optional extra flags) -- it must NOT simply run `mngr create --help` and verify
-that `--foo` is a supported flag. The test fixture already sets up an isolated
-environment, so using hardcoded agent names is fine.
-
-**Verify the behavior the block demonstrates, not just surface-level output.**
-The script blocks usually don't contain verification code, but the test must
-verify the behavior the block demonstrates, by observing concrete effects. For
-example, if a script block creates an agent in a specific directory, it is not
-sufficient to only verify that the agent appears in the result of `mngr list` --
-you must also verify that the agent is running in that directory, e.g. by running
-`mngr exec $agent_name pwd` and checking its output. Conversely, do not assert on
-effects the block does not demonstrate (see the forward/backward check above):
-over-specific assertions make tests brittle without verifying documented behavior.
-
-**Add comments to transcript commands.** The `e2e.run()` method accepts an
-optional `comment` parameter that is recorded in the transcript above the command
-(as `# ...` lines). Use this to annotate each command with a brief description of
-what it does. Reuse comments from the tutorial script block where available.
+When that happens, update BOTH the "Tutorial block:" section in the docstring and
+the corresponding block in mega_tutorial.sh (keep them identical, modulo leading
+whitespace), and record the change under the key "FIX_TUTORIAL". This should be
+rare. The "Scope:" prose and every other docstring are always off-limits. Tests
+without a "Tutorial block:" section have no tutorial to fix.
 
 # Cross-cutting setup blockers
 
 Some problems can only be fixed by a substantial, shared setup change that is out
-of scope for a single test -- for example, the suite mocking a claude or codex
-agent with a `sleep` command instead of a real fake-agent fixture, a missing
-shared helper, or a dependency on credentials absent from the environment (e.g.
-OpenAI credentials for codex). You see only one test, so you cannot tell whether
-such setup is duplicated across the suite, nor fix it suite-wide.
+of scope for a single test -- for example, the suite mocking an agent with a
+`sleep` command instead of a real fake-agent fixture, a missing shared helper, or
+a dependency on credentials absent from the environment (e.g. cloud credentials
+for a provider test). You see only one test, so you cannot tell whether such
+setup is duplicated across the suite, nor fix it suite-wide.
 
 When you hit one, do NOT paper over it with a brittle local hack. Instead:
 
@@ -115,30 +95,14 @@ A later integration step collects these comments, resolves the ones it can verif
 suite-wide, and surfaces the rest to the user. Your job is only to flag them
 clearly -- do not attempt the suite-wide change yourself.
 
-# Examining the CLI transcript
+# Examining the test output
 
-After each test run, examine the generated CLI transcript (in the test output
-directory). Look for unexpected output such as warnings, deprecation notices,
-or error messages that were not caught by the test assertions. If you find
-something concerning, consider whether the test should assert on it, or whether
-the implementation should be fixed to avoid the warning.
-
-# Inspecting tutorial blocks
-
-Each of those tests are also associated with a tutorial block in
-libs/mngr/imbue/mngr/resources/mega_tutorial.sh; we divide the file into blocks by splitting
-around empty lines. You'll find a reproduction of a tutorial block using the API
-e2e.write_tutorial_block. When modifying the test, you should normally keep the
-tutorial block unchanged: they should match exactly with the block in the tutorial
-file (modulo leading whitespaces).
-
-However, try to think if tutorial itself could be wrong or outdated. This should be
-a rare case - often the tutorial block is a bit too concise to be run as-is, and
-that may be intentional.
-
-If you do think that the tutorial block is wrong or outdated, update both the
-tutorial block in the mega_tutorial.sh resource file and the test code itself, and record
-a change under the key "FIX_TUTORIAL".
+After each test run, examine any output the test produced (logs, a CLI
+transcript in the test output directory, captured stdout/stderr). Look for
+unexpected output such as warnings, deprecation notices, or error messages that
+were not caught by the test assertions. If you find something concerning,
+consider whether the test should assert on it (only if the scope covers it), or
+whether the implementation should be fixed to avoid the warning.
 
 # Committing your changes
 
@@ -148,25 +112,30 @@ in brackets. Examples:
 
   [FIX_TEST] Fix assertion to check exit code instead of stdout
   [FIX_IMPL] Add missing timeout parameter to create command
-  [IMPROVE_TEST] Add edge case for empty agent list
+  [IMPROVE_TEST] Remove assertion outside the documented scope
 
 This means if you make both a FIX_TEST and a FIX_IMPL change, you should have
 exactly two commits. Do NOT mix different kinds in the same commit.
 
 # Running tests multiple times
-
+{% if e2e_run_name %}
 You may run the test multiple times during your work (initial run, then after
 each fix attempt). Each run should use a DIFFERENT --mngr-e2e-run-name value
 by appending a suffix to the base run name that was passed to you:
 
-  First run:  --mngr-e2e-run-name <base>_try_1
-  Second run: --mngr-e2e-run-name <base>_try_2
+  First run:  --mngr-e2e-run-name {{ e2e_run_name }}_try_1
+  Second run: --mngr-e2e-run-name {{ e2e_run_name }}_try_2
   ...and so on.
 
 This ensures each run's artifacts (transcripts, recordings) are kept separately.
 Before each run, decide on a brief description: "initial run" for the first one,
 or something like "after fixing assertion timeout" for subsequent runs.
-
+{% else %}
+You may run the test multiple times during your work (initial run, then after
+each fix attempt). Before each run, decide on a brief description: "initial run"
+for the first one, or something like "after fixing assertion timeout" for
+subsequent runs. Record each run in the test_runs field of the outcome.
+{% endif %}
 # Writing the result
 
 Write the result atomically to avoid races with the orchestrator reading it:
@@ -181,8 +150,8 @@ The schema is:
  "tests_passing_after": true,
  "summary_markdown": "Fixed test assertion and verified it passes.",
  "test_runs": [
-   {"run_name": "<base>_try_1", "description_markdown": "initial run"},
-   {"run_name": "<base>_try_2", "description_markdown": "after fixing assertion timeout"}
+   {"run_name": "<try_1>", "description_markdown": "initial run"},
+   {"run_name": "<try_2>", "description_markdown": "after fixing assertion timeout"}
  ]}
 
 Fields:
@@ -194,8 +163,7 @@ Fields:
 - tests_passing_after: are tests passing now, after all your changes?
 - summary_markdown: overall markdown summary of what happened.
 - test_runs: list of objects, one per test run, in order. Each has run_name
-  (matching the --mngr-e2e-run-name used) and description_markdown (brief
-  description of what this run was for).
+  and description_markdown (brief description of what this run was for).
 
 # Publishing the outputs archive
 

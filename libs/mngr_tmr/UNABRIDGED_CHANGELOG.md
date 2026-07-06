@@ -4,6 +4,24 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-01
+
+Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.
+
+## 2026-06-26
+
+TMR is now generic over any release test rather than specific to the mngr e2e
+tutorial tests. Each test's docstring is the scope contract: the mapper agent
+makes the test verify exactly what its docstring describes and treats the
+docstring as read-only (the one exception being an outdated `Tutorial block:`
+section, which it may correct along with `mega_tutorial.sh` as a `FIX_TUTORIAL`
+change). The mapper and reducer prompts no longer re-derive scope from the
+tutorial or assume e2e-only conventions.
+
+The e2e-only `--mngr-e2e-run-name` flag is now injected only for e2e tests, so
+TMR can run the non-e2e release tests (install/docker/cli and the per-provider
+packages) without pytest erroring on an unrecognized argument.
+
 ## 2026-06-25
 
 Reworked the TMR agent prompts so generated e2e tests converge to a stable size instead of accreting assertions every run:

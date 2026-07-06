@@ -14,6 +14,7 @@ Jinja2 macros + ``{% extends %}`` to JinjaX components.
 
 import html
 import os
+import re
 from collections.abc import Collection
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -39,6 +40,7 @@ from imbue.minds.primitives import OneTimeCode
 from imbue.minds.utils.sentry.frontend import frontend_sentry_browser_payload
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import InvalidName
 from imbue.mngr_forward.loading_page import render_loading_page
 
 TEMPLATE_DIR: Final[Path] = Path(__file__).resolve().parent / "templates"
@@ -103,7 +105,7 @@ _BTN_VARIANTS: Final[Mapping[str, str]] = {
 # recoloring it.
 _INPUT_BASE: Final[str] = (
     "p-2 type-body border border-strong bg-surface-primary text-primary "
-    "placeholder:text-tertiary hover:border-stronger "
+    "placeholder:text-tertiary hover:border-stronger focus:border-stronger "
     "focus:outline-2 focus:outline-offset-2 focus:outline-accent"
 )
 
@@ -216,7 +218,6 @@ CATALOG: Final[Catalog] = _build_catalog()
 def render_landing_page(
     accessible_agent_ids: Sequence[AgentId],
     mngr_forward_origin: str = "",
-    telegram_status_by_agent_id: dict[str, bool] | None = None,
     is_discovering: bool = False,
     agent_names: dict[str, str] | None = None,
     destroying_status_by_agent_id: dict[str, str] | None = None,
@@ -231,9 +232,6 @@ def render_landing_page(
     (e.g. ``"http://localhost:8421"``). Workspace links target
     ``{mngr_forward_origin}/goto/<agent>/`` because Phase 2 deletes minds'
     in-process subdomain forwarder; the plugin owns ``/goto/`` now.
-
-    telegram_status_by_agent_id maps agent ID strings to whether they have
-    active Telegram bot credentials. When None, no telegram buttons are shown.
 
     agent_names maps agent ID strings to human-readable workspace names.
 
@@ -267,8 +265,6 @@ def render_landing_page(
         agent_ids=accessible_agent_ids,
         agent_accents=effective_accents,
         mngr_forward_origin=mngr_forward_origin,
-        telegram_enabled=telegram_status_by_agent_id is not None,
-        telegram_status_by_agent_id=telegram_status_by_agent_id or {},
         is_discovering=is_discovering,
         agent_names=agent_names or {},
         destroying_status_by_agent_id=destroying_status_by_agent_id or {},
@@ -281,11 +277,14 @@ def render_landing_page(
 # Hardcoded fallbacks for the workspace-creation form. Overridable via the
 # MINDS_WORKSPACE_* env vars only when the operator explicitly opts in -- see
 # ``_operator_workspace_default`` for the gating rationale.
-_FALLBACK_GIT_URL: Final[str] = "https://github.com/imbue-ai/forever-claude-template.git"
+# Public alias: the default forever-claude-template repo URL. The pre-baked Lima
+# image gate (lima_image_prefetch) keys on this to recognize the default workspace.
+DEFAULT_FOREVER_CLAUDE_GIT_URL: Final[str] = "https://github.com/imbue-ai/forever-claude-template.git"
+_FALLBACK_GIT_URL: Final[str] = DEFAULT_FOREVER_CLAUDE_GIT_URL
 # Pin to an annotated FCT tag so a shipped binary clones the exact FCT
 # snapshot it was verified against. Bump to a newer tag only after
 # re-verifying launch-to-msg CI against (this binary, the new tag).
-FALLBACK_BRANCH: Final[str] = "minds-v0.3.4"
+FALLBACK_BRANCH: Final[str] = "minds-v0.3.5"
 
 # Env var (set by ``just minds-start`` and the e2e workspace runner) that opts a
 # launch into the operator's local-worktree create-form defaults. Gating on an
@@ -299,10 +298,20 @@ FALLBACK_BRANCH: Final[str] = "minds-v0.3.4"
 _WORKSPACE_DEFAULTS_OPT_IN_ENV_VAR: Final[str] = "MINDS_USE_LOCAL_WORKSPACE_DEFAULTS"
 
 
+def is_local_workspace_defaults_opt_in() -> bool:
+    """Return whether the operator opted into local-worktree create-form defaults (the dev loop).
+
+    True when ``MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1`` -- the same signal that
+    routes the create form at the operator's local FCT worktree. The pre-baked
+    image gate treats this as "dev loop" and falls back to build-in-VM.
+    """
+    return os.environ.get(_WORKSPACE_DEFAULTS_OPT_IN_ENV_VAR) == "1"
+
+
 def _operator_workspace_default(env_var: str, fallback: str) -> str:
     """Return ``env_var`` only when the operator explicitly opted in; else ``fallback``.
 
-    The MINDS_WORKSPACE_GIT_URL / _NAME / _BRANCH env vars wire the create-form
+    The MINDS_WORKSPACE_GIT_URL / _BRANCH env vars wire the create-form
     defaults to the operator's local FCT worktree. They are honored only when
     ``MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1`` is set in the same environment
     (``just minds-start`` and the e2e runner set it). An end-user ``minds run``
@@ -322,8 +331,29 @@ def _operator_workspace_default(env_var: str, fallback: str) -> str:
 
 
 # Base for auto-generated workspace host names. The generic default is never
-# used bare -- it is always numbered (``mind-1``, ``mind-2``, ...).
-_DEFAULT_HOST_NAME_BASE: Final[str] = "mind"
+# used bare -- it is always numbered (``workspace-1``, ``workspace-2``, ...).
+_DEFAULT_HOST_NAME_BASE: Final[str] = "workspace"
+
+# Minds derives a short, pretty host-name slug from the user's arbitrary
+# display name. The slug target is well under mngr's ``HostName`` hard cap.
+_MINDS_HOST_NAME_SLUG_MAX_LENGTH: Final[int] = 32
+_NON_SLUG_CHARS_RE: Final = re.compile(r"[^a-z0-9]+")
+
+
+def normalize_host_name_slug(text: str) -> HostName:
+    """Convert an arbitrary human-readable name into a normalized host-name slug.
+
+    Lowercases, replaces every run of non-alphanumeric characters with a single
+    dash, trims leading/trailing dashes, and truncates to the slug length cap.
+    Raises ``InvalidName`` if the result is empty (e.g. the input was all
+    emoji/punctuation).
+    """
+    lowered = text.strip().lower()
+    collapsed = _NON_SLUG_CHARS_RE.sub("-", lowered).strip("-")
+    truncated = collapsed[:_MINDS_HOST_NAME_SLUG_MAX_LENGTH].strip("-")
+    if not truncated:
+        raise InvalidName("Workspace name must include at least one letter or number.")
+    return HostName(truncated)
 
 
 @pure
@@ -339,8 +369,8 @@ def make_unique_host_name(base: str, existing_host_names: Collection[str], *, al
 
     With ``always_number`` True, ``base`` is never used bare: the smallest free
     ``base-1``, ``base-2``, ... is returned. This is the generic default's
-    scheme, which has no bare ``mind`` form; a gap left by a destroyed
-    ``mind-2`` is reused before climbing to ``mind-4``.
+    scheme, which has no bare ``workspace`` form; a gap left by a destroyed
+    ``workspace-2`` is reused before climbing to ``workspace-4``.
 
     Raises ``InvalidName`` if the chosen name is not a valid ``HostName`` (i.e.
     ``base`` itself is invalid); appending ``-N`` to a valid base stays valid.
@@ -357,31 +387,24 @@ def make_unique_host_name(base: str, existing_host_names: Collection[str], *, al
 def resolve_create_host_name(submitted_host_name: str, existing_host_names: Collection[str] = ()) -> HostName:
     """Resolve the host name for a new workspace.
 
-    The create form no longer asks for a name; it is chosen automatically.
-    Resolution order:
+    The name defaults to an automatic ``workspace-N`` unless the operator types
+    one into the create form's "Name" field. Resolution order:
 
-    1. the user-submitted name, if any, used verbatim (validated as a
-       ``HostName``);
-    2. the operator override ``MINDS_WORKSPACE_NAME``, honored only under the
-       explicit opt-in (see ``_operator_workspace_default``) -- this is how the
-       e2e runner / ``just minds-start <name>`` pin a known name, also used
-       verbatim;
-    3. the next free ``mind-N`` name (smallest positive ``N`` whose ``mind-N``
-       is not already in ``existing_host_names``).
+    1. the user-submitted name, if any, normalized into a host-name slug
+       (lowercased, non-alphanumeric runs collapsed to dashes, truncated);
+    2. the next free ``workspace-N`` name (smallest positive ``N`` whose
+       ``workspace-N`` is not already in ``existing_host_names``).
 
-    The two named paths (1, 2) are used verbatim and never uniquified -- an
-    explicit collision is the API's 409 to reject, not ours to silently rename
-    (a duplicate name fails the ``mngr create`` pre-flight). Only the generated
-    ``mind-N`` fallback consults ``existing_host_names`` to pick a free name.
+    The normalized submitted name is never uniquified -- an explicit collision
+    is the API's 409 to reject, not ours to silently rename (a duplicate name
+    fails the ``mngr create`` pre-flight). Only the generated ``workspace-N``
+    fallback consults ``existing_host_names`` to pick a free name.
 
-    Raises ``InvalidName`` if a non-empty submitted or operator name is not
-    a valid host name; the generated fallback is always valid.
+    Raises ``InvalidName`` if a non-empty submitted name normalizes to an empty
+    slug (e.g. all punctuation/emoji); the generated fallback is always valid.
     """
     if submitted_host_name:
-        return HostName(submitted_host_name)
-    operator_name = _operator_workspace_default("MINDS_WORKSPACE_NAME", "")
-    if operator_name:
-        return HostName(operator_name)
+        return normalize_host_name_slug(submitted_host_name)
     return make_unique_host_name(_DEFAULT_HOST_NAME_BASE, existing_host_names, always_number=True)
 
 
@@ -437,7 +460,7 @@ def render_create_form(
 
     ``host_name`` is an optional explicit workspace name, exposed as a "Name"
     field in the advanced view. When empty the name is chosen automatically
-    server-side (the next free ``mind-N`` via ``resolve_create_host_name``); a
+    server-side (the next free ``workspace-N`` via ``resolve_create_host_name``); a
     submitted value is carried back here so it survives a validation-error
     re-render. The color is always chosen automatically (the first unused
     palette entry); ``color`` is the ``#rrggbb`` hex carried in the hidden
@@ -620,17 +643,31 @@ def render_consent_page(report_unexpected_errors: bool, include_logs: bool) -> s
 
 
 @pure
-def render_help_page(include_logs_setting: bool, workspace_agent_id: str) -> str:
+def render_help_page(
+    include_logs_setting: bool,
+    workspace_agent_id: str,
+    description: str = "",
+    is_agent_report: bool = False,
+    workspace_name: str = "",
+) -> str:
     """Render the get-help modal page (report a bug; agent help disabled for now).
 
     ``include_logs_setting`` is the persistent include-logs preference: when on, logs are always
     attached and the form hides its one-off "include logs" checkbox. ``workspace_agent_id`` is the
     workspace the help flow was opened from ("" on a general screen), enabling workspace-scoped options.
+    ``description`` pre-fills the report textarea -- non-empty when an in-workspace ``/assist`` agent
+    asked the app to open the modal with its diagnosis already written in. ``is_agent_report`` is set
+    for that agent-escalation flow: the modal then frames the pre-filled report as the agent's
+    submission (titled with ``workspace_name``, when known) and hides the mode choice, since a report
+    is already underway.
     """
     return CATALOG.render(
         "pages.Help",
         include_logs_setting=include_logs_setting,
         workspace_agent_id=workspace_agent_id,
+        description=description,
+        is_agent_report=is_agent_report,
+        workspace_name=workspace_name,
     )
 
 
@@ -903,10 +940,11 @@ _RECOVERY_STYLE: Final[str] = """\
       #copy-diagnostics-btn:hover,
       #copy-ssh-btn:hover { background: #f4f4f5; }
 
-      /* A quiet "Report a problem" link under the primary action, always visible
-         so the user can open the bug-report modal from any recovery state. Kept
-         de-emphasized (text-only) so it never competes with the restart/retry
-         button above it. */
+      /* A quiet "Report a problem" link under the primary action, shown only on
+         the terminal recovery states that offer a restart/retry (not the
+         transient "Loading workspace" spinner, where there is nothing to report
+         yet). Kept de-emphasized (text-only) so it never competes with the
+         restart/retry button above it. */
       #recovery-report-btn {
         margin-top: 12px;
         align-self: center;
@@ -942,6 +980,9 @@ _RECOVERY_SCRIPT: Final[str] = """\
         // workspace-unreachable states, where a restart cannot help; re-runs the
         // host-health probe so the user can re-check reachability on demand.
         var retryBtn = document.getElementById('recovery-retry-btn');
+        // The "Report a problem" link. Hidden on the transient loading spinner;
+        // shown only on the terminal states that offer a restart or retry.
+        var reportBtn = document.getElementById('recovery-report-btn');
         // Holds the verbatim provider error on the backend-unreachable state;
         // hidden (and emptied) on every other state. Populated by
         // renderBackendUnreachable from the response's ``unreachable_reason``.
@@ -1057,6 +1098,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
           show(errorEl, false);
           show(hostBtn, false);
           show(retryBtn, false);
+          show(reportBtn, false);
           // A stale diagnostic from the previous tick would be misleading
           // while we're in flight to a fresh check; hide it and drop the
           // cached payload so renderDebugMenu starts blank next time.
@@ -1080,6 +1122,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
           hostBtn.textContent = 'Restart workspace';
           hostBtn.classList.remove('secondary');
           show(hostBtn, true);
+          show(reportBtn, true);
         }
         function renderDispatchError() {
           titleEl.textContent = 'Workspace unresponsive';
@@ -1089,6 +1132,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
           hostBtn.textContent = 'Restart workspace';
           hostBtn.classList.remove('secondary');
           show(hostBtn, true);
+          show(reportBtn, true);
         }
         // The provider/backend hosting this workspace is unreachable or rejected
         // us (connector down, docker daemon stopped or paused, expired login,
@@ -1115,27 +1159,33 @@ _RECOVERY_SCRIPT: Final[str] = """\
           show(errorEl, false);
           show(hostBtn, false);
           show(retryBtn, true);
+          show(reportBtn, true);
           // No diagnostics here: when the backend itself is unreachable the
           // in-container probes are moot -- the cause is the provider's own
           // error, shown verbatim above -- so suppress the Diagnostics disclosure.
           show(debugDetailsEl, false);
         }
 
-        function postRestart(path) {
+        function postRestart(body) {
           renderLoading();
-          // The endpoint returns 202 once the tracker is RESTARTING; any other
-          // status means the dispatch did not start, so surface an error
-          // instead of refreshing into a re-probe loop.
-          fetch('/api/agents/' + encodeURIComponent(agentId) + path, {
+          // The endpoint returns a 202 operation handle once the tracker is
+          // RESTARTING; any other status means the dispatch did not start, so
+          // surface an error instead of refreshing into a re-probe loop. The
+          // page keeps its own health-poll loop (scheduleRefresh re-reads the
+          // tracker via the recovery page), so the operation handle is unused
+          // here -- a clean 202 is enough to start polling.
+          fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/restart', {
             method: 'POST',
             credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
           }).then(function (resp) {
             if (resp.ok) { scheduleRefresh(); } else { renderDispatchError(); }
           }, renderDispatchError);
         }
 
         function fetchHealth() {
-          return fetch('/api/agents/' + encodeURIComponent(agentId) + '/host-health', {
+          return fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/health', {
             credentials: 'same-origin',
           }).then(function (resp) { return resp.json(); });
         }
@@ -1159,22 +1209,37 @@ _RECOVERY_SCRIPT: Final[str] = """\
             scheduleHealthyPoll();
             return;
           }
+          // The in-container probe shows the interface is actually answering
+          // (HTTP 200), so there is nothing to restart -- on EVERY entry path
+          // (live auto-dispatch and restart_failed alike). Reload the recovery
+          // route; once the background tracker also confirms HEALTHY it 302s the
+          // user back to the workspace. If the tracker is still catching up the
+          // route re-renders here, we re-probe, see HEALTHY again, and converge
+          // -- never dispatching a restart against a working backend.
+          if (tier === 'healthy') {
+            renderLoading();
+            scheduleRefresh();
+            return;
+          }
           if (!autoDispatch) {
             // restart_failed entry: render unresponsive so the failure reason and
             // the diagnostics list both stay visible.
             renderUnresponsive();
             return;
           }
+          // ``auto_dispatched=1`` marks these as recovery-page auto-restarts (not
+          // a manual sidebar restart), so the endpoint can skip the bounce if the
+          // workspace self-recovered while the slow host-health probe was in flight.
           if (tier === 'host_offline') {
             // Container fully stopped: nothing live to interrupt, dispatch
             // unattended. Tell the endpoint the host is already stopped so it
             // skips the redundant stop step and cold-boots straight away.
-            postRestart('/restart-host?host_already_stopped=1');
+            postRestart({ scope: 'host', host_already_stopped: true, auto_dispatched: true });
             return;
           }
           if (tier === 'interface_unresponsive') {
             // Container running, exec works: restart the system-services agent in place.
-            postRestart('/restart-system-interface');
+            postRestart({ scope: 'services', auto_dispatched: true });
             return;
           }
           // 'host_unresponsive' or anything else: require explicit user consent for a host restart.
@@ -1196,7 +1261,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
         }
 
         hostBtn.addEventListener('click', function () {
-          postRestart('/restart-host');
+          postRestart({ scope: 'host' });
         });
         if (retryBtn) {
           retryBtn.addEventListener('click', function () {
@@ -1209,7 +1274,6 @@ _RECOVERY_SCRIPT: Final[str] = """\
         if (copyBtn) {
           copyBtn.addEventListener('click', copyDiagnostics);
         }
-        var reportBtn = document.getElementById('recovery-report-btn');
         if (reportBtn) {
           reportBtn.addEventListener('click', function () {
             // Ask the shell to open the get-help / report-a-bug modal, scoped to this
@@ -1317,7 +1381,7 @@ def render_recovery_page(
         '      <p id="recovery-provider-reason" class="recovery-provider-reason hidden"></p>\n'
         '      <button id="recovery-host-btn" class="hidden">Restart workspace</button>\n'
         '      <button id="recovery-retry-btn" class="hidden">Retry</button>\n'
-        '      <button type="button" id="recovery-report-btn">Report a problem</button>\n'
+        '      <button type="button" id="recovery-report-btn" class="hidden">Report a problem</button>\n'
         '      <div class="recovery-troubleshooting">\n'
         '        <p class="recovery-troubleshooting-label">Troubleshooting</p>\n'
         + error_block
@@ -1346,11 +1410,11 @@ def render_destroying_page(
 ) -> str:
     """Render the detail page for an in-flight or recently-completed destroy.
 
-    The page polls ``/api/destroying/<agent_id>/{status,log}`` to keep its
-    log tail and status badge up to date; once status flips to ``done`` it
-    redirects to ``/``. ``status`` is the initial server-side computed
-    value (``running``/``failed``/``done``) so the page renders correctly
-    even before the first poll completes.
+    The page polls ``/api/v1/workspaces/operations/destroy/<agent_id>`` for status
+    and streams its log over SSE from ``.../operations/destroy/<agent_id>/logs``;
+    once status flips to ``done`` it redirects to ``/``. ``status`` is the initial
+    server-side computed value (``running``/``failed``/``done``) so the page
+    renders correctly even before the first poll completes.
     """
     return CATALOG.render(
         "pages.Destroying",
@@ -1475,18 +1539,11 @@ def render_workspace_settings(
     current_account: object | None,
     accounts: Sequence[object],
     servers: Sequence[str],
-    telegram_state: str | None = None,
     is_leased_imbue_cloud: bool = False,
     current_color: str = DEFAULT_WORKSPACE_COLOR,
     is_stale: bool = False,
 ) -> str:
     """Render the workspace settings page.
-
-    telegram_state controls whether the Telegram section is shown:
-
-    - ``None`` -- no Telegram orchestrator configured; section is hidden.
-    - ``"active"`` -- Telegram is already set up for this workspace.
-    - ``"pending"`` -- setup button is shown.
 
     ``is_leased_imbue_cloud`` is True for workspaces on a host leased from
     Imbue Cloud; the account section then shows the bound account with a
@@ -1511,7 +1568,6 @@ def render_workspace_settings(
         current_account=current_account,
         accounts=accounts,
         servers=servers,
-        telegram_state=telegram_state,
         is_leased_imbue_cloud=is_leased_imbue_cloud,
         current_color=current_color,
         is_stale=is_stale,

@@ -12,10 +12,14 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 def test_help_succeeds(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # or see the other commands--list, destroy, message, connect, git, clone, and more!  These other commands are covered in their own sections below.
-    mngr --help
-    """)
+    """Tutorial block:
+        # or see the other commands--list, destroy, message, connect, git, clone, and more!  These other commands are covered in their own sections below.
+        mngr --help
+
+    Scope: `mngr --help` exits 0 and its output is a usage page that lists every
+    subcommand the tutorial comment advertises (create, list, destroy, message,
+    connect, git, clone).
+    """
     result = e2e.run(
         "mngr --help",
         comment="or see the other commands--list, destroy, message, connect, git, clone, and more!",
@@ -34,13 +38,15 @@ def test_help_succeeds(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_help_unknown_command_fails(e2e: E2eSession) -> None:
-    # Unhappy path for the same tutorial block: the tutorial points users to
-    # `mngr --help` to discover commands. Invoking a command that does not exist
-    # should fail and steer the user back to --help rather than crash.
-    e2e.write_tutorial_block("""
-    # or see the other commands--list, destroy, message, connect, git, clone, and more!  These other commands are covered in their own sections below.
-    mngr --help
-    """)
+    """Tutorial block:
+        # or see the other commands--list, destroy, message, connect, git, clone, and more!  These other commands are covered in their own sections below.
+        mngr --help
+
+    Scope: the unhappy path of the same block, which steers users to `mngr --help`
+    to discover commands. Invoking a command that does not exist fails, and the
+    error names the offending command and points the user back to `--help` rather
+    than crashing with a Traceback.
+    """
     result = e2e.run(
         "mngr definitely-not-a-real-command",
         comment="an unknown command fails and points the user back to --help",
@@ -57,10 +63,15 @@ def test_help_unknown_command_fails(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_create_help_succeeds(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # tons more arguments for anything you could want! As always, you can learn more via --help
-    mngr create --help
-    """)
+    """Tutorial block:
+        # tons more arguments for anything you could want! As always, you can learn more via --help
+        mngr create --help
+
+    Scope: `mngr create --help` exits 0 with no stderr (help is informational
+    output, not a warning), and renders the create command's man-page help with
+    its structural sections (SYNOPSIS, DESCRIPTION, OPTIONS, EXAMPLES) plus the
+    advertised flags (a representative spread: --no-connect, --type).
+    """
     result = e2e.run(
         "mngr create --help",
         comment="tons more arguments for anything you could want! As always, you can learn more via --help",
@@ -81,13 +92,15 @@ def test_create_help_succeeds(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 def test_create_help_short_form_and_alias_succeed(e2e: E2eSession) -> None:
-    # Shares the "mngr create --help" tutorial block, but covers the abbreviated
-    # forms advertised in the help's own SYNOPSIS line ("mngr [create|c] ... -h"):
-    # the "-h" short flag and the "c" alias must produce the same help.
-    e2e.write_tutorial_block("""
-    # tons more arguments for anything you could want! As always, you can learn more via --help
-    mngr create --help
-    """)
+    """Tutorial block:
+        # tons more arguments for anything you could want! As always, you can learn more via --help
+        mngr create --help
+
+    Scope: the abbreviated forms advertised in the help's own SYNOPSIS line
+    ("mngr [create|c] ... -h"). The `-h` short flag and the `c` alias each
+    succeed with no stderr and produce the same `create` help (its NAME summary
+    and SYNOPSIS) as the canonical `mngr create --help`.
+    """
     short_form = e2e.run("mngr create -h", comment="the -h short flag is equivalent to --help")
     expect(short_form).to_succeed()
     expect(short_form.stderr).to_be_empty()

@@ -3,6 +3,7 @@ from pathlib import Path
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_ARGS_IN_DOCSTRINGS
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_ASSERT_ISINSTANCE
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_ASYNCIO_IMPORT
+from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_ASYNC_AWAIT
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BARE_EXCEPT
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BARE_GENERIC_TYPES
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BARE_PRINT
@@ -175,6 +176,10 @@ def check_setattr(source_dir: Path, max_count: int) -> None:
 
 def check_asyncio_import(source_dir: Path, max_count: int) -> None:
     assert_ratchet(PREVENT_ASYNCIO_IMPORT, source_dir, max_count)
+
+
+def check_async_await(source_dir: Path, max_count: int) -> None:
+    assert_ratchet(PREVENT_ASYNC_AWAIT, source_dir, max_count)
 
 
 def check_pandas_import(source_dir: Path, max_count: int) -> None:

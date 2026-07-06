@@ -12,7 +12,7 @@
 
   The color is chosen automatically (the first unused palette entry, carried
   in a hidden input), so it is not asked for here. The workspace name defaults
-  to an auto-generated ``mind-N`` (server-side) but can be set explicitly via
+  to an auto-generated ``workspace-N`` (server-side) but can be set explicitly via
   the advanced view's ``Name`` field.
 
   ``selected_preset`` picks which card starts selected (and which
@@ -22,6 +22,7 @@
 #}
 {% set _default_restic_env = "# see docs linked above for available options\n# for example:\nRESTIC_REPOSITORY=s3:s3.amazonaws.com/<bucket_name>\nAWS_ACCESS_KEY_ID=\nAWS_SECRET_ACCESS_KEY=\n" %}
 {% set _scripts %}
+<script src="/_static/api_errors.js"></script>
 <script>
   (function() {
     // The remote (Imbue Cloud) preset needs an Imbue account. When a signed-out
@@ -64,6 +65,18 @@
     var regionSelect = document.getElementById('region');
     var presetCards = document.querySelectorAll('[data-preset]');
     var accountError = document.getElementById('account-error');
+    // Inputs read when building the create request body (some -- master password,
+    // save-password -- only exist when no shared backup password is saved yet).
+    var gitUrlInput = document.getElementById('git_url');
+    var branchInput = document.getElementById('branch');
+    var hostNameInput = document.getElementById('host_name');
+    var hostNameError = document.getElementById('host-name-error');
+    var colorInput = document.getElementById('create-color-input');
+    var backupApiKeyEnvInput = document.getElementById('backup_api_key_env');
+    var backupSavePasswordInput = document.getElementById('backup_save_password');
+    var createError = document.getElementById('create-error');
+    // The field highlighted by the last create error, cleared before the next try.
+    var lastErrorField = null;
     var REGION_OPTIONS = {{ region_options_by_launch_mode | tojson }};
     var REGION_SELECTED = {{ region_selected_by_launch_mode | tojson }};
 
@@ -136,6 +149,113 @@
       accountSelect.classList.remove('!ring-1', 'ring-important');
     }
 
+    // ---- Live Name (host name) validation -------------------------------
+    // Mirrors mngr's HostName rules (alphanumeric plus '-'/'_' in the middle,
+    // no leading/trailing '-'/'_', no dots) for instant format feedback, then
+    // debounced-asks the server whether the name is free on the *selected*
+    // provider (the scope where a real create would actually collide). State
+    // 'ok' lets submit through; 'invalid'/'taken' block it (the field stays
+    // editable). Empty is always 'ok' -- the server auto-names it.
+    var HOST_NAME_OK = 'ok', HOST_NAME_INVALID = 'invalid', HOST_NAME_TAKEN = 'taken';
+    var hostNameState = HOST_NAME_OK;
+    var hostNameDebounce = null;
+    var hostNameCheckSeq = 0;
+    // The availability key (name + provider scope) a HOST_NAME_TAKEN was computed
+    // for. A 'taken' verdict only blocks submit while the current inputs still
+    // produce this exact key; once the user edits the name or switches
+    // provider/account/region it is stale and must not fail-close a name/scope it
+    // was never checked against.
+    var hostNameTakenKey = null;
+
+    function hostNameFormatError(value) {
+      // Friendly message for the first broken rule, or '' if valid. Empty is
+      // valid (named automatically server-side).
+      if (value === '') return '';
+      var invalidChar = value.match(/[^a-zA-Z0-9_-]/);
+      if (invalidChar) {
+        if (invalidChar[0] === '.') return "Dots aren't allowed in a name.";
+        if (invalidChar[0] === ' ') return "Spaces aren't allowed in a name.";
+        return 'Use only letters, numbers, dashes, and underscores.';
+      }
+      if (/^[-_]/.test(value)) return "Can't start with a dash or underscore.";
+      if (/[-_]$/.test(value)) return "Can't end with a dash or underscore.";
+      return '';
+    }
+
+    function showHostNameError(message) {
+      hostNameError.textContent = message;
+      hostNameError.classList.remove('hidden');
+      // Turn the field's own border red (no extra ring), and recolor the focus
+      // outline red instead of the default accent. ``!border-important`` beats
+      // the base ``border-strong`` / ``hover:border-stronger``;
+      // ``focus:!outline-important`` overrides the base ``focus:outline-accent``.
+      hostNameInput.classList.add('!border-important', 'focus:!outline-important');
+    }
+
+    function clearHostNameError() {
+      hostNameError.textContent = '';
+      hostNameError.classList.add('hidden');
+      hostNameInput.classList.remove('!border-important', 'focus:!outline-important');
+    }
+
+    function hostNameAvailabilityUrl(value) {
+      var params = new URLSearchParams({
+        name: value,
+        launch_mode: launchSelect.value,
+        account_id: accountSelect.value,
+        region: regionSelect.disabled ? '' : regionSelect.value
+      });
+      return '/api/v1/desktop/host-name-available?' + params.toString();
+    }
+
+    function validateHostName() {
+      var value = hostNameInput.value.trim();
+      var formatError = hostNameFormatError(value);
+      if (formatError) {
+        hostNameState = HOST_NAME_INVALID;
+        hostNameTakenKey = null;
+        showHostNameError(formatError);
+        return;
+      }
+      if (value === '') {
+        hostNameState = HOST_NAME_OK;
+        hostNameTakenKey = null;
+        clearHostNameError();
+        return;
+      }
+      // Format is fine; ask the server about availability. Until it answers we
+      // optimistically treat the name as ok so a fast Create isn't blocked (the
+      // rare race falls back to the server's own create-time conflict check).
+      hostNameState = HOST_NAME_OK;
+      hostNameTakenKey = null;
+      clearHostNameError();
+      var url = hostNameAvailabilityUrl(value);
+      var seq = ++hostNameCheckSeq;
+      fetch(url, { headers: { 'Accept': 'application/json' } })
+        .then(function (resp) { return resp.ok ? resp.json() : null; })
+        .then(function (data) {
+          // Ignore a stale response superseded by a newer keystroke/change.
+          if (seq !== hostNameCheckSeq) return;
+          if (data && data.available === false) {
+            hostNameState = HOST_NAME_TAKEN;
+            // Remember exactly which name/scope is taken so a later edit doesn't
+            // leave this verdict blocking a different name (see submit handler).
+            hostNameTakenKey = url;
+            showHostNameError('That name is already taken. Pick a different one.');
+          } else {
+            hostNameState = HOST_NAME_OK;
+            hostNameTakenKey = null;
+            clearHostNameError();
+          }
+        })
+        .catch(function () { /* network error: fail open, leave the name usable */ });
+    }
+
+    function scheduleHostNameValidation() {
+      if (hostNameDebounce) clearTimeout(hostNameDebounce);
+      hostNameDebounce = setTimeout(validateHostName, 300);
+    }
+
     function onPresetClick(name) {
       // Clicking a card only selects it -- it never navigates. Remote (Imbue
       // Cloud) compute needs an account: when the user has signed-in accounts
@@ -148,6 +268,10 @@
       markPresetSelected(name);
       applyPreset(name);
       update();
+      // applyPreset sets launchSelect.value (and may change the account) directly,
+      // which does not fire a 'change' event, so re-run the availability check
+      // explicitly to re-scope "taken" to the preset's provider/account.
+      scheduleHostNameValidation();
     }
 
     for (var i = 0; i < presetCards.length; i++) {
@@ -167,20 +291,133 @@
     toggleAdvanced.addEventListener('click', function () { showAdvanced(true); });
     backToSimple.addEventListener('click', function () { showAdvanced(false); });
 
+    function fieldValue(el) {
+      // Skip disabled / absent inputs (e.g. the region select while hidden) so
+      // their stale values are not sent.
+      if (!el || el.disabled) return '';
+      return el.value;
+    }
+
+    function clearCreateError() {
+      if (createError) createError.classList.add('hidden');
+      if (lastErrorField) {
+        lastErrorField.classList.remove('!ring-1', 'ring-important');
+        lastErrorField = null;
+      }
+    }
+
+    function showCreateError(message, field) {
+      if (createError) {
+        createError.textContent = message || 'Could not create the workspace.';
+        createError.classList.remove('hidden');
+      }
+      // When the API names the offending field, reveal the advanced view it
+      // lives in, ring it, and bring it into focus so the message has context.
+      if (field) {
+        var fieldEl = document.getElementById(field);
+        if (fieldEl) {
+          showAdvanced(true);
+          fieldEl.classList.add('!ring-1', 'ring-important');
+          fieldEl.focus();
+          fieldEl.scrollIntoView({ block: 'center' });
+          lastErrorField = fieldEl;
+        }
+      }
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Create';
+    }
+
+    function submitCreate() {
+      clearCreateError();
+      // The advanced selects are always the source of truth on submit (the
+      // preset cards just pre-fill them); send the full create field surface.
+      var body = {
+        git_url: fieldValue(gitUrlInput).trim(),
+        host_name: fieldValue(hostNameInput).trim(),
+        branch: fieldValue(branchInput).trim(),
+        color: fieldValue(colorInput),
+        launch_mode: launchSelect.value,
+        ai_provider: aiProviderSelect.value,
+        account_id: accountSelect.value,
+        anthropic_api_key: fieldValue(apiKeyInput).trim(),
+        backup_provider: backupSelect.value,
+        backup_encryption_method: backupEncryptionSelect.value,
+        backup_api_key_env: fieldValue(backupApiKeyEnvInput),
+        backup_master_password: fieldValue(backupMasterPasswordInput),
+        backup_save_password: backupSavePasswordInput ? backupSavePasswordInput.checked : false,
+        region: fieldValue(regionSelect)
+      };
+      fetch('/api/v1/workspaces', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      }).then(function (r) {
+        return r.json().then(function (data) { return { status: r.status, data: data || {} }; });
+      }).then(function (res) {
+        if (res.status === 202 && res.data.operation_id) {
+          window.location = '/creating/' + res.data.operation_id;
+          return;
+        }
+        // Normalize both the structural 422 contract and the handler's semantic
+        // {error, field, redirect_url} into one shape. The no-account imbue_cloud
+        // backstop carries a sign-up redirect target; a field error rings the
+        // matching input (the 422 field names line up with the form input ids).
+        var err = normalizeApiError(res.data);
+        if (err.redirect_url) {
+          window.location = err.redirect_url;
+          return;
+        }
+        showCreateError(err.message, err.field);
+      }).catch(function () {
+        showCreateError('Could not reach the server. Please try again.');
+      });
+    }
+
     form.addEventListener('submit', function (e) {
+      // Always handle submission via fetch (never a native POST navigation).
+      e.preventDefault();
       // Imbue Cloud needs an account. If none is selected, don't submit:
       //  - signed out -> open the sign-in modal (overlay layer).
       //  - signed in  -> surface the account-picker error, but only now (on a
       //    Create attempt) -- not proactively as the user clicks between
       //    presets, which is too distracting.
       if (imbueCloudNeedsAccount()) {
-        e.preventDefault();
         if (HAS_ANY_ACCOUNT) showAccountError();
         else openSigninModal();
         return;
       }
+      // Re-run format validation synchronously so a known-bad / already-taken
+      // name blocks submit (mirroring the account-picker guard). Availability
+      // that hasn't come back yet does not block -- the server's create-time
+      // conflict check backstops that rare race. This synchronous check owns the
+      // *format* dimension: it must also clear a stale 'invalid' from a prior
+      // keystroke (the debounced validateHostName may not have re-run yet), or a
+      // name the user just corrected would be wrongly blocked.
+      var trimmedName = hostNameInput.value.trim();
+      var nameFormatError = hostNameFormatError(trimmedName);
+      if (nameFormatError) {
+        hostNameState = HOST_NAME_INVALID;
+        showHostNameError(nameFormatError);
+      } else if (hostNameState === HOST_NAME_INVALID) {
+        hostNameState = HOST_NAME_OK;
+        clearHostNameError();
+      }
+      // A 'taken' verdict only blocks the exact name/scope it was computed for.
+      // If the user has since edited the name (or switched provider/account/region)
+      // the verdict is stale -- the debounced re-check may not have run yet -- so it
+      // must not fail-close a name that was never checked; we fall through to
+      // optimistic-allow and let the server's create-time conflict check backstop.
+      var nameStillTaken =
+        hostNameState === HOST_NAME_TAKEN && hostNameTakenKey === hostNameAvailabilityUrl(trimmedName);
+      if (hostNameState === HOST_NAME_INVALID || nameStillTaken) {
+        // (default already prevented above) -- just surface the inline error.
+        showAdvanced(true);
+        hostNameInput.focus();
+        return;
+      }
       submitBtn.disabled = true;
       submitBtn.textContent = 'Creating...';
+      submitCreate();
     });
 
     function onAccountChange() {
@@ -268,29 +505,45 @@
     backupSelect.addEventListener('change', update);
     backupEncryptionSelect.addEventListener('change', update);
 
+    hostNameInput.addEventListener('input', scheduleHostNameValidation);
+    // Provider / account / region changes move the goalposts for "taken", so
+    // re-check the name against the newly-selected scope.
+    accountSelect.addEventListener('change', scheduleHostNameValidation);
+    launchSelect.addEventListener('change', scheduleHostNameValidation);
+    regionSelect.addEventListener('change', scheduleHostNameValidation);
+
     var initialPreset = selectedPreset();
     if (initialPreset) markPresetSelected(initialPreset);
     showAdvanced({{ 'true' if start_advanced else 'false' }});
     update();
+    // Validate any pre-filled name on load (e.g. a re-rendered submit error).
+    validateHostName();
   })();
 </script>
 {% endset %}
-<PageNarrowContainer title="Create a mind" padding="form" max_width="max-w-[720px]" scripts={{ _scripts }}>
-  <form id="create-form" action="/create" method="post">
-    {# Auto-chosen color carried through the POST; no visible picker. #}
+<PageNarrowContainer title="Create a workspace" padding="form" max_width="max-w-[720px]" scripts={{ _scripts }}>
+  {# Submission is a JS fetch to POST /api/v1/workspaces (the same create front
+     door agents use); see the submit handler in the scripts block. The form
+     element keeps the field layout + native required-field validation. #}
+  <form id="create-form">
+    {# Auto-chosen color carried in the create request; no visible picker. #}
     <input type="hidden" name="color" id="create-color-input" value="{{ color }}">
 
     <div class="text-center mb-12">
-      <p class="type-label uppercase tracking-wide text-secondary">Create a mind</p>
-      <h1 class="type-heading-lg text-primary mt-1">Where do you want to run your mind?</h1>
+      <p class="type-label uppercase tracking-wide text-secondary">Create a workspace</p>
+      <h1 class="type-heading-lg text-primary mt-1">Where should it run?</h1>
     </div>
 
     {% if error_message %}
       <Notice variant="error">{{ error_message }}</Notice>
     {% endif %}
 
+    {# Filled in + revealed by the submit handler from the create API's
+       structured 400 ({error, field}); hidden on a fresh form. #}
+    <p id="create-error" role="alert" class="hidden mb-6 type-helper text-important text-center"></p>
+
     {# ---- Simple view: two compute presets ---- #}
-    <div id="simple-view" role="radiogroup" aria-label="Where to run your mind">
+    <div id="simple-view" role="radiogroup" aria-label="Where to run your workspace">
       <div class="flex gap-6 items-stretch">
         <PresetCard preset="remote" :selected="selected_preset == 'remote'" extra="flex-1">
           <div class="flex items-center gap-2">
@@ -324,7 +577,7 @@
         {% for acct in accounts %}
           <option value="{{ acct.user_id }}"{% if acct.user_id == default_account_id %} selected{% endif %}>{{ acct.email }}</option>
         {% endfor %}
-        <option value=""{% if not default_account_id %} selected{% endif %}>No account (private project)</option>
+        <option value=""{% if not default_account_id %} selected{% endif %}>No account (private workspace)</option>
       </select>
       <span id="advanced-toggle-wrap">
         <Button variant="ghost" id="toggle-advanced"
@@ -356,7 +609,10 @@
       <div>
         <FormLabel target="host_name">Name</FormLabel>
         <p class="mb-1 type-helper text-tertiary">Leave empty to name it automatically</p>
-        <TextInput name="host_name" :value="host_name" placeholder="my-mind" id="host_name" />
+        <TextInput name="host_name" :value="host_name" placeholder="my-workspace" id="host_name" />
+        {# Inline live-validation message for the name field (format + availability),
+           toggled by the script below; mirrors the account-picker error pattern. #}
+        <p id="host-name-error" class="hidden mt-1 type-helper text-important"></p>
       </div>
 
       <div>

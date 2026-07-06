@@ -147,6 +147,19 @@ bundled `permissions` extension (see [Gateway HTTP extensions](#gateway-http-ext
 only the deny-all default, the admin file, and the per-agent opaque
 baseline are written directly via `imbue.mngr_latchkey.store.save_permissions`.
 
+## Data-format migrations
+
+The plugin records the version of its on-disk data format in a
+`data-format-version` file at the root of `<latchkey_directory>/mngr_latchkey/`.
+When the shape of that state changes incompatibly, the change is expressed as a
+reversible migration (`up`/`down`) under the `imbue.mngr_latchkey.migrations`
+package rather than as ad-hoc repair code in the readers. Every
+`Latchkey.initialize()` reconciles the recorded version against the version the
+installed code targets, applying the intervening migrations in the appropriate
+direction (`up` after an upgrade, `down` after a downgrade) and re-stamping the
+file. This is cheap in the steady state (one small file read when already
+current), and a fresh install is simply stamped straight to the current version.
+
 ---
 
 # Reference

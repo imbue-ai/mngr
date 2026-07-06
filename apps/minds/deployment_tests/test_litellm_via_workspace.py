@@ -20,15 +20,20 @@ from imbue.minds.deployment_tests.data_types import SharedEnvHandle
 from imbue.minds.deployment_tests.data_types import VerifiedUserHandle
 from imbue.minds.deployment_tests.helpers import wait_for_env_ready
 
-pytestmark = pytest.mark.minds_services
+pytestmark = [pytest.mark.release, pytest.mark.minds_services]
 
 
+# NOT YET WORKING. This test is wired into the per-run CI env flow (correct
+# fixtures + minds_services marker) but its body is still a stub: it must be
+# debugged and implemented before it can pass. Remaining work: a desktop-client
+# workspace-create driver, a Neon litellm_cost DSN query helper, and a Docker
+# daemon (operator-side today; Docker-in-Docker in a future offload services
+# config). Tracked as a Phase 2 follow-up; see specs/minds-deployment-tests.md.
 @pytest.mark.skip(
     reason=(
-        "Pending: desktop-client workspace-create driver, Neon DSN query helper, "
-        "verified_user fixture provisioning. Also requires a Docker daemon (operator-side "
-        "today; Docker-in-Docker in the future offload services config). See "
-        "specs/minds-deployment-tests.md."
+        "NOT YET WORKING -- wired into the per-run CI env flow but the body is a stub; needs "
+        "a workspace-create driver + Neon DSN query helper + Docker daemon before it will pass. "
+        "Phase 2 follow-up; see specs/minds-deployment-tests.md."
     )
 )
 def test_litellm_spend_tracking_via_local_workspace(

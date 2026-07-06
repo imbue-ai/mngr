@@ -134,9 +134,12 @@ def test_snapshot_destroy_then_list_on_modal(
     temp_source_dir: Path,
     modal_subprocess_env: ModalSubprocessTestEnv,
 ) -> None:
-    """Test snapshot deletion on a Modal agent.
+    """Verify ``mngr snapshot destroy --all-snapshots`` actually removes a Modal agent's snapshots.
 
-    Destroys all original snapshots and verifies they are gone.
+    On a live Modal agent, runs ``snapshot destroy --all-snapshots`` and asserts the reported
+    delete count, then runs ``snapshot list`` and asserts zero snapshots remain -- proving the
+    destroy reached Modal rather than no-opting. Currently skipped: the create-then-list path
+    above already covers the snapshot CLI, so the extra Modal time is not worth it.
     """
     agent_name = f"test-snap-lifecycle-{get_short_random_string()}"
     env = modal_subprocess_env.env

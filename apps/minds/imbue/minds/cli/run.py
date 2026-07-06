@@ -58,11 +58,17 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.laptop_agent_types_seed import seed_laptop_agent_types_for_minds
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
+from imbue.minds.desktop_client.latchkey.handlers.accounts import AccountsPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.handlers.file_sharing import FileSharingGrantHandler
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
+from imbue.minds.desktop_client.latchkey.handlers.workspace import WorkspacePermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
 from imbue.minds.desktop_client.latchkey_auto_register import LatchkeyAutoRegister
+from imbue.minds.desktop_client.lima_image_prefetch import LimaImageCreateGate
+from imbue.minds.desktop_client.lima_image_prefetch import is_lima_image_cache_disabled
+from imbue.minds.desktop_client.lima_image_prefetch import make_lima_image_prefetcher
+from imbue.minds.desktop_client.lima_image_prefetch import make_lima_image_source
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
@@ -76,9 +82,13 @@ from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.system_interface_health import should_enroll_suspect_for_backend_failure
+from imbue.minds.desktop_client.templates import DEFAULT_FOREVER_CLAUDE_GIT_URL
+from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
+from imbue.minds.desktop_client.templates import is_local_workspace_defaults_opt_in
+from imbue.minds.envs.docker_cleanup import DockerCleanupError
+from imbue.minds.envs.docker_cleanup import start_active_env_state_container
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
-from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.output import emit_event
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
@@ -243,6 +253,27 @@ def run(
     root_concurrency_group = ConcurrencyGroup(name="minds-run")
     root_concurrency_group.__enter__()
 
+    # Resolved up front: needed both to restart the docker state container just
+    # below and by the ``mngr forward`` consumer further down.
+    mngr_host_dir_str = os.environ.get("MNGR_HOST_DIR")
+    mngr_host_dir = Path(mngr_host_dir_str).expanduser() if mngr_host_dir_str else (Path.home() / ".mngr")
+
+    # Restart this env's mngr docker *state* container before the discovery
+    # producer spawns. The quit flow stops it (``stop_active_env_state_container``)
+    # so no stray container is left running; but if it's still stopped when
+    # discovery polls, the docker provider can't read host records and reports
+    # zero hosts -- which blanks the restored windows and the landing page on the
+    # first snapshot. Bring it back up first. Best-effort: a no-op without docker,
+    # and a start failure must not block startup (discovery then degrades to
+    # ProviderUnavailable + retain-last-known rather than a misleading empty).
+    try:
+        start_active_env_state_container(
+            mngr_host_dir=mngr_host_dir,
+            parent_concurrency_group=root_concurrency_group,
+        )
+    except DockerCleanupError as exc:
+        logger.warning("Could not start the Docker state container at launch: {}", exc)
+
     # Spawn (or adopt) a detached ``mngr latchkey forward`` supervisor.
     # The supervisor owns the shared latchkey gateway + per-agent reverse
     # tunnels; running it as a detached subprocess (rather than the inline
@@ -333,11 +364,20 @@ def run(
         gateway_client=gateway_client,
         mngr_message_sender=mngr_message_sender,
     )
+    workspace_permission_handler = WorkspacePermissionGrantHandler(
+        data_dir=data_directory,
+        gateway_client=gateway_client,
+        mngr_message_sender=mngr_message_sender,
+    )
+    accounts_permission_handler = AccountsPermissionGrantHandler(
+        data_dir=data_directory,
+        gateway_client=gateway_client,
+        mngr_message_sender=mngr_message_sender,
+    )
     imbue_cloud_cli = ImbueCloudCli(
         parent_concurrency_group=root_concurrency_group,
         connector_url=client_env_config.connector_url,
     )
-    telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
     session_store = MultiAccountSessionStore(data_dir=data_directory, cli=imbue_cloud_cli)
     response_events = load_response_events(data_directory)
     request_inbox = RequestInbox()
@@ -350,8 +390,6 @@ def run(
     # Minds API: agents reach it through the latchkey gateway's bundled
     # ``minds-api-proxy`` extension instead, so no ``--reverse`` specs
     # are needed here.
-    mngr_host_dir_str = os.environ.get("MNGR_HOST_DIR")
-    mngr_host_dir = Path(mngr_host_dir_str).expanduser() if mngr_host_dir_str else (Path.home() / ".mngr")
     # `mngr forward` and every other laptop-side mngr invocation (including the
     # bundled mngr CLI when run from a Terminal under this MNGR_HOST_DIR) starts
     # with cwd=$HOME, so the FCT workspace's `[agent_types.main]` block in
@@ -386,12 +424,13 @@ def run(
     # consumer's failure callback (registered before consumer.start() below;
     # otherwise early failures would dispatch against an empty list).
     system_interface_health_tracker = SystemInterfaceHealthTracker()
+
     # The plugin reports every non-2xx response; minds decides which ones count.
     # Only connection-level failures and infrastructure 5xx enroll a suspect --
-    # application errors are left for the background probe to adjudicate.
+    # application errors (and UNRESOLVED, a routeless warm-up) are left alone.
     consumer.add_on_system_interface_backend_failure_callback(
-        lambda agent_id, _reason, status_code: system_interface_health_tracker.record_failure(agent_id)
-        if should_enroll_suspect_for_backend_failure(status_code)
+        lambda agent_id, reason, status_code: system_interface_health_tracker.record_failure(agent_id)
+        if should_enroll_suspect_for_backend_failure(reason, status_code)
         else None
     )
 
@@ -422,6 +461,35 @@ def run(
     # readiness probe can use the same preauth cookie the plugin accepts and
     # Electron pre-sets, and after ``wait_for_listening`` so it has the
     # plugin's actual bound port.
+    # Start the pre-baked Lima image prefetch as early as possible (issue 2306):
+    # a background worker keeps the current release's verified image present so a
+    # later Lima create can boot it instead of building the toolchain in-VM. Only
+    # active when this env configures an image source and the kill switch is unset.
+    lima_image_source = make_lima_image_source(client_env_config)
+    lima_image_gate: LimaImageCreateGate | None = None
+    if lima_image_source is not None and not is_lima_image_cache_disabled(os.environ):
+        lima_image_prefetcher = make_lima_image_prefetcher(
+            source=lima_image_source,
+            current_release_tag=FALLBACK_BRANCH,
+            data_dir=paths.data_dir,
+            concurrency_group=root_concurrency_group,
+        )
+        root_concurrency_group.start_new_thread(
+            target=lima_image_prefetcher.run_background_loop,
+            args=(root_concurrency_group,),
+            name="lima-image-prefetch",
+            # Best-effort: a prefetch failure must never tear down the desktop app
+            # (gated creates fall back / surface a retryable error on their own).
+            is_checked=False,
+        )
+        lima_image_gate = LimaImageCreateGate(
+            prefetcher=lima_image_prefetcher,
+            current_release_tag=FALLBACK_BRANCH,
+            default_repo_url=DEFAULT_FOREVER_CLAUDE_GIT_URL,
+            is_dev_loop=is_local_workspace_defaults_opt_in(),
+        )
+        logger.info("  lima image prefetch: started ({})", FALLBACK_BRANCH)
+
     agent_creator = AgentCreator(
         paths=paths,
         server_port=port,
@@ -432,6 +500,7 @@ def run(
         mngr_forward_port=mngr_forward_port,
         mngr_forward_preauth_cookie=preauth_cookie,
         system_interface_health_tracker=system_interface_health_tracker,
+        lima_image_gate=lima_image_gate,
     )
 
     # Every newly-discovered agent on a minds-managed host gets
@@ -465,7 +534,6 @@ def run(
         http_client=None,
         agent_creator=agent_creator,
         imbue_cloud_cli=imbue_cloud_cli,
-        telegram_orchestrator=telegram_orchestrator,
         notification_dispatcher=notification_dispatcher,
         paths=paths,
         envelope_stream_consumer=consumer,
@@ -473,7 +541,12 @@ def run(
         minds_config=minds_config,
         client_env_config=client_env_config,
         request_inbox=request_inbox,
-        request_event_handlers=(latchkey_permission_handler, file_sharing_handler),
+        request_event_handlers=(
+            latchkey_permission_handler,
+            file_sharing_handler,
+            workspace_permission_handler,
+            accounts_permission_handler,
+        ),
         server_port=port,
         mngr_forward_port=mngr_forward_port,
         mngr_forward_preauth_cookie=preauth_cookie,

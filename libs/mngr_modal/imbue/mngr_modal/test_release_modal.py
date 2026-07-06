@@ -303,6 +303,18 @@ def test_provider_release_trip1(
     temp_git_repo: Path,
     _modal_release_alignment: tuple[ModalProviderInstance, str, str],
 ) -> None:
+    """Verify the full Modal host lifecycle: create -> exec -> stop -> start -> snapshot -> kill -> gc.
+
+    Drives the real ``mngr`` CLI against a live Modal sandbox and cross-checks every step
+    against the Modal API via the in-process probe: the sandbox exists and is RUNNING right
+    after create, a marker file written over ``mngr exec`` reads back, plain ``mngr stop``
+    leaves the sandbox running while ``mngr stop --stop-host`` is refused with
+    ``HostShutdownNotSupportedError`` (Modal cannot halt compute), ``mngr start`` is
+    idempotent and the marker survives, ``snapshot create``/``list`` succeed, an out-of-band
+    terminate flips ``mngr list`` to CRASHED, and ``mngr gc`` reclaims the sandbox so the
+    backend ends clean. A passing run proves each transition actually happened on Modal; a
+    no-op create or a missed teardown fails an assertion.
+    """
     provider, user_id, app_name = _modal_release_alignment
     run_provider_release_trip1(
         _ModalReleaseProfile(provider=provider, user_id=user_id, app_name=app_name),
@@ -324,6 +336,15 @@ def test_provider_release_trip2(
     temp_git_repo: Path,
     _modal_release_alignment: tuple[ModalProviderInstance, str, str],
 ) -> None:
+    """Verify Modal's auto-shutdown contract: a lifetime-capped sandbox genuinely terminates.
+
+    Creates a host with a short ``--timeout`` lifetime cap, then polls the Modal API until the
+    sandbox is gone (``_list_sandboxes`` drops to zero), proving auto-shutdown actually stops
+    billing rather than leaving the sandbox running. Because Modal has no resumable stopped
+    state (``resumes_after_auto_shutdown`` is False), the trip asserts the termination only and
+    skips the resume/marker-survival branch. A run where the sandbox never expired would hang
+    on the poll and fail.
+    """
     provider, user_id, app_name = _modal_release_alignment
     run_provider_release_trip2(
         _ModalReleaseProfile(provider=provider, user_id=user_id, app_name=app_name),
@@ -345,6 +366,14 @@ def test_provider_release_trip3(
     temp_git_repo: Path,
     _modal_release_alignment: tuple[ModalProviderInstance, str, str],
 ) -> None:
+    """Verify a Modal snapshot is portable: it outlives ``mngr destroy`` and seeds a fresh create.
+
+    Snapshots a host carrying a marker file in its own filesystem, destroys the host, then runs
+    ``mngr create --snapshot <id>`` and reads the marker back from the restored host -- proving
+    the snapshot is an independent filesystem image (``snapshot_survives_destroy`` is True), not
+    something tied to the sandbox's lifetime. If the restored host came up empty (snapshot lost
+    on destroy, or restore not applied) the marker read would fail.
+    """
     provider, user_id, app_name = _modal_release_alignment
     run_provider_release_trip3(
         _ModalReleaseProfile(provider=provider, user_id=user_id, app_name=app_name),
@@ -364,6 +393,15 @@ def test_provider_release_trip4(
     temp_git_repo: Path,
     _modal_release_alignment: tuple[ModalProviderInstance, str, str],
 ) -> None:
+    """Verify Modal's no-boot error classification: missing credentials surface curated help.
+
+    A pure CLI exercise that never provisions a sandbox (hence no ``rsync`` mark). With Modal's
+    tokens blanked, ``mngr create`` fails fast with ``ProviderUnavailableError`` whose message
+    contains "modal is not authorized" and curated help pointing at ``uvx modal token set``
+    (``raises_contract_unavailable_error`` / ``has_curated_unavailable_help`` are True). The
+    ``--vps-*`` migration-arg check is skipped because Modal uses its own build-arg parser. A
+    create that silently succeeded, or surfaced a generic/wrong error, would fail an assertion.
+    """
     # No-boot CLI error-classification trip: no ``rsync`` mark (it never provisions a sandbox).
     provider, user_id, app_name = _modal_release_alignment
     run_provider_release_trip4(

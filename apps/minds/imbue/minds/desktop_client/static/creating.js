@@ -21,7 +21,6 @@
     'Tip: your workspace is backed up automatically so your work survives a restart.',
     'Did you know: in <b>privacy mode</b>, the data we gather stays on your own computer.',
     'Tip: switch accounts anytime from the workspace menu.',
-    'Tip: connect a <b>Telegram bot</b> to message your agent from your phone.',
     'Tip: share a running app with a teammate from the workspace’s Share menu.',
     'Did you know: you can revisit permissions and compute settings later.'
   ];
@@ -113,9 +112,12 @@
   }
 
   // ---- Status polling (authoritative completion signal) ----
-  // The SSE 'done' event can be missed on a page reload (the log queue may
-  // already be drained), so poll the status endpoint as the source of truth
-  // for completion. SSE is used only for the live log + stage caption.
+  // The generic v1 operations resource is the source of truth for completion:
+  // the SSE 'done' event can be missed on a page reload (the log queue may
+  // already be drained), so we poll the operation status. SSE is used only for
+  // the live log stream. The create operation reports
+  // {status, is_done, redirect_url, error}; redirect_url is the absolute
+  // /goto/<agent>/ URL the server builds once the workspace is ready.
   var statusPoll = null;
   function applyStatus(data) {
     if (!data) return;
@@ -128,10 +130,15 @@
       creationError = data.error || 'unknown error';
       showFailure();
       if (statusPoll) { clearInterval(statusPoll); statusPoll = null; }
+    } else if (data.status_text && !creationFailed) {
+      // Live stage caption (e.g. "Cloning repository...") from the create
+      // operation status, restoring the per-stage text the old SSE carried.
+      var stageEl = document.getElementById('stage');
+      if (stageEl) stageEl.textContent = data.status_text;
     }
   }
   function pollStatus() {
-    fetch('/api/create-agent/' + agentId + '/status')
+    fetch('/api/v1/workspaces/operations/create/' + agentId)
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(applyStatus)
       .catch(function () {});
@@ -139,7 +146,10 @@
   pollStatus();
   statusPoll = setInterval(pollStatus, 2000);
 
-  // ---- SSE: status text + logs ----
+  // ---- SSE: live logs ----
+  // The v1 operations log stream emits {log: ...} frames and a final
+  // {done: true} frame. Completion + redirect are driven by the status poll
+  // above; this stream only fills the live log view.
   var logsEl = document.getElementById('logs');
   var pendingLines = [];
   var flushScheduled = false;
@@ -151,7 +161,7 @@
     logsEl.scrollTop = logsEl.scrollHeight;
   }
 
-  var source = new EventSource('/api/create-agent/' + agentId + '/logs');
+  var source = new EventSource('/api/v1/workspaces/operations/create/' + agentId + '/logs');
   source.onmessage = function (event) {
     var data;
     try {
@@ -159,20 +169,9 @@
     } catch (e) {
       return;
     }
-    if (data._type === 'done') {
+    if (data.done) {
       source.close();
       flushLogs();
-      if (data.status === 'DONE' && data.redirect_url) {
-        creationDone = true;
-        redirectUrl = data.redirect_url;
-      } else if (data.status === 'FAILED') {
-        creationFailed = true;
-        creationError = data.error || 'unknown error';
-        showFailure();
-      }
-    } else if (data._type === 'status' && data.status_text) {
-      var stageEl = document.getElementById('stage');
-      if (stageEl && !creationFailed) stageEl.textContent = data.status_text;
     } else if (data.log) {
       pendingLines.push(data.log);
       if (!flushScheduled) {

@@ -44,6 +44,8 @@ dev = [
     "shellcheck-py>=0.10.0",
     # In-memory AWS service mocks for unit tests (S3 state-bucket round-trips).
     "moto[s3]>=5.0",
+    # Validates the generated /api/schema OpenAPI document in minds tests.
+    "openapi-spec-validator>=0.7",
 ]
 
 # Shared pytest settings (markers, filterwarnings, coverage report config)

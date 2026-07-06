@@ -1,0 +1,1 @@
+Integrates the "simple names" work: Lima hosts can now be renamed (`LimaProviderInstance.rename_host` updates the offline-writable host record), and new Lima VMs derive their limactl instance name from the immutable host id (`<prefix><host_id>`) so a rename never desyncs the instance name from the host name. Existing VMs created under the old scheme keep working.

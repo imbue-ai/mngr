@@ -9,6 +9,7 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
+from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.discovery_events import ResolvedAgentHost
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
 from imbue.mngr.api.discovery_events import resolve_hosts_for_identifiers
@@ -44,6 +45,7 @@ from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
@@ -73,6 +75,23 @@ def _ensure_providers_support_host_shutdown(providers: Sequence[BaseProviderInst
             raise HostShutdownNotSupportedError(provider.name)
 
 
+def _live_discover_agents_for_resolution(mngr_ctx: MngrContext, identifiers: Sequence[str]) -> list[DiscoveredAgent]:
+    """Live-discover agents for ``identifiers`` (the read-after-write fallback for host resolution).
+
+    Injected into ``resolve_hosts_for_identifiers`` so the SSH-free stream replay can fall
+    back to a live discovery for an agent not yet in the event stream (e.g. just created),
+    without ``discovery_events`` importing the live discovery path (which would be circular).
+    """
+    agents_by_host, _providers = discover_hosts_and_agents(
+        mngr_ctx,
+        provider_names=None,
+        agent_identifiers=tuple(identifiers),
+        include_destroyed=False,
+        reset_caches=False,
+    )
+    return [agent for agent_refs in agents_by_host.values() for agent in agent_refs]
+
+
 def _stop_hosts_for_addresses(
     agent_addresses: Sequence[AgentAddress],
     mngr_ctx: MngrContext,
@@ -91,7 +110,11 @@ def _stop_hosts_for_addresses(
     Returns the list of agent identifiers whose host was stopped (or was
     already stopped).
     """
-    resolved_by_identifier = resolve_hosts_for_identifiers(mngr_ctx, [str(addr.agent) for addr in agent_addresses])
+    resolved_by_identifier = resolve_hosts_for_identifiers(
+        mngr_ctx,
+        [str(addr.agent) for addr in agent_addresses],
+        live_discovery_fallback=lambda identifiers: _live_discover_agents_for_resolution(mngr_ctx, identifiers),
+    )
 
     # Fetch each distinct host once (SSH-free) -- this is also what validates
     # the resolved host still exists. Honor any explicit @HOST[.PROVIDER]

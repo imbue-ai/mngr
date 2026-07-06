@@ -16,6 +16,8 @@ hooks directly with canned JSONL strings to exercise:
 import io
 import json
 import threading
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 
 import pytest
@@ -26,8 +28,8 @@ from imbue.imbue_common.event_envelope import IsoTimestamp
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import DiscoveryError
-from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
+from imbue.mngr.api.discovery_events import make_provider_discovery_snapshot_event
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
@@ -46,6 +48,8 @@ from imbue.mngr_forward.testing import TEST_AGENT_ID_2
 _TIMESTAMP = IsoTimestamp("2026-05-03T00:00:00.000000000+00:00")
 _EVENT_SOURCE = EventSource("mngr/discovery")
 _HOST_ID = HostId("host-" + "0" * 31 + "1")
+_DISCOVERY_STARTED_AT = datetime(2026, 5, 3, 0, 0, 0, tzinfo=timezone.utc)
+_DISCOVERY_FINISHED_AT = datetime(2026, 5, 3, 0, 0, 1, tzinfo=timezone.utc)
 
 
 def _next_event_id(counter: list[int]) -> EventId:
@@ -77,36 +81,39 @@ def setup() -> tuple[ForwardStreamManager, ForwardResolver, io.StringIO, list[in
     return manager, resolver, buf, counter
 
 
-def _full_snapshot_line(agents: tuple[DiscoveredAgent, ...], counter: list[int]) -> str:
-    event = FullDiscoverySnapshotEvent(
-        timestamp=_TIMESTAMP,
-        event_id=_next_event_id(counter),
-        source=_EVENT_SOURCE,
+def _provider_snapshot_line(
+    agents: tuple[DiscoveredAgent, ...],
+    counter: list[int],
+    provider_name: str = "modal",
+) -> str:
+    del counter
+    event = make_provider_discovery_snapshot_event(
+        provider_name=ProviderInstanceName(provider_name),
         agents=agents,
         hosts=(),
+        discovery_started_at=_DISCOVERY_STARTED_AT,
+        discovery_finished_at=_DISCOVERY_FINISHED_AT,
     )
     return _serialize(event)
 
 
-def _full_snapshot_line_with_errors(
+def _provider_snapshot_line_with_error(
     agents: tuple[DiscoveredAgent, ...],
-    errored_provider_names: tuple[str, ...],
+    errored_provider_name: str,
     counter: list[int],
 ) -> str:
-    event = FullDiscoverySnapshotEvent(
-        timestamp=_TIMESTAMP,
-        event_id=_next_event_id(counter),
-        source=_EVENT_SOURCE,
+    del counter
+    event = make_provider_discovery_snapshot_event(
+        provider_name=ProviderInstanceName(errored_provider_name),
         agents=agents,
         hosts=(),
-        error_by_provider_name={
-            ProviderInstanceName(name): DiscoveryError(
-                type_name="RuntimeError",
-                message="discovery failed",
-                provider_name=ProviderInstanceName(name),
-            )
-            for name in errored_provider_names
-        },
+        discovery_started_at=_DISCOVERY_STARTED_AT,
+        discovery_finished_at=_DISCOVERY_FINISHED_AT,
+        error=DiscoveryError(
+            type_name="RuntimeError",
+            message="discovery failed",
+            provider_name=ProviderInstanceName(errored_provider_name),
+        ),
     )
     return _serialize(event)
 
@@ -154,13 +161,13 @@ def _feed_observe(manager: ForwardStreamManager, line: str) -> None:
     manager._on_observe_output(line + "\n", is_stdout=True)  # noqa: SLF001
 
 
-def test_full_snapshot_updates_resolver_and_fires_callback(
+def test_provider_snapshot_updates_resolver_and_fires_callback(
     setup: tuple[ForwardStreamManager, ForwardResolver, io.StringIO, list[int]],
 ) -> None:
     manager, resolver, buf, counter = setup
     discovered: list[tuple[AgentId, RemoteSSHInfo | None, str]] = []
     manager.add_on_agent_discovered_callback(lambda aid, ssh, prov: discovered.append((aid, ssh, prov)))
-    line = _full_snapshot_line((_agent(TEST_AGENT_ID_1), _agent(TEST_AGENT_ID_2)), counter)
+    line = _provider_snapshot_line((_agent(TEST_AGENT_ID_1), _agent(TEST_AGENT_ID_2)), counter)
     _feed_observe(manager, line)
     # Resolver received both agents.
     assert set(resolver.list_known_agent_ids()) == {TEST_AGENT_ID_1, TEST_AGENT_ID_2}
@@ -199,7 +206,7 @@ def test_agent_discovery_excluded_by_filter_skips_resolver(
     assert fired == [TEST_AGENT_ID_2]
 
 
-def test_full_snapshot_retains_agent_whose_provider_errored_then_drops_on_clean(
+def test_provider_snapshot_retains_agent_whose_provider_errored_then_drops_on_clean(
     setup: tuple[ForwardStreamManager, ForwardResolver, io.StringIO, list[int]],
 ) -> None:
     """A snapshot omitting an agent whose provider errored keeps it; a clean snapshot drops it."""
@@ -208,16 +215,16 @@ def test_full_snapshot_retains_agent_whose_provider_errored_then_drops_on_clean(
     manager.add_on_agent_destroyed_callback(lambda aid: destroyed.append(aid))
 
     # Both agents present (provider 'modal' succeeded).
-    _feed_observe(manager, _full_snapshot_line((_agent(TEST_AGENT_ID_1), _agent(TEST_AGENT_ID_2)), counter))
+    _feed_observe(manager, _provider_snapshot_line((_agent(TEST_AGENT_ID_1), _agent(TEST_AGENT_ID_2)), counter))
     assert set(resolver.list_known_agent_ids()) == {TEST_AGENT_ID_1, TEST_AGENT_ID_2}
 
     # Snapshot omits agent 2 but its provider 'modal' errored -> retained, no destruction.
-    _feed_observe(manager, _full_snapshot_line_with_errors((_agent(TEST_AGENT_ID_1),), ("modal",), counter))
+    _feed_observe(manager, _provider_snapshot_line_with_error((_agent(TEST_AGENT_ID_1),), "modal", counter))
     assert set(resolver.list_known_agent_ids()) == {TEST_AGENT_ID_1, TEST_AGENT_ID_2}
     assert destroyed == []
 
     # Clean snapshot (no provider error) still omits agent 2 -> dropped now.
-    _feed_observe(manager, _full_snapshot_line((_agent(TEST_AGENT_ID_1),), counter))
+    _feed_observe(manager, _provider_snapshot_line((_agent(TEST_AGENT_ID_1),), counter))
     assert set(resolver.list_known_agent_ids()) == {TEST_AGENT_ID_1}
     assert destroyed == [TEST_AGENT_ID_2]
 
@@ -415,6 +422,86 @@ def test_multiple_observe_lines_serialize_through_envelope(
     assert all(env["stream"] == "observe" for env in envelopes)
 
 
+class _FakeEventsProcess:
+    """Stand-in for a per-agent events RunningProcess with a controllable liveness.
+
+    ``poll()`` returns None while "alive" and a non-None return code once
+    marked dead, mirroring the real RunningProcess contract used by
+    ``_start_events_stream``.
+    """
+
+    def __init__(self) -> None:
+        self._poll_value: int | None = None
+
+    def mark_dead(self, returncode: int) -> None:
+        self._poll_value = returncode
+
+    def poll(self) -> int | None:
+        return self._poll_value
+
+    @property
+    def returncode(self) -> int | None:
+        return self._poll_value
+
+
+class _RecordingConcurrencyGroup:
+    """Minimal ConcurrencyGroup double that records every background spawn.
+
+    Only the two methods ``_start_events_stream`` touches are implemented:
+    ``is_shutting_down`` (always False so the spawn path runs) and
+    ``run_process_in_background`` (records and returns a fresh live fake).
+    """
+
+    def __init__(self) -> None:
+        self.spawned: list[_FakeEventsProcess] = []
+
+    def is_shutting_down(self) -> bool:
+        return False
+
+    def run_process_in_background(self, **_kwargs: object) -> _FakeEventsProcess:
+        process = _FakeEventsProcess()
+        self.spawned.append(process)
+        return process
+
+
+def _start_events(manager: ForwardStreamManager, agent_id: AgentId) -> None:
+    """Invoke the manager's private per-agent events-stream starter (test hook)."""
+    manager._start_events_stream(agent_id)  # noqa: SLF001
+
+
+def _install_recording_cg(manager: ForwardStreamManager, fake_cg: "_RecordingConcurrencyGroup") -> None:
+    """Swap in a recording ConcurrencyGroup double so spawns are observable (test hook)."""
+    manager._cg = fake_cg  # ty: ignore[invalid-assignment] # noqa: SLF001
+
+
+def test_dead_events_stream_is_respawned_on_next_start(
+    setup: tuple[ForwardStreamManager, ForwardResolver, io.StringIO, list[int]],
+) -> None:
+    """A per-agent events stream that has exited must be respawned, not skipped.
+
+    Regression for the forward wedging on "Loading workspace": when an agent's
+    host restarts, the long-lived ``mngr event ... --follow`` child exits
+    non-zero. The old guard skipped any agent already present in
+    ``_events_processes`` -- including dead entries -- so the resolver's
+    per-agent service map stayed empty forever and ``resolve`` returned None.
+    """
+    manager, _resolver, _buf, _counter = setup
+    fake_cg = _RecordingConcurrencyGroup()
+    _install_recording_cg(manager, fake_cg)
+
+    # First start spawns a live stream; a second start leaves the live stream
+    # alone (no duplicate spawn).
+    _start_events(manager, TEST_AGENT_ID_1)
+    _start_events(manager, TEST_AGENT_ID_1)
+    assert len(fake_cg.spawned) == 1
+
+    # Once the stream exits (host restart broke --follow), the next start must
+    # drop the dead entry and respawn a fresh one rather than skip the agent.
+    fake_cg.spawned[0].mark_dead(1)
+    _start_events(manager, TEST_AGENT_ID_1)
+    assert len(fake_cg.spawned) == 2
+
+
 def test_observe_via_file_tails_discovery_log_without_spawning_observe(tmp_path: Path) -> None:
     """With ``discovery_events_path`` set (``--observe-via-file``), the manager drives
     discovery by tailing a file written by another process and spawns no ``mngr observe``."""
@@ -436,7 +523,7 @@ def test_observe_via_file_tails_discovery_log_without_spawning_observe(tmp_path:
     manager.start()
     try:
         # A separate "writer" creates the shared discovery log after the tail is running.
-        events_path.write_text(_full_snapshot_line((_agent(TEST_AGENT_ID_1),), counter) + "\n")
+        events_path.write_text(_provider_snapshot_line((_agent(TEST_AGENT_ID_1),), counter) + "\n")
         poll_until(lambda: TEST_AGENT_ID_1 in discovered, timeout=5.0)
         # Discovery came purely from the file tail -- no observe subprocess was spawned.
         assert manager._observe_process is None  # noqa: SLF001 - asserts internal state

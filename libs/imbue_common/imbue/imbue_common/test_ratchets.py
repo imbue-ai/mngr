@@ -145,6 +145,14 @@ def test_prevent_exit_stack() -> None:
     rc.check_exit_stack(_DIR, snapshot(0))
 
 
+def test_prevent_async_await() -> None:
+    # The 3 are all self-references: the PREVENT_ASYNC_AWAIT rule's own rule_name and
+    # rule_description in common_ratchets.py contain the literal words "async def" / "await"
+    # (one "async def" + two "await"), which the dead-simple regex matches. There is no actual
+    # async code in imbue_common.
+    rc.check_async_await(_DIR, snapshot(3))
+
+
 # --- Hardcoded paths ---
 
 

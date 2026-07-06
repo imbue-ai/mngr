@@ -14,6 +14,7 @@ import pytest
 from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client.restic_cli import _env_and_flags
 from imbue.minds.desktop_client.restic_cli import _looks_already_initialized
+from imbue.minds.desktop_client.restic_cli import parse_restic_snapshots
 from imbue.minds.desktop_client.restic_cli import parse_restic_timestamp
 from imbue.minds.desktop_client.testing import restic_backup_a_file
 from imbue.minds.errors import BackupProvisioningError
@@ -174,6 +175,96 @@ def test_init_add_key_and_status_against_local_repo(tmp_path: Path) -> None:
     latest = restic_cli.get_latest_snapshot_time(repository=repo, backend_env={}, password=workspace_password)
     assert latest is not None
     assert latest.tzinfo is not None
+
+
+# --- parse_restic_snapshots ---
+
+
+def test_parse_restic_snapshots_parses_fields_summary_and_tags() -> None:
+    stdout = """[
+      {
+        "time": "2026-05-29T05:33:16.123456789Z",
+        "paths": ["/data", "/runtime"],
+        "hostname": "workspace-host",
+        "tags": ["hourly"],
+        "id": "aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa7777bbbb8888",
+        "short_id": "aaaa1111",
+        "summary": {"total_size": 4096}
+      }
+    ]"""
+
+    snapshots = parse_restic_snapshots(stdout)
+
+    assert len(snapshots) == 1
+    snapshot = snapshots[0]
+    assert snapshot.snapshot_id == "aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa7777bbbb8888"
+    assert snapshot.short_id == "aaaa1111"
+    assert snapshot.paths == ("/data", "/runtime")
+    assert snapshot.hostname == "workspace-host"
+    assert snapshot.tags == ("hourly",)
+    assert snapshot.total_size_bytes == 4096
+    assert snapshot.time.tzinfo is not None
+
+
+def test_parse_restic_snapshots_defaults_short_id_and_size_when_absent() -> None:
+    stdout = """[
+      {"time": "2026-05-29T05:33:16Z", "id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
+    ]"""
+
+    snapshots = parse_restic_snapshots(stdout)
+
+    assert len(snapshots) == 1
+    assert snapshots[0].short_id == "01234567"
+    assert snapshots[0].paths == ()
+    assert snapshots[0].tags == ()
+    assert snapshots[0].total_size_bytes is None
+
+
+def test_parse_restic_snapshots_skips_entries_missing_id_or_time() -> None:
+    stdout = """[
+      {"time": "2026-05-29T05:33:16Z"},
+      {"id": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "time": "not-a-time"},
+      {"id": "feed0000feed0000feed0000feed0000feed0000feed0000feed0000feed0000", "time": "2026-05-29T06:00:00Z"}
+    ]"""
+
+    snapshots = parse_restic_snapshots(stdout)
+
+    assert len(snapshots) == 1
+    assert snapshots[0].snapshot_id == "feed0000feed0000feed0000feed0000feed0000feed0000feed0000feed0000"
+
+
+def test_parse_restic_snapshots_handles_empty_output() -> None:
+    assert parse_restic_snapshots("") == ()
+    assert parse_restic_snapshots("[]") == ()
+
+
+def test_parse_restic_snapshots_raises_on_non_list_payload() -> None:
+    with pytest.raises(BackupProvisioningError):
+        parse_restic_snapshots('{"not": "a list"}')
+
+
+def test_parse_restic_snapshots_raises_on_non_json() -> None:
+    with pytest.raises(BackupProvisioningError):
+        parse_restic_snapshots("this is not json")
+
+
+@pytest.mark.timeout(60)
+def test_list_snapshots_against_local_repo(tmp_path: Path) -> None:
+    repo = str(tmp_path / "repo")
+    password = "list-test-pw"
+    restic_cli.init_repo(repository=repo, backend_env={}, password=password)
+
+    # No snapshots yet.
+    assert restic_cli.list_snapshots(repository=repo, backend_env={}, password=password) == ()
+
+    source = tmp_path / "data.txt"
+    source.write_text("hello list")
+    restic_backup_a_file(repo, password, source)
+
+    snapshots = restic_cli.list_snapshots(repository=repo, backend_env={}, password=password)
+    assert len(snapshots) == 1
+    assert len(snapshots[0].snapshot_id) == 64
+    assert snapshots[0].time.tzinfo is not None
 
 
 @pytest.mark.timeout(60)
