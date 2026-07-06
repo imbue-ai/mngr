@@ -648,7 +648,7 @@ def _handle_workspace_stop(agent_id: str) -> WorkspaceLifecycleResponse | Respon
 def _apply_workspace_display_label(agent_id: AgentId, display_name: str, parent_cg: ConcurrencyGroup) -> Response:
     """Write the workspace's human-readable display label, returning the API response."""
     returncode, _stdout, stderr = _run_mngr_blocking(
-        [get_state().mngr_binary, "label", str(agent_id), f"{WORKSPACE_DISPLAY_NAME_LABEL}={display_name}"],
+        [get_state().mngr_binary, "label", str(agent_id), "--label", f"{WORKSPACE_DISPLAY_NAME_LABEL}={display_name}"],
         parent_cg,
     )
     if returncode != 0:
