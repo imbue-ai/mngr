@@ -30,6 +30,8 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -730,3 +732,24 @@ class HostLifecycleOptions(FrozenModel):
             else default_idle_timeout_seconds,
             activity_sources=resolved_activity_sources,
         )
+
+
+class BoundedProviderDiscoveryResult(FrozenModel):
+    """Result of a per-host-bounded provider discovery poll.
+
+    ``hosts`` and ``agents`` are the items that were read within their per-host
+    sub-provider timeout. ``unknown_host_ids`` / ``unknown_agent_ids`` mark items
+    whose individual read exceeded that timeout: they are omitted from ``hosts`` /
+    ``agents`` and surfaced as explicitly unknown (distinct from being destroyed,
+    which is an absence, and from a fully-errored provider). Consumers retain an
+    unknown item's previously-known state rather than dropping it.
+    """
+
+    hosts: tuple[DiscoveredHost, ...] = Field(description="Hosts read within the per-host timeout")
+    agents: tuple[DiscoveredAgent, ...] = Field(description="Agents read within the per-host timeout")
+    unknown_host_ids: tuple[HostId, ...] = Field(
+        default=(), description="Hosts whose read exceeded the per-host timeout (state explicitly unknown)"
+    )
+    unknown_agent_ids: tuple[AgentId, ...] = Field(
+        default=(), description="Agents whose read exceeded the per-agent timeout (state explicitly unknown)"
+    )

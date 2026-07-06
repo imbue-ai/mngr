@@ -1,12 +1,17 @@
 """Tests for ProviderInstanceInterface default method implementations."""
 
+import threading
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import Field
+from pydantic import PrivateAttr
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.test_utils import poll_until
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.hosts.offline_host import OfflineHost
@@ -14,6 +19,7 @@ from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.provider_instance import HostDiscoveryReadRegistry
 from imbue.mngr.interfaces.provider_instance import _discover_agents_on_host
 from imbue.mngr.interfaces.provider_instance import build_agent_details_from_offline_ref
 from imbue.mngr.primitives import ActivitySource
@@ -27,6 +33,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
+from imbue.mngr.utils.testing import capture_loguru
 
 
 def _make_certified_data(host_id: HostId) -> CertifiedHostData:
@@ -506,3 +513,281 @@ def test_discover_hosts_and_agents_falls_back_to_offline_on_connection_error(
     # The connected_host cleanup and on_connection_error hook still run.
     broken_host.disconnect.assert_called_once()
     assert provider.connection_errors_cleared == [host_id]
+
+
+# =============================================================================
+# discover_hosts_and_agents_within_timeouts per-host timeout tests
+# =============================================================================
+
+
+class _PerHostGatedProvider(MockProviderInstance):
+    """Provider whose per-host agent reads can be individually gated.
+
+    Exercises the per-host timeout in ``discover_hosts_and_agents_within_timeouts``
+    without a live host connection: ``read_host_agents_for_bounded_discovery`` blocks
+    for ``gated_host_id`` until ``release()`` is called, and returns the configured
+    agents for every other host immediately.
+    """
+
+    gated_host_id: HostId | None = Field(default=None)
+    agents_by_host_id: dict[str, list[DiscoveredAgent]] = Field(default_factory=dict)
+
+    _gate: threading.Event = PrivateAttr(default_factory=threading.Event)
+    # Records the ``timeout_seconds`` seen on each per-host read, keyed by host id, so tests
+    # can assert the per-host bound is threaded down (and how many reads were started).
+    _read_timeouts_by_host_id: dict[str, list[float]] = PrivateAttr(default_factory=dict)
+    _record_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+
+    def discover_hosts(
+        self,
+        cg: ConcurrencyGroup,
+        include_destroyed: bool = False,
+    ) -> list[DiscoveredHost]:
+        return list(self.mock_discovered_hosts)
+
+    def read_host_agents_for_bounded_discovery(
+        self,
+        host_ref: DiscoveredHost,
+        timeout_seconds: float,
+    ) -> list[DiscoveredAgent]:
+        with self._record_lock:
+            self._read_timeouts_by_host_id.setdefault(str(host_ref.host_id), []).append(timeout_seconds)
+        if self.gated_host_id is not None and host_ref.host_id == self.gated_host_id:
+            self._gate.wait()
+        return list(self.agents_by_host_id.get(str(host_ref.host_id), []))
+
+    def read_count_for_host(self, host_id: HostId) -> int:
+        with self._record_lock:
+            return len(self._read_timeouts_by_host_id.get(str(host_id), []))
+
+    def read_timeouts_for_host(self, host_id: HostId) -> list[float]:
+        with self._record_lock:
+            return list(self._read_timeouts_by_host_id.get(str(host_id), []))
+
+    def release(self) -> None:
+        self._gate.set()
+
+
+def test_discover_within_timeouts_marks_slow_host_unknown(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
+    """A host whose agent read exceeds the per-host timeout is reported UNKNOWN, and the
+    method returns without waiting for that host -- other hosts' agents still come through."""
+    provider = _PerHostGatedProvider(
+        name=ProviderInstanceName("gated"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+    fast_host = DiscoveredHost(
+        host_id=HostId.generate(),
+        host_name=HostName("fast"),
+        provider_name=provider.name,
+        host_state=HostState.RUNNING,
+    )
+    slow_host = DiscoveredHost(
+        host_id=HostId.generate(),
+        host_name=HostName("slow"),
+        provider_name=provider.name,
+        host_state=HostState.RUNNING,
+    )
+    fast_agent = _make_agent_ref(fast_host.host_id, AgentId.generate(), provider.name)
+    provider.mock_discovered_hosts = [fast_host, slow_host]
+    provider.agents_by_host_id = {str(fast_host.host_id): [fast_agent]}
+    provider.gated_host_id = slow_host.host_id
+
+    try:
+        result = provider.discover_hosts_and_agents_within_timeouts(
+            cg=temp_mngr_ctx.concurrency_group,
+            host_discovery_timeout_seconds=1.0,
+            agent_discovery_timeout_seconds=1.0,
+        )
+
+        assert slow_host.host_id in result.unknown_host_ids
+        assert fast_host.host_id not in result.unknown_host_ids
+        assert {h.host_id for h in result.hosts} == {fast_host.host_id}
+        assert {a.agent_id for a in result.agents} == {fast_agent.agent_id}
+    finally:
+        # Release the orphaned read so its daemon thread can exit cleanly.
+        provider.release()
+
+
+def test_discover_within_timeouts_returns_all_when_fast(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> None:
+    """With no slow host, every host's agents are returned and nothing is marked unknown."""
+    provider = _PerHostGatedProvider(
+        name=ProviderInstanceName("gated"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+    host = DiscoveredHost(
+        host_id=HostId.generate(),
+        host_name=HostName("h"),
+        provider_name=provider.name,
+        host_state=HostState.RUNNING,
+    )
+    agent = _make_agent_ref(host.host_id, AgentId.generate(), provider.name)
+    provider.mock_discovered_hosts = [host]
+    provider.agents_by_host_id = {str(host.host_id): [agent]}
+
+    result = provider.discover_hosts_and_agents_within_timeouts(
+        cg=temp_mngr_ctx.concurrency_group,
+        host_discovery_timeout_seconds=5.0,
+        agent_discovery_timeout_seconds=5.0,
+    )
+
+    assert result.unknown_host_ids == ()
+    assert {h.host_id for h in result.hosts} == {host.host_id}
+    assert {a.agent_id for a in result.agents} == {agent.agent_id}
+
+
+def test_discover_within_timeouts_threads_host_timeout_into_read(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """The per-host timeout is threaded into each host's read (bounded), not left as None.
+
+    Change 1: without a hard per-command timeout, an abandoned read runs forever; here we
+    assert the read receives exactly the ``host_discovery_timeout_seconds`` value.
+    """
+    provider = _PerHostGatedProvider(
+        name=ProviderInstanceName("gated"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+    host = DiscoveredHost(
+        host_id=HostId.generate(),
+        host_name=HostName("h"),
+        provider_name=provider.name,
+        host_state=HostState.RUNNING,
+    )
+    provider.mock_discovered_hosts = [host]
+    provider.agents_by_host_id = {
+        str(host.host_id): [_make_agent_ref(host.host_id, AgentId.generate(), provider.name)]
+    }
+
+    result = provider.discover_hosts_and_agents_within_timeouts(
+        cg=temp_mngr_ctx.concurrency_group,
+        # Deliberately distinct from the agent timeout so a bug that passes the wrong value
+        # (or None) would be caught.
+        host_discovery_timeout_seconds=4.0,
+        agent_discovery_timeout_seconds=9.0,
+    )
+
+    assert result.unknown_host_ids == ()
+    assert provider.read_timeouts_for_host(host.host_id) == [4.0]
+
+
+def test_discover_within_timeouts_reuses_in_flight_read_across_polls(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A host whose prior read is still in flight is not re-read on the next poll, and the
+    skip is logged as a warning.
+
+    Change 2: sharing one registry across two polls, a permanently-gated host's read is
+    started exactly once (the second poll reuses the in-flight future), both polls report it
+    UNKNOWN, and a wedged-host warning is emitted.
+    """
+    provider = _PerHostGatedProvider(
+        name=ProviderInstanceName("gated"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+    wedged_host = DiscoveredHost(
+        host_id=HostId.generate(),
+        host_name=HostName("wedged"),
+        provider_name=provider.name,
+        host_state=HostState.RUNNING,
+    )
+    provider.mock_discovered_hosts = [wedged_host]
+    provider.gated_host_id = wedged_host.host_id
+    registry = HostDiscoveryReadRegistry()
+
+    try:
+        with capture_loguru() as log_output:
+            first = provider.discover_hosts_and_agents_within_timeouts(
+                cg=temp_mngr_ctx.concurrency_group,
+                host_discovery_timeout_seconds=0.3,
+                agent_discovery_timeout_seconds=0.3,
+                registry=registry,
+            )
+            # The first poll must have actually started the read (and stored its future) before
+            # the second poll, so the second poll sees it as in-flight.
+            assert poll_until(lambda: provider.read_count_for_host(wedged_host.host_id) >= 1)
+            second = provider.discover_hosts_and_agents_within_timeouts(
+                cg=temp_mngr_ctx.concurrency_group,
+                host_discovery_timeout_seconds=0.3,
+                agent_discovery_timeout_seconds=0.3,
+                registry=registry,
+            )
+
+        assert wedged_host.host_id in first.unknown_host_ids
+        assert wedged_host.host_id in second.unknown_host_ids
+        # The read was started exactly once across both polls (the second reused the in-flight one).
+        assert provider.read_count_for_host(wedged_host.host_id) == 1
+        assert "prior read still in flight" in log_output.getvalue()
+    finally:
+        # Release the orphaned read so its daemon thread can exit cleanly.
+        provider.release()
+
+
+def test_discover_within_timeouts_harvests_late_finished_read_on_next_poll(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A wedged host whose read finishes late is harvested (reported discovered) on a later poll.
+
+    Change 2: complements the in-flight-skip path. Sharing one registry, a gated host is
+    UNKNOWN on the first poll (its read is left in flight). After the gate is released and the
+    read completes, the next poll harvests that finished future -- the host is now discovered
+    (its agents surface) rather than UNKNOWN -- and the registry entry is cleared so a third
+    poll starts a fresh read.
+    """
+    provider = _PerHostGatedProvider(
+        name=ProviderInstanceName("gated"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+    host = DiscoveredHost(
+        host_id=HostId.generate(),
+        host_name=HostName("late"),
+        provider_name=provider.name,
+        host_state=HostState.RUNNING,
+    )
+    agent = _make_agent_ref(host.host_id, AgentId.generate(), provider.name)
+    provider.mock_discovered_hosts = [host]
+    provider.gated_host_id = host.host_id
+    provider.agents_by_host_id = {str(host.host_id): [agent]}
+    registry = HostDiscoveryReadRegistry()
+
+    first = provider.discover_hosts_and_agents_within_timeouts(
+        cg=temp_mngr_ctx.concurrency_group,
+        host_discovery_timeout_seconds=0.3,
+        agent_discovery_timeout_seconds=0.3,
+        registry=registry,
+    )
+    # The first poll left the read in flight (host UNKNOWN, one read started).
+    assert host.host_id in first.unknown_host_ids
+    assert poll_until(lambda: provider.read_count_for_host(host.host_id) >= 1)
+
+    # Let the wedged read complete, then wait until its future is actually done so the next
+    # poll takes the harvest branch rather than the still-in-flight branch.
+    provider.release()
+    in_flight = registry.future_by_host_id[host.host_id]
+    assert poll_until(in_flight.done)
+
+    second = provider.discover_hosts_and_agents_within_timeouts(
+        cg=temp_mngr_ctx.concurrency_group,
+        host_discovery_timeout_seconds=0.3,
+        agent_discovery_timeout_seconds=0.3,
+        registry=registry,
+    )
+    # The finished-late read is harvested: the host is discovered (not UNKNOWN) and its agent
+    # surfaces, without starting a second read.
+    assert host.host_id not in second.unknown_host_ids
+    assert {h.host_id for h in second.hosts} == {host.host_id}
+    assert {a.agent_id for a in second.agents} == {agent.agent_id}
+    assert provider.read_count_for_host(host.host_id) == 1
+    # The harvest cleared the registry entry, so a third poll starts a fresh read.
+    assert host.host_id not in registry.future_by_host_id
+    provider.discover_hosts_and_agents_within_timeouts(
+        cg=temp_mngr_ctx.concurrency_group,
+        host_discovery_timeout_seconds=0.3,
+        agent_discovery_timeout_seconds=0.3,
+        registry=registry,
+    )
+    assert provider.read_count_for_host(host.host_id) == 2

@@ -258,7 +258,11 @@ minds-test-deployment-only *tests:
 # the gitignored stylesheet. The test lives in the snapshot-resume suite (it
 # runs in CI in the snapshot offload stage, reusing that image's warm Electron
 # toolchain) but creates its own fresh workspace, so it runs fine locally too.
+# The test itself only consumes the FCT worktree (erroring if absent), so this
+# recipe first materializes it (paired FCT branch + vendored mngr) unless an
+# operator worktree is already present, mirroring the CI snapshot bake.
 minds-test-electron *args: minds-css
+  uv run python -c 'from imbue.minds.desktop_client.fct_worktree import materialize_paired_fct_worktree; materialize_paired_fct_worktree()'
   xvfb-run -a uv run pytest apps/minds/test_snapshot_resume.py::test_create_apikey_workspace_and_chat_via_electron -v --no-cov --cov-fail-under=0 {{args}}
 
 # Drive the FULL Electron workspace lifecycle end-to-end (create local Docker

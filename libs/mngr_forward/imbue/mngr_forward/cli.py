@@ -548,7 +548,7 @@ signing key is persisted to disk under ``$MNGR_HOST_DIR/plugin/forward/``.""",
         ("Set up reverse tunnels", "mngr forward --service system_interface --reverse 8420:8420"),
         (
             "Filter to a single label set",
-            "mngr forward --service system_interface --agent-include 'has(agent.labels.workspace)'",
+            "mngr forward --service system_interface --agent-include 'has(agent.labels.is_primary)'",
         ),
     ),
 ).register()

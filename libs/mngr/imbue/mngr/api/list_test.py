@@ -30,7 +30,7 @@ from imbue.mngr.api.list import _apply_cel_filters
 from imbue.mngr.api.list import _collect_and_emit_details_for_host
 from imbue.mngr.api.list import _construct_discover_and_emit_for_provider
 from imbue.mngr.api.list import _handle_listing_error
-from imbue.mngr.api.list import _maybe_write_full_discovery_snapshot
+from imbue.mngr.api.list import _maybe_write_provider_discovery_snapshots
 from imbue.mngr.api.list import _process_host_with_error_handling
 from imbue.mngr.api.list import agent_details_to_cel_context
 from imbue.mngr.api.list import build_agent_cel_context
@@ -741,35 +741,37 @@ def test_apply_cel_filters_no_filters_includes_all() -> None:
 
 
 # =============================================================================
-# _maybe_write_full_discovery_snapshot Tests
+# _maybe_write_provider_discovery_snapshots Tests
 # =============================================================================
 
 
-def test_maybe_write_full_discovery_snapshot_writes_when_unfiltered_and_error_free(
+def test_maybe_write_provider_discovery_snapshots_writes_when_unfiltered_and_error_free(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """_maybe_write_full_discovery_snapshot writes a snapshot when the listing is complete and error-free."""
+    """_maybe_write_provider_discovery_snapshots writes a snapshot when the listing is complete and error-free."""
     host_details = _make_host_details()
     agent = _make_agent_details("snapshot-agent", host_details)
     result = ListResult()
     result.agents.append(agent)
 
-    _maybe_write_full_discovery_snapshot(
+    _maybe_write_provider_discovery_snapshots(
         mngr_ctx=temp_mngr_ctx,
         result=result,
         provider_names=None,
         include_filters=(),
         exclude_filters=(),
+        discovery_started_at=datetime.now(timezone.utc),
     )
 
     events_path = get_discovery_events_path(temp_mngr_ctx.config)
     assert events_path.exists()
     content = events_path.read_text()
-    assert "DISCOVERY_FULL" in content
+    assert "DISCOVERY_PROVIDER" in content
+    assert "DISCOVERY_FULL" not in content
     assert "snapshot-agent" in content
 
 
-def test_maybe_write_full_discovery_snapshot_skips_when_non_provider_error_present(
+def test_maybe_write_provider_discovery_snapshots_skips_when_non_provider_error_present(
     temp_mngr_ctx: MngrContext,
 ) -> None:
     """Non-provider-attributable errors (plain ErrorInfo) skip the snapshot.
@@ -783,19 +785,20 @@ def test_maybe_write_full_discovery_snapshot_skips_when_non_provider_error_prese
     result.agents.append(agent)
     result.errors.append(ErrorInfo.build(RuntimeError("non-provider failure")))
 
-    _maybe_write_full_discovery_snapshot(
+    _maybe_write_provider_discovery_snapshots(
         mngr_ctx=temp_mngr_ctx,
         result=result,
         provider_names=None,
         include_filters=(),
         exclude_filters=(),
+        discovery_started_at=datetime.now(timezone.utc),
     )
 
     events_path = get_discovery_events_path(temp_mngr_ctx.config)
     assert not events_path.exists()
 
 
-def test_maybe_write_full_discovery_snapshot_emits_with_error_by_provider_name_for_provider_errors(
+def test_maybe_write_provider_discovery_snapshots_emits_with_error_by_provider_name_for_provider_errors(
     temp_mngr_ctx: MngrContext,
 ) -> None:
     """Per-provider errors emit a snapshot with error_by_provider_name populated."""
@@ -808,59 +811,63 @@ def test_maybe_write_full_discovery_snapshot_emits_with_error_by_provider_name_f
         ProviderErrorInfo.build_for_provider(RuntimeError("modal token missing"), failing_provider),
     )
 
-    _maybe_write_full_discovery_snapshot(
+    _maybe_write_provider_discovery_snapshots(
         mngr_ctx=temp_mngr_ctx,
         result=result,
         provider_names=None,
         include_filters=(),
         exclude_filters=(),
+        discovery_started_at=datetime.now(timezone.utc),
     )
 
     events_path = get_discovery_events_path(temp_mngr_ctx.config)
     assert events_path.exists()
     content = events_path.read_text()
-    assert "DISCOVERY_FULL" in content
+    assert "DISCOVERY_PROVIDER" in content
+    assert "DISCOVERY_FULL" not in content
     assert "modal token missing" in content
     assert "RuntimeError" in content
     assert "modal" in content
 
 
-def test_maybe_write_full_discovery_snapshot_skips_when_provider_filter_set(
+def test_maybe_write_provider_discovery_snapshots_skips_when_provider_filter_set(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """_maybe_write_full_discovery_snapshot does not write when provider_names is set."""
+    """_maybe_write_provider_discovery_snapshots does not write when provider_names is set."""
     host_details = _make_host_details()
     agent = _make_agent_details("filtered-agent", host_details)
     result = ListResult()
     result.agents.append(agent)
 
-    _maybe_write_full_discovery_snapshot(
+    _maybe_write_provider_discovery_snapshots(
         mngr_ctx=temp_mngr_ctx,
         result=result,
         provider_names=("local",),
         include_filters=(),
         exclude_filters=(),
+        discovery_started_at=datetime.now(timezone.utc),
     )
 
     events_path = get_discovery_events_path(temp_mngr_ctx.config)
     assert not events_path.exists()
 
 
-def test_maybe_write_full_discovery_snapshot_skips_when_include_filters_set(
+def test_maybe_write_provider_discovery_snapshots_skips_when_include_filters_set(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """_maybe_write_full_discovery_snapshot does not write when include_filters are set."""
+    """_maybe_write_provider_discovery_snapshots does not write when include_filters are set."""
     host_details = _make_host_details()
     agent = _make_agent_details("include-filtered-agent", host_details)
     result = ListResult()
     result.agents.append(agent)
 
-    _maybe_write_full_discovery_snapshot(
+    _maybe_write_provider_discovery_snapshots(
         mngr_ctx=temp_mngr_ctx,
         result=result,
         provider_names=None,
         include_filters=('name == "include-filtered-agent"',),
         exclude_filters=(),
+        discovery_started_at=datetime.now(timezone.utc),
     )
 
     events_path = get_discovery_events_path(temp_mngr_ctx.config)
@@ -1882,10 +1889,10 @@ def test_list_agents_abort_mode_propagates_top_level_mngr_error(
 # =============================================================================
 
 
-def test_maybe_write_full_discovery_snapshot_logs_warning_on_oserror(
+def test_maybe_write_provider_discovery_snapshots_logs_warning_on_oserror(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """_maybe_write_full_discovery_snapshot logs a warning when OSError occurs.
+    """_maybe_write_provider_discovery_snapshots logs a warning when OSError occurs.
 
     Makes the discovery events path a directory so that the write attempt
     fails with IsADirectoryError (a subclass of OSError). This works
@@ -1904,22 +1911,23 @@ def test_maybe_write_full_discovery_snapshot_logs_warning_on_oserror(
     result.agents.append(agent)
 
     with capture_loguru(level="WARNING") as log_output:
-        _maybe_write_full_discovery_snapshot(
+        _maybe_write_provider_discovery_snapshots(
             mngr_ctx=temp_mngr_ctx,
             result=result,
             provider_names=None,
             include_filters=(),
             exclude_filters=(),
+            discovery_started_at=datetime.now(timezone.utc),
         )
 
     output = log_output.getvalue()
-    assert "Failed to write full discovery snapshot" in output
+    assert "Failed to write per-provider discovery snapshots" in output
 
 
-def test_maybe_write_full_discovery_snapshot_emits_ssh_host_info(
+def test_maybe_write_provider_discovery_snapshots_emits_ssh_host_info(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """_maybe_write_full_discovery_snapshot emits SSH info for hosts that have it.
+    """_maybe_write_provider_discovery_snapshots emits SSH info for hosts that have it.
 
     When an agent's host has SSH connection info, the snapshot write should
     also call emit_host_ssh_info (line 235). The events file must contain
@@ -1942,18 +1950,20 @@ def test_maybe_write_full_discovery_snapshot_emits_ssh_host_info(
     result = ListResult()
     result.agents.append(agent)
 
-    _maybe_write_full_discovery_snapshot(
+    _maybe_write_provider_discovery_snapshots(
         mngr_ctx=temp_mngr_ctx,
         result=result,
         provider_names=None,
         include_filters=(),
         exclude_filters=(),
+        discovery_started_at=datetime.now(timezone.utc),
     )
 
     events_path = get_discovery_events_path(temp_mngr_ctx.config)
     assert events_path.exists()
     content = events_path.read_text()
-    assert "DISCOVERY_FULL" in content
+    assert "DISCOVERY_PROVIDER" in content
+    assert "DISCOVERY_FULL" not in content
     assert "ssh-agent" in content
 
 
