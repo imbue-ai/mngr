@@ -376,7 +376,7 @@ class _StubOnlineHost:
             raise self._raise_on_get_agents
         return list(self._remaining_agents)
 
-    def discover_agents(self) -> list[object]:
+    def discover_agents(self, timeout_seconds: float | None = None) -> list[object]:
         # Plugin-hook short-circuit: an empty discover list means the hook
         # has nothing to preserve / no sessions to save.
         return []

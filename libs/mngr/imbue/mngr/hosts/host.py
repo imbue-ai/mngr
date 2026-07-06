@@ -708,14 +708,20 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         result = self.execute_idempotent_command(f"test -d '{str(path)}'")
         return result.success
 
-    def _list_directory(self, path: Path) -> list[str]:
-        """List files in a directory on the host."""
+    def _list_directory(self, path: Path, timeout_seconds: float | None = None) -> list[str]:
+        """List files in a directory on the host.
+
+        When ``timeout_seconds`` is set, the remote ``ls`` self-terminates on a
+        stall (surfacing as ``HostConnectionError`` after transient retries)
+        rather than blocking forever. Used by the per-host-bounded discovery read;
+        other callers leave it ``None`` (unbounded, prior behavior).
+        """
         if self.is_local:
             try:
                 return list(entry.name for entry in path.iterdir())
             except (FileNotFoundError, OSError):
                 return []
-        result = self.execute_idempotent_command(f"ls -1 '{str(path)}' 2>/dev/null")
+        result = self.execute_idempotent_command(f"ls -1 '{str(path)}' 2>/dev/null", timeout_seconds=timeout_seconds)
         if result.success and result.stdout.strip():
             return result.stdout.strip().split("\n")
         return []
@@ -1263,7 +1269,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         logger.trace("Loaded {} agent(s) from host {}", len(agents), self.id)
         return agents
 
-    def discover_agents(self) -> list[DiscoveredAgent]:
+    def discover_agents(self, timeout_seconds: float | None = None) -> list[DiscoveredAgent]:
         """Get lightweight references to all agents on this host.
 
         This method reads only the data.json files for each agent, avoiding the
@@ -1272,13 +1278,20 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
         Note that we override the base method in order to read more directly from the host,
         since that data is more likely to be up-to-date.
+
+        When ``timeout_seconds`` is set (the per-host-bounded discovery path), each
+        remote SSH read (the directory listing and every ``data.json`` read) is
+        bounded by that wall-clock so a wedged host self-terminates its reads
+        rather than leaving the discovery thread running forever. The bound is
+        per-command, so a host with N agents can take up to ~N x the timeout; the
+        outer per-host wall-clock wait remains the overall guarantee.
         """
         with log_span("Loading all agents from host {}", self.id):
             agents_dir = get_agents_root_dir(self.host_dir)
 
             with log_span("Listing agent dir for host {}", self.id):
                 try:
-                    dir_listing = self._list_directory(agents_dir)
+                    dir_listing = self._list_directory(agents_dir, timeout_seconds=timeout_seconds)
                 except FileNotFoundError:
                     logger.trace("Failed to find agents directory for host {}", self.id)
                     return []
@@ -1289,7 +1302,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     agent_dir = agents_dir / dir_name
                     data_path = agent_dir / "data.json"
                     try:
-                        content = self.read_text_file(data_path)
+                        if timeout_seconds is not None:
+                            content = self.read_text_file_within_timeout(data_path, timeout_seconds)
+                        else:
+                            content = self.read_text_file(data_path)
                     except FileNotFoundError:
                         if not self._is_directory(agent_dir):
                             logger.warning("Could not load agent reference from {}", data_path)

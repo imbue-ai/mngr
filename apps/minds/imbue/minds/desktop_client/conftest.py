@@ -1,6 +1,9 @@
 import json
 import tempfile
 from collections.abc import Iterator
+from collections.abc import Mapping
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 
 import pytest
@@ -18,6 +21,8 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.primitives import ServiceName
+from imbue.mngr.api.discovery_events import DiscoveredProvider
+from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
@@ -128,6 +133,32 @@ def make_agents_json(*agent_ids: AgentId, labels: dict[str, str] | None = None) 
 def make_service_log(service: str, url: str) -> str:
     """Build a single JSONL line matching the services/events.jsonl format."""
     return json.dumps({"service": service, "url": url}) + "\n"
+
+
+def seed_provider_snapshots(
+    resolver: MngrCliBackendResolver,
+    providers: tuple[DiscoveredProvider, ...] = (),
+    error_by_provider_name: Mapping[ProviderInstanceName, DiscoveryError] | None = None,
+    last_snapshot_at: datetime | None = None,
+) -> None:
+    """Feed per-provider discovery snapshots into ``resolver`` via its per-provider merge API.
+
+    Convenience for tests that previously seeded provider state through the old
+    global ``update_providers`` in a single call: it fans the healthy providers
+    and the errored-provider entries into one ``update_providers`` call each,
+    every entry stamped with ``last_snapshot_at`` (defaulting to now). A real
+    provider snapshot carries either a constructed provider or an error, so the
+    two groups are kept distinct here.
+    """
+    snapshot_at = last_snapshot_at if last_snapshot_at is not None else datetime.now(timezone.utc)
+    for provider in providers:
+        resolver.update_providers(
+            provider_name=provider.provider_name, provider=provider, error=None, last_snapshot_at=snapshot_at
+        )
+    for provider_name, error in (error_by_provider_name or {}).items():
+        resolver.update_providers(
+            provider_name=provider_name, provider=None, error=error, last_snapshot_at=snapshot_at
+        )
 
 
 def make_resolver_with_data(
