@@ -210,13 +210,13 @@ _IN_SANDBOX_RUNNER_PROGRAM: Final[str] = textwrap.dedent(
 #   test-results, .test_output)
 # - .git: worktree ``.git`` is a tiny ``gitdir: <path>`` file pointing at
 #   the main repo's .git/worktrees/<id>/ -- that path does not exist
-#   inside the sandbox, so no in-sandbox git command would work even if
-#   we did upload it. The runner's ``_current_mngr_branch`` tolerates a
-#   missing / unusable .git and returns None, routing
-#   ``resolve_fct_path`` through the documented "fall back to FCT main"
-#   path.
-# - .external_worktrees can hold large FCT working trees; we prefer the
-#   sandbox to clone FCT fresh from the public remote.
+#   inside the sandbox, so no in-sandbox git command would work. That is
+#   why the paired FCT worktree is materialized on the runner (where git
+#   works) and baked in via a separate upload, not cloned in-sandbox.
+# - .external_worktrees can hold large FCT working trees and is where the
+#   materialized worktree lands; the main rsync excludes it and the worktree
+#   is baked in through its own ``add_local_dir`` layer (see
+#   ``_build_snapshot_image``).
 _STAGING_RSYNC_EXCLUDES: Final[tuple[str, ...]] = (
     ".venv",
     "node_modules",
