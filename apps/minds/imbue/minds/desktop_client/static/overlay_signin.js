@@ -40,7 +40,7 @@
       if (typeof window.initSigninAuthForm === 'function') teardown = window.initSigninAuthForm(container);
     },
     destroy: function () {
-      if (teardown) { try { teardown(); } catch (e) { /* noop */ } teardown = null; }
+      if (teardown) { try { teardown(); } catch (error) { /* noop */ } teardown = null; }
       clearAuthNavHooks();
     },
   };

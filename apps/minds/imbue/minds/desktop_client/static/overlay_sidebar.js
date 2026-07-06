@@ -51,29 +51,29 @@
         listContainer.textContent = '';
         if (!workspaces || workspaces.length === 0) return;
         var groups = {};
-        workspaces.forEach(function (w) {
-          var key = w.account || 'Private';
+        workspaces.forEach(function (workspace) {
+          var key = workspace.account || 'Private';
           if (!groups[key]) groups[key] = [];
-          groups[key].push(w);
+          groups[key].push(workspace);
         });
-        var keys = Object.keys(groups).sort(function (a, b) {
-          if (a === 'Private') return -1;
-          if (b === 'Private') return 1;
-          return a.localeCompare(b);
+        var keys = Object.keys(groups).sort(function (leftKey, rightKey) {
+          if (leftKey === 'Private') return -1;
+          if (rightKey === 'Private') return 1;
+          return leftKey.localeCompare(rightKey);
         });
-        keys.forEach(function (key, keyIdx) {
-          if (keyIdx > 0 || keys.length > 1) {
+        keys.forEach(function (key, keyIndex) {
+          if (keyIndex > 0 || keys.length > 1) {
             var header = document.createElement('div');
             header.className = 'px-2 pt-2 pb-1 type-section text-tertiary';
             header.textContent = key === 'Private' ? 'Private' : key;
             listContainer.appendChild(header);
           }
-          groups[key].forEach(function (w) {
+          groups[key].forEach(function (workspace) {
             // Shared row builder; withOpenNew:true since Electron supports
             // multi-window. Spacing is owned by the container's flex gap.
             listContainer.appendChild(
-              window.mindsSidebarRow.buildRow(w, {
-                isCurrent: w.id === currentWorkspaceId,
+              window.mindsSidebarRow.buildRow(workspace, {
+                isCurrent: workspace.id === currentWorkspaceId,
                 withOpenNew: true,
               }),
             );
@@ -116,21 +116,21 @@
       // (a sign-in / sign-out happens there). Mirrors chrome.js's browser menu.
       function updateAccountUI(data) {
         var label = find('#sidebar-account-label');
-        var btn = find('#sidebar-account');
-        if (!label || !btn) return;
+        var accountButton = find('#sidebar-account');
+        if (!label || !accountButton) return;
         if (data && data.signedIn) {
           signedIn = true;
           label.textContent = 'Manage account(s)';
-          btn.title = data.email || 'Manage accounts';
+          accountButton.title = data.email || 'Manage accounts';
         } else {
           signedIn = false;
           label.textContent = 'Log in';
-          btn.title = 'Sign in to your account';
+          accountButton.title = 'Sign in to your account';
         }
       }
       function refreshAuthStatus() {
         fetch('/auth/api/status')
-          .then(function (r) { return r.json(); })
+          .then(function (response) { return response.json(); })
           .then(updateAccountUI)
           .catch(function () {});
       }
@@ -164,7 +164,7 @@
     },
 
     destroy: function () {
-      cleanups.forEach(function (fn) { try { fn(); } catch (e) { /* noop */ } });
+      cleanups.forEach(function (cleanup) { try { cleanup(); } catch (error) { /* noop */ } });
       cleanups = [];
     },
   };

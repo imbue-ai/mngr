@@ -17,7 +17,7 @@
 
   function initHelp(root) {
     var isElectron = !!(window.minds && window.minds.closeModal);
-    var teardownFns = [];
+    var teardownCallbacks = [];
 
     function find(selector) {
       return root.querySelector(selector);
@@ -34,22 +34,22 @@
       else window.history.back();
     }
 
-    function restoreSticky(box) {
-      var stored = window.localStorage.getItem(STICKY_PREFIX + box.id);
-      if (stored !== null) box.checked = stored === 'true';
+    function restoreSticky(checkbox) {
+      var stored = window.localStorage.getItem(STICKY_PREFIX + checkbox.id);
+      if (stored !== null) checkbox.checked = stored === 'true';
     }
-    function persistSticky(box) {
+    function persistSticky(checkbox) {
       try {
-        window.localStorage.setItem(STICKY_PREFIX + box.id, box.checked ? 'true' : 'false');
-      } catch (e) {
+        window.localStorage.setItem(STICKY_PREFIX + checkbox.id, checkbox.checked ? 'true' : 'false');
+      } catch (error) {
         /* ignore: a full/blocked localStorage just means the value isn't sticky */
       }
     }
-    STICKY_IDS.forEach(function (id) {
-      var box = find('#' + id);
-      if (!box) return; // not rendered (e.g. include-logs hidden, or no workspace)
-      try { restoreSticky(box); } catch (e) { /* ignore unreadable localStorage */ }
-      box.addEventListener('change', function () { persistSticky(box); });
+    STICKY_IDS.forEach(function (checkboxId) {
+      var checkbox = find('#' + checkboxId);
+      if (!checkbox) return; // not rendered (e.g. include-logs hidden, or no workspace)
+      try { restoreSticky(checkbox); } catch (error) { /* ignore unreadable localStorage */ }
+      checkbox.addEventListener('change', function () { persistSticky(checkbox); });
     });
 
     find('#help-close-btn').addEventListener('click', closeHelp);
@@ -92,8 +92,8 @@
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ description: description, workspace_agent_id: workspaceAgentId }),
-      }).then(function (resp) {
-        return resp.json().then(function (data) { return { ok: resp.ok, data: data }; });
+      }).then(function (response) {
+        return response.json().then(function (data) { return { ok: response.ok, data: data }; });
       }).then(function (result) {
         if (result.ok) {
           closeHelp();
@@ -140,8 +140,8 @@
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
-      }).then(function (resp) {
-        return resp.json().then(function (data) { return { ok: resp.ok, data: data }; });
+      }).then(function (response) {
+        return response.json().then(function (data) { return { ok: response.ok, data: data }; });
       }).then(function (result) {
         if (result.ok) {
           showSent(result.data && result.data.event_id);
@@ -170,14 +170,14 @@
       }
     }
 
-    var copyBtn = find('#help-copy-id-btn');
-    copyBtn.addEventListener('click', function () {
-      var id = find('#help-event-id').textContent;
+    var copyButton = find('#help-copy-id-btn');
+    copyButton.addEventListener('click', function () {
+      var eventId = find('#help-event-id').textContent;
       try {
-        if (navigator.clipboard) navigator.clipboard.writeText(id);
-        copyBtn.textContent = 'Copied';
-        setTimeout(function () { copyBtn.textContent = 'Copy'; }, 1500);
-      } catch (e) {
+        if (navigator.clipboard) navigator.clipboard.writeText(eventId);
+        copyButton.textContent = 'Copied';
+        setTimeout(function () { copyButton.textContent = 'Copy'; }, 1500);
+      } catch (error) {
         /* ignore */
       }
     });
@@ -196,14 +196,14 @@
       }
       var onKeydown = function (event) { if (event.key === 'Escape') closeHelp(); };
       document.addEventListener('keydown', onKeydown);
-      teardownFns.push(function () { document.removeEventListener('keydown', onKeydown); });
+      teardownCallbacks.push(function () { document.removeEventListener('keydown', onKeydown); });
     }
 
     // The close button's data-tooltip is wired by the overlay host (which calls
     // bindTooltips on each injected fragment) or, on the standalone page, by the
     // global tooltip_triggers.js scan from Base.jinja -- not here.
     return function teardown() {
-      teardownFns.forEach(function (fn) { try { fn(); } catch (e) { /* noop */ } });
+      teardownCallbacks.forEach(function (callback) { try { callback(); } catch (error) { /* noop */ } });
     };
   }
 
@@ -213,7 +213,7 @@
     positioning: 'backdrop',
     init: function (container) { teardown = initHelp(container); },
     destroy: function () {
-      if (teardown) { try { teardown(); } catch (e) { /* noop */ } teardown = null; }
+      if (teardown) { try { teardown(); } catch (error) { /* noop */ } teardown = null; }
     },
   };
 

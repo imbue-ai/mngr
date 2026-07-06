@@ -28,7 +28,7 @@
   function initInbox(root) {
     var isElectron = !!(window.minds && window.minds.closeModal);
     var host = window.MINDS_OVERLAY_HOST || {};
-    var teardownFns = [];
+    var teardownCallbacks = [];
 
     function find(selector) {
       return root.querySelector(selector);
@@ -65,7 +65,7 @@
       try {
         var parsed = JSON.parse(input.getAttribute('data-allowed-roots') || '[]');
         return Array.isArray(parsed) ? parsed : [];
-      } catch (e) {
+      } catch (error) {
         return [];
       }
     }
@@ -83,8 +83,8 @@
       if (!value) return false;
       var lower = value.toLowerCase();
       return roots.some(function (root) {
-        var r = String(root).replace(/\/+$/, '').toLowerCase() || '/';
-        return lower === r || lower.indexOf(r + '/') === 0;
+        var normalizedRoot = String(root).replace(/\/+$/, '').toLowerCase() || '/';
+        return lower === normalizedRoot || lower.indexOf(normalizedRoot + '/') === 0;
       });
     }
 
@@ -93,16 +93,16 @@
       if (!form) return;
       var wildcard = form.querySelector('input[name="permissions"][data-wildcard]');
       if (!wildcard) return;
-      form.querySelectorAll('input[name="permissions"]').forEach(function (box) {
-        if (box !== wildcard) box.disabled = wildcard.checked;
+      form.querySelectorAll('input[name="permissions"]').forEach(function (checkbox) {
+        if (checkbox !== wildcard) checkbox.disabled = wildcard.checked;
       });
     }
 
     function updateApproveState() {
       var form = find('#permissions-form');
       if (!form) return;
-      var approveBtn = find('#permissions-approve-btn');
-      if (!approveBtn) return;
+      var approveButton = find('#permissions-approve-btn');
+      if (!approveButton) return;
       syncPermissionWildcardExclusivity();
       var anyChecked = form.querySelector('input[name="permissions"]:checked') !== null;
       var pathInput = find('#file-sharing-path-input');
@@ -114,14 +114,14 @@
         var hint = find('#file-sharing-path-hint');
         if (hint) hint.classList.toggle('hidden', !(value.length > 0 && !withinRoots));
       }
-      approveBtn.disabled = !(anyChecked && pathOk);
+      approveButton.disabled = !(anyChecked && pathOk);
     }
 
     function wireSharePathControls() {
       if (!(window.minds && window.minds.showFilePicker)) return;
       ['file-sharing-browse-file-btn', 'file-sharing-browse-folder-btn'].forEach(function (id) {
-        var btn = find('#' + id);
-        if (btn) btn.classList.remove('hidden');
+        var button = find('#' + id);
+        if (button) button.classList.remove('hidden');
       });
     }
 
@@ -137,7 +137,7 @@
           input.value = selected;
           updateApproveState();
         }
-      } catch (e) {
+      } catch (error) {
         /* user cancelled or the bridge errored -- keep the current path */
       }
     }
@@ -155,11 +155,11 @@
 
     var denyingIds = new Set();
 
-    function isSelectableCard(el) {
-      return !!el
-        && el.classList
-        && el.classList.contains('inbox-card')
-        && !el.classList.contains('is-denying');
+    function isSelectableCard(element) {
+      return !!element
+        && element.classList
+        && element.classList.contains('inbox-card')
+        && !element.classList.contains('is-denying');
     }
 
     function syncDenyingClasses() {
@@ -190,26 +190,26 @@
     }
 
     async function fetchListFragment() {
-      var resp = await fetch('/inbox/list', { credentials: 'same-origin' });
-      if (!resp.ok) return;
-      var html = await resp.text();
+      var response = await fetch('/inbox/list', { credentials: 'same-origin' });
+      if (!response.ok) return;
+      var html = await response.text();
       inboxList.innerHTML = html;
       syncDenyingClasses();
       applyEmptyState();
     }
 
     async function fetchDetailFragment(id) {
-      var resp = await fetch('/inbox/detail/' + encodeURIComponent(id), { credentials: 'same-origin' });
-      if (!resp.ok) return;
-      var html = await resp.text();
+      var response = await fetch('/inbox/detail/' + encodeURIComponent(id), { credentials: 'same-origin' });
+      if (!response.ok) return;
+      var html = await response.text();
       inboxDetail.innerHTML = html;
       updateApproveState();
       wireSharePathControls();
     }
 
     function setSelectedCard(id) {
-      inboxList.querySelectorAll('.inbox-card.is-selected').forEach(function (c) {
-        c.classList.remove('is-selected');
+      inboxList.querySelectorAll('.inbox-card.is-selected').forEach(function (selectedCard) {
+        selectedCard.classList.remove('is-selected');
       });
       if (!id) return;
       var card = inboxList.querySelector('.inbox-card[data-request-id="' + id + '"]');
@@ -220,7 +220,7 @@
       try {
         var target = id ? '/inbox?selected=' + encodeURIComponent(id) : '/inbox';
         history.replaceState(null, '', target);
-      } catch (e) { /* noop in restricted contexts */ }
+      } catch (error) { /* noop in restricted contexts */ }
     }
 
     async function selectItem(id) {
@@ -248,22 +248,22 @@
       }
     }
 
-    function scrollDetailIntoView(el) {
-      if (!el) return;
+    function scrollDetailIntoView(element) {
+      if (!element) return;
       try {
         inboxDetail.scrollTo({ top: inboxDetail.scrollHeight, behavior: 'smooth' });
-      } catch (e) {
+      } catch (error) {
         inboxDetail.scrollTop = inboxDetail.scrollHeight;
       }
     }
 
     async function submitGrant(form, resolvedId) {
-      var approveBtn = find('#permissions-approve-btn');
+      var approveButton = find('#permissions-approve-btn');
       var errorBox = find('#permissions-error');
-      var errorMsg = find('#permissions-error-message');
+      var errorMessageElement = find('#permissions-error-message');
       var manualBox = find('#permissions-manual-credentials');
       var progress = find('#permissions-progress');
-      if (approveBtn) approveBtn.disabled = true;
+      if (approveButton) approveButton.disabled = true;
       if (errorBox) errorBox.classList.add('hidden');
       if (manualBox) manualBox.classList.add('hidden');
       if (progress) {
@@ -289,10 +289,10 @@
         }
         if (progress) progress.classList.add('hidden');
         if (data.outcome === 'NEEDS_MANUAL_CREDENTIALS') {
-          var cmdEl = find('#permissions-manual-credentials-command');
-          var msgEl = find('#permissions-manual-credentials-message');
-          if (cmdEl) cmdEl.textContent = data.set_credentials_example || '';
-          if (msgEl) msgEl.textContent = data.message || '';
+          var commandElement = find('#permissions-manual-credentials-command');
+          var messageElement = find('#permissions-manual-credentials-message');
+          if (commandElement) commandElement.textContent = data.set_credentials_example || '';
+          if (messageElement) messageElement.textContent = data.message || '';
           if (manualBox) {
             manualBox.classList.remove('hidden');
             scrollDetailIntoView(manualBox);
@@ -301,28 +301,28 @@
           return;
         }
         if (data.outcome === 'FAILED') {
-          if (errorMsg) errorMsg.textContent = data.message || 'Approval failed; please try again.';
+          if (errorMessageElement) errorMessageElement.textContent = data.message || 'Approval failed; please try again.';
           if (errorBox) {
             errorBox.classList.remove('hidden');
             scrollDetailIntoView(errorBox);
           }
-          if (approveBtn) approveBtn.disabled = false;
+          if (approveButton) approveButton.disabled = false;
           return;
         }
-        if (errorMsg) errorMsg.textContent = data.message || 'Authorization failed.';
+        if (errorMessageElement) errorMessageElement.textContent = data.message || 'Authorization failed.';
         if (errorBox) {
           errorBox.classList.remove('hidden');
           scrollDetailIntoView(errorBox);
         }
-        if (approveBtn) approveBtn.disabled = false;
-      } catch (err) {
+        if (approveButton) approveButton.disabled = false;
+      } catch (error) {
         if (progress) progress.classList.add('hidden');
-        if (errorMsg) errorMsg.textContent = err && err.message ? err.message : String(err);
+        if (errorMessageElement) errorMessageElement.textContent = error && error.message ? error.message : String(error);
         if (errorBox) {
           errorBox.classList.remove('hidden');
           scrollDetailIntoView(errorBox);
         }
-        if (approveBtn) approveBtn.disabled = false;
+        if (approveButton) approveButton.disabled = false;
       }
     }
 
@@ -335,8 +335,8 @@
         var card = inboxList.querySelector('.inbox-card[data-request-id="' + resolvedId + '"]');
         if (card) card.classList.add('is-denying');
       }
-      var approveBtn = find('#permissions-approve-btn');
-      if (approveBtn) approveBtn.disabled = true;
+      var approveButton = find('#permissions-approve-btn');
+      if (approveButton) approveButton.disabled = true;
       var denyUrl = form.action.replace(/\/grant\b/, '/deny');
       fetch(denyUrl, {
         method: 'POST',
@@ -348,32 +348,32 @@
 
     // -- Event delegation (on container elements; dropped with the DOM) --
 
-    inboxList.addEventListener('click', function (e) {
-      var card = e.target.closest('.inbox-card');
+    inboxList.addEventListener('click', function (event) {
+      var card = event.target.closest('.inbox-card');
       if (!card) return;
       var id = card.getAttribute('data-request-id');
       if (id) selectItem(id);
     });
 
-    inboxDetail.addEventListener('submit', function (e) {
-      var form = e.target;
+    inboxDetail.addEventListener('submit', function (event) {
+      var form = event.target;
       if (!form || form.id !== 'permissions-form') return;
-      e.preventDefault();
+      event.preventDefault();
       submitGrant(form, getSelectedId());
     });
 
-    inboxDetail.addEventListener('change', function (e) {
-      if (e.target && e.target.name === 'permissions') updateApproveState();
+    inboxDetail.addEventListener('change', function (event) {
+      if (event.target && event.target.name === 'permissions') updateApproveState();
     });
 
     // -- Live list refresh from the host's cached chrome events (Electron only;
     // in the browser there is no MINDS_OVERLAY_HOST, so no subscription) --
 
     if (host.onChromeEvent) {
-      teardownFns.push(host.onChromeEvent(function (evt) {
-        if (!evt || evt.type !== 'requests') return;
+      teardownCallbacks.push(host.onChromeEvent(function (event) {
+        if (!event || event.type !== 'requests') return;
         var currentId = getSelectedId();
-        var newIds = Array.isArray(evt.request_ids) ? evt.request_ids.map(String) : [];
+        var newIds = Array.isArray(event.request_ids) ? event.request_ids.map(String) : [];
         fetchListFragment().then(function () {
           if (!currentId) return;
           if (newIds.indexOf(currentId) === -1) {
@@ -397,7 +397,7 @@
       }
       var onKeydown = function (event) { if (event.key === 'Escape') closeInbox(); };
       document.addEventListener('keydown', onKeydown);
-      teardownFns.push(function () { document.removeEventListener('keydown', onKeydown); });
+      teardownCallbacks.push(function () { document.removeEventListener('keydown', onKeydown); });
     }
 
     // Expose the handlers the server-rendered detail fragments call inline.
@@ -413,7 +413,7 @@
     wireSharePathControls();
 
     return function teardown() {
-      teardownFns.forEach(function (fn) { try { fn(); } catch (e) { /* noop */ } });
+      teardownCallbacks.forEach(function (callback) { try { callback(); } catch (error) { /* noop */ } });
       GLOBAL_HANDLER_NAMES.forEach(function (name) { delete window[name]; });
     };
   }
@@ -424,7 +424,7 @@
     positioning: 'backdrop',
     init: function (container) { teardown = initInbox(container); },
     destroy: function () {
-      if (teardown) { try { teardown(); } catch (e) { /* noop */ } teardown = null; }
+      if (teardown) { try { teardown(); } catch (error) { /* noop */ } teardown = null; }
     },
   };
 
