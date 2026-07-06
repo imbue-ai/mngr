@@ -259,44 +259,31 @@ def test_prevent_bash_without_strict_mode() -> None:
     ``set -euo pipefail`` is meaningless for them and would only leak strict mode
     into whatever shell sources them.
 
-    The snapshot count below accommodates two kinds of committed exception:
+    The snapshot below is an upper bound on the remaining committed scripts that
+    trip the ratchet. Most fall into two groups:
 
-    - The minds verify scripts ``apps/minds/scripts/first-message-verify.sh``
-      and ``apps/minds/scripts/launch-and-verify.sh``, which use
-      ``set -uo pipefail`` (omitting ``-e``) on purpose: they handle errors
-      explicitly (a ``fail`` helper, ``PIPESTATUS``, polling loops that depend
-      on commands exiting non-zero while they retry, and diagnostic blocks on
-      failure). ``-e`` would abort that handling instead of running it. The
-      sibling non-verify scripts in the same directory do use ``set -euo
-      pipefail``, so this omission is a deliberate, matched choice rather than
-      an oversight.
+    - Scripts that deliberately use ``set -uo pipefail`` (omitting ``-e``) because
+      a single non-zero exit must not abort a best-effort sweep -- e.g.
+      ``apps/minds/scripts/mac-runner-reset.sh`` (host cleanup that must not abort
+      on one failed step) and ``libs/mngr/imbue/mngr/resources/sigwinch_panes.sh``
+      (a per-session tmux repaint that signals every pane's children and must not
+      abort when one pane's signal fails).
 
-    - The merged agent-plugin ports' shell resources under
-      ``libs/mngr_{codex,opencode,antigravity}/.../resources/`` (lifecycle-marker,
-      hook, and launch scripts), brought in by merging the codex/opencode/antigravity
-      plugin ports. Marker/hook scripts routinely omit ``-e`` on purpose -- they test
-      for files that may be absent and act on non-zero exits, which ``-e`` would abort
-      -- so tightening any that do not need the exemption is left to those plugins.
+    - Marker/hook/launch and transcript-library resources under the merged
+      ``libs/mngr{,_codex,_opencode,_antigravity}/.../resources/`` plugin ports,
+      which routinely omit ``-e`` because they probe for files that may be absent
+      and act on non-zero exits, which ``-e`` would abort. Hardening any that do
+      not need the exemption is left to those plugins.
 
-    The count is an upper bound, and the binding environment is the offload CI
-    sandbox, NOT the local checkout -- the two diverge and CI is currently the
-    higher of the two:
-
-    - The local checkout sees 10 violations (after the ``.minds/template/``
-      exclusion above).
-    - The offload sandbox sees 11. The extra one is
-      ``apps/minds/scripts/mac-runner-reset.sh``, which *does* carry
-      ``set -euo pipefail`` at HEAD but is not modified on most branches, so
-      offload's thin-diff image serves a stale base-image copy that predates the
-      commit which added strict mode to it. When the offload base image is
-      refreshed the CI count drops back to 10 (still within this bound).
-
-    So the snapshot is pinned to the CI count (11), which the local run also
-    satisfies. Do NOT ``--inline-snapshot=trim`` this number from a local run --
-    that would lower it to 10 and fail CI at ``11 <= 10``.
+    ``find_bash_scripts_without_strict_mode`` counts only tracked ``*.sh`` files
+    present on disk, so the effective count can differ between a full local
+    checkout and an offload sandbox whose thin-diff image omits some tracked
+    paths; the snapshot is pinned to the highest observed count. Adding
+    ``sigwinch_panes.sh`` alongside the per-session SIGWINCH client-attached hook
+    raised that count from 11 to 12.
     """
     violations = find_bash_scripts_without_strict_mode(_REPO_ROOT)
-    assert len(violations) <= snapshot(11), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
+    assert len(violations) <= snapshot(12), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
         f"  - {v}" for v in violations
     )
 
