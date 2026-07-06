@@ -4,6 +4,58 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-01
+
+Split the mngr and minds release test suites cleanly.
+
+Renamed the two jobs in `.github/workflows/release-tests.yml` to make it explicit they cover the *mngr* release suite: `test-docker-release` -> `test-mngr-release-docker` and `test-release` -> `test-mngr-release`. Both jobs now exclude the whole `apps/minds` tree by path (`--ignore apps/minds`) instead of enumerating minds markers, so the mngr release run never touches minds tests.
+
+Folded all minds `@release` tests into the minds release job (`test-minds-release` in `ci.yml`): in addition to the `minds_deployment` group, it now installs Chromium and runs the plain minds `@release` tests (`-m 'release and not minds_deployment and not minds_services and not minds_snapshot_resume'`). This keeps the two release procedures separate (mngr = `v*` tag / dispatch; minds = manual `run_minds_release_tests` dispatch). Updated the stale `test-docker-release` reference in `offload-modal-release.toml`.
+
+Bumped the pinned Claude Code CLI version from `2.1.141` to `2.1.160` (matching forever-claude-template) in the release-tests workflow, the `tmr-setup` action, and the minds snapshot build script, so they stay aligned with the release Dockerfile pin.
+
+Cleaned up dev-level files for the OVH-VPS removal.
+
+- Removed `--backend slice` from the `bake-slice-{dev,prod}` justfile recipes (the flag no longer exists) and reframed the pool recipe comments to slice-only. The `destroy-pool-host` note still correctly states that `minds env destroy` tears down a whole env's unleased slices.
+
+- Deleted the unused `scripts/remove_old_flat_vault_secrets.py`.
+
+- Deleted obsolete specs/blueprints that only described the removed behavior: `specs/swap-pool-to-ovh/`, `blueprint/deprecate-ovh-vps/`, and `blueprint/disable-ovh-qemu-backups/`.
+
+Added a design doc (`blueprint/ratchet-async-await/`) describing the new monorepo-wide async/await ratchet that freezes and gradually reduces `async def` / `await` usage.
+
+## 2026-06-30
+
+Updated the minds error-reporting / get-help design doc (`blueprint/minds-error-reporting-help/`) to record the phase-3 design: the in-workspace agent-help flow escalates by opening a pre-filled report modal for human review rather than submitting or raising an inbox permission request, the outer app spawns the `/assist` chat via `mngr create` against the workspace's container host, and `/update-self` gains a recognizable merge-commit convention.
+
+Added the operator-run build + publish pipeline for the pre-baked Lima VM image (issue #2306). These scripts run locally on the release operator's machines (not in CI), so the R2 credentials and the minisign signing key never touch GitHub.
+
+- Replaced the stale Packer/QEMU image pipeline with a Lima-based bake (`scripts/build-lima-image.sh` + `scripts/lima_image/bake_provision.sh`; removed `scripts/packer/`). Baking with Lima means the image is produced by the same virtualizer that consumes it (`vz` on Apple Silicon, accelerated QEMU on Linux), so the artifact is guaranteed Lima-bootable and the macOS build host needs no separate QEMU/Packer toolchain. It boots the Debian 12 base (matching the Lima provider), runs the exact forever-claude-template build scripts (`setup_system`/`install_dependencies`/`build_workspace` + Playwright) to bake the toolchain, applies cheap reproducibility cleanups for small deltas, then flattens the Lima disk to a standalone qcow2 (Lima format) + raw (what gets chunked). Builds one arch per native host (amd64 on a KVM Linux host, arm64 on an Apple-Silicon Mac).
+
+- Added `scripts/lima_image/publish.py`: chunks the raw image with `desync`, signs the per-release root manifest with `minisign`, and uploads the new chunks + index + signed manifest to Cloudflare R2 (via the S3 API or the Cloudflare REST object API). Content-addressed chunks already present are skipped, so re-publishing a near-identical image only uploads the changed chunks.
+
+- Removed the obsolete `scripts/publish-lima-image.sh`.
+
+- Added the implementation spec under `blueprint/lima-image-cache/`.
+
+Fixed the scheduled TMR CI workflow, which had been failing at the `tmr-setup` step with `ImportError: cannot import name 'find_user_claude_config'`. The pre-trust step inlined a Python heredoc that imported `find_user_claude_config`, a function that was renamed to `find_user_config_in_isolated_mode`; the rename updated every call site except the one buried in the workflow's heredoc, which no grep or type checker could see.
+
+The `tmr-setup` action now invokes a real module (`scripts/pretrust_claude_checkout.py`) instead of an inline heredoc, so future renames of the claude-config API are caught by `ty` rather than only at CI runtime.
+
+Added the operator-run build + publish pipeline for the pre-baked Lima VM image (issue #2306). These scripts run locally on the release operator's machines (not in CI), so the R2 credentials and the minisign signing key never touch GitHub.
+
+- Replaced the stale Packer/QEMU image pipeline with a Lima-based bake (`scripts/build-lima-image.sh` + `scripts/lima_image/bake_provision.sh`; removed `scripts/packer/`). Baking with Lima means the image is produced by the same virtualizer that consumes it (`vz` on Apple Silicon, accelerated QEMU on Linux), so the artifact is guaranteed Lima-bootable and the macOS build host needs no separate QEMU/Packer toolchain. It boots the Debian 12 base (matching the Lima provider), runs the exact forever-claude-template build scripts (`setup_system`/`install_dependencies`/`build_workspace` + Playwright) to bake the toolchain, applies cheap reproducibility cleanups for small deltas, then flattens the Lima disk to a standalone qcow2 (Lima format) + raw (what gets chunked). Builds one arch per native host (amd64 on a KVM Linux host, arm64 on an Apple-Silicon Mac).
+
+- Added `scripts/lima_image/publish.py`: chunks the raw image with `desync`, signs the per-release root manifest with `minisign`, and uploads the new chunks + index + signed manifest to Cloudflare R2 (via the S3 API or the Cloudflare REST object API). Content-addressed chunks already present are skipped, so re-publishing a near-identical image only uploads the changed chunks.
+
+- Removed the obsolete `scripts/publish-lima-image.sh`.
+
+- Added the implementation spec under `blueprint/lima-image-cache/`.
+
+Raise the `minds-launch-to-msg.yml` build timeouts so a fresh ToDesktop bundle can finish. The `pnpm dist` step budget goes 45 -> 70 min and the build job budget 60 -> 85 min. A fresh dual-arch cloud build (serial sign + notarize x64 + arm64, plus a ~15-min final packaging phase) runs ~43 min even with a fast source download, and ~60+ min when ToDesktop's source-download phase stalls -- so the old 45-min step budget timed out mid-notarize on back-to-back scheduled runs, and because the workflow cancels the in-progress build on timeout, the SHA could never go green. The 70/85 split preserves the ~15-min margin the post-failure cancel step needs to tear an orphaned build down.
+
+Update the Slack notification's build link: the single `binary` link (which pointed at the ToDesktop dashboard) becomes `todesktop(mac-arm64)` -- `todesktop` links to the dashboard build page and `mac-arm64` links to the arm64 `.dmg` download.
+
 ## 2026-06-29
 
 Added a blueprint planning document (`blueprint/hostname-live-validation/`) for live validation of the mind-creation Name field.

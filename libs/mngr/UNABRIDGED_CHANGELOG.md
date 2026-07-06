@@ -4,6 +4,20 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-01
+
+Bumped the release Dockerfile's `CLAUDE_CODE_VERSION` from `2.1.141` to `2.1.160` to match the pin in forever-claude-template's `.mngr/settings.toml` (`[agent_types.claude].version`). The two had drifted, which the `test_claude_code_version_matches_forever_claude_template_pin` release test flags because a mismatch makes agent provisioning fail with "Claude version mismatch".
+
+Regenerated the `mngr imbue_cloud` CLI reference doc to reflect the slice-only `admin pool` commands (the `--backend`/`ovh_vps` flags are gone). Docs-only; no `mngr` core behavior change.
+
+Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.
+
+## 2026-06-30
+
+Simplified the internal `--reuse` agent-lookup scoping introduced for `mngr create <agent>@<host>.<provider>`: the lookup is now driven entirely by the host named in the create address. No user-visible behavior change -- a fresh-host create still skips same-named agents on other hosts, an existing-host re-create still reuses the agent on the named host, and a bare-name `--reuse` with multiple matches still raises the disambiguation error.
+
+The redundant `target_host_ref` parameter (which scoped by host id only for already-resolved existing hosts) has been removed; its constraint was already covered by the address's host name plus provider. Host-in-scope matching now lives in a single pure `_is_host_in_reuse_scope` helper.
+
 ## 2026-06-29
 
 Fixed `mngr destroy` (and `mngr gc`) crashing with a Docker `409 Conflict` traceback when a Docker host's per-host build image was still referenced by a leaked (often orphaned, stopped) container.

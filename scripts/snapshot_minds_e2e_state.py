@@ -80,6 +80,10 @@ import modal
 import modal.exception
 from modal.stream_type import StreamType
 
+# Lightweight (loguru + stdlib only, no playwright) so importing it on the CI
+# runner does not require the Electron toolchain.
+from imbue.minds.desktop_client.fct_worktree import materialize_paired_fct_worktree
+
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
 
 _DEFAULT_APP_NAME: Final[str] = "mngr-minds-e2e-snapshot"
@@ -93,7 +97,7 @@ _RUNC_VERSION: Final[str] = "v1.3.0"
 # Keep these in sync with apps/minds/.nvmrc and apps/minds/package.json engines.
 _NODE_VERSION: Final[str] = "24.15.0"
 _PNPM_VERSION: Final[str] = "10.33.4"
-_CLAUDE_CODE_VERSION: Final[str] = "2.1.141"
+_CLAUDE_CODE_VERSION: Final[str] = "2.1.160"
 
 # In-sandbox entrypoint that invokes the shared e2e workspace runner the
 # pytest test also uses, but without the test's mngr-destroy cleanup. The
@@ -145,46 +149,48 @@ _IN_SANDBOX_RUNNER_PROGRAM: Final[str] = textwrap.dedent(
     # pytest path applies in
     # apps/minds/test_snapshot_resume.py::test_create_apikey_workspace_and_chat_via_electron.
     _write_to_os_environ("MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME", "runc")
-    with tempfile.TemporaryDirectory(prefix="snapshot-fct-") as scratch:
-        fct_path = resolve_fct_path(Path(scratch))
-        workspace_name = f"forever-{get_short_random_string()}"
-        debug_port = find_free_port()
-        print(f"[snapshot] workspace={workspace_name} debug_port={debug_port}", flush=True)
-        create_workspace_via_electron(fct_path, workspace_name, debug_port)
-        # IMPORTANT: do NOT call destroy_agent_best_effort here. The whole
-        # point of this script is to leave the workspace agent + Docker
-        # container's on-disk state (volumes, /code, /worktree, the
-        # bootstrap-written runtime/, etc.) captured by snapshot_filesystem.
-        # But we DO want the container itself stopped cleanly before the
-        # snapshot fires, so its filesystem state is consistent (no
-        # half-written sqlite WALs, no inflight tmux pty writes, etc.)
-        # and so a sandbox booted from the snapshot can `docker start`
-        # the container deterministically rather than inheriting a
-        # mid-flight running state.
-        #
-        # `docker stop` sends SIGTERM, waits up to `--time`, then SIGKILL.
-        # The FCT container runs tini as PID 1, which propagates SIGTERM
-        # to the bootstrap/services/agent processes inside. 60s grace is
-        # generous enough for the bootstrap to flush its event log and
-        # close the chat agent's claude session cleanly.
-        running = subprocess.run(
-            ["docker", "ps", "--format", "{{.Names}}"],
+    # The paired FCT worktree was materialized on the runner and baked into the
+    # image at ``.external_worktrees/forever-claude-template``; resolve it
+    # (errors loudly if the bake did not stage it).
+    fct_path = resolve_fct_path()
+    workspace_name = f"forever-{get_short_random_string()}"
+    debug_port = find_free_port()
+    print(f"[snapshot] workspace={workspace_name} debug_port={debug_port}", flush=True)
+    create_workspace_via_electron(fct_path, workspace_name, debug_port)
+    # IMPORTANT: do NOT call destroy_agent_best_effort here. The whole
+    # point of this script is to leave the workspace agent + Docker
+    # container's on-disk state (volumes, /code, /worktree, the
+    # bootstrap-written runtime/, etc.) captured by snapshot_filesystem.
+    # But we DO want the container itself stopped cleanly before the
+    # snapshot fires, so its filesystem state is consistent (no
+    # half-written sqlite WALs, no inflight tmux pty writes, etc.)
+    # and so a sandbox booted from the snapshot can `docker start`
+    # the container deterministically rather than inheriting a
+    # mid-flight running state.
+    #
+    # `docker stop` sends SIGTERM, waits up to `--time`, then SIGKILL.
+    # The FCT container runs tini as PID 1, which propagates SIGTERM
+    # to the bootstrap/services/agent processes inside. 60s grace is
+    # generous enough for the bootstrap to flush its event log and
+    # close the chat agent's claude session cleanly.
+    running = subprocess.run(
+        ["docker", "ps", "--format", "{{.Names}}"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    ).stdout.split()
+    for name in running:
+        print(f"[snapshot] stopping container {name!r}", flush=True)
+        subprocess.run(
+            ["docker", "stop", "--time", "60", name],
             check=True,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        ).stdout.split()
-        for name in running:
-            print(f"[snapshot] stopping container {name!r}", flush=True)
-            subprocess.run(
-                ["docker", "stop", "--time", "60", name],
-                check=True,
-                timeout=120,
-            )
-        print(
-            f"[snapshot] workspace agent {workspace_name!r} container stopped; ready for snapshot",
-            flush=True,
+            timeout=120,
         )
+    print(
+        f"[snapshot] workspace agent {workspace_name!r} container stopped; ready for snapshot",
+        flush=True,
+    )
     """
 ).strip()
 
@@ -204,13 +210,13 @@ _IN_SANDBOX_RUNNER_PROGRAM: Final[str] = textwrap.dedent(
 #   test-results, .test_output)
 # - .git: worktree ``.git`` is a tiny ``gitdir: <path>`` file pointing at
 #   the main repo's .git/worktrees/<id>/ -- that path does not exist
-#   inside the sandbox, so no in-sandbox git command would work even if
-#   we did upload it. The runner's ``_current_mngr_branch`` tolerates a
-#   missing / unusable .git and returns None, routing
-#   ``resolve_fct_path`` through the documented "fall back to FCT main"
-#   path.
-# - .external_worktrees can hold large FCT working trees; we prefer the
-#   sandbox to clone FCT fresh from the public remote.
+#   inside the sandbox, so no in-sandbox git command would work. That is
+#   why the paired FCT worktree is materialized on the runner (where git
+#   works) and baked in via a separate upload, not cloned in-sandbox.
+# - .external_worktrees can hold large FCT working trees and is where the
+#   materialized worktree lands; the main rsync excludes it and the worktree
+#   is baked in through its own ``add_local_dir`` layer (see
+#   ``_build_snapshot_image``).
 _STAGING_RSYNC_EXCLUDES: Final[tuple[str, ...]] = (
     ".venv",
     "node_modules",
@@ -252,8 +258,16 @@ def _stage_repo_to_temp_dir(staging_dir: Path) -> Path:
     return target
 
 
-def _build_snapshot_image(staged_repo: Path) -> modal.Image:
+def _build_snapshot_image(staged_repo: Path, fct_worktree: Path | None) -> modal.Image:
     """Return a Modal image with every dep the minds Electron e2e test needs.
+
+    ``fct_worktree``, when provided, is the paired FCT working tree materialized
+    on the runner (paired branch + vendored mngr under test). It is baked into
+    the image at ``/code/mngr/.external_worktrees/forever-claude-template`` via a
+    separate upload layer -- the main staged-repo rsync deliberately excludes
+    ``.external_worktrees`` -- so the in-sandbox ``resolve_fct_path`` finds it and
+    the workspace container runs the paired FCT + mngr rather than the released
+    tag. ``None`` (``--skip-workspace-creation``) skips the extra upload.
 
     Built inline (not via ``modal.Image.from_dockerfile``) so this script
     stays self-contained -- ``Dockerfile.release`` is a generated artifact
@@ -266,7 +280,7 @@ def _build_snapshot_image(staged_repo: Path) -> modal.Image:
     live working tree) is what keeps Modal's "modified during build"
     check from aborting the run.
     """
-    return (
+    image = (
         modal.Image.debian_slim(python_version="3.12")
         # System deps -- superset of the base mngr Dockerfile, plus the extras
         # the Electron e2e test needs: xvfb (display server for Electron) and
@@ -402,6 +416,16 @@ def _build_snapshot_image(staged_repo: Path) -> modal.Image:
             "ln -s /code/mngr /app",
         )
     )
+    if fct_worktree is not None:
+        # Separate upload layer for the paired FCT worktree (the main staged-repo
+        # rsync excludes .external_worktrees). Placed last: no earlier build step
+        # depends on it, and the in-sandbox resolve_fct_path reads it at runtime.
+        image = image.add_local_dir(
+            str(fct_worktree),
+            "/code/mngr/.external_worktrees/forever-claude-template",
+            copy=True,
+        )
+    return image
 
 
 def _exec_in_sandbox(
@@ -585,7 +609,15 @@ def main() -> None:
                     staging_dir = Path(staging_dir_str)
                     staged_repo = _stage_repo_to_temp_dir(staging_dir)
 
-                    image = _build_snapshot_image(staged_repo)
+                    # Materialize the paired FCT worktree HERE on the runner
+                    # (git + GITHUB_HEAD_REF work) into a scratch dir, then bake
+                    # it into the image. Skipped when no workspace is created.
+                    fct_worktree = (
+                        None
+                        if args.skip_workspace_creation
+                        else materialize_paired_fct_worktree(staging_dir / "fct_worktree")
+                    )
+                    image = _build_snapshot_image(staged_repo, fct_worktree)
                     app = modal.App.lookup(args.app_name, create_if_missing=True)
 
                     print(f"Creating sandbox in app {args.app_name!r} with vm_runtime=True", flush=True)

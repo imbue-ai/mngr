@@ -55,7 +55,6 @@ from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.state import get_state
 from imbue.mngr.primitives import AgentId
-from imbue.mngr_latchkey.workspace_permissions import MINDS_WORKSPACES_SCOPE
 from imbue.mngr_latchkey.workspace_permissions import WORKSPACE_VERBS
 
 # Label shown on the inbox list card (lower-case, short).
@@ -296,13 +295,17 @@ class WorkspacePermissionGrantHandler(RequestEventHandler):
         The gateway record is removed out of band: the ``/approve`` endpoint
         deletes it on a successful grant, and :meth:`apply_deny_request` issues
         the ``DELETE`` for a denial. Mirrors the file-sharing handler.
+
+        The response event's ``scope`` is left unset: it is informational only
+        and redundant with ``request_type`` here (the cross-workspace verbs no
+        longer live under a dedicated detent scope -- they attach to
+        ``latchkey-self``), mirroring the accounts handler which also omits it.
         """
         response_event = create_request_response_event(
             request_event_id=request_event_id,
             status=status,
             agent_id=str(agent_id),
             request_type=str(RequestType.WORKSPACE_PERMISSION),
-            scope=MINDS_WORKSPACES_SCOPE,
         )
         append_response_event(self.data_dir, response_event)
         self.mngr_message_sender.send(agent_id, message)

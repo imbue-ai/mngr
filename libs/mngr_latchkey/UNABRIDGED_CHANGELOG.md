@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-01
+
+Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.
+
+## 2026-06-30
+
+The per-agent minds bug-report route (`POST /minds-api-proxy/api/v1/agents/<id>/report`) is now reachable by any in-workspace agent without a prior per-agent permission grant: a baseline rule allows that exact path ahead of the unauthorized gate. The route's bearer-key auth still applies. This is an interim allowance pending broader minds-API-surface latchkey work.
+
 ## 2026-06-28
 
 Added a third permission-request type, `workspace`, to the `permission-requests` gateway extension (alongside `predefined` and `file-sharing`), for the cross-workspace `minds-workspaces` API.

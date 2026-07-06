@@ -1,0 +1,3 @@
+`mngr rename --host <agent> <new-name>` now renames the host of the referenced agent (previously a `[future]` placeholder). Only the provider's logical host name changes; the agent name, tmux session, env file, and git branch are untouched. Not all providers support host renaming (e.g. `ssh` host names remain user-owned).
+
+Host names are now length-capped (`HostName`, 63 characters -- the DNS-label limit), since they end up in provider-side identifiers with their own length limits. The cap is generous so existing host-name generators are unaffected; callers that derive a pretty slug from arbitrary text apply their own smaller target on top. Agent names and provider instance names are unaffected. Auto-generated host names are kept within the cap.

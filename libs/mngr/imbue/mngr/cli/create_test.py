@@ -23,6 +23,7 @@ from imbue.mngr.cli.create import _compute_loader_provider_filter
 from imbue.mngr.cli.create import _editor_cleanup_scope
 from imbue.mngr.cli.create import _get_source_remote_url
 from imbue.mngr.cli.create import _is_creating_new_host
+from imbue.mngr.cli.create import _is_host_in_reuse_scope
 from imbue.mngr.cli.create import _parse_agent_opts
 from imbue.mngr.cli.create import _parse_branch_flag
 from imbue.mngr.cli.create import _parse_host_lifecycle_options
@@ -335,7 +336,6 @@ def test_try_reuse_existing_agent_no_agents_found(temp_mngr_ctx: MngrContext) ->
     result = _try_reuse_existing_agent(
         agent_name=AgentName("nonexistent"),
         provider_name=None,
-        target_host_ref=None,
         host_name=None,
         mngr_ctx=temp_mngr_ctx,
         agent_and_host_loader=lambda: {},
@@ -352,7 +352,6 @@ def test_try_reuse_existing_agent_no_matching_name(temp_mngr_ctx: MngrContext) -
     result = _try_reuse_existing_agent(
         agent_name=AgentName("test-agent"),
         provider_name=None,
-        target_host_ref=None,
         host_name=None,
         mngr_ctx=temp_mngr_ctx,
         agent_and_host_loader=lambda: {host_ref: [agent_ref]},
@@ -369,7 +368,6 @@ def test_try_reuse_existing_agent_filters_by_provider(temp_mngr_ctx: MngrContext
     result = _try_reuse_existing_agent(
         agent_name=AgentName("test-agent"),
         provider_name=ProviderInstanceName("local"),
-        target_host_ref=None,
         host_name=None,
         mngr_ctx=temp_mngr_ctx,
         agent_and_host_loader=lambda: {host_ref: [agent_ref]},
@@ -378,23 +376,65 @@ def test_try_reuse_existing_agent_filters_by_provider(temp_mngr_ctx: MngrContext
     assert result is None
 
 
-def test_try_reuse_existing_agent_filters_by_host(temp_mngr_ctx: MngrContext) -> None:
-    """Returns None when agent exists but on different host."""
-    host_ref = _make_discovered_host(host_id=TEST_HOST_ID_1)
+def test_try_reuse_existing_agent_filters_by_address_host_id(temp_mngr_ctx: MngrContext) -> None:
+    """Returns None when agent exists but on a host whose id differs from the address's host id."""
+    host_ref = _make_discovered_host(host_id=TEST_HOST_ID_1, host_name="h1")
     agent_ref = _make_discovered_agent(agent_name="test-agent", host_id=TEST_HOST_ID_1)
-
-    target_host_ref = _make_discovered_host(host_id=TEST_HOST_ID_2)
 
     result = _try_reuse_existing_agent(
         agent_name=AgentName("test-agent"),
         provider_name=None,
-        target_host_ref=target_host_ref,
-        host_name=None,
+        host_name=HostId(TEST_HOST_ID_2),
         mngr_ctx=temp_mngr_ctx,
         agent_and_host_loader=lambda: {host_ref: [agent_ref]},
     )
 
     assert result is None
+
+
+def test_try_reuse_existing_agent_filters_by_address_host_name(temp_mngr_ctx: MngrContext) -> None:
+    """Returns None when agent exists on a host whose name differs from the address's host name."""
+    host_ref = _make_discovered_host(host_name="h1")
+    agent_ref = _make_discovered_agent(agent_name="test-agent")
+
+    result = _try_reuse_existing_agent(
+        agent_name=AgentName("test-agent"),
+        provider_name=None,
+        host_name=HostName("h2"),
+        mngr_ctx=temp_mngr_ctx,
+        agent_and_host_loader=lambda: {host_ref: [agent_ref]},
+    )
+
+    assert result is None
+
+
+def test_is_host_in_reuse_scope_matches_documented_examples() -> None:
+    """Direct coverage of ``_is_host_in_reuse_scope``'s scoping matrix.
+
+    An unspecified provider or host name does not constrain the match; a
+    specified one must agree with the discovered host. ``host_name`` may be a
+    :class:`HostName` (match by name) or a :class:`HostId` (match by exact id).
+    """
+    host = _make_discovered_host(provider="modal", host_id=TEST_HOST_ID_1, host_name="h2")
+
+    # Nothing specified -> every host is in scope.
+    assert _is_host_in_reuse_scope(host, None, None) is True
+
+    # Provider only.
+    assert _is_host_in_reuse_scope(host, ProviderInstanceName("modal"), None) is True
+    assert _is_host_in_reuse_scope(host, ProviderInstanceName("docker"), None) is False
+
+    # Host name only.
+    assert _is_host_in_reuse_scope(host, None, HostName("h2")) is True
+    assert _is_host_in_reuse_scope(host, None, HostName("h1")) is False
+
+    # Provider and host name together.
+    assert _is_host_in_reuse_scope(host, ProviderInstanceName("modal"), HostName("h2")) is True
+    assert _is_host_in_reuse_scope(host, ProviderInstanceName("docker"), HostName("h2")) is False
+
+    # Host id matches by exact id, not by name.
+    assert _is_host_in_reuse_scope(host, None, HostId(TEST_HOST_ID_1)) is True
+    assert _is_host_in_reuse_scope(host, None, HostId(TEST_HOST_ID_2)) is False
 
 
 def test_try_reuse_existing_agent_scopes_to_address_host_name_when_new_host(
@@ -404,8 +444,8 @@ def test_try_reuse_existing_agent_scopes_to_address_host_name_when_new_host(
     agent on a *different* host is not matched.
 
     This is the regression guard: minds names every workspace's primary agent the
-    constant ``system-services`` and passes ``--new-host`` (so ``target_host_ref``
-    is None). Several discoverable ``system-services`` agents on other hosts must
+    constant ``system-services`` and passes ``--new-host`` (so the address names a
+    fresh, not-yet-created host). Several discoverable ``system-services`` agents on other hosts must
     not make the lookup ambiguous -- it should return None (nothing to reuse on the
     brand-new host) so the caller creates a fresh agent, rather than raising
     "Multiple agents found".
@@ -422,7 +462,6 @@ def test_try_reuse_existing_agent_scopes_to_address_host_name_when_new_host(
     result = _try_reuse_existing_agent(
         agent_name=AgentName("system-services"),
         provider_name=ProviderInstanceName("docker"),
-        target_host_ref=None,
         host_name=HostName("fresh-workspace"),
         mngr_ctx=temp_mngr_ctx,
         agent_and_host_loader=lambda: {other_host_a: [agent_a], other_host_b: [agent_b]},
@@ -451,7 +490,6 @@ def test_try_reuse_existing_agent_raises_on_ambiguous_match_without_host_scope(
         _try_reuse_existing_agent(
             agent_name=AgentName("system-services"),
             provider_name=ProviderInstanceName("docker"),
-            target_host_ref=None,
             host_name=None,
             mngr_ctx=temp_mngr_ctx,
             agent_and_host_loader=lambda: {host_a: [agent_a], host_b: [agent_b]},
@@ -498,7 +536,6 @@ def test_try_reuse_existing_agent_found_and_started(
         result = _try_reuse_existing_agent(
             agent_name=agent.name,
             provider_name=None,
-            target_host_ref=None,
             host_name=None,
             mngr_ctx=temp_mngr_ctx,
             agent_and_host_loader=lambda: {host_ref: [agent_ref]},
@@ -561,7 +598,6 @@ def test_try_reuse_existing_agent_scopes_to_address_host_name_among_many(
         result = _try_reuse_existing_agent(
             agent_name=agent.name,
             provider_name=None,
-            target_host_ref=None,
             host_name=local_host.get_name(),
             mngr_ctx=temp_mngr_ctx,
             agent_and_host_loader=lambda: {
@@ -601,7 +637,6 @@ def test_try_reuse_existing_agent_not_found_on_host(
     result = _try_reuse_existing_agent(
         agent_name=AgentName("ghost-agent"),
         provider_name=None,
-        target_host_ref=None,
         host_name=None,
         mngr_ctx=temp_mngr_ctx,
         agent_and_host_loader=lambda: {host_ref: [agent_ref]},

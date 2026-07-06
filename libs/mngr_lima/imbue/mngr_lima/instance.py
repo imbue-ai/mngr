@@ -62,7 +62,6 @@ from imbue.mngr_lima.constants import CLOUD_INIT_TIMEOUT_SECONDS
 from imbue.mngr_lima.constants import lima_host_data_disk_name
 from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_lima.errors import LimaHostCreationError
-from imbue.mngr_lima.errors import LimaHostRenameError
 from imbue.mngr_lima.host_store import HostRecord
 from imbue.mngr_lima.host_store import LimaHostConfig
 from imbue.mngr_lima.host_store import LimaHostStore
@@ -72,7 +71,7 @@ from imbue.mngr_lima.lima_yaml import merge_lima_yaml
 from imbue.mngr_lima.lima_yaml import parse_build_args_for_yaml_path
 from imbue.mngr_lima.lima_yaml import write_lima_yaml
 from imbue.mngr_lima.limactl import LimaSshConfig
-from imbue.mngr_lima.limactl import lima_instance_name
+from imbue.mngr_lima.limactl import lima_instance_name_from_host_id
 from imbue.mngr_lima.limactl import limactl_delete
 from imbue.mngr_lima.limactl import limactl_disk_create
 from imbue.mngr_lima.limactl import limactl_disk_delete
@@ -473,7 +472,10 @@ sudo poweroff
         """Create a new Lima VM host."""
         self._ensure_lima_available()
         host_id = HostId.generate()
-        instance_name = lima_instance_name(name, self.mngr_ctx.config.prefix)
+        # Derive the limactl instance name from the immutable host id, not the
+        # (mutable) host name, so a later rename never leaves the VM's instance
+        # name out of sync with the host name (limactl has no rename).
+        instance_name = lima_instance_name_from_host_id(host_id, self.mngr_ctx.config.prefix)
         logger.info("Creating Lima VM host {} ({}) ...", name, instance_name)
 
         # Resolve the host_dir layout once and lock it in on the host record.
@@ -1209,7 +1211,32 @@ sudo poweroff
         self._write_tags(host_id, existing)
 
     def rename_host(self, host: HostInterface | HostId, name: HostName) -> HostInterface:
-        raise LimaHostRenameError()
+        """Rename a Lima host by updating the logical host name on its record.
+
+        Only the host name in the local host record changes; the limactl
+        instance name is untouched (it is derived from the immutable host id
+        for current-scheme VMs, or persisted verbatim for legacy VMs), so no
+        VM rename -- which limactl does not support -- is needed. The host
+        store is a local directory, so this works whether or not the VM is
+        running, and applies uniformly to legacy and current-scheme VMs
+        because discovery reads the name from the record, never from the
+        instance name.
+        """
+        host_id = host.id if isinstance(host, HostInterface) else host
+        host_record = self._host_store.read_host_record(host_id, use_cache=False)
+        if host_record is None:
+            raise HostNotFoundError(self.name, host_id)
+        updated_certified = host_record.certified_host_data.model_copy_update(
+            to_update(host_record.certified_host_data.field_ref().host_name, str(name)),
+            to_update(host_record.certified_host_data.field_ref().updated_at, datetime.now(timezone.utc)),
+        )
+        self._host_store.write_host_record(
+            host_record.model_copy_update(
+                to_update(host_record.field_ref().certified_host_data, updated_certified),
+            )
+        )
+        self._evict_cached_host(host_id)
+        return self.get_host(host_id)
 
     # =========================================================================
     # Connector Method

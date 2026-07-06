@@ -4,6 +4,76 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-01
+
+The minds release-tier tests (`deployment_tests/`, marked `minds_deployment` / `minds_services`) now also carry `@pytest.mark.release`, so the whole release suite -- mngr and minds -- is discoverable by the `release` tag rather than by path.
+
+All minds release tests now run from the minds release job (`test-minds-release` in `ci.yml`, manual `run_minds_release_tests` dispatch), never from the mngr release workflow. That job now runs the heavy `minds_deployment` group (via the deployment orchestrator) and then the plain minds `@release` tests that need no ci env -- `test_claude_version_alignment`, `test_sse_redirect` (Chromium installed in-job), and `test_aws_workspace_release` (skips without AWS opt-in) -- selected by tag. Previously those three ran in the mngr release workflow on `v*` tags; they now run on the minds release dispatch instead, matching the minds release procedure.
+
+Fixed two pre-existing failures in the plain minds release tests that folding them into the minds release job surfaced:
+
+- `test_sse_redirect` was stale: it drove `/creating/<agent-id>`, but the creating page now takes a `CreationId` and polls the v1 operations resource (`/api/v1/workspaces/operations/create/<creation_id>`) for completion. Reworked it to key the fake creation by a `CreationId`, mount the `/api/v1` blueprint (pass `paths`), and assert the canonical `/goto/<agent>/` redirect.
+
+- `test_claude_version_alignment` was failing on a real drift (the release Dockerfile pinned an older Claude Code version than forever-claude-template); fixed by bumping the pin (see the mngr changelog).
+
+Docs updated: `deployment_tests/README.md` and `docs/testing-overview.md`.
+
+Removed the legacy OVH-VPS pool-host path from the minds env tooling. Pool hosts are bare-metal slices only.
+
+- `minds pool create` is slice-only: dropped `--backend` and the OVH-VPS-only flags; `--server-id` is required.
+
+- `minds env destroy` no longer tags/terminates OVH VPSes (deleted the `envs/providers/ovh_tags.py` module and its env-teardown step).
+
+- Stopped reading the `<tier>/ovh` Vault entry during deploy and dropped the `ovh` Modal secret from the connector deployment. The `<tier>/ovh` Vault entry and `.minds/template/ovh.sh` remain, reframed for operator-sourced bare-metal box ordering (`mngr imbue_cloud admin server`).
+
+- Dropped the now-unused `imbue-mngr-ovh` dependency from the minds package (the shipped Electron bundle keeps it, since `mngr_imbue_cloud`'s bare-metal box ordering still uses it).
+
+The direct OVH provider (`mngr create @host.ovh`) is unaffected.
+
+Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.
+
+Release minds v0.3.5: bump `apps/minds/package.json` to `0.3.5` and point the shipped binary's `FALLBACK_BRANCH` at the `minds-v0.3.5` forever-claude-template tag. This rolls up all mngr/minds changes that landed on `main` since `minds-v0.3.4`, notably:
+
+- The "get help" flow now spawns an `/assist` chat in the loaded workspace and frames the help modal as an agent submission for agent-escalated reports, with a full loading state that auto-closes on success.
+
+- UI copy renamed from "project" to "workspace" throughout (Login window title, page copy, and the "Back to workspaces" back-link).
+
+- Release tests split by tag: the minds release suite (`minds_deployment` / `minds_services` plus the plain minds `@release` tests) now runs from the minds release job rather than the mngr release workflow.
+
+## 2026-06-30
+
+Workspace recovery page: the "Report a problem" link no longer appears on the transient "Loading workspace" spinner. It is now shown only on the terminal states that offer an action -- "Workspace unresponsive" (restart), the restart-dispatch error, and "Can't connect to ..." (provider unreachable, retry) -- where there is an actual failure to report.
+
+Get-help / error reporting (in progress): an in-workspace agent that wants to file a bug report no longer submits to Sentry directly. The authenticated report route now asks the desktop app to open the report-a-bug modal -- pre-filled with the agent's description and scoped to that workspace -- so a human reviews what to attach and submits it through the normal report path. A human now gates every send.
+
+Get help: "Have an agent help fix the problem" is now available in the get-help modal when you're in a loaded workspace (and is the default choice there). Choosing it and describing the problem spawns a new chat in that workspace that diagnoses the issue and fixes what it can. While the chat is being created the modal shows a loading spinner, then closes itself once the chat is ready and its tab has opened in the workspace; it surfaces an error if the spawn fails.
+
+Get help: when the modal is opened by an in-workspace agent's escalation (rather than by you clicking the help button), it now reads "An agent in workspace <name> wants to submit this report:" and hides the "have an agent help" / "report a bug" choice -- a report is already underway, so there is nothing to pick. The pre-filled description and the report controls are unchanged, and it opens in the window showing that workspace.
+
+Accelerated local Lima workspace creation by adding a pre-baked Lima VM image cache, distributed via `desync` content-defined-chunking deltas (issue #2306). For the default workspace (the current release tag + the default forever-claude-template repo), a Lima create now boots a pre-built image instead of building the full toolchain in the VM on every create.
+
+- Added a new `imbue.minds.lima_image` package that downloads, verifies, and assembles the current release's pre-baked image: a signed root manifest (verified in pure Python against an Ed25519/minisign public key), a content-addressed chunk store, and a per-(version, arch) index. The "ensure current image present" operation is idempotent and resumable, seeds incremental upgrades from the previously-installed image, verifies the assembled image's hash before use, converts it to qcow2 for Lima, and keeps only the current version on disk.
+
+- The desktop app starts the image prefetch as a background worker as early as possible at startup (`minds run`), writing progress to a per-env state file. A Lima create gates on the verified image and points Lima at it via the provider's existing `providers.lima.default_image_url_*` override (no Lima provider code change). If the create runs before the download finishes, it blocks and shows progress (faster than rebuilding).
+
+- Fallback behavior: when no image is published for the selected release+arch, the app warns and builds the workspace in-VM as before; when a published image fails to download or verify, the create fails with a clear, retryable error (downloads resume on retry) rather than silently rebuilding. Background auto-retry runs while the app is open. A `MINDS_DISABLE_LIMA_IMAGE_CACHE=1` env var disables the path entirely (for testing/dev).
+
+- The per-env chunk-store base URL and trusted minisign public key come from `client.toml` (`lima_image_base_url`, `lima_image_minisign_public_key`); when unset, the pre-baked path is disabled and the app builds in-VM. Each minds env keeps its own image cache under its data root. The dev-env `client.toml` writer round-trips these two fields when set, so a dev env can opt into a pre-baked image source; `apps/minds/docs/release.md` documents the per-tier setup + per-release publish runbook.
+
+- Bundled the `desync` binary alongside `uv`/`git`/`lima` in the Electron resources (macOS/Linux) and added it to the backend PATH.
+
+Accelerated local Lima workspace creation by adding a pre-baked Lima VM image cache, distributed via `desync` content-defined-chunking deltas (issue #2306). For the default workspace (the current release tag + the default forever-claude-template repo), a Lima create now boots a pre-built image instead of building the full toolchain in the VM on every create.
+
+- Added a new `imbue.minds.lima_image` package that downloads, verifies, and assembles the current release's pre-baked image: a signed root manifest (verified in pure Python against an Ed25519/minisign public key), a content-addressed chunk store, and a per-(version, arch) index. The "ensure current image present" operation is idempotent and resumable, seeds incremental upgrades from the previously-installed image, verifies the assembled image's hash before use, converts it to qcow2 for Lima, and keeps only the current version on disk.
+
+- The desktop app starts the image prefetch as a background worker as early as possible at startup (`minds run`), writing progress to a per-env state file. A Lima create gates on the verified image and points Lima at it via the provider's existing `providers.lima.default_image_url_*` override (no Lima provider code change). If the create runs before the download finishes, it blocks and shows progress (faster than rebuilding).
+
+- Fallback behavior: when no image is published for the selected release+arch, the app warns and builds the workspace in-VM as before; when a published image fails to download or verify, the create fails with a clear, retryable error (downloads resume on retry) rather than silently rebuilding. Background auto-retry runs while the app is open. A `MINDS_DISABLE_LIMA_IMAGE_CACHE=1` env var disables the path entirely (for testing/dev).
+
+- The per-env chunk-store base URL and trusted minisign public key come from `client.toml` (`lima_image_base_url`, `lima_image_minisign_public_key`); when unset, the pre-baked path is disabled and the app builds in-VM. Each minds env keeps its own image cache under its data root. The dev-env `client.toml` writer round-trips these two fields when set, so a dev env can opt into a pre-baked image source; `apps/minds/docs/release.md` documents the per-tier setup + per-release publish runbook.
+
+- Bundled the `desync` binary alongside `uv`/`git`/`lima` in the Electron resources (macOS/Linux) and added it to the backend PATH.
+
 ## 2026-06-29
 
 The create-a-mind form now validates the advanced "Name" field live as you type, so a bad or already-used name is caught immediately instead of failing partway through creation.

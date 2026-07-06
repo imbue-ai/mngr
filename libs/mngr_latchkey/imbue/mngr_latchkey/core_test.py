@@ -382,7 +382,7 @@ def test_start_gateway_drops_bundled_extensions(tmp_path: Path) -> None:
         workspace_permissions_path = extensions_dir / "workspace_permissions.json"
         assert workspace_permissions_path.is_file()
         workspace_permissions = json.loads(workspace_permissions_path.read_text())
-        assert workspace_permissions["scope"] == "minds-workspaces"
+        assert workspace_permissions["path_prefix"] == "/minds-api-proxy/api/v1/workspaces"
         assert isinstance(workspace_permissions["verbs"], list) and len(workspace_permissions["verbs"]) > 0
         manager.stop_gateway()
 
