@@ -1496,6 +1496,20 @@ def render_sidebar_page(
     )
 
 
+@pure
+def render_overlay_host_page() -> str:
+    """Render the always-warm overlay host page loaded into the shared modal WebContentsView.
+
+    The page is a transparent shell hosting the overlay manager (overlay.js).
+    Every overlay -- the migrated workspace menu / inbox / help / sign-in modals
+    (as mount-on-demand iframes, created when opened and destroyed when closed)
+    and hover tooltips -- is in-page DOM driven over IPC, so opening an overlay
+    never costs a per-open page load. main.js loads this once at window creation
+    and keeps it mounted for the window's life.
+    """
+    return CATALOG.render("pages.OverlayHost")
+
+
 # -- Workspace/settings/sharing/accounts --
 
 

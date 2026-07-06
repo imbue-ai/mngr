@@ -507,6 +507,39 @@ def test_landing_page_lists_agents_when_multiple_known(tmp_path: Path) -> None:
     assert str(agent_id_2) in response.text
 
 
+def test_landing_row_buttons_have_tooltips(tmp_path: Path) -> None:
+    """Landing workspace-row action buttons carry data-tooltip labels (rendered
+    as in-page custom tooltips by tooltip_triggers.js, since the content view
+    has no overlay bridge) rather than native title= attributes, plus an
+    aria-label so these icon-only buttons keep an accessible name."""
+    agent_id = AgentId()
+    backend_resolver = StaticBackendResolver(
+        url_by_agent_and_service={str(agent_id): {"web": "http://test:9100"}},
+    )
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/")
+    assert response.status_code == 200
+    # A normal (non-shutdown-capable) row shows Restart / Open / Settings.
+    assert 'data-tooltip="Restart workspace"' in response.text
+    assert 'data-tooltip="Open in new window"' in response.text
+    assert 'data-tooltip="Settings"' in response.text
+    # No native title= tooltips remain on the row buttons.
+    assert 'title="Restart workspace"' not in response.text
+    assert 'title="Settings"' not in response.text
+    # data-tooltip is not exposed to assistive tech, so the aria-labels stay.
+    assert 'aria-label="Restart workspace"' in response.text
+    assert 'aria-label="Workspace settings"' in response.text
+    # The shared trigger script is loaded (via Base), which wires these up and
+    # -- absent the window.minds bridge -- renders them in-page.
+    assert "/_static/tooltip_triggers.js" in response.text
+
+
 def test_creating_page_returns_501_without_agent_creator(tmp_path: Path) -> None:
     """GET /creating/{id} returns 501 when no agent_creator is configured."""
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
@@ -727,6 +760,22 @@ def test_chrome_page_includes_sidebar_toggle(tmp_path: Path) -> None:
     assert "sidebar-menu" in response.text
 
 
+def test_chrome_titlebar_buttons_have_tooltips(tmp_path: Path) -> None:
+    """Titlebar buttons carry data-tooltip labels (rendered as custom tooltips on
+    the overlay surface) rather than native title= attributes, plus an aria-label
+    so these icon-only buttons keep an accessible name for assistive tech."""
+    client, _, _ = _setup_test_server(tmp_path)
+
+    response = client.get("/_chrome")
+    assert response.status_code == 200
+    assert 'data-tooltip="Main Menu"' in response.text
+    assert 'data-tooltip="Get help"' in response.text
+    # data-tooltip is not exposed to assistive tech, so each icon-only titlebar
+    # button also needs an aria-label to keep an accessible name.
+    assert 'aria-label="Main Menu"' in response.text
+    assert 'aria-label="Get help"' in response.text
+
+
 def test_chrome_sidebar_page_renders(tmp_path: Path) -> None:
     """The /_chrome/sidebar route returns the standalone sidebar HTML."""
     client, _, _ = _setup_test_server(tmp_path)
@@ -736,6 +785,16 @@ def test_chrome_sidebar_page_renders(tmp_path: Path) -> None:
     assert "sidebar-workspaces" in response.text
     # Interactivity including the SSE fallback has moved to the external JS.
     assert "/_static/sidebar.js" in response.text
+
+
+def test_chrome_overlay_page_renders(tmp_path: Path) -> None:
+    """The /_chrome/overlay route returns the always-warm overlay host HTML."""
+    client, _, _ = _setup_test_server(tmp_path)
+
+    response = client.get("/_chrome/overlay")
+    assert response.status_code == 200
+    assert "overlay-root" in response.text
+    assert "/_static/overlay.js" in response.text
 
 
 def test_chrome_events_sse_returns_auth_required_when_unauthenticated(tmp_path: Path) -> None:
@@ -1069,6 +1128,26 @@ def test_auth_signin_modal_page_renders_overlay_with_auth_form(tmp_path: Path) -
     assert 'id="signin-modal-backdrop"' in response.text
     assert 'id="signin-form"' in response.text
     assert "run your workspace on Imbue Cloud" in response.text
+
+
+def test_signin_modal_close_button_has_tooltip(tmp_path: Path) -> None:
+    """The sign-in modal's close button (DialogCloseButton) carries a Close tooltip,
+    wired by the shared trigger script on the overlay surface."""
+    client = _create_test_client_with_auth_routes(tmp_path)
+    response = client.get("/auth/signin-modal")
+    assert response.status_code == 200
+    assert 'data-tooltip="Close"' in response.text
+    assert "/_static/tooltip_triggers.js" in response.text
+
+
+def test_inbox_close_button_has_tooltip(tmp_path: Path) -> None:
+    """The inbox modal's close button carries a Close tooltip on the overlay surface."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.get("/inbox")
+    assert response.status_code == 200
+    assert 'data-tooltip="Close"' in response.text
+    assert "/_static/tooltip_triggers.js" in response.text
 
 
 def test_auth_page_ignores_unsafe_return_to(tmp_path: Path) -> None:
@@ -1617,6 +1696,16 @@ def test_help_page_renders_report_option(tmp_path: Path) -> None:
     # The agent-help radio is disabled in this phase.
     agent_radio = response.text.split('value="agent"')[1].split(">")[0]
     assert "disabled" in agent_radio
+
+
+def test_help_page_close_button_has_tooltip(tmp_path: Path) -> None:
+    """The help dialog's close button carries a custom tooltip wired by the shared
+    trigger script (modal pages can render tooltips on the overlay surface too)."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/help")
+    assert response.status_code == 200
+    assert 'data-tooltip="Close"' in response.text
+    assert "/_static/tooltip_triggers.js" in response.text
 
 
 def test_help_page_enables_agent_option_in_a_workspace(tmp_path: Path) -> None:
