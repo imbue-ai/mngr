@@ -243,12 +243,9 @@ def test_bundled_git_payload_end_to_end(tmp_path: Path) -> None:
     pinned_git_version: str = manifest["gitVersion"]
     dugite_tag: str = manifest["dugiteNativeTag"]
 
-    # Phase 1: obtain the pinned release asset and recompute its SHA256. Offload
-    # sandboxes run with network disabled, so in CI the asset comes from the
-    # image cache the mngr Dockerfile pre-fetches (MINDS_DUGITE_NATIVE_CACHE_DIR);
-    # elsewhere (dev machines) it is downloaded live. The hash check below runs
-    # against either source, doubling as a supply-chain tripwire: swapped bytes
-    # fail here instead of silently shipping a different git.
+    # Phase 1: obtain the pinned release asset -- from the image cache when
+    # present (offload sandboxes have no network), else a live download -- and
+    # recompute its SHA256 against the manifest pin, whichever the source.
     cache_dir_value = os.environ.get("MINDS_DUGITE_NATIVE_CACHE_DIR")
     cached_asset_path = Path(cache_dir_value) / asset_name if cache_dir_value else None
     if cached_asset_path is not None and cached_asset_path.is_file():

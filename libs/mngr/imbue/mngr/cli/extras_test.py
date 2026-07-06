@@ -581,7 +581,7 @@ def test_extras_config_yes_flag(cli_runner: CliRunner) -> None:
 
 # Same claude-plugin status probe as test_extras_no_args_shows_status above:
 # ~7s even on a fast machine, so the global 10s pytest-timeout has no headroom
-# on a contended CI sandbox (it timed out there on 2026-07-06).
+# on a contended CI sandbox.
 @pytest.mark.timeout(30)
 def test_extras_interactive_includes_default_type(cli_runner: CliRunner) -> None:
     """Running 'mngr extras -i' walks through the default agent type prompt."""

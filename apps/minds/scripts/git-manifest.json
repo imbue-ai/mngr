@@ -1,5 +1,5 @@
 {
-  "comment": "Pinned dugite-native git payload for the minds desktop app. Single source of truth consumed by download-binaries.js, scripts/build_test.py, apps/minds/test_bundled_git.py, and .github/workflows/minds-git-freshness.yml. Update via the runbook in apps/minds/docs/desktop-app.md; design: specs/minds-managed-git/concise.md. Asset names embed a dugite-native commit short-SHA, so record them verbatim. Hashes were independently recomputed from downloaded bytes on 2026-07-06, matching the published .sha256 release assets.",
+  "comment": "Pinned dugite-native git payload for the minds desktop app. Asset names embed a dugite-native commit short-SHA, so record them verbatim. Update via the runbook in apps/minds/docs/desktop-app.md; design: specs/minds-managed-git/concise.md.",
   "dugiteNativeTag": "v2.53.0-3",
   "gitVersion": "2.53.0",
   "targets": {

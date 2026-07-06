@@ -309,14 +309,9 @@ def test_pnpm_workspace_pins_cross_platform_architectures() -> None:
         assert cpu in text, f"pnpm-workspace.yaml supportedArchitectures.cpu must include '{cpu}'."
 
 
-# --- Bundled git (dugite-native) manifest ---
-#
-# scripts/git-manifest.json is the single source of truth for the pinned
-# dugite-native git payload (design: specs/minds-managed-git/concise.md). It is
-# consumed by download-binaries.js (Node), ensure-binaries.js (staleness marker),
-# these unit tests (Python), and the freshness workflow (jq). The tests below are
-# pure file-parsing drift guards (no network, no toolchain) that keep the manifest
-# internally consistent and in sync with the two JS consumers.
+# Drift guards for scripts/git-manifest.json, the single source of truth for
+# the pinned dugite-native git payload (design: specs/minds-managed-git/concise.md).
+# Pure file-parsing tests: no network, no toolchain.
 
 # The manifest targets and the per-target asset "label" segment
 # (dugite-native-v<gitVersion>-<shortsha>-<label>.tar.gz) that each target's

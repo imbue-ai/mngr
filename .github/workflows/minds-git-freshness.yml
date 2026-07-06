@@ -90,9 +90,6 @@ jobs:
 
           echo "Pin $pinned is behind latest $latest."
 
-          # Build the issue body in a file: pinned tag, latest tag + URL, a
-          # truncated excerpt of the release notes (first ~40 lines), and
-          # pointers to the runbook and design spec.
           notes_excerpt=$(mktemp)
           jq -r '.body // ""' "$release_json" | head -n 40 > "$notes_excerpt"
 
