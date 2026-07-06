@@ -609,6 +609,15 @@ class DockerConfigValidationError(ConfigError, ValueError):
     """Raised when Docker provider config fields are mutually inconsistent."""
 
 
+class ProviderTimeoutConfigError(ConfigError, ValueError):
+    """Raised when a provider's discovery timeout fields are mis-ordered.
+
+    The per-host and per-agent discovery timeouts must be below the provider
+    error timeout, otherwise a single slow host could never surface as UNKNOWN
+    before its whole provider is declared errored.
+    """
+
+
 class UnknownAgentTypeError(ConfigError):
     """Unknown agent type."""
 

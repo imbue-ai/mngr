@@ -99,6 +99,47 @@ def test_lease_host_success_parses_response(monkeypatch: pytest.MonkeyPatch) -> 
     assert result.attributes == {"cpus": 2}
 
 
+def test_rename_host_success_posts_new_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = _json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={"host_db_id": "00000000-0000-0000-0000-000000000009", "host_name": "new-name"},
+        )
+
+    transport = httpx.MockTransport(handler)
+
+    def fake_post(*args, **kwargs):
+        with httpx.Client(transport=transport) as inner:
+            return inner.post(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
+    client.rename_host(SecretStr("tok"), "00000000-0000-0000-0000-000000000009", "new-name")
+
+    assert captured["url"] == "https://example.com/hosts/00000000-0000-0000-0000-000000000009/rename"
+    assert captured["body"] == {"host_name": "new-name"}
+
+
+def test_rename_host_error_raises_connector_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="boom")
+
+    transport = httpx.MockTransport(handler)
+
+    def fake_post(*args, **kwargs):
+        with httpx.Client(transport=transport) as inner:
+            return inner.post(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
+    with pytest.raises(ImbueCloudConnectorError):
+        client.rename_host(SecretStr("tok"), "00000000-0000-0000-0000-000000000009", "new-name")
+
+
 def test_unauthenticated_responses_raise_auth_error(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, json={"detail": "no token"})

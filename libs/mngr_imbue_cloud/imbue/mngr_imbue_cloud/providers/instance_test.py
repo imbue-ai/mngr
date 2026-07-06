@@ -15,6 +15,7 @@ from pydantic import SecretStr
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.host import Host
@@ -106,13 +107,13 @@ def test_build_offline_details_from_lease_preserves_host_and_failure_reason(tmp_
         container_ssh_port=2222,
         agent_id=str(agent_id),
         host_id=str(host_id),
-        host_name=str(host_id),
+        host_name="crashed-host",
         attributes={},
         leased_at="2025-01-01T00:00:00Z",
     )
     host_ref = DiscoveredHost(
         host_id=host_id,
-        host_name=HostName(str(host_id)),
+        host_name=HostName("crashed-host"),
         provider_name=provider_name,
         host_state=HostState.CRASHED,
     )
@@ -225,6 +226,42 @@ def test_release_lease_on_failure_does_not_release_on_success() -> None:
 
 
 # =============================================================================
+# rename_host -- the workspace-name refactor exposes host rename for imbue_cloud.
+# The lease's host_db_id is the durable identity; only the friendly host_name
+# changes (via the connector), so a rename never touches the VPS/container.
+# =============================================================================
+
+
+class _RecordingRenameClient:
+    """Stub connector client that records rename_host calls."""
+
+    def __init__(self) -> None:
+        self.rename_calls: list[tuple[str, str]] = []
+
+    def rename_host(self, access_token: SecretStr, host_db_id: str, host_name: str) -> None:
+        self.rename_calls.append((host_db_id, host_name))
+
+
+class _NoLeaseRenameProvider(ImbueCloudProvider):
+    """Provider stub whose lease lookup always misses, to exercise the not-found guard."""
+
+    def _find_leased(self, host_id: HostId) -> LeasedHostInfo | None:
+        return None
+
+
+def test_rename_host_raises_when_lease_not_found() -> None:
+    """rename_host raises HostNotFoundError when the host has no lease (before any connector call)."""
+    client = _RecordingRenameClient()
+    provider = _NoLeaseRenameProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"),
+        client=client,
+    )
+    with pytest.raises(HostNotFoundError):
+        provider.rename_host(HostId.generate(), HostName("new-name"))
+    assert client.rename_calls == []
+
+
+# =============================================================================
 # Restart routing + re-bootstrap: a stopped leased container must (1) resolve
 # via get_host to an OFFLINE host so ensure_host_started routes ``mngr start``
 # through start_host, and (2) have start_host relaunch the container's sshd over
@@ -321,7 +358,7 @@ def _make_lease(host_id: HostId) -> LeasedHostInfo:
         container_ssh_port=2222,
         agent_id=str(AgentId.generate()),
         host_id=str(host_id),
-        host_name=str(host_id),
+        host_name="leased-host",
         attributes={},
         leased_at="2025-01-01T00:00:00Z",
     )

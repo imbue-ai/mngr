@@ -11,7 +11,6 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NestedTmuxError
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
-from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.utils.deps import SSH
@@ -33,44 +32,9 @@ CONNECT_COMMAND_ACTIVE_ENV_VAR: Final[str] = "MNGR_CONNECT_COMMAND_ACTIVE"
 
 
 @pure
-def build_post_attach_sigwinch_script(session_name: str) -> str:
-    """Build a shell command that sends SIGWINCH to every pane's child processes.
-
-    After a tmux client attaches, the agent process needs a SIGWINCH to re-query
-    its terminal size (TIOCGWINSZ) and redraw at the client's dimensions. We send
-    the signal directly rather than via ``tmux resize-window`` because
-    resize-window has a documented side effect of switching the window's
-    ``window-size`` option to ``manual`` -- which pins the window at its current
-    size and stops it tracking later client resizes, so the user sees a field of
-    padding dots once their terminal grows past the pinned size. With
-    ``window-size`` left at tmux's default (``latest``), the window already
-    resizes to match the client on attach and on every subsequent terminal
-    resize; this script's only job is to nudge the in-pane process to redraw.
-
-    Uses pgrep -P to find child processes of each pane. This avoids any
-    dependency on matching the agent's process name, which is unreliable
-    (on macOS, Claude's process title shows as its version number rather
-    than "claude").
-
-    The session component is rendered via :class:`TmuxSessionTarget`;
-    ``:$W`` stays as a literal shell-variable suffix so the loop iterates
-    over windows at runtime.
-    """
-    session_target = TmuxSessionTarget(session_name=session_name).as_shell_arg()
-    return (
-        f"tmux list-windows -t {session_target} -F '#I' | "
-        f"while read W; do "
-        f"tmux list-panes -t {session_target}:$W -F '#{{pane_pid}}' "
-        f"| xargs -I{{}} sh -c 'kill -WINCH {{}} $(pgrep -P {{}})' 2>/dev/null; "
-        f"done"
-    )
-
-
-@pure
 def _build_ssh_activity_wrapper_script(
     session_name: str,
     host_dir: Path,
-    primary_window_name: str,
     attach_args: tuple[str, ...] = (),
 ) -> str:
     """Build a shell script that tracks SSH activity while running tmux.
@@ -92,31 +56,16 @@ def _build_ssh_activity_wrapper_script(
     ``attach_args`` are tmux *client* flags spliced in before the ``attach``
     subcommand (``tmux <attach_args> attach ...``). The motivating case is
     ``-CC`` (iTerm2 control mode), which turns the SSH session's stdout into a
-    control-protocol stream -- so the background resize helper's stdout is
-    redirected to /dev/null below to keep it from corrupting that stream.
+    control-protocol stream.
+
+    Note: the post-attach SIGWINCH repaint nudge is no longer sent here. It now
+    fires from a per-session tmux ``client-attached`` hook (set at session
+    creation), so every attach -- this SSH wrapper, a plain ``tmux attach``, the
+    ttyd terminal -- triggers the redraw rather than only ``mngr connect``.
     """
     activity_dir = host_dir / "activity"
     activity_file = activity_dir / "ssh"
     signal_file = host_dir / "signals" / session_name
-    # After attaching, nudge the agent to redraw by sending SIGWINCH to its pane
-    # processes. Skip it when the agent's window is pinned ("manual" window-size):
-    # such a window never changes size on attach, so there is nothing to redraw,
-    # and we leave the deliberately-fixed dimensions untouched. The check runs on
-    # the remote host at attach time (window-size is a window option, read via -wv).
-    # We deliberately do NOT use `tmux resize-window` here: it would flip
-    # window-size to manual as a side effect, pinning the window and breaking the
-    # live resize tracking that the default window-size=latest otherwise provides.
-    # Target the primary window by name (not the literal :0 index) so the
-    # manual-pin guard holds regardless of the user's tmux base-index, matching how
-    # the window is created and targeted everywhere else.
-    agent_window_target = TmuxWindowTarget(session_name=session_name, window=primary_window_name).as_shell_arg()
-    sigwinch_step = (
-        f"(sleep 3; "
-        f'if [ "$(tmux show-options -t {agent_window_target} -wv window-size 2>/dev/null)" != manual ]; then '
-        # Redirect stdout too (not just stderr) so control mode (-CC) is not
-        # corrupted by stray tmux command output on the SSH stdout stream.
-        f"{build_post_attach_sigwinch_script(session_name)}; fi) >/dev/null 2>&1 & "
-    )
     # Render the shared attach argv to a shell-command string. shlex.join quotes
     # each token (matching TmuxSessionTarget.as_shell_arg for the target), so this
     # is the same command the local path execs -- just as text for the remote shell.
@@ -130,7 +79,6 @@ def _build_ssh_activity_wrapper_script(
         f'printf \'{{\\n  "time": %d,\\n  "ssh_pid": %d\\n}}\\n\' "$TIME_MS" "$$" > \'{activity_file}\'; '
         f"sleep 5; done) & "
         "MNGR_ACTIVITY_PID=$!; "
-        f"{sigwinch_step}"
         # actually attach. Route the -t target through TmuxSessionTarget so the
         # = exact-match prefix and shell-escaping rule are uniform with the rest
         # of the codebase (see TmuxSessionTarget docstring for the prefix-matching
@@ -325,7 +273,6 @@ def connect_to_agent(
         wrapper_script = _build_ssh_activity_wrapper_script(
             session_name,
             host.host_dir,
-            mngr_ctx.config.tmux.primary_window_name,
             mngr_ctx.config.tmux.attach_args,
         )
         # Pass the wrapper as a single remote command string so SSH doesn't

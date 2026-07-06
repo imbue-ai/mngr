@@ -20,6 +20,7 @@ from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
+from imbue.minds.desktop_client.conftest import seed_provider_snapshots
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.mngr.api.discovery_events import DiscoveredProvider
@@ -78,10 +79,11 @@ def _resolver_with_capable_agents(host_state_by_agent: dict[AgentId, HostState |
     has not learned the state yet"). At most two agents are supported (two hosts).
     """
     resolver = MngrCliBackendResolver()
-    resolver.update_providers(
+    seed_provider_snapshots(
+        resolver,
         providers=(_docker_provider(),),
         error_by_provider_name={},
-        last_full_snapshot_at=datetime.now(timezone.utc),
+        last_snapshot_at=datetime.now(timezone.utc),
     )
     hosts = (_HOST_A, _HOST_B)
     discovered: list[DiscoveredAgent] = []

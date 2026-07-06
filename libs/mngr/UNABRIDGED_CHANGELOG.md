@@ -4,6 +4,32 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-07-01
+
+Bumped the release Dockerfile's `CLAUDE_CODE_VERSION` from `2.1.141` to `2.1.160` to match the pin in forever-claude-template's `.mngr/settings.toml` (`[agent_types.claude].version`). The two had drifted, which the `test_claude_code_version_matches_forever_claude_template_pin` release test flags because a mismatch makes agent provisioning fail with "Claude version mismatch".
+
+Regenerated the `mngr imbue_cloud` CLI reference doc to reflect the slice-only `admin pool` commands (the `--backend`/`ovh_vps` flags are gone). Docs-only; no `mngr` core behavior change.
+
+Added a new async/await ratchet (`test_prevent_async_await`) that freezes the current amount of `async def` / `await` usage in this project and fails if new async code is added. We strongly prefer synchronous code: it is far easier to debug, and our software is intentionally low-scale, so async provides no benefit. Existing usage is grandfathered in at its current count; the count can only decrease.
+
+## 2026-06-30
+
+Simplified the internal `--reuse` agent-lookup scoping introduced for `mngr create <agent>@<host>.<provider>`: the lookup is now driven entirely by the host named in the create address. No user-visible behavior change -- a fresh-host create still skips same-named agents on other hosts, an existing-host re-create still reuses the agent on the named host, and a bare-name `--reuse` with multiple matches still raises the disambiguation error.
+
+The redundant `target_host_ref` parameter (which scoped by host id only for already-resolved existing hosts) has been removed; its constraint was already covered by the address's host name plus provider. Host-in-scope matching now lives in a single pure `_is_host_in_reuse_scope` helper.
+
+## 2026-06-29
+
+Fixed `mngr destroy` (and `mngr gc`) crashing with a Docker `409 Conflict` traceback when a Docker host's per-host build image was still referenced by a leaked (often orphaned, stopped) container.
+
+The post-destroy garbage collection removed the build image while a leftover container still referenced it, which Docker refuses with "must be forced - container is using its referenced image". The raw error was not caught in `delete_host`, so it aborted GC and surfaced as a failed `mngr destroy` even though the requested agent had already been destroyed.
+
+`delete_host` now re-runs `destroy_host` (which is idempotent and runs on aged-out, FAILED, or CRASHED hosts that GC never destroys back-to-back) to clear any leftover container before purging the host's records. Because the container is removed first, the build-image removal no longer hits the 409 conflict. The build image is force-removed so mngr always drops its `mngr-build-<host>` tag: when nothing else references the image it is deleted outright, and if something unexpected still references it only mngr's tag is dropped (the image is left for that user). Any resource that genuinely cannot be removed is recorded as a structured `CleanupFailedGroup` cleanup failure that the GC sweep aggregates and continues past, so one host's leak is surfaced with a cause-specific exit code instead of crashing the whole `mngr destroy`/`mngr gc`.
+
+A host whose cleanup leaves a resource behind is no longer forgotten: `delete_host` now deletes the host record only when cleanup fully succeeds, and keeps it (raising the `CleanupFailedGroup`) otherwise, so the next GC sweep retries rather than orphaning the leaked resource. The sweep records the leak and counts the host as deleted (and emits its destroyed event) only on a clean delete.
+
+Also tightened the host-volume cleanup in `delete_host`: a failed volume-directory removal is now recorded as a leftover-resource leak instead of being dismissed as "no volume" (the removal is idempotent on a missing path, so an exception there means the data still exists). And the Docker provider's test teardown now collects and fails loudly on cleanup failures rather than silently swallowing a broad set of exceptions, so a leaked container or volume can no longer accumulate unnoticed across tests.
+
 ## 2026-06-28
 
 Gives the `mngr list` nested-fields CLI test (`test_list_command_with_nested_fields`) the same `@pytest.mark.timeout(30)` its sibling real-tmux `list` tests already carry, so it no longer flakily exceeds the 10s default timeout while creating a real tmux agent under CI load.

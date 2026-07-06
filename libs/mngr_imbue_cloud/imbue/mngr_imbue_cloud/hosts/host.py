@@ -218,9 +218,8 @@ class ImbueCloudHost(Host):
         )
 
         # Merge labels: bake's defaults + minds' user-supplied (latter wins).
-        # Minds passes ``--label workspace=<host_name>`` so the workspace
-        # identity is propagated via the caller's labels; we don't re-derive
-        # it from any agent name.
+        # The workspace identity lives on the host name (and the host id), not
+        # on a label; we don't re-derive it from any agent name.
         merged_labels: dict[str, str] = dict(existing.get("labels") or {})
         merged_labels.update(options.label_options.labels)
 

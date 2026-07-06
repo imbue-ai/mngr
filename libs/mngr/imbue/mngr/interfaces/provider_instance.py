@@ -3,6 +3,7 @@ from abc import abstractmethod
 from collections.abc import Callable
 from collections.abc import Iterator
 from concurrent.futures import Future
+from concurrent.futures import wait
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
@@ -13,12 +14,14 @@ from typing import Sequence
 from typing import TypeVar
 
 from loguru import logger
+from pydantic import ConfigDict
 from pydantic import Field
 from pyinfra.api.host import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import HostAuthenticationError
@@ -26,6 +29,7 @@ from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.data_types import BoundedProviderDiscoveryResult
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
@@ -53,6 +57,7 @@ from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.utils.name_generator import generate_host_name
+from imbue.mngr.utils.thread_cleanup import cleanup_thread_local_resources
 from imbue.mngr.utils.thread_cleanup import mngr_executor
 
 
@@ -275,8 +280,14 @@ def connected_host(
 def _discover_agents_on_host(
     provider: "ProviderInstanceInterface",
     host_id: HostId,
+    timeout_seconds: float | None = None,
 ) -> list[DiscoveredAgent]:
-    """Discover agents on a host, disconnecting afterward."""
+    """Discover agents on a host, disconnecting afterward.
+
+    When ``timeout_seconds`` is set (the per-host-bounded discovery path), the
+    host's reads are bounded by that wall-clock so a wedged host self-terminates
+    its reads rather than hanging the (potentially abandoned) discovery thread.
+    """
     # FIXME: wrap this in a bounded retry (e.g. tenacity) so a *transient*
     # connection failure (timeout, connection refused, banner reset) is retried
     # here rather than immediately surfacing to the caller. The retry predicate
@@ -287,7 +298,97 @@ def _discover_agents_on_host(
     # (e.g. SSH), where a transient blip would otherwise propagate as a
     # ProviderDiscoveryError.
     with connected_host(provider, host_id) as host:
-        return host.discover_agents()
+        return host.discover_agents(timeout_seconds=timeout_seconds)
+
+
+def _discover_agents_on_host_with_offline_fallback(
+    provider: "ProviderInstanceInterface",
+    host_ref: DiscoveredHost,
+    timeout_seconds: float | None = None,
+) -> list[DiscoveredAgent]:
+    """Discover a host's agents, falling back to the provider's offline view on connection error.
+
+    The host was reachable enough to be discovered, but enumerating its agents
+    over SSH failed (sshd crashed, banner reset, auth failure, ...). Rather than
+    fail the whole provider, recover the host's agents from the provider's
+    persisted/offline records so its workspaces stay visible. Mirrors the
+    inline recovery in ``discover_hosts_and_agents``.
+
+    ``timeout_seconds``, when set, bounds the online read (a per-host-timeout hit
+    surfaces as ``HostConnectionError`` and lands in the offline fallback, which
+    is itself bounded because it reads persisted records rather than the host).
+    """
+    try:
+        return _discover_agents_on_host(provider, host_ref.host_id, timeout_seconds)
+    except HostConnectionError as e:
+        # Drop any cached per-host handle so the next cycle does not re-hit the
+        # wedged connection, then recover the host's agents from the offline view.
+        provider.on_connection_error(host_ref.host_id)
+        logger.debug(
+            "Falling back to offline agent enumeration for host {} ({}) after connection error: {}",
+            host_ref.host_id,
+            host_ref.host_name,
+            e,
+        )
+        return provider.to_offline_host(host_ref.host_id).discover_agents()
+
+
+@pure
+def bounded_result_from_agents_by_host(
+    agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
+) -> BoundedProviderDiscoveryResult:
+    """Flatten a host->agents map into a BoundedProviderDiscoveryResult with no unknown items.
+
+    Used by providers that batch host+agent discovery (and therefore cannot bound
+    individual host reads): their whole discovery is bounded only by the
+    provider-level error timeout, so nothing is marked UNKNOWN here.
+    """
+    hosts = tuple(agents_by_host.keys())
+    agents = tuple(agent for agent_list in agents_by_host.values() for agent in agent_list)
+    return BoundedProviderDiscoveryResult(hosts=hosts, agents=agents)
+
+
+def _set_host_agents_future(
+    provider: "ProviderInstanceInterface",
+    host_ref: DiscoveredHost,
+    future: "Future[list[DiscoveredAgent]]",
+    timeout_seconds: float,
+) -> None:
+    """Read one host's agents on a daemon thread, recording the outcome on ``future``.
+
+    Captures the expected discovery failure modes onto the future so a failed
+    host can be treated as UNKNOWN rather than crashing the poll. ``timeout_seconds``
+    bounds each of the host's reads so an abandoned thread (left running past the
+    per-host timeout) still self-terminates rather than running forever. Always
+    releases thread-local gevent resources, since this thread may be abandoned and
+    only resolves its future late.
+    """
+    try:
+        agents = provider.read_host_agents_for_bounded_discovery(host_ref, timeout_seconds)
+    except (MngrError, OSError) as e:
+        future.set_exception(e)
+    else:
+        future.set_result(agents)
+    finally:
+        cleanup_thread_local_resources()
+
+
+class HostDiscoveryReadRegistry(MutableModel):
+    """Holds in-flight per-host discovery reads so a wedged host is not re-read every poll.
+
+    A long-lived registry (owned by a provider's discovery poller) that maps a
+    host to the ``Future`` of its currently-running bounded read. When a poll finds
+    a host whose prior read is still in flight, it reuses that future instead of
+    spawning a second read, bounding accumulation to at most one abandoned read per
+    host. A per-call (fresh) registry is used for one-shot discovery, where there is
+    nothing to carry across polls.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    future_by_host_id: dict[HostId, "Future[list[DiscoveredAgent]]"] = Field(
+        default_factory=dict, description="In-flight per-host agent-read futures, keyed by host id"
+    )
 
 
 class ProviderInstanceInterface(MutableModel, ABC):
@@ -566,6 +667,124 @@ class ProviderInstanceInterface(MutableModel, ABC):
                 )
                 results[host_ref] = offline_agents
         return results
+
+    def read_host_agents_for_bounded_discovery(
+        self,
+        host_ref: DiscoveredHost,
+        timeout_seconds: float,
+    ) -> list[DiscoveredAgent]:
+        """Read one host's agents (with offline fallback) for the per-host-bounded discovery path.
+
+        A seam used by ``discover_hosts_and_agents_within_timeouts``: each host's read
+        runs through this method on its own daemon thread so a slow host can be
+        abandoned. ``timeout_seconds`` bounds each of the host's reads so an abandoned
+        thread self-terminates rather than running forever. Tests override it to inject
+        a controllable per-host delay without a live host connection.
+        """
+        return _discover_agents_on_host_with_offline_fallback(self, host_ref, timeout_seconds)
+
+    def discover_hosts_and_agents_within_timeouts(
+        self,
+        cg: ConcurrencyGroup,
+        host_discovery_timeout_seconds: float,
+        agent_discovery_timeout_seconds: float,
+        include_destroyed: bool = False,
+        registry: "HostDiscoveryReadRegistry | None" = None,
+    ) -> BoundedProviderDiscoveryResult:
+        """Discover this provider's hosts/agents, bounding each host's agent read by a timeout.
+
+        A host whose agent read does not finish within ``host_discovery_timeout_seconds``
+        (or fails) is omitted from the result and reported in ``unknown_host_ids`` -- so one
+        slow or wedged host cannot stall the whole provider's snapshot. The abandoned read
+        keeps running on a daemon thread (threads cannot be killed) but ``host_discovery_timeout_seconds``
+        is threaded down as a per-command bound so it self-terminates instead of hanging forever.
+
+        ``registry`` carries in-flight per-host reads across polls: a host whose prior read is
+        still running is *not* re-spawned (a warning is logged instead), so at most one abandoned
+        read exists per host at a time. When ``None`` (one-shot discovery), a fresh per-call
+        registry is used, so there is no cross-poll state and every host is read.
+
+        The default per-host implementation bounds at host granularity, which already
+        encompasses that host's agent enumeration, so ``agent_discovery_timeout_seconds`` is
+        unused here (it exists for providers that read agents individually). Providers that
+        batch host+agent discovery override this to delegate to their batch
+        ``discover_hosts_and_agents`` (bounded only by the provider-level error timeout).
+        """
+        host_refs = self.discover_hosts(cg=cg, include_destroyed=include_destroyed)
+        active_registry = registry if registry is not None else HostDiscoveryReadRegistry()
+        host_ref_by_id = {host_ref.host_id: host_ref for host_ref in host_refs}
+
+        # Decide, per host, whether to spawn a fresh read or reuse an in-flight one from a
+        # prior poll. Each fresh read runs on its own daemon thread via _set_host_agents_future,
+        # which calls read_host_agents_for_bounded_discovery (overridable for testing).
+        future_by_host_ref: dict[DiscoveredHost, Future[list[DiscoveredAgent]]] = {}
+        skipped_unknown_host_ids: list[HostId] = []
+        for host_ref in host_refs:
+            in_flight = active_registry.future_by_host_id.get(host_ref.host_id)
+            if in_flight is not None and not in_flight.done():
+                # A prior poll's read for this host is still running. Do not spawn a second
+                # read; with the per-command timeout in place this should essentially never
+                # happen, so warn loudly -- it is a precise "host wedged past its timeout" alarm.
+                # The host is still UNKNOWN this poll (its state is retained by the consumer).
+                logger.warning(
+                    "Skipped discovery for host {} on provider {}: prior read still in flight "
+                    "(host wedged past its {:.0f}s timeout)",
+                    host_ref.host_id,
+                    self.name,
+                    host_discovery_timeout_seconds,
+                )
+                skipped_unknown_host_ids.append(host_ref.host_id)
+                continue
+            if in_flight is not None:
+                # A prior poll's read finished (possibly late). Harvest it this poll; the
+                # harvest loop below clears it so the next poll starts a fresh read.
+                future_by_host_ref[host_ref] = in_flight
+                continue
+            host_future: Future[list[DiscoveredAgent]] = Future()
+            active_registry.future_by_host_id[host_ref.host_id] = host_future
+            future_by_host_ref[host_ref] = host_future
+            cg.start_new_thread(
+                target=_set_host_agents_future,
+                args=(self, host_ref, host_future, host_discovery_timeout_seconds),
+                daemon=True,
+                is_checked=False,
+                name=f"discover_host_{host_ref.host_id}",
+                on_failure=lambda exc, ref=host_ref: logger.opt(exception=exc).debug(
+                    "Host {} discovery thread crashed; treating as unknown", ref.host_id
+                ),
+            )
+
+        # Wait once, up to the per-host budget, for every host's read to finish.
+        wait(list(future_by_host_ref.values()), timeout=host_discovery_timeout_seconds)
+
+        discovered_hosts: list[DiscoveredHost] = []
+        discovered_agents: list[DiscoveredAgent] = []
+        unknown_host_ids: list[HostId] = []
+        for host_ref, host_future in future_by_host_ref.items():
+            # A host that did not finish in time, or whose read failed, is unknown
+            # (not gone): the consumer retains its previously-known state.
+            if not host_future.done() or host_future.exception() is not None:
+                unknown_host_ids.append(host_ref.host_id)
+                # A read that finished (with an exception) is cleared so the next poll retries
+                # it fresh; a still-running read is kept so the next poll does not re-spawn it.
+                if host_future.done():
+                    active_registry.future_by_host_id.pop(host_ref.host_id, None)
+                continue
+            discovered_hosts.append(host_ref)
+            discovered_agents.extend(host_future.result())
+            active_registry.future_by_host_id.pop(host_ref.host_id, None)
+
+        # Drop registry entries for hosts no longer discovered (e.g. destroyed while wedged)
+        # so the registry stays bounded to currently-known hosts.
+        stale_host_ids = [host_id for host_id in active_registry.future_by_host_id if host_id not in host_ref_by_id]
+        for host_id in stale_host_ids:
+            active_registry.future_by_host_id.pop(host_id, None)
+
+        return BoundedProviderDiscoveryResult(
+            hosts=tuple(discovered_hosts),
+            agents=tuple(discovered_agents),
+            unknown_host_ids=tuple(skipped_unknown_host_ids) + tuple(unknown_host_ids),
+        )
 
     @abstractmethod
     def get_host_resources(self, host: HostInterface) -> HostResources:
