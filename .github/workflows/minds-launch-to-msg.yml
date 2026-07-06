@@ -78,10 +78,16 @@ jobs:
             [[ -z "$sha" ]] && sha=$(git ls-remote "$url" "refs/heads/$ref" "refs/tags/$ref" | awk '{print $1; exit}')
             echo "$sha"
           }
-          # Empty commit_sha -> github.sha (for schedule, the default branch HEAD).
+          # Empty commit_sha -> the trigger commit (for schedule, the default
+          # branch HEAD), labeled with the trigger branch so slack/summaries
+          # show `main (<sha>)` rather than a bare SHA.
           MNGR_REF='${{ inputs.commit_sha }}'
-          [[ -z "$MNGR_REF" ]] && MNGR_REF='${{ github.sha }}'
-          MNGR_SHA=$(resolve_ref 'https://github.com/${{ github.repository }}.git' "$MNGR_REF")
+          if [[ -z "$MNGR_REF" ]]; then
+            MNGR_REF='${{ github.ref_name }}'
+            MNGR_SHA='${{ github.sha }}'
+          else
+            MNGR_SHA=$(resolve_ref 'https://github.com/${{ github.repository }}.git' "$MNGR_REF")
+          fi
           FCT_REF='${{ inputs.template_ref }}'
           [[ -z "$FCT_REF" ]] && FCT_REF='main'
           FCT_REPO_URL='${{ inputs.template_url }}'
