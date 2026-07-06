@@ -383,6 +383,9 @@ def test_extras_no_args_shows_status(cli_runner: CliRunner) -> None:
     assert "Extras" in result.output
 
 
+# Same claude-plugin status probe as test_extras_no_args_shows_status above;
+# see that comment for why the global 10s pytest-timeout needs headroom here.
+@pytest.mark.timeout(30)
 def test_extras_interactive_mode(cli_runner: CliRunner) -> None:
     """Running 'mngr extras -i' walks through all extras interactively."""
     # In the test environment, has_interactive_terminal() returns False
@@ -576,6 +579,10 @@ def test_extras_config_yes_flag(cli_runner: CliRunner) -> None:
     assert result.exit_code == 0
 
 
+# Same claude-plugin status probe as test_extras_no_args_shows_status above:
+# ~7s even on a fast machine, so the global 10s pytest-timeout has no headroom
+# on a contended CI sandbox (it timed out there on 2026-07-06).
+@pytest.mark.timeout(30)
 def test_extras_interactive_includes_default_type(cli_runner: CliRunner) -> None:
     """Running 'mngr extras -i' walks through the default agent type prompt."""
     result = cli_runner.invoke(extras, ["-i"])
