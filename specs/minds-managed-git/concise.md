@@ -85,7 +85,7 @@ These are set only in the backend subprocess environment, never globally. Implem
 ### New file: `.github/workflows/minds-git-freshness.yml`
 
 - Weekly cron plus `workflow_dispatch`, on ubuntu. Reads `dugiteNativeTag` from the manifest, fetches `repos/desktop/dugite-native/releases/latest` via `gh api`, and:
-  - If behind: create-or-update a single issue (stable title, dedicated label) containing the latest tag and release notes excerpt.
+  - If behind: create-or-update a single issue (matched by stable title; deliberately no label dependency, so the workflow never needs label provisioning) containing the latest tag and release notes excerpt.
   - If current: close any open nag issue.
 - Rationale: dugite-native's releases track upstream git security releases within days, and nagging on what is actually pinnable is the actionable signal. Watching git CVE feeds directly is deliberately omitted (it would nag about versions we cannot pin yet).
 
