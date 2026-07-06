@@ -2,13 +2,19 @@
 
 import json
 from collections.abc import Callable
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 
 import pluggy
 import pytest
 from click.testing import CliRunner
 
-from imbue.mngr.api.discovery_events import write_full_discovery_snapshot
+from imbue.mngr.api.discovery_events import DISCOVERY_EVENT_SOURCE
+from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
+from imbue.mngr.api.discovery_events import _make_envelope_fields
+from imbue.mngr.api.discovery_events import append_discovery_event
+from imbue.mngr.api.discovery_events import write_provider_discovery_snapshot
 from imbue.mngr.cli.stop import StopCliOptions
 from imbue.mngr.cli.stop import _ensure_providers_support_host_shutdown
 from imbue.mngr.cli.stop import _output_result
@@ -175,12 +181,29 @@ def test_ensure_providers_support_host_shutdown_raises_for_unsupported(
 # =============================================================================
 
 
+def _write_local_provider_snapshot(
+    mngr_ctx: MngrContext,
+    agents: list[DiscoveredAgent],
+    hosts: list[DiscoveredHost],
+) -> None:
+    """Write a per-provider DISCOVERY_PROVIDER snapshot for the local provider."""
+    now = datetime.now(timezone.utc)
+    write_provider_discovery_snapshot(
+        mngr_ctx.config,
+        provider_name=ProviderInstanceName("local"),
+        agents=agents,
+        hosts=hosts,
+        discovery_started_at=now,
+        discovery_finished_at=now,
+    )
+
+
 def _seed_local_agent_snapshot(
     mngr_ctx: MngrContext,
     local_provider: LocalProviderInstance,
     agent_name: str,
 ) -> None:
-    """Write a DISCOVERY_FULL snapshot with one agent on the real local host.
+    """Write a per-provider snapshot with one agent on the real local host.
 
     This is the only state ``--stop-host`` needs: it resolves the host from
     the event stream, without ever enumerating agents over SSH.
@@ -198,7 +221,50 @@ def _seed_local_agent_snapshot(
         host_name=HostName(LOCAL_HOST_NAME),
         provider_name=ProviderInstanceName("local"),
     )
-    write_full_discovery_snapshot(mngr_ctx.config, [agent], [host])
+    _write_local_provider_snapshot(mngr_ctx, [agent], [host])
+
+
+def test_stop_hosts_for_addresses_resolves_from_legacy_full_snapshot(
+    temp_mngr_ctx: MngrContext,
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A historical on-disk DISCOVERY_FULL snapshot must still resolve a host (back-compat).
+
+    Old discovery logs predating per-provider snapshots contain DISCOVERY_FULL lines;
+    resolution must keep tolerating them so ``--stop-host`` works against a stale log.
+    """
+    host_id = local_provider.host_id
+    agent = DiscoveredAgent(
+        host_id=host_id,
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("legacy-agent"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={},
+    )
+    host = DiscoveredHost(
+        host_id=host_id,
+        host_name=HostName(LOCAL_HOST_NAME),
+        provider_name=ProviderInstanceName("local"),
+    )
+    timestamp, event_id = _make_envelope_fields()
+    legacy_event = FullDiscoverySnapshotEvent(
+        timestamp=timestamp,
+        event_id=event_id,
+        source=DISCOVERY_EVENT_SOURCE,
+        agents=(agent,),
+        hosts=(host,),
+    )
+    append_discovery_event(temp_mngr_ctx.config, legacy_event)
+
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
+    # The local provider rejects the actual stop; reaching that rejection proves the
+    # host resolved from the legacy snapshot and routed through to provider.stop_host.
+    with pytest.raises(LocalHostNotStoppableError):
+        _stop_hosts_for_addresses(
+            [AgentAddress(agent=AgentName("legacy-agent"))],
+            temp_mngr_ctx,
+            output_opts,
+        )
 
 
 def test_stop_hosts_for_addresses_routes_to_provider_stop_host(
@@ -263,7 +329,7 @@ def test_stop_hosts_for_addresses_raises_when_host_no_longer_exists(
         host_name=HostName(LOCAL_HOST_NAME),
         provider_name=ProviderInstanceName("local"),
     )
-    write_full_discovery_snapshot(temp_mngr_ctx.config, [agent], [host])
+    _write_local_provider_snapshot(temp_mngr_ctx, [agent], [host])
 
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
     with pytest.raises(HostNotFoundError):

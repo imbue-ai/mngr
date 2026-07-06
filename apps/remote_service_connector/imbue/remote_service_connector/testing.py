@@ -1012,6 +1012,26 @@ class FakeCursor:
                     row.host_name = host_name
                     break
 
+        elif "select leased_to_user, status from pool_hosts" in query_lower:
+            # Rename endpoint: a narrow ownership/status lookup by id (only
+            # ``leased_to_user`` and ``status``). Matched before the broader
+            # release lookup below, which selects additional columns.
+            raw_host_id = params[0]
+            host_id = UUID(raw_host_id) if isinstance(raw_host_id, str) else raw_host_id
+            for row in self._backend.pool_rows:
+                if row.host_id == host_id:
+                    self._results = [(row.leased_to_user, row.status)]
+                    break
+
+        elif "update pool_hosts set host_name" in query_lower:
+            # Rename endpoint: set the mutable friendly name by id.
+            host_name, raw_host_id = params
+            host_id = UUID(raw_host_id) if isinstance(raw_host_id, str) else raw_host_id
+            for row in self._backend.pool_rows:
+                if row.host_id == host_id:
+                    row.host_name = host_name
+                    break
+
         elif (
             "from pool_hosts" in query_lower
             and "leased_to_user" in query_lower

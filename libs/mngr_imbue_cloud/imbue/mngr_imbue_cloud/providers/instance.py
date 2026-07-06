@@ -67,6 +67,7 @@ from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.data_types import BoundedProviderDiscoveryResult
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
@@ -80,6 +81,8 @@ from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
+from imbue.mngr.interfaces.provider_instance import HostDiscoveryReadRegistry
+from imbue.mngr.interfaces.provider_instance import bounded_result_from_agents_by_host
 from imbue.mngr.interfaces.provider_instance import build_agent_details_from_offline_ref
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -441,6 +444,24 @@ class ImbueCloudProvider(BaseProviderInstance):
     # even the outer SSH is unreachable -- in normal operation we expect
     # outer SSH to be reachable for every leased VPS.
     # ------------------------------------------------------------------
+
+    def discover_hosts_and_agents_within_timeouts(
+        self,
+        cg: ConcurrencyGroup,
+        host_discovery_timeout_seconds: float,
+        agent_discovery_timeout_seconds: float,
+        include_destroyed: bool = False,
+        registry: HostDiscoveryReadRegistry | None = None,
+    ) -> BoundedProviderDiscoveryResult:
+        """Delegate to the batch discovery path; bounded only by the provider-level error timeout.
+
+        Imbue Cloud discovery reads all leased hosts (and their agents) in one batched
+        pass, so individual host reads cannot be bounded; nothing is marked UNKNOWN here.
+        ``registry`` is accepted for interface compatibility but unused: this path spawns
+        no per-host reads to de-duplicate across polls.
+        """
+        agents_by_host = self.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
+        return bounded_result_from_agents_by_host(agents_by_host)
 
     def discover_hosts_and_agents(
         self,
@@ -1971,7 +1992,27 @@ class ImbueCloudProvider(BaseProviderInstance):
         host: HostInterface | HostId,
         name: HostName,
     ) -> Host:
-        raise NotImplementedError("imbue_cloud does not support renaming hosts (the host_id is fixed by the lease)")
+        """Rename a leased host by updating its mutable ``host_name`` in the connector.
+
+        The lease's ``host_db_id`` remains the durable identity; only the
+        friendly name changes. The connector owns the name, so this works
+        whether or not the leased container is currently running.
+        """
+        host_id = host.id if isinstance(host, HostInterface) else host
+        lease = self._find_leased(host_id)
+        if lease is None:
+            raise HostNotFoundError(self.name, host_id)
+
+        account = self._require_account()
+        token = self._get_access_token(account)
+        self.client.rename_host(token, str(lease.host_db_id), str(name))
+
+        # The connector DB is authoritative for discovery (host_name comes from
+        # the lease listing), so drop the cache and build the host from the
+        # locally-updated lease to avoid an extra round-trip.
+        updated_lease = lease.model_copy_update(to_update(lease.field_ref().host_name, str(name)))
+        self.reset_caches()
+        return self._build_host_object(updated_lease, adopt_pre_baked_agent=False)
 
     # ------------------------------------------------------------------
     # pyinfra connector lookup

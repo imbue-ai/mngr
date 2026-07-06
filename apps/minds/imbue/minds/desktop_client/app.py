@@ -120,8 +120,11 @@ from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
+from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
+from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
 from imbue.mngr.api.discovery_events import DISCOVERY_STREAM_POLL_INTERVAL_SECONDS
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
@@ -188,12 +191,17 @@ def _should_emit_system_interface_status(
     unconditionally -- they do not trigger the redirect, and the user is already on
     the recovery page when they apply. Only the passive-discovery resolver tracks
     snapshot freshness; for any other resolver the redirect is not gated.
+
+    Freshness is scoped to the *workspace's own provider*: each provider is
+    discovered on its own decoupled loop, so this gate compares against the last
+    snapshot of the agent's provider (falling back to the aggregate when that
+    provider is not yet known), not a single global snapshot.
     """
     if status != AgentHealth.STUCK:
         return True
     if not isinstance(backend_resolver, MngrCliBackendResolver):
         return True
-    _, last_full_snapshot_at = backend_resolver.get_freshness_timestamps()
+    last_snapshot_at = _workspace_provider_snapshot_at(backend_resolver, agent_id)
     onset = tracker.get_failure_run_started_wall_at(agent_id) if tracker is not None else None
     # When discovery is *persistently* stale -- the producer/consumer pipeline has
     # stalled, not merely a provider being down -- no post-onset snapshot ever
@@ -203,8 +211,29 @@ def _should_emit_system_interface_status(
     # dead consumer) escalates to a terminal BLOCKED app-takeover -- so the user is
     # never left stranded on the "Loading workspace" loader here with no recourse.
     if onset is None:
-        return _is_discovery_fresh(last_full_snapshot_at)
-    return last_full_snapshot_at is not None and last_full_snapshot_at >= onset
+        return _is_discovery_fresh(last_snapshot_at)
+    return last_snapshot_at is not None and last_snapshot_at >= onset
+
+
+def _workspace_provider_snapshot_at(backend_resolver: MngrCliBackendResolver, agent_id: AgentId) -> datetime | None:
+    """Last per-provider snapshot time for ``agent_id``'s provider, or the aggregate fallback.
+
+    The recovery redirect gates on whether discovery has re-observed *this
+    workspace's* host since the outage began. Because each provider is discovered
+    on its own decoupled loop, a healthy provider keeps emitting fresh snapshots
+    even while an unrelated provider is down -- so the gate must use the
+    workspace's own provider's snapshot time, not a single global one. When the
+    agent's provider is known, its snapshot time is returned even if ``None`` (no
+    snapshot of that provider has completed yet, so freshness cannot be
+    established and the caller treats it as stale). Only when the agent's provider
+    is *unknown* (it has not appeared in discovery at all) do we fall back to the
+    aggregate snapshot time across all providers.
+    """
+    info = backend_resolver.get_agent_display_info(agent_id)
+    if info is not None and info.provider_name is not None:
+        return backend_resolver.get_last_snapshot_at_for_provider(ProviderInstanceName(info.provider_name))
+    _, aggregate_snapshot_at = backend_resolver.get_freshness_timestamps()
+    return aggregate_snapshot_at
 
 
 def _discovery_health_payload(health: DiscoveryHealth) -> dict[str, str]:
@@ -437,6 +466,7 @@ def _handle_consent_submit() -> Response:
         minds_config.set_report_unexpected_errors(report)
         minds_config.set_include_error_logs(include_logs and report)
         minds_config.set_error_reporting_consent_given(True)
+        _sync_latchkey_forward_sentry_consent(minds_config)
     return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
 
 
@@ -458,7 +488,21 @@ def _handle_error_reporting_settings() -> Response:
             minds_config.set_report_unexpected_errors(bool(body["report_unexpected_errors"]))
         if "include_logs" in body:
             minds_config.set_include_error_logs(bool(body["include_logs"]))
+        _sync_latchkey_forward_sentry_consent(minds_config)
     return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
+
+
+def _sync_latchkey_forward_sentry_consent(minds_config: MindsConfig) -> None:
+    """Rewrite the detached ``mngr latchkey forward`` daemon's live consent file after a consent change.
+
+    The daemon reads this file live (per event) to gate what it sends, so rewriting it here is what
+    makes a grant/revoke take effect on the running daemon without respawning it.
+    """
+    write_latchkey_forward_sentry_consent(
+        latchkey_forward_sentry_consent_path(minds_config.data_dir),
+        is_error_reporting_enabled=minds_config.get_report_unexpected_errors(),
+        is_log_inclusion_enabled=minds_config.get_include_error_logs(),
+    )
 
 
 def _handle_help_page() -> Response:
@@ -597,14 +641,12 @@ def _handle_help_assist() -> Response:
             media_type="application/json",
         )
 
-    workspace_name = state.backend_resolver.get_workspace_name(workspace_agent_id)
     # Wait for the create to finish before responding so the get-help modal keeps its
     # "starting..." state until the chat exists, rather than dismissing into a blank gap
     # while the agent boots. The cheroot WSGI pool (50 threads) absorbs the blocking call.
     started = spawn_assist_chat(
         mngr_caller=mngr_caller,
         workspace_agent_id=workspace_agent_id,
-        workspace_name=workspace_name,
         description=description,
     )
     if not started:

@@ -446,6 +446,22 @@ class ReleaseHostResponse(BaseModel):
     )
 
 
+class RenameHostRequest(BaseModel):
+    host_name: str = Field(
+        description=(
+            "New user-chosen friendly name for the leased host. Must satisfy mngr's SafeName "
+            "regex (alphanumeric, dashes/underscores allowed in the middle). Required."
+        )
+    )
+
+    _validate_host_name = field_validator("host_name")(_validate_host_name)
+
+
+class RenameHostResponse(BaseModel):
+    host_db_id: UUID = Field(description="Database ID of the renamed host")
+    host_name: str = Field(description="The new user-chosen friendly name")
+
+
 class LeasedHostInfo(BaseModel):
     host_db_id: UUID = Field(description="Database ID of the leased host")
     vps_address: str = Field(
@@ -2672,6 +2688,46 @@ def _finish_releasing_pool_host(
     """
     clean_up_slice_on_box(conn, host_db_id, bare_metal_server_id, lima_instance_name, lima_disk_name)
     _delete_pool_host_row(conn, host_db_id)
+
+
+@web_app.post("/hosts/{host_db_id}/rename")
+def rename_host(request: Request, host_db_id: UUID, body: RenameHostRequest) -> dict[str, object]:
+    """Rename a leased host: update the mutable ``host_name`` column on its row.
+
+    The lease's ``host_db_id`` is the durable identity; only the friendly
+    ``host_name`` changes, so a rename never touches the VPS/VM or the lease
+    state. Ownership is enforced (a row leased by another user returns 403);
+    a missing or not-leased row returns 404. ``host_name`` is validated by the
+    request model against mngr's SafeName regex.
+    """
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        conn = _get_pool_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT leased_to_user, status FROM pool_hosts WHERE id = %s",
+                    (str(host_db_id),),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    raise HTTPException(status_code=404, detail="No such host")
+                leased_to_user, status = row
+                # Ownership check first, to avoid leaking a status signal.
+                if leased_to_user != admin.username:
+                    raise HTTPException(status_code=403, detail="You do not own this host lease")
+                if status != "leased":
+                    raise HTTPException(status_code=404, detail="Host is not currently leased")
+                cur.execute(
+                    "UPDATE pool_hosts SET host_name = %s WHERE id = %s",
+                    (body.host_name, str(host_db_id)),
+                )
+                conn.commit()
+        finally:
+            conn.close()
+        return RenameHostResponse(host_db_id=host_db_id, host_name=body.host_name).model_dump()
 
 
 @web_app.get("/hosts")
