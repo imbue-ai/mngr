@@ -42,6 +42,7 @@ from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRe
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.errors import MngrCommandTimeoutError
 from imbue.mngr.api.discovery_events import DiscoveryError
+from imbue.mngr.errors import HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
@@ -69,12 +70,6 @@ _SURGICAL_STARTUP_WAIT_SECONDS: Final[float] = 15.0
 _HOST_RESTART_STARTUP_WAIT_SECONDS: Final[float] = 30.0
 # Poll cadence while waiting for the system interface to come back post-restart.
 _RESTART_PROBE_INTERVAL_SECONDS: Final[float] = 1.0
-# Substring of HostShutdownNotSupportedError's message (raised by ``mngr stop --stop-host``
-# when a provider's ``supports_shutdown_hosts`` is False, e.g. Modal). A host-restart on
-# such a provider hits this on the stop step; it is expected, not a failure -- ``mngr start``
-# performs the restart on its own (reconnect-if-alive, else recreate-from-snapshot), so the
-# restart worker treats it as "skip the stop" and proceeds rather than aborting.
-_HOST_SHUTDOWN_NOT_SUPPORTED_SIGNAL: Final[str] = "does not support stopping hosts"
 
 
 def _build_mngr_stop_argv(mngr_binary: str, agent_id: AgentId, is_host_restart: bool) -> list[str]:
@@ -239,7 +234,12 @@ def run_restart_sequence(
         try:
             _run_mngr(concurrency_group, _build_mngr_stop_argv(mngr_binary, services_agent_id, is_host_restart), env)
         except MngrCommandError as exc:
-            if _HOST_SHUTDOWN_NOT_SUPPORTED_SIGNAL in str(exc):
+            # ``mngr stop --stop-host`` raises HostShutdownNotSupportedError when a provider's
+            # ``supports_shutdown_hosts`` is False (e.g. Modal). minds runs mngr as a subprocess,
+            # so it can only match the error's message text in stderr -- keyed off mngr's exported
+            # HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE constant (one shared source of truth) rather than
+            # a duplicated literal.
+            if HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE in str(exc):
                 # Provider can't stop a host in place (e.g. Modal). Expected, not a
                 # failure: the start step below restarts it on its own (reconnect-if-alive,
                 # else recreate-from-snapshot), so skip the stop and proceed.

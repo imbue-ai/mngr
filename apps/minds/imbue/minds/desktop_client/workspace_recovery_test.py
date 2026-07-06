@@ -24,6 +24,7 @@ from imbue.minds.desktop_client.workspace_recovery import _build_mngr_stop_argv
 from imbue.minds.desktop_client.workspace_recovery import _provider_error_message_for_workspace
 from imbue.minds.desktop_client.workspace_recovery import run_restart_sequence
 from imbue.mngr.api.discovery_events import DiscoveryError
+from imbue.mngr.errors import HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
@@ -283,13 +284,15 @@ def test_run_restart_sequence_skips_unsupported_stop_and_proceeds(tmp_path: Path
     tracker.mark_restarting(workspace_agent)
     resolver = _resolver_with_system_services(workspace_agent, services_agent)
     registry = _started_registry(workspace_agent)
-    # A fake mngr whose ``stop`` fails with the host-shutdown-not-supported signal (as Modal
-    # does) and whose ``start`` succeeds -- mirrors a no-shutdown provider's restart.
+    # A fake mngr whose ``stop`` fails with the host-shutdown-not-supported message (as Modal
+    # does) and whose ``start`` succeeds -- mirrors a no-shutdown provider's restart. The stderr
+    # is built from mngr's exported HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE, the same constant the
+    # restart worker matches on, so this exercises the real shared-source-of-truth mechanism.
     script = tmp_path / "fake_mngr_no_shutdown"
     script.write_text(
         "#!/bin/sh\n"
         'case "$1" in\n'
-        '  stop) echo "Provider modal does not support stopping hosts" >&2; exit 1 ;;\n'
+        f'  stop) echo "Provider modal {HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE}" >&2; exit 1 ;;\n'
         "  *) exit 0 ;;\n"
         "esac\n"
     )
