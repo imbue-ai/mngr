@@ -1,4 +1,4 @@
-{#def include_logs_setting=false, workspace_agent_id="", description="", is_agent_report=false, workspace_name="" #}
+{#def include_logs_setting=false, workspace_agent_id="", assist_available=false, description="", is_agent_report=false, workspace_name="" #}
 {#
   Get-help modal page. Loaded into the shared modal overlay view in Electron (and
   into the content frame as a fallback in browser mode), so the body is transparent
@@ -93,12 +93,32 @@
     // message sent, ~15s).
     function showAgentLoading() {
       document.getElementById("help-form").classList.add("hidden");
+      document.getElementById("help-error").classList.add("hidden");
       document.getElementById("help-loading").classList.remove("hidden");
     }
-    function hideAgentLoading() {
+    // A failed agent-help spawn (this workspace lacks the /assist skill, or it's unreachable, or
+    // the create errored) swaps the body to an error state carrying the server's explanation plus
+    // a "Back to report" button, instead of stranding the user on the spinner. Back returns to the
+    // form in report mode so they can file a bug instead.
+    function showAgentError(message) {
+      document.getElementById("help-form").classList.add("hidden");
       document.getElementById("help-loading").classList.add("hidden");
-      document.getElementById("help-form").classList.remove("hidden");
+      document.getElementById("help-error-body").textContent = message;
+      document.getElementById("help-error").classList.remove("hidden");
     }
+    function backToReportFromError() {
+      document.getElementById("help-error").classList.add("hidden");
+      document.getElementById("help-form").classList.remove("hidden");
+      submit.disabled = false;
+      // Select report mode by comparing each radio's value as a bare string (not a value
+      // attribute selector): the mode-choice radios are absent in agent-report mode, and tests
+      // assert the rendered markup contains no such selector outside the real radio inputs.
+      Array.prototype.forEach.call(document.querySelectorAll('input[name="help-mode"]'), function (radio) {
+        if (radio.value === "report") radio.checked = true;
+      });
+      applyMode();
+    }
+    document.getElementById("help-error-back-btn").addEventListener("click", backToReportFromError);
 
     function submitAgentHelp(description) {
       submit.disabled = true;
@@ -116,16 +136,10 @@
           // auto-opened in the workspace, so just dismiss the modal.
           closeHelp();
         } else {
-          hideAgentLoading();
-          submit.disabled = false;
-          status.textContent = (result.data && result.data.error) || "Could not start an agent.";
-          status.className = "type-helper text-danger mt-2";
+          showAgentError((result.data && result.data.error) || "Could not start an agent.");
         }
       }).catch(function () {
-        hideAgentLoading();
-        submit.disabled = false;
-        status.textContent = "Network error starting the agent.";
-        status.className = "type-helper text-danger mt-2";
+        showAgentError("Network error starting the agent.");
       });
     }
 
@@ -238,8 +252,8 @@
            already reporting). With no radios rendered, the submit JS falls back to report mode. #}
         {% if not is_agent_report %}
         <div class="flex flex-col gap-2 mb-4">
-          {% if workspace_agent_id %}
-          {# In a loaded workspace, agent help is available and is the default choice -- except
+          {% if assist_available %}
+          {# Reachable/healthy workspace: agent help is available and is the default choice -- except
              when a description was pre-filled, which only happens when an in-workspace /assist
              agent escalated its diagnosis: that flow must land on the report form for a human to
              review and submit, so report (below) is the default in that case. #}
@@ -251,17 +265,22 @@
             </span>
           </label>
           {% else %}
-          {# Outside a workspace, agent help is not yet available (a future phase launches a new mind). #}
+          {# Disabled: either not in a workspace at all, or the workspace isn't reachable yet -- a
+             loading/stuck workspace can't host a chat you could see or use. Reporting still works. #}
           <label class="flex items-start gap-3 cursor-not-allowed opacity-50">
             <input type="radio" name="help-mode" value="agent" class="mt-1 shrink-0" disabled>
             <span>
               <span class="type-body text-primary font-semibold">Have an agent help fix the problem</span>
+              {% if workspace_agent_id %}
+              <span class="block type-helper text-tertiary">Available once this workspace is responding.</span>
+              {% else %}
               <span class="block type-helper text-tertiary">Open a workspace to use this.</span>
+              {% endif %}
             </span>
           </label>
           {% endif %}
           <label class="flex items-start gap-3 cursor-pointer">
-            <input type="radio" name="help-mode" value="report" class="mt-1 shrink-0" {% if not workspace_agent_id or description %}checked{% endif %}>
+            <input type="radio" name="help-mode" value="report" class="mt-1 shrink-0" {% if not assist_available or description %}checked{% endif %}>
             <span>
               <span class="type-body text-primary font-semibold">Report a bug to Imbue</span>
               <span class="block type-helper text-tertiary">Send us a description and diagnostics so we can investigate.</span>
@@ -310,6 +329,12 @@
         <div class="flex justify-center mb-4"><Spinner size="lg" /></div>
         <p class="type-body text-primary">Starting an agent to help&hellip;</p>
         <p class="type-helper text-tertiary mt-1">Setting up a new chat in this workspace. This can take a few seconds.</p>
+      </div>
+
+      <div id="help-error" class="p-4 hidden text-center">
+        <h2 class="type-heading text-primary mb-2">Couldn&rsquo;t start an agent</h2>
+        <p id="help-error-body" class="type-body text-secondary mb-4"></p>
+        <Button variant="primary" block id="help-error-back-btn">Back to report</Button>
       </div>
 
       <div id="help-sent" class="p-4 hidden text-center">

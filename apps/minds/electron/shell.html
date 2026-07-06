@@ -20,6 +20,16 @@
       -webkit-app-region: drag;
       user-select: none;
     }
+    /* When a main-process modal (the /help report dialog opened from the error
+       takeover's "Report a bug" button) overlays this screen, drop the
+       window-drag region. macOS unions -webkit-app-region: drag across all
+       visible views, so this full-window drag would otherwise intercept every
+       click meant for the modal's interior -- the modal looks visible but
+       nothing inside it is clickable. Mirrors the chrome titlebar's modal-open
+       drag suppression. */
+    body.modal-open {
+      -webkit-app-region: no-drag;
+    }
     /* Brand block: head illustration stacked above the wordmark, centered,
        18px apart. */
     .brand {
@@ -445,6 +455,15 @@
       window.minds.onStatusUpdate(function(message) {
         if (message) statusLine.textContent = message;
       });
+      // A main-process modal (the report dialog) opened from this screen
+      // overlays the full window; toggle the drag-region suppression (see
+      // body.modal-open) so its interior is actually clickable, then restore
+      // the window drag when it closes.
+      if (window.minds.onModalStateChanged) {
+        window.minds.onModalStateChanged(function(data) {
+          if (data) document.body.classList.toggle('modal-open', !!data.open);
+        });
+      }
       window.minds.onErrorDetails(function(data) {
         lastErrorData = data;
         // This page is reused (not reloaded) across takeovers, so clear any prior

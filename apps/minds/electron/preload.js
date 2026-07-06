@@ -49,7 +49,9 @@ contextBridge.exposeInMainWorld('minds', {
   // Get-help modal (report a bug). ``agentId`` is the currently-displayed
   // workspace id (or '' on a general screen) so the help page can scope its
   // report to that workspace; it is packed into the help page URL by main.
-  toggleHelp: (agentId) => ipcRenderer.send('toggle-help', agentId),
+  // ``assistAvailable`` marks the workspace healthy enough to host an /assist
+  // chat, gating the "have an agent help" option (see chrome.js).
+  toggleHelp: (agentId, assistAvailable) => ipcRenderer.send('toggle-help', agentId, assistAvailable),
 
   // One-shot bug report from the full-app error takeover (shell.html) when the
   // backend is down and the normal /help flow is unreachable. Reports the
@@ -104,8 +106,11 @@ contextBridge.exposeInMainWorld('minds', {
     ipcRenderer.send('navigate-to-request', agentId, eventId),
   showWorkspaceContextMenu: (agentId, x, y) =>
     ipcRenderer.send('show-workspace-context-menu', agentId, x, y),
+  // ``contentReady`` is whether the content view is showing a reachable
+  // workspace (vs the mngr_forward "Loading workspace" 503 loader), so the
+  // titlebar can keep the "have an agent help" option disabled while loading.
   onCurrentWorkspaceChanged: (callback) => {
-    ipcRenderer.on('current-workspace-changed', (_event, agentId) => callback(agentId));
+    ipcRenderer.on('current-workspace-changed', (_event, agentId, contentReady) => callback(agentId, contentReady));
   },
 
   // The accent source for THIS window's current screen: the workspace id on

@@ -646,25 +646,30 @@ def render_consent_page(report_unexpected_errors: bool, include_logs: bool) -> s
 def render_help_page(
     include_logs_setting: bool,
     workspace_agent_id: str,
+    assist_available: bool = False,
     description: str = "",
     is_agent_report: bool = False,
     workspace_name: str = "",
 ) -> str:
-    """Render the get-help modal page (report a bug; agent help disabled for now).
+    """Render the get-help modal page (report a bug + optional agent help).
 
     ``include_logs_setting`` is the persistent include-logs preference: when on, logs are always
     attached and the form hides its one-off "include logs" checkbox. ``workspace_agent_id`` is the
     workspace the help flow was opened from ("" on a general screen), enabling workspace-scoped options.
-    ``description`` pre-fills the report textarea -- non-empty when an in-workspace ``/assist`` agent
-    asked the app to open the modal with its diagnosis already written in. ``is_agent_report`` is set
-    for that agent-escalation flow: the modal then frames the pre-filled report as the agent's
-    submission (titled with ``workspace_name``, when known) and hides the mode choice, since a report
-    is already underway.
+    ``assist_available`` enables the "have an agent help" option; it is set only when the workspace is
+    reachable/healthy enough to host an ``/assist`` chat (an unreachable workspace's chat couldn't be
+    seen or used), so it is distinct from ``workspace_agent_id``, which still scopes a bug report to a
+    stuck workspace. ``description`` pre-fills the report textarea -- non-empty when an in-workspace
+    ``/assist`` agent asked the app to open the modal with its diagnosis already written in.
+    ``is_agent_report`` is set for that agent-escalation flow: the modal then frames the pre-filled
+    report as the agent's submission (titled with ``workspace_name``, when known) and hides the mode
+    choice, since a report is already underway.
     """
     return CATALOG.render(
         "pages.Help",
         include_logs_setting=include_logs_setting,
         workspace_agent_id=workspace_agent_id,
+        assist_available=assist_available,
         description=description,
         is_agent_report=is_agent_report,
         workspace_name=workspace_name,
@@ -960,9 +965,11 @@ _RECOVERY_STYLE: Final[str] = """\
 
 # The recovery page's behavior. It drives the shared loading card (toggling
 # the spinner, heading and message) plus the recovery-only restart button and
-# error <details>. While a restart is in flight it auto-refreshes itself:
-# _handle_recovery_page re-renders from the live tracker state on every GET,
-# so a timed reload is the whole "is it healthy yet?" check.
+# error <details>. While a restart is in flight it polls the recovery route in
+# the background (so it does not steal focus from any overlaid view) and only
+# reloads once the state actually changes: _handle_recovery_page re-renders from
+# the live tracker state on every GET and exposes it via the X-Recovery-Status
+# header, which scheduleRefresh reads to decide "keep waiting" vs. "reload".
 _RECOVERY_SCRIPT: Final[str] = """\
       (function () {
         var root = document.querySelector('[data-agent-id]');
@@ -997,12 +1004,12 @@ _RECOVERY_SCRIPT: Final[str] = """\
 
         var latestHealth = null;
 
-        // A timed reload restarts the spinner's CSS animation from 0deg, so the
-        // interval must be a whole multiple of the spinner's 1s rotation period
-        // (see LOADING_PAGE_CSS' ``spin`` keyframe) -- otherwise the spinner
-        // visibly jumps back mid-rotation on every refresh. 1000ms also matches
-        // the mngr_forward proxy loader's 1s meta refresh, keeping the two
-        // loading pages a user may see during recovery in lockstep.
+        // The background convergence/healthy polls below run on this cadence.
+        // 1000ms matches the mngr_forward proxy loader's poll interval, keeping
+        // the two loading pages a user may see during recovery in lockstep, and
+        // is a whole multiple of the spinner's 1s rotation period (see
+        // LOADING_PAGE_CSS' ``spin`` keyframe) so the one eventual state-change
+        // reload lands at the animation's cycle boundary rather than mid-spin.
         var REFRESH_INTERVAL_MS = 1000;
 
         function show(el, visible) {
@@ -1064,15 +1071,40 @@ _RECOVERY_SCRIPT: Final[str] = """\
           if (returnTo) u += '?return_to=' + encodeURIComponent(returnTo);
           return u;
         }
+        // Convergence poll while a restart is in flight (the RESTARTING state).
+        // A full-page reload here would steal OS focus from any Electron view
+        // layered over this one -- e.g. the bug-report modal opened from
+        // "Report a problem" -- on every tick, making its inputs impossible to
+        // type into (Electron has no per-WebContentsView focus-on-navigation
+        // control; see https://github.com/electron/electron/issues/42578). So
+        // poll in the background instead: a HEALTHY tracker 302s back to the
+        // workspace (an opaque redirect, which we follow), and any non-restarting
+        // status (e.g. restart_failed) means we reload to render that state.
+        // While the status stays 'restarting' we leave the page -- and any
+        // focused overlay -- untouched and just poll again.
         function scheduleRefresh() {
-          setTimeout(function () { window.location.assign(pollUrl()); }, REFRESH_INTERVAL_MS);
+          setTimeout(function () {
+            fetch(pollUrl(), { credentials: 'same-origin', redirect: 'manual', cache: 'no-store' }).then(function (resp) {
+              if (resp.type === 'opaqueredirect' || (resp.status >= 300 && resp.status < 400)) {
+                window.location.assign(pollUrl());
+                return;
+              }
+              if ((resp.headers.get('X-Recovery-Status') || '') === 'restarting') {
+                scheduleRefresh();
+                return;
+              }
+              window.location.assign(pollUrl());
+            }, function () {
+              scheduleRefresh();
+            });
+          }, REFRESH_INTERVAL_MS);
         }
-        // Background convergence poll for the restart_failed state. Unlike
-        // scheduleRefresh (which reloads the whole page), this fetches pollUrl
-        // with manual redirect handling: while the workspace is still down the
-        // server returns the recovery HTML (200), which we discard so the
-        // displayed failure reason + diagnostics stay put and the heavy
-        // host-health probe is not re-run. Once the background probe loop flips
+        // Background convergence poll for the restart_failed state. Like
+        // scheduleRefresh it polls in the background rather than reloading, but
+        // it only ever navigates on a healthy redirect: while the workspace is
+        // still down the server returns the recovery HTML (200), which we
+        // discard so the displayed failure reason + diagnostics stay put and the
+        // heavy host-health probe is not re-run. Once the background probe loop flips
         // the tracker to HEALTHY the server starts 302ing to return_to, which
         // surfaces as an opaque-redirect response; we then follow it to send
         // the user back to the now-recovered workspace.

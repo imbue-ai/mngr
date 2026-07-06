@@ -602,7 +602,10 @@ def test_subdomain_forward_returns_retry_page_on_backend_connect_error(tmp_path:
     # something useful instead of a hard 502.
     assert html_response.status_code == 503
     assert "Loading workspace" in html_response.text
-    assert 'http-equiv="refresh"' in html_response.text
+    # The loader re-attempts the workspace by polling in the background and
+    # reloading once it answers (rather than a focus-stealing meta refresh).
+    assert "fetch(" in html_response.text
+    assert "location.reload" in html_response.text
     # Non-HTML callers get a plain 503 they can interpret programmatically.
     assert json_response.status_code == 503
 
