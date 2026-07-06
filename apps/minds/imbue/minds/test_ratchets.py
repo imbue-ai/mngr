@@ -332,6 +332,11 @@ def test_prevent_direct_subprocess() -> None:
         # as ``testing.py``: it is only ever called from test / operator
         # entrypoints, never from product code.
         "*/desktop_client/e2e_workspace_runner.py",
+        # ``desktop_client/fct_worktree.py`` is the sibling helper that
+        # materializes the paired FCT worktree (git clone / archive / commit)
+        # for the same e2e / snapshot entrypoints. Same justification: one-shot
+        # git shell-outs from test / operator code, never from product code.
+        "*/desktop_client/fct_worktree.py",
     )
     # The one allowed match is ``cli/env.py::_exec_into_recover``,
     # which uses ``os.execvp`` to REPLACE the current process with

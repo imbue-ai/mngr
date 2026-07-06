@@ -45,16 +45,14 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 from imbue.minds.config.loader import repo_tier_client_config_path
-from imbue.minds.desktop_client.templates import FALLBACK_BRANCH as _FORM_DEFAULT_BRANCH
+from imbue.minds.desktop_client.fct_worktree import FCT_EXTERNAL_WORKTREE
+from imbue.minds.desktop_client.fct_worktree import current_worktree_branch
 
 # This file lives at apps/minds/imbue/minds/desktop_client/e2e_workspace_runner.py,
 # so parents[5] hops up over desktop_client, minds, imbue, minds, apps to the repo
 # root. (The original copy of this code lived two levels closer to the root in
 # apps/minds/test_desktop_client_e2e.py, where parents[2] was correct.)
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[5]
-_FCT_EXTERNAL_WORKTREE: Final[Path] = _REPO_ROOT / ".external_worktrees" / "forever-claude-template"
-_FCT_REMOTE: Final[str] = "https://github.com/imbue-ai/forever-claude-template.git"
-_FCT_FALLBACK_BRANCH: Final[str] = "main"
 
 # The contentView page URL contains ``/_chrome`` only for the chrome
 # (sidebar/title-bar) view; the main content view never does. We match the
@@ -138,217 +136,24 @@ def find_free_port() -> int:
         return s.getsockname()[1]
 
 
-def _current_mngr_branch() -> str | None:
-    """Return the current branch name of the mngr repo, or None if detached.
+def resolve_fct_path() -> Path:
+    """Return the FCT working tree that workspace-creation tests build from.
 
-    Returning ``None`` for a detached HEAD lets the FCT resolver skip the
-    "branch matching" step rather than asking FCT for a ref named ``HEAD``.
-
-    In CI the checkout is a detached HEAD, so ``git rev-parse --abbrev-ref
-    HEAD`` returns ``HEAD`` and the branch-matching step would never fire --
-    meaning a PR that needs a same-named FCT branch (e.g. one changing the
-    mngr<->FCT config contract) could not be tested against it. GitHub Actions
-    exposes the real branch in the environment, so consult that first:
-    ``GITHUB_HEAD_REF`` is the PR source branch (set only for pull_request
-    events); ``GITHUB_REF_NAME`` is the branch for push events (but a
-    ``<n>/merge`` ref for PRs, which we ignore).
-
-    Any failure to invoke git (missing ``.git`` -- e.g. when the runner
-    executes inside a Modal sandbox whose source tree was uploaded via
-    ``add_local_dir`` and the worktree's ``.git`` file points at a
-    gitdir that does not exist on the sandbox; ``CalledProcessError``;
-    ``TimeoutExpired``) is logged at warning level and treated as
-    "branch unknown", which routes the caller through the documented
-    fall-back to FCT ``main`` rather than crashing the whole run.
+    The tree is produced ahead of time by
+    :func:`imbue.minds.desktop_client.fct_worktree.materialize_paired_fct_worktree`
+    -- on the CI runner before the snapshot image is staged, or by the local
+    test recipe -- and either lives at ``.external_worktrees/forever-claude-template``
+    or is baked into the snapshot image there. Consumers only *use* it; an absent
+    worktree means the materialize step did not run, which is a setup error we
+    surface loudly rather than silently cloning the released FCT tag.
     """
-    ci_head_ref = os.environ.get("GITHUB_HEAD_REF")
-    if ci_head_ref:
-        return ci_head_ref
-    ci_ref_name = os.environ.get("GITHUB_REF_NAME")
-    if ci_ref_name and not ci_ref_name.endswith("/merge"):
-        return ci_ref_name
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(_REPO_ROOT), "rev-parse", "--abbrev-ref", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
-        logger.warning("Could not determine current mngr branch ({!r}); treating as unknown", exc)
-        return None
-    branch = result.stdout.strip()
-    if not branch or branch == "HEAD":
-        return None
-    return branch
-
-
-def _fct_remote_has_branch(branch: str) -> bool:
-    """Return True iff the FCT public remote currently has ``branch``.
-
-    ``git ls-remote`` exits 0 either way; presence is signalled by stdout
-    being non-empty. Network-level failures (DNS hiccup, GitHub 5xx,
-    proxy block, timeout) are logged as a warning and treated the same as
-    "no such branch" so the caller still falls back to ``main`` per the
-    documented 3-step chain rather than crashing the whole run on a
-    transient probe failure.
-    """
-    try:
-        result = subprocess.run(
-            ["git", "ls-remote", "--heads", _FCT_REMOTE, branch],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        logger.warning(
-            "Failed to query FCT remote for branch {!r}; treating as absent so main fallback runs: {!r}",
-            branch,
-            exc,
-        )
-        return False
-    return bool(result.stdout.strip())
-
-
-def _shallow_clone_fct(branch: str, destination: Path) -> Path:
-    """Shallow-clone ``branch`` of the FCT public remote into ``destination``.
-
-    Also fetches any release tags into the clone. The minds create form's
-    default branch field (see ``FALLBACK_BRANCH`` in templates.py) pins
-    to an annotated FCT tag (e.g. ``v0.3.0``); without this extra fetch,
-    a depth-1 clone of an unrelated branch does not have the tag's commit,
-    and the downstream ``mngr create`` clone of the form's branch field
-    would fail with ``Remote branch v0.3.0 not found``. Cheap (a handful
-    of extra refs) and keeps test create flows aligned with production.
-    """
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["git", "clone", "--depth", "1", "--branch", branch, _FCT_REMOTE, str(destination)],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=120,
+    if FCT_EXTERNAL_WORKTREE.is_dir() and (FCT_EXTERNAL_WORKTREE / ".git").exists():
+        logger.info("Using FCT worktree at {}", FCT_EXTERNAL_WORKTREE)
+        return FCT_EXTERNAL_WORKTREE
+    raise WorkspaceFlowError(
+        f"No FCT worktree at {FCT_EXTERNAL_WORKTREE}. Run materialize_paired_fct_worktree() first "
+        "(the CI snapshot bake materializes it before staging; local runs go through the test recipe)."
     )
-    # ``--depth 1`` would only fetch the tag's tip, but ``--tags`` already
-    # implies fetching all tag-pointed commits at shallow depth; combine
-    # so each tag's target commit is reachable without filling out full
-    # branch history.
-    subprocess.run(
-        ["git", "-C", str(destination), "fetch", "--depth", "1", "--tags", "origin"],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    # The create form pre-fills its branch field with `_FORM_DEFAULT_BRANCH`
-    # (templates.py `FALLBACK_BRANCH`), so the spawned `mngr create` runs
-    # `git checkout <that ref>` in this very clone. Leaving the clone on
-    # the originally-cloned branch turns that into a real checkout that
-    # rejects any uncommitted edits the test fixture made to opt files in
-    # (e.g. `.mngr/settings.toml is_allowed_in_pytest`). Pre-positioning
-    # to the form's default makes that downstream checkout a no-op even
-    # when the working tree is dirty. Best effort: if the ref is not
-    # reachable (e.g. tag not present on FCT remote yet), leave the clone
-    # as-is and let `mngr create` surface the resulting error.
-    _checkout_best_effort(destination, _FORM_DEFAULT_BRANCH)
-    return destination
-
-
-def _checkout_best_effort(repo: Path, ref: str) -> None:
-    verify = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "--verify", f"{ref}^{{commit}}"],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    if verify.returncode != 0:
-        logger.info("Skipping pre-checkout of FCT clone to {!r}: ref not reachable", ref)
-        return
-    subprocess.run(
-        ["git", "-C", str(repo), "checkout", "--detach", ref],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    # Point FETCH_HEAD at the same commit we just checked out. The minds create
-    # flow runs ``git checkout -B <ref> FETCH_HEAD`` in this clone; with HEAD
-    # already on <ref>, making FETCH_HEAD == HEAD turns that into a true no-op
-    # that preserves the uncommitted ``is_allowed_in_pytest`` opt-in the test
-    # writes into ``.mngr/settings.toml``. Without this, FETCH_HEAD still points
-    # at the branch tip left by the earlier ``fetch --tags`` (a different
-    # commit, whose ``.mngr/settings.toml`` differs from the tag's), so the
-    # downstream checkout tries to switch content and aborts on the dirty file
-    # ("Your local changes ... would be overwritten by checkout"). Fetching from
-    # ``.`` is local-only (no network).
-    subprocess.run(
-        ["git", "-C", str(repo), "fetch", "--no-tags", ".", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-
-
-def resolve_fct_path(scratch_dir: Path) -> Path:
-    """Return a local FCT working tree via the 3-step fallback chain.
-
-    Step 1 (preferred): operator-managed ``.external_worktrees/forever-claude-template/``.
-    Step 2: a shallow clone of the current mngr branch from the FCT remote
-    if FCT has a branch by that name.
-    Step 3: a shallow clone of FCT ``main``.
-
-    ``scratch_dir`` is the directory in which the shallow clone is placed
-    when steps 2 or 3 fire (e.g. ``pytest tmp_path`` for the test,
-    ``$TMPDIR`` for the snapshot script).
-    """
-    if _FCT_EXTERNAL_WORKTREE.is_dir() and (_FCT_EXTERNAL_WORKTREE / ".git").exists():
-        logger.info("Using FCT external worktree at {}", _FCT_EXTERNAL_WORKTREE)
-        return _FCT_EXTERNAL_WORKTREE
-
-    destination = scratch_dir / "fct"
-    branch = _current_mngr_branch()
-    if branch is not None and _fct_remote_has_branch(branch):
-        logger.info("Shallow-cloning FCT branch {!r} into {}", branch, destination)
-        return _shallow_clone_fct(branch, destination)
-
-    logger.info(
-        "FCT remote does not have a branch named {!r}; falling back to {!r}",
-        branch,
-        _FCT_FALLBACK_BRANCH,
-    )
-    return _shallow_clone_fct(_FCT_FALLBACK_BRANCH, destination)
-
-
-def materialize_isolated_fct(fct_source: Path, scratch_dir: Path) -> Path:
-    """Return a throwaway FCT working tree the caller may safely write into.
-
-    The pytest wrapper writes a ``is_allowed_in_pytest`` opt-in into the
-    returned tree's ``.mngr/settings.toml`` before ``mngr create`` mirrors
-    it into the workspace container. When ``fct_source`` is the operator's
-    ``.external_worktrees/forever-claude-template/`` checkout, that edit
-    must not land on the real file, so clone it into ``scratch_dir``
-    (committed state) and position it on the create form's default branch
-    (matching :func:`_shallow_clone_fct`). When ``fct_source`` is already a
-    throwaway clone (steps 2-3 of :func:`resolve_fct_path`), return it
-    unchanged.
-    """
-    if fct_source != _FCT_EXTERNAL_WORKTREE:
-        return fct_source
-    destination = scratch_dir / "fct_isolated"
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    logger.info("Cloning FCT external worktree into {} to keep the operator's checkout pristine", destination)
-    subprocess.run(
-        ["git", "clone", str(fct_source), str(destination)],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=300,
-    )
-    _checkout_best_effort(destination, _FORM_DEFAULT_BRANCH)
-    return destination
 
 
 def ensure_minds_env_defaults(setenv: Callable[[str, str], None]) -> None:
@@ -363,7 +168,14 @@ def ensure_minds_env_defaults(setenv: Callable[[str, str], None]) -> None:
     the snapshot script (which runs in a throwaway sandbox) passes a
     setter that writes to ``os.environ`` directly. Both options share
     the validation / logging logic below.
+
+    Also points the create form at the present paired FCT worktree (the same
+    ``MINDS_WORKSPACE_*`` env vars ``just minds-start`` sets), so ``mngr create``
+    builds from that worktree's branch with the vendored mngr under test rather
+    than the released ``FALLBACK_BRANCH`` tag. That step runs regardless of the
+    ``MINDS_ROOT_NAME`` early return below.
     """
+    _ensure_paired_workspace_env(setenv)
     if os.environ.get("MINDS_ROOT_NAME"):
         logger.info("Using inherited MINDS_ROOT_NAME={}", os.environ["MINDS_ROOT_NAME"])
         return
@@ -381,6 +193,32 @@ def ensure_minds_env_defaults(setenv: Callable[[str, str], None]) -> None:
         _DEFAULT_MINDS_ROOT_NAME,
         config_path,
     )
+
+
+def _ensure_paired_workspace_env(setenv: Callable[[str, str], None]) -> None:
+    """Point the create form at the present FCT worktree on its own branch.
+
+    When the materialized worktree exists, set the ``just minds-start`` env vars
+    so ``mngr create`` builds from that worktree's branch (not the released
+    ``FALLBACK_BRANCH`` tag) with the vendored mngr under test. No-op when the
+    worktree is absent (the consumer surfaces that) or when a var is already set
+    (an explicit override wins).
+    """
+    if not (FCT_EXTERNAL_WORKTREE.is_dir() and (FCT_EXTERNAL_WORKTREE / ".git").exists()):
+        return
+    if not os.environ.get("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS"):
+        setenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", "1")
+    if not os.environ.get("MINDS_WORKSPACE_GIT_URL"):
+        setenv("MINDS_WORKSPACE_GIT_URL", str(FCT_EXTERNAL_WORKTREE))
+    if not os.environ.get("MINDS_WORKSPACE_BRANCH"):
+        branch = current_worktree_branch(FCT_EXTERNAL_WORKTREE)
+        if branch is not None:
+            setenv("MINDS_WORKSPACE_BRANCH", branch)
+        else:
+            logger.warning(
+                "FCT worktree at {} has no resolvable branch; leaving MINDS_WORKSPACE_BRANCH unset",
+                FCT_EXTERNAL_WORKTREE,
+            )
 
 
 def _build_electron_env(workspace_git_url: Path) -> dict[str, str]:
