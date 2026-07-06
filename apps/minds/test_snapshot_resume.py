@@ -37,7 +37,6 @@ from imbue.minds.desktop_client.e2e_workspace_runner import create_workspace_via
 from imbue.minds.desktop_client.e2e_workspace_runner import destroy_agent_best_effort
 from imbue.minds.desktop_client.e2e_workspace_runner import ensure_minds_env_defaults
 from imbue.minds.desktop_client.e2e_workspace_runner import find_free_port
-from imbue.minds.desktop_client.e2e_workspace_runner import materialize_isolated_fct
 from imbue.minds.desktop_client.e2e_workspace_runner import resolve_fct_path
 from imbue.minds.desktop_client.recovery_probe import PROBE_SENTINEL
 from imbue.minds.desktop_client.recovery_probe import build_probe_shell_command
@@ -494,11 +493,13 @@ def _prepare_electron_workspace_inputs(tmp_path: Path, monkeypatch: pytest.Monke
     # override to the default runtime (FCT names this exact escape-hatch env var).
     monkeypatch.setenv("MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME", "runc")
     # The Electron-spawned mngr loads two project-config trees under
-    # PYTEST_CURRENT_TEST (host-side + the FCT checkout); both must opt into the
-    # pytest config guard, and neither opt-in lives in committed state, so point
-    # at throwaway opted-in copies.
-    fct_path = materialize_isolated_fct(resolve_fct_path(tmp_path), tmp_path)
-    _opt_into_pytest_config_guard(fct_path / ".mngr" / "settings.toml")
+    # PYTEST_CURRENT_TEST: the host-side config (a throwaway opted-in copy built
+    # here) and the FCT worktree. The FCT worktree is materialized ahead of time
+    # by ``materialize_paired_fct_worktree`` (baked into the snapshot image in
+    # CI, or created by the local test recipe) with its pytest opt-in already
+    # committed, so this only resolves it -- and errors loudly if the materialize
+    # step never ran.
+    fct_path = resolve_fct_path()
     host_config_root = _isolated_host_config_root(tmp_path)
     return fct_path, host_config_root
 

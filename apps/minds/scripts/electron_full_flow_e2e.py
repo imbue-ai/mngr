@@ -30,7 +30,6 @@ runners. The create + chat path is the one crystallized as a pytest test
 
 import os
 import sys
-from pathlib import Path
 
 from loguru import logger
 
@@ -39,6 +38,7 @@ from imbue.minds.desktop_client.e2e_workspace_runner import destroy_agent_best_e
 from imbue.minds.desktop_client.e2e_workspace_runner import find_free_port
 from imbue.minds.desktop_client.e2e_workspace_runner import resolve_fct_path
 from imbue.minds.desktop_client.e2e_workspace_runner import run_full_workspace_flow
+from imbue.minds.desktop_client.fct_worktree import materialize_paired_fct_worktree
 from imbue.mngr.utils.testing import get_short_random_string
 
 
@@ -51,8 +51,11 @@ def main() -> None:
     os.environ["MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME"] = "runc"
     os.environ["MNGR__PROVIDERS__MODAL__IS_ENABLED"] = "false"
 
-    scratch = Path("/tmp") / f"minds-flow-fct-{get_short_random_string()}"
-    fct_path = resolve_fct_path(scratch)
+    # Materialize the paired FCT worktree (clone paired branch or main + vendor
+    # this mngr checkout) if it is not already present, then resolve it. A
+    # pre-existing operator worktree is left untouched.
+    materialize_paired_fct_worktree()
+    fct_path = resolve_fct_path()
     workspace_name = f"flowtest-{get_short_random_string()}"
     token = f"flowtok-{get_short_random_string()}"
     debug_port = find_free_port()

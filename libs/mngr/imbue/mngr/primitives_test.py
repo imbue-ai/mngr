@@ -15,6 +15,7 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import InvalidName
+from imbue.mngr.primitives import MAX_HOST_NAME_LENGTH
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import default_branch_name
 
@@ -29,6 +30,24 @@ def test_host_name_accepts_simple_name() -> None:
     """HostName accepts plain alphanumeric (with dash/underscore) names."""
     assert str(HostName("myhost")) == "myhost"
     assert str(HostName("my-host")) == "my-host"
+
+
+def test_host_name_accepts_name_at_max_length() -> None:
+    """HostName accepts a name exactly at the max length."""
+    name_at_limit = "a" * MAX_HOST_NAME_LENGTH
+    assert str(HostName(name_at_limit)) == name_at_limit
+
+
+def test_host_name_rejects_name_over_max_length() -> None:
+    """HostName rejects a name longer than the max length."""
+    with pytest.raises(InvalidName, match="at most"):
+        HostName("a" * (MAX_HOST_NAME_LENGTH + 1))
+
+
+def test_agent_name_is_not_capped_at_host_name_length() -> None:
+    """The length cap is on HostName only; AgentName (and the SafeName base) stay uncapped."""
+    long_name = "a" * (MAX_HOST_NAME_LENGTH + 20)
+    assert str(AgentName(long_name)) == long_name
 
 
 # =============================================================================
