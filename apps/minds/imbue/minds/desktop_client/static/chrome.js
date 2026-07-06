@@ -214,11 +214,12 @@
   //
   // SSE pushes ``system_interface_status`` events whenever an agent transitions
   // between healthy / stuck / restarting. When the currently-displayed agent
-  // goes STUCK we navigate the content view to the recovery page; the recovery
-  // page's own SSE subscription redirects back to ``return_to`` once the agent
-  // is healthy again. We redirect at most once per stuck episode (per agent),
-  // cleared by a subsequent ``healthy`` event, so the recovery page itself
-  // doesn't get clobbered on repeat STUCK transitions while the user is on it.
+  // goes STUCK we navigate the content view to the recovery page; that page then
+  // polls its own recovery route (a cheap liveness poll) and gets 302'd back to
+  // ``return_to`` once the agent is healthy again. We redirect at most once per
+  // stuck episode (per agent), cleared by a subsequent ``healthy`` event, so the
+  // recovery page itself doesn't get clobbered on repeat STUCK transitions while
+  // the user is on it.
   var systemInterfaceStatusByAgent = {};
   var redirectedAgents = {};
 

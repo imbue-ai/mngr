@@ -870,11 +870,63 @@ def test_render_recovery_page_script_branches_on_dispatch_tier() -> None:
         "'interface_unresponsive'",
         "'host_unresponsive'",
         "'backend_unreachable'",
+        "'indeterminate'",
     ):
         assert tier in html, f"recovery page JS missing branch for {tier}"
     # The shared landing places for each branch.
     assert "renderUnresponsive" in html
     assert "renderBackendUnreachable" in html
+    assert "renderReconnecting" in html
+
+
+def test_render_recovery_page_indeterminate_renders_reconnecting_not_a_verdict() -> None:
+    """The INDETERMINATE tier keeps checking instead of rendering a verdict.
+
+    When the probe timed out or the snapshot is stale, the page must not auto-
+    dispatch a restart or show a restart verdict -- it renders the live
+    "reconnecting" state and re-probes slowly. The branch must come before the
+    auto-dispatch tiers so no restart fires off non-evidence.
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="stuck",
+        initial_error="",
+    )
+    apply_start = html.find("function applyHealth(")
+    apply_block = html[apply_start : html.find("function ", apply_start + 1)]
+    assert "'indeterminate'" in apply_block
+    assert "renderReconnecting()" in apply_block
+    assert "scheduleIndeterminateReprobe()" in apply_block
+    assert apply_block.find("'indeterminate'") < apply_block.find("postRestart")
+    # renderReconnecting shows a spinner and no restart button, and arms the poll.
+    recon_start = html.find("function renderReconnecting")
+    recon_block = html[recon_start : html.find("function ", recon_start + 1)]
+    assert "show(hostBtn, false)" in recon_block
+    assert "armHealthyPoll()" in recon_block
+
+
+def test_render_recovery_page_every_wait_state_arms_the_homeward_poll() -> None:
+    """No recovery state is a dead end: each waiting state arms the cheap liveness poll.
+
+    This is the fix for the post-macOS-sleep "Workspace unresponsive" strand: a
+    workspace that comes back on its own must return the user home without any
+    action. Every terminal/waiting render arms the poll, and the stuck entry arms
+    it before the slow heavy probe even runs (cheap-probe-first).
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="stuck",
+        initial_error="",
+    )
+    for fn in ("renderUnresponsive", "renderDispatchError", "renderReconnecting", "renderBackendUnreachable"):
+        start = html.find("function " + fn)
+        block = html[start : html.find("function ", start + 1)]
+        assert "armHealthyPoll()" in block, f"{fn} must arm the homeward poll so it is not a dead end"
+    # Cheap-probe-first: the stuck entry arms the poll before running the heavy probe.
+    entry = html[html.rfind("if (initialStatus === 'restarting')") :]
+    assert entry.find("armHealthyPoll();") < entry.rfind("runProbe(true);")
 
 
 def test_render_recovery_page_backend_unreachable_offers_retry_not_restart() -> None:
@@ -909,12 +961,13 @@ def test_render_recovery_page_backend_unreachable_offers_retry_not_restart() -> 
     # Diagnostics are suppressed on this tier (the cause is the external backend,
     # shown verbatim, not anything the in-container probes inspect).
     assert "show(debugDetailsEl, false)" in provider_block
-    # The backend_unreachable branch arms the healthy-poll (auto-return when the
-    # backend recovers) and returns before any restart dispatch.
+    # The render arms the cheap liveness poll so the page auto-returns the user
+    # once the backend recovers and the tracker flips HEALTHY.
+    assert "armHealthyPoll()" in provider_block
+    # The backend_unreachable branch returns before any restart dispatch.
     apply_start = html.find("function applyHealth(")
     apply_block = html[apply_start : html.find("function ", apply_start + 1)]
     assert apply_block.find("'backend_unreachable'") < apply_block.find("postRestart")
-    assert "scheduleHealthyPoll()" in apply_block
 
 
 def test_render_recovery_page_loading_hides_diagnostic_dropdown() -> None:

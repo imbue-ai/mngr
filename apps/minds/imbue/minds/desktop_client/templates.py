@@ -1089,6 +1089,35 @@ _RECOVERY_SCRIPT: Final[str] = """\
             });
           }, REFRESH_INTERVAL_MS);
         }
+        // The cheap liveness poll, idempotently armed. scheduleHealthyPoll re-hits
+        // the recovery route on a ~1s cadence; the route 302s to return_to the
+        // instant the background probe loop flips the tracker HEALTHY, so this sends
+        // the user home the moment the workspace answers -- regardless of which
+        // verdict (if any) is on screen. Every terminal state arms this, and the
+        // stuck entry arms it before the slow in-container probe even runs, so a
+        // healthy or self-recovering workspace is never stranded. A no-op when
+        // there is no return_to to go home to.
+        var healthyPollArmed = false;
+        function armHealthyPoll() {
+          if (healthyPollArmed || !returnTo) return;
+          healthyPollArmed = true;
+          scheduleHealthyPoll();
+        }
+        // While INDETERMINATE (no trustworthy evidence to classify), re-run the
+        // heavy probe on a slow cadence so we still converge to a real verdict if
+        // the workspace is genuinely wedged but host-reachable. Slow on purpose:
+        // each heavy probe can take tens of seconds, and the cheap liveness poll
+        // above already does the fast recovery work -- this is only the slow
+        // convergence path. Re-render via applyHealth (not renderLoading) so the
+        // "Reconnecting" state stays put while the background probe is in flight.
+        var INDETERMINATE_REPROBE_MS = 8000;
+        function scheduleIndeterminateReprobe() {
+          setTimeout(function () {
+            fetchHealth().then(function (data) { applyHealth(data, true); }, function () {
+              scheduleIndeterminateReprobe();
+            });
+          }, INDETERMINATE_REPROBE_MS);
+        }
 
 
         function renderLoading() {
@@ -1123,6 +1152,32 @@ _RECOVERY_SCRIPT: Final[str] = """\
           hostBtn.classList.remove('secondary');
           show(hostBtn, true);
           show(reportBtn, true);
+          // Keep watching for self-recovery: the workspace may come back on its own
+          // (a slow cold boot, a healed network) while this consent page is shown,
+          // and the cheap liveness poll returns the user home the moment it does.
+          armHealthyPoll();
+        }
+        // INDETERMINATE: we lack trustworthy evidence to classify -- the
+        // in-container probe timed out (observed nothing), or discovery has not
+        // re-observed the host since the outage began, so its host state may be
+        // stale. Render neither a verdict nor a restart button, just a live
+        // "reconnecting" spinner. The cheap liveness poll (armed here) returns the
+        // user home the instant the workspace answers; a slow heavy re-probe
+        // converges to a real tier if it is genuinely down and a fresh snapshot
+        // later lands. A live GET / 200 short-circuits to HEALTHY upstream, so we
+        // only reach here without direct positive evidence.
+        function renderReconnecting() {
+          titleEl.textContent = 'Reconnecting to your workspace';
+          messageEl.textContent =
+            'This is taking longer than usual. We\\'ll reconnect you automatically as soon '
+            + 'as your workspace responds.';
+          show(spinnerEl, true);
+          show(errorEl, false);
+          show(hostBtn, false);
+          show(retryBtn, false);
+          show(reportBtn, true);
+          if (providerReasonEl) { providerReasonEl.textContent = ''; show(providerReasonEl, false); }
+          armHealthyPoll();
         }
         function renderDispatchError() {
           titleEl.textContent = 'Workspace unresponsive';
@@ -1133,6 +1188,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
           hostBtn.classList.remove('secondary');
           show(hostBtn, true);
           show(reportBtn, true);
+          armHealthyPoll();
         }
         // The provider/backend hosting this workspace is unreachable or rejected
         // us (connector down, docker daemon stopped or paused, expired login,
@@ -1164,6 +1220,10 @@ _RECOVERY_SCRIPT: Final[str] = """\
           // in-container probes are moot -- the cause is the provider's own
           // error, shown verbatim above -- so suppress the Diagnostics disclosure.
           show(debugDetailsEl, false);
+          // Return the user to the workspace automatically once the backend
+          // recovers and the tracker flips HEALTHY (a resumed daemon, a restored
+          // login, a healed network all recover identically).
+          armHealthyPoll();
         }
 
         function postRestart(body) {
@@ -1191,22 +1251,21 @@ _RECOVERY_SCRIPT: Final[str] = """\
         }
 
         // Render (and, when ``autoDispatch``, dispatch a restart for) the tier in
-        // a host-health payload. The recovery page is only reached once discovery
-        // is fresh (the redirect is gated on freshness), so the classification is
-        // trustworthy and there is no transient awaiting-discovery state to
-        // converge through.
+        // a host-health payload. The page can be reached before discovery has
+        // re-observed the host after an outage (the STUCK redirect is no longer
+        // gated on freshness), so a classification the backend cannot yet trust
+        // arrives as the ``indeterminate`` tier -- handled below as a live
+        // "reconnecting" state rather than a verdict.
         function applyHealth(data, autoDispatch) {
           latestHealth = data || null;
           renderDebugMenu(latestHealth);
           var tier = data && data.dispatch_tier;
           // A backend-unreachable outcome short-circuits before any restart
           // dispatch on EVERY entry path: no restart can or should fire while the
-          // backend is unreachable or rejecting us. Render-only, and arm the
-          // background healthy-poll so the page auto-returns once the backend
-          // recovers (a resumed daemon and a restored login recover identically).
+          // backend is unreachable or rejecting us. Render-only; renderBackendUnreachable
+          // arms the healthy-poll so the page auto-returns once the backend recovers.
           if (tier === 'backend_unreachable') {
             renderBackendUnreachable(data);
-            scheduleHealthyPoll();
             return;
           }
           // The in-container probe shows the interface is actually answering
@@ -1223,8 +1282,19 @@ _RECOVERY_SCRIPT: Final[str] = """\
           }
           if (!autoDispatch) {
             // restart_failed entry: render unresponsive so the failure reason and
-            // the diagnostics list both stay visible.
+            // the diagnostics list both stay visible (renderUnresponsive keeps the
+            // healthy-poll running so a self-recovery still returns the user home).
             renderUnresponsive();
+            return;
+          }
+          // No trustworthy evidence to classify (probe timed out, or discovery has
+          // not re-observed the host since the outage). Show a live "reconnecting"
+          // state and keep checking -- never a verdict or an auto-restart off
+          // non-evidence. The cheap liveness poll (armed by renderReconnecting)
+          // does the fast recovery; the slow re-probe converges to a real tier.
+          if (tier === 'indeterminate') {
+            renderReconnecting();
+            scheduleIndeterminateReprobe();
             return;
           }
           // ``auto_dispatched=1`` marks these as recovery-page auto-restarts (not
@@ -1300,21 +1370,24 @@ _RECOVERY_SCRIPT: Final[str] = """\
           renderLoading();
           scheduleRefresh();
         } else if (initialStatus === 'restart_failed') {
-          // Show the failure reason AND the diagnostic together: re-run
-          // the probe with auto-dispatch off so the renderUnresponsive path
-          // also has the diagnostics populated.
+          // Show the failure reason AND the diagnostic together: re-run the probe
+          // with auto-dispatch off so the renderUnresponsive path also has the
+          // diagnostics populated. renderUnresponsive arms the healthy-poll, so a
+          // failed restart is not terminal -- if the background probe loop recovers
+          // the workspace on its own (e.g. a cold boot that finished just after the
+          // restart worker's bounded wait elapsed) the user is returned home.
           runProbe(false);
-          // A failed restart is not necessarily terminal: the background probe
-          // loop keeps polling the workspace and may recover it on its own
-          // (e.g. a cold container boot that finished just after the restart
-          // worker's bounded wait elapsed). Watch for that recovery so we can
-          // return the user to the workspace without them having to act.
-          scheduleHealthyPoll();
         } else if (initialStatus === 'healthy') {
           // Degenerate: rendered HEALTHY with no return_to to 302 to. Offer a
           // manual restart rather than auto-dispatching one on a healthy page.
           renderUnresponsive();
         } else {
+          // Cheap-probe-first: start the liveness poll immediately so a workspace
+          // that is actually healthy (or recovers while the slow in-container probe
+          // is in flight) returns the user home within ~1s, without waiting on the
+          // heavy diagnosis probe. The heavy probe still runs to populate
+          // diagnostics and pick a restart tier, but it can no longer strand anyone.
+          armHealthyPoll();
           runProbe(true);
         }
       })();

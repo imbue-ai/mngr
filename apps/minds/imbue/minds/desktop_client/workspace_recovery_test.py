@@ -8,6 +8,7 @@ the host-already-stopped fast path).
 """
 
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
 
@@ -21,7 +22,9 @@ from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKi
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
 from imbue.minds.desktop_client.workspace_recovery import _build_mngr_start_argv
 from imbue.minds.desktop_client.workspace_recovery import _build_mngr_stop_argv
+from imbue.minds.desktop_client.workspace_recovery import _is_discovery_fresh
 from imbue.minds.desktop_client.workspace_recovery import _provider_error_message_for_workspace
+from imbue.minds.desktop_client.workspace_recovery import is_recovery_classification_trustworthy
 from imbue.minds.desktop_client.workspace_recovery import run_restart_sequence
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.primitives import AgentId
@@ -333,3 +336,130 @@ def test_run_restart_sequence_stops_before_start_by_default(tmp_path: Path) -> N
     assert stop_index is not None, invocations
     assert start_index is not None, invocations
     assert stop_index < start_index
+
+
+# -- recovery classification trustworthiness (freshness gate on the verdict path) --
+
+
+def _drive_to_stuck_with_onset(tracker: SystemInterfaceHealthTracker, agent_id: AgentId) -> datetime:
+    """Drive ``agent_id`` to STUCK via the real probe path and return its onset.
+
+    A zero stuck-threshold makes the first probe failure stick immediately, so the
+    outage onset is recorded deterministically without sleeping.
+    """
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+    assert tracker.get_health(agent_id) == AgentHealth.STUCK
+    onset = tracker.get_failure_run_started_wall_at(agent_id)
+    assert onset is not None
+    return onset
+
+
+def _register_workspace_agent(resolver: MngrCliBackendResolver, agent_id: AgentId, provider_name: str) -> None:
+    """Register one workspace agent on ``provider_name`` so its display info resolves a provider.
+
+    Trustworthiness is scoped to the workspace's own provider's last snapshot, so
+    the agent must be discoverable with a provider for the predicate to find a
+    per-provider snapshot time.
+    """
+    agent = DiscoveredAgent(
+        host_id=HostId("host-" + "0" * 31 + "1"),
+        agent_id=agent_id,
+        agent_name=AgentName("ws-agent"),
+        provider_name=ProviderInstanceName(provider_name),
+        certified_data={"labels": {"workspace": "true", "is_primary": "true"}},
+    )
+    resolver.update_agents(ParsedAgentsResult(agent_ids=(agent_id,), discovered_agents=(agent,)))
+
+
+def _set_provider_snapshot_at(resolver: MngrCliBackendResolver, provider_name: str, snapshot_at: datetime) -> None:
+    """Record ``provider_name``'s last per-provider snapshot time on the resolver."""
+    resolver.update_providers(
+        provider_name=ProviderInstanceName(provider_name),
+        provider=None,
+        error=None,
+        last_snapshot_at=snapshot_at,
+    )
+
+
+def test_is_discovery_fresh_distinguishes_recent_from_stale_and_missing() -> None:
+    """Only a recent snapshot backs a trustworthy classification via the age fallback."""
+    now = datetime.now(timezone.utc)
+    assert _is_discovery_fresh(now) is True
+    # A snapshot well past the freshness window (a stalled pipeline) is stale.
+    assert _is_discovery_fresh(now - timedelta(minutes=5)) is False
+    # No snapshot at all (e.g. before initial discovery) cannot be trusted.
+    assert _is_discovery_fresh(None) is False
+
+
+def test_classification_trustworthy_only_after_a_post_onset_snapshot() -> None:
+    """A verdict is trustworthy only once a snapshot taken *after* the outage began has landed.
+
+    A snapshot that predates the outage still carries the pre-outage host state (a
+    just-stopped container still reads RUNNING), so it must not make the
+    classification trustworthy -- only a snapshot at or after the outage onset
+    does. Freshness is scoped to the workspace's own provider's snapshot time.
+    """
+    resolver = MngrCliBackendResolver()
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    agent_id = AgentId.generate()
+    _register_workspace_agent(resolver, agent_id, "docker")
+    onset = _drive_to_stuck_with_onset(tracker, agent_id)
+
+    # A recent snapshot of the agent's provider that nonetheless predates the outage
+    # is the exact bug case: within the absolute freshness window but still showing
+    # the pre-outage host state, so the classification stays untrustworthy.
+    _set_provider_snapshot_at(resolver, "docker", onset - timedelta(seconds=1))
+    assert is_recovery_classification_trustworthy(resolver, tracker, agent_id) is False
+
+    # A snapshot of the agent's provider taken after the outage began reflects it.
+    _set_provider_snapshot_at(resolver, "docker", onset + timedelta(seconds=1))
+    assert is_recovery_classification_trustworthy(resolver, tracker, agent_id) is True
+
+
+def test_classification_trustworthiness_is_scoped_to_the_workspaces_own_provider() -> None:
+    """A fresh snapshot of an *unrelated* provider must not make the verdict trustworthy.
+
+    Each provider is discovered on its own loop, so only the workspace's own
+    provider's snapshot can establish that its host was re-observed post-onset.
+    """
+    resolver = MngrCliBackendResolver()
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    agent_id = AgentId.generate()
+    _register_workspace_agent(resolver, agent_id, "docker")
+    onset = _drive_to_stuck_with_onset(tracker, agent_id)
+
+    # A post-onset snapshot for a different provider leaves docker's freshness stale.
+    _set_provider_snapshot_at(resolver, "modal", onset + timedelta(seconds=1))
+    assert is_recovery_classification_trustworthy(resolver, tracker, agent_id) is False
+
+    # Only the agent's own provider going fresh post-onset makes it trustworthy.
+    _set_provider_snapshot_at(resolver, "docker", onset + timedelta(seconds=1))
+    assert is_recovery_classification_trustworthy(resolver, tracker, agent_id) is True
+
+
+def test_classification_trustworthiness_without_onset_falls_back_to_age() -> None:
+    """Without a recorded onset, trustworthiness falls back to the absolute-age freshness check.
+
+    Only the force-``mark_stuck`` path (used in tests) reaches STUCK without a
+    probe-failure run, so there is no onset to compare against; the predicate then
+    behaves on age alone -- cold start is untrustworthy, a recent snapshot is
+    trustworthy. A missing tracker is treated the same way.
+    """
+    resolver = MngrCliBackendResolver()
+    tracker = SystemInterfaceHealthTracker()
+    agent_id = AgentId.generate()
+    _register_workspace_agent(resolver, agent_id, "docker")
+    tracker.mark_stuck(agent_id)
+    assert tracker.get_failure_run_started_wall_at(agent_id) is None
+
+    # Cold start, no snapshot yet: untrustworthy.
+    assert is_recovery_classification_trustworthy(resolver, tracker, agent_id) is False
+    # A recent snapshot of the agent's provider is trustworthy via the age fallback.
+    _set_provider_snapshot_at(resolver, "docker", datetime.now(timezone.utc))
+    assert is_recovery_classification_trustworthy(resolver, tracker, agent_id) is True
+    # A stale snapshot (a stalled pipeline) is untrustworthy again.
+    _set_provider_snapshot_at(resolver, "docker", datetime.now(timezone.utc) - timedelta(minutes=5))
+    assert is_recovery_classification_trustworthy(resolver, tracker, agent_id) is False
+    # No tracker at all behaves identically to a missing onset.
+    assert is_recovery_classification_trustworthy(resolver, None, agent_id) is False
