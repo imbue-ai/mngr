@@ -1,0 +1,1 @@
+The provider's discovery now supplies each agent's lifecycle state to the shared discovery helper (required after `DiscoveredAgent.state` became non-optional): agents read from persisted data without a liveness probe report `UNKNOWN`, and the offline-discovery path reports `STOPPED`. No user-visible behavior change; the full-listing path still derives the real lifecycle state.

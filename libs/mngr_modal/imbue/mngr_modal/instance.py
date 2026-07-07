@@ -2546,9 +2546,7 @@ log "=== Shutdown script completed ==="
                 # probe, so the honest state is UNKNOWN; the full-listing path
                 # re-derives a real state (probe for online hosts, STOPPED for
                 # offline) when it builds AgentDetails.
-                ref = validate_and_create_discovered_agent(
-                    agent_data, host_id, self.name, AgentLifecycleState.UNKNOWN
-                )
+                ref = validate_and_create_discovered_agent(agent_data, host_id, self.name, AgentLifecycleState.UNKNOWN)
                 if ref is not None:
                     agent_refs.append(ref)
 
