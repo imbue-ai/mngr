@@ -48,9 +48,10 @@ on:
         description: "Optional repo-relative path to a Jinja template overriding the reducer prompt (blank = packaged default)."
         required: false
         default: ""
-  # Invoked by the TMR (scheduled) workflow on its daily cron. The shared
-  # inputs below mirror the workflow_dispatch inputs; the two extra inputs
-  # (is_scheduled, supersedes_pr) are scheduled-run plumbing and are not
+  # Invoked by the per-variant scheduled wrappers (tmr-mngr-scheduled.yml,
+  # tmr-minds-scheduled.yml) on their daily crons. The shared inputs below
+  # mirror the workflow_dispatch inputs; the extra inputs (is_scheduled,
+  # supersedes_pr, periodic_label) are scheduled-run plumbing and are not
   # surfaced in the manual-dispatch UI.
   workflow_call:
     inputs:
@@ -89,10 +90,15 @@ on:
         required: false
         default: ""
       is_scheduled:
-        description: "Set by the scheduled wrapper workflow. When true, the auto-opened PR is labeled `tmr-periodic` so the next scheduled run's gate can find it."
+        description: "Set by the scheduled wrapper workflow. When true, the auto-opened PR is labeled with `periodic_label` so the next scheduled run's gate for that variant can find it."
         type: boolean
         required: false
         default: false
+      periodic_label:
+        description: "Label to attach to the auto-opened PR on scheduled runs (each variant uses its own, e.g. tmr-mngr-periodic / tmr-minds-periodic, so their gates stay independent). Only used when is_scheduled is true."
+        type: string
+        required: false
+        default: "tmr-periodic"
       supersedes_pr:
         description: "Set by the scheduled wrapper workflow when this run was triggered after auto-closing a stale prior periodic PR. The newly-opened PR's number is posted as a follow-up comment on this PR."
         type: string
@@ -205,6 +211,7 @@ jobs:
         env:
           IS_SCHEDULED: ${{ inputs.is_scheduled }}
           SUPERSEDES_PR: ${{ inputs.supersedes_pr }}
+          PERIODIC_LABEL: ${{ inputs.periodic_label }}
         run: |
           set -euo pipefail
           branch=$(jq -r 'select(.event == "integrator_branch") | .branch_name' < tmr-report/events.jsonl | tail -n 1)
@@ -226,7 +233,7 @@ jobs:
           # runs leave it unlabeled and unassigned.
           scheduled_args=()
           if [ "$IS_SCHEDULED" = "true" ]; then
-            scheduled_args+=(--label tmr-periodic)
+            scheduled_args+=(--label "$PERIODIC_LABEL")
             scheduled_args+=(--assignee qi-imbue --assignee joshalbrecht)
           fi
           new_pr_url=$(gh pr create \
