@@ -195,6 +195,10 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MNGR_PREFIX: mngrPrefix,
           MINDS_LATCHKEY_BINARY: paths.getLatchkeyPath(),
           MINDS_LATCHKEY_DIRECTORY: paths.getLatchkeyDirectory(),
+          // The prestart hook (ensure-binaries.js) stages resources/qemu/ before
+          // the dev app launches, so point the converter at the bundled binary
+          // rather than depending on a Homebrew qemu on the dev's PATH.
+          MINDS_QEMU_IMG_BINARY: paths.getQemuImgPath(),
           MINDS_RELEASE_ID: releaseId,
           MINDS_GIT_SHA: gitSha,
         };
