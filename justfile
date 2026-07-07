@@ -964,11 +964,21 @@ create-new-mind-repo repo_name parent_dir="$HOME/project":
 # slots and is not region-filtered today, so the box must have a free slot.
 
 # Dev slice bake from a working tree (identity = its origin remote + current branch).
-bake-slice-dev region workspace_dir=env_var_or_default('FCT_DIR', env_var('HOME') / 'project/forever-claude-template') count="1" *extra_args:
+# workspace_dir resolves: explicit arg, else FCT_DIR (shell or gitignored
+# apps/minds/.env), else the .external_worktrees/forever-claude-template checkout
+# that `just fct-worktree` creates. No personal path baked in.
+bake-slice-dev region workspace_dir="" count="1" *extra_args:
+    #!/usr/bin/env bash
+    set -ueo pipefail
+    wd="{{workspace_dir}}"
+    if [ -z "$wd" ]; then
+        [ -f apps/minds/.env ] && { set -a; . apps/minds/.env; set +a; }
+        wd="${FCT_DIR:-.external_worktrees/forever-claude-template}"
+    fi
     uv run minds pool create \
         --count "{{count}}" \
         --region "{{region}}" \
-        --workspace-dir "{{workspace_dir}}" \
+        --workspace-dir "$wd" \
         --skip-deferred-install-wait \
         {{extra_args}}
 
