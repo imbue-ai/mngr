@@ -747,6 +747,14 @@ class BoundedProviderDiscoveryResult(FrozenModel):
 
     hosts: tuple[DiscoveredHost, ...] = Field(description="Hosts read within the per-host timeout")
     agents: tuple[DiscoveredAgent, ...] = Field(description="Agents read within the per-host timeout")
+    # Per-host SSH info the streaming discovery poller re-emits as ``HOST_SSH_INFO`` events.
+    # A remote provider that knows a host's SSH endpoint at discovery time populates this so
+    # consumers that tunnel to the host (e.g. the minds system_interface forward) get the
+    # endpoint from the streaming path, not only from an occasional full ``mngr list``. Empty
+    # for providers that surface no SSH info (local hosts, or providers that don't populate it).
+    host_ssh_infos: tuple[tuple[HostId, SSHInfo], ...] = Field(
+        default=(), description="Per-host SSH info to emit as HOST_SSH_INFO events"
+    )
     unknown_host_ids: tuple[HostId, ...] = Field(
         default=(), description="Hosts whose read exceeded the per-host timeout (state explicitly unknown)"
     )
