@@ -171,6 +171,13 @@ def _register_agent_internal(
     config_class: type[AgentTypeConfig] | None = None,
 ) -> None:
     """Internal function to register an agent type."""
+    # Registering neither a class nor a config is a silent no-op that almost
+    # certainly means a caller forgot to pass one of them; explode on it rather
+    # than pretending the registration succeeded.
+    assert agent_class is not None or config_class is not None, (
+        f"Cannot register agent type {agent_type!r} with neither an agent class nor a config class; "
+        "at least one must be provided."
+    )
     if agent_class is not None:
         register_agent_class(agent_type, agent_class)
     if config_class is not None:
