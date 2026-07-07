@@ -260,6 +260,20 @@ def push_per_env_modal_secret(
         secret_name,
         *(f"{k}={v}" for k, v in values.items()),
     ]
+    # The command carries the raw secret values as ``KEY=VALUE`` args; give the
+    # process a name with the values masked so they never reach the reader
+    # thread's name (recorded in JSONL logs) or a ProcessError message. The
+    # real command is still what executes.
+    loggable_command = [
+        "modal",
+        "secret",
+        "create",
+        "--force",
+        "--env",
+        modal_env,
+        secret_name,
+        *(f"{k}=***" for k in values),
+    ]
     cg = parent_cg.make_concurrency_group(name=f"modal-secret-{secret_name}")
     with cg:
         result = cg.run_process_to_completion(
@@ -267,6 +281,7 @@ def push_per_env_modal_secret(
             timeout=_MODAL_SECRET_TIMEOUT_SECONDS,
             is_checked_after=False,
             env=_modal_subprocess_env(),
+            name=" ".join(loggable_command),
         )
     if result.returncode != 0:
         stderr = result.stderr.strip() or result.stdout.strip()

@@ -29,8 +29,16 @@ class RunningProcess:
         output_queue: Queue[tuple[str, bool]] | None,
         shutdown_event: MutableEvent,
         is_checked: bool = False,
+        name: str | None = None,
     ) -> None:
         self._command = command
+        # An optional caller-supplied, log-safe label for this process. Used as
+        # the reader thread's name and as the display command in any
+        # ProcessError/TimeoutExpired it raises, so callers whose command
+        # carries secret argument values can keep those out of logs. The real
+        # ``command`` is still what gets executed. Defaults (``None``) to the
+        # joined command, preserving prior behavior.
+        self._name = name
         self._output_queue = output_queue
         self._shutdown_event = shutdown_event
         self._is_checked = is_checked
@@ -86,7 +94,7 @@ class RunningProcess:
         if thread.is_alive():
             stdout = self.read_stdout()
             stderr = self.read_stderr()
-            raise TimeoutExpired(self._command, timeout if timeout is not None else 0.0, stdout, stderr)
+            raise TimeoutExpired(self._error_command, timeout if timeout is not None else 0.0, stdout, stderr)
         result = self.poll()
         if result is None:
             raise ProcessSetupError(
@@ -94,6 +102,7 @@ class RunningProcess:
                 stdout="",
                 stderr="Process exited before being started!",
                 is_output_already_logged=True,
+                display_name=self._name,
             )
         if self._is_checked:
             self.check()
@@ -102,7 +111,7 @@ class RunningProcess:
     def check(self) -> None:
         if self.returncode is not None and self.returncode != 0:
             stdout, stderr = self.read_stdout(), self.read_stderr()
-            raise ProcessError(tuple(self._command), stdout, stderr, self.returncode)
+            raise ProcessError(tuple(self._command), stdout, stderr, self.returncode, display_name=self._name)
 
     def poll(self) -> int | None:
         thread = self._thread
@@ -134,7 +143,7 @@ class RunningProcess:
         if thread.is_alive():
             stdout = self.read_stdout()
             stderr = self.read_stderr()
-            raise TimeoutExpired(self._command, force_kill_seconds, stdout, stderr)
+            raise TimeoutExpired(self._error_command, force_kill_seconds, stdout, stderr)
 
     def start(self, kwargs: dict) -> None:
         context = contextvars.copy_context()
@@ -154,7 +163,20 @@ class RunningProcess:
             raise maybe_initialization_exception
 
     def _get_name(self) -> str:
+        if self._name is not None:
+            return self._name
         return f"RunningProcess: {' '.join(self._command)}"
+
+    @property
+    def _error_command(self) -> Sequence[str] | str:
+        """Command rendering safe for stdlib ``TimeoutExpired`` (the ``name`` when supplied).
+
+        ``subprocess.TimeoutExpired`` renders its ``cmd`` into ``str(exc)``, so a
+        command carrying secrets would leak there. When a ``name`` was supplied we
+        hand that in as ``cmd`` instead; otherwise we fall back to the real command
+        (prior behavior).
+        """
+        return self._name if self._name is not None else self._command
 
     def run(self, kwargs: dict) -> None:
         self._completed_process = run_local_command_modern_version(**kwargs)
@@ -189,6 +211,7 @@ def run_background(
     pass_fds: Sequence[int] = (),
     process_class: type[ProcessClassType] = RunningProcess,  # ty: ignore[invalid-parameter-default]
     process_class_kwargs: Mapping[str, object] | None = None,
+    name: str | None = None,
 ) -> ProcessClassType:
     """
     Run a subprocess command in a non-blocking manner with output handling.
@@ -197,6 +220,8 @@ def run_background(
     - Access a queue to process output lines as they are produced
     - Wait for completion and read all output at once
     - Check process status, terminate it, or monitor return codes
+
+    ``name`` is an optional log-safe label for the process (see ``RunningProcess``).
     """
     if output_queue is None:
         output_queue = Queue()
@@ -206,6 +231,7 @@ def run_background(
         shutdown_event=true_shutdown_event,
         command=command,
         is_checked=is_checked,
+        name=name,
         **(process_class_kwargs or {}),
     )
     process.start(
@@ -220,6 +246,7 @@ def run_background(
             shutdown_timeout_sec=shutdown_timeout_sec,
             env=env,
             pass_fds=pass_fds,
+            name=name,
         )
     )
     return process
