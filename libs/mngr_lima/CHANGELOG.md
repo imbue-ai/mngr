@@ -6,8 +6,13 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `LimaProviderInstance.rename_host` — updates the logical host name on the (offline-writable) host record, so it works whether or not the VM is running.
+
 ### Changed
 
+- Changed: New Lima VMs derive their `limactl` instance name from the immutable host id (`<prefix><host_id>`) rather than the host name, so a rename never leaves the VM's instance name out of sync with the host name (`limactl` has no native rename). Existing VMs created under the old `<prefix><host_name>` scheme keep working; discovery reads the host name and instance name from the persisted record rather than parsing the instance name.
 - Changed: Lima VM provisioning script's required-package check now includes `flock` (the `util-linux` package), used by mngr's unified cross-actor host lock and the in-host idle-shutdown watcher. Already present on standard Debian images; only installs on minimal/custom images that lack it.
 
 ## [v0.1.10] - 2026-06-18
